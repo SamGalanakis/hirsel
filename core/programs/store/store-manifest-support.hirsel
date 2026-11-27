@@ -762,10 +762,13 @@ pub fn history_frame(path: String, ctx: format.DiskContext, raw: Bytes, at: u64,
     Ok(frame)
 }
 
-// The objects@1 head's own frame kinds (ORIGIN), then the host stream's.
+// The objects@1 head's own frame kinds (ORIGIN), then archive and host stream.
 fn history_kind_limit(kind: u16) -> Option[u64] {
     if kind == 0x00E0 {
         return Some(ORIGIN_PAYLOAD_BYTES)
+    }
+    if let Some(limit) = format.archive_kind_limit(kind) {
+        return Some(limit)
     }
     format.stream_kind_limit(kind)
 }

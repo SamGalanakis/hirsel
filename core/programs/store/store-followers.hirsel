@@ -1,7 +1,7 @@
-pub opaque type Authority = LogAuthority(Dir) | ObjectAuthority(ObjectAuthorityConfig) | SimAuthority(ObjectAuthorityConfig)
+pub opaque type Authority = LogAuthority(Dir, Option[ArchiveAttachConfig]) | ObjectAuthority(ObjectAuthorityConfig) | SimAuthority(ObjectAuthorityConfig)
 
 pub fn log_authority(d: Dir) -> Authority {
-    LogAuthority(d)
+    LogAuthority(d, None)
 }
 
 pub opaque type Followers {
@@ -222,7 +222,7 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
 
 pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: Authority, c: Clock, expect: Option[StoreId]) -> Result[Follower, Error] waits {
     let (take transport, take workers, on_log, op_ms, due): (object_writer.FollowerTransport, Option[std.object.Workers], bool, u64, u64) = match (slot.plan.kind, take authority) {
-        (Directory, LogAuthority(directory)) => (DirectoryFollow(directory, c), None, true, 0u64, 0u64),
+        (Directory, LogAuthority(directory, _)) => (DirectoryFollow(directory, c), None, true, 0u64, 0u64),
         (Bucket(lanes), ObjectAuthority(take config)) => object_follow_transport(take config, lanes, 1)?,
         (Bucket(lanes), SimAuthority(take config)) => object_follow_transport(take config, lanes, 2)?,
         _ => return Error(Missing("follower_kind")),

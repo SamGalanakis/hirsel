@@ -292,6 +292,7 @@ pub fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclai
     if drop_released && released {
         lane.export_lease = None
     }
+    archive_reclaim_protect(mut lane, mut pass, deadline)?
     Ok(take pass)
 }
 

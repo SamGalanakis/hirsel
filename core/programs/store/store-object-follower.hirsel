@@ -7,15 +7,16 @@ type ObjectAuthorityConfig {
     stream: Option[JournalSlot],
     // Read-only stream root from `stream_reader` (§12.11.1, §12.11.9).
     stream_root: Option[String],
-    cache: Option[pager.ObjectsCache]
+    cache: Option[pager.ObjectsCache],
+    archive: Option[ArchiveAttachConfig]
 }
 
 pub fn object_authority(take c: std.object.Client, level_name: String, op_ms: u64) -> Authority {
-    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None, stream: None, stream_root: None, cache: None))
+    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None, stream: None, stream_root: None, cache: None, archive: None))
 }
 
 pub fn sim_authority(take c: std.object.Client, declared: SimLevels, take sync: LevelSync, op_ms: u64) -> Authority {
-    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync)), stream: None, stream_root: None, cache: None))
+    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync)), stream: None, stream_root: None, cache: None, archive: None))
 }
 
 pub type Claim: codec + key + shareable + cross {

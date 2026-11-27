@@ -1,0 +1,313 @@
+// Bucket source-side archive reclaim hold, cut retention within `hold_bytes`,
+// and attached-Place settle-then-archive support (STORE-SPEC §15.7, §12.11.11 M6).
+pub type ObjectArchiveReclaimConfig: send {
+    binding_id: u64,
+    hold_bytes: u64,
+    hold_bytes_explicit: bool,
+    sink_control: Sender[history.ArchiveLaneMsg],
+    clock: Clock,
+    op_ms: u64
+}
+
+pub type ArchiveObservedState: send {
+    settled_through: u64,
+    acked_unsettled: u64,
+    observed_ns: u64,
+    known: bool
+}
+
+pub fn empty_archive_observed() -> ArchiveObservedState {
+    ArchiveObservedState(settled_through: 0, acked_unsettled: 0, observed_ns: 0, known: false)
+}
+
+pub fn archive_observed_now(lane: ObjectJournalSession, c: Option[Clock]) -> ArchiveObservedState {
+    let head = history.register_head(lane.register)
+    let unsettled = match history.register_attach(lane.register) {
+        Some(a) => {
+            let sealed_count = list.len(a.sealed)
+            let live_count = match (a.live, view lane.stream) {
+                (Some(r), Some(link)) => host_stream.slot_unsettled_batches(link, r.from_seq),
+                _ => 0u64,
+            }
+            int.saturating_add(sealed_count, live_count)
+        },
+        None => 0u64,
+    }
+    let now_ns = match c {
+        Some(clk) => host.mono_ns(clk),
+        None => 0u64,
+    }
+    ArchiveObservedState(settled_through: head.entry.seq, acked_unsettled: unsettled, observed_ns: now_ns, known: true)
+}
+
+// Measures the additional bytes (deduplicated outside `live_keys`) required to
+// hold checkpoint `cp_ref` and its dependency closure (`e-`, `m-`, `l-`, `p-`).
+fn checkpoint_additional_closure(mut client: std.object.Client, head: history.HistoryHead, cp_ref: pages.HistoryRef, live_keys: Map[String, ()], mut seen_keys: Map[String, ()], deadline: u64) -> Result[(u64, List[String]), types.Failure] waits {
+    let e_key = history.history_read_key("e-", cp_ref)?
+    let e_raw = history.history_read_object(mut client, e_key, cp_ref, deadline)?
+    let mark = manifest.disk_allocation(scoped fn() -> Result[history.HistoryMark, types.Failure] {
+        history.history_read_mark(e_key, head.store, cp_ref, e_raw)
+    })?
+    let mut at = head
+    at.checkpoint = cp_ref
+    let located = history.history_locator(mut client, at, mark, e_raw, deadline)?
+    let mut keys: List[String] = list.new()
+    let mut added = 0u64
+    let m_key = history.history_read_key("m-", mark.manifest)?
+    if !map.contains(live_keys, m_key) && !map.contains(seen_keys, m_key) {
+        types.capacity(map.try_reserve(mut seen_keys, 1))?
+        map.insert(mut seen_keys, string.from(m_key), ())
+        added = int.saturating_add(added, mark.manifest.len)
+    }
+    types.capacity(list.try_reserve(mut keys, 1))?
+    list.push(mut keys, take m_key)
+    for item in history.locator_chunks(located) {
+        let l_key = history.history_read_key("l-", item)?
+        if !map.contains(live_keys, l_key) && !map.contains(seen_keys, l_key) {
+            types.capacity(map.try_reserve(mut seen_keys, 1))?
+            map.insert(mut seen_keys, string.from(l_key), ())
+            added = int.saturating_add(added, item.len)
+        }
+        types.capacity(list.try_reserve(mut keys, 1))?
+        list.push(mut keys, take l_key)
+    }
+    for (_, item) in history.locator_rows(located) {
+        let p_key = history.history_read_key("p-", item)?
+        if !map.contains(live_keys, p_key) && !map.contains(seen_keys, p_key) {
+            types.capacity(map.try_reserve(mut seen_keys, 1))?
+            map.insert(mut seen_keys, string.from(p_key), ())
+            added = int.saturating_add(added, item.len)
+        }
+        types.capacity(list.try_reserve(mut keys, 1))?
+        list.push(mut keys, take p_key)
+    }
+    if !map.contains(live_keys, e_key) && !map.contains(seen_keys, e_key) {
+        types.capacity(map.try_reserve(mut seen_keys, 1))?
+        map.insert(mut seen_keys, string.from(e_key), ())
+        added = int.saturating_add(added, cp_ref.len)
+    }
+    types.capacity(list.try_reserve(mut keys, 1))?
+    list.push(mut keys, take e_key)
+    Ok((added, take keys))
+}
+
+// Bound `objects@1` cut retention within `hold_bytes` (A3: zero foreground
+// archive network I/O — uses only stable source metadata + last witnessed
+// `archived_through`). Keeps at least the ordinary `retain - 1` checkpoints,
+// plus unarchived earlier checkpoints that fit inside `hold_bytes` (up to 254).
+pub fn archive_retain_for_cut(mut lane: ObjectJournalSession, previous: history.HistoryMark, prior: pages.HistoryRef, current_seq: u64, retain: u8, binding_id: u64, hold_bytes: u64, hold_bytes_explicit: bool, witnessed_through: u64, deadline: u64) -> Result[history.HistoryRetention, types.Failure] waits {
+    let ordinary = history_retain(previous, prior, current_seq, retain)?
+    if binding_id == 0 {
+        return Ok(take ordinary)
+    }
+    let head = history.register_head(lane.register)
+    // Candidate list in ascending seq order: `previous.retained ++ [prior]`.
+    let mut all_candidates: List[pages.HistoryRef] = list.new()
+    types.capacity(list.try_reserve(mut all_candidates, list.len(previous.retained) + 1))?
+    for r in previous.retained {
+        list.push(mut all_candidates, r)
+    }
+    list.push(mut all_candidates, prior)
+    let total = list.len(all_candidates)
+    let ordinary_count = list.len(ordinary.earlier)
+    if total <= ordinary_count {
+        return Ok(take ordinary)
+    }
+    let budget = if hold_bytes_explicit {
+        hold_bytes
+    } else {
+        // Default budget when unspecified: generous 64 MiB for Bucket cuts.
+        67108864u64
+    }
+    // Build the ordinary live key set (from `prior` and any other ordinary retained).
+    let mut live_keys: Map[String, ()] = map.new()
+    for i in total - ordinary_count .. total {
+        let cp = all_candidates[i]
+        let mut scratch_seen: Map[String, ()] = map.new()
+        if let Ok((_, ks)) = checkpoint_additional_closure(mut lane.client, head, cp, map.new(), mut scratch_seen, deadline) {
+            for k in ks {
+                let _ = map.try_reserve(mut live_keys, 1)
+                map.insert(mut live_keys, string.from(k), ())
+            }
+        }
+    }
+    // Walk older unarchived candidates from newest to oldest, admitting while
+    // cumulative deduplicated additional bytes <= budget (at most 254 total).
+    let mut extra_rev: List[pages.HistoryRef] = list.new()
+    let mut seen_extra: Map[String, ()] = map.new()
+    let mut used_bytes = 0u64
+    let extra_avail = total - ordinary_count
+    let mut idx = extra_avail
+    while idx > 0 && ordinary_count + list.len(extra_rev) < 254 {
+        idx -= 1
+        let cp = all_candidates[idx]
+        // Stop once everything at or below `cp` is already witnessed archived.
+        let next_cp_seq = if idx + 1 < total {
+            all_candidates[idx + 1].seq
+        } else {
+            current_seq
+        }
+        if witnessed_through >= next_cp_seq {
+            break
+        }
+        let mut trial_seen: Map[String, ()] = clone(seen_extra)
+        let added = match checkpoint_additional_closure(mut lane.client, head, cp, live_keys, mut trial_seen, deadline) {
+            Ok((bytes_add, _)) => bytes_add,
+            Error(_) => break,
+        }
+        let candidate_total = int.saturating_add(used_bytes, added)
+        if candidate_total <= budget {
+            used_bytes = candidate_total
+            seen_extra = take trial_seen
+            types.capacity(list.try_reserve(mut extra_rev, 1))?
+            list.push(mut extra_rev, cp)
+        } else {
+            break
+        }
+    }
+    if list.len(extra_rev) == 0 {
+        return Ok(take ordinary)
+    }
+    let mut merged: List[pages.HistoryRef] = list.new()
+    types.capacity(list.try_reserve(mut merged, list.len(extra_rev) + ordinary_count))?
+    let mut r_i = list.len(extra_rev)
+    while r_i > 0 {
+        r_i -= 1
+        list.push(mut merged, extra_rev[r_i])
+    }
+    for r in ordinary.earlier {
+        list.push(mut merged, r)
+    }
+    let floor = merged[0u64].seq
+    Ok(history.HistoryRetention(floor, earlier: take merged))
+}
+
+// Bucket source-side reclaim hold (§15.7): before erasing any object on a bound
+// Bucket store, exact-GET `<store_hex>/archive-head` via `sink_control`. Protect
+// unarchived source units (`e-`, `m-`, `l-`, `p-`) within `hold_bytes`, treating
+// an unreachable or mismatched sink conservatively (no inferred ack).
+pub fn archive_reclaim_protect(mut lane: ObjectJournalSession, mut pass: ReclaimPass, deadline: u64) -> Result[(), types.Failure] waits {
+    let Some(cfg) = view lane.archive_reclaim else {
+        return Ok(())
+    }
+    if cfg.binding_id == 0 {
+        return Ok(())
+    }
+    let head = history.register_head(lane.register)
+    let acked_through = match history.archive_head_fetch_channel(channel.sender(cfg.sink_control), head.store, cfg.clock, cfg.op_ms) {
+        Ok(Some((sink_head, _))) if sink_head.binding_id == cfg.binding_id && !sink_head.open_gap => match sink_head.through {
+            Some(c) => c.ordinal,
+            None => 0u64,
+        },
+        _ => 0u64,
+    }
+    // Every key in `pass.live` and every canonical `e-` in `[pass.floor, pass.position]`
+    // is already protected by `reclaim_capture` / `history_dead_key`. Add any
+    // unarchived `e-` in `pass.chain` (seq > acked_through) to `pass.leased` so
+    // even if a caller adjusts `pass.floor`, unarchived units stay protected within budget.
+    let budget = if cfg.hold_bytes_explicit {
+        cfg.hold_bytes
+    } else {
+        67108864u64
+    }
+    let mut held_bytes = 0u64
+    let chain_len = list.len(pass.chain)
+    let mut idx = chain_len
+    while idx > 0 {
+        idx -= 1
+        let seq = pass.recovered_checkpoint + 1 + idx
+        if seq <= acked_through {
+            break
+        }
+        let link = pass.chain[idx]
+        let item = pages.HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
+        let key = history.history_read_key("e-", item)?
+        if !map.contains(pass.leased, key) {
+            if seq < pass.floor {
+                if int.saturating_add(held_bytes, item.len) > budget {
+                    break
+                }
+                held_bytes = int.saturating_add(held_bytes, item.len)
+            }
+            types.capacity(map.try_reserve(mut pass.leased, 1))?
+            map.insert(mut pass.leased, take key, ())
+        }
+    }
+    let _ = deadline
+    Ok(())
+}
+
+// Settles all sealed tails in claim order, then the eligible live prefix into
+// Place GROUP entries while keeping ATTACH intact (never forces a cut).
+pub fn archive_settle_attached_lane(take lane: ObjectJournalSession, group_bytes: u64, group_commits: u64, c: Option[Clock]) -> (ObjectJournalSession, Result[ArchiveObservedState, types.Failure]) waits {
+    let mut active = take lane
+    let is_attached = match history.register_attach(active.register) {
+        Some(_) => true,
+        None => false,
+    }
+    if !is_attached {
+        let obs = archive_observed_now(active, c)
+        return (take active, Ok(obs))
+    }
+    let has_sealed = match history.register_attach(active.register) {
+        Some(a) => list.len(a.sealed) != 0,
+        None => false,
+    }
+    if has_sealed {
+        let (take settled_s, take out_s) = settle_object_sealed(take active, group_bytes, group_commits)
+        active = take settled_s
+        match take out_s {
+            Ok(SettleApplied) => (),
+            Ok(SettleFenced(_, _)) => {
+                let ep = history.register_head(active.register).pair.epoch
+                return (take active, Error(Fenced(ep)))
+            },
+            Ok(SettleNotApplied) => {
+                let obs = archive_observed_now(active, c)
+                return (take active, Ok(obs))
+            },
+            Error(take problem) => return (take active, Error(take problem)),
+        }
+    }
+    let live_info: Option[(u64, u64)] = match (history.register_attach(active.register), view active.stream) {
+        (Some(a), Some(link)) => match a.live {
+            Some(r) => {
+                let last_b = host_stream.slot_last_batch(link)
+                if last_b >= r.from_seq && host_stream.slot_unsettled_batches(link, r.from_seq) > 0 {
+                    Some((last_b, last_b + 1))
+                } else {
+                    None
+                }
+            },
+            None => None,
+        },
+        _ => None,
+    }
+    if let Some((through_seq, next_seq)) = live_info {
+        let (take settled_l, take out_l) = settle_object_stream(take active, through_seq, next_seq, false, group_bytes, group_commits)
+        active = take settled_l
+        match take out_l {
+            Ok(SettleApplied) => {
+                let fseq = match history.register_attach(active.register) {
+                    Some(a) => match a.live {
+                        Some(r) => r.from_seq,
+                        None => 0u64,
+                    },
+                    None => 0u64,
+                }
+                object_journal_stream_trim_batches(mut active, fseq)
+                if let Some(link) = view active.stream {
+                    host_stream.slot_report_head(link, history.register_head(active.register).store, history.register_attach(active.register), through_seq)
+                }
+            },
+            Ok(SettleFenced(_, _)) => {
+                let ep = history.register_head(active.register).pair.epoch
+                return (take active, Error(Fenced(ep)))
+            },
+            Ok(SettleNotApplied) => (),
+            Error(take problem) => return (take active, Error(take problem)),
+        }
+    }
+    let obs = archive_observed_now(active, c)
+    (take active, Ok(obs))
+}

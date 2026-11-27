@@ -1,0 +1,418 @@
+// Archive sink transport, A1 exact-GET/CAS/Q5, 64 KiB chained index spilling,
+// journal chunk conflict handling, and A2 no-relisting verification (§15.7).
+pub type ArchiveCasOutcome = ArchiveCasApplied(std.object.ETag) | ArchiveCasConflict(format.ArchiveHeadRep, std.object.ETag) | ArchiveCasUncertain
+
+pub type ArchiveUnitPut = UnitStored | UnitDiverged(String)
+
+pub type ArchiveChunkPut = ChunkStored(u64) | ChunkAdoptedPrefix(u64, u64, u64) | ChunkDiverged(String)
+
+pub type ArchiveFetchReq: send {
+    key: String,
+    max_bytes: u64,
+    deadline: u64,
+    reply: Sender[Result[(Bytes, std.object.ETag), types.Failure]]
+}
+
+pub type ArchiveHeadProbeReq: send {
+    store: types.StoreKey,
+    deadline: u64,
+    reply: Sender[Result[Option[(format.ArchiveHeadRep, std.object.ETag)], types.Failure]]
+}
+
+// Serves one exact-GET request on an existing `std.object.Client` without
+// reaching `Net` authority in callers.
+pub fn archive_serve_fetch(mut client: std.object.Client, take req: ArchiveFetchReq) waits {
+    let ArchiveFetchReq(key: take key, max_bytes, deadline, reply: take reply) = take req
+    let buf = match manifest.disk_read_buffer(max_bytes) {
+        Ok(take b) => take b,
+        Error(take problem) => {
+            let _ = channel.send(reply, Error(take problem))
+            return
+        },
+    }
+    let (take res, take out) = std.object.fetch(mut client, key, take buf, deadline)
+    let answer: Result[(Bytes, std.object.ETag), types.Failure] = match take res {
+        Ok(meta) => Ok((take out, meta.etag)),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+    let _ = channel.send(reply, take answer)
+}
+
+// Exact GET of any key through a channel-backed source client (zero `Net`
+// authority, zero LIST).
+pub fn archive_channel_fetch(source: Sender[ArchiveFetchReq], key: String, max_bytes: u64, deadline: u64) -> Result[(Bytes, std.object.ETag), types.Failure] waits {
+    let (reply_tx, reply_rx): (Sender[Result[(Bytes, std.object.ETag), types.Failure]], Receiver[Result[(Bytes, std.object.ETag), types.Failure]]) = channel.new(1)
+    if let Error(_) = channel.send(source, ArchiveFetchReq(key: string.from(key), max_bytes, deadline, reply: take reply_tx)) {
+        return Error(Io(Closed))
+    }
+    match channel.receive(reply_rx) {
+        Ok(take res) => take res,
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+pub fn archive_head_fetch(mut sink: std.object.Client, store: types.StoreKey, deadline: u64) -> Result[Option[(format.ArchiveHeadRep, std.object.ETag)], types.Failure] waits {
+    let key = format.archive_head_key(store)
+    let mut raw = manifest.disk_read_buffer(format.ARCHIVE_HEAD_LIMIT)?
+    let meta = match history_fetch(mut sink, key, mut raw, deadline) {
+        Ok(m) => m,
+        Error(Remote(NotFound)) => return Ok(None),
+        Error(take problem) => return Error(take problem),
+    }
+    if meta.etag.len == 0 {
+        return Error(format.disk_fault(key, 0, Malformed))
+    }
+    let head = format.decode_archive_head(key, store, raw)?
+    Ok(Some((take head, meta.etag)))
+}
+
+// Exact GET of `<store_hex>/archive-head` via the background archiver lane's
+// sink client with a bounded wait so Bucket reclaim never deadlocks with an
+// in-flight archiver step (falling back conservatively on busy/timeout).
+pub fn archive_head_fetch_channel(sink_control: Sender[ArchiveLaneMsg], store: types.StoreKey, c: Clock, op_ms: u64) -> Result[Option[(format.ArchiveHeadRep, std.object.ETag)], types.Failure] waits {
+    let now = host.mono_ns(c)
+    let deadline = std.clock.deadline_after_ms(now, op_ms)
+    let probe_until = order.min(deadline, int.saturating_add(now, 100000000u64))
+    let (reply_tx, reply_rx): (Sender[Result[Option[(format.ArchiveHeadRep, std.object.ETag)], types.Failure]], Receiver[Result[Option[(format.ArchiveHeadRep, std.object.ETag)], types.Failure]]) = channel.new(1)
+    if let Error(_) = channel.try_send(sink_control, ArchiveSinkHeadProbe(ArchiveHeadProbeReq(store, deadline, reply: take reply_tx))) {
+        return Ok(None)
+    }
+    match channel.receive_until(reply_rx, At(c, probe_until)) {
+        Ok(take res) => take res,
+        Error(_) => Ok(None),
+    }
+}
+
+pub fn archive_head_cas(mut sink: std.object.Client, store: types.StoreKey, pre: std.object.Precondition, head: format.ArchiveHeadRep, deadline: u64) -> Result[ArchiveCasOutcome, types.Failure] waits {
+    let key = format.archive_head_key(store)
+    let encoded = format.encode_archive_head(head)?
+    let (take outcome, take returned) = std.object.store_if_retry(mut sink, key, pre, clone(encoded), deadline)
+    let _ = take returned
+    match take outcome {
+        Ok(Applied(meta)) => Ok(ArchiveCasApplied(meta.etag)),
+        Ok(Mismatch) => archive_head_reconcile(mut sink, store, key, encoded, deadline),
+        Error(Uncertain(_)) => archive_head_reconcile(mut sink, store, key, encoded, deadline),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn archive_head_reconcile(mut sink: std.object.Client, store: types.StoreKey, key: String, expected_raw: Bytes, deadline: u64) -> Result[ArchiveCasOutcome, types.Failure] waits {
+    let mut witness = manifest.disk_read_buffer(format.ARCHIVE_HEAD_LIMIT)?
+    let meta = match history_fetch(mut sink, key, mut witness, deadline) {
+        Ok(m) => m,
+        Error(Remote(NotFound)) => return Ok(ArchiveCasUncertain),
+        Error(_) => return Ok(ArchiveCasUncertain),
+    }
+    if witness == expected_raw {
+        return Ok(ArchiveCasApplied(meta.etag))
+    }
+    match format.decode_archive_head(key, store, witness) {
+        Ok(take other) => Ok(ArchiveCasConflict(take other, meta.etag)),
+        Error(_) => Ok(ArchiveCasUncertain),
+    }
+}
+
+// Create-only immutable unit PUT (`Absent`). On `Mismatch` (Exists), exact-GET
+// and verify byte identity; differing bytes are a hard `UnitDiverged` stop.
+pub fn archive_put_immutable(mut sink: std.object.Client, key: String, take raw: Bytes, deadline: u64) -> Result[ArchiveUnitPut, types.Failure] waits {
+    let (take outcome, take returned) = std.object.store_if_retry(mut sink, key, Absent, take raw, deadline)
+    match take outcome {
+        Ok(Applied(_)) => Ok(UnitStored),
+        Ok(Mismatch) => {
+            let mut existing = manifest.disk_read_buffer(list.len(returned))?
+            let _ = history_fetch(mut sink, key, mut existing, deadline)?
+            if existing == returned {
+                Ok(UnitStored)
+            } else {
+                Ok(UnitDiverged(string.from(key)))
+            }
+        },
+        Error(Uncertain(_)) => {
+            let mut existing = manifest.disk_read_buffer(list.len(returned))?
+            match history_fetch(mut sink, key, mut existing, deadline) {
+                Ok(_) if existing == returned => Ok(UnitStored),
+                Ok(_) => Ok(UnitDiverged(string.from(key))),
+                Error(take problem) => Error(take problem),
+            }
+        },
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+// Verifies raw journal chunk bytes at `[from .. from + len)` under `(store, role=2, seq)`
+// and returns `(last_main_version, last_main_at)` if every frame through the end is complete.
+pub fn archive_verify_journal_chunk(key: String, store: types.StoreKey, seq: u64, from: u64, raw: Bytes, init_ver: u64, init_at: u64) -> Result[(u64, u64), types.Failure] {
+    let total = list.len(raw)
+    if total == 0 {
+        return Error(format.disk_fault(key, from, Truncated))
+    }
+    let ctx = format.DiskContext(store, role: 2, seq)
+    let mut pos = 0u64
+    let mut main_ver = init_ver
+    let mut main_at = init_at
+    if from == 0 {
+        if total < 72 {
+            return Error(format.disk_fault(key, 0, Truncated))
+        }
+        let _ = manifest.disk_read_header(key, list.slice(raw, 0, 72), 2, Some(seq), Some(store))?
+        pos = 72
+    }
+    while pos < total {
+        let abs_at = from + pos
+        if total - pos < 16 {
+            return Error(format.disk_fault(key, abs_at, Truncated))
+        }
+        let head = list.slice(raw, pos, pos + 16)
+        let fh = manifest.disk_read_frame_head(key, head, abs_at)?
+        if fh.size > total - pos - 16 {
+            return Error(format.disk_fault(key, abs_at, Truncated))
+        }
+        let body = list.slice(raw, pos + 16, pos + 16 + fh.size)
+        let check = types.capacity(format.disk_check(ctx, abs_at, head, body))?
+        if check != fh.checksum {
+            return Error(format.disk_fault(key, abs_at, Checksum))
+        }
+        manifest.disk_check_frame_kind(key, ctx, fh.kind, fh.flags, abs_at)?
+        if fh.kind == 0x0011 {
+            if fh.size < 20 {
+                return Error(format.disk_fault(key, abs_at, Malformed))
+            }
+            let branch = format.read_le(body, 0, 4)
+            let version = format.read_le(body, 4, 8)
+            let at_ms = format.read_le(body, 12, 8)
+            if branch == 0 {
+                main_ver = version
+                main_at = at_ms
+            }
+        }
+        pos += 16 + fh.size
+    }
+    Ok((main_ver, main_at))
+}
+
+// Create-only PUT for `log@1` journal chunk `j-<seq>-<from>`. On `Exists`:
+// - identical bytes -> `ChunkStored(from + len)`
+// - shorter complete verified prefix -> `ChunkAdoptedPrefix(from + existing_len, main_ver, main_at)`
+// - differing or torn bytes -> `ChunkDiverged(key)` (hard stop).
+pub fn archive_put_journal_chunk(mut sink: std.object.Client, store: types.StoreKey, seq: u64, from: u64, take raw: Bytes, init_ver: u64, init_at: u64, deadline: u64) -> Result[ArchiveChunkPut, types.Failure] waits {
+    let key = format.archive_key(store, format.archive_log_journal_rel(seq, from))
+    let expected_len = list.len(raw)
+    let (take outcome, take returned) = std.object.store_if_retry(mut sink, key, Absent, take raw, deadline)
+    match take outcome {
+        Ok(Applied(_)) => Ok(ChunkStored(from + expected_len)),
+        Ok(Mismatch) => archive_reconcile_journal_chunk(mut sink, store, key, seq, from, returned, init_ver, init_at, deadline),
+        Error(Uncertain(_)) => archive_reconcile_journal_chunk(mut sink, store, key, seq, from, returned, init_ver, init_at, deadline),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn archive_reconcile_journal_chunk(mut sink: std.object.Client, store: types.StoreKey, key: String, seq: u64, from: u64, candidate: Bytes, init_ver: u64, init_at: u64, deadline: u64) -> Result[ArchiveChunkPut, types.Failure] waits {
+    let mut existing = manifest.disk_read_buffer(list.len(candidate))?
+    let _ = history_fetch(mut sink, key, mut existing, deadline)?
+    if existing == candidate {
+        return Ok(ChunkStored(from + list.len(candidate)))
+    }
+    let ex_len = list.len(existing)
+    if ex_len > 0 && ex_len < list.len(candidate) && existing == list.slice(candidate, 0, ex_len) {
+        if let Ok((p_ver, p_at)) = archive_verify_journal_chunk(key, store, seq, from, existing, init_ver, init_at) {
+            return Ok(ChunkAdoptedPrefix(from + ex_len, p_ver, p_at))
+        }
+    }
+    Ok(ChunkDiverged(string.from(key)))
+}
+
+// Spills a base row (paging its `packs` across 1 or more chained <= 64 KiB
+// `index-<ordinal>-<xxh3>` objects) and any spilled closed intervals.
+// Returns the new `index_tail` ref, or `Error(Diverged(..))` on key conflict.
+pub fn archive_spill_base_index(mut sink: std.object.Client, store: types.StoreKey, source_kind: u8, prev_tail: Option[format.ArchiveIndexRefRep], base: format.ArchiveBaseRowRep, spilled_intervals: List[format.ArchiveIntervalRep], deadline: u64) -> Result[(format.ArchiveIndexRefRep, u64), types.Failure] waits {
+    let mut cur_prev = prev_tail
+    let mut next_ord = match prev_tail {
+        Some(p) => p.ordinal + 1,
+        None => 1u64,
+    }
+    let first_ord = next_ord
+    let total_packs = list.len(base.packs)
+    // Reserve worst-case fixed overhead inside the 64 KiB index segment:
+    // 88 (HEADER+frame) + 8 (ordinal) + 25 (prev) + 4 (base_count) + 101 (base fixed) + 4 (iv_count)
+    // + spilled_intervals * ARCHIVE_INTERVAL_SUMMARY_BYTES.
+    let iv_bytes = list.len(spilled_intervals) * format.ARCHIVE_INTERVAL_SUMMARY_BYTES
+    let fixed_first = 230u64 + iv_bytes
+    if fixed_first >= format.ARCHIVE_INDEX_LIMIT {
+        return Error(Limit(Manifest))
+    }
+    let max_packs_first = (format.ARCHIVE_INDEX_LIMIT - fixed_first) / format.ARCHIVE_PACK_REF_BYTES
+    let max_packs_cont = (format.ARCHIVE_INDEX_LIMIT - 230u64) / format.ARCHIVE_PACK_REF_BYTES
+    let mut at = 0u64
+    let mut first_seg = true
+    loop {
+        let cap = if first_seg {
+            max_packs_first
+        } else {
+            max_packs_cont
+        }
+        let take_end = order.min(total_packs, at + cap)
+        let mut slice_packs: List[format.ArchivePackRefRep] = list.new()
+        types.capacity(list.try_reserve(mut slice_packs, take_end - at))?
+        for i in at .. take_end {
+            list.push(mut slice_packs, base.packs[i])
+        }
+        let mut frontier = base.frontier
+        frontier.first_index_ordinal = first_ord
+        let row = format.ArchiveBaseRowRep(base_ordinal: base.base_ordinal, epoch: base.epoch, digest: base.digest, len: base.len, first_unit: base.first_unit, main_version: base.main_version, main_at: base.main_at, frontier, pack_continuation: !first_seg, packs: take slice_packs)
+        let mut bases: List[format.ArchiveBaseRowRep] = list.new()
+        types.capacity(list.try_reserve(mut bases, 1))?
+        list.push(mut bases, take row)
+        let seg_ivs: List[format.ArchiveIntervalRep] = if first_seg {
+            clone(spilled_intervals)
+        } else {
+            list.new()
+        }
+        let seg = format.ArchiveIndexSegmentRep(ordinal: next_ord, prev: cur_prev, bases: take bases, spilled_intervals: take seg_ivs)
+        let encoded = format.encode_archive_index(store, source_kind, seg)?
+        let seg_len = list.len(encoded)
+        let seg_digest = std.check.xxh3(encoded, 0, seg_len)
+        let rel = format.archive_index_rel(next_ord, seg_digest)
+        let full_key = format.archive_key(store, rel)
+        match archive_put_immutable(mut sink, full_key, take encoded, deadline)? {
+            UnitStored => (),
+            UnitDiverged(_) => return Error(Diverged(0)),
+        }
+        let ref_now = format.ArchiveIndexRefRep(ordinal: next_ord, len: seg_len, digest: seg_digest)
+        cur_prev = Some(ref_now)
+        next_ord += 1
+        at = take_end
+        first_seg = false
+        if at >= total_packs {
+            return Ok((ref_now, first_ord))
+        }
+    }
+}
+
+// Walks `index_tail` backwards by exact GET (zero LIST) to reconstruct the most
+// recently advertised base row and its complete pack map (for A2 no-relisting).
+pub fn archive_load_latest_base(mut sink: std.object.Client, store: types.StoreKey, tail: format.ArchiveIndexRefRep, deadline: u64) -> Result[(format.ArchiveBaseRowRep, Map[u64, format.ArchivePackRefRep]), types.Failure] waits {
+    let mut cur = Some(tail)
+    let mut packs: Map[u64, format.ArchivePackRefRep] = map.new()
+    let mut latest_summary: Option[format.ArchiveBaseRowRep] = None
+    while let Some(idx_ref) = cur {
+        let key = format.archive_key(store, format.archive_index_rel(idx_ref.ordinal, idx_ref.digest))
+        let mut raw = manifest.disk_read_buffer(idx_ref.len)?
+        let _ = history_fetch(mut sink, key, mut raw, deadline)?
+        let seg = format.decode_archive_index(key, store, idx_ref, raw)?
+        if list.len(seg.bases) == 0 {
+            cur = seg.prev
+            continue
+        }
+        let row = view seg.bases[list.len(seg.bases) - 1]
+        match latest_summary {
+            None => {
+                latest_summary = Some(format.archive_base_summary(row))
+            },
+            Some(prev_sum) => if row.base_ordinal != prev_sum.base_ordinal {
+                break
+            },
+        }
+        types.capacity(map.try_reserve(mut packs, list.len(row.packs)))?
+        for p in row.packs {
+            map.insert(mut packs, p.seq, p)
+        }
+        if !row.pack_continuation {
+            break
+        }
+        cur = seg.prev
+    }
+    let Some(take summary) = take latest_summary else {
+        return Error(format.disk_fault("archive-index", 0, Malformed))
+    }
+    Ok((take summary, take packs))
+}
+
+// A2 No-relisting check (§15.7): every pack in `candidate` absent from `prev_packs`
+// must have ordinal `>= prev_base.frontier.next_pack`; shared packs must match
+// exact `(epoch, len, digest)`; base ordinal and frontiers must never regress.
+pub fn archive_check_no_relisting(prev_base: format.ArchiveBaseRowRep, prev_packs: Map[u64, format.ArchivePackRefRep], candidate: format.ArchiveBaseRowRep) -> Result[(), types.Failure] {
+    if candidate.base_ordinal < prev_base.base_ordinal {
+        return Error(format.disk_fault("archive-head", 0, Order))
+    }
+    if candidate.base_ordinal == prev_base.base_ordinal && candidate.digest != prev_base.digest {
+        return Error(format.disk_fault("archive-head", 0, Malformed))
+    }
+    if candidate.frontier.next_pack < prev_base.frontier.next_pack || candidate.frontier.next_gen < prev_base.frontier.next_gen {
+        return Error(format.disk_fault("archive-head", 0, Order))
+    }
+    for p in candidate.packs {
+        match map.get(prev_packs, p.seq) {
+            Some(old_p) => {
+                if old_p.epoch != p.epoch || old_p.len != p.len || old_p.digest != p.digest {
+                    return Error(format.disk_fault("archive-head", 0, Malformed))
+                }
+            },
+            None => {
+                if p.seq < prev_base.frontier.next_pack {
+                    return Error(format.disk_fault("archive-head", 0, Order))
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+// A1 exact-GET-only closure verifier: walks `index_tail` down to `floor` and
+// verifies every index segment and every unit of the latest base (zero LIST).
+pub fn archive_verify_head_closure(mut sink: std.object.Client, store: types.StoreKey, head: format.ArchiveHeadRep, deadline: u64) -> Result[(), types.Failure] waits {
+    let Some(tail) = head.index_tail else {
+        return Ok(())
+    }
+    let stop_ord = match head.floor_base {
+        Some(fb) => fb.frontier.first_index_ordinal,
+        None => 1u64,
+    }
+    let mut cur = Some(tail)
+    let mut checked_latest = false
+    while let Some(idx_ref) = cur {
+        let key = format.archive_key(store, format.archive_index_rel(idx_ref.ordinal, idx_ref.digest))
+        let mut raw = manifest.disk_read_buffer(idx_ref.len)?
+        let _ = history_fetch(mut sink, key, mut raw, deadline)?
+        let seg = format.decode_archive_index(key, store, idx_ref, raw)?
+        if !checked_latest && list.len(seg.bases) != 0 {
+            let row = view seg.bases[list.len(seg.bases) - 1]
+            if head.source_kind == format.ARCHIVE_SOURCE_LOG {
+                let m_key = format.archive_key(store, format.archive_log_manifest_rel(row.base_ordinal, row.digest))
+                let mut m_raw = manifest.disk_read_buffer(row.len)?
+                let _ = history_fetch(mut sink, m_key, mut m_raw, deadline)?
+                if list.len(m_raw) != row.len || std.check.xxh3(m_raw, 0, row.len) != row.digest {
+                    return Error(format.disk_fault(m_key, 0, Checksum))
+                }
+                for p in row.packs {
+                    let p_key = format.archive_key(store, format.archive_log_pack_rel(p.seq, p.digest))
+                    let mut p_raw = manifest.disk_read_buffer(p.len)?
+                    let _ = history_fetch(mut sink, p_key, mut p_raw, deadline)?
+                    if list.len(p_raw) != p.len || std.check.xxh3(p_raw, 0, p.len) != p.digest {
+                        return Error(format.disk_fault(p_key, 0, Checksum))
+                    }
+                }
+            } else {
+                let e_ref = pages.HistoryRef(seq: row.base_ordinal, epoch: row.epoch, len: row.len, digest: row.digest)
+                let e_key = format.archive_key(store, history_read_key("e-", e_ref)?)
+                let mut e_raw = manifest.disk_read_buffer(row.len)?
+                let _ = history_fetch(mut sink, e_key, mut e_raw, deadline)?
+                history_object_digest(e_key, e_ref, e_raw)?
+                for p in row.packs {
+                    let p_ref = pages.HistoryRef(seq: p.seq, epoch: p.epoch, len: p.len, digest: p.digest)
+                    let p_key = format.archive_key(store, history_read_key("p-", p_ref)?)
+                    let mut p_raw = manifest.disk_read_buffer(p.len)?
+                    let _ = history_fetch(mut sink, p_key, mut p_raw, deadline)?
+                    history_object_digest(p_key, p_ref, p_raw)?
+                }
+            }
+            if !row.pack_continuation {
+                checked_latest = true
+            }
+        }
+        if idx_ref.ordinal <= stop_ord {
+            break
+        }
+        cur = seg.prev
+    }
+    Ok(())
+}

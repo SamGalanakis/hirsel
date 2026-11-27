@@ -11,6 +11,6 @@ pub fn objects_cache(take a: Authority, d: Dir, capacity_bytes: u64) -> Authorit
             config.cache = cache
             SimAuthority(take config)
         },
-        LogAuthority(dir) => LogAuthority(dir),
+        LogAuthority(dir, take arch) => LogAuthority(dir, take arch),
     }
 }

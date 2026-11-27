@@ -12,7 +12,8 @@ pub opaque type ObjectJournalStart: send {
     reclaim: Option[ObjectReclaimCapture],
     weak: Option[WeakPublisher],
     // An attached Place's slot: its frames go to the host stream (§12.11.4).
-    stream: Option[host_stream.SlotLink]
+    stream: Option[host_stream.SlotLink],
+    archive_reclaim: Option[ObjectArchiveReclaimConfig]
 }
 
 type ObjectJournalTask: send {
@@ -25,7 +26,9 @@ type ObjectJournalTask: send {
     group_commits: u64,
     idle: Option[Sender[()]],
     health_signal: Option[ObjectHealthSignal],
-    reclaims: Option[Latest[ReclaimFailures]]
+    reclaims: Option[Latest[ReclaimFailures]],
+    archive_observed: Option[Latest[ArchiveObservedState]],
+    clock: Option[Clock]
 }
 
 fn history_probe_writer(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
@@ -68,18 +71,19 @@ pub opaque type ObjectJournalSession {
     reclaim: Option[ObjectReclaimCapture],
     weak: Option[WeakPublisher],
     // An attached Place's slot: its frames go to the host stream (§12.11.4).
-    stream: Option[host_stream.SlotLink]
+    stream: Option[host_stream.SlotLink],
+    archive_reclaim: Option[ObjectArchiveReclaimConfig]
 }
 
 pub fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take input
-    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream, archive_reclaim: take archive_reclaim) = take input
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream, archive_reclaim: take archive_reclaim)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream, archive_reclaim: take archive_reclaim) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream, archive_reclaim: take archive_reclaim)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), types.Failure] waits {
@@ -178,6 +182,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut stream_queued: List[(Bytes, u64)] = list.new()
     if let Some(link) = lane.stream {
         host_stream.slot_report_head(link, history.register_head(lane.register).store, history.register_attach(lane.register), host_stream.slot_last_batch(link))
+    }
+    if let Some(shared) = input.archive_observed {
+        latest.publish(shared, arc.new(archive_observed_now(lane, input.clock)))
     }
     loop {
         if let Some(terminal) = history.register_terminal(lane.register) {
@@ -297,6 +304,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 match take ack {
                     SlotAcked(through, batch_seq) => {
                         object_journal_stream_advance_batch(mut lane, batch_seq, through > 0)
+                        if let Some(shared) = input.archive_observed {
+                            latest.publish(shared, arc.new(archive_observed_now(lane, input.clock)))
+                        }
                         is_stalled = false
                         if let Some((in_seq, in_bytes)) = stream_in_flight {
                             if through >= in_seq {
@@ -491,6 +501,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 let read = object_export_read(mut lane, key, reference, take buffer)
                 let _ = channel.send(outlet, take read)
             },
+            ObjectArchiveFetch(take req) => history.archive_serve_fetch(mut lane.client, take req),
             ObjectPause(take pause_response, take resuming) => {
                 let owner = object_journal_pause(take lane)
                 if let Error(_) = channel.send(pause_response, take owner) {
@@ -499,8 +510,48 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 match channel.receive(resuming) {
                     Ok(take restored) => {
                         lane = object_journal_begin(take restored)
+                        if let Some(shared) = input.archive_observed {
+                            latest.publish(shared, arc.new(archive_observed_now(lane, input.clock)))
+                        }
                     },
                     _ => return Ok(()),
+                }
+            },
+            ArchiveSettleTick => {
+                if !stream_awaiting_fence {
+                    let (take settled, take obs_res) = archive_settle_attached_lane(take lane, input.group_bytes, input.group_commits, input.clock)
+                    lane = take settled
+                    match take obs_res {
+                        Ok(obs) => if let Some(shared) = input.archive_observed {
+                            latest.publish(shared, arc.new(obs))
+                        },
+                        Error(Fenced(ep)) => return Error(Fenced(ep)),
+                        Error(_) => (),
+                    }
+                }
+            },
+            ArchiveSettleNow(take reply_to) => {
+                let (take settled, take obs_res) = archive_settle_attached_lane(take lane, input.group_bytes, input.group_commits, input.clock)
+                lane = take settled
+                let fenced_ep: Option[u64] = match obs_res {
+                    Ok(obs) => {
+                        if let Some(shared) = input.archive_observed {
+                            latest.publish(shared, arc.new(obs))
+                        }
+                        None
+                    },
+                    Error(Fenced(ep)) => Some(ep),
+                    Error(_) => None,
+                }
+                let _ = channel.send(reply_to, take obs_res)
+                if let Some(ep) = fenced_ep {
+                    return Error(Fenced(ep))
+                }
+            },
+            SetArchiveReclaim(take cfg) => {
+                lane.archive_reclaim = take cfg
+                if let Some(shared) = input.archive_observed {
+                    latest.publish(shared, arc.new(archive_observed_now(lane, input.clock)))
                 }
             },
         }

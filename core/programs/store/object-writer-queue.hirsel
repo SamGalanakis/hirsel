@@ -1,4 +1,4 @@
-pub type JournalMsg: send = Frame(Bytes, u64) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), types.Failure]], u64) | ObjectSkipFence(Sender[Result[(), types.Failure]]) | ObjectExportRead(journal.ObjectExportFetch) | StreamAnswer(journal.SlotAck) | ObjectClose(Sender[Result[(), types.Failure]])
+pub type JournalMsg: send = Frame(Bytes, u64) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), types.Failure]], u64) | ObjectSkipFence(Sender[Result[(), types.Failure]]) | ObjectExportRead(journal.ObjectExportFetch) | ObjectArchiveFetch(history.ArchiveFetchReq) | StreamAnswer(journal.SlotAck) | ObjectClose(Sender[Result[(), types.Failure]]) | ArchiveSettleTick | ArchiveSettleNow(Sender[Result[ArchiveObservedState, types.Failure]]) | SetArchiveReclaim(Option[ObjectArchiveReclaimConfig])
 
 pub type ObjectAck: send = ObjectJournaled(u64, u64, u64) | ObjectBroken(types.Failure)
 
@@ -13,6 +13,21 @@ fn journal_idle_timer(take timer: JournalIdleTimer) waits {
     while let Ok(()) = channel.receive(timer.requests) {
         std.clock.sleep_ns(timer.clock, timer.interval_ns)
         if let Error(_) = channel.send(timer.journal, IdleCheck) {
+            return
+        }
+    }
+}
+
+type ArchiveTickTimer: send {
+    clock: Clock,
+    journal: Sender[JournalMsg],
+    interval_ns: u64
+}
+
+fn archive_tick_timer(take timer: ArchiveTickTimer) waits {
+    loop {
+        std.clock.sleep_ns(timer.clock, timer.interval_ns)
+        if let Error(_) = channel.send(timer.journal, ArchiveSettleTick) {
             return
         }
     }

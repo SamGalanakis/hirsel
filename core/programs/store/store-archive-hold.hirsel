@@ -270,6 +270,7 @@ pub fn detach_archive(mut db: Db) -> Result[Ticket, Error] waits {
     if archive_binding_id(db) == 0 {
         return Error(Missing("archive"))
     }
+    stop_archiver(mut db)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.pending_binding = Some(0u64)
     })
@@ -288,6 +289,7 @@ fn note_directory_archive_ack(mut db: Db, acked_gen: u64, acked_digest: u64, ack
         return Ok(())
     }
     let d = log_directory(db)?
+    let cur_gen = db.accounting.checkpointed
     let mut unlink_gens: List[u64] = list.new()
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         if acked_gen > state.archive_hold.acked_gen {
@@ -296,6 +298,9 @@ fn note_directory_archive_ack(mut db: Db, acked_gen: u64, acked_digest: u64, ack
         }
         if acked_seg > state.archive_hold.acked_seg {
             state.archive_hold.acked_seg = acked_seg
+        }
+        if acked_gen >= cur_gen && cur_gen > 0 {
+            state.archive_hold.released_gap = false
         }
         let mut kept: List[manifest.HeldReceipt] = list.new()
         for r in state.archive_hold.receipts {

@@ -1,0 +1,602 @@
+// Background point-in-time archive lane (A3), public API, and Attention.archive (§15.7).
+pub type ArchiveOptions: send {
+    binding_id: u64,
+    op_ms: u64,
+    hold_bytes: Option[u64],
+    archive_ms: u64
+}
+
+pub fn archive_options(binding_id: u64, op_ms: u64) -> ArchiveOptions {
+    ArchiveOptions(binding_id, op_ms, hold_bytes: None, archive_ms: format.ARCHIVE_DEFAULT_TICK_MS)
+}
+
+type ArchiveAttachConfig {
+    sink: std.object.Client,
+    options: ArchiveOptions
+}
+
+fn check_archive_options(config: ArchiveOptions) -> Result[(), Error] {
+    if config.binding_id == 0 {
+        return Error(Missing("binding_id"))
+    }
+    if config.op_ms == 0 {
+        return Error(Missing("op_ms"))
+    }
+    if config.archive_ms == 0 {
+        return Error(Missing("archive_ms"))
+    }
+    Ok(())
+}
+
+/// Attaches a point-in-time archive sink to an Authority (§15.7).
+/// Refuses zero binding_id/op_ms/archive_ms or overlapping source/stream/archive prefixes.
+pub fn archived(take a: Authority, take sink: std.object.Client, config: ArchiveOptions) -> Result[Authority, Error] {
+    check_archive_options(config)?
+    let sink_bucket = std.object.bucket_config(sink)
+    match take a {
+        LogAuthority(d, _) => Ok(LogAuthority(d, Some(ArchiveAttachConfig(sink: take sink, options: config)))),
+        ObjectAuthority(take cfg) => {
+            let mut oc = take cfg
+            if format.archive_bucket_overlaps(std.object.bucket_config(oc.client), sink_bucket) {
+                return Error(Stream(Overlap))
+            }
+            if let Some(ref_slot) = view oc.stream {
+                let s_root = host_stream.slot_root_bucket(ref_slot.inner)
+                if format.archive_bucket_overlaps(s_root, sink_bucket) {
+                    return Error(Stream(Overlap))
+                }
+            }
+            if let Some(s_root_prefix) = view oc.stream_root {
+                let place_b = std.object.bucket_config(oc.client)
+                let sr_b = std.object.Bucket(endpoint: string.from(place_b.endpoint), aws_region: string.from(place_b.aws_region), bucket: string.from(place_b.bucket), prefix: string.from(s_root_prefix), style: place_b.style)
+                if format.archive_bucket_overlaps(sr_b, sink_bucket) {
+                    return Error(Stream(Overlap))
+                }
+            }
+            oc.archive = Some(ArchiveAttachConfig(sink: take sink, options: config))
+            Ok(ObjectAuthority(take oc))
+        },
+        SimAuthority(take cfg) => {
+            let mut oc = take cfg
+            if format.archive_bucket_overlaps(std.object.bucket_config(oc.client), sink_bucket) {
+                return Error(Stream(Overlap))
+            }
+            if let Some(ref_slot) = view oc.stream {
+                let s_root = host_stream.slot_root_bucket(ref_slot.inner)
+                if format.archive_bucket_overlaps(s_root, sink_bucket) {
+                    return Error(Stream(Overlap))
+                }
+            }
+            oc.archive = Some(ArchiveAttachConfig(sink: take sink, options: config))
+            Ok(SimAuthority(take oc))
+        },
+    }
+}
+
+type ArchiveLaneSource: send = ArchiveDirSource(Dir) | ArchiveObjectSource(Sender[history.ArchiveFetchReq], u64)
+
+type ArchiveSourceBridgeInput: send {
+    rx: Receiver[history.ArchiveFetchReq],
+    journal: Sender[object_writer.JournalMsg]
+}
+
+fn archive_source_bridge(take input: ArchiveSourceBridgeInput) waits {
+    let ArchiveSourceBridgeInput(rx: take rx, journal: take journal) = take input
+    while let Ok(take req) = channel.receive(rx) {
+        if let Error(_) = channel.send(journal, ObjectArchiveFetch(take req)) {
+            return
+        }
+    }
+}
+
+type ArchiveStatusSnapshot: shareable + send {
+    seq: u64,
+    binding_id: u64,
+    state: ArchiveStateKind,
+    archived_through: Option[ArchiveProgressView],
+    acked_gen: u64,
+    acked_digest: u64,
+    acked_seg: u64,
+    acked_entry: u64,
+    last_error: Option[String]
+}
+
+type ArchiveLane {
+    binding_id: u64,
+    op_ms: u64,
+    archive_ms: u64,
+    control: Sender[history.ArchiveLaneMsg],
+    status: Latest[ArchiveStatusSnapshot],
+    worker: Task[()],
+    wake_timer: Option[Task[()]],
+    source_tx: Option[Sender[history.ArchiveFetchReq]],
+    source_bridge: Option[Task[()]],
+    sink_workers: Option[std.object.Workers]
+}
+
+type ArchiveWorkerInput: send {
+    store: types.StoreKey,
+    binding_id: u64,
+    op_ms: u64,
+    allow_rebind: bool,
+    source: ArchiveLaneSource,
+    sink_requests: std.object.Requests,
+    control: Receiver[history.ArchiveLaneMsg],
+    status: Latest[ArchiveStatusSnapshot]
+}
+
+type ArchiveWakeTimerInput: send {
+    clock: Clock,
+    control: Sender[history.ArchiveLaneMsg],
+    interval_ns: u64
+}
+
+fn archive_wake_timer(take input: ArchiveWakeTimerInput) waits {
+    loop {
+        std.clock.sleep_ns(input.clock, input.interval_ns)
+        if let Error(_) = channel.try_send(input.control, ArchiveTickWake) {
+            return
+        }
+    }
+}
+
+fn archive_progress_from_cursor(c: format.ArchiveCursorRep) -> ArchiveProgressView {
+    ArchiveProgressView(ordinal: c.ordinal, sub: c.sub, gen: c.gen, main_version: c.main_version, main_at: c.main_at)
+}
+
+fn archive_error_summary(problem: types.Failure) -> String {
+    match problem {
+        Diverged(_) => string.from("Diverged"),
+        Fenced(_) => string.from("Fenced"),
+        Lost => string.from("Lost"),
+        Corrupt(_) => string.from("Corrupt"),
+        Remote(_) => string.from("Remote"),
+        Undecided => string.from("Undecided"),
+        _ => string.from("Error"),
+    }
+}
+
+fn archive_lane_step_once(source: ArchiveLaneSource, store: types.StoreKey, binding_id: u64, allow_rebind: bool, mut sink: std.object.Client, op_ms: u64) -> Result[history.ArchiveStepResult, types.Failure] waits {
+    let deadline = std.object.deadline_after_ms(sink, op_ms)
+    match source {
+        ArchiveDirSource(d) => history.archive_step_directory(d, store, binding_id, allow_rebind, mut sink, deadline),
+        ArchiveObjectSource(src_tx, holder_epoch) => history.archive_step_objects(channel.sender(src_tx), store, binding_id, holder_epoch, allow_rebind, mut sink, deadline),
+    }
+}
+
+fn archive_update_status(shared: Latest[ArchiveStatusSnapshot], mut snap: ArchiveStatusSnapshot, outcome: Result[history.ArchiveStepResult, types.Failure]) {
+    snap.seq = int.saturating_add(snap.seq, 1)
+    match outcome {
+        Ok(step) => {
+            if let Some(head) = view step.head {
+                if let Some(cur) = head.through {
+                    snap.archived_through = Some(archive_progress_from_cursor(cur))
+                }
+                snap.state = if head.open_gap {
+                    ArchiveGap
+                } else {
+                    ArchiveActive
+                }
+            }
+            if step.acked_gen > snap.acked_gen {
+                snap.acked_gen = step.acked_gen
+                snap.acked_digest = step.acked_digest
+            }
+            if step.acked_seg > snap.acked_seg {
+                snap.acked_seg = step.acked_seg
+            }
+            if step.acked_entry > snap.acked_entry {
+                snap.acked_entry = step.acked_entry
+            }
+            snap.last_error = None
+        },
+        Error(problem) => {
+            snap.last_error = Some(archive_error_summary(problem))
+            snap.state = match problem {
+                Diverged(_) => ArchiveDiverged,
+                _ => ArchiveUnknown,
+            }
+        },
+    }
+    latest.publish(shared, arc.new(clone(snap)))
+}
+
+const ARCHIVE_LANE_BUDGET: u64 = 33554432
+
+fn archive_lane_worker(take input: ArchiveWorkerInput) waits {
+    let ArchiveWorkerInput(store, binding_id, op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control, status: take status) = take input
+    let mut sink = std.object.attach(take sink_requests, None)
+    let mut snap = ArchiveStatusSnapshot(seq: 0, binding_id, state: ArchiveUnknown, archived_through: None, acked_gen: 0, acked_digest: 0, acked_seg: 0, acked_entry: 0, last_error: None)
+    let mut stopped = false
+    let mut allow_next_rebind = allow_rebind
+    while let Ok(take msg) = channel.receive(control) {
+        match take msg {
+            ArchiveStop => return,
+            ArchiveSinkHeadProbe(take probe_req) => {
+                let history.ArchiveHeadProbeReq(store: probe_store, deadline: probe_due, reply: take probe_reply) = take probe_req
+                let res = history.archive_head_fetch(mut sink, probe_store, probe_due)
+                let _ = channel.send(probe_reply, take res)
+            },
+            ArchiveTickWake => {
+                if stopped {
+                    continue
+                }
+                let res = archive_lane_step_once(source, store, binding_id, allow_next_rebind, mut sink, op_ms)
+                if let Ok(step) = view res {
+                    if step.advanced {
+                        allow_next_rebind = false
+                    }
+                }
+                if let Error(Diverged(_)) = res {
+                    stopped = true
+                }
+                if let Error(Fenced(_)) = res {
+                    stopped = true
+                }
+                archive_update_status(status, mut snap, res)
+            },
+            ArchiveStepNow(take reply_to) => {
+                if stopped {
+                    let _ = channel.send(reply_to, Error(Diverged(0)))
+                    continue
+                }
+                let res = archive_lane_step_once(source, store, binding_id, allow_next_rebind, mut sink, op_ms)
+                if let Ok(step) = view res {
+                    if step.advanced {
+                        allow_next_rebind = false
+                    }
+                }
+                if let Error(Diverged(_)) = res {
+                    stopped = true
+                }
+                if let Error(Fenced(_)) = res {
+                    stopped = true
+                }
+                let reply_copy: Result[history.ArchiveStepResult, types.Failure] = match view res {
+                    Ok(step) => Ok(clone(step)),
+                    Error(problem) => Error(clone(problem)),
+                }
+                archive_update_status(status, mut snap, res)
+                let _ = channel.send(reply_to, take reply_copy)
+            },
+        }
+    }
+}
+
+fn join_archive_tick(take tick: Option[Task[()]]) waits {
+    if let Some(take running) = take tick {
+        let mut t = take running
+        task.cancel(mut t)
+        let _ = task.join(take t)
+    }
+}
+
+fn start_archive_lane_returning(mut db: Db, take sink: std.object.Client, config: ArchiveOptions, allow_rebind: bool) -> Result[(), (Error, std.object.Client)] waits {
+    stop_archiver(mut db)
+    let (take sink_requests, take sink_workers) = std.object.split(take sink)
+    let tasks = disk_state(db).tasks
+    let store = store_key_to_rep(db.store)
+    let (take source, take source_tx_opt, take source_bridge): (ArchiveLaneSource, Option[Sender[history.ArchiveFetchReq]], Option[Task[()]]) = match disk_state(db).backend {
+        DirBackend(directory) => (ArchiveDirSource(journal.directory(directory)), None, None),
+        ObjectBackend(writer) => {
+            let (take req_tx, take req_rx): (Sender[history.ArchiveFetchReq], Receiver[history.ArchiveFetchReq]) = match disk_allocation(fn() -> Result[(Sender[history.ArchiveFetchReq], Receiver[history.ArchiveFetchReq]), Error] {
+                Ok(channel.new(8))
+            }) {
+                Ok(take pair) => take pair,
+                Error(take problem) => return Error((take problem, std.object.attach(take sink_requests, take sink_workers))),
+            }
+            let bridge_in = ArchiveSourceBridgeInput(rx: take req_rx, journal: channel.sender(object_sender(disk_state(db))))
+            let bridge = match task.try_spawn(tasks, bytes 4096, take bridge_in, archive_source_bridge) {
+                Ok(take running) => take running,
+                Error((problem, _)) => return Error((Full(Allocation(problem)), std.object.attach(take sink_requests, take sink_workers))),
+            }
+            let holder_epoch = object_writer.claim_pair(writer).epoch
+            let worker_tx = channel.sender(req_tx)
+            (ArchiveObjectSource(take worker_tx, holder_epoch), Some(take req_tx), Some(take bridge))
+        },
+    }
+    let (take control_tx, take control_rx): (Sender[history.ArchiveLaneMsg], Receiver[history.ArchiveLaneMsg]) = match disk_allocation(fn() -> Result[(Sender[history.ArchiveLaneMsg], Receiver[history.ArchiveLaneMsg]), Error] {
+        Ok(channel.new(16))
+    }) {
+        Ok(take pair) => take pair,
+        Error(take problem) => {
+            let _ = take source
+            let _ = take source_tx_opt
+            join_archive_tick(take source_bridge)
+            return Error((take problem, std.object.attach(take sink_requests, take sink_workers)))
+        },
+    }
+    let init_snap = ArchiveStatusSnapshot(seq: 1, binding_id: config.binding_id, state: ArchiveUnknown, archived_through: None, acked_gen: 0, acked_digest: 0, acked_seg: 0, acked_entry: 0, last_error: None)
+    let status = match disk_allocation(scoped fn() -> Result[Latest[ArchiveStatusSnapshot], Error] {
+        Ok(latest.new(arc.new(clone(init_snap))))
+    }) {
+        Ok(take st) => take st,
+        Error(take problem) => {
+            let _ = take source
+            let _ = take source_tx_opt
+            join_archive_tick(take source_bridge)
+            return Error((take problem, std.object.attach(take sink_requests, take sink_workers)))
+        },
+    }
+    let wake_input = ArchiveWakeTimerInput(clock: db.clock, control: channel.sender(control_tx), interval_ns: int.saturating_mul(config.archive_ms, 1000000))
+    let wake_timer = match task.try_spawn(tasks, bytes 4096, take wake_input, archive_wake_timer) {
+        Ok(take running) => Some(take running),
+        Error((problem, _)) => {
+            let _ = take source
+            let _ = take source_tx_opt
+            join_archive_tick(take source_bridge)
+            return Error((Full(Allocation(problem)), std.object.attach(take sink_requests, take sink_workers)))
+        },
+    }
+    let worker_input = ArchiveWorkerInput(store, binding_id: config.binding_id, op_ms: config.op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control_rx, status: latest.handle(status))
+    let worker = match task.try_spawn(tasks, bytes ARCHIVE_LANE_BUDGET, take worker_input, archive_lane_worker) {
+        Ok(take running) => take running,
+        Error((problem, take ret_in)) => {
+            join_archive_tick(take wake_timer)
+            let ArchiveWorkerInput(sink_requests: take back_req, source: take back_src, ..) = take ret_in
+            let _ = take back_src
+            let _ = take source_tx_opt
+            join_archive_tick(take source_bridge)
+            return Error((Full(Allocation(problem)), std.object.attach(take back_req, take sink_workers)))
+        },
+    }
+    let (hold_limit, hold_explicit) = match config.hold_bytes {
+        Some(limit) => (limit, true),
+        None => (0u64, false),
+    }
+    let reclaim_cfg = object_writer.ObjectArchiveReclaimConfig(binding_id: config.binding_id, hold_bytes: hold_limit, hold_bytes_explicit: hold_explicit, sink_control: channel.sender(control_tx), clock: db.clock, op_ms: config.op_ms)
+    let lane = ArchiveLane(binding_id: config.binding_id, op_ms: config.op_ms, archive_ms: config.archive_ms, control: take control_tx, status: take status, worker: take worker, wake_timer: take wake_timer, source_tx: take source_tx_opt, source_bridge: take source_bridge, sink_workers: take sink_workers)
+    let is_obj = object_writer_open(db)
+    let c = db.clock
+    let tick_ms = config.archive_ms
+    let old_tick = match write_disk(mut db.disk, take lane, scoped fn(mut state: DiskState, take l: ArchiveLane) -> Result[Option[Task[()]], Error] {
+        if hold_explicit {
+            state.archive_hold.hold_bytes = hold_limit
+            state.archive_hold.hold_bytes_explicit = true
+        }
+        state.archiver = Some(take l)
+        if is_obj {
+            if let ObjectBackend(mut writer) = state.backend {
+                return failure_result_from_rep(object_writer.start_archive_tick(mut writer, tasks, c, tick_ms))
+            }
+        }
+        Ok(None)
+    }) {
+        Ok(take t) => take t,
+        Error(take problem) => fail("archive tick OOM"),
+    }
+    join_archive_tick(take old_tick)
+    if is_obj {
+        object_writer.send_archive_reclaim(object_state(db), Some(take reclaim_cfg))
+    }
+    Ok(())
+}
+
+fn start_archive_lane(mut db: Db, take sink: std.object.Client, config: ArchiveOptions, allow_rebind: bool) -> Result[(), Error] waits {
+    match start_archive_lane_returning(mut db, take sink, config, allow_rebind) {
+        Ok(()) => Ok(()),
+        Error((take problem, _)) => Error(take problem),
+    }
+}
+
+fn stop_archiver(mut db: Db) waits {
+    if !is_disk(db) {
+        return
+    }
+    let is_obj = object_writer_open(db)
+    let (take old_tick, take taken) = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> (Option[Task[()]], Option[ArchiveLane]) {
+        let tick = if let ObjectBackend(mut writer) = state.backend {
+            object_writer.take_archive_tick(mut writer)
+        } else {
+            None
+        }
+        (take tick, replace(mut state.archiver, None))
+    })
+    join_archive_tick(take old_tick)
+    if is_obj {
+        object_writer.send_archive_reclaim(object_state(db), None)
+    }
+    if let Some(take lane) = take taken {
+        let ArchiveLane(control: take control, worker: take worker, wake_timer: take wake_timer, source_tx: take source_tx, source_bridge: take source_bridge, sink_workers: take sink_workers, ..) = take lane
+        if let Some(take wt) = take wake_timer {
+            let mut t = take wt
+            task.cancel(mut t)
+            let _ = task.join(take t)
+        }
+        let _ = channel.try_send(control, ArchiveStop)
+        let _ = take control
+        let _ = task.join(take worker)
+        let _ = take source_tx
+        join_archive_tick(take source_bridge)
+        let _ = take sink_workers
+    }
+}
+
+/// Binds an open disk or Bucket store to an archive sink via an explicit cut
+/// and starts its background archiver lane (A3).
+pub fn bind_archive(mut db: Db, take sink: std.object.Client, config: ArchiveOptions) -> Result[Ticket, Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(Unsupported(1))
+    }
+    check_archive_options(config)?
+    if object_writer_open(db) {
+        let sink_bucket = std.object.bucket_config(sink)
+        let src_bucket = object_writer.source_bucket(object_state(db))
+        if format.archive_bucket_overlaps(src_bucket, sink_bucket) {
+            return Error(Stream(Overlap))
+        }
+    }
+    let bound_ticket = bind_archive_hold(mut db, config.binding_id, config.hold_bytes)?
+    durable(mut db, bound_ticket)?
+    start_archive_lane(mut db, take sink, config, true)?
+    Ok(bound_ticket)
+}
+
+/// Runs one deterministic step of the background archiver lane and reconciles
+/// acknowledged Directory receipts. Returns `true` if `archive-head` advanced
+/// (unit published or typed `Gap` committed), `false` if already caught up.
+pub fn archive_step(mut db: Db) -> Result[bool, Error] waits {
+    let step = archive_step_detailed(mut db)?
+    Ok(step.advanced)
+}
+
+fn archive_control_sender(db: Db) -> Result[Sender[history.ArchiveLaneMsg], Error] {
+    let state = disk_state(db)
+    match view state.archiver {
+        Some(lane) => Ok(channel.sender(lane.control)),
+        None => Error(Missing("archive")),
+    }
+}
+
+fn archive_source_sender(db: Db) -> Result[Sender[history.ArchiveFetchReq], Error] {
+    let state = disk_state(db)
+    match view state.archiver {
+        Some(lane) => match view lane.source_tx {
+            Some(tx) => Ok(channel.sender(tx)),
+            None => Error(Missing("archive")),
+        },
+        None => Error(Missing("archive")),
+    }
+}
+
+fn archive_step_detailed(mut db: Db) -> Result[history.ArchiveStepResult, Error] waits {
+    if !is_disk(db) {
+        return Error(Unsupported(1))
+    }
+    let control = archive_control_sender(db)?
+    let (reply_tx, reply_rx): (Sender[Result[history.ArchiveStepResult, types.Failure]], Receiver[Result[history.ArchiveStepResult, types.Failure]]) = channel.new(1)
+    if let Error(_) = channel.send(control, ArchiveStepNow(take reply_tx)) {
+        return Error(Io(Closed))
+    }
+    let step = match channel.receive(reply_rx) {
+        Ok(take outcome) => failure_result_from_rep(take outcome)?,
+        Error(_) => return Error(Io(Closed)),
+    }
+    if step.acked_gen > 0 && !object_writer_open(db) {
+        note_directory_archive_ack(mut db, step.acked_gen, step.acked_digest, step.acked_seg)?
+    }
+    Ok(take step)
+}
+
+/// Drains pending archive units up to `max_steps` steps.
+pub fn archive_drain(mut db: Db, max_steps: u64) -> Result[u64, Error] waits {
+    let mut done = 0u64
+    while done < max_steps {
+        if !archive_step(mut db)? {
+            break
+        }
+        done += 1
+    }
+    Ok(done)
+}
+
+/// Triggers an immediate settle pass on an attached Bucket Place without forcing
+/// a cut (§12.11.11 M6).
+pub fn archive_settle_now(mut db: Db) -> Result[(), Error] waits {
+    healthy(db)?
+    if !object_writer_open(db) {
+        return Ok(())
+    }
+    let _ = failure_result_from_rep(object_writer.request_archive_settle_now(object_state(db)))?
+    Ok(())
+}
+
+/// Reads the current `archive-head` for `store` by exact GET (zero LIST).
+pub fn archive_read_head(mut sink: std.object.Client, store: StoreId, op_ms: u64) -> Result[Option[format.ArchiveHeadRep], Error] waits {
+    let deadline = std.object.deadline_after_ms(sink, op_ms)
+    match failure_result_from_rep(history.archive_head_fetch(mut sink, store_key_to_rep(store), deadline))? {
+        Some((take head, _)) => Ok(Some(take head)),
+        None => Ok(None),
+    }
+}
+
+/// Exact-GET-only verification of `archive-head` and its chained index/base closure.
+pub fn archive_verify_closure(mut sink: std.object.Client, store: StoreId, op_ms: u64) -> Result[format.ArchiveHeadRep, Error] waits {
+    let deadline = std.object.deadline_after_ms(sink, op_ms)
+    let Some((take head, _)) = failure_result_from_rep(history.archive_head_fetch(mut sink, store_key_to_rep(store), deadline))? else {
+        return Error(NotFound)
+    }
+    failure_result_from_rep(history.archive_verify_head_closure(mut sink, store_key_to_rep(store), head, deadline))?
+    Ok(take head)
+}
+
+fn archive_witnessed_through(db: Db) -> u64 {
+    if !is_disk(db) {
+        return 0u64
+    }
+    let state = disk_state(db)
+    match view state.archiver {
+        Some(lane) => latest.read(lane.status).acked_entry,
+        None => 0u64,
+    }
+}
+
+fn archive_attention_seq(db: Db) -> u64 {
+    if !is_disk(db) {
+        return 0u64
+    }
+    let state = disk_state(db)
+    let lane_seq = match view state.archiver {
+        Some(lane) => latest.read(lane.status).seq,
+        None => 0u64,
+    }
+    let obs_seq = match view state.backend {
+        ObjectBackend(writer) => {
+            let obs = object_writer.archive_observed(writer)
+            if obs.known {
+                int.saturating_add(obs.settled_through, obs.acked_unsettled)
+            } else {
+                0u64
+            }
+        },
+        DirBackend(_) => 0u64,
+    }
+    int.saturating_add(lane_seq, obs_seq)
+}
+
+fn archive_attention(db: Db) -> Option[ArchiveAttention] {
+    if !is_disk(db) {
+        return None
+    }
+    let state = disk_state(db)
+    let bound_id = state.archive_hold.binding_id
+    let (settled_opt, unsettled_opt, age_opt) = match view state.backend {
+        ObjectBackend(writer) => {
+            let obs = object_writer.archive_observed(writer)
+            if obs.known {
+                let now = host.mono_ns(db.clock)
+                let age_ns = if now >= obs.observed_ns {
+                    now - obs.observed_ns
+                } else {
+                    0u64
+                }
+                (Some(obs.settled_through), Some(obs.acked_unsettled), Some(age_ns / 1000000))
+            } else {
+                (None, None, None)
+            }
+        },
+        DirBackend(_) => (Some(db.frame_seq), Some(0u64), Some(0u64)),
+    }
+    match view state.archiver {
+        Some(lane) => {
+            let snap = latest.read(lane.status)
+            let reported_state = if state.archive_hold.released_gap && snap.state == ArchiveActive {
+                ArchiveGap
+            } else {
+                snap.state
+            }
+            Some(ArchiveAttention(state: reported_state, binding_id: snap.binding_id, archived_through: snap.archived_through, settled_through: settled_opt, acked_unsettled: unsettled_opt, observation_age_ms: age_opt, last_error: clone(snap.last_error)))
+        },
+        None => if bound_id != 0 {
+            let st = if state.archive_hold.released_gap {
+                ArchiveGap
+            } else {
+                ArchiveUnknown
+            }
+            Some(ArchiveAttention(state: st, binding_id: bound_id, archived_through: None, settled_through: settled_opt, acked_unsettled: unsettled_opt, observation_age_ms: age_opt, last_error: None))
+        } else {
+            None
+        },
+    }
+}

@@ -4,13 +4,13 @@ pub fn group_law_worker(tasks: Tasks) -> (Sender[ObjectJournalStart], Sender[Jou
     let (acks, delivered): (Sender[ObjectAck], Receiver[ObjectAck]) = channel.new(4)
     let (notices, observed): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(1)
     let (synced, woken): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None)
+    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None, archive_observed: None, clock: None)
     let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
     (take init, take send_to, take delivered, take observed, take woken, take actor)
 }
 
 pub fn start_group_law_worker(init: Sender[ObjectJournalStart], take requests: std.object.Requests, take held: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64) waits {
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None, archive_reclaim: None)
     result.unwrap(channel.send(init, take opened))
 }
 

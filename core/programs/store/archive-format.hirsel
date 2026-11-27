@@ -1,0 +1,646 @@
+// Point-in-time archive wire format, keys and framing (STORE-SPEC §15.7).
+pub const ROLE_ARCHIVE_HEAD: u8 = 16
+
+pub const ROLE_ARCHIVE_INDEX: u8 = 17
+
+pub const KIND_ARCHIVE_HEAD: u16 = 0x0110
+
+pub const KIND_ARCHIVE_INDEX: u16 = 0x0111
+
+pub const ARCHIVE_HEAD_LIMIT: u64 = 65536
+
+pub const ARCHIVE_INDEX_LIMIT: u64 = 65536
+
+// 72-byte HEADER + 16-byte frame head = 88 bytes overhead.
+pub const ARCHIVE_INDEX_PAYLOAD_LIMIT: u64 = ARCHIVE_INDEX_LIMIT - 88
+
+pub const ARCHIVE_SOURCE_LOG: u8 = 0
+
+pub const ARCHIVE_SOURCE_OBJECTS: u8 = 1
+
+pub const ARCHIVE_DEFAULT_TICK_MS: u64 = 1000
+
+pub const ARCHIVE_HEAD_INTERVAL_MAX: u64 = 16
+
+pub fn archive_kind_limit(kind: u16) -> Option[u64] {
+    match kind {
+        0x0110 => Some(ARCHIVE_HEAD_LIMIT - 88),
+        0x0111 => Some(ARCHIVE_INDEX_PAYLOAD_LIMIT),
+        _ => None,
+    }
+}
+
+fn archive_push_hex_u64(mut out: String, value: u64) {
+    let digits = string.as_bytes("0123456789abcdef")
+    let mut shift = 60u64
+    loop {
+        let nibble = (value >> shift) & 15
+        string.push_char(mut out, option.unwrap(char.from_u32(int.widen(digits[nibble]))))
+        if shift == 0 {
+            return
+        }
+        shift -= 4
+    }
+}
+
+fn archive_push_dec20(mut out: String, value: u64) {
+    let mut text = string.with_capacity(20)
+    string.push_u64(mut text, value)
+    let pad = if string.byte_len(text) < 20 {
+        20 - string.byte_len(text)
+    } else {
+        0u64
+    }
+    for _ in 0u64 .. pad {
+        string.push_char(mut out, '0')
+    }
+    string.push(mut out, text)
+}
+
+pub fn archive_store_hex(id: types.StoreKey) -> String {
+    let mut out = string.with_capacity(32)
+    archive_push_hex_u64(mut out, id.hi)
+    archive_push_hex_u64(mut out, id.lo)
+    take out
+}
+
+pub fn archive_key(id: types.StoreKey, rel: String) -> String {
+    let mut out = string.with_capacity(33 + string.byte_len(rel))
+    archive_push_hex_u64(mut out, id.hi)
+    archive_push_hex_u64(mut out, id.lo)
+    string.push_char(mut out, '/')
+    string.push(mut out, rel)
+    take out
+}
+
+pub fn archive_head_key(id: types.StoreKey) -> String {
+    archive_key(id, string.from("archive-head"))
+}
+
+pub fn archive_index_rel(ordinal: u64, digest: u64) -> String {
+    let mut out = string.with_capacity(43)
+    string.push(mut out, "index-")
+    archive_push_dec20(mut out, ordinal)
+    string.push_char(mut out, '-')
+    archive_push_hex_u64(mut out, digest)
+    take out
+}
+
+pub fn archive_log_manifest_rel(generation: u64, digest: u64) -> String {
+    let mut out = string.with_capacity(39)
+    string.push(mut out, "m-")
+    archive_push_dec20(mut out, generation)
+    string.push_char(mut out, '-')
+    archive_push_hex_u64(mut out, digest)
+    take out
+}
+
+pub fn archive_log_pack_rel(seq: u64, digest: u64) -> String {
+    let mut out = string.with_capacity(39)
+    string.push(mut out, "p-")
+    archive_push_dec20(mut out, seq)
+    string.push_char(mut out, '-')
+    archive_push_hex_u64(mut out, digest)
+    take out
+}
+
+pub fn archive_log_journal_rel(seq: u64, from: u64) -> String {
+    let mut out = string.with_capacity(43)
+    string.push(mut out, "j-")
+    archive_push_dec20(mut out, seq)
+    string.push_char(mut out, '-')
+    archive_push_dec20(mut out, from)
+    take out
+}
+
+// Two Bucket namespaces overlap iff they address the same endpoint + bucket
+// and either prefix is a prefix of the other.
+pub fn archive_bucket_overlaps(a: std.object.Bucket, b: std.object.Bucket) -> bool {
+    if a.endpoint != b.endpoint || a.bucket != b.bucket {
+        return false
+    }
+    string.starts_with(a.prefix, b.prefix) || string.starts_with(b.prefix, a.prefix)
+}
+
+pub type ArchiveCursorRep: key + shareable + send {
+    source_kind: u8,
+    ordinal: u64,
+    sub: u64,
+    gen: u64,
+    digest: u64,
+    len: u64,
+    main_version: u64,
+    main_at: u64
+}
+
+pub type ArchiveFrontierRep: shareable + send {
+    next_pack: u64,
+    next_gen: u64,
+    next_unit: u64,
+    next_offset: u64,
+    first_index_ordinal: u64
+}
+
+pub type ArchivePackRefRep: shareable + send {
+    seq: u64,
+    epoch: u64,
+    len: u64,
+    digest: u64
+}
+
+pub type ArchiveBaseRowRep: shareable + send {
+    base_ordinal: u64,
+    epoch: u64,
+    digest: u64,
+    len: u64,
+    first_unit: u64,
+    main_version: u64,
+    main_at: u64,
+    frontier: ArchiveFrontierRep,
+    pack_continuation: bool,
+    packs: List[ArchivePackRefRep]
+}
+
+pub type ArchiveIntervalRep: shareable + send {
+    first_base: ArchiveBaseRowRep,
+    through: ArchiveCursorRep,
+    closed_by_gap: bool
+}
+
+pub type ArchiveIndexRefRep: shareable + send {
+    ordinal: u64,
+    len: u64,
+    digest: u64
+}
+
+pub type ArchiveIndexSegmentRep: shareable + send {
+    ordinal: u64,
+    prev: Option[ArchiveIndexRefRep],
+    bases: List[ArchiveBaseRowRep],
+    spilled_intervals: List[ArchiveIntervalRep]
+}
+
+pub type ArchiveHeadRep: shareable + send {
+    store: types.StoreKey,
+    source_kind: u8,
+    binding_id: u64,
+    holder_epoch: u64,
+    rev: u64,
+    open_gap: bool,
+    through: Option[ArchiveCursorRep],
+    floor_base: Option[ArchiveBaseRowRep],
+    index_tail: Option[ArchiveIndexRefRep],
+    intervals: List[ArchiveIntervalRep]
+}
+
+pub fn archive_base_summary(base: ArchiveBaseRowRep) -> ArchiveBaseRowRep {
+    ArchiveBaseRowRep(base_ordinal: base.base_ordinal, epoch: base.epoch, digest: base.digest, len: base.len, first_unit: base.first_unit, main_version: base.main_version, main_at: base.main_at, frontier: base.frontier, pack_continuation: false, packs: list.new())
+}
+
+pub fn archive_cursor_same(a: ArchiveCursorRep, b: ArchiveCursorRep) -> bool {
+    a.source_kind == b.source_kind && a.ordinal == b.ordinal && a.sub == b.sub && a.gen == b.gen && a.digest == b.digest && a.len == b.len && a.main_version == b.main_version && a.main_at == b.main_at
+}
+
+pub fn archive_index_ref_same(a: ArchiveIndexRefRep, b: ArchiveIndexRefRep) -> bool {
+    a.ordinal == b.ordinal && a.len == b.len && a.digest == b.digest
+}
+
+pub const ARCHIVE_CURSOR_BYTES: u64 = 57
+
+pub const ARCHIVE_FRONTIER_BYTES: u64 = 40
+
+pub const ARCHIVE_PACK_REF_BYTES: u64 = 32
+
+pub const ARCHIVE_BASE_FIXED_BYTES: u64 = 101
+
+pub const ARCHIVE_INTERVAL_SUMMARY_BYTES: u64 = ARCHIVE_BASE_FIXED_BYTES + ARCHIVE_CURSOR_BYTES + 1
+
+pub fn archive_base_row_bytes(base: ArchiveBaseRowRep) -> u64 {
+    ARCHIVE_BASE_FIXED_BYTES + ARCHIVE_PACK_REF_BYTES * list.len(base.packs)
+}
+
+fn put_archive_cursor(mut out: Bytes, c: ArchiveCursorRep) {
+    list.push(mut out, c.source_kind)
+    list.put_word_le(mut out, c.ordinal)
+    list.put_word_le(mut out, c.sub)
+    list.put_word_le(mut out, c.gen)
+    list.put_word_le(mut out, c.digest)
+    list.put_word_le(mut out, c.len)
+    list.put_word_le(mut out, c.main_version)
+    list.put_word_le(mut out, c.main_at)
+}
+
+fn read_archive_cursor(file: String, raw: Bytes, mut at: u64) -> Result[ArchiveCursorRep, types.Failure] {
+    if list.len(raw) - at < ARCHIVE_CURSOR_BYTES {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let source_kind = raw[at]
+    if source_kind != ARCHIVE_SOURCE_LOG && source_kind != ARCHIVE_SOURCE_OBJECTS {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let c = ArchiveCursorRep(source_kind, ordinal: read_le(raw, at + 1, 8), sub: read_le(raw, at + 9, 8), gen: read_le(raw, at + 17, 8), digest: read_le(raw, at + 25, 8), len: read_le(raw, at + 33, 8), main_version: read_le(raw, at + 41, 8), main_at: read_le(raw, at + 49, 8))
+    at += ARCHIVE_CURSOR_BYTES
+    Ok(c)
+}
+
+fn put_archive_frontier(mut out: Bytes, f: ArchiveFrontierRep) {
+    list.put_word_le(mut out, f.next_pack)
+    list.put_word_le(mut out, f.next_gen)
+    list.put_word_le(mut out, f.next_unit)
+    list.put_word_le(mut out, f.next_offset)
+    list.put_word_le(mut out, f.first_index_ordinal)
+}
+
+fn read_archive_frontier(file: String, raw: Bytes, mut at: u64) -> Result[ArchiveFrontierRep, types.Failure] {
+    if list.len(raw) - at < ARCHIVE_FRONTIER_BYTES {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let f = ArchiveFrontierRep(next_pack: read_le(raw, at, 8), next_gen: read_le(raw, at + 8, 8), next_unit: read_le(raw, at + 16, 8), next_offset: read_le(raw, at + 24, 8), first_index_ordinal: read_le(raw, at + 32, 8))
+    at += ARCHIVE_FRONTIER_BYTES
+    Ok(f)
+}
+
+fn put_archive_base_row(mut out: Bytes, row: ArchiveBaseRowRep) {
+    list.put_word_le(mut out, row.base_ordinal)
+    list.put_word_le(mut out, row.epoch)
+    list.put_word_le(mut out, row.digest)
+    list.put_word_le(mut out, row.len)
+    list.put_word_le(mut out, row.first_unit)
+    list.put_word_le(mut out, row.main_version)
+    list.put_word_le(mut out, row.main_at)
+    put_archive_frontier(mut out, row.frontier)
+    list.push(mut out, if row.pack_continuation {
+        1u8
+    } else {
+        0u8
+    })
+    let count: u32 = int.narrow(list.len(row.packs))
+    list.put_word_le(mut out, count)
+    for p in row.packs {
+        list.put_word_le(mut out, p.seq)
+        list.put_word_le(mut out, p.epoch)
+        list.put_word_le(mut out, p.len)
+        list.put_word_le(mut out, p.digest)
+    }
+}
+
+fn read_archive_base_row(file: String, raw: Bytes, mut at: u64, allow_packs: bool) -> Result[ArchiveBaseRowRep, types.Failure] {
+    if list.len(raw) - at < ARCHIVE_BASE_FIXED_BYTES {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let base_ordinal = read_le(raw, at, 8)
+    let epoch = read_le(raw, at + 8, 8)
+    let digest = read_le(raw, at + 16, 8)
+    let len = read_le(raw, at + 24, 8)
+    let first_unit = read_le(raw, at + 32, 8)
+    let main_version = read_le(raw, at + 40, 8)
+    let main_at = read_le(raw, at + 48, 8)
+    at += 56
+    let frontier = read_archive_frontier(file, raw, mut at)?
+    let cont_byte = raw[at]
+    if cont_byte > 1 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let pack_count = read_le(raw, at + 1, 4)
+    at += 5
+    if !allow_packs && pack_count != 0 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    if pack_count > (list.len(raw) - at) / ARCHIVE_PACK_REF_BYTES {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let mut packs: List[ArchivePackRefRep] = list.new()
+    types.capacity(list.try_reserve(mut packs, pack_count))?
+    for _ in 0u64 .. pack_count {
+        let p = ArchivePackRefRep(seq: read_le(raw, at, 8), epoch: read_le(raw, at + 8, 8), len: read_le(raw, at + 16, 8), digest: read_le(raw, at + 24, 8))
+        at += ARCHIVE_PACK_REF_BYTES
+        list.push(mut packs, p)
+    }
+    Ok(ArchiveBaseRowRep(base_ordinal, epoch, digest, len, first_unit, main_version, main_at, frontier, pack_continuation: cont_byte == 1, packs: take packs))
+}
+
+fn put_archive_interval(mut out: Bytes, iv: ArchiveIntervalRep) {
+    put_archive_base_row(mut out, archive_base_summary(iv.first_base))
+    put_archive_cursor(mut out, iv.through)
+    list.push(mut out, if iv.closed_by_gap {
+        1u8
+    } else {
+        0u8
+    })
+}
+
+fn read_archive_interval(file: String, raw: Bytes, mut at: u64) -> Result[ArchiveIntervalRep, types.Failure] {
+    let first_base = read_archive_base_row(file, raw, mut at, false)?
+    let through = read_archive_cursor(file, raw, mut at)?
+    if list.len(raw) - at < 1 {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let closed_byte = raw[at]
+    if closed_byte > 1 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    at += 1
+    Ok(ArchiveIntervalRep(first_base: take first_base, through, closed_by_gap: closed_byte == 1))
+}
+
+fn put_archive_index_ref(mut out: Bytes, r: ArchiveIndexRefRep) {
+    list.put_word_le(mut out, r.ordinal)
+    list.put_word_le(mut out, r.len)
+    list.put_word_le(mut out, r.digest)
+}
+
+fn read_archive_index_ref(file: String, raw: Bytes, mut at: u64) -> Result[ArchiveIndexRefRep, types.Failure] {
+    if list.len(raw) - at < 24 {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let r = ArchiveIndexRefRep(ordinal: read_le(raw, at, 8), len: read_le(raw, at + 8, 8), digest: read_le(raw, at + 16, 8))
+    at += 24
+    if r.ordinal == 0 || r.len < 88 || r.len > ARCHIVE_INDEX_LIMIT {
+        return Error(disk_fault(file, at - 24, Malformed))
+    }
+    Ok(r)
+}
+
+fn decode_archive_envelope(file: String, expected_store: types.StoreKey, expected_role: u8, expected_kind: u16, raw: Bytes) -> Result[(DiskContext, u64, u64), types.Failure] {
+    if list.len(raw) < 88 {
+        return Error(disk_fault(file, 0, Truncated))
+    }
+    let stored = types.StoreKey(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8))
+    let seq = read_le(raw, 56, 8)
+    let ctx = DiskContext(store: stored, role: raw[28], seq)
+    if !types.same(stored.hi, stored.lo, expected_store.hi, expected_store.lo) || raw[28] != expected_role {
+        return Error(disk_fault(file, 0, Header))
+    }
+    let h_kind: u16 = list.word_le(raw, 0)
+    let h_flags: u16 = list.word_le(raw, 2)
+    let h_size = read_le(raw, 4, 4)
+    let h_check: u64 = list.word_le(raw, 8)
+    if h_kind != 0x0001 || h_flags != 1 || h_size != 56 {
+        return Error(disk_fault(file, 0, Header))
+    }
+    if types.capacity(disk_check(ctx, 0, list.slice(raw, 0, 16), list.slice(raw, 16, 72)))? != h_check {
+        return Error(disk_fault(file, 0, Checksum))
+    }
+    if list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || read_le(raw, 30, 2) != 0 || read_le(raw, 64, 8) != 0 {
+        return Error(disk_fault(file, 0, Header))
+    }
+    let ver = read_le(raw, 24, 4)
+    if ver != DISK_FORMAT {
+        return Error(Unsupported(ver))
+    }
+    let f_kind: u16 = list.word_le(raw, 72)
+    let f_flags: u16 = list.word_le(raw, 74)
+    let f_size = read_le(raw, 76, 4)
+    let f_check: u64 = list.word_le(raw, 80)
+    if f_kind != expected_kind {
+        return Error(disk_fault(file, 72, Kind(int.widen(f_kind))))
+    }
+    if f_flags != 1 {
+        return Error(disk_fault(file, 72, Flags))
+    }
+    if 88 + f_size != list.len(raw) {
+        return Error(disk_fault(file, 72, Truncated))
+    }
+    if types.capacity(disk_check(ctx, 72, list.slice(raw, 72, 88), list.slice(raw, 88, 88 + f_size)))? != f_check {
+        return Error(disk_fault(file, 72, Checksum))
+    }
+    Ok((ctx, 88, 88 + f_size))
+}
+
+pub fn encode_archive_head(head: ArchiveHeadRep) -> Result[Bytes, types.Failure] {
+    if head.binding_id == 0 || head.rev == 0 {
+        return Error(disk_fault("archive-head", 72, Malformed))
+    }
+    let iv_count = list.len(head.intervals)
+    let est = 32 + ARCHIVE_CURSOR_BYTES + ARCHIVE_BASE_FIXED_BYTES + 25 + iv_count * ARCHIVE_INTERVAL_SUMMARY_BYTES
+    let mut payload: Bytes = list.new()
+    types.capacity(list.try_reserve(mut payload, est))?
+    list.push(mut payload, head.source_kind)
+    list.put_word_le(mut payload, head.binding_id)
+    list.put_word_le(mut payload, head.holder_epoch)
+    list.put_word_le(mut payload, head.rev)
+    list.push(mut payload, if head.open_gap {
+        1u8
+    } else {
+        0u8
+    })
+    match head.through {
+        Some(c) => {
+            list.push(mut payload, 1u8)
+            put_archive_cursor(mut payload, c)
+        },
+        None => list.push(mut payload, 0u8),
+    }
+    match head.floor_base {
+        Some(fb) => {
+            list.push(mut payload, 1u8)
+            put_archive_base_row(mut payload, archive_base_summary(fb))
+        },
+        None => list.push(mut payload, 0u8),
+    }
+    match head.index_tail {
+        Some(idx) => {
+            list.push(mut payload, 1u8)
+            put_archive_index_ref(mut payload, idx)
+        },
+        None => list.push(mut payload, 0u8),
+    }
+    let count_u32: u32 = int.narrow(iv_count)
+    list.put_word_le(mut payload, count_u32)
+    for iv in head.intervals {
+        put_archive_interval(mut payload, iv)
+    }
+    if 88 + list.len(payload) > ARCHIVE_HEAD_LIMIT {
+        return Error(Limit(Manifest))
+    }
+    let ctx = DiskContext(store: head.store, role: ROLE_ARCHIVE_HEAD, seq: head.rev)
+    let hdr = types.capacity(disk_header_bytes(ctx, 0, head.source_kind))?
+    let frame = types.capacity(disk_seal(ctx, 72, KIND_ARCHIVE_HEAD, 1, payload))?
+    let mut out: Bytes = list.new()
+    types.capacity(list.try_reserve(mut out, list.len(hdr) + list.len(frame)))?
+    list.append(mut out, hdr)
+    list.append(mut out, frame)
+    Ok(take out)
+}
+
+pub fn decode_archive_head(key: String, expected_store: types.StoreKey, raw: Bytes) -> Result[ArchiveHeadRep, types.Failure] {
+    if list.len(raw) > ARCHIVE_HEAD_LIMIT {
+        return Error(disk_fault(key, 0, Malformed))
+    }
+    let (ctx, start, end) = decode_archive_envelope(key, expected_store, ROLE_ARCHIVE_HEAD, KIND_ARCHIVE_HEAD, raw)?
+    let p = list.slice(raw, start, end)
+    if list.len(p) < 33 {
+        return Error(disk_fault(key, 72, Truncated))
+    }
+    let source_kind = p[0]
+    if source_kind != ARCHIVE_SOURCE_LOG && source_kind != ARCHIVE_SOURCE_OBJECTS {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let binding_id = read_le(p, 1, 8)
+    let holder_epoch = read_le(p, 9, 8)
+    let rev = read_le(p, 17, 8)
+    let gap_byte = p[25]
+    if binding_id == 0 || rev == 0 || rev != ctx.seq || gap_byte > 1 {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let mut at = 26u64
+    let through: Option[ArchiveCursorRep] = match p[at] {
+        0 => {
+            at += 1
+            None
+        },
+        1 => {
+            at += 1
+            Some(read_archive_cursor(key, p, mut at)?)
+        },
+        _ => return Error(disk_fault(key, 72 + at, Malformed)),
+    }
+    if at >= list.len(p) {
+        return Error(disk_fault(key, 72 + at, Truncated))
+    }
+    let floor_base: Option[ArchiveBaseRowRep] = match p[at] {
+        0 => {
+            at += 1
+            None
+        },
+        1 => {
+            at += 1
+            Some(read_archive_base_row(key, p, mut at, false)?)
+        },
+        _ => return Error(disk_fault(key, 72 + at, Malformed)),
+    }
+    if at >= list.len(p) {
+        return Error(disk_fault(key, 72 + at, Truncated))
+    }
+    let index_tail: Option[ArchiveIndexRefRep] = match p[at] {
+        0 => {
+            at += 1
+            None
+        },
+        1 => {
+            at += 1
+            Some(read_archive_index_ref(key, p, mut at)?)
+        },
+        _ => return Error(disk_fault(key, 72 + at, Malformed)),
+    }
+    if list.len(p) - at < 4 {
+        return Error(disk_fault(key, 72 + at, Truncated))
+    }
+    let iv_count = read_le(p, at, 4)
+    at += 4
+    if iv_count > ARCHIVE_HEAD_INTERVAL_MAX {
+        return Error(disk_fault(key, 72 + at, Malformed))
+    }
+    let mut intervals: List[ArchiveIntervalRep] = list.new()
+    types.capacity(list.try_reserve(mut intervals, iv_count))?
+    for _ in 0u64 .. iv_count {
+        list.push(mut intervals, read_archive_interval(key, p, mut at)?)
+    }
+    if at != list.len(p) {
+        return Error(disk_fault(key, 72 + at, Malformed))
+    }
+    Ok(ArchiveHeadRep(store: ctx.store, source_kind, binding_id, holder_epoch, rev, open_gap: gap_byte == 1, through, floor_base: take floor_base, index_tail, intervals: take intervals))
+}
+
+pub fn encode_archive_index(store: types.StoreKey, source_kind: u8, seg: ArchiveIndexSegmentRep) -> Result[Bytes, types.Failure] {
+    if seg.ordinal == 0 {
+        return Error(disk_fault("archive-index", 72, Malformed))
+    }
+    let mut est = 48u64
+    for b in seg.bases {
+        est += archive_base_row_bytes(b)
+    }
+    est += list.len(seg.spilled_intervals) * ARCHIVE_INTERVAL_SUMMARY_BYTES
+    let mut payload: Bytes = list.new()
+    types.capacity(list.try_reserve(mut payload, est))?
+    list.put_word_le(mut payload, seg.ordinal)
+    match seg.prev {
+        Some(prev) => {
+            list.push(mut payload, 1u8)
+            put_archive_index_ref(mut payload, prev)
+        },
+        None => list.push(mut payload, 0u8),
+    }
+    let b_count: u32 = int.narrow(list.len(seg.bases))
+    list.put_word_le(mut payload, b_count)
+    for b in seg.bases {
+        put_archive_base_row(mut payload, b)
+    }
+    let iv_count: u32 = int.narrow(list.len(seg.spilled_intervals))
+    list.put_word_le(mut payload, iv_count)
+    for iv in seg.spilled_intervals {
+        put_archive_interval(mut payload, iv)
+    }
+    if 88 + list.len(payload) > ARCHIVE_INDEX_LIMIT {
+        return Error(Limit(Manifest))
+    }
+    let ctx = DiskContext(store, role: ROLE_ARCHIVE_INDEX, seq: seg.ordinal)
+    let hdr = types.capacity(disk_header_bytes(ctx, 0, source_kind))?
+    let frame = types.capacity(disk_seal(ctx, 72, KIND_ARCHIVE_INDEX, 1, payload))?
+    let mut out: Bytes = list.new()
+    types.capacity(list.try_reserve(mut out, list.len(hdr) + list.len(frame)))?
+    list.append(mut out, hdr)
+    list.append(mut out, frame)
+    Ok(take out)
+}
+
+pub fn decode_archive_index(key: String, expected_store: types.StoreKey, expected: ArchiveIndexRefRep, raw: Bytes) -> Result[ArchiveIndexSegmentRep, types.Failure] {
+    if list.len(raw) != expected.len || list.len(raw) > ARCHIVE_INDEX_LIMIT {
+        return Error(disk_fault(key, 0, Truncated))
+    }
+    if std.check.xxh3(raw, 0, list.len(raw)) != expected.digest {
+        return Error(disk_fault(key, 0, Checksum))
+    }
+    let (ctx, start, end) = decode_archive_envelope(key, expected_store, ROLE_ARCHIVE_INDEX, KIND_ARCHIVE_INDEX, raw)?
+    if ctx.seq != expected.ordinal {
+        return Error(disk_fault(key, 0, Header))
+    }
+    let p = list.slice(raw, start, end)
+    if list.len(p) < 17 {
+        return Error(disk_fault(key, 72, Truncated))
+    }
+    let ordinal = read_le(p, 0, 8)
+    if ordinal != expected.ordinal {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let mut at = 8u64
+    let prev: Option[ArchiveIndexRefRep] = match p[at] {
+        0 => {
+            at += 1
+            None
+        },
+        1 => {
+            at += 1
+            let pr = read_archive_index_ref(key, p, mut at)?
+            if pr.ordinal >= ordinal {
+                return Error(disk_fault(key, 72 + at - 24, Order))
+            }
+            Some(pr)
+        },
+        _ => return Error(disk_fault(key, 72 + at, Malformed)),
+    }
+    if list.len(p) - at < 4 {
+        return Error(disk_fault(key, 72 + at, Truncated))
+    }
+    let b_count = read_le(p, at, 4)
+    at += 4
+    let mut bases: List[ArchiveBaseRowRep] = list.new()
+    types.capacity(list.try_reserve(mut bases, b_count))?
+    for _ in 0u64 .. b_count {
+        list.push(mut bases, read_archive_base_row(key, p, mut at, true)?)
+    }
+    if list.len(p) - at < 4 {
+        return Error(disk_fault(key, 72 + at, Truncated))
+    }
+    let iv_count = read_le(p, at, 4)
+    at += 4
+    let mut spilled_intervals: List[ArchiveIntervalRep] = list.new()
+    types.capacity(list.try_reserve(mut spilled_intervals, iv_count))?
+    for _ in 0u64 .. iv_count {
+        list.push(mut spilled_intervals, read_archive_interval(key, p, mut at)?)
+    }
+    if at != list.len(p) {
+        return Error(disk_fault(key, 72 + at, Malformed))
+    }
+    Ok(ArchiveIndexSegmentRep(ordinal, prev, bases: take bases, spilled_intervals: take spilled_intervals))
+}

@@ -284,6 +284,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     if !is_disk(owned) {
         return Ok(())
     }
+    stop_archiver(mut owned)
     let mut failure: Option[Error] = None
     if let Error(take e) = drain_close_journal(mut owned) {
         failure = Some(take e)

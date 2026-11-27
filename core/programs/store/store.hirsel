@@ -39,8 +39,7 @@ pub opaque type Db {
     frame_seq: u64,
     accounting: txn.AccountingState,
     call_streams: txn.CallStreamState[Ticket],
-    // Index drift seen since this open (§I.3 step one), one entry per index.
-    // `attention_mark`'s own part (store-attention.hirsel).
+    // Index drift seen since open (§I.3) & attention_mark's part (store-attention.hirsel).
     attention_seq: u64,
     // The projector pins' roots, rebuilt on each pin change; every Snapshot and
     // Tx shares them as `read_tail`'s bases. Then the registered projectors (§1.14).
@@ -1546,6 +1545,7 @@ type DiskState {
     packs: manifest.PackDiskState,
     archive_hold: manifest.DirArchiveHold,
     pending_binding: Option[u64],
+    archiver: Option[ArchiveLane],
     backend: Backend,
     tasks: Tasks,
     tiered: pager.DiskPagerState
@@ -1671,7 +1671,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
     let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
     let archive_hold = manifest.recovered_archive_hold(binding_id, None, archive_prev_first, take held_receipts)
-    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, archive_hold: take archive_hold, pending_binding: None, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
+    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, archive_hold: take archive_hold, pending_binding: None, archiver: None, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
     Ok(take db)
 }
 

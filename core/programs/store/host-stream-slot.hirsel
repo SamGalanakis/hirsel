@@ -472,6 +472,20 @@ pub fn slot_trim_batches(mut link: SlotLink, from_seq: u64) {
     }
 }
 
+pub fn slot_unsettled_batches(link: SlotLink, from_seq: u64) -> u64 {
+    let mut n = 0u64
+    for seq in link.commit_batches {
+        if seq >= from_seq {
+            n += 1
+        }
+    }
+    n
+}
+
+pub fn slot_root_bucket(slot: ServiceSlotHandle) -> std.object.Bucket {
+    std.object.Bucket(endpoint: string.from(slot.endpoint), aws_region: string.from(slot.aws_region), bucket: string.from(slot.bucket), prefix: string.from(slot.root), style: Path)
+}
+
 pub opaque type DeferredSlotReport {
     reports: Client[SlotReport],
     bell: Client[u32],

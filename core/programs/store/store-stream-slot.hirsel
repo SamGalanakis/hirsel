@@ -52,7 +52,7 @@ fn stream_authority_parts(a: Authority) -> Result[(u8, u64, bool), Error] {
             Some((names, _)) if list.len(names) != 0 => Ok((2u8, config.op_ms, true)),
             _ => Ok((2u8, config.op_ms, false)),
         },
-        LogAuthority(_) => Error(Unsupported(0)),
+        LogAuthority(_, _) => Error(Unsupported(0)),
     }
 }
 
@@ -84,17 +84,17 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     let config = match take a {
         ObjectAuthority(take config) => take config,
         SimAuthority(take config) => take config,
-        LogAuthority(_) => fail("journal_service: a log authority passed the check"),
+        LogAuthority(_, _) => fail("journal_service: a log authority passed the check"),
     }
-    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms: _, sim: take sim, stream: take stream, stream_root: take stream_root, cache) = take config
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms: _, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive) = take config
     match host_stream.stream_service_start(tasks, take client, service_plan, budget, c, kind, holder, op_ms) {
         Ok(take service) => Ok(JournalService(inner: take service)),
-        Error((take back, take problem)) => Error(Refusal(error: failure_from_rep(take problem), authority: stream_rewrap(kind, take back, take level_name, op_ms, take sim, take stream, take stream_root, cache))),
+        Error((take back, take problem)) => Error(Refusal(error: failure_from_rep(take problem), authority: stream_rewrap(kind, take back, take level_name, op_ms, take sim, take stream, take stream_root, cache, take archive))),
     }
 }
 
-fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String], cache: Option[pager.ObjectsCache]) -> Authority {
-    wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), kind)
+fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String], cache: Option[pager.ObjectsCache], take archive: Option[ArchiveAttachConfig]) -> Authority {
+    wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive), kind)
 }
 
 // One Place's slot (§12.11.12): the service creates its data connection, so
@@ -133,9 +133,14 @@ pub fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, 
     let mut config = match take a {
         ObjectAuthority(take config) => take config,
         SimAuthority(take config) => take config,
-        LogAuthority(_) => return Error(Unsupported(0)),
+        LogAuthority(_, _) => return Error(Unsupported(0)),
     }
     failure_result_from_rep(host_stream.validate_slot(slot.inner, config.client))?
+    if let Some(arch) = view config.archive {
+        if format.archive_bucket_overlaps(host_stream.slot_root_bucket(slot.inner), std.object.bucket_config(arch.sink)) {
+            return Error(Stream(Overlap))
+        }
+    }
     config.stream = Some(take slot)
     config.stream_root = None
     Ok(wrap_object_authority(take config, kind))
@@ -155,7 +160,7 @@ pub fn stream_reader(take a: Authority, root: StreamRoot) -> Result[Authority, E
     let mut config = match take a {
         ObjectAuthority(take config) => take config,
         SimAuthority(take config) => take config,
-        LogAuthority(_) => return Error(Unsupported(0)),
+        LogAuthority(_, _) => return Error(Unsupported(0)),
     }
     let place = std.object.bucket_config(config.client)
     let dir = host_stream.stream_root_dir(root.prefix)

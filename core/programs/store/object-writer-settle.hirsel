@@ -1,12 +1,12 @@
 // The root keeps the paused worker and its channels. Host stream gets only
 // the session fields it needs to settle, and returns them on every value exit.
 fn with_object_settle[T](take session: ObjectJournalSession, body: scoped fn(mut host_stream.SettleView) -> T waits) -> (ObjectJournalSession, T) waits {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take slot) = take session
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take slot, archive_reclaim: take archive_reclaim) = take session
     let mut stream = take slot
     let mut settlement = host_stream.settle_view(take client, take register, take authority, take buffers, op_ms, mut stream)
     let outcome = body(mut settlement)
     let (take back_client, take back_register, take back_authority, take back_buffers) = host_stream.return_settle_view(take settlement, mut stream)
-    let lane = ObjectJournalSession(client: take back_client, register: take back_register, authority: take back_authority, buffers: take back_buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
+    let lane = ObjectJournalSession(client: take back_client, register: take back_register, authority: take back_authority, buffers: take back_buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream, archive_reclaim: take archive_reclaim)
     (take lane, take outcome)
 }
 

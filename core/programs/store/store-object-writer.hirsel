@@ -44,7 +44,25 @@ pub type Refusal {
 
 pub fn open_authority(tasks: Tasks, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[Db, Refusal] waits {
     match take authority {
-        LogAuthority(d) => Ok(open(tasks, d, c, r, options) ?=> |problem| Refusal(error: take problem, authority: log_authority(d))),
+        LogAuthority(d, None) => Ok(open(tasks, d, c, r, options) ?=> |problem| Refusal(error: take problem, authority: log_authority(d))),
+        LogAuthority(d, Some(take arch)) => {
+            let ArchiveAttachConfig(sink: take sink, options: arch_opts) = take arch
+            let mut db = match open_directory_bound(tasks, d, c, r, options, arch_opts.binding_id, arch_opts.hold_bytes) {
+                Ok(take opened) => take opened,
+                Error(take problem) => return Error(Refusal(error: take problem, authority: LogAuthority(d, Some(ArchiveAttachConfig(sink: take sink, options: arch_opts))))),
+            }
+            if archive_binding_id(db) == 0 {
+                if let Error(take problem) = bind_archive_hold(mut db, arch_opts.binding_id, arch_opts.hold_bytes) {
+                    let _ = close(take db)
+                    return Error(Refusal(error: take problem, authority: LogAuthority(d, Some(ArchiveAttachConfig(sink: take sink, options: arch_opts)))))
+                }
+            }
+            if let Error(take problem) = start_archive_lane(mut db, take sink, arch_opts, false) {
+                let _ = close(take db)
+                return Error(Refusal(error: take problem, authority: log_authority(d)))
+            }
+            Ok(take db)
+        },
         ObjectAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 1),
         SimAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 2),
     }
@@ -164,7 +182,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     if let Some(_) = config.stream_root {
         return Error(Refusal(error: Unsupported(0), authority: wrap_object_authority(take config, authority_kind)))
     }
-    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache) = take config
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive) = take config
     let mut initial_source = history.history_reader(take client, 0)
     initial_source.cache = cache
     let mut opening = Some(take initial_source)
@@ -174,13 +192,14 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         Ok(take ready) => take ready,
         Error(take problem) => {
             let history.ObjectPackRead(client: take returned, ..) = take read_source
-            return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), authority_kind)))
+            return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive), authority_kind)))
         },
     }
     let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, journal_worker: take journal_worker, options: take held_options, levels: take names_in_order, link: take link) = take prepared
     let mut db = take started
     let head = history.register_head(register)
     let history.ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
+    let src_bucket = std.object.bucket_config(owned_client)
     let (take requests, take workers) = std.object.split(take owned_client)
     let chosen_base = match take base {
         Some(take admitted) => take admitted,
@@ -188,22 +207,39 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     }
     let binding_id = history.open_base_binding_id(chosen_base)
     let (generation, fence, recorded_after, sweep, take pages) = history.open_base_parts(take chosen_base)
-    let activation = object_writer.activate_worker(take journal_worker, take requests, take workers, take register, take metadata, take workspace, op_ms, sweep, generation, manifest.pack_next(pages), take names_in_order, take locator, cache, take link)
+    let activation = object_writer.activate_worker(take journal_worker, take requests, take workers, take src_bucket, take register, take metadata, take workspace, op_ms, sweep, generation, manifest.pack_next(pages), take names_in_order, take locator, cache, take link)
     let (take object, force_open_cut) = match take activation {
         Ok(take active) => take active,
         Error((take returned, take returned_workers)) => {
             let restored = std.object.attach(take returned, take returned_workers)
-            return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), authority_kind)))
+            return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive), authority_kind)))
         },
     }
     db.accounting.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
     db.accounting.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
-    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, archive_hold: manifest.recovered_archive_hold(binding_id, None, head.checkpoint.seq, list.new()), pending_binding: None, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
+    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, archive_hold: manifest.recovered_archive_hold(binding_id, None, head.checkpoint.seq, list.new()), pending_binding: None, archiver: None, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
         if let Ok(cut_ticket) = checkpoint(mut db) {
             let _ = durable(mut db, cut_ticket)
+        }
+    }
+    if let Some(take arch) = take archive {
+        let ArchiveAttachConfig(sink: take sink, options: arch_opts) = take arch
+        if binding_id != 0 && binding_id != arch_opts.binding_id {
+            let _ = close(take db)
+            return Error(Refusal(error: Conflict("archive binding"), authority: wrap_object_authority(ObjectAuthorityConfig(client: take sink, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: None), authority_kind)))
+        }
+        if binding_id == 0 {
+            if let Error(take problem) = bind_archive_hold(mut db, arch_opts.binding_id, arch_opts.hold_bytes) {
+                let _ = close(take db)
+                return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take sink, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: None), authority_kind)))
+            }
+        }
+        if let Error((take problem, take back_sink)) = start_archive_lane_returning(mut db, take sink, arch_opts, false) {
+            let _ = close(take db)
+            return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take back_sink, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: None), authority_kind)))
         }
     }
     Ok(take db)
@@ -303,6 +339,21 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     prepare_holder_slot(mut db, delta)?
     let (take paused, take resume) = take_object_journal_with(mut db, true)?
     let mut lane = take paused
+    // §12.11.11 M6 (settle-then-archive): when bound and attached, settle sealed
+    // tails in claim order then the eligible live prefix into Place GROUP entries
+    // before the bound cut folds them.
+    let effective_binding = match disk_state(db).pending_binding {
+        Some(next_b) => next_b,
+        None => disk_state(db).archive_hold.binding_id,
+    }
+    if effective_binding != 0 {
+        let (take settled_lane, take settle_res) = object_writer.archive_settle_attached_lane(take lane, int.widen(disk_state(db).options.group_bytes), int.widen(disk_state(db).options.group_commits), Some(db.clock))
+        lane = take settled_lane
+        if let Error(take problem) = take settle_res {
+            failure_result_from_rep(object_writer.return_object_journal(take lane, resume))?
+            return Error(failure_from_rep(take problem))
+        }
+    }
     let mut observed: Option[host_stream.DeferredSlotReport] = None
     let mut completion: Option[host_stream.DeferredSlotReport] = None
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit, mut observed, mut completion)
@@ -335,7 +386,11 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
     }
     let now = object_writer.paused_deadline(lane)
     let (take previous, _) = failure_result_from_rep(object_writer.read_checkpoint(mut lane, old, now))?
-    let retained = failure_result_from_rep(object_writer.history_retain(previous, old.checkpoint, seq, disk_state(db).options.retain))?
+    let cut_binding = match disk_state(db).pending_binding {
+        Some(next_b) => next_b,
+        None => disk_state(db).archive_hold.binding_id,
+    }
+    let retained = failure_result_from_rep(object_writer.archive_retain_for_cut(mut lane, previous, old.checkpoint, seq, disk_state(db).options.retain, cut_binding, disk_state(db).archive_hold.hold_bytes, disk_state(db).archive_hold.hold_bytes_explicit, archive_witnessed_through(db), now))?
     let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(db, delta)
     })?

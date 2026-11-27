@@ -52,6 +52,7 @@ std = { major = 1 }
 "object-writer-export.hirsel" = "object_writer"
 "object-writer-journal.hirsel" = "object_writer"
 "object-writer-settle.hirsel" = "object_writer"
+"object-writer-archive.hirsel" = "object_writer"
 "object-writer-queue.hirsel" = "object_writer"
 "store-journal-state.hirsel" = "journal"
 "store-journal-support.hirsel" = "journal"
@@ -107,6 +108,7 @@ std = { major = 1 }
 "store-api-limits.hirsel" = "store"
 "store-types.hirsel" = "types"
 "store-format.hirsel" = "format"
+"archive-format.hirsel" = "format"
 "store.hirsel" = "store"
 "capture-manifest.hirsel" = "capture"
 "history-directory.hirsel" = "history"
@@ -176,6 +178,9 @@ std = { major = 1 }
 "store-manifest.hirsel" = "manifest"
 "manifest-archive-hold.hirsel" = "manifest"
 "store-archive-hold.hirsel" = "store"
+"store-archive.hirsel" = "store"
+"history-archive.hirsel" = "history"
+"history-archive-ship.hirsel" = "history"
 "store-cold-walk.hirsel" = "store"
 "store-list-read.hirsel" = "manifest"
 "store-manifest-wire.hirsel" = "manifest"
@@ -400,6 +405,8 @@ dirs = ["."]
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format13_laws.hirsel" = "store"
 "store_archive_hold_laws.hirsel" = "store"
+"store_archive_laws.hirsel" = "store"
+"store_archive_stream_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "manifest"
@@ -1078,6 +1085,22 @@ limit = 402653184
 
 [tests.runs."store@1/store/test_la2_directory_durable_hold_and_budget"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_la1_named_after_stored_and_no_relisting"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la3_typed_gap_mandatory_and_attention"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la6_stale_archiver_fenced"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la8_attached_place_settle_then_archive"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_archive_retention_trace"]
+limit = 536870912
+grants = ["Clock", "Random", "Tasks", "Stdout"]
 
 [tests.runs."store@1/store/test_la10_directory_thirteen_handoff_cuts"]
 limit = 268435456

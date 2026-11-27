@@ -1,0 +1,126 @@
+// Phase 3 law L-A8: Host-stream attached Place settle-then-archive (§12.11.11 M6, §15.7–§15.8).
+// Two Places share a JournalService batch. Freeze multiple sealed tails across claims,
+// settle via tick without cutting, cut with settle-first, archive Place A, and verify:
+// - Place A commits are archived in order once;
+// - zero `b-` batch keys or Place B bytes ever appear in the archive sink;
+// - unsettled stream acknowledgements appear ONLY as lag on `Attention.archive`.
+@test
+fn test_la8_attached_place_settle_then_archive(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33278)
+    let outcome = la8_run(d, sim, tasks, c, r)
+    let report = bucket_law_report(take sim)
+    outcome?
+    // Verify ZERO `b-` batch keys were ever written under the archive prefix.
+    for req in report.requests {
+        if string.starts_with(req.key, "la8-arch/") && arch_law_text_contains(req.key, "b-") {
+            fail("L-A8: host stream b- batch key leaked into archive namespace")
+        }
+    }
+    Ok(())
+}
+
+fn la8_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+    let sid = HostStreamId(hi: 0x5152535455565758, lo: 0x595a5b5c5d5e5f60)
+    let mut svc = df_start_service_host(sim, tasks, r, "spare.test", 801, sid, 10, 0, DF_OP_MS)?
+    // Verify archive sink overlapping host stream root is refused with Stream(Overlap).
+    let slot_ov = journal_slot(mut svc)?
+    let cl_ov = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 802, string.from("la8-a/"), 2)?
+    let sink_ov = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 803, string.from("streams/sub/"), 2)?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    let st_ov = streamed(object_authority(take cl_ov, "bucket", DF_OP_MS), take slot_ov)?
+    match archived(take st_ov, take sink_ov, a_opts) {
+        Error(Stream(Overlap)) => (),
+        _ => fail("L-A8: archive sink overlapping stream root was not refused"),
+    }
+    // Open Place A (epoch 1) and Place B sharing the same JournalService.
+    let mut pA1 = exit_open_attached(sim, tasks, r, mut svc, "spare.test", 804, string.from("la8-a/"), true, 1)?
+    let mut pB = exit_open_attached(sim, tasks, r, mut svc, "spare.test", 805, string.from("la8-b/"), true, 1)?
+    let _ = bucket_law_rows_table(mut pA1)?
+    let _ = bucket_law_rows_table(mut pB)?
+    // Commit rows to both Place A and Place B into shared stream batches.
+    bucket_law_commit(mut pA1, 1)?
+    bucket_law_commit(mut pB, 101)?
+    bucket_law_commit(mut pA1, 2)?
+    bucket_law_commit(mut pB, 102)?
+    // Drop Place A epoch 1 (simulating crash) -> sealed tail 1 has rows 1 & 2.
+    let _ = take pA1
+    // Reopen Place A epoch 2 on same service -> commit row 3 -> crash -> sealed tail 2 has row 3.
+    let mut pA2 = exit_open_attached(sim, tasks, r, mut svc, "spare.test", 806, string.from("la8-a/"), false, 1)?
+    bucket_law_commit(mut pA2, 3)?
+    bucket_law_commit(mut pB, 103)?
+    let _ = take pA2
+    // Reopen Place A epoch 3 with archive attached!
+    let slot_a3 = journal_slot(mut svc)?
+    let cl_a3 = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 807, string.from("la8-a/"), 2)?
+    let sink_a3 = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 808, string.from("la8-arch/"), 2)?
+    let auth_a3 = archived(streamed(object_authority(take cl_a3, "bucket", DF_OP_MS), take slot_a3)?, take sink_a3, a_opts)?
+    let mut pA3 = match open_authority(tasks, take auth_a3, sim.time, r, exit_open_opts(false, 1)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let id_a = pA3.store
+    let id_b = pB.store
+    // Commit row 4 on live stream tail (and row 104 on Place B).
+    bucket_law_commit(mut pA3, 4)?
+    bucket_law_commit(mut pB, 104)?
+    // Unsettled acknowledgements MUST appear as lag on Attention.archive (never as archived_through).
+    let att_before = attention(pA3)?
+    let Some(aa_before) = view att_before.archive else {
+        fail("L-A8: Attention.archive missing on bound attached Place")
+    }
+    match aa_before.acked_unsettled {
+        Some(n) if n > 0 => (),
+        _ => fail("L-A8: expected nonzero acked_unsettled lag before settle tick"),
+    }
+    // Archive settle tick drives settle ONLY (must NOT force a cut!).
+    let gen_before_tick = pA3.accounting.checkpointed
+    archive_settle_now(mut pA3)?
+    if pA3.accounting.checkpointed != gen_before_tick {
+        fail("L-A8: archive settle tick forced a cut")
+    }
+    // Verify ATTACH is still intact, sealed is now empty, and unsettled lag dropped to 0.
+    let (_, attach_after_tick) = df_head_attach_live(sim, tasks, "spare.test", 809, string.from("la8-a/"))?
+    let Some(a_tick) = attach_after_tick else {
+        fail("L-A8: settle tick dropped ATTACH")
+    }
+    if list.len(a_tick.sealed) != 0 {
+        fail("L-A8: settle tick did not drain sealed tails")
+    }
+    let att_after_tick = attention(pA3)?
+    let Some(aa_tick) = view att_after_tick.archive else {
+        fail("L-A8: Attention.archive missing after settle tick")
+    }
+    if aa_tick.acked_unsettled != Some(0u64) {
+        fail("L-A8: acked_unsettled did not clear after settle tick")
+    }
+    // Commit row 5 on live stream tail, then run a bound cut (must settle live tail BEFORE cutting!).
+    bucket_law_commit(mut pA3, 5)?
+    let cut_t = checkpoint(mut pA3)?
+    durable(mut pA3, cut_t)?
+    if bucket_law_rows(mut pA3)? != 5 {
+        fail("L-A8: Place A missing rows after settle-first bound cut")
+    }
+    // Drain archiver and verify exact-GET closure on sink!
+    let steps = archive_drain(mut pA3, 24)?
+    if steps == 0 {
+        fail("L-A8: Place A archiver did not publish any units")
+    }
+    let mut probe = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 810, string.from("la8-arch/"), 2)?
+    let head_a = archive_verify_closure(mut probe, id_a, DF_OP_MS)?
+    let Some(cur_a) = head_a.through else {
+        fail("L-A8: Place A archive-head missing through")
+    }
+    if cur_a.main_version < 5 {
+        fail("L-A8: Place A archive-head did not reach all 5 committed rows")
+    }
+    // Verify Place B has NO archive-head in Place A's archive sink.
+    if let Some(_) = archive_read_head(mut probe, id_b, DF_OP_MS)? {
+        fail("L-A8: Place B appeared in Place A's archive sink")
+    }
+    close(take pA3)?
+    close(take pB)?
+    close_journal_service(take svc)?
+    let _ = d
+    Ok(())
+}

@@ -62,6 +62,32 @@ pub type IndexReport: codec + shareable + send {
     state: IndexState
 }
 
+/// Current point-in-time archive state reported on `Attention.archive` (§15.7).
+pub type ArchiveStateKind: codec + key + shareable + send = ArchiveActive | ArchiveGap | ArchiveDiverged | ArchiveUnknown
+
+/// Physical cursor and main branch version/time of the latest committed
+/// `archive-head` recovery promise.
+pub type ArchiveProgressView: codec + key + shareable + send {
+    ordinal: u64,
+    sub: u64,
+    gen: u64,
+    main_version: u64,
+    main_at: u64
+}
+
+/// Archive observability on `Attention.archive` (§15.7): `archived_through` is
+/// the sole recovery promise; `settled_through`, `acked_unsettled`, and
+/// `observation_age_ms` report best-effort settlement lag (`None` = unknown).
+pub type ArchiveAttention: codec + shareable + send {
+    state: ArchiveStateKind,
+    binding_id: u64,
+    archived_through: Option[ArchiveProgressView],
+    settled_through: Option[u64],
+    acked_unsettled: Option[u64],
+    observation_age_ms: Option[u64],
+    last_error: Option[String]
+}
+
 /// Conditions a working store reports to its operator (§II.3), unlike
 /// `Health`, which signals once when the store stops working.
 ///
@@ -76,7 +102,8 @@ pub type Attention: codec + shareable + send {
     indexes: List[IndexReport],
     drift: List[IndexDrift],
     reclaim_failures: u64,
-    reclaim_pending: bool
+    reclaim_pending: bool,
+    archive: Option[ArchiveAttention]
 }
 
 pub fn attention(db: Db) -> Result[Attention, Error] {
@@ -87,7 +114,7 @@ pub fn attention(db: Db) -> Result[Attention, Error] {
         list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: failure_result_from_rep(catalog.named(seen.index))?, count: seen.count, demoted: seen.demoted))
     }
     let reclaims = reclaim_state(db)
-    Ok(Attention(indexes: index_reports(db)?, drift: take drift, reclaim_failures: reclaims.count, reclaim_pending: reclaims.pending))
+    Ok(Attention(indexes: index_reports(db)?, drift: take drift, reclaim_failures: reclaims.count, reclaim_pending: reclaims.pending, archive: archive_attention(db)))
 }
 
 // `Db.attention_seq` moves on every schema commit and every drift or demotion
@@ -97,7 +124,7 @@ pub fn attention(db: Db) -> Result[Attention, Error] {
 /// equal answers.
 pub fn attention_mark(db: Db) -> (u64, u64, bool) {
     let reclaims = reclaim_state(db)
-    (db.attention_seq, reclaims.count, reclaims.pending)
+    (int.saturating_add(db.attention_seq, archive_attention_seq(db)), reclaims.count, reclaims.pending)
 }
 
 fn index_reports(db: Db) -> Result[List[IndexReport], Error] {

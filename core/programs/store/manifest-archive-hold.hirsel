@@ -419,10 +419,10 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         }
         return Ok(DirArchiveCutPlan(new_binding: 0, new_prev_first: order.min(ordinary_prev_first, hold.prev_first), archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: 0, hold_bytes_explicit: false))
     }
-    let effective_budget = if hold.hold_bytes_explicit || hold.hold_bytes > 0 {
+    let effective_budget = if hold.hold_bytes_explicit {
         hold.hold_bytes
     } else {
-        live_generation_bytes(d, live_packs_next, next_manifest_estimate)?
+        order.max(live_generation_bytes(d, live_packs_next, next_manifest_estimate)?, 65536u64)
     }
     // Bind cut (Unbound -> Bound, or rebind to a new binding_id): fresh start at generation g+1.
     if hold.binding_id == 0 || new_binding != hold.binding_id {

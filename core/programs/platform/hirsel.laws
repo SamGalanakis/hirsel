@@ -19,9 +19,9 @@ platform@1/operator/operator_vectors src=338a53fe88a5025f sig=60a2f294c2096eaf r
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=b9ae57262167a50d run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/assignment_wake src=ac0f48ad9544b322 sig=2416d4b8fb8c6b5f run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/begin_source_limits src=9d10fc140b6f236f sig=2e7c45373497ba21 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/bucket_activation_witness_distinguishes_prepared src=16b44fd25a32bfd1 sig=406370eecbc4ad50 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
-platform@1/platform/bucket_hand_install_adopts_at_12 src=ccf9f2c6c25ece6f sig=f0985cddf85425b1 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
-platform@1/platform/bucket_moved_activation_recovery src=20d0312c0aee95e0 sig=58b6e3bb66e64b36 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_activation_witness_distinguishes_prepared src=16b44fd25a32bfd1 sig=3a58a5f2e864cd59 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_hand_install_adopts_at_12 src=ccf9f2c6c25ece6f sig=61ea4b3269cad4d4 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
+platform@1/platform/bucket_moved_activation_recovery src=20d0312c0aee95e0 sig=574e78d694115a66 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=6d09c975245303e2 sig=cd2f4a123c1f92cf run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=675c0dc60ee67a73 sig=a2d3a5267d4b78a6 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=a19a4d84548bb5f4 sig=e8b377c43ae258fe run=b1818af2b24835d3 bug=- oracle=- rows=pending

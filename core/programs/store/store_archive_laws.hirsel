@@ -1,0 +1,626 @@
+// Phase 3 point-in-time archive laws:
+//   L-A1 (named-after-stored, A1 exact-GET/Q5, A2 no-relisting, A3 zero foreground I/O, j- chunk rules)
+//   L-A3 (mandatory typed Gap after budget release, Attention.archive, sink damage != Gap, Bucket reclaim hold)
+//   L-A6 (stale archiver fenced on holder/binding change, no overwrite/splice/receipt unlink)
+//   Real TLA+ archive/gap trace emitter for proofs/store/check_proofs.py --trace-only.
+fn arch_law_sink_client(s: BucketSim, tasks: Tasks, seed: u64, prefix: String) -> Result[std.object.Client, Error] waits {
+    df_client_host(s.endpoint, s.time, tasks, "spare.test", seed, prefix, 2)
+}
+
+fn arch_law_put_garbage(mut sink: std.object.Client, key: String, fill: u8, len: u64, op_ms: u64) -> Result[(), Error] waits {
+    let mut raw: Bytes = list.with_capacity(len)
+    list.fill(mut raw, len, fill)
+    let due = std.object.deadline_after_ms(sink, op_ms)
+    let (take res, _) = std.object.store(mut sink, key, take raw, due)
+    match take res {
+        Ok(_) => Ok(()),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn arch_law_count_sink_requests(report: std.sim.s3.Report, prefix: String) -> u64 {
+    let mut n = 0u64
+    for entry in report.requests {
+        if string.starts_with(entry.key, prefix) {
+            n += 1
+        }
+    }
+    n
+}
+
+fn arch_law_text_contains(hay: String, needle: String) -> bool {
+    let hb = string.as_bytes(hay)
+    let nb = string.as_bytes(needle)
+    let hn = list.len(hb)
+    let nn = list.len(nb)
+    if nn == 0 {
+        return true
+    }
+    if nn > hn {
+        return false
+    }
+    for i in 0u64 .. (hn - nn + 1) {
+        if list.slice(hb, i, i + nn) == nb {
+            return true
+        }
+    }
+    false
+}
+
+fn arch_law_count_sink_lists(report: std.sim.s3.Report) -> u64 {
+    let mut n = 0u64
+    for entry in report.requests {
+        if entry.method == "LIST" {
+            n += 1
+        }
+    }
+    n
+}
+
+// L-A1: Named after stored (A1), Q5 lost CAS reply, zero LIST authority,
+// A2 no-relisting refusal, A3 zero foreground archive I/O, and log@1 j-<seq>-<from>
+// identical / verified shorter prefix / Diverged hard stop.
+@test
+fn test_la1_named_after_stored_and_no_relisting(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // Separate S3 simulator for archive sinks vs source Bucket so we can prove
+    // strictly ZERO LIST requests are ever sent to the archive sink (A1).
+    let sink_sim = df_complete_expired_sim(tasks, c, 33271)
+    let place_sim = df_complete_expired_sim(tasks, c, 33272)
+    let outcome = la1_run(d, sink_sim, place_sim, tasks, c, r)
+    let sink_report = bucket_law_report(take sink_sim)
+    let _ = bucket_law_report(take place_sim)
+    outcome?
+    // Verify zero LIST requests were issued against the archive sink simulator.
+    if arch_law_count_sink_lists(sink_report) != 0 {
+        fail("L-A1: archiver or closure verifier issued a LIST on the archive sink")
+    }
+    Ok(())
+}
+
+fn la1_run(d: Dir, sim: BucketSim, place_sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+    // --- Part 1: log@1 (Directory) A1, A2, A3, and j-<seq>-<from> conflict rules ---
+    let dir1 = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let sink_dir = arch_law_sink_client(sim, tasks, 101, string.from("arch-dir/"))?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    // Verify zero binding_id is refused before opening.
+    let bad_sink = arch_law_sink_client(sim, tasks, 102, string.from("arch-bad/"))?
+    match archived(log_authority(dir1), take bad_sink, archive_options(0, DF_OP_MS)) {
+        Error(Missing(_)) => (),
+        _ => fail("L-A1: archived accepted binding_id == 0"),
+    }
+    let auth = archived(log_authority(dir1), take sink_dir, a_opts)?
+    let mut db = match open_authority(tasks, take auth, sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let store_id = db.store
+    let t = archive_hold_table(mut db)?
+    // Plant misleading garbage keys in the sink under the store's prefix (A1: LIST has zero authority).
+    let mut probe_sink = arch_law_sink_client(sim, tasks, 103, string.from("arch-dir/"))?
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), string.from("p-00000000000000000099-deadbeefdeadbeef")), 0xAA, 128, DF_OP_MS)?
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), string.from("index-00000000000000000099-deadbeefdeadbeef")), 0xBB, 128, DF_OP_MS)?
+    // A3: foreground commits do ZERO archive network I/O.
+    let _ = archive_hold_put(mut db, t, 1, 0x11, 200)?
+    let _ = archive_hold_put(mut db, t, 2, 0x22, 200)?
+    let _ = archive_hold_put(mut db, t, 3, 0x33, 200)?
+    // Before archiver runs, archive-head must still be absent (A1: uploads/commits advertise nothing).
+    if let Some(_) = archive_read_head(mut probe_sink, store_id, DF_OP_MS)? {
+        fail("L-A1: foreground commits wrote archive-head")
+    }
+    // Step 1: publishes initial base + index segment (<= 64 KiB).
+    if !archive_step(mut db)? {
+        fail("L-A1: first archive_step did not publish initial base")
+    }
+    let h1 = archive_verify_closure(mut probe_sink, store_id, DF_OP_MS)?
+    if h1.binding_id != 1 || h1.open_gap || list.len(h1.intervals) != 1 {
+        fail("L-A1: initial log@1 archive-head invalid")
+    }
+    // Step 2: let durable END flush (`end_interval_ms = 10`), then ship journal chunk j-<seq>-0.
+    std.clock.sleep_ns(sim.time, 25000000)
+    let _ = archive_drain(mut db, 8)?
+    let h2 = archive_verify_closure(mut probe_sink, store_id, DF_OP_MS)?
+    let Some(cur2) = h2.through else {
+        fail("L-A1: archive-head missing through after journal chunk")
+    }
+    if cur2.sub == 0 || cur2.main_version < 3 {
+        fail("L-A1: journal chunk did not advance through past committed rows")
+    }
+    // Exercise j-<seq>-<from> conflict rules directly:
+    // (a) identical bytes -> ChunkStored; (b) shorter verified prefix -> ChunkAdoptedPrefix;
+    // (c) divergent bytes -> ChunkDiverged.
+    let seg_path = failure_result_from_rep(manifest.journal_path(cur2.ordinal, ""))?
+    let mut seg_f = host.open(dir1, seg_path, Read) ?=> Io
+    let seg_raw = failure_result_from_rep(manifest.read_disk_bytes(mut seg_f, seg_path, 0, cur2.sub))?
+    host.close(take seg_f) ?=> Io
+    let due_j = std.object.deadline_after_ms(probe_sink, DF_OP_MS)
+    // (a) Identical chunk re-PUT at existing key -> ChunkStored.
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), cur2.ordinal, 0, clone(seg_raw), 0, 0, due_j))? {
+        ChunkStored(end_pos) if end_pos == cur2.sub => (),
+        _ => fail("L-A1: identical j-<seq>-0 PUT was not accepted"),
+    }
+    // (b) Plant verified shorter prefix (HEADER only = 72 bytes) at unused seq = 777 with valid header + 1st frame!
+    let synthetic_seq = 777u64
+    let syn_ctx = format.DiskContext(store: store_key_to_rep(store_id), role: 2, seq: synthetic_seq)
+    let syn_hdr = failure_result_from_rep(types.capacity(format.disk_header_bytes(syn_ctx, 0, 0)))?
+    let mut syn_longer: Bytes = clone(syn_hdr)
+    let mut commit_payload: Bytes = list.with_capacity(28)
+    list.fill(mut commit_payload, 28, 0u8)
+    let syn_frame = failure_result_from_rep(types.capacity(format.disk_seal(syn_ctx, 72, 0x0011, 1, commit_payload)))?
+    list.append(mut syn_longer, syn_frame)
+    let _ = failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, clone(syn_hdr), 0, 0, due_j))?
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, clone(syn_longer), 0, 0, due_j))? {
+        ChunkAdoptedPrefix(prefix_end, _, _) if prefix_end == 72 => (),
+        _ => fail("L-A1: shorter verified journal prefix was not adopted"),
+    }
+    // (c) Divergent bytes at same key -> ChunkDiverged (hard stop).
+    let mut diverged_raw: Bytes = clone(syn_longer)
+    diverged_raw[10] = diverged_raw[10] ^ 0xFF
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, take diverged_raw, 0, 0, due_j))? {
+        ChunkDiverged(_) => (),
+        _ => fail("L-A1: divergent j-<seq>-0 bytes did not return ChunkDiverged"),
+    }
+    // Cut and archive continuous second base (generation advances; stays in 1 continuous interval).
+    let cut1 = checkpoint(mut db)?
+    durable(mut db, cut1)?
+    let _ = archive_hold_put(mut db, t, 4, 0x44, 200)?
+    let _ = archive_drain(mut db, 8)?
+    let h3 = archive_verify_closure(mut probe_sink, store_id, DF_OP_MS)?
+    if list.len(h3.intervals) != 1 || h3.open_gap {
+        fail("L-A1: continuous cut split interval unexpectedly")
+    }
+    // A2 No-relisting check: construct a candidate base that relists an old pack ordinal
+    // strictly below `prev_base.frontier.next_pack` and absent from `prev_packs`.
+    let Some(tail3) = h3.index_tail else {
+        fail("L-A1: missing index_tail for A2 check")
+    }
+    let (take prev_base, take prev_packs) = failure_result_from_rep(history.archive_load_latest_base(mut probe_sink, store_key_to_rep(store_id), tail3, due_j))?
+    let mut bad_packs: List[format.ArchivePackRefRep] = list.new()
+    // Find an ordinal < prev_base.frontier.next_pack not in prev_packs (or 0 if all present).
+    let mut bad_ord = 1u64
+    while map.contains(prev_packs, bad_ord) && bad_ord < prev_base.frontier.next_pack {
+        bad_ord += 1
+    }
+    if bad_ord == prev_base.frontier.next_pack {
+        // Construct explicit previous base with frontier.next_pack = 10 and prev_packs = {5}
+        let synth_prev = format.ArchiveBaseRowRep(base_ordinal: 2, epoch: 0, digest: 0x11, len: 100, first_unit: 2, main_version: 2, main_at: 1, frontier: format.ArchiveFrontierRep(next_pack: 10, next_gen: 3, next_unit: 2, next_offset: 0, first_index_ordinal: 1), pack_continuation: false, packs: list.new())
+        let mut synth_map: Map[u64, format.ArchivePackRefRep] = map.new()
+        map.insert(mut synth_map, 5u64, format.ArchivePackRefRep(seq: 5, epoch: 0, len: 100, digest: 0x55))
+        list.push(mut bad_packs, format.ArchivePackRefRep(seq: 3, epoch: 0, len: 100, digest: 0x33))
+        let bad_cand = format.ArchiveBaseRowRep(base_ordinal: 3, epoch: 0, digest: 0x22, len: 100, first_unit: 3, main_version: 3, main_at: 2, frontier: format.ArchiveFrontierRep(next_pack: 11, next_gen: 4, next_unit: 3, next_offset: 0, first_index_ordinal: 2), pack_continuation: false, packs: take bad_packs)
+        match failure_result_from_rep(history.archive_check_no_relisting(synth_prev, synth_map, bad_cand)) {
+            Error(Corrupt(Fault(why: Order, ..))) => (),
+            _ => fail("L-A1 (A2): relisted old pack ordinal was not refused"),
+        }
+    } else {
+        list.push(mut bad_packs, format.ArchivePackRefRep(seq: bad_ord, epoch: 0, len: 100, digest: 0x33))
+        let mut bad_frontier = prev_base.frontier
+        bad_frontier.next_gen = prev_base.base_ordinal + 2
+        let bad_cand = format.ArchiveBaseRowRep(base_ordinal: prev_base.base_ordinal + 1, epoch: 0, digest: 0x22, len: 100, first_unit: prev_base.first_unit + 1, main_version: prev_base.main_version + 1, main_at: prev_base.main_at + 1, frontier: bad_frontier, pack_continuation: false, packs: take bad_packs)
+        match failure_result_from_rep(history.archive_check_no_relisting(prev_base, prev_packs, bad_cand)) {
+            Error(Corrupt(Fault(why: Order, ..))) => (),
+            _ => fail("L-A1 (A2): relisted old pack ordinal was not refused"),
+        }
+    }
+    close(take db)?
+    // --- Part 2: objects@1 (Bucket) overlap refusal + A1/A3 + concurrent export lease ---
+    let place_overlap = arch_law_sink_client(sim, tasks, 104, string.from("obj-place/"))?
+    let sink_overlap = arch_law_sink_client(sim, tasks, 105, string.from("obj-place/sub/"))?
+    match archived(object_authority(take place_overlap, "bucket", DF_OP_MS), take sink_overlap, a_opts) {
+        Error(Stream(Overlap)) => (),
+        _ => fail("L-A1: overlapping Bucket source and archive prefix was not refused"),
+    }
+    let place_client = arch_law_sink_client(place_sim, tasks, 106, string.from("obj-place/"))?
+    let obj_sink = arch_law_sink_client(sim, tasks, 107, string.from("arch-obj/"))?
+    let obj_auth = archived(object_authority(take place_client, "bucket", DF_OP_MS), take obj_sink, a_opts)?
+    let mut obj_db = match open_authority(tasks, take obj_auth, place_sim.time, r, exit_open_opts(true, 4)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let obj_id = obj_db.store
+    let _ = bucket_law_rows_table(mut obj_db)?
+    bucket_law_commit(mut obj_db, 1)?
+    bucket_law_commit(mut obj_db, 2)?
+    // A3: archiver never takes the export/deploy lease — begin_backup succeeds while bound!
+    let backup_dir = disk_test_directory(d)
+    let att = exit_attempt(9u8)
+    let job = match begin_backup(mut obj_db, backup_dir, failure_result_from_rep(types.copied(att))?) {
+        Ok(take j) => take j,
+        Error(_) => fail("L-A1 (A3): bound archiver blocked begin_backup export lease"),
+    }
+    let _ = match export_copy(take job) {
+        Ok(take done) => take done,
+        Error(_) => fail("L-A1 (A3): export_copy failed while archive bound"),
+    }
+    release_export(mut obj_db, att)
+    let obj_cut = checkpoint(mut obj_db)?
+    durable(mut obj_db, obj_cut)?
+    bucket_law_commit(mut obj_db, 3)?
+    let steps = archive_drain(mut obj_db, 16)?
+    if steps == 0 {
+        fail("L-A1: objects@1 archiver did not advance")
+    }
+    let mut obj_probe = arch_law_sink_client(sim, tasks, 108, string.from("arch-obj/"))?
+    let oh = archive_verify_closure(mut obj_probe, obj_id, DF_OP_MS)?
+    if oh.source_kind != format.ARCHIVE_SOURCE_OBJECTS || oh.binding_id != 1 || oh.open_gap {
+        fail("L-A1: objects@1 archive-head invalid")
+    }
+    let Some(ocur) = oh.through else {
+        fail("L-A1: objects@1 archive-head missing through")
+    }
+    if ocur.main_version < 3 {
+        fail("L-A1: objects@1 archive-head did not reach committed version")
+    }
+    close(take obj_db)?
+    Ok(())
+}
+
+// L-A3: Drop a required successor past `hold_bytes`, crash/reopen, reconnect:
+// first head change closes interval with mandatory typed Gap, Attention.archive
+// reports Gap, next step publishes fresh independent base. Damage to a committed
+// unit on the sink is Lost/Corrupt and NEVER masked as a budget Gap.
+@test
+fn test_la3_typed_gap_mandatory_and_attention(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33273)
+    let outcome = la3_run(d, sim, tasks, c, r)
+    let _ = bucket_law_report(take sim)
+    outcome
+}
+
+fn la3_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+    let dir1 = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let sink1 = arch_law_sink_client(sim, tasks, 301, string.from("la3-dir/"))?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.hold_bytes = Some(65536u64)
+    a_opts.archive_ms = 60000
+    let auth1 = archived(log_authority(dir1), take sink1, a_opts)?
+    let mut db = match open_authority(tasks, take auth1, sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let store_id = db.store
+    let t = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, t, 1, 0x11, 200)?
+    let _ = archive_drain(mut db, 8)?
+    let c1 = checkpoint(mut db)?
+    durable(mut db, c1)?
+    let _ = archive_drain(mut db, 8)?
+    let att_active = attention(db)?
+    let Some(aa1) = view att_active.archive else {
+        fail("L-A3: Attention.archive missing while bound")
+    }
+    if aa1.state != ArchiveActive || aa1.binding_id != 1 || aa1.archived_through == None {
+        fail("L-A3: Attention.archive not ArchiveActive after initial archive")
+    }
+    // Simulate sink disconnect: stop archiving while primary continues cutting past tiny hold_bytes = 1024.
+    close(take db)?
+    let mut opts_reopen = archive_hold_options(false)
+    let mut db_offline = open_directory_bound(tasks, dir1, sim.time, r, opts_reopen, 1, Some(1024u64))?
+    let t_off = table(mut db_offline, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut db_offline, t_off, 2, 0x22, 1600)?
+    let c2 = checkpoint(mut db_offline)?
+    durable(mut db_offline, c2)?
+    let _ = archive_hold_put(mut db_offline, t_off, 3, 0x33, 1600)?
+    let c3 = checkpoint(mut db_offline)?
+    durable(mut db_offline, c3)?
+    let _ = archive_hold_put(mut db_offline, t_off, 4, 0x44, 1600)?
+    let c4 = checkpoint(mut db_offline)?
+    durable(mut db_offline, c4)?
+    // Verify Attention.archive already signals Gap locally due to budget release.
+    let att_rel = attention(db_offline)?
+    if let Some(aa_rel) = view att_rel.archive {
+        if aa_rel.state != ArchiveGap {
+            fail("L-A3: local budget release did not report ArchiveGap on Attention.archive")
+        }
+    } else {
+        fail("L-A3: Attention.archive missing on offline bound store")
+    }
+    // Crash/reopen and reconnect sink.
+    close(take db_offline)?
+    // --- Sub-check: damage to committed unit at sink MUST NOT become a budget Gap ---
+    let mut probe = arch_law_sink_client(sim, tasks, 302, string.from("la3-dir/"))?
+    let Some(before_head) = archive_read_head(mut probe, store_id, DF_OP_MS)? else {
+        fail("L-A3: archive-head missing before reconnect")
+    }
+    let Some(before_cur) = before_head.through else {
+        fail("L-A3: archive-head missing through before reconnect")
+    }
+    let committed_m_key = format.archive_key(store_key_to_rep(store_id), format.archive_log_manifest_rel(before_cur.gen, before_cur.digest))
+    // Save committed manifest bytes, then corrupt it on sink.
+    let due_p = std.object.deadline_after_ms(probe, DF_OP_MS)
+    let mut saved_m: Bytes = list.with_capacity(before_cur.len)
+    let _ = failure_result_from_rep(history.history_fetch(mut probe, committed_m_key, mut saved_m, due_p))?
+    arch_law_put_garbage(mut probe, committed_m_key, 0xFF, before_cur.len, DF_OP_MS)?
+    let sink_dmg = arch_law_sink_client(sim, tasks, 303, string.from("la3-dir/"))?
+    let auth_dmg = archived(log_authority(dir1), take sink_dmg, a_opts)?
+    let mut db_dmg = match open_authority(tasks, take auth_dmg, sim.time, r, opts_reopen) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    match archive_step(mut db_dmg) {
+        Error(Corrupt(_)) => (),
+        Error(Lost) => (),
+        Ok(_) => fail("L-A3: sink damage to committed unit was masked as a budget Gap"),
+        Error(_) => fail("L-A3: unexpected error for damaged committed unit"),
+    }
+    let Some(head_after_dmg) = archive_read_head(mut probe, store_id, DF_OP_MS)? else {
+        fail("L-A3: archive-head vanished")
+    }
+    if head_after_dmg.open_gap {
+        fail("L-A3: sink damage mutated archive-head to open_gap")
+    }
+    close(take db_dmg)?
+    // Restore committed manifest bytes so genuine budget release commits mandatory typed Gap.
+    let (take put_res, _) = std.object.store(mut probe, committed_m_key, take saved_m, std.object.deadline_after_ms(probe, DF_OP_MS))
+    let _ = put_res ?=> Remote
+    let sink_rec = arch_law_sink_client(sim, tasks, 304, string.from("la3-dir/"))?
+    let auth_rec = archived(log_authority(dir1), take sink_rec, a_opts)?
+    let mut db_rec = match open_authority(tasks, take auth_rec, sim.time, r, opts_reopen) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    // Step 1 on reconnect: MUST commit typed Gap closing old interval FIRST (never bridge).
+    if !archive_step(mut db_rec)? {
+        fail("L-A3: reconnect step 1 did not commit typed Gap")
+    }
+    let Some(gap_head) = archive_read_head(mut probe, store_id, DF_OP_MS)? else {
+        fail("L-A3: archive-head missing after Gap CAS")
+    }
+    if !gap_head.open_gap || list.len(gap_head.intervals) != 1 || !gap_head.intervals[0u64].closed_by_gap {
+        fail("L-A3: first head change did not close interval with typed Gap")
+    }
+    let att_gap = attention(db_rec)?
+    let Some(aa_gap) = view att_gap.archive else {
+        fail("L-A3: Attention.archive missing after Gap CAS")
+    }
+    if aa_gap.state != ArchiveGap {
+        fail("L-A3: Attention.archive did not report ArchiveGap after Gap CAS")
+    }
+    // Step 2: publishes fresh independent base opening interval 2.
+    if !archive_step(mut db_rec)? {
+        fail("L-A3: step 2 after Gap did not publish fresh independent base")
+    }
+    let h_after = archive_verify_closure(mut probe, store_id, DF_OP_MS)?
+    if h_after.open_gap || list.len(h_after.intervals) != 2 || !h_after.intervals[0u64].closed_by_gap || h_after.intervals[1u64].closed_by_gap {
+        fail("L-A3: post-Gap independent base intervals malformed")
+    }
+    close(take db_rec)?
+    // --- Sub-check: Bucket (`objects@1`) source-side reclaim hold (exact-GET archive-head + hold_bytes) ---
+    let obj_p = arch_law_sink_client(sim, tasks, 305, string.from("la3-obj-place/"))?
+    let obj_s = arch_law_sink_client(sim, tasks, 306, string.from("la3-obj-sink/"))?
+    let mut obj_aopts = archive_options(1, DF_OP_MS)
+    obj_aopts.hold_bytes = Some(65536u64)
+    obj_aopts.archive_ms = 60000
+    let mut obj_db = match open_authority(tasks, archived(object_authority(take obj_p, "bucket", DF_OP_MS), take obj_s, obj_aopts)?, sim.time, r, exit_open_opts(true, 1)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let obj_id = obj_db.store
+    let _ = bucket_law_rows_table(mut obj_db)?
+    bucket_law_commit(mut obj_db, 1)?
+    let oc1 = checkpoint(mut obj_db)?
+    durable(mut obj_db, oc1)?
+    bucket_law_commit(mut obj_db, 2)?
+    let oc2 = checkpoint(mut obj_db)?
+    durable(mut obj_db, oc2)?
+    bucket_law_commit(mut obj_db, 3)?
+    // Run source-side reclaim BEFORE archiving: exact-GET archive-head (absent => acked 0)
+    // and protect unarchived units within hold_bytes!
+    reclaim_barrier(obj_db)?
+    let _ = archive_drain(mut obj_db, 16)?
+    let mut obj_probe = arch_law_sink_client(sim, tasks, 307, string.from("la3-obj-sink/"))?
+    let oh = archive_verify_closure(mut obj_probe, obj_id, DF_OP_MS)?
+    if oh.open_gap {
+        fail("L-A3 (Bucket): reclaim erased unarchived units within hold_bytes")
+    }
+    let Some(ocur) = oh.through else {
+        fail("L-A3 (Bucket): archive-head missing through after reclaim hold")
+    }
+    if ocur.main_version < 3 {
+        fail("L-A3 (Bucket): archive-head did not reach committed version 3 after reclaim hold")
+    }
+    close(take obj_db)?
+    Ok(())
+}
+
+// L-A6: Pause stale archiver after upload, change holder/binding, resume stale CAS:
+// stale archiver is fenced, never overwrites new archive-head, never splices, and
+// never unlinks the new binding's source receipt.
+@test
+fn test_la6_stale_archiver_fenced(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33276)
+    let outcome = la6_run(d, sim, tasks, c, r)
+    let _ = bucket_law_report(take sim)
+    outcome
+}
+
+fn la6_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+    // --- Part 1: Directory detach/rebind fences stale binding 1 and preserves binding 2's receipts ---
+    let dir1 = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let sink1 = arch_law_sink_client(sim, tasks, 601, string.from("la6-dir/"))?
+    let mut a_opts1 = archive_options(1, DF_OP_MS)
+    a_opts1.archive_ms = 60000
+    let mut db = match open_authority(tasks, archived(log_authority(dir1), take sink1, a_opts1)?, sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let store_id = db.store
+    let t = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, t, 1, 0x11, 200)?
+    let _ = archive_drain(mut db, 8)?
+    // Detach binding 1 and rebind to binding 2 with a fresh cut (so binding 2 has a live m-<g> receipt).
+    let d_tick = detach_archive(mut db)?
+    durable(mut db, d_tick)?
+    let sink2 = arch_law_sink_client(sim, tasks, 602, string.from("la6-dir/"))?
+    let mut a_opts2 = archive_options(2, DF_OP_MS)
+    a_opts2.archive_ms = 60000
+    let b2_tick = bind_archive(mut db, take sink2, a_opts2)?
+    durable(mut db, b2_tick)?
+    let _ = archive_hold_put(mut db, t, 2, 0x22, 200)?
+    let c2 = checkpoint(mut db)?
+    durable(mut db, c2)?
+    // Drain binding 2 (commits Gap for binding 1 then opens binding 2 interval).
+    let _ = archive_drain(mut db, 8)?
+    let mut probe = arch_law_sink_client(sim, tasks, 603, string.from("la6-dir/"))?
+    let Some(h_b2) = archive_read_head(mut probe, store_id, DF_OP_MS)? else {
+        fail("L-A6: binding 2 archive-head missing")
+    }
+    if h_b2.binding_id != 2 {
+        fail("L-A6: expected binding_id 2 on archive-head")
+    }
+    // Create two cuts under binding 2 without archiving so `m-<c3>` is unarchived and held for binding 2.
+    let _ = archive_hold_put(mut db, t, 3, 0x33, 200)?
+    let c3 = checkpoint(mut db)?
+    durable(mut db, c3)?
+    let _ = archive_hold_put(mut db, t, 4, 0x44, 200)?
+    let c4 = checkpoint(mut db)?
+    durable(mut db, c4)?
+    let prev_gen = db.accounting.checkpointed - 1
+    let receipt_path = failure_result_from_rep(manifest.archive_manifest_path(prev_gen, ""))?
+    if !archive_hold_exists(dir1, receipt_path)? {
+        fail("L-A6: binding 2 receipt missing before stale archiver attempt")
+    }
+    // Stale binding-1 archiver attempts a step against the same Directory + sink -> MUST fence!
+    let mut stale_sink = arch_law_sink_client(sim, tasks, 604, string.from("la6-dir/"))?
+    let due = std.object.deadline_after_ms(stale_sink, DF_OP_MS)
+    match failure_result_from_rep(history.archive_step_directory(dir1, store_key_to_rep(store_id), 1, false, mut stale_sink, due)) {
+        Error(Fenced(_)) => (),
+        _ => fail("L-A6: stale Directory archiver was not fenced"),
+    }
+    // Verify archive-head stayed at binding 2 and binding 2's receipt was NOT unlinked.
+    let Some(h_after) = archive_read_head(mut probe, store_id, DF_OP_MS)? else {
+        fail("L-A6: archive-head vanished")
+    }
+    if h_after.binding_id != 2 || h_after.rev != h_b2.rev {
+        fail("L-A6: stale Directory archiver mutated archive-head")
+    }
+    if !archive_hold_exists(dir1, receipt_path)? {
+        fail("L-A6: stale Directory archiver unlinked binding 2 receipt")
+    }
+    close(take db)?
+    // --- Part 2: objects@1 stale holder epoch & stale binding CAS fenced ---
+    let obj_c1 = arch_law_sink_client(sim, tasks, 605, string.from("la6-obj/"))?
+    let obj_s1 = arch_law_sink_client(sim, tasks, 606, string.from("la6-obj-sink/"))?
+    let mut obj_db1 = match open_authority(tasks, archived(object_authority(take obj_c1, "bucket", DF_OP_MS), take obj_s1, a_opts1)?, sim.time, r, exit_open_opts(true, 4)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let obj_id = obj_db1.store
+    let obj_ep1 = claim_of(obj_db1)?.epoch
+    let _ = bucket_law_rows_table(mut obj_db1)?
+    bucket_law_commit(mut obj_db1, 1)?
+    let _ = archive_drain(mut obj_db1, 8)?
+    // Capture read-only source sender for stale archiver BEFORE holder epoch 2 takes over.
+    let stale_src_tx = archive_source_sender(obj_db1)?
+    // Depose holder epoch 1 by opening holder epoch 2 without closing epoch 1 first.
+    let obj_c2 = arch_law_sink_client(sim, tasks, 607, string.from("la6-obj/"))?
+    let obj_s2 = arch_law_sink_client(sim, tasks, 608, string.from("la6-obj-sink/"))?
+    let mut obj_db2 = match open_authority(tasks, archived(object_authority(take obj_c2, "bucket", DF_OP_MS), take obj_s2, a_opts1)?, sim.time, r, exit_open_opts(false, 4)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let obj_ep2 = claim_of(obj_db2)?.epoch
+    if obj_ep2 <= obj_ep1 {
+        fail("L-A6: holder epoch did not advance")
+    }
+    bucket_law_commit(mut obj_db2, 2)?
+    let _ = archive_drain(mut obj_db2, 8)?
+    let mut obj_probe = arch_law_sink_client(sim, tasks, 609, string.from("la6-obj-sink/"))?
+    let Some(oh_ep2) = archive_read_head(mut obj_probe, obj_id, DF_OP_MS)? else {
+        fail("L-A6: epoch 2 archive-head missing")
+    }
+    if oh_ep2.holder_epoch != obj_ep2 {
+        fail("L-A6: archive-head did not record holder epoch 2")
+    }
+    // Resume stale archiver pinned to holder epoch 1 -> MUST be fenced!
+    let mut stale_obj_sink = arch_law_sink_client(sim, tasks, 610, string.from("la6-obj-sink/"))?
+    let due2 = std.object.deadline_after_ms(stale_obj_sink, DF_OP_MS)
+    match failure_result_from_rep(history.archive_step_objects(take stale_src_tx, store_key_to_rep(obj_id), 1, obj_ep1, false, mut stale_obj_sink, due2)) {
+        Error(Fenced(ep)) if ep == obj_ep1 => (),
+        _ => fail("L-A6: stale objects@1 archiver was not fenced"),
+    }
+    let Some(oh_after) = archive_read_head(mut obj_probe, obj_id, DF_OP_MS)? else {
+        fail("L-A6: objects@1 archive-head vanished")
+    }
+    if oh_after.holder_epoch != obj_ep2 || oh_after.rev != oh_ep2.rev {
+        fail("L-A6: stale objects@1 archiver moved epoch 2 archive-head")
+    }
+    let _ = take obj_db1
+    close(take obj_db2)?
+    Ok(())
+}
+
+// Emits a real NDJSON archive/gap trace from actual `log@1` archiver execution,
+// checked directly by `proofs/store/check_proofs.py --trace-only --trace <file>`.
+@test
+fn test_archive_retention_trace(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33279)
+    let outcome = archive_trace_run(d, sim, tasks, c, r, out)
+    let _ = bucket_law_report(take sim)
+    outcome
+}
+
+fn archive_trace_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random, out: Stdout) -> Result[(), Error] waits {
+    let dir1 = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let sink1 = arch_law_sink_client(sim, tasks, 901, string.from("trace-sink/"))?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.hold_bytes = Some(65536u64)
+    a_opts.archive_ms = 60000
+    let mut db = match open_authority(tasks, archived(log_authority(dir1), take sink1, a_opts)?, sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let t = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, t, 1, 0x11, 800)?
+    let cut1 = checkpoint(mut db)?
+    durable(mut db, cut1)?
+    // Publish initial base (model cursor 1: unit 1 + pack 1).
+    let s1 = archive_step_detailed(mut db)?
+    if !s1.advanced {
+        fail("trace: initial base did not publish")
+    }
+    let mut trace_out = string.new()
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":1,\"key\":[\"unit\",1]}\n")
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":1,\"key\":[\"pack\",1]}\n")
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"publish\",\"cursor\":1}\n")
+    close(take db)?
+    // Disconnect sink, perform two cuts past tiny hold_bytes = 1024, then reopen.
+    let opts_reopen = archive_hold_options(false)
+    let mut db_off = open_directory_bound(tasks, dir1, sim.time, r, opts_reopen, 1, Some(1024u64))?
+    let t_off = table(mut db_off, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = archive_hold_put(mut db_off, t_off, 2, 0x22, 1600)?
+    let cut2 = checkpoint(mut db_off)?
+    durable(mut db_off, cut2)?
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"cut\",\"shared\":[]}\n")
+    let _ = archive_hold_put(mut db_off, t_off, 3, 0x33, 1600)?
+    let cut3 = checkpoint(mut db_off)?
+    durable(mut db_off, cut3)?
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"cut\",\"shared\":[]}\n")
+    close(take db_off)?
+    // Reopen + reconnect sink: unified cleanup runs, then Gap CAS, then fresh independent base!
+    let sink2 = arch_law_sink_client(sim, tasks, 902, string.from("trace-sink/"))?
+    let mut db_rec = match open_authority(tasks, archived(log_authority(dir1), take sink2, a_opts)?, sim.time, r, opts_reopen) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"reopen\",\"files\":[[\"unit\",3],[\"pack\",2],[\"unit\",4],[\"unit\",5],[\"pack\",3]]}\n")
+    let gap_step = archive_step_detailed(mut db_rec)?
+    if !gap_step.gap_committed {
+        fail("trace: expected typed Gap commit on reconnect")
+    }
+    string.push(mut trace_out, "{\"kind\":\"gap\",\"after\":1}\n")
+    let base_step = archive_step_detailed(mut db_rec)?
+    if !base_step.advanced || base_step.gap_committed {
+        fail("trace: expected fresh independent base publish after Gap")
+    }
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":5,\"key\":[\"pack\",3]}\n")
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":5,\"key\":[\"unit\",5]}\n")
+    string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"publish\",\"cursor\":5}\n")
+    close(take db_rec)?
+    let _ = stdout.write(out, trace_out)
+    Ok(())
+}

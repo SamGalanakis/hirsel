@@ -4796,7 +4796,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 | lineage | PagePtr 36 | root of the lineage tree (§13.6): fork rows and deadlist cells (boundaries are derived, v2.91); a class-2 list tree |
 | deferred_frees | PagePtr 36 | root of the deferred-free queue (§13.6); a class-2 list tree |
 | deferred_next | u64 | the next queue sequence number |
-| binding_id | u64 | Zero for an unbound store. The reader refuses a nonzero value until §15.7 source holds are implemented. |
+| binding_id | u64 | Zero for an unbound store; nonzero installs an archive binding for §15.7 source holds and background archiving. |
 | sweep | 3 × u64 | the reclaim sweep cursor (§12.6): (position, epoch, digest) of the last `e-` key fully examined; all zero = before the first |
 
 - Format 13 has 236 fixed MANIFEST payload bytes. AP4a admission is 236 + the store’s meta limit, at most 16,777,452 bytes. The provenance frame of a restored store (§15.3) is separate from this payload. Its encoded length and envelope are included in the bound on the containing MANIFEST file at exact GET and recovery.

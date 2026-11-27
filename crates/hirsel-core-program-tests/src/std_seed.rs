@@ -468,14 +468,14 @@ fn float_constant_tables_are_read_only_data() {
         .collect();
     let p = Program::declare(&index, &modules);
     let checked = Checked::corpus(&corpus);
-    for name in ["SHIFTS", "POW10_64", "POW10_32", "POW5"] {
+    for name in ["SHIFTS", "POW10_64", "POW10_32", "POW5_U64"] {
         let constant = p
             .constants
             .iter()
             .find(|c| c.path.0.modules == ["float"] && c.path.0.name == name)
             .unwrap();
         assert!(
-            constant.value.is_some(),
+            constant.value.is_some() || constant.computed,
             "{name}: {:?} {:?}",
             p.refusals,
             p.gaps
@@ -520,10 +520,17 @@ fn float_constant_tables_are_read_only_data() {
     );
     assert_eq!(module.statics.len(), 1);
     let recipes = hirsel_core_layout::compute(&module.types).unwrap();
-    assert_eq!(
-        module.statics[0].native(&module.types, &recipes).1.len(),
-        19 * 8
-    );
+    match &module.statics[0] {
+        hirsel_core_ir::Static::Computed { ty, constant } => {
+            assert_eq!(constant.0.modules, ["float"]);
+            assert_eq!(constant.0.name, "SHIFTS");
+            assert_eq!(
+                hirsel_core_layout::field_size(&module.types, &recipes, ty).0,
+                19 * 8
+            );
+        }
+        data => assert_eq!(data.native(&module.types, &recipes).1.len(), 19 * 8),
+    }
     println!(
         "std.float.shift_for SHIFTS: {} CoreIR instructions per lookup, no table stores/copies",
         end + 1 - start

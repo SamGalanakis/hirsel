@@ -2043,13 +2043,13 @@ fn request_sequences_build_as_an_empty_store() {
 include!("source_std_native.rs");
 
 // The process leg (S3; STEP-C 2.1 replay law). A request is the `hirsel`
-// executable's: a child of this test binary runs `crate::request::main` with
-// the request's arguments, and its stdout, stderr, exit status and output
-// file are compared with the same request against an empty store. Work
-// counters are not answers and are left out (REPORT D2): the text line's
-// checked-definitions count. Each step also says whether the request
-// record must answer it, read from its `--metrics` stages, so a case cannot
-// pass by never hitting.
+// executable's: the sequence cases run the product driver binary, so the
+// memory-limit cases measure it rather than libtest startup. Its stdout,
+// stderr, exit status and output file are compared with the same request
+// against an empty store. Work counters are not answers and are left out
+// (REPORT D2): the text line's checked-definitions count. Each step also
+// says whether the request record must answer it, read from its `--metrics`
+// stages, so a case cannot pass by never hitting.
 pub(crate) mod process {
 use super::*;
 
@@ -2068,7 +2068,7 @@ struct Step {
     hit: bool,
     /// Done to the case's root before the primed request.
     before: Option<fn(&Path)>,
-    /// Run the primed request through a copy of this test binary.
+    /// Run the primed request through a copy of the driver.
     copied: bool,
     /// The output path under the run directory.
     output: &'static str,
@@ -2257,8 +2257,7 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
     );
     let mut child = Command::new(exe);
     child
-        .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
-        .env("REQUEST_CHILD_ARGS", serde_json::to_string(&args).unwrap())
+        .args(&args)
         .env("XDG_CACHE_HOME", cache_for(store))
         .current_dir(root);
     for (name, value) in &step.env {
@@ -2270,10 +2269,6 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
     let out = child.output().unwrap();
     let after = |bytes: &[u8]| {
         let text = String::from_utf8_lossy(bytes).into_owned();
-        let text = match text.find(CHILD_MARK) {
-            Some(at) => text[at + CHILD_MARK.len()..].to_owned(),
-            None => panic!("{} child did not write its marker ({}): {text}\n{}", step.command, out.status, String::from_utf8_lossy(&out.stderr)),
-        };
         let text = text
             .replace(&cache_for(store).display().to_string(), "<cache>")
             .replace(&store.display().to_string(), "<store>")
@@ -2314,7 +2309,11 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
 fn run_case(case: &Case) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let exe = std::env::current_exe().unwrap();
+    let exe = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_DEV_TEST_DRIVER").expect("driver artifact"))
+        .canonicalize()
+        .unwrap();
     let copy = root.join("copied-driver");
     let primed_store = root.join("primed-store");
     let mut failures = vec![];

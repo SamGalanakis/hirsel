@@ -1,0 +1,8 @@
+// expect: accept
+// expect: on aarch64-apple-ios refuses PROG-6: main.main reaches target.unsupported("iOS apps cannot create processes") for target aarch64-apple-ios, through exec.spawn
+// expect: on aarch64-apple-ios-sim refuses PROG-6: main.main reaches target.unsupported("iOS apps cannot create processes") for target aarch64-apple-ios-sim, through exec.spawn
+pub fn main(e: Exec) -> Result[(), Exit] waits {
+    let launch = Launch(program: "child", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Discard, stdout: Discard, stderr: Discard)
+    let _ = exec.spawn(e, launch)
+    Ok(())
+}

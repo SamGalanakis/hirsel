@@ -1,0 +1,28 @@
+// library: runner
+// expect: accept
+// expect: on aarch64-apple-ios run smoke() = 7
+// expect: on aarch64-apple-ios-sim run smoke() = 7
+fn probe(n: Net, _caller: runner.Caller, take args: (bool, Bytes)) -> Result[bool, Capacity] waits {
+    let (system, take roots) = take args
+    let trust: Trust = if system {
+        System
+    } else {
+        Roots(take roots)
+    }
+    let addr = Addr(ip: V4(2130706433u32), port: 443u16)
+    match host.connect(n, addr, Never) {
+        Ok(take socket) => match tls.connect(n, take socket, "localhost", trust, list.new(), Never) {
+            Ok(_) => Ok(true),
+            Error(_) => Ok(false),
+        },
+        Error(_) => Ok(false),
+    }
+}
+
+fn place(mut r: runner.Registry[Net, ()]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut r, code.describe(probe), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn smoke() -> u64 {
+    7
+}

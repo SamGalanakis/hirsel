@@ -1,0 +1,15 @@
+// expect: accept
+// expect: on aarch64-apple-ios run smoke() = 7
+// expect: on aarch64-apple-ios-sim run smoke() = 7
+pub fn main(e: Exec, n: Net) -> Result[(), Exit] waits {
+    if target.os != (Ios : target.Os) {
+        let launch = Launch(program: "child", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Discard, stdout: Discard, stderr: Discard)
+        let _ = exec.spawn(e, launch)
+        let _ = host.connect_unix(n, "work", "socket", Never)
+    }
+    Ok(())
+}
+
+fn smoke() -> u64 {
+    7
+}

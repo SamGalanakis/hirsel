@@ -1,8 +1,32 @@
 // Launch-profile authority and child process operations (EXEC-2, EXEC-3, EXEC-5).
 pub fn narrow(e: Exec, r: ExecRule) -> Result[Exec, RuleError]
 
-pub fn spawn(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits
+pub fn spawn(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("iOS apps cannot create processes")
+    } else {
+        spawn_raw(e, l)
+    }
+}
 
-pub fn wait(mut p: Proc, until: Until) -> Result[Termination, ExecError] waits
+fn spawn_raw(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits
 
-pub fn signal(mut p: Proc, s: Signal) -> Result[(), ExecError] waits
+pub fn wait(mut p: Proc, until: Until) -> Result[Termination, ExecError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("iOS apps cannot create processes")
+    } else {
+        wait_raw(mut p, until)
+    }
+}
+
+fn wait_raw(mut p: Proc, until: Until) -> Result[Termination, ExecError] waits
+
+pub fn signal(mut p: Proc, s: Signal) -> Result[(), ExecError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("iOS apps cannot create processes")
+    } else {
+        signal_raw(mut p, s)
+    }
+}
+
+fn signal_raw(mut p: Proc, s: Signal) -> Result[(), ExecError] waits

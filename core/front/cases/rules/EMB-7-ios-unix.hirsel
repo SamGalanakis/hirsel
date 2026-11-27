@@ -1,0 +1,7 @@
+// expect: accept
+// expect: on aarch64-apple-ios refuses PROG-6: main.main reaches target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer") for target aarch64-apple-ios, through host.connect_unix
+// expect: on aarch64-apple-ios-sim refuses PROG-6: main.main reaches target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer") for target aarch64-apple-ios-sim, through host.connect_unix
+pub fn main(n: Net) -> Result[(), Exit] waits {
+    let _ = host.connect_unix(n, "work", "socket", Never)
+    Ok(())
+}

@@ -11,6 +11,16 @@ use std::collections::HashMap;
 
 type Built = Result<(Module, HashMap<String, FuncId>), String>;
 
+#[test]
+fn ios_capability_refusals() {
+    let cases = super::root().join("cases/rules");
+    for case in ["exec", "unix", "unreached", "runner-tls"] {
+        let path = cases.join(format!("EMB-7-ios-{case}.hirsel"));
+        let failures = super::run_case(&path);
+        assert!(failures.is_empty(), "{case}: {}", failures.join("\n"));
+    }
+}
+
 pub(super) struct OnTargets<'a> {
     product: &'a CheckProduct,
     roots: &'a [Identity],

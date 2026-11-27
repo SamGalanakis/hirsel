@@ -81,23 +81,95 @@ pub fn recv_ready(mut r: ReadHalf, until: Until) -> Result[(), NetError] waits
 
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits
 
-pub fn connect_unix(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits
+pub fn connect_unix(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        connect_unix_raw(n, root, path, until)
+    }
+}
 
-pub fn listen_unix(n: Net, root: String, path: String, backlog: u16) -> Result[UnixListener, NetError] waits
+fn connect_unix_raw(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits
 
-pub fn accept_unix(mut l: UnixListener, until: Until) -> Result[Socket, NetError] waits
+pub fn listen_unix(n: Net, root: String, path: String, backlog: u16) -> Result[UnixListener, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        listen_unix_raw(n, root, path, backlog)
+    }
+}
 
-pub fn open_datagram(n: Net) -> Result[UnixDatagram, NetError] waits
+fn listen_unix_raw(n: Net, root: String, path: String, backlog: u16) -> Result[UnixListener, NetError] waits
 
-pub fn bind_datagram(n: Net, root: String, path: String) -> Result[UnixDatagram, NetError] waits
+pub fn accept_unix(mut l: UnixListener, until: Until) -> Result[Socket, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        accept_unix_raw(mut l, until)
+    }
+}
 
-pub fn connect_datagram(mut d: UnixDatagram, root: String, path: String) -> Result[(), NetError] waits
+fn accept_unix_raw(mut l: UnixListener, until: Until) -> Result[Socket, NetError] waits
 
-pub fn send_datagram(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), NetError] waits
+pub fn open_datagram(n: Net) -> Result[UnixDatagram, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        open_datagram_raw(n)
+    }
+}
 
-pub fn send_to(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits
+fn open_datagram_raw(n: Net) -> Result[UnixDatagram, NetError] waits
 
-pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits
+pub fn bind_datagram(n: Net, root: String, path: String) -> Result[UnixDatagram, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        bind_datagram_raw(n, root, path)
+    }
+}
+
+fn bind_datagram_raw(n: Net, root: String, path: String) -> Result[UnixDatagram, NetError] waits
+
+pub fn connect_datagram(mut d: UnixDatagram, root: String, path: String) -> Result[(), NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        connect_datagram_raw(mut d, root, path)
+    }
+}
+
+fn connect_datagram_raw(mut d: UnixDatagram, root: String, path: String) -> Result[(), NetError] waits
+
+pub fn send_datagram(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        send_datagram_raw(mut d, b, until)
+    }
+}
+
+fn send_datagram_raw(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), NetError] waits
+
+pub fn send_to(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        send_to_raw(mut d, root, path, b, until)
+    }
+}
+
+fn send_to_raw(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits
+
+pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits {
+    if target.os == (Ios : target.Os) {
+        target.unsupported("Unix socket naming needs `pthread_fchdir_np`, which iOS does not offer")
+    } else {
+        recv_datagram_raw(mut d, mut buf, until)
+    }
+}
+
+fn recv_datagram_raw(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits
 
 pub fn udp_open(n: Net, v6: bool, opts: UdpOptions) -> Result[UdpSocket, NetError] waits
 

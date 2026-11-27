@@ -1,7 +1,89 @@
-//! File operations on Linux. Inside a unit whose pool owns a file ring, each
-//! operation goes through the ring (`crate::units::file_request`); otherwise
-//! it is the plain syscall.
+//! File I/O on Linux. A tied issuer waits on its own file ring. Pool units
+//! park while their worker continues to issue and reap other requests.
+use hirsel_core_net::{FileRequest, file_ring::FileRing};
+use std::cell::Cell;
 use std::{io, os::fd::RawFd};
+
+thread_local! {
+    static TIED: io::Result<Option<FileRing>> = hirsel_core_net::reactor().and_then(|backend| {
+        if backend.completes_files() {
+            FileRing::new(32).map(Some)
+        } else {
+            Ok(None)
+        }
+    });
+}
+
+pub(crate) fn write_ring() -> io::Result<bool> {
+    if crate::units::untied() {
+        return Ok(crate::units::uses_file_ring());
+    }
+    TIED.with(|r| r.as_ref().map(Option::is_some).map_err(copy_error))
+}
+
+fn copy_error(e: &io::Error) -> io::Error {
+    e.raw_os_error().map_or_else(
+        || io::Error::new(e.kind(), e.to_string()),
+        io::Error::from_raw_os_error,
+    )
+}
+
+fn with_ring<T>(f: impl FnOnce(&FileRing) -> io::Result<T>) -> io::Result<T> {
+    if crate::units::untied() {
+        let poller = crate::units::file_poller().ok_or(io::ErrorKind::Unsupported)?;
+        // SAFETY: only the running pool unit can obtain its slot poller here.
+        return f(unsafe { poller.file_ring() }?);
+    }
+    TIED.with(|r| {
+        f(r.as_ref()
+            .map_err(copy_error)?
+            .as_ref()
+            .ok_or(io::ErrorKind::Unsupported)?)
+    })
+}
+
+/// Select the writer's pair on the current file issuer. The existing
+/// provider write path recognizes slices of either buffer, including suffixes.
+pub fn register_file_buffers(buffers: &hirsel_core_net::file_ring::FileBuffers) -> io::Result<()> {
+    with_ring(|ring| ring.register_buffers(buffers))
+}
+
+unsafe fn request(ring: &FileRing, entry: io_uring::squeue::Entry) -> io::Result<i32> {
+    if crate::units::uses_file_ring() {
+        // SAFETY: caller holds operands until completion on the unit's slot.
+        return unsafe { crate::units::file_request(entry) };
+    }
+    unsafe fn finish(context: *const (), result: i32) {
+        // SAFETY: the issuer retains its stack cell until this callback.
+        unsafe {
+            (*context.cast::<Cell<Option<i32>>>()).set(Some(result));
+        }
+    }
+    let result = Cell::<Option<i32>>::new(None);
+    let pending = FileRequest::new(entry, (&raw const result).cast(), finish);
+    // SAFETY: the tied issuer waits on this thread with all operands pinned.
+    unsafe { ring.queue(&pending) };
+    while result.get().is_none() {
+        // An enter failure is not the operation's CQE. Returning would let
+        // the caller release memory the kernel may still be using.
+        if ring.drive(true).is_err() {
+            std::process::abort();
+        }
+    }
+    let result = result.get().unwrap();
+    if result < 0 {
+        Err(io::Error::from_raw_os_error(-result))
+    } else {
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SYSCALL_WRITES: Cell<u32> = const { Cell::new(0) };
+    static FIXED_WRITES: Cell<u32> = const { Cell::new(0) };
+    static RING_WRITES: Cell<u32> = const { Cell::new(0) };
+}
 
 fn checked(rc: isize) -> io::Result<isize> {
     if rc < 0 {
@@ -22,17 +104,25 @@ pub(crate) fn write_part(
     align: u64,
 ) -> io::Result<usize> {
     if ring {
-        let entry = io_uring::opcode::Write::new(
-            io_uring::types::Fd(fd),
-            bytes.as_ptr(),
-            bytes.len().min(i32::MAX as usize & !(align as usize - 1)) as u32,
-        )
-        .offset(offset.map_or(u64::MAX, |at| at as u64))
-        .build();
-        // SAFETY: the provider keeps fd and bytes live until the call's CQE.
-        let result = unsafe { crate::units::file_request(entry) }?;
-        return Ok(result as usize);
+        return with_ring(|issuer| {
+            let len = bytes.len().min(i32::MAX as usize & !(align as usize - 1));
+            let entry =
+                issuer.write_entry(fd, &bytes[..len], offset.map_or(u64::MAX, |at| at as u64));
+            #[cfg(test)]
+            let fixed = entry.get_opcode() == u32::from(io_uring::opcode::WriteFixed::CODE);
+            // SAFETY: the provider pins fd and bytes until the CQE.
+            let count = unsafe { request(issuer, entry) }?;
+            #[cfg(test)]
+            if fixed {
+                FIXED_WRITES.set(FIXED_WRITES.get() + 1);
+            }
+            #[cfg(test)]
+            RING_WRITES.set(RING_WRITES.get() + 1);
+            Ok(count as usize)
+        });
     }
+    #[cfg(test)]
+    SYSCALL_WRITES.set(SYSCALL_WRITES.get() + 1);
     // SAFETY: fd and bytes remain live through the syscall.
     let result = unsafe {
         let data = bytes.as_ptr().cast();
@@ -46,7 +136,11 @@ pub(crate) fn write_part(
 
 /// Close the sole owner of `fd`.
 pub(crate) fn close(fd: RawFd) -> io::Result<()> {
-    if crate::units::uses_file_ring() {
+    if let Some(poller) = crate::units::file_poller()
+        // SAFETY: only the current slot owner has this poller. If setup fails
+        // before submission, the caller still owns the fd and closes it below.
+        && unsafe { poller.file_ring() }.is_ok()
+    {
         let entry = io_uring::opcode::Close::new(io_uring::types::Fd(fd)).build();
         // SAFETY: the entry consumes the sole owned descriptor.
         unsafe { crate::units::file_request(entry) }?;
@@ -128,8 +222,12 @@ pub(crate) fn zero_part(fd: RawFd, iov: &[libc::iovec], at: i64, ring: bool) -> 
                 .build();
         // SAFETY: the provider holds fd and the caller pins the iovecs and
         // what they name until the call's CQE.
-        return unsafe { crate::units::file_request(entry) }.map(|n| n as usize);
+        return with_ring(|issuer| unsafe { request(issuer, entry) }).map(|n| n as usize);
     }
     // SAFETY: fd and the initialized vector are live throughout pwritev.
     checked(unsafe { libc::pwritev(fd, iov.as_ptr(), iov.len() as i32, at) }).map(|n| n as usize)
 }
+
+#[cfg(test)]
+#[path = "file_tests.rs"]
+mod tests;

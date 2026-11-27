@@ -104,7 +104,7 @@ pub(crate) fn reset(eventfd: &WakeSource) {
     unsafe { libc::read(eventfd.as_raw_fd(), (&raw mut pending).cast(), 8) };
 }
 
-fn eventfd() -> io::Result<OwnedFd> {
+pub(super) fn eventfd() -> io::Result<OwnedFd> {
     // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
     Ok(unsafe {
         OwnedFd::from_raw_fd(checked(libc::eventfd(

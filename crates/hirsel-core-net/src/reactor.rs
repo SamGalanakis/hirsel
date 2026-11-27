@@ -33,10 +33,14 @@ use crate::ready::{Event, Handle, Waker};
 #[cfg(target_os = "linux")]
 pub use sendzc::TxSlot;
 #[cfg(target_vendor = "apple")]
-pub use sys::{FileEntry, TxSlot};
+pub use sys::{FileEntry, FileRequest, TxSlot};
 pub use udp_group::UdpMember;
 #[cfg(target_os = "linux")]
-pub use uring::FileEntry;
+pub use uring::{FileEntry, FileRequest};
+pub mod file_ring {
+    #[cfg(target_os = "linux")]
+    pub use super::uring::{FileBuffers, FileRing};
+}
 #[cfg(target_os = "linux")]
 use uring::{Uring, msg_ring_wake};
 
@@ -524,6 +528,7 @@ struct SlotPollers {
 /// The file ring's completion-descriptor tag; poller-owned tags (UDP groups)
 /// stay below it.
 const COMPLETION_READY: u64 = u64::MAX - 2;
+const FILE_READY: u64 = u64::MAX - 3;
 static SHARED: Mutex<Option<Arc<SlotPollers>>> = Mutex::new(None);
 /// Bits of a shared tag below the unit.
 pub const SHARED_UNIT_SHIFT: u32 = 40;

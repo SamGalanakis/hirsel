@@ -9,7 +9,7 @@ fn plan_derivation_and_envelope_refusal() {
     assert_eq!(plan.logical_units_hint, 233_017);
     assert_eq!(plan.fixed_threads, 17);
     assert_eq!(plan.max_host_threads, 32);
-    assert_eq!(plan.pinned_ring_bytes, 96 * KIB);
+    assert_eq!(plan.pinned_ring_bytes, 144 * KIB);
     assert_eq!(plan.retained_bytes, 8 * MIB);
     assert_eq!(plan.reclaim_bytes, 2 * MIB);
 
@@ -20,12 +20,21 @@ fn plan_derivation_and_envelope_refusal() {
         memlock_limit: Some(768 * KIB as u64),
         ..unbounded
     };
+    assert!(
+        derive(constrained, ReactorChoice::IoUring)
+            .unwrap_err()
+            .contains("RLIMIT_MEMLOCK")
+    );
+    let constrained = HostEnvelope {
+        memlock_limit: Some(1152 * KIB as u64),
+        ..constrained
+    };
     let plan = derive(constrained, ReactorChoice::IoUring).unwrap();
     assert_eq!(plan.fixed_threads, 13);
     assert!(plan.fixed_threads + 4 + plan.max_host_threads <= 24);
     assert_eq!(plan.reactor.iowq_bounded, 1);
     assert_eq!(plan.reactor.iowq_unbounded, 1);
-    assert_eq!(plan.pinned_ring_bytes, 384 * KIB);
+    assert_eq!(plan.pinned_ring_bytes, 576 * KIB);
     assert_eq!(plan.task_stack_reserve, MIB);
     for bytes in [
         plan.worker_stack_bytes,

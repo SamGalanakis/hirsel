@@ -281,15 +281,17 @@ impl OsProvider {
                 }
             }
             WRITE | WRITE_AT => {
-                return Ok(write_request(self.file(request.handle), request));
+                let (fd, ring) = self.write_target(request.handle)?;
+                return Ok(write_request(fd, request, ring));
             }
             ZERO_AT => {
-                let fd = self.file(request.handle);
+                let (fd, ring) = self.write_target(request.handle)?;
                 return Ok(write::zero_at(
                     fd,
                     request.offset(),
                     request.zero_len(),
                     request.mode,
+                    ring,
                 ));
             }
             CLOSE => {
@@ -827,8 +829,12 @@ unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     let os = unsafe { &*state.cast::<OsProvider>() };
     let request = unsafe { &mut *request };
     match request.operation {
-        STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
-        STDERR => write_request(os.stderr_fd(), request),
+        STDOUT => write_request(
+            os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+            request,
+            false,
+        ),
+        STDERR => write_request(os.stderr_fd(), request, false),
         TERM_SIZE => {
             let fd = if request.mode == 2 {
                 os.stderr_fd()

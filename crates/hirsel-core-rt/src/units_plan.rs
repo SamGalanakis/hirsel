@@ -81,7 +81,8 @@ fn reactor_plan(
     let Some((mut reactor, pinned)) = [128, 64, 32].into_iter().find_map(|batch| {
         let plan = ReactorPlan::for_batch(batch);
         let ring = |cq| round(cq as usize * 16) + page + round(plan.sq_entries as usize * 64);
-        let pinned = w * (ring(plan.readiness_cq) + ring(plan.completion_cq));
+        let pinned =
+            w * (ring(plan.readiness_cq) + ring(plan.completion_cq) + ring(plan.sq_entries));
         host.memlock_limit
             .is_none_or(|m| pinned as u64 <= m / 2)
             .then_some((plan, pinned))

@@ -1,10 +1,10 @@
 //! The io_uring backend of a [`Poller`](super::Poller): one ring per owner,
 //! its mailbox, and the multishot polls of its watched descriptors.
-use super::COMPLETION_READY;
 use super::{
     Backend, PollEvents, Poller, REGISTER_SEND_MSG_RING, ReactorPlan, Turn, WAKE, sendzc,
     sys::INTEREST,
 };
+use super::{COMPLETION_READY, FILE_READY};
 use crate::ready::{Event, Ready};
 use std::{
     collections::VecDeque,
@@ -13,6 +13,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod completion;
+mod file;
+pub use file::{FileBuffers, FileRequest, FileRing};
 mod ring;
 mod watch;
 use completion::Completion;
@@ -67,6 +69,7 @@ pub(super) struct Uring {
     /// The kernel runs SEND_ZC.
     pub(super) zc: bool,
     pub(super) completion: Completion,
+    files: std::sync::OnceLock<FileRing>,
     #[cfg(test)]
     pub(super) refuse_submit: std::sync::atomic::AtomicBool,
 }
@@ -215,6 +218,7 @@ impl Uring {
             tx: Mutex::default(),
             zc,
             completion,
+            files: std::sync::OnceLock::new(),
             #[cfg(test)]
             refuse_submit: std::sync::atomic::AtomicBool::new(false),
         };
@@ -255,13 +259,16 @@ impl Uring {
     }
 
     pub(super) fn due(&self) -> bool {
-        queue_due(&self.ring, &self.sq) || self.watches().due() || self.completion.due()
+        queue_due(&self.ring, &self.sq)
+            || self.watches().due()
+            || self.completion.due()
+            || self.files.get().is_some_and(FileRing::due)
     }
 
     pub(super) fn enter(&self, timeout_ns: Option<u64>) {
         let refused = self.refused_submit();
         self.completion.enter(refused);
-        let timeout_ns = if self.completion.due() {
+        let timeout_ns = if self.completion.due() || self.files.get().is_some_and(FileRing::due) {
             Some(0)
         } else {
             timeout_ns
@@ -280,6 +287,8 @@ impl Uring {
         let limit = self.plan.poll_batch as usize;
         let mut remaining = limit;
         let mut completion_left = limit;
+        let files = self.files.get();
+        let completed_files = files.map_or(Ok(0), |files| files.drive(false))?;
         let n = self.completion.reap(self, out, &mut completion_left);
         let mut watches = self.watches();
         watches.recover_if_dropped(dropped);
@@ -290,7 +299,7 @@ impl Uring {
         // Kept transmit slots are freed by a later turn, so do not sleep
         // past their trim.
         let trim_ns = sendzc::TRIM.as_nanos() as u64;
-        let timeout_ns = if n != 0 || remaining < limit || recovering {
+        let timeout_ns = if n != 0 || completed_files != 0 || remaining < limit || recovering {
             Some(0)
         } else if self.tx_kept() && timeout_ns.is_none_or(|ns| ns > trim_ns) {
             Some(trim_ns)
@@ -298,6 +307,9 @@ impl Uring {
             timeout_ns
         };
         self.enter(timeout_ns);
+        if let Some(files) = files {
+            files.drive(false)?;
+        }
         if n != 0 {
             return Ok(n);
         }
@@ -337,7 +349,7 @@ impl Uring {
                     let Some(tag) = watches.polled(self, cqe)? else {
                         continue;
                     };
-                    if res <= 0 || tag == COMPLETION_READY {
+                    if res <= 0 || matches!(tag, COMPLETION_READY | FILE_READY) {
                         continue;
                     }
                     (tag, Ready::from_poll_mask(res as u32))
@@ -426,26 +438,56 @@ impl Poller {
 }
 
 impl Poller {
-    /// Queue a one-shot file operation to the slot's completion ring. Epoll
-    /// leaves the operation to the caller.
+    /// Drain all file callbacks on the worker before its issuer thread exits.
+    pub fn drain_files(&self) -> io::Result<()> {
+        if let Backend::Uring(owner) = &self.backend
+            && let Some(files) = owner.files.get()
+        {
+            files.drain()?;
+        }
+        Ok(())
+    }
+
+    /// Create the slot's file ring on its issuing worker. The readiness ring
+    /// watches its work eventfd while the worker sleeps.
     ///
     /// # Safety
-    /// The caller owns the running slot and has at most one file request per
-    /// unit. All descriptors and memory named by `entry` and `context` must
-    /// remain valid until completion, except a descriptor consumed by CLOSE.
-    /// `complete` must publish the result without unwinding or polling.
-    pub unsafe fn submit_file(
-        &self,
-        unit: u32,
-        entry: FileEntry,
-        context: *const (),
-        complete: unsafe fn(*const (), i32),
-    ) -> bool {
-        let Backend::Uring(ring) = &self.backend else {
-            return false;
+    /// Only the slot owner may initialize its file issuer.
+    pub unsafe fn file_ring(&self) -> io::Result<&FileRing> {
+        let Backend::Uring(owner) = &self.backend else {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
         };
-        // SAFETY: the caller keeps the request live until the sole CQE.
-        unsafe { ring.completion.push_file(unit, entry, context, complete) };
+        if let Some(files) = owner.files.get() {
+            return Ok(files);
+        }
+        let files = FileRing::with_workers(
+            owner.plan.sq_entries,
+            owner.plan.iowq_bounded,
+            owner.plan.iowq_unbounded,
+        )?;
+        let fd = files.work_event()?;
+        // Only the slot owner initializes its file issuer.
+        owner.add(FILE_READY, Arc::new(fd))?;
+        owner
+            .files
+            .set(files)
+            .map_err(|_| io::Error::from_raw_os_error(libc::EBUSY))?;
+        Ok(owner.files.get().unwrap())
+    }
+
+    /// # Safety
+    /// The running slot pins the request and its operands until the callback.
+    pub unsafe fn submit_file(&self, request: *const FileRequest) -> bool {
+        if !matches!(self.backend, Backend::Uring(_)) {
+            return false;
+        }
+        match unsafe { self.file_ring() } {
+            // SAFETY: the caller owns this slot and pins every operand.
+            Ok(files) => unsafe { files.queue(&*request) },
+            Err(e) => unsafe {
+                FileRequest::finish(request, -e.raw_os_error().unwrap_or(libc::EIO))
+            },
+        }
         true
     }
 }

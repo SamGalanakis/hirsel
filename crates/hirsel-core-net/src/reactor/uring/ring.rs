@@ -23,6 +23,8 @@ const SETUP_CQSIZE: u32 = 1 << 3;
 const SETUP_CLAMP: u32 = 1 << 4;
 const SETUP_COOP_TASKRUN: u32 = 1 << 8;
 const SETUP_TASKRUN_FLAG: u32 = 1 << 9;
+const SETUP_SINGLE_ISSUER: u32 = 1 << 12;
+const SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 const SETUP_NO_MMAP: u32 = 1 << 14;
 const SETUP_NO_SQARRAY: u32 = 1 << 16;
 const FEAT_NODROP: u32 = 1 << 1;
@@ -31,6 +33,7 @@ const SQ_CQ_OVERFLOW: u32 = 1 << 1;
 const SQ_TASKRUN: u32 = 1 << 2;
 const ENTER_GETEVENTS: u32 = 1 << 0;
 const ENTER_EXT_ARG: u32 = 1 << 3;
+const REGISTER_EVENTFD: u32 = 4;
 const REGISTER_PROBE: u32 = 8;
 const REGISTER_BUFFERS2: u32 = 15;
 const REGISTER_BUFFERS_UPDATE: u32 = 16;
@@ -150,13 +153,18 @@ fn result(rc: libc::c_long) -> io::Result<i32> {
 }
 
 /// A private anonymous mapping of order-0 pages, not inherited by children.
-struct Mapping {
-    base: *mut u8,
-    len: usize,
+pub(super) struct Mapping {
+    pub(super) base: *mut u8,
+    pub(super) len: usize,
 }
 
+// SAFETY: ownership keeps the mapping live. Access to its contents is
+// separately governed by the queue or file buffer that owns it.
+unsafe impl Send for Mapping {}
+unsafe impl Sync for Mapping {}
+
 impl Mapping {
-    fn new(len: usize) -> io::Result<Self> {
+    pub(super) fn new(len: usize) -> io::Result<Self> {
         // SAFETY: a fresh anonymous mapping aliases nothing.
         let base = unsafe {
             libc::mmap(
@@ -232,6 +240,23 @@ impl Ring {
     /// completions (`clamp`: cut sizes past the kernel's maximum). A kernel
     /// without NODROP or EXT_ARG is refused as unsupported.
     pub(in crate::reactor) fn new(sq: u32, cq: u32, clamp: bool) -> io::Result<Self> {
+        Self::setup(
+            sq,
+            cq,
+            SETUP_COOP_TASKRUN | if clamp { SETUP_CLAMP } else { 0 },
+        )
+    }
+
+    pub(super) fn file(depth: u32) -> io::Result<Self> {
+        match Self::setup(depth, depth, SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN) {
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) => {
+                Self::new(depth, depth, false)
+            }
+            result => result,
+        }
+    }
+
+    fn setup(sq: u32, cq: u32, mode: u32) -> io::Result<Self> {
         // SAFETY: sysconf has no preconditions.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         let round = |bytes: usize| bytes.div_ceil(page) * page;
@@ -241,12 +266,7 @@ impl Ring {
         let sqes = Mapping::new(round(sq.next_power_of_two() as usize * SQE_BYTES))?;
         let mut p = Params {
             cq_entries: cq,
-            flags: SETUP_CQSIZE
-                | SETUP_COOP_TASKRUN
-                | SETUP_TASKRUN_FLAG
-                | SETUP_NO_MMAP
-                | SETUP_NO_SQARRAY
-                | if clamp { SETUP_CLAMP } else { 0 },
+            flags: SETUP_CQSIZE | mode | SETUP_TASKRUN_FLAG | SETUP_NO_MMAP | SETUP_NO_SQARRAY,
             ..Params::default()
         };
         p.cq_off.user_addr = rings.base as u64;
@@ -425,6 +445,11 @@ impl Ring {
         })
     }
 
+    pub(super) fn notify_via(&self, fd: RawFd) -> io::Result<()> {
+        self.register(REGISTER_EVENTFD, (&raw const fd).cast(), 1)
+            .map(drop)
+    }
+
     /// Whether the kernel supports every opcode in `ops`.
     pub(in crate::reactor) fn supports(&self, ops: &[u8]) -> io::Result<bool> {
         let mut probe = Probe {
@@ -449,6 +474,25 @@ impl Ring {
         let mut max = [bounded, unbounded];
         self.register(REGISTER_IOWQ_MAX_WORKERS, max.as_mut_ptr().cast(), 2)
             .map(drop)
+    }
+
+    /// # Safety
+    /// The extents remain live until unregistered, with no outstanding reads
+    /// by the kernel when they are mutated or freed.
+    pub(super) unsafe fn register_file_buffers(
+        &self,
+        buffers: &[libc::iovec; 2],
+    ) -> io::Result<()> {
+        self.register(0, buffers.as_ptr().cast(), 2).map(drop)
+    }
+
+    pub(super) fn unregister_file_buffers(&self) -> io::Result<()> {
+        loop {
+            match self.register(1, ptr::null(), 0) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result.map(drop),
+            }
+        }
     }
 
     /// Register `nr` empty fixed-buffer slots.

@@ -352,18 +352,16 @@ impl Poller {
         self.udp_due()
     }
 
+    pub fn drain_files(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// A kqueue poller completes no file operations; there are none to queue.
     ///
     /// # Safety
     /// None: no `FileEntry` exists on this host.
-    pub unsafe fn submit_file(
-        &self,
-        _unit: u32,
-        entry: FileEntry,
-        _context: *const (),
-        _complete: unsafe fn(*const (), i32),
-    ) -> bool {
-        match entry {}
+    pub unsafe fn submit_file(&self, _: *const FileRequest) -> bool {
+        false
     }
 
     /// kqueue has no transmit ring: sends copy from the caller's buffer.
@@ -380,6 +378,12 @@ impl Poller {
 /// A completion-ring file operation. Darwin has no completion ring, so no
 /// operation can be queued and the type has no values.
 pub enum FileEntry {}
+pub enum FileRequest {}
+impl FileRequest {
+    pub fn new(entry: FileEntry, _: *const (), _: unsafe fn(*const (), i32)) -> Self {
+        match entry {}
+    }
+}
 
 /// A ring transmit slot. Darwin has no transmit ring, so no slot exists.
 pub enum TxSlot {}

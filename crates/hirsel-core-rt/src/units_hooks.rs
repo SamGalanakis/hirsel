@@ -23,7 +23,7 @@ pub(super) struct PoolHooks {
     pub(super) wake: fn(u32),
     pub(super) off_slot: fn(HostCall, &mut (dyn FnMut() + Send)) -> bool,
     pub(super) take_slot: fn(),
-    pub(super) uses_file_ring: fn() -> bool,
+    pub(super) file_poller: fn() -> Option<&'static hirsel_core_net::Poller>,
     pub(super) file_request: unsafe fn(hirsel_core_net::FileEntry) -> std::io::Result<i32>,
 }
 
@@ -39,7 +39,7 @@ pub(super) fn enable_pool() {
         wake: wake_unit_by_id,
         off_slot: run_off_slot,
         take_slot: take_running_slot,
-        uses_file_ring: reply::uses_file_ring_pool,
+        file_poller: reply::current_file_poller,
         file_request: reply::file_request_pool,
     });
     UNTIED_ON.store(true, Ordering::SeqCst);

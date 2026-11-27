@@ -573,16 +573,19 @@ fn a_completion_overflow_burst_loses_no_completion() {
         assert!(matches!(slot.state(), TxState::Sending));
     }
     let calls: Vec<_> = (0..FILES).map(|_| AtomicU32::new(0)).collect();
-    for (unit, calls) in calls.iter().enumerate() {
-        // SAFETY: NOP has one result and its counter is pinned.
-        assert!(unsafe {
-            poller.submit_file(
-                u32::try_from(unit).unwrap(),
+    let files: Vec<_> = calls
+        .iter()
+        .map(|calls| {
+            FileRequest::new(
                 io_uring::opcode::Nop::new().build(),
                 std::ptr::from_ref(calls).cast(),
                 count,
             )
-        });
+        })
+        .collect();
+    for file in &files {
+        // SAFETY: NOP has one result and both request and counter are pinned.
+        assert!(unsafe { poller.submit_file(file) });
     }
     for _ in 0..=(2 * SENDS + FILES) / Uring::ENTRIES as usize {
         ring.enter(Some(0));

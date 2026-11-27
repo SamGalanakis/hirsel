@@ -14,7 +14,7 @@ use std::{
 
 // Unit 0xffff is reserved for poller-owned registrations.
 const FIRST: u64 = (super::RESERVED_UNIT as u64) << super::SHARED_UNIT_SHIFT;
-const LAST: u64 = super::COMPLETION_READY;
+const LAST: u64 = super::FILE_READY;
 
 struct Group {
     socket: Socket,

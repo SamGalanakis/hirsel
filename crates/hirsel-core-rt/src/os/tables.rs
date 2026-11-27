@@ -41,13 +41,22 @@ impl OsProvider {
     pub(super) fn file(&self, handle: u64) -> i32 {
         self.tables().files[&handle].fd.as_raw_fd()
     }
+    pub(super) fn write_target(&self, handle: u64) -> std::io::Result<(i32, bool)> {
+        let (fd, peer) = {
+            let tables = self.tables();
+            let file = &tables.files[&handle];
+            (file.fd.as_raw_fd(), file.peer_wait)
+        };
+        Ok((fd, !peer && crate::host::write_ring()?))
+    }
+
     pub(super) fn peer_file(&self, handle: u64) -> bool {
         self.tables().files[&handle].peer_wait
     }
 
     pub(super) fn insert_file(&self, fd: OwnedFd) -> u64 {
         let id = self.id();
-        let peer_wait = crate::units::untied()
+        let peer_wait = (crate::host::TIED_FILE_WRITES || crate::units::untied())
             && super::metadata::file_stat(fd.as_fd())
                 .map_or(true, |stat| stat.st_mode & libc::S_IFMT != libc::S_IFREG);
         self.tables().files.insert(id, OpenFile { fd, peer_wait });

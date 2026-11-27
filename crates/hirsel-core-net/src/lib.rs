@@ -382,9 +382,9 @@ pub use grant::{
 mod reactor;
 pub mod ready;
 pub use reactor::{
-    FileEntry, Here, Poller, REACTOR_ENV, RESERVED_UNIT, Reactor, ReactorPlan, SEND_ZC_ENV,
-    SHARED_UNIT_SHIFT, SocketTransfer, Sockets, TxSlot, TxState, UdpMember, reactor, slot_pollers,
-    slot_readiness_pollers,
+    FileEntry, FileRequest, Here, Poller, REACTOR_ENV, RESERVED_UNIT, Reactor, ReactorPlan,
+    SEND_ZC_ENV, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, TxSlot, TxState, UdpMember, file_ring,
+    reactor, slot_pollers, slot_readiness_pollers,
 };
 /// mc-units-untied: kernel waits (epoll_wait or io_uring_enter) made by run reactors.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

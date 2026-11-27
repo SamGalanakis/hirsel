@@ -51,6 +51,7 @@ pub(crate) use hooks::{return_root_stack, take_root_stack, untied};
 use plan::UntiedPlan;
 #[path = "units_reply.rs"]
 mod reply;
+pub(crate) use reply::file_poller;
 pub(crate) use reply::{Reply, file_request, uses_file_ring};
 #[path = "units_report.rs"]
 mod report;
@@ -986,6 +987,9 @@ fn worker_main(p: &'static Pool, ix: usize) {
     crate::fiber::arm();
     let _alt = crate::fiber::Alternate::install().unwrap_or_else(|s| crate::run_stop::raise(s));
     run_slot(p, ix);
+    if p.slots[ix].poller.drain_files().is_err() {
+        std::process::abort();
+    }
     WORKER_STATS.with(|stats| {
         for (total, local) in USTATS.iter().zip(stats) {
             total.fetch_add(local.get(), Ordering::Relaxed);

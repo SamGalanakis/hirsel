@@ -26,6 +26,17 @@ pub(crate) mod inherited;
 #[cfg(target_os = "linux")]
 mod linux;
 pub(crate) mod trust;
+#[cfg(target_os = "linux")]
+pub use linux::file::register_file_buffers;
+
+pub(crate) const TIED_FILE_WRITES: bool = cfg!(target_os = "linux");
+
+pub(crate) fn write_ring() -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    return linux::file::write_ring();
+    #[cfg(target_vendor = "apple")]
+    Ok(crate::units::uses_file_ring())
+}
 #[cfg(target_vendor = "apple")]
 use darwin as provider;
 #[cfg(target_os = "linux")]

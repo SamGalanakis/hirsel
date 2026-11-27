@@ -1,4 +1,4 @@
-use super::{COMPLETION_READY, INTEREST, Uring, WAKE};
+use super::{COMPLETION_READY, FILE_READY, INTEREST, Uring, WAKE};
 use crate::ready::{Event, Ready};
 use io_uring::{cqueue, opcode, squeue, types};
 use std::{
@@ -96,6 +96,9 @@ impl Watches {
         let Some(&tag) = self.ids.get(&id) else {
             return Ok(None);
         };
+        if tag == FILE_READY && cqe.result() > 0 && self.is_current(tag, id) {
+            super::super::sys::reset(&self.live[&tag].fd);
+        }
         if !cqueue::more(cqe.flags()) {
             if self.is_current(tag, id) {
                 let next = self.id(tag)?;
@@ -124,7 +127,7 @@ impl Watches {
             let Some(tag) = self.rechecks.pop_front() else {
                 break;
             };
-            if tag != COMPLETION_READY && self.live.contains_key(&tag) {
+            if !matches!(tag, COMPLETION_READY | FILE_READY) && self.live.contains_key(&tag) {
                 out[n] = Event::new(tag, Ready::READABLE | Ready::WRITABLE);
                 n += 1;
             }
@@ -205,7 +208,7 @@ impl Uring {
     pub(in crate::reactor) fn add(&self, tag: u64, fd: Arc<OwnedFd>) -> io::Result<()> {
         let mut watches = self.watches();
         let id = watches.id(tag)?;
-        let interest = if tag == COMPLETION_READY {
+        let interest = if matches!(tag, COMPLETION_READY | FILE_READY) {
             Ready::READABLE.poll_mask()
         } else {
             INTEREST

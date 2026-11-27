@@ -5,12 +5,20 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub(super) fn uses_file_ring_pool() -> bool {
-    in_unit() && pool().uring
+pub(super) fn current_file_poller() -> Option<&'static hirsel_core_net::Poller> {
+    (in_unit() && pool().uring).then(|| pool().slots[worker_ix()].poller.as_ref())
+}
+
+pub(crate) fn file_poller() -> Option<&'static hirsel_core_net::Poller> {
+    if untied() {
+        (pool_hooks().file_poller)()
+    } else {
+        None
+    }
 }
 
 pub(crate) fn uses_file_ring() -> bool {
-    untied() && (pool_hooks().uses_file_ring)()
+    super::file_poller().is_some()
 }
 
 /// Submit on this slot and park until its CQE, with the request still pinned.
@@ -43,14 +51,8 @@ pub(super) unsafe fn file_request_pool(entry: hirsel_core_net::FileEntry) -> std
     p.net_used.store(true, Ordering::Relaxed);
     // SAFETY: `cur` is the running unit. It cannot leave the slot before
     // queuing the entry or leave this frame before its one completion.
-    assert!(unsafe {
-        p.slots[worker_ix()].poller.submit_file(
-            (*cur()).id,
-            entry,
-            (&raw const answer).cast(),
-            complete,
-        )
-    });
+    let request = hirsel_core_net::FileRequest::new(entry, (&raw const answer).cast(), complete);
+    assert!(unsafe { p.slots[worker_ix()].poller.submit_file(&raw const request) });
     answer.reply.wait();
     let result = answer.result.load(Ordering::Relaxed);
     if result < 0 {

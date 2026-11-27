@@ -41,16 +41,12 @@ fn wide_unit_tags_route_socket_and_file_completions() {
         // SAFETY: the fixture pins an AtomicI32 until the file result.
         unsafe { (*context.cast::<AtomicI32>()).store(result, Ordering::Release) };
     }
-    for (unit, answer) in [(1, &first), (HIGH, &second)] {
+    let files = [&first, &second].map(|answer| {
+        FileRequest::new(io_uring::opcode::Nop::new().build(), ptr(answer), completed)
+    });
+    for file in &files {
         // SAFETY: NOP emits exactly one CQE and each result has its own pin.
-        assert!(unsafe {
-            poller.submit_file(
-                unit,
-                io_uring::opcode::Nop::new().build(),
-                ptr(answer),
-                completed,
-            )
-        });
+        assert!(unsafe { poller.submit_file(file) });
     }
     let mut events = [Event::EMPTY; 256];
     poller.wait_slot(&mut events, Some(10_000_000)).unwrap();

@@ -547,19 +547,13 @@ pub type CallReserve {
     steps: u64
 }
 
-// Outside s_e, each metered draft pays for its admission scope (1),
-// draft_call (1), isolate and its callback (2), issued-cell into_inner (1),
-// log.finish (1), and finish_stage (1). Calls inside core's log.finish take
-// no steps; a prepared reply makes finish_stage skip its data-row scan.
-const CALL_FIXED_STEPS: u64 = 7
-
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
     // The isolate needs only the cause cell that a block charge includes.
     let cause = charge.block(bytes[()], 0)?
     let Some(retained) = int.checked_add(plan.n_e, cause) else {
         return None
     }
-    let Some(steps) = int.checked_add(plan.s_e, CALL_FIXED_STEPS) else {
+    let Some(steps) = int.checked_add(plan.s_e, transfer.CALL_FIXED_STEPS) else {
         return None
     }
     Some(CallReserve(retained: retained, steps: steps))
@@ -1309,7 +1303,7 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
     for id in ids {
         let charge = failure_result_from_rep(catalog.remove_store_collection(mut roots.collections, id, mut plan.schema.next_node))?
         // 3150 F2: a dropped table and its indexes supersede their ids.
-        discard_replayed_collection(mut roots.collections, id)?
+        failure_result_from_rep(transfer.discard_replayed_collection(mut roots.collections, id))?
         list.push(mut plan.schema.superseded, id)
         if !plan.schema.retained {
             live_bytes = int.saturating_sub(live_bytes, charge)
@@ -1524,146 +1518,6 @@ pub type PreparedTarget: codec + send {
     limits: Option[StoreLimits]
 }
 
-type PreparedMeta: codec + send {
-    base: ExportStamp,
-    target: PreparedTarget,
-    next_table: u32,
-    changes: u64,
-    ranges: u64
-}
-
-type CatalogChange: codec + send {
-    key: Bytes,
-    before: Option[Bytes],
-    after: Option[Bytes]
-}
-
-type Inventory: codec + send {
-    id: u32,
-    count: u64,
-    digest: u64
-}
-
-type PreparedRow: codec + send {
-    key: Bytes,
-    value: Bytes
-}
-
-fn catalog_changes(base: pages.Roots, target: pages.Roots) -> Result[List[CatalogChange], Error] {
-    let mut edits: List[CatalogChange] = list.new()
-    let mut before = failure_result_from_rep(pages.open_page_range(base.catalog, None, true, false, None))?
-    while let Some((take key, old_arc)) = failure_result_from_rep(catalog.next_page_range(mut before))? {
-        match pages.get_page_row(target.catalog, key) {
-            Some(new) => if list.compare_bytes(new, old_arc) != Equal {
-                list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: Some(failure_result_from_rep(types.copied(new))?)))
-            },
-            None => list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: None)),
-        }
-    }
-    let mut after = failure_result_from_rep(pages.open_page_range(target.catalog, None, true, false, None))?
-    while let Some((take key, new)) = failure_result_from_rep(catalog.next_page_range(mut after))? {
-        let exists = match pages.get_page_row(base.catalog, key) {
-            Some(_) => true,
-            None => false
-        }
-        if !exists {
-            list.push(mut edits, CatalogChange(key: take key, before: None, after: Some(failure_result_from_rep(types.copied(new))?)))
-        }
-    }
-    list.sort(mut edits, fn(a: CatalogChange, b: CatalogChange) -> Order {
-        std.order.compare(a.key, b.key)
-    })
-    Ok(take edits)
-}
-
-type RangeChange: send {
-    id: u32,
-    catalog: Option[Bytes]
-}
-
-fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Result[List[RangeChange], Error] {
-    let mut changes_by_id: List[RangeChange] = list.new()
-    for change in edits {
-        let old = match change.before {
-            Some(raw) => decode_catalog(raw)?.id,
-            None => 0u32
-        }
-        let new = match change.after {
-            Some(raw) => decode_catalog(raw)?.id,
-            None => 0u32
-        }
-        if old == new {
-            // An index OLD left Backfilling or Failed that the preparation
-            // finished under the same id: its entries ship as a replaced range.
-            if let (Some(before), Some(after)) = (change.before, change.after) {
-                if indexes.catalog_kind(decode_catalog(after)?.record) == IndexCollection && !catalog.record_public(before) {
-                    list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(failure_result_from_rep(types.copied(after))?)))
-                }
-            }
-            continue
-        }
-        if old != 0u32 {
-            list.push(mut changes_by_id, RangeChange(id: old, catalog: None))
-        }
-        if let Some(raw) = change.after {
-            list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(failure_result_from_rep(types.copied(raw))?)))
-        }
-    }
-    list.sort(mut changes_by_id, fn(a: RangeChange, b: RangeChange) -> Order {
-        std.order.compare(a.id, b.id)
-    })
-    let mut previous = 0u32
-    let mut expected = initial
-    for change in changes_by_id {
-        if previous >= change.id {
-            return Error(failure_from_rep(pages.malformed(0u64)))
-        }
-        previous = change.id
-        if change.id >= initial {
-            if change.id != expected || expected == 4294967295u32 {
-                return Error(failure_from_rep(pages.malformed(0u64)))
-            }
-            expected += 1
-        }
-    }
-    if expected != advanced {
-        return Error(failure_from_rep(pages.malformed(0u64)))
-    }
-    Ok(take changes_by_id)
-}
-
-fn entries_of(data: pages.PageTree, id: u32) -> Result[pages.PageRange, Error] {
-    if id == 4294967295u32 {
-        return Error(failure_from_rep(pages.malformed(0u64)))
-    }
-    byte_cursor(data, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1u32))?)
-}
-
-fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Result[(), Error] {
-    let mut lengths: Bytes = list.with_capacity(8u64)
-    failure_result_from_rep(types.capacity(format.le(mut lengths, list.len(key), 4u64)))?
-    failure_result_from_rep(types.capacity(format.le(mut lengths, list.len(encoded), 4u64)))?
-    std.check.add(mut checksum, lengths, 0u64, 8u64)
-    std.check.add(mut checksum, key, 0u64, list.len(key))
-    std.check.add(mut checksum, encoded, 0u64, list.len(encoded))
-    Ok(())
-}
-
-fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[List[Inventory], Error] {
-    let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
-    for desc in ranges {
-        let mut cursor = entries_of(data, desc.id)?
-        let mut row_total = 0u64
-        let mut checksum = std.check.start()
-        while let Some((key, value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
-            checksum_row(mut checksum, key, value)?
-            row_total += 1
-        }
-        list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: std.check.finish(checksum)))
-    }
-    Ok(take inventory)
-}
-
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = failure_result_from_rep(types.capacity(current_state(source.db)))?
     state.tips[0].roots = pages.share_roots(staged.plan.schema.roots)
@@ -1672,7 +1526,7 @@ pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Res
 
 fn db_target(db: Db) -> Option[manifest.TargetLimits] {
     if is_disk(db) {
-        disk_state(db).target
+        transfer.target_limits(disk_state(db).transfer)
     } else {
         None
     }
@@ -1761,13 +1615,9 @@ fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[jou
 type DiskState {
     open: u64,
     options: Options,
-    lease: Option[Arc[manifest.ExportLease]],
+    transfer: transfer.TransferState,
     // The schema commits main published since the lease last moved
     // (§3.5a "Catch-up"): they reach the child as the round's STEPS.
-    steps: List[LeaseStep],
-    imported: Option[KeptImport],
-    reserving: Option[Inline[u8, 32]],
-    target: Option[manifest.TargetLimits],
     retention: journal.RecordRetention,
     packs: manifest.PackDiskState,
     backend: Backend,
@@ -1894,7 +1744,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     db.accounting.checkpointed = generation
     let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
     let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
-    db.disk = Some(DiskState(open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
+    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
     Ok(take db)
 }
 
@@ -2040,7 +1890,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         let manifest.PackBuffers(out: take out, ..) = take buffers
         let mut page_record = take out
         let (take pages, take compaction, take removals) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
-            failure_result_from_rep(journal.cut_retirement(layout, holders, disk_state(db).lease, manifest.pack_scrubs(disk_state(db).packs), staged.compaction, cut_input(db, delta).lease_span, prev_first, seq))
+            failure_result_from_rep(journal.cut_retirement(layout, holders, transfer.active_lease(disk_state(db).transfer), manifest.pack_scrubs(disk_state(db).packs), staged.compaction, cut_input(db, delta).lease_span, prev_first, seq))
         })?
         fill_cut_manifest(mut page_record, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, compaction: take compaction, removals: take removals, manifest: take page_record))
@@ -2056,7 +1906,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = manifest.resident_location_charge(manifest.pack_locations(prepared_pages))
-    validate_cut_pages(d, id, page_record, target, disk_state(db).lease, disk_state(db).packs)?
+    validate_cut_pages(d, id, page_record, target, transfer.active_lease(disk_state(db).transfer), disk_state(db).packs)?
     if let Error(take problem) = failure_result_from_rep(manifest.publish_page_manifest_bytes(d, page_record)) {
         return Error(cut_io_error(mut db, take problem))
     }

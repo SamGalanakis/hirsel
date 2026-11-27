@@ -36,13 +36,13 @@ type SchemaPlan: send {
     chunk_freed: Option[pager.TieredFreed],
     // D-CU-1: rows this schema commit itself wrote, and whether the commit is
     // non-replayable under an export lease (`Drift`).
-    step_rows: List[StepOp],
+    step_rows: List[transfer.StepOp],
     step_drift: bool,
     // M3b-S3: migrate_table target -> base source id bindings for frame 0x008B,
     // and deferred Tiered builds executed in chunked commits.
-    migrate_sources: List[MigrateSource],
-    pending_migrates: List[DeferredMigrate],
-    pending_indexes: List[DeferredIndexBuild],
+    migrate_sources: List[transfer.MigrateSource],
+    pending_migrates: List[transfer.DeferredMigrate],
+    pending_indexes: List[transfer.DeferredIndexBuild],
     preview: Option[List[MigrationBackfill]],
     // The staging head's collection map (a shared root). A hot Tiered build's
     // publish judges untouched ids against it (§13.10a re-base rule, F3).
@@ -53,28 +53,19 @@ fn schema_plan(db: Db) -> SchemaPlan {
     SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.accounting.resident, db.accounting.ceiling, retaining(db), db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
 }
 
-fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
-    failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
-    plan.schema.roots = take roots
-    plan.schema.live = live_bytes
-    plan.schema.next_table = next_table
-    plan.schema.changed = true
-    Ok(())
-}
-
 type MigrationJob: send {
     plan: SchemaPlan,
-    child_cut: Option[ChildCutContext],
+    child_cut: Option[transfer.ChildCutContext],
     opened: u64,
     configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
-    answer: Sender[Result[(SchemaPlan, Option[ChildCutContext]), Error]]
+    answer: Sender[Result[(SchemaPlan, Option[transfer.ChildCutContext]), Error]]
 }
 
 fn prepare_migration(take job: MigrationJob) -> () waits {
     let MigrationJob(plan: take plan, child_cut: take child_cut, opened: opened, configure: configure, answer: take answer) = take job
     let mut working = Migration(plan: take plan)
     let result = (code.callable(configure))(mut working)
-    let completed: Result[(SchemaPlan, Option[ChildCutContext]), Error] = match take result {
+    let completed: Result[(SchemaPlan, Option[transfer.ChildCutContext]), Error] = match take result {
         Ok(()) => {
             let Migration(plan: take committed, ..) = take working
             let mut finished = take committed
@@ -105,8 +96,8 @@ fn stage_migration_plan(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrati
     Ok(take built)
 }
 
-fn stage_migration_plan_with(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], take plan: SchemaPlan, take child_cut: Option[ChildCutContext], opened: u64) -> Result[(SchemaPlan, Option[ChildCutContext]), Error] waits {
-    let (answer, from): (Sender[Result[(SchemaPlan, Option[ChildCutContext]), Error]], Receiver[Result[(SchemaPlan, Option[ChildCutContext]), Error]]) = channel.new(1)
+fn stage_migration_plan_with(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], take plan: SchemaPlan, take child_cut: Option[transfer.ChildCutContext], opened: u64) -> Result[(SchemaPlan, Option[transfer.ChildCutContext]), Error] waits {
+    let (answer, from): (Sender[Result[(SchemaPlan, Option[transfer.ChildCutContext]), Error]], Receiver[Result[(SchemaPlan, Option[transfer.ChildCutContext]), Error]]) = channel.new(1)
     let job = MigrationJob(plan: take plan, child_cut: take child_cut, opened: opened, configure: configure, answer: take answer)
     // The callback can wait, so its fault boundary is a task (FAIL-14).
     // An empty task result costs 288 B (MEM-24). Use the parent's remaining
@@ -239,4 +230,8 @@ fn preview_catalog_changes(before: pages.PageTree, after: pages.PageTree) -> Res
         }
     }
     Ok(take catalog_delta)
+}
+
+fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
+    failure_result_from_rep(catalog.keep_schema(mut plan.schema, take roots, live_bytes, next_table))
 }

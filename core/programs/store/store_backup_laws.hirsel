@@ -459,7 +459,7 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     failure_result_from_rep(manifest.disk_write_synced(target, extra, b"stray"))?
     failure_result_from_rep(manifest.disk_write_synced(target, temp, b"temporary"))?
     let restored_stamp = result.unwrap(restore(target, restored, c, options))
-    if !same_stamp(stamp, restored_stamp) || failure_result_from_rep(journal.disk_exists(restored, extra))? || failure_result_from_rep(journal.disk_exists(restored, temp))? {
+    if !transfer.same_stamp(export_stamp_to_rep(take stamp), export_stamp_to_rep(take restored_stamp)) || failure_result_from_rep(journal.disk_exists(restored, extra))? || failure_result_from_rep(journal.disk_exists(restored, temp))? {
         fail("restore copied unlisted files or changed the stamp")
     }
     let raw = failure_result_from_rep(manifest.disk_read_file(source, pack, 1048576))?
@@ -560,7 +560,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)
     let job = begin_backup(mut db, target, result.unwrap(failure_result_from_rep(types.copied(attempt))))?
-    let leased_ok = match disk_state(db).lease {
+    let leased_ok = match transfer.active_lease(disk_state(db).transfer) {
         Some(held_lease) => held_lease.packs == want_packs,
         None => false,
     }

@@ -1,0 +1,152 @@
+pub type PreparedInput {
+    file: HostFile,
+    ctx: format.DiskContext,
+    offset: u64,
+    digest: std.sha256.Sha256,
+    peek: Option[u8]
+}
+
+// A scratch frame file (PREPARED, ROUND) written in batches of about 1 MiB
+// rather than a write per frame; the bytes are the same.
+pub type FrameFile {
+    file: HostFile,
+    pending: Bytes,
+    ctx: format.DiskContext,
+    offset: u64
+}
+
+const FRAME_BATCH: u64 = 1048576
+
+fn prepared_read_input(mut input: PreparedInput, n: u64) -> Result[Bytes, types.Failure] waits {
+    if n == 0 {
+        return Ok(list.new())
+    }
+    if let Some(first_byte) = replace(mut input.peek, None) {
+        let mut out: Bytes = list.with_capacity(n)
+        list.push(mut out, first_byte)
+        if n > 1 {
+            let rest = prepared_read(mut input.file, n - 1)?
+            list.append(mut out, rest)
+        }
+        return Ok(take out)
+    }
+    prepared_read(mut input.file, n)
+}
+
+pub fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, types.Failure] waits {
+    let mut out: Bytes = list.with_capacity(n)
+    while list.len(out) < n {
+        let room = n - list.len(out)
+        // Keep the old temporary's admission before issuing the read.
+        let charge = ((room + 7u64) / 8u64) * 8u64
+        types.capacity(bound bytes charge {})?
+        if manifest.disk_io(host.read(mut file, mut out))? == 0 {
+            // The old temporary was still charged when the eight-byte name
+            // was cloned. Check both charges before cloning in the caller.
+            if let Error(c) = bound bytes (charge + 8u64) {} {
+                return Error(Full(Allocation(Capacity(requested: 8, available: c.available - charge))))
+            }
+            return Error(format.disk_fault("PREPARED", list.len(out), Truncated))
+        }
+    }
+    Ok(take out)
+}
+
+pub fn open_frames(d: Dir, name: String, ctx: format.DiskContext) -> Result[FrameFile, types.Failure] waits {
+    let file = manifest.disk_io(host.open(d, name, Write))?
+    let header = types.capacity(format.disk_header_bytes(ctx, 0u64, 0))?
+    Ok(FrameFile(file: take file, pending: take header, ctx: ctx, offset: 72u64))
+}
+
+pub fn write_prepared_frame[T](mut out: FrameFile, kind: u16, codec: std.codec.Codec[T], value: T) -> Result[(), types.Failure] waits {
+    let mut encoded: Bytes = list.new()
+    std.codec.encode(codec, value, mut encoded) ?=> |_| Limit(Value)
+    write_prepared_payload(mut out, kind, encoded)
+}
+
+pub fn write_prepared_payload(mut out: FrameFile, kind: u16, encoded: Bytes) -> Result[(), types.Failure] waits {
+    let raw = types.capacity(format.disk_seal(out.ctx, out.offset, kind, 1, encoded))?
+    out.offset += list.len(raw)
+    types.capacity(list.try_reserve(mut out.pending, list.len(raw)))?
+    list.append(mut out.pending, raw)
+    if list.len(out.pending) >= FRAME_BATCH {
+        flush_frames(mut out)?
+    }
+    Ok(())
+}
+
+fn flush_frames(mut out: FrameFile) -> Result[(), types.Failure] waits {
+    if list.len(out.pending) != 0 {
+        if let Error(e) = host.write(mut out.file, out.pending) {
+            return Error(Io(e.error))
+        }
+        list.clear(mut out.pending)
+    }
+    Ok(())
+}
+
+pub fn finish_frames(take out: FrameFile) -> Result[(), types.Failure] waits {
+    let mut done = take out
+    flush_frames(mut done)?
+    let FrameFile(file: take file, ..) = take done
+    let mut written = take file
+    manifest.disk_io(host.sync(mut written))?
+    manifest.disk_io(host.close(take written))
+}
+
+pub fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployFailure] waits {
+    let raw = scratch_result(prepared_read_input(mut input, 16u64))?
+    let encoded = prepared_payload(mut input, kind, raw)?
+    match std.codec.decode(codec, encoded) {
+        Error(_) => Error(ImportMalformed),
+        Ok(take value) => Ok(take value),
+    }
+}
+
+fn prepared_payload(mut input: PreparedInput, kind: u16, raw: Bytes) -> Result[Bytes, DeployFailure] waits {
+    let n = format.read_le(raw, 4u64, 4u64)
+    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(manifest.disk_kind_limit(kind)) {
+        return Error(ImportMalformed)
+    }
+    let encoded = scratch_result(prepared_read(mut input.file, n))?
+    let check = deploy_result(types.capacity(format.disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded)))?
+    if check != format.read_le(raw, 8u64, 8u64) {
+        return Error(ImportMalformed)
+    }
+    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
+    std.sha256.add(mut input.digest, encoded, 0u64, n)
+    input.offset += 16u64 + n
+    Ok(take encoded)
+}
+
+pub fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite], DeployFailure] waits {
+    let mut first: Bytes = list.with_capacity(1)
+    if let Some(peeked) = replace(mut input.peek, None) {
+        list.push(mut first, peeked)
+    } else if scratch_result(manifest.disk_io(host.read(mut input.file, mut first)))? == 0 {
+        return Ok(list.new())
+    }
+    if first[0] != 0x85 {
+        return Error(ImportMalformed)
+    }
+    let rest = scratch_result(prepared_read(mut input.file, 15))?
+    list.append(mut first, rest)
+    let offset = input.offset
+    let payload = prepared_payload(mut input, 0x0085, first)?
+    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
+    let rewrites = std.codec.decode(codec, payload) ?=> |_| Scratch(format.disk_fault("PREPARED", offset, Malformed))
+    if list.len(rewrites) == 0 {
+        return Error(ImportMalformed)
+    }
+    for i in 0u64 .. list.len(rewrites) {
+        let row = rewrites[i]
+        if list.len(row.value) > types.VALUE_LIMIT || (i != 0 && compare_rewrite(rewrites[i - 1], row.id, row.key) != Less) {
+            return Error(ImportMalformed)
+        }
+    }
+    list.clear(mut first)
+    if scratch_result(manifest.disk_io(host.read(mut input.file, mut first)))? != 0 {
+        return Error(ImportMalformed)
+    }
+    Ok(take rewrites)
+}

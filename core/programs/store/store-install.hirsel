@@ -5,8 +5,8 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[KeptImport, DeployErro
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
-    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[KeptImport] {
-        replace(mut state.imported, None)
+    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[transfer.KeptImportRep] {
+        transfer.take_import(mut state.transfer)
     })
     let Some(take staged) = take finished else {
         return Error(ExportMismatch)
@@ -18,7 +18,7 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[KeptImport, DeployErro
     if !agrees {
         return Error(ExportMismatch)
     }
-    Ok(take staged)
+    Ok(KeptImport(inner: take staged))
 }
 
 // V2 can be observed while the admission timer and control inbox are live.
@@ -33,12 +33,13 @@ pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
 }
 
 fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], target_binding: Option[Inline[u8, 32]], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
-    let staged = accept_cutover(mut db, request)?
-    let base = view staged.meta.base
+    let KeptImport(inner: take staged) = accept_cutover(mut db, request)?
+    let transfer.KeptImportRep(meta: take kept_meta, tree: take tree, ranges: take kept, delta: take delta, rewrites: take rewrites, ..) = take staged
+    let transfer.PreparedMeta(base: take base, target: take wanted_target, next_table, ..) = take kept_meta
     if pages.holder_heads(db.holders)[0].head != base.head || catalog.next_table_id(db.schema) != base.next_table || current_activation != base.activation {
         return Error(Drift)
     }
-    let target = view staged.meta.target
+    let target = prepared_target_from_rep(take wanted_target)
     if let Some(wanted) = target.limits {
         if !types.same_limits(limits_to_rep(wanted), limits_to_rep(db.limits)) {
             return Error(Store(LimitsDiffer(db.limits)))
@@ -50,9 +51,10 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let disk_limit = disk_state(db).options.resident_limit
     let mut schema_change = schema_plan(db)
     schema_change.schema.ceiling = disk_limit
-    planned_catalog(mut schema_change, staged.delta)?
-    let ranges = kept_ranges(staged)?
-    planned_ranges(mut schema_change, ranges)?
+    transfer_result(transfer.planned_catalog(mut schema_change.schema, delta))?
+    let ranges = transfer_result(transfer.kept_ranges(tree, kept))?
+    schema_change.step_drift = true
+    transfer_result(transfer.planned_ranges(mut schema_change.schema, ranges))?
     let has_tiered = pages.tiered_collections(schema_change.schema.roots.collections.root) || store_has_tiered(db)
     let started_pager = if has_tiered {
         if pager.has_requests(db.pager) {
@@ -64,7 +66,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     } else {
         false
     }
-    if let Error(take problem) = apply_import_rewrites_tiered(db, mut schema_change, staged.rewrites) {
+    if let Error(take problem) = apply_import_rewrites_tiered(db, mut schema_change, rewrites) {
         if started_pager {
             stop_residency_pager(mut db)
         }
@@ -78,7 +80,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(Store(NotReady(take name)))
     }
     let tiered_reserve = tiered_plan_reserve(disk_state(db).options)
-    schema_change.schema.next_table = staged.meta.next_table
+    schema_change.schema.next_table = next_table
     schema_change.schema.live = install_account(db, schema_change.schema.roots, import_pin_slot(db))?
     let admitted_before = if has_tiered {
         int.saturating_add(schema_change.schema.live, tiered_reserve)
@@ -117,14 +119,14 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     db.accounting.ceiling = disk_limit
     let limits = manifest.TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame, tiered_reserve: tiered_reserve, has_tiered: has_tiered)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.target = Some(limits)
+        transfer.set_target(mut state.transfer, Some(limits))
     })
     let StagedMigration(plan: take ready, ..) = take installation
     // The same cut drops the import pin: the installed main now holds its pages.
     let import_slot = import_pin_slot(db)
     let installed = publish_schema_plan_binding(mut db, take ready, activation_update, import_slot)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.target = None
+        transfer.set_target(mut state.transfer, None)
     })
     match take installed {
         Ok(_) => Ok(release_at),
@@ -163,10 +165,7 @@ fn perform_cutover_with[V](mut db: Db, request: Cutover, current_activation: u64
 
 fn forget_import(mut db: Db) {
     db.accounting.ceiling = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> u64 {
-        state.imported = None
-        state.reserving = None
-        state.lease = None
-        state.steps = list.new()
+        transfer.forget_import(mut state.transfer)
         if let ObjectBackend(mut writer) = state.backend {
             object_writer.set_export_lifetime(mut writer, None)
         }

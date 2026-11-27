@@ -382,7 +382,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
     // E2: copy files without EXPORT -> image unusable (restore refuses NotFound).
     for listed in result.unwrap(std.dir.list(target, None)) {
         if listed.name != "EXPORT" {
-            copy_export_file(target, partial_copy, listed.name, None)?
+            failure_result_from_rep(transfer.copy_export_file(target, partial_copy, listed.name, None))?
         }
     }
     match restore(partial_copy, disk_test_directory(d), c, clone(run_opts)) {
@@ -391,7 +391,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
     }
     // R3: EXPORT present in restore target -> ordinary open refuses ExportDirectory.
     for listed in result.unwrap(std.dir.list(target, None)) {
-        copy_export_file(target, partial_restore, listed.name, None)?
+        failure_result_from_rep(transfer.copy_export_file(target, partial_restore, listed.name, None))?
     }
     match open(tasks, partial_restore, c, r, clone(run_opts)) {
         Error(ExportDirectory) => (),
@@ -653,7 +653,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     let p_name = failure_result_from_rep(manifest.paged_pack_path(pack_b))?
     for listed in result.unwrap(std.dir.list(bak_b, None)) {
         if listed.name != p_name {
-            copy_export_file(bak_b, missing_p, listed.name, None)?
+            failure_result_from_rep(transfer.copy_export_file(bak_b, missing_p, listed.name, None))?
         }
     }
     match open_copied(missing_p, c, failure_result_from_rep(types.copied(attempt_b))?, clone(run_opts), false) {

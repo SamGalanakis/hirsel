@@ -1,0 +1,395 @@
+// M3b-S3 Tiered transfer internals (STORE-SPEC §3.5a, §13.10a):
+// - 0x008B migrate source map codec and residency derivation on OLD;
+// - Pass-2 streaming bottom-up Tiered page builder with chunked `hold_import` cuts;
+// - Child Tiered scratch cuts, streaming inventory/row emission, deferred Tiered diffs,
+//   and Tiered round application on OLD and child;
+// - Queued Cold `stage_rewrite` validation and activation application;
+// - Chunked Tiered `migrate_table` and declared index builds in the prepare child.
+// One entry of PREPARED frame 0x008B (role 6, limit 1,048,832): binds a new
+// migrated table id to its base source table id on OLD.
+pub type MigrateSource: codec + send {
+    target: u32,
+    source: u32
+}
+
+// One queued Cold rewrite from `stage_rewrite` (§3.5a, §13.10a). Checked in
+// one writer call attempt in the consuming `waits` call (`write_prepared`,
+// `install_activation`).
+pub type QueuedRewrite: send {
+    id: u32,
+    schema: u16,
+    key: Bytes,
+    logical: Bytes,
+    raw: Bytes,
+    staged_range: bool
+}
+
+// One deferred Tiered `migrate_table` conversion queued by `stage_migrate`
+// and executed in chunked commits inside `prepare_migration`.
+pub type DeferredMigrate: send {
+    from_id: u32,
+    to_id: u32,
+    to_name: String,
+    olds: List[u32],
+    convert: own[send] fn(Bytes, Bytes) -> Result[Option[(Bytes, Bytes)], types.Failure],
+    preview_slot: Option[u64]
+}
+
+// One deferred Tiered index build queued by `stage_index_build` and executed
+// in chunked commits in the consuming `waits` call (`write_prepared`, `seal`,
+// `install_activation`).
+pub type DeferredIndexBuild: send {
+    catalog_key: Bytes,
+    name: String,
+    record_raw: Bytes,
+    // A hot Tiered target's first scratch id; the second follows it
+    // (§13.10a). Drawn only for a hot build; the prepare child uses none.
+    scratch: u32,
+    preview_slot: Option[u64]
+}
+
+// Filters `sources` to new tables present in `delta` whose source is a base
+// table (< `base_next_table`), sorted strictly increasing by `target`.
+pub fn export_source_map(delta: List[CatalogChange], base_next_table: u32, sources: List[MigrateSource]) -> Result[List[MigrateSource], types.Failure] {
+    if list.len(sources) == 0 {
+        return Ok(list.new())
+    }
+    let mut new_tables: Map[u32, ()] = map.new()
+    for change in delta {
+        if let Some(raw) = view change.after {
+            let record = indexes.decode_catalog(raw)?
+            if indexes.catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+                map.insert(mut new_tables, record.id, ())
+            }
+        }
+    }
+    let mut out: List[MigrateSource] = list.new()
+    for item in sources {
+        if item.source < base_next_table && map.contains(new_tables, item.target) {
+            list.push(mut out, item)
+        }
+    }
+    list.sort(mut out, fn(a: MigrateSource, b: MigrateSource) -> Order {
+        order.compare(a.target, b.target)
+    })
+    Ok(take out)
+}
+
+// Extracts every collection's (id -> (kind, residency)) from a CollectionMap root.
+fn collect_base_descriptors(root: Arc[std.page.Page], mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]) -> Result[(), types.Failure] {
+    let image = std.page.image_of(root)
+    let height = std.page.level(image)
+    for slot in 0u64 .. std.page.count(image) {
+        if height != 0 {
+            collect_base_descriptors(option.unwrap(std.page.child(root, slot)), mut out)?
+            continue
+        }
+        let key = option.unwrap(std.page.key_at(image, slot))
+        let id: u32 = list.word_be(key, 0)
+        let desc = pages.unwrap_collection_descriptor(std.page.value_at(root, slot))
+        types.capacity(map.try_reserve(mut out, 1))?
+        map.insert(mut out, id, (desc.kind, desc.residency))
+    }
+    Ok(())
+}
+
+pub fn base_descriptors_from_tree(tree: pages.PageTree) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], types.Failure] {
+    let mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = map.new()
+    collect_base_descriptors(tree.root, mut out)?
+    Ok(take out)
+}
+
+fn read_disk_file_bounded(mut file: HostFile, name: String, limit: u64) -> Result[Bytes, types.Failure] waits {
+    let mut out: Bytes = list.new()
+    let mut chunk: Bytes = list.with_capacity(16384)
+    loop {
+        list.clear(mut chunk)
+        let n = manifest.disk_io(host.read(mut file, mut chunk))?
+        if n == 0 {
+            return Ok(take out)
+        }
+        if list.len(out) + n > limit {
+            return Error(format.disk_fault(name, list.len(out), Malformed))
+        }
+        types.capacity(list.try_reserve(mut out, n))?
+        list.append(mut out, list.slice(chunk, 0, n))
+    }
+}
+
+// Installs a collection entry with an explicit residency and rebuilt
+// descriptor into `tree` (supports both HotPage and ColdPage roots).
+pub fn put_collection_with_residency(mut tree: pages.PageTree, key: Bytes, take slot: Option[std.page.Slot], rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency, private_from: u64, mut ids: u64) -> Result[(), types.Failure] {
+    if residency == ResidentMemory {
+        let built: Option[Arc[std.page.Page]] = match take slot {
+            Some(HotPage(page)) => Some(take page),
+            None => None,
+            Some(ColdPage(_)) => return Error(pages.malformed(0)),
+        }
+        return pages.put_collection(mut tree, key, take built, kind, private_from, mut ids)
+    }
+    let empty_root = match view tree.empty_collection {
+        Some(shared) => arc.share(shared),
+        None => fail("store: missing empty collection page"),
+    }
+    match take slot {
+        None => {
+            let record = match kind {
+                4 => pages.log_record(empty_root, 0, 0, ResidentTiered)?,
+                _ => pages.rooted_collection_record(empty_root, kind, ResidentTiered)?,
+            }
+            pages.page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids))
+        },
+        Some(HotPage(page)) => {
+            let record = match kind {
+                4 => pages.log_record(page, 0, rows, ResidentTiered)?,
+                _ => pages.rooted_collection_record(page, kind, ResidentTiered)?,
+            }
+            pages.page_result(std.page.insert(mut tree.root, key, record, Some(take page), tree.inline, private_from, mut ids))
+        },
+        Some(ColdPage(ptr)) => {
+            // A map entry's pointer names its child's stamp, so the entry goes
+            // in over an empty stand-in with the Cold root's stamp, which
+            // install_tiered_root then replaces with the Cold root.
+            let stand_in = std.page.empty(0, ptr.stamp, Collection)
+            let record = pages.collection_header(ptr.stamp, rows, charge, kind, ResidentTiered)?
+            pages.page_result(std.page.insert(mut tree.root, key, record, Some(take stand_in), tree.inline, private_from, mut ids))?
+            pages.page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids))
+        },
+    }
+}
+
+pub fn define_empty_tiered_collection(mut tree: pages.PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), types.Failure] {
+    let first = catalog.stamp_after(final_item)?
+    let mut draw = first
+    put_collection_with_residency(mut tree, catalog.prefix(id)?, None, 0, 0, kind, ResidentTiered, first, mut draw)?
+    pages.canonical_tree(mut tree)?
+    final_item = draw - 1
+    Ok(())
+}
+
+// Measures Hot bytes currently held in Tiered pages/blobs of `tree`.
+pub fn tiered_tree_hot_bytes(tree: pages.PageTree) -> Result[u64, types.Failure] {
+    let mut roots: List[pages.Roots] = list.with_capacity(1)
+    let mut empty = pages.empty_roots()
+    empty.collections = pages.share_page_tree(tree)
+    list.push(mut roots, take empty)
+    let pager.TieredCutFrames(pages: pages, blobs: blobs, ..) = pager.tiered_cut_frames(roots)?
+    let mut total = 0u64
+    for item in pages {
+        total = int.saturating_add(total, item.frame.size)
+    }
+    for item in blobs {
+        total = int.saturating_add(total, item.frame.size)
+    }
+    Ok(total)
+}
+
+// Validates the 0x008B source-map frame against `delta` and `base_next_table`
+// (§13.10a): strictly increasing targets, each target a new table in `delta`,
+// each source < `base_next_table`.
+pub fn validate_source_map(source_map: List[MigrateSource], delta: List[CatalogChange], base_next_table: u32) -> Result[(), DeployFailure] {
+    if list.len(source_map) == 0 {
+        return Ok(())
+    }
+    let mut new_tables: Map[u32, ()] = map.new()
+    for change in delta {
+        if let Some(raw) = view change.after {
+            let record = deploy_result(indexes.decode_catalog(raw))?
+            if indexes.catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+                map.insert(mut new_tables, record.id, ())
+            }
+        }
+    }
+    for i in 0u64 .. list.len(source_map) {
+        let item = source_map[i]
+        if i != 0 && !(source_map[i - 1u64].target < item.target) {
+            return Error(ImportMalformed)
+        }
+        if item.target < base_next_table || !map.contains(new_tables, item.target) {
+            return Error(ImportMalformed)
+        }
+        if item.source == 0 || item.source >= base_next_table {
+            return Error(ImportMalformed)
+        }
+    }
+    Ok(())
+}
+
+// Derives each shipped range's residency from OLD's base descriptors and the
+// 0x008B source map (§13.10a "Residency of a shipped range"). Validates that
+// every source in `source_map` is a base table when `check_sources` is true.
+pub fn derive_range_residencies(base: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], needed: List[RangeChange], source_map: List[MigrateSource], base_next_table: u32, check_sources: bool) -> Result[List[std.page_descriptor.Residency], DeployFailure] {
+    let mut source_by_target: Map[u32, u32] = map.new()
+    for item in source_map {
+        if check_sources {
+            match map.get(base, item.source) {
+                Some((TableCollection, _)) => (),
+                _ => return Error(ImportMalformed),
+            }
+        }
+        map.insert(mut source_by_target, item.target, item.source)
+    }
+    // First pass: resolve all non-index ranges so new indexes on new migrated
+    // tables see their owner table's target residency.
+    let mut target_residency: Map[u32, std.page_descriptor.Residency] = map.new()
+    for (id, (_, res)) in base {
+        map.insert(mut target_residency, id, res)
+    }
+    for change in needed {
+        let Some(raw) = view change.catalog else {
+            continue
+        }
+        let record = deploy_result(indexes.decode_catalog(raw))?
+        let kind = indexes.catalog_kind(record.record)
+        if kind == IndexCollection {
+            continue
+        }
+        let res: std.page_descriptor.Residency = if change.id < base_next_table {
+            match map.get(base, change.id) {
+                Some((_, old_res)) => old_res,
+                None => ResidentMemory,
+            }
+        } else if kind == TableCollection {
+            match map.get(source_by_target, change.id) {
+                Some(src) => match map.get(base, src) {
+                    Some((_, src_res)) => src_res,
+                    None => ResidentMemory,
+                },
+                None => ResidentMemory,
+            }
+        } else {
+            ResidentMemory
+        }
+        map.insert(mut target_residency, change.id, res)
+    }
+    let mut out: List[std.page_descriptor.Residency] = list.with_capacity(list.len(needed))
+    for change in needed {
+        let Some(raw) = view change.catalog else {
+            list.push(mut out, ResidentMemory)
+            continue
+        }
+        let record = deploy_result(indexes.decode_catalog(raw))?
+        let res: std.page_descriptor.Residency = if change.id < base_next_table {
+            match map.get(base, change.id) {
+                Some((_, old_res)) => old_res,
+                None => ResidentMemory,
+            }
+        } else if indexes.catalog_kind(record.record) == IndexCollection {
+            match map.get(target_residency, record.owner) {
+                Some(owner_res) => owner_res,
+                None => ResidentMemory,
+            }
+        } else {
+            match map.get(target_residency, change.id) {
+                Some(r) => r,
+                None => ResidentMemory,
+            }
+        }
+        list.push(mut out, res)
+    }
+    Ok(take out)
+}
+
+// Helper for reading an optional 0x008B source-map frame after the 0x0083
+// inventory frames without disturbing the following 0x0084/0x0085 frame.
+pub fn read_optional_source_map(mut input: PreparedInput) -> Result[List[MigrateSource], DeployFailure] waits {
+    let mut first: Bytes = list.with_capacity(1)
+    if scratch_result(manifest.disk_io(host.read(mut input.file, mut first)))? == 0 {
+        return Ok(list.new())
+    }
+    if first[0u64] != 0x8Bu8 {
+        input.peek = Some(first[0u64])
+        return Ok(list.new())
+    }
+    let rest = scratch_result(prepared_read(mut input.file, 15u64))?
+    list.append(mut first, rest)
+    let payload = prepared_payload(mut input, 0x008B, first)?
+    let codec: std.codec.Codec[List[MigrateSource]] = std.codec.of()
+    let sources = std.codec.decode(codec, payload) ?=> |_| ImportMalformed
+    if list.len(sources) == 0 {
+        return Error(ImportMalformed)
+    }
+    Ok(take sources)
+}
+
+pub fn table_is_tiered(tree: pages.PageTree, table_id: u32) -> Result[bool, types.Failure] {
+    if let None = view tree.paging {
+        return Ok(false)
+    }
+    if let Some((_, descriptor)) = std.page.collection_slot(tree.root, catalog.prefix(table_id)?) {
+        return Ok(pages.collection_descriptor(descriptor).residency != ResidentMemory)
+    }
+    Ok(false)
+}
+
+// Reads only MANIFEST and the class-0 CollectionMap pages of main's root in `d`
+// to learn base collection residencies during Pass 1 when `validate_prepared(d)`
+// runs without OLD's `Db`. Returns empty map when `d` has no `MANIFEST`.
+pub fn read_export_base_descriptors(d: Dir, id: types.StoreKey) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], types.Failure] waits {
+    let mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = map.new()
+    let manifest_raw = match host.open(d, "MANIFEST", Read) {
+        Ok(take fd) => {
+            let mut file = take fd
+            let limit = 72 + 16 + manifest.MANIFEST_LIMIT + 20 + manifest.UNKNOWN_ROOM
+            let read_res = read_disk_file_bounded(mut file, "MANIFEST", limit)
+            manifest.disk_io(host.close(take file))?
+            read_res?
+        },
+        Error(NotFound) => return Ok(take out),
+        Error(problem) => return Error(Io(problem)),
+    }
+    let (owner, take page_record) = manifest.disk_allocation(scoped fn() -> Result[(types.StoreKey, manifest.PageManifest), types.Failure] {
+        manifest.disk_read_page_manifest("MANIFEST", manifest_raw)
+    })?
+    if !types.same(owner.hi, owner.lo, id.hi, id.lo) || list.len(page_record.branches) == 0 {
+        return Ok(take out)
+    }
+    let root_ptr = page_record.branches[0u64].roots.collections
+    if root_ptr.stamp == 0 {
+        return Ok(take out)
+    }
+    read_collection_map_descriptors(d, id, root_ptr, mut out)?
+    Ok(take out)
+}
+
+fn read_collection_map_descriptors(d: Dir, id: types.StoreKey, ptr: std.page.PagePtr, mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]) -> Result[(), types.Failure] waits {
+    if ptr.stamp == 0 {
+        return Ok(())
+    }
+    let path = manifest.paged_pack_path(ptr.pack)?
+    let mut file = manifest.disk_io(host.open(d, path, Read))?
+    let width: u64 = int.widen(ptr.len)
+    let wire = manifest.read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
+    manifest.disk_io(host.close(take file))?
+    let (height, take children, take found_descs) = manifest.disk_allocation(scoped fn() -> Result[(u8, List[std.page.PagePtr], List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]), types.Failure] {
+        let image = pages.page_result(std.page.decode(types.copied(list.slice(wire, 16, 16 + width))?, CollectionMap))?
+        let lvl = std.page.level(image)
+        let mut kids: List[std.page.PagePtr] = list.new()
+        let mut descs: List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = list.new()
+        for slot in 0u64 .. std.page.count(image) {
+            if lvl != 0 {
+                if let Some(PageEdge(child)) = std.page.owning_edge(image, slot) {
+                    list.push(mut kids, child)
+                }
+            } else {
+                let row = option.unwrap(std.page.entry(image, slot))
+                if let InlineValue(raw) = row.cell {
+                    let cid: u32 = list.word_be(row.key, 0)
+                    let desc = pages.collection_descriptor(raw)
+                    list.push(mut descs, (cid, desc.kind, desc.residency))
+                }
+            }
+        }
+        Ok((lvl, take kids, take descs))
+    })?
+    for (cid, kind, residency) in found_descs {
+        types.capacity(map.try_reserve(mut out, 1))?
+        map.insert(mut out, cid, (kind, residency))
+    }
+    if height != 0 {
+        for child in children {
+            read_collection_map_descriptors(d, id, child, mut out)?
+        }
+    }
+    Ok(())
+}

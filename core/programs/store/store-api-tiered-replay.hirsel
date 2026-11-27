@@ -1,26 +1,3 @@
-// H supersedes this collection on its proposed main root (§13.7). The
-// installed root and any fork or snapshot still hold their own overlay.
-fn discard_replayed_collection(mut tree: pages.PageTree, id: u32) -> Result[(), Error] {
-    let replacement = {
-        let Some(previous) = view tree.replay else {
-            return Ok(())
-        }
-        let Some(removed) = std.omap.get(previous.collections, id) else {
-            return Ok(())
-        }
-        disk_allocation(scoped fn() -> Result[Option[Arc[pages.ReplayBranch]], Error] {
-            let mut ids = previous.ids
-            let collections = std.omap.remove(mut ids, previous.collections, id)
-            if let None = std.omap.root(collections) {
-                return Ok(None)
-            }
-            Ok(Some(arc.new(pages.ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: previous.charged - removed.charged))))
-        })?
-    }
-    tree.replay = take replacement
-    Ok(())
-}
-
 fn replay_tiered_op(file: String, mut tree: pages.PageTree, mut next_stamp: u64, mut account: pager.ReplayTieredAccount, before: pager.ReplayDescriptor, op: format.JournalOp) -> Result[(), Error] {
     failure_result_from_rep(txn.replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op))
 }

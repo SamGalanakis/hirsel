@@ -1,21 +1,3 @@
-// Catch-up in the prepare child (STORE-SPEC §3.5a "Catch-up"). OLD advances the export
-// lease to its new head and appends the journal tail to the export directory
-// (`advance_export`, `copy_export_tail`). The child replays that tail from
-// where its last round ended, on the load it already holds, brings each
-// index range the preparation ships to the new head from the rows the tail
-// changed, and writes the entries that changed as ROUND (store-rounds).
-// OLD's schema commits since the last round (index build chunks, verify
-// demotions) come as STEPS: the replay applies them between the tail's
-// commits, and each index record they moved is moved in the plan too.
-// One shipped entry-index range: its catalog name, record and kind, and
-// the position of the extractor its declaration bound in the plan's bindings.
-type CatchUpIndex {
-    name: String,
-    record: indexes.Catalog,
-    kind: IndexKind,
-    binding: u64
-}
-
 // Replays the tail copied into `d`, brings `staged` to the new head, and writes
 // ROUND: the entries the shipped ranges changed, for OLD's kept import
 // (`apply_round`). Returns the number of rows the tail changed. Drift means this round cannot
@@ -40,7 +22,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let Some(take kept) = replace(mut source.shipped, None) else {
         return Error(ExportMismatch)
     }
-    let ShippedImport(ranges: take round_ranges, round: last_round, staged_roots: take carried) = take kept
+    let transfer.ShippedImport(ranges: take round_ranges, round: last_round, staged_roots: take carried) = take kept
     if let Some((take built_roots, built_next_node)) = take carried {
         staged.plan.schema.roots = take built_roots
         staged.plan.schema.next_node = order.max(staged.plan.schema.next_node, built_next_node)
@@ -51,22 +33,22 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let state = deploy_result(failure_result_from_rep(types.capacity(current_state(source.db))))?
     let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(source.db.holders), limits_to_rep(source.db.limits))))?
     initial.tiered.total = source.db.accounting.tiered
-    let steps = read_steps(d, stamp)?
+    let steps = transfer_result(transfer.read_steps(d, store_key_to_rep(id), stamp.head, stamp.terminal, stamp.end))?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }
-    let moved = deploy_result(catalog_changes(before, replayed.state.tips[0].roots))?
-    follow_moves(mut staged.plan, moved, round_ranges)?
-    let shipped = catch_up_indexes(staged.plan, round_ranges)?
+    let moved = deploy_result(failure_result_from_rep(transfer.catalog_changes(before, replayed.state.tips[0].roots)))?
+    transfer_result(transfer.follow_moves(mut staged.plan.schema, moved, round_ranges))?
+    let shipped = transfer_result(transfer.catch_up_indexes(staged.plan.schema, staged.plan.bindings, round_ranges))?
     let (take tail, take deferred) = deploy_result(catch_up_compare_collections(before.collections, replayed.state.tips[0].roots.collections, replayed.superseded))?
-    let mut row_changes: List[CatchUpChange] = list.with_capacity(list.len(tail.rows))
+    let mut row_changes: List[transfer.CatchUpChange] = list.with_capacity(list.len(tail.rows))
     for row in tail.rows {
         let after_val: Option[Arc[Bytes]] = match view row.value {
             Some(v) => Some(arc.share(v)),
             None => None,
         }
-        list.push(mut row_changes, CatchUpChange(tree_key: deploy_result(failure_result_from_rep(types.copied(row.tree_key)))?, before: None, after: take after_val))
+        list.push(mut row_changes, transfer.CatchUpChange(tree_key: deploy_result(failure_result_from_rep(types.copied(row.tree_key)))?, before: None, after: take after_val))
     }
     if list.len(deferred) != 0 {
         let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: pages.share_roots(before), watermark: pages.holder_next_node(source.db.holders) + 1, bases: pages.no_tail_bases())
@@ -78,14 +60,14 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     }
     let next_node = order.max(staged.plan.schema.next_node, replayed.next_node)
     staged.plan.schema.next_node = next_node
-    let mut touched: List[Touch] = list.new()
+    let mut touched: List[transfer.Touch] = list.new()
     let mut cut_ctx = child_cut_context(source)
-    deploy_result(patch_index_ranges(mut cut_ctx, stamp.opened, mut staged.plan, before.collections, shipped, row_changes, mut touched))?
+    deploy_result(failure_result_from_rep(transfer.patch_index_ranges(mut cut_ctx, stamp.opened, mut staged.plan.schema, staged.plan.bindings, before.collections, shipped, row_changes, mut touched)))?
     save_child_cut_pack(source, cut_ctx.next_pack)
-    let ops = deploy_result(round_ops_direct(source.dir, id, pager.pin_partition(source.db.pager), stamp.opened, staged.plan.schema.roots.collections, mut touched))?
-    let round_totals = deploy_result(range_totals(staged.plan.schema.roots.collections, round_ranges))?
+    let ops = deploy_result(failure_result_from_rep(transfer.round_ops_direct(source.dir, store_key_to_rep(id), pager.pin_partition(source.db.pager), stamp.opened, staged.plan.schema.roots.collections, mut touched)))?
+    let round_totals = deploy_result(failure_result_from_rep(transfer.range_totals(staged.plan.schema.roots.collections, round_ranges)))?
     let round = last_round + 1
-    write_round(d, id, RoundMeta(round: round, from: clone(source.stamp), to: clone(stamp), ops: list.len(ops), totals: take round_totals), ops)?
+    transfer_result(transfer.write_round(d, store_key_to_rep(id), transfer.RoundMeta(round: round, from: export_stamp_to_rep(clone(source.stamp)), to: export_stamp_to_rep(clone(stamp)), ops: list.len(ops), totals: take round_totals), ops))?
     let live_bytes = deploy_result(failure_result_from_rep(journal.journal_account(replayed)))?
     let pager.JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
@@ -96,279 +78,8 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     }
     pages.set_next_node(mut source.db.holders, staged.plan.schema.next_node)
     source.stamp = take stamp
-    source.shipped = Some(ShippedImport(ranges: take round_ranges, round: round, staged_roots: None))
+    source.shipped = Some(transfer.ShippedImport(ranges: take round_ranges, round: round, staged_roots: None))
     staged.inner = catalog.declaration_state(declaration_base(source.db))
     staged.base_rows = pages.share_page_tree(pages.holder_heads(source.db.holders)[0].roots.collections)
     Ok(list.len(row_changes))
-}
-
-// OLD's steps move only index records' build states (`export_step`). A record
-// the plan leaves as OLD had it follows OLD; one the plan changed must ship
-// (or be dropped by it), since the install takes the plan's record and range.
-fn follow_moves(mut plan: SchemaPlan, moved: List[CatalogChange], ranges: List[KeptRange]) -> Result[(), DeployError] {
-    for change in moved {
-        let (Some(was), Some(now)) = (change.before, change.after) else {
-            return Error(Drift)
-        }
-        let untouched = match pages.get_page_row(plan.schema.roots.catalog, change.key) {
-            Some(raw) => catalog_bytes_equal(raw, was),
-            None => false,
-        }
-        if untouched {
-            let live_bytes = txn.catalog_recharge(plan.schema.live, plan.schema.roots, change.key, now, plan.schema.retained)
-            let roots = deploy_result(failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, plan.schema.roots, change.key, now)))?
-            let next_table = plan.schema.next_table
-            deploy_result(keep_schema(mut plan, take roots, live_bytes, next_table))?
-            continue
-        }
-        let id = deploy_result(decode_catalog(now))?.id
-        let mut kept = false
-        for shipped_range in ranges {
-            if shipped_range.id == id {
-                kept = true
-            }
-        }
-        if !kept {
-            return Error(Drift)
-        }
-    }
-    Ok(())
-}
-
-// The index ranges the preparation ships, each with the extractor its
-// declaration bound. A shipped table range with rows, or an index range
-// without a bound extractor, cannot be caught up from row changes.
-fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[CatchUpIndex], DeployError] {
-    let mut found: List[CatchUpIndex] = list.new()
-    let mut records = deploy_result(failure_result_from_rep(pages.open_page_range(plan.schema.roots.catalog, None, true, false, None)))?
-    while let Some((take key, raw)) = deploy_result(failure_result_from_rep(catalog.next_page_range(mut records)))? {
-        let record = deploy_result(decode_catalog(raw))?
-        let mut shipped = false
-        for shipped_range in ranges {
-            if shipped_range.kind != 0u8 && shipped_range.id == record.id {
-                shipped = true
-            }
-        }
-        if !shipped {
-            continue
-        }
-        let kind = {
-            let CatalogIndex(index_meta) = view record.record else {
-                if deploy_result(range_rows(plan.schema.roots.collections, record.id))? != 0 {
-                    return Error(Drift)
-                }
-                continue
-            }
-            // An aggregate's group totals are not entries a row owns; a full
-            // preparation rebuilds them.
-            let Entries(kind) = index_meta.shape else {
-                return Error(Drift)
-            }
-            public_index_kind(kind)
-        }
-        let index_name = deploy_result(failure_result_from_rep(catalog.declaration_index_name(key)))?
-        let Some(slot) = indexes.matching_binding_index(plan.bindings, record) else {
-            return Error(Drift)
-        }
-        list.push(mut found, CatchUpIndex(name: take index_name, record: take record, kind: kind, binding: slot))
-    }
-    Ok(take found)
-}
-
-// Brings each shipped index range from the base rows to the new ones. Every
-// entry a changed row no longer yields is removed before any new entry is
-// written, so two rows that trade a Unique key do not collide on the way.
-// A Unique key two rows claim at the new head fails the round with Conflict,
-// as a full build of the same rows does.
-fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPlan, before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(), Error] waits {
-    if list.len(shipped) == 0 || list.len(rows) == 0 {
-        return Ok(())
-    }
-    let bindings = replace(mut plan.bindings, indexes.empty_bindings())
-    let patched = patch_entries(mut ctx, opened, plan, bindings, before, shipped, rows, mut touched)
-    plan.bindings = take bindings
-    let (take roots, live_bytes, next_node) = patched?
-    plan.schema.next_node = next_node
-    let next_table = plan.schema.next_table
-    keep_schema(mut plan, take roots, live_bytes, next_table)
-}
-
-fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: indexes.IndexBindings, before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(pages.Roots, u64, u64), Error] waits {
-    let mut roots = pages.share_roots(plan.schema.roots)
-    let mut live_bytes = plan.schema.live
-    let mut first = failure_result_from_rep(catalog.stamp_after(plan.schema.next_node))?
-    let mut next_stamp = first
-    let mut additions: List[(u64, Bytes, Bytes, Bytes)] = list.new()
-    for i in 0u64 .. list.len(shipped) {
-        let target = view shipped[i]
-        let target_tiered = table_is_tiered(roots.collections, target.record.id)?
-        let extractor = indexes.binding_at(bindings, target.binding)
-        for row in rows {
-            if list.len(row.tree_key) < 4 {
-                continue
-            }
-            let owner: u32 = list.word_be(row.tree_key, 0)
-            if owner != target.record.owner {
-                continue
-            }
-            let primary = list.slice(row.tree_key, 4, list.len(row.tree_key))
-            let old_keys: List[Bytes] = match view row.before {
-                Some(raw) => {
-                    let indexes.IndexValue(keys: take keys, ..) = extract_index(extractor, raw, primary)?
-                    take keys
-                },
-                None => match pages.get_page_row(before, row.tree_key) {
-                    Some(raw) => {
-                        let indexes.IndexValue(keys: take keys, ..) = extract_index(extractor, raw, primary)?
-                        take keys
-                    },
-                    None => list.new(),
-                },
-            }
-            let current: Option[indexes.IndexValue] = match row.after {
-                Some(raw) => Some(extract_index(extractor, raw, primary)?),
-                None => None,
-            }
-            for key in old_keys {
-                let kept = match current {
-                    Some(value) => contains_bytes(value.keys, key),
-                    None => false,
-                }
-                if kept {
-                    continue
-                }
-                let Some(charge) = owned_entry_direct(ctx, opened, roots.collections, key, target.kind, primary)? else {
-                    continue
-                }
-                if !target_tiered && !plan.schema.retained {
-                    live_bytes = int.saturating_sub(live_bytes, charge)
-                }
-                note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
-                if target_tiered {
-                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayAbsent, first, mut next_stamp)?
-                    if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
-                        failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
-                        child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
-                        first = failure_result_from_rep(catalog.stamp_after(next_stamp - 1))?
-                        next_stamp = first
-                    }
-                } else {
-                    let _ = failure_result_from_rep(pages.remove_page_row(mut roots.collections, key, first, mut next_stamp))?
-                }
-            }
-            if let Some(take value) = take current {
-                let indexes.IndexValue(keys: take keys, payload: take payload, ..) = take value
-                for take key in take keys {
-                    list.push(mut additions, (i, take key, failure_result_from_rep(types.copied(payload))?, failure_result_from_rep(types.copied(primary))?))
-                }
-            }
-        }
-    }
-    for (i, key, payload, primary) in additions {
-        let target = view shipped[i]
-        let target_tiered = table_is_tiered(roots.collections, target.record.id)?
-        if let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, roots.collections, key)? {
-            if let Unique = target.kind {
-                if list.slice(prior, 4, failure_result_from_rep(indexes.unique_owner_end(prior))?) != primary {
-                    return Error(Conflict(failure_result_from_rep(catalog.named(target.name))?))
-                }
-            }
-            if !target_tiered && !plan.schema.retained {
-                live_bytes = int.saturating_sub(live_bytes, txn.entry(key, prior))
-            }
-        }
-        if !target_tiered {
-            live_bytes = int.saturating_add(live_bytes, txn.entry(key, payload))
-            failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
-        }
-        note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
-        if target_tiered {
-            child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayPut(arc.new(failure_result_from_rep(types.copied(payload))?)), first, mut next_stamp)?
-            if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
-                failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
-                child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
-                first = failure_result_from_rep(catalog.stamp_after(next_stamp - 1))?
-                next_stamp = first
-            }
-        } else {
-            failure_result_from_rep(pages.put_page_row(mut roots.collections, key, payload, first, mut next_stamp))?
-        }
-    }
-    failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
-    Ok((take roots, live_bytes, next_stamp - 1))
-}
-
-// The charge of `key`'s entry when it belongs to `primary`. A Unique entry
-// another row holds is that row's, and stays.
-fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: pages.PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] waits {
-    let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)? else {
-        return Ok(None)
-    }
-    if let Unique = kind {
-        if list.slice(prior, 4, failure_result_from_rep(indexes.unique_owner_end(prior))?) != primary {
-            return Ok(None)
-        }
-    }
-    Ok(Some(txn.entry(key, prior)))
-}
-
-fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: pages.PageTree, key: Bytes) -> Result[(), Error] waits {
-    let prior = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)?
-    let seq = list.len(touched)
-    let note = Touch(key: failure_result_from_rep(types.copied(key))?, seq: seq, prior: take prior)
-    failure_result_from_rep(types.capacity(list.try_reserve(mut touched, 1)))?
-    list.push(mut touched, take note)
-    Ok(())
-}
-
-fn round_ops_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64, after: pages.PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] waits {
-    list.sort(mut touched, fn(a: Touch, b: Touch) -> Order {
-        match bytes_order(a.key, b.key) {
-            Equal => if a.seq < b.seq {
-                Less
-            } else if b.seq < a.seq {
-                Greater
-            } else {
-                Equal
-            },
-            other => other,
-        }
-    })
-    let mut ops: List[RoundOp] = list.new()
-    for i in 0u64 .. list.len(touched) {
-        let note = view touched[i]
-        if i != 0 && touched[i - 1].key == note.key {
-            continue
-        }
-        let new = child_get_row(d, id, writer_pin_bytes, opened, after, note.key)?
-        match take new {
-            Some(take raw) => {
-                let had = match note.prior {
-                    Some(prior) => {
-                        if prior == raw {
-                            continue
-                        }
-                        true
-                    },
-                    None => false,
-                }
-                list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: Some(take raw), prior: had))
-            },
-            None => {
-                if let Some(_) = note.prior {
-                    list.push(mut ops, RoundOp(key: failure_result_from_rep(types.copied(note.key))?, value: None, prior: true))
-                }
-            },
-        }
-    }
-    Ok(take ops)
-}
-
-fn contains_bytes(keys: List[Bytes], key: Bytes) -> bool {
-    for candidate in keys {
-        if candidate == key {
-            return true
-        }
-    }
-    false
 }

@@ -1,0 +1,412 @@
+pub type CatalogChange: codec + send {
+    key: Bytes,
+    before: Option[Bytes],
+    after: Option[Bytes]
+}
+
+pub type Inventory: codec + send {
+    id: u32,
+    count: u64,
+    digest: u64
+}
+
+pub type PreparedRow: codec + send {
+    key: Bytes,
+    value: Bytes
+}
+
+type RangeChange: send {
+    id: u32,
+    catalog: Option[Bytes]
+}
+
+pub type ValidatedRange: send {
+    id: u32,
+    kind: u8,
+    rows: List[std.page.Row],
+    count: u64,
+    digest: u64,
+    row_bytes: u64,
+    over_inline: u64,
+    residency: std.page_descriptor.Residency
+}
+
+pub type ImportedRange: send {
+    id: u32,
+    kind: u8,
+    tree: Option[Arc[std.page.Page]],
+    slot: Option[std.page.Slot],
+    rows: u64,
+    charge: u64,
+    count: u64,
+    digest: u64,
+    residency: std.page_descriptor.Residency
+}
+
+// OLD's checks of a PREPARED file's catalog delta (STORE-SPEC §3.5a, M1-M3):
+// each changed record is well formed and keeps its identity, and only ids at
+// or above the export's next_table are new.
+fn validate_catalog_key(key: Bytes, c: indexes.Catalog) -> bool {
+    let is_index = indexes.catalog_kind(c.record) == IndexCollection
+    let prefix_tag = if is_index {
+        2u8
+    } else {
+        1u8
+    }
+    if list.len(key) == 0 || key[0u64] != prefix_tag {
+        return false
+    }
+    let prefix_size = if is_index {
+        5u64
+    } else {
+        1u64
+    }
+    if list.len(key) < prefix_size || list.len(key) - prefix_size > 255u64 {
+        return false
+    }
+    if is_index {
+        let owner: u32 = list.word_be(key, 1u64)
+        if owner != c.owner {
+            return false
+        }
+    }
+    if !is_index {
+        let total_count = list.len(c.schemas)
+        if c.owner != 0 || c.next == 0 || total_count == 0 || c.schemas[total_count - 1u64].number != c.next - 1u16 {
+            return false
+        }
+        for i in 0u64 .. total_count {
+            let schema = c.schemas[i]
+            if (i > 0 && schema.number <= c.schemas[i - 1u64].number) || std.codec.fingerprint_of(schema.schema) != schema.fingerprint {
+                return false
+            }
+        }
+    } else if c.next != 0 || list.len(c.schemas) != 0 {
+        return false
+    }
+    let text = match types.copied(list.slice(key, prefix_size, list.len(key))) {
+        Ok(take b) => take b,
+        Error(_) => return false
+    }
+    match string.from_utf8(take text) {
+        Ok(name) => !std.string.starts_with(name, "hirsel."),
+        Error(_) => false,
+    }
+}
+
+fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {
+    a == b
+}
+
+pub fn catalog_changes(base: pages.Roots, target: pages.Roots) -> Result[List[CatalogChange], types.Failure] {
+    let mut edits: List[CatalogChange] = list.new()
+    let mut before = pages.open_page_range(base.catalog, None, true, false, None)?
+    while let Some((take key, old_arc)) = catalog.next_page_range(mut before)? {
+        match pages.get_page_row(target.catalog, key) {
+            Some(new) => if list.compare_bytes(new, old_arc) != Equal {
+                list.push(mut edits, CatalogChange(key: take key, before: Some(types.copied(old_arc)?), after: Some(types.copied(new)?)))
+            },
+            None => list.push(mut edits, CatalogChange(key: take key, before: Some(types.copied(old_arc)?), after: None)),
+        }
+    }
+    let mut after = pages.open_page_range(target.catalog, None, true, false, None)?
+    while let Some((take key, new)) = catalog.next_page_range(mut after)? {
+        let exists = match pages.get_page_row(base.catalog, key) {
+            Some(_) => true,
+            None => false
+        }
+        if !exists {
+            list.push(mut edits, CatalogChange(key: take key, before: None, after: Some(types.copied(new)?)))
+        }
+    }
+    list.sort(mut edits, fn(a: CatalogChange, b: CatalogChange) -> Order {
+        std.order.compare(a.key, b.key)
+    })
+    Ok(take edits)
+}
+
+pub fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Result[List[RangeChange], types.Failure] {
+    let mut changes_by_id: List[RangeChange] = list.new()
+    for change in edits {
+        let old = match change.before {
+            Some(raw) => indexes.decode_catalog(raw)?.id,
+            None => 0u32
+        }
+        let new = match change.after {
+            Some(raw) => indexes.decode_catalog(raw)?.id,
+            None => 0u32
+        }
+        if old == new {
+            // An index OLD left Backfilling or Failed that the preparation
+            // finished under the same id: its entries ship as a replaced range.
+            if let (Some(before), Some(after)) = (change.before, change.after) {
+                if indexes.catalog_kind(indexes.decode_catalog(after)?.record) == IndexCollection && !catalog.record_public(before) {
+                    list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(types.copied(after)?)))
+                }
+            }
+            continue
+        }
+        if old != 0u32 {
+            list.push(mut changes_by_id, RangeChange(id: old, catalog: None))
+        }
+        if let Some(raw) = change.after {
+            list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(types.copied(raw)?)))
+        }
+    }
+    list.sort(mut changes_by_id, fn(a: RangeChange, b: RangeChange) -> Order {
+        std.order.compare(a.id, b.id)
+    })
+    let mut previous = 0u32
+    let mut expected = initial
+    for change in changes_by_id {
+        if previous >= change.id {
+            return Error(pages.malformed(0u64))
+        }
+        previous = change.id
+        if change.id >= initial {
+            if change.id != expected || expected == 4294967295u32 {
+                return Error(pages.malformed(0u64))
+            }
+            expected += 1
+        }
+    }
+    if expected != advanced {
+        return Error(pages.malformed(0u64))
+    }
+    Ok(take changes_by_id)
+}
+
+pub fn entries_of(data: pages.PageTree, id: u32) -> Result[pages.PageRange, types.Failure] {
+    if id == 4294967295u32 {
+        return Error(pages.malformed(0u64))
+    }
+    read.byte_cursor(data, Included(catalog.prefix(id)?), catalog.prefix(id + 1u32)?)
+}
+
+pub fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Result[(), types.Failure] {
+    let mut lengths: Bytes = list.with_capacity(8u64)
+    types.capacity(format.le(mut lengths, list.len(key), 4u64))?
+    types.capacity(format.le(mut lengths, list.len(encoded), 4u64))?
+    std.check.add(mut checksum, lengths, 0u64, 8u64)
+    std.check.add(mut checksum, key, 0u64, list.len(key))
+    std.check.add(mut checksum, encoded, 0u64, list.len(encoded))
+    Ok(())
+}
+
+fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[List[Inventory], types.Failure] {
+    let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
+    for desc in ranges {
+        let mut cursor = entries_of(data, desc.id)?
+        let mut row_total = 0u64
+        let mut checksum = std.check.start()
+        while let Some((key, value)) = catalog.next_bytes(mut cursor)? {
+            checksum_row(mut checksum, key, value)?
+            row_total += 1
+        }
+        list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: std.check.finish(checksum)))
+    }
+    Ok(take inventory)
+}
+
+pub fn validate_delta(change: CatalogChange, initial: u32) -> Result[(), DeployFailure] {
+    let old = match change.before {
+        Some(raw) => {
+            let c = deploy_result(indexes.decode_catalog(raw))?
+            if !validate_catalog_key(change.key, c) || c.id >= initial {
+                return Error(ImportMalformed)
+            }
+            Some(take c)
+        },
+        None => None,
+    }
+    if let Some(raw) = change.after {
+        let c = deploy_result(indexes.decode_catalog(raw))?
+        if !validate_catalog_key(change.key, c) {
+            return Error(ImportMalformed)
+        }
+        if let Some(before) = old {
+            if c.id == before.id {
+                if indexes.catalog_kind(c.record) != indexes.catalog_kind(before.record) || c.owner != before.owner || c.epoch < before.epoch || c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision || list.len(c.schemas) < list.len(before.schemas) {
+                    return Error(ImportMalformed)
+                }
+                for i in 0u64 .. list.len(before.schemas) {
+                    let left = before.schemas[i]
+                    let right = c.schemas[i]
+                    if left.number != right.number || left.fingerprint != right.fingerprint || left.schema != right.schema {
+                        return Error(ImportMalformed)
+                    }
+                }
+                return Ok(())
+            }
+        }
+        if c.id < initial {
+            return Error(ImportMalformed)
+        }
+    } else if let None = old {
+        return Error(ImportMalformed)
+    }
+    Ok(())
+}
+
+pub fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inventory, residency: std.page_descriptor.Residency, inline_threshold: u64, codec: std.codec.Codec[PreparedRow], mut charge: u64) -> Result[ValidatedRange, DeployFailure] waits {
+    if desc.id != expected.id {
+        return Error(ImportMalformed)
+    }
+    let (kind, schema_number, unique) = match expected.catalog {
+        Some(raw) => {
+            let meta = deploy_result(indexes.decode_catalog(raw))?
+            let unique = match meta.record {
+                CatalogIndex(indexes.IndexRecord(shape: Entries(UniqueEntry), ..)) => true,
+                _ => false,
+            }
+            (pages.descriptor_kind_byte(indexes.catalog_kind(meta.record)), meta.next, unique)
+        },
+        None => {
+            if desc.count != 0u64 {
+                return Error(ImportMalformed)
+            }
+            (0u8, 0u16, false)
+        },
+    }
+    if (kind == 3 || kind == 4) && desc.count != 0 {
+        return Error(ImportMalformed)
+    }
+    let keep_rows = residency == ResidentMemory
+    let mut rows: List[std.page.Row] = list.new()
+    let mut prev_suffix: Option[Bytes] = None
+    let mut digest = std.check.start()
+    let mut range_row_bytes = 0u64
+    let mut over_inline = 0u64
+    for i in 0u64 .. desc.count {
+        let PreparedRow(key: take key, value: take encoded) = prepared_frame(mut input, 0x0084, codec)?
+        if list.len(key) < 4 || list.len(key) > 4096 || list.len(encoded) > types.VALUE_LIMIT {
+            return Error(ImportMalformed)
+        }
+        let seen: u32 = list.word_be(key, 0)
+        let suffix = list.slice(key, 4, list.len(key))
+        let in_order = if keep_rows {
+            i == 0 || rows[i - 1].key < suffix
+        } else {
+            match view prev_suffix {
+                Some(prev) => prev < suffix,
+                None => true,
+            }
+        }
+        if seen != desc.id || !in_order {
+            return Error(ImportMalformed)
+        }
+        if kind == 1 {
+            if list.len(encoded) < 2 || format.read_le(encoded, 0, 2) + 1 != int.widen(schema_number) {
+                return Error(ImportMalformed)
+            }
+        } else if kind == 2 {
+            // An index entry carries its payload: a Unique entry starts with
+            // its owner's primary, and either kind may carry a projection.
+            if unique {
+                let owner_end = indexes.unique_owner_end(encoded) ?=> |_| ImportMalformed
+                if owner_end == 4 {
+                    return Error(ImportMalformed)
+                }
+            }
+        } else if list.len(encoded) != 0 {
+            return Error(ImportMalformed)
+        }
+        deploy_result(checksum_row(mut digest, key, encoded))?
+        let row_charge = txn.entry(key, encoded)
+        range_row_bytes = int.saturating_add(range_row_bytes, row_charge)
+        if list.len(encoded) > inline_threshold {
+            over_inline += 1
+        }
+        if keep_rows {
+            charge = int.saturating_add(charge, row_charge)
+            list.push(mut rows, std.page.Row(key: deploy_result(types.copied(suffix))?, value: take encoded, charge: row_charge))
+        } else {
+            prev_suffix = Some(deploy_result(types.copied(suffix))?)
+        }
+    }
+    if std.check.finish(digest) != desc.digest {
+        return Error(ImportMalformed)
+    }
+    if kind != 0 {
+        charge = int.saturating_add(charge, 126)
+    }
+    Ok(ValidatedRange(id: desc.id, kind: kind, rows: take rows, count: desc.count, digest: desc.digest, row_bytes: range_row_bytes, over_inline: over_inline, residency: residency))
+}
+
+pub type PreparedMeta: codec + send {
+    base: ExportStampRep,
+    target: PreparedTargetRep,
+    next_table: u32,
+    changes: u64,
+    ranges: u64
+}
+
+pub type PreparedTargetRep: codec + send {
+    describe: Bytes,
+    release: Bytes,
+    digest: Bytes,
+    resident_limit: u64,
+    pack_bytes: u64,
+    checkpoint_bytes: u64,
+    journal_limit: u64,
+    // NEW's limits (§11.1 AP4a); None keeps the store's, others must match.
+    limits: Option[types.LimitsRep]
+}
+
+pub fn planned_catalog(mut plan: catalog.SchemaPlan, delta: List[CatalogChange]) -> Result[(), DeployFailure] {
+    for changed in delta {
+        let agrees = {
+            let current = pages.get_page_row(plan.roots.catalog, changed.key)
+            match changed.before {
+                Some(expected) => match current {
+                    Some(raw) => catalog_bytes_equal(raw, expected),
+                    None => false
+                },
+                None => match current {
+                    None => true,
+                    Some(_) => false
+                },
+            }
+        }
+        if !agrees {
+            return Error(ImportMalformed)
+        }
+        if let Some(raw) = changed.after {
+            let roots = deploy_result(catalog.catalog_insert(mut plan.next_node, plan.roots, changed.key, raw))?
+            plan.roots = take roots
+        } else {
+            deploy_result(catalog.remove_store_row(mut plan.roots.catalog, changed.key, mut plan.next_node))?
+        }
+    }
+    Ok(())
+}
+
+pub fn planned_ranges(mut plan: catalog.SchemaPlan, imported: List[ImportedRange]) -> Result[(), DeployFailure] {
+    let private_from = deploy_result(catalog.stamp_after(plan.next_node))?
+    let mut next_stamp = private_from
+    for replaced in imported {
+        let had_tiered = deploy_result(table_is_tiered(plan.roots.collections, replaced.id))?
+        if had_tiered {
+            deploy_result(discard_replayed_collection(mut plan.roots.collections, replaced.id))?
+            deploy_result(types.capacity(list.try_reserve(mut plan.superseded, 1)))?
+            list.push(mut plan.superseded, replaced.id)
+        }
+        if replaced.kind == 0 {
+            let _ = deploy_result(catalog.drop_collection(mut plan.roots.collections, replaced.id, private_from, mut next_stamp))?
+        } else {
+            let key = deploy_result(catalog.prefix(replaced.id))?
+            let slot: Option[std.page.Slot] = if replaced.residency == ResidentMemory {
+                match view replaced.tree {
+                    Some(page) => Some(HotPage(arc.share(page))),
+                    None => None,
+                }
+            } else {
+                clone(replaced.slot)
+            }
+            deploy_result(put_collection_with_residency(mut plan.roots.collections, key, take slot, replaced.rows, replaced.charge, replaced.kind, replaced.residency, private_from, mut next_stamp))?
+        }
+    }
+    deploy_result(pages.canonical_tree(mut plan.roots.collections))?
+    plan.next_node = next_stamp - 1
+    Ok(())
+}

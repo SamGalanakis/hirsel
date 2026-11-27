@@ -1,0 +1,71 @@
+pub type ActivationRewrite: codec + send {
+    id: u32,
+    key: Bytes,
+    value: Bytes
+}
+
+fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
+    match order.compare(a.id, id) {
+        Equal => list.compare_bytes(a.key, key),
+        different => different,
+    }
+}
+
+pub fn check_rewrite_indexes(tree: pages.PageTree, bindings: indexes.IndexBindings, id: u32, schema: u16, key: Bytes, old: Bytes, raw: Bytes) -> Result[(), types.Failure] {
+    let mut records = read.byte_cursor(tree, Included(catalog.index_prefix(id)?), catalog.index_prefix(id + 1)?)?
+    while let Some((name_key, encoded)) = catalog.next_bytes(mut records)? {
+        let record = indexes.decode_catalog(encoded)?
+        let Some(ix) = indexes.binding_for_schema(bindings, id, schema, record) else {
+            return Error(Stale(id))
+        }
+        let before = indexes.extract_row(ix, old, key)?
+        let after = indexes.extract_row(ix, raw, key)?
+        if before.keys != after.keys || before.payload != after.payload || before.sums != after.sums {
+            return Error(Changed(catalog.declaration_index_name(name_key)?))
+        }
+    }
+    Ok(())
+}
+
+pub fn encode_rewrite_frame(rewrites: Map[(u32, Bytes), ()], collections: pages.PageTree, take extra: List[ActivationRewrite]) -> Result[Option[Bytes], DeployFailure] {
+    if map.len(rewrites) == 0 && list.len(extra) == 0 {
+        return Ok(None)
+    }
+    let mut rows: List[ActivationRewrite] = list.new()
+    let mut size = 4u64
+    let limit = option.unwrap(manifest.disk_kind_limit(0x0085))
+    for ((id, key), _) in rewrites {
+        let logical = deploy_result(catalog.logical_key(id, key))?
+        let Some(raw) = pages.get_page_row(collections, logical) else {
+            return Error(Store(Missing("row")))
+        }
+        size = int.saturating_add(size, 12 + list.len(key) + list.len(raw))
+        if size > limit {
+            return Error(Scratch(Limit(Triggers)))
+        }
+        list.push(mut rows, ActivationRewrite(id, key: deploy_result(types.copied(key))?, value: deploy_result(types.copied(raw))?))
+    }
+    for take row in take extra {
+        size = int.saturating_add(size, 12 + list.len(row.key) + list.len(row.value))
+        if size > limit {
+            return Error(Scratch(Limit(Triggers)))
+        }
+        list.push(mut rows, take row)
+    }
+    list.sort(mut rows, fn(a: ActivationRewrite, b: ActivationRewrite) -> Order {
+        compare_rewrite(a, b.id, b.key)
+    })
+    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
+    let mut raw: Bytes = list.with_capacity(size)
+    std.codec.encode(codec, rows, mut raw) ?=> |_| Scratch(Limit(Triggers))
+    Ok(Some(take raw))
+}
+
+fn apply_import_rewrites(mut plan: catalog.SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployFailure] {
+    for row in rewrites {
+        let key = deploy_result(catalog.logical_key(row.id, row.key))?
+        let raw = deploy_result(types.copied(row.value))?
+        let _ = deploy_result(catalog.insert_row(mut plan.next_node, mut plan.roots, take key, take raw))?
+    }
+    Ok(())
+}

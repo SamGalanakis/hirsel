@@ -105,7 +105,7 @@ fn l102_g_seed(mut db: Db) -> Result[Index[u64, u64, Bytes, ()], Error] waits {
     let Backfilling(_) = lix_state(db, "by_s")? else {
         fail("L102 (g): the fixture must leave by_s Backfilling")
     }
-    if table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, sparse.id)? {
+    if failure_result_from_rep(transfer.table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, sparse.id))? {
         fail("L102 (g): by_s must stay Memory when wide is made Tiered")
     }
     Ok(sparse)
@@ -125,7 +125,7 @@ fn test_l102_hot_memory_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let _ = l102_g_seed(mut db)?
     let (rebuilt, _) = l102_g_declare(mut db, Migrate, false)?
     l102_g_index(db, rebuilt, string.from("by_s"), true)?
-    if table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, rebuilt.id)? {
+    if failure_result_from_rep(transfer.table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, rebuilt.id))? {
         fail("L102 (g): the rebuild made by_s Tiered")
     }
     close(take db)?

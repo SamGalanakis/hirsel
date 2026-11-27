@@ -12,7 +12,7 @@ type ProposedMain {
     chunk_freed: Option[pager.TieredFreed],
     // D-CU-1: rows this schema commit itself wrote, and whether the commit is
     // non-replayable under an export lease.
-    step_rows: List[StepOp],
+    step_rows: List[transfer.StepOp],
     step_drift: bool
 }
 
@@ -30,7 +30,7 @@ fn cut_input(db: Db, delta: HolderDelta) -> manifest.CutInput[in db, in delta] {
     }
     // A catch-up round copies every segment OLD wrote from the lease's first.
     let lease_span = match view db.disk {
-        Some(state) => match state.lease {
+        Some(state) => match transfer.active_lease(state.transfer) {
             Some(held) => Some((held.first, 18446744073709551615u64)),
             None => None,
         },

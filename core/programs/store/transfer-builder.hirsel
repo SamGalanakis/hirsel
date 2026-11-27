@@ -1,0 +1,284 @@
+// ---------------------------------------------------------------------------
+// Pass 2 streaming bottom-up Tiered page builder with chunked hold_import cuts
+// ---------------------------------------------------------------------------
+pub type StreamNode {
+    slot: std.page.Slot,
+    stamp: u64,
+    level: u8,
+    first: Bytes,
+    last: Bytes,
+    rows: u64,
+    charge: u64
+}
+
+pub type StreamBuilder {
+    id: u32,
+    kind: u8,
+    inline: u64,
+    dirty_bytes: u64,
+    hot_bytes: u64,
+    leaf_rows: List[std.page.Row],
+    leaf_sum: u64,
+    leaf_prefix: u64,
+    levels: List[List[StreamNode]],
+    next_stamp: u64,
+    stamp_high: u64,
+    // The owner-3 pin each flush cut sets: `import` or `build`.
+    pin: String
+}
+
+pub fn new_stream_builder(id: u32, kind: u8, inline: u64, dirty_bytes: u64, first_stamp: u64, stamp_high: u64, take holder: String) -> StreamBuilder {
+    StreamBuilder(id: id, kind: kind, inline: inline, dirty_bytes: dirty_bytes, hot_bytes: 0, leaf_rows: list.new(), leaf_sum: 0, leaf_prefix: 0, levels: list.new(), next_stamp: first_stamp, stamp_high: stamp_high, pin: take holder)
+}
+
+pub fn stream_leaf_row_width(key_len: u64, value_len: u64, inline: u64) -> u64 {
+    let cell = if value_len <= inline {
+        3 + value_len
+    } else {
+        43u64
+    }
+    4 + key_len + cell
+}
+
+pub fn stream_compressed(sum: u64, n: u64, p: u64) -> u64 {
+    24 + sum - (n - 1) * p
+}
+
+fn clone_stream_node(node: StreamNode) -> StreamNode {
+    StreamNode(slot: clone(node.slot), stamp: node.stamp, level: node.level, first: clone(node.first), last: clone(node.last), rows: node.rows, charge: node.charge)
+}
+
+fn stream_draw_stamp(mut cursor: u64, high: u64) -> Result[u64, types.Failure] {
+    if cursor > high {
+        return Error(Limit(Ids))
+    }
+    let drawn = cursor
+    cursor += 1
+    Ok(drawn)
+}
+
+pub fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), types.Failure] {
+    let n = list.len(leaf_rows)
+    let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
+    let mut blobs: List[std.page.BlobSlot] = list.new()
+    let mut rows = 0u64
+    let mut charge = 0u64
+    let mut hot = 0u64
+    let mut first: Bytes = list.new()
+    let mut last_key: Bytes = list.new()
+    let mut idx = 0u64
+    for take row in take leaf_rows {
+        let std.page.Row(key: take key, value: take value, charge: row_charge) = take row
+        if idx == 0 {
+            first = types.copied(key)?
+        }
+        if idx + 1 == n {
+            last_key = types.copied(key)?
+        }
+        idx += 1
+        rows += 1
+        charge = int.saturating_add(charge, row_charge)
+        let width = list.len(value)
+        if width <= inline {
+            list.push(mut page_entries, std.page.Entry(key: take key, cell: InlineValue(take value)))
+        } else {
+            let ordinal: u16 = int.truncate(list.len(blobs))
+            let blob_stamp = stream_draw_stamp(mut cursor, high)?
+            let checksum = std.check.xxh3(value, 0, width)
+            let reference = std.page.BlobRef(stamp: blob_stamp, len: width, checksum: checksum, pack: 0, offset: 0, body: ordinal)
+            hot = int.saturating_add(hot, 8 + width)
+            list.push(mut blobs, HotBlob(arc.new(take value)))
+            list.push(mut page_entries, std.page.Entry(key: take key, cell: BlobValue(reference)))
+        }
+    }
+    let id = stream_draw_stamp(mut cursor, high)?
+    let image = pages.page_result(std.page.encode(page_entries, 0u8, id, Collection))?
+    hot = int.saturating_add(hot, std.page.sealed_size(image))
+    let page = pages.page_result(std.page.attach(take image, list.new(), take blobs))?
+    Ok((StreamNode(slot: HotPage(take page), stamp: id, level: 0u8, first: take first, last: take last_key, rows: rows, charge: charge), hot))
+}
+
+fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), types.Failure] {
+    let n = hi - lo
+    let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
+    let mut kids: List[std.page.Slot] = list.with_capacity(n)
+    let mut rows = 0u64
+    let mut charge = 0u64
+    let lvl = nodes[lo].level + 1u8
+    for i in lo .. hi {
+        let node = view nodes[i]
+        rows += node.rows
+        charge = int.saturating_add(charge, node.charge)
+        let sep: Bytes = if i == lo {
+            list.new()
+        } else {
+            pages.page_result(std.page.separator(nodes[i - 1u64].last, node.first))?
+        }
+        let ptr = match node.slot {
+            ColdPage(place) => place,
+            HotPage(_) => std.page.unlocated(node.stamp),
+        }
+        list.push(mut page_entries, std.page.Entry(key: take sep, cell: Child(std.page.Branch(child: ptr, rows: node.rows, charge: node.charge))))
+        list.push(mut kids, clone(node.slot))
+    }
+    let id = stream_draw_stamp(mut cursor, high)?
+    let image = pages.page_result(std.page.encode(page_entries, lvl, id, Collection))?
+    let hot = std.page.sealed_size(image)
+    let page = pages.page_result(std.page.attach(take image, take kids, list.new()))?
+    let first = types.copied(nodes[lo].first)?
+    let last_key = types.copied(nodes[hi - 1u64].last)?
+    Ok((StreamNode(slot: HotPage(take page), stamp: id, level: lvl, first: take first, last: take last_key, rows: rows, charge: charge), hot))
+}
+
+fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool, types.Failure] {
+    if hi - lo <= 2 {
+        return Ok(true)
+    }
+    let mut sum = 4u64 + 52u64
+    let mut first_sep: Bytes = list.new()
+    let mut common = 0u64
+    for i in lo + 1u64 .. hi {
+        let sep = pages.page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first))?
+        sum += 4 + 52 + list.len(sep)
+        if i == lo + 1u64 {
+            common = list.len(sep)
+            first_sep = take sep
+        } else {
+            common = std.page.common_prefix(first_sep, sep)
+        }
+    }
+    Ok(stream_compressed(sum, hi - lo, common) <= 4096)
+}
+
+pub fn stream_push_node(mut builder: StreamBuilder, lvl_idx: u64, take node: StreamNode) -> Result[(), types.Failure] {
+    while list.len(builder.levels) <= lvl_idx {
+        list.push(mut builder.levels, list.new())
+    }
+    list.push(mut builder.levels[lvl_idx], take node)
+    // Keep at least 2 children on the right tail so finalization never hits a
+    // unary branch when a full prefix splits off.
+    let node_count = list.len(builder.levels[lvl_idx])
+    if node_count >= 4 && !stream_branch_fits(builder.levels[lvl_idx], 0, node_count)? {
+        let split = node_count - 2
+        let (take parent, hot) = stream_encode_branch(builder.levels[lvl_idx], 0, split, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, hot)
+        let mut tail: List[StreamNode] = list.with_capacity(2)
+        for i in split .. node_count {
+            list.push(mut tail, clone_stream_node(builder.levels[lvl_idx][i]))
+        }
+        builder.levels[lvl_idx] = take tail
+        stream_push_node(mut builder, lvl_idx + 1, take parent)?
+    }
+    Ok(())
+}
+
+// Collapses a copy of `tree_levels` into one uniform-height AP3 root for a flush
+// cut (temporary wrapper stamps drawn from `temp_stamp`, never touching the
+// reserved stamp block).
+pub fn stream_temporary_root_multi(tree_levels: List[List[StreamNode]], mut temp_stamp: u64) -> Result[Option[StreamNode], types.Failure] {
+    let max_stamp = 18446744073709551614u64
+    let mut carry: List[StreamNode] = list.new()
+    for idx in 0u64 .. list.len(tree_levels) {
+        let mut group: List[StreamNode] = list.new()
+        for node in tree_levels[idx] {
+            list.push(mut group, clone_stream_node(node))
+        }
+        for take item in take carry {
+            list.push(mut group, take item)
+        }
+        if list.len(group) == 0 {
+            carry = list.new()
+            continue
+        }
+        let mut has_higher = false
+        for j in idx + 1u64 .. list.len(tree_levels) {
+            if list.len(tree_levels[j]) != 0 {
+                has_higher = true
+            }
+        }
+        if !has_higher && list.len(group) == 1 {
+            return Ok(Some(clone_stream_node(group[0u64])))
+        }
+        let (take wrapped, _) = stream_wrap_level(group, mut temp_stamp, max_stamp)?
+        carry = take wrapped
+    }
+    while list.len(carry) > 1 {
+        let (take wrapped, _) = stream_wrap_level(carry, mut temp_stamp, max_stamp)?
+        carry = take wrapped
+    }
+    if list.len(carry) == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(clone_stream_node(carry[0u64])))
+    }
+}
+
+fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Result[(List[StreamNode], u64), types.Failure] {
+    let n = list.len(nodes)
+    let mut out: List[StreamNode] = list.new()
+    let mut hot = 0u64
+    let mut lo = 0u64
+    while lo < n {
+        let mut hi = lo + 1
+        while hi < n && stream_branch_fits(nodes, lo, hi + 1)? {
+            hi += 1
+        }
+        if hi == n - 1 && hi - lo >= 2 {
+            hi = if hi - lo == 2 {
+                n
+            } else {
+                hi - 1
+            }
+        }
+        let (take parent_node, added) = stream_encode_branch(nodes, lo, hi, mut cursor, high)?
+        hot = int.saturating_add(hot, added)
+        list.push(mut out, take parent_node)
+        lo = hi
+    }
+    Ok((take out, hot))
+}
+
+pub fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode], types.Failure] {
+    if list.len(builder.leaf_rows) != 0 {
+        let ready_rows = replace(mut builder.leaf_rows, list.new())
+        let (take leaf_node, hot) = stream_encode_leaf(take ready_rows, builder.inline, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, hot)
+        stream_push_node(mut builder, 0u64, take leaf_node)?
+    }
+    let mut carry: List[StreamNode] = list.new()
+    for idx in 0u64 .. list.len(builder.levels) {
+        let mut group: List[StreamNode] = list.new()
+        for node in builder.levels[idx] {
+            list.push(mut group, clone_stream_node(node))
+        }
+        for take item in take carry {
+            list.push(mut group, take item)
+        }
+        if list.len(group) == 0 {
+            carry = list.new()
+            continue
+        }
+        let mut has_higher = false
+        for j in idx + 1u64 .. list.len(builder.levels) {
+            if list.len(builder.levels[j]) != 0 {
+                has_higher = true
+            }
+        }
+        if !has_higher && list.len(group) == 1 {
+            return Ok(Some(clone_stream_node(group[0u64])))
+        }
+        let (take wrapped, added) = stream_wrap_level(group, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, added)
+        carry = take wrapped
+    }
+    while list.len(carry) > 1 {
+        let (take wrapped, added) = stream_wrap_level(carry, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, added)
+        carry = take wrapped
+    }
+    if list.len(carry) == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(clone_stream_node(carry[0u64])))
+    }
+}

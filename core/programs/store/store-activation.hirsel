@@ -9,13 +9,7 @@ pub opaque type StagedMigration {
     base_rows: pages.PageTree,
     rewrites: Map[(u32, Bytes), ()],
     // Queued Cold rewrites checked in the consuming `waits` call (§3.5).
-    queued_rewrites: List[QueuedRewrite]
-}
-
-type ActivationRewrite: codec + send {
-    id: u32,
-    key: Bytes,
-    value: Bytes
+    queued_rewrites: List[transfer.QueuedRewrite]
 }
 
 fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool, take registered: List[DeclaredProjector]) -> StagedMigration {
@@ -26,29 +20,6 @@ fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool, take register
 /// the install's counterpart of `staged_snapshot` on the export side.
 pub fn staged_install_snapshot(db: Db, staged: StagedMigration) -> Snapshot {
     snapshot_from(db, 0u64, pages.holder_heads(db.holders)[0].head, staged.plan.schema.roots, int.saturating_add(staged.plan.schema.next_node, 1))
-}
-
-fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
-    match order.compare(a.id, id) {
-        Equal => list.compare_bytes(a.key, key),
-        different => different,
-    }
-}
-
-fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old: Bytes, raw: Bytes) -> Result[(), Error] {
-    let mut records = byte_cursor(plan.schema.roots.catalog, Included(failure_result_from_rep(catalog.index_prefix(id))?), failure_result_from_rep(catalog.index_prefix(id + 1))?)?
-    while let Some((name_key, encoded)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
-        let record = decode_catalog(encoded)?
-        let Some(ix) = indexes.binding_for_schema(plan.bindings, id, schema, record) else {
-            return Error(Stale(id))
-        }
-        let before = extract_index(ix, old, key)?
-        let after = extract_index(ix, raw, key)?
-        if before.keys != after.keys || before.payload != after.payload || before.sums != after.sums {
-            return Error(Changed(failure_result_from_rep(catalog.declaration_index_name(name_key))?))
-        }
-    }
-    Ok(())
 }
 
 pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
@@ -77,9 +48,9 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         }
         let _ = row_value(t.readers, t.id, raw)?
         let tiered = if staged_range {
-            table_is_tiered(plan.schema.roots.collections, t.id)?
+            failure_result_from_rep(transfer.table_is_tiered(plan.schema.roots.collections, t.id))?
         } else {
-            table_is_tiered(staged.base_rows, t.id)?
+            failure_result_from_rep(transfer.table_is_tiered(staged.base_rows, t.id))?
         }
         (take key, take logical, take raw, staged_range, current.number, tiered)
     }
@@ -92,7 +63,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
             }
         }
         failure_result_from_rep(types.capacity(list.try_reserve(mut staged.queued_rewrites, 1)))?
-        list.push(mut staged.queued_rewrites, QueuedRewrite(id: t.id, schema: schema_number, key: take key, logical: take logical, raw: take raw, staged_range: staged_range))
+        list.push(mut staged.queued_rewrites, transfer.QueuedRewrite(id: t.id, schema: schema_number, key: take key, logical: take logical, raw: take raw, staged_range: staged_range))
         return Ok(())
     }
     let live_bytes = {
@@ -105,7 +76,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         let Some(old) = found else {
             return Error(Missing("row"))
         }
-        check_rewrite_indexes(plan, t.id, schema_number, key, old, raw)?
+        failure_result_from_rep(transfer.check_rewrite_indexes(plan.schema.roots.catalog, plan.bindings, t.id, schema_number, key, old, raw))?
         let mut kept = plan.schema.live
         if staged_range || !plan.schema.retained {
             if let Some(previous) = pages.get_page_row(plan.schema.roots.collections, logical) {
@@ -218,7 +189,7 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
             Some(sender) => PagerTask(channel.sender(sender)),
             None => PagerDirect(log_directory(db)?, store_key_to_rep(db.store)),
         }
-        let mut no_cut: Option[ChildCutContext] = None
+        let mut no_cut: Option[transfer.ChildCutContext] = None
         let _ = resolve_queued_rewrites(take backend, pager.pin_partition(db.pager), open_number(db), db.store, mut working_staged, mut no_cut)?
     }
     let StagedMigration(plan: take staged_plan, declared: declared, projectors: take registered, ..) = take working_staged
@@ -280,145 +251,11 @@ fn publish_schema_plan_binding(mut db: Db, take staged: SchemaPlan, activation: 
     Ok(commit_ticket)
 }
 
-fn encode_rewrite_frame(staged: StagedMigration, take extra: List[ActivationRewrite]) -> Result[Option[Bytes], DeployError] {
-    if map.len(staged.rewrites) == 0 && list.len(extra) == 0 {
-        return Ok(None)
-    }
-    let mut rows: List[ActivationRewrite] = list.new()
-    let mut size = 4u64
-    let limit = option.unwrap(manifest.disk_kind_limit(0x0085))
-    for ((id, key), _) in staged.rewrites {
-        let logical = deploy_result(failure_result_from_rep(catalog.logical_key(id, key)))?
-        let Some(raw) = pages.get_page_row(staged.plan.schema.roots.collections, logical) else {
-            return Error(Store(Missing("row")))
-        }
-        size = int.saturating_add(size, 12 + list.len(key) + list.len(raw))
-        if size > limit {
-            return Error(Scratch(Limit(Triggers)))
-        }
-        list.push(mut rows, ActivationRewrite(id, key: deploy_result(failure_result_from_rep(types.copied(key)))?, value: deploy_result(failure_result_from_rep(types.copied(raw)))?))
-    }
-    for take row in take extra {
-        size = int.saturating_add(size, 12 + list.len(row.key) + list.len(row.value))
-        if size > limit {
-            return Error(Scratch(Limit(Triggers)))
-        }
-        list.push(mut rows, take row)
-    }
-    list.sort(mut rows, fn(a: ActivationRewrite, b: ActivationRewrite) -> Order {
-        compare_rewrite(a, b.id, b.key)
-    })
-    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
-    let mut raw: Bytes = list.with_capacity(size)
-    std.codec.encode(codec, rows, mut raw) ?=> |_| Scratch(Limit(Triggers))
-    Ok(Some(take raw))
-}
-
-type PreparedInput {
-    file: HostFile,
-    ctx: format.DiskContext,
-    offset: u64,
-    digest: std.sha256.Sha256,
-    peek: Option[u8]
-}
-
-fn prepared_read_input(mut input: PreparedInput, n: u64) -> Result[Bytes, Error] waits {
-    if n == 0 {
-        return Ok(list.new())
-    }
-    if let Some(first_byte) = replace(mut input.peek, None) {
-        let mut out: Bytes = list.with_capacity(n)
-        list.push(mut out, first_byte)
-        if n > 1 {
-            let rest = prepared_read(mut input.file, n - 1)?
-            list.append(mut out, rest)
-        }
-        return Ok(take out)
-    }
-    prepared_read(mut input.file, n)
-}
-
-fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
-    let mut out: Bytes = list.with_capacity(n)
-    while list.len(out) < n {
-        let room = n - list.len(out)
-        // Keep the old temporary's admission before issuing the read.
-        let charge = ((room + 7u64) / 8u64) * 8u64
-        failure_result_from_rep(types.capacity(bound bytes charge {}))?
-        if failure_result_from_rep(manifest.disk_io(host.read(mut file, mut out)))? == 0 {
-            // The old temporary was still charged when the eight-byte name
-            // was cloned. Check both charges before cloning in the caller.
-            if let Error(c) = bound bytes (charge + 8u64) {} {
-                return Error(Full(Allocation(Capacity(requested: 8, available: c.available - charge))))
-            }
-            return Error(failure_from_rep(format.disk_fault("PREPARED", list.len(out), Truncated)))
-        }
-    }
-    Ok(take out)
-}
-
-fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
-    let raw = scratch_result(prepared_read_input(mut input, 16u64))?
-    let encoded = prepared_payload(mut input, kind, raw)?
-    match std.codec.decode(codec, encoded) {
-        Error(_) => Error(ImportMalformed),
-        Ok(take value) => Ok(take value),
-    }
-}
-
-fn prepared_payload(mut input: PreparedInput, kind: u16, raw: Bytes) -> Result[Bytes, DeployError] waits {
-    let n = format.read_le(raw, 4u64, 4u64)
-    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(manifest.disk_kind_limit(kind)) {
-        return Error(ImportMalformed)
-    }
-    let encoded = scratch_result(prepared_read(mut input.file, n))?
-    let check = deploy_result(failure_result_from_rep(types.capacity(format.disk_check(input.ctx, input.offset, list.slice(raw, 0u64, 8u64), encoded))))?
-    if check != format.read_le(raw, 8u64, 8u64) {
-        return Error(ImportMalformed)
-    }
-    std.sha256.add(mut input.digest, raw, 0u64, 16u64)
-    std.sha256.add(mut input.digest, encoded, 0u64, n)
-    input.offset += 16u64 + n
-    Ok(take encoded)
-}
-
-fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite], DeployError] waits {
-    let mut first: Bytes = list.with_capacity(1)
-    if let Some(peeked) = replace(mut input.peek, None) {
-        list.push(mut first, peeked)
-    } else if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut first))))? == 0 {
-        return Ok(list.new())
-    }
-    if first[0] != 0x85 {
-        return Error(ImportMalformed)
-    }
-    let rest = scratch_result(prepared_read(mut input.file, 15))?
-    list.append(mut first, rest)
-    let offset = input.offset
-    let payload = prepared_payload(mut input, 0x0085, first)?
-    let codec: std.codec.Codec[List[ActivationRewrite]] = std.codec.of()
-    let rewrites = std.codec.decode(codec, payload) ?=> |_| Scratch(failure_from_rep(format.disk_fault("PREPARED", offset, Malformed)))
-    if list.len(rewrites) == 0 {
-        return Error(ImportMalformed)
-    }
-    for i in 0u64 .. list.len(rewrites) {
-        let row = rewrites[i]
-        if list.len(row.value) > VALUE_LIMIT || (i != 0 && compare_rewrite(rewrites[i - 1], row.id, row.key) != Less) {
-            return Error(ImportMalformed)
-        }
-    }
-    list.clear(mut first)
-    if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut first))))? != 0 {
-        return Error(ImportMalformed)
-    }
-    Ok(take rewrites)
-}
-
 fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), DeployError] {
     if list.len(imported.rewrites) == 0 {
         return Ok(())
     }
-    let Some(lease) = disk_state(db).lease else {
+    let Some(lease) = transfer.active_lease(disk_state(db).transfer) else {
         return Error(ExportMismatch)
     }
     let tree = view lease.collections
@@ -426,7 +263,7 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
         if row.id == 0 || row.id >= imported.meta.base.next_table {
             return Error(ImportMalformed)
         }
-        if let Ok(_) = list.binary_search_by(imported.ranges, scoped fn(checked_range: ValidatedRange) -> Order {
+        if let Ok(_) = list.binary_search_by(imported.ranges, scoped fn(checked_range: transfer.ValidatedRange) -> Order {
             order.compare(checked_range.id, row.id)
         }) {
             return Error(ImportMalformed)
@@ -438,15 +275,6 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
         let Some(_) = pages.get_page_row(tree, logical) else {
             return Error(ImportMalformed)
         }
-    }
-    Ok(())
-}
-
-fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployError] {
-    for row in rewrites {
-        let key = deploy_result(failure_result_from_rep(catalog.logical_key(row.id, row.key)))?
-        let raw = deploy_result(failure_result_from_rep(types.copied(row.value)))?
-        let _ = deploy_result(failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take key, take raw)))?
     }
     Ok(())
 }
@@ -514,7 +342,7 @@ fn leased_table_rows(db: Db, tree: pages.PageTree, id: u32) -> Result[List[(Byte
 }
 
 pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Result[ImportSettlement, DeployError] waits {
-    let Some(lease) = disk_state(db).lease else {
+    let Some(lease) = transfer.active_lease(disk_state(db).transfer) else {
         return Error(ExportMismatch)
     }
     let key = deploy_result(failure_result_from_rep(catalog.table_key(name)))?
@@ -564,7 +392,7 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
 /// payloads in order, then each 0x0083 (id, kind) as 4 bytes little endian and 1 byte, and
 /// the catalog key of each change.
 pub fn import_migration(imported: ValidatedImport) -> Result[(Bytes, List[Bytes]), DeployError] {
-    let codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let codec: std.codec.Codec[transfer.CatalogChange] = std.codec.of()
     let mut hashed = std.sha256.start()
     let mut keys: List[Bytes] = list.new()
     for change in imported.delta {

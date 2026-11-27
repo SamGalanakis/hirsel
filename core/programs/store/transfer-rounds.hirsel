@@ -1,0 +1,297 @@
+// The kept import and its delta rounds (STORE-SPEC §3.5a "The kept import").
+//
+// OLD validates the whole PREPARED file and keeps it while it still serves:
+// `keep_import` puts the shipped ranges into an import pin, a manifest holder
+// disjoint from main, and cuts, so every imported page is packed before the
+// pause. Each later catch-up round ships only the entries the round changed
+// (ROUND, written by the child's `catch_up_export`); OLD checks it
+// (`validate_round`) and patches the kept trees in memory (`apply_round`).
+// The install cut takes the ranges from the kept trees and drops the pin in
+// the same manifest, so it writes only the pages the rounds changed. A crash
+// at any point before that cut reopens OLD with the pin and no kept import;
+// the next cut drops the orphan pin.
+pub type KeptRange: send {
+    id: u32,
+    kind: u8,
+    residency: std.page_descriptor.Residency
+}
+
+type RangeTotal: codec + send {
+    id: u32,
+    rows: u64
+}
+
+// One entry the round changed: its new value, or None when the round removed
+// it, and whether the entry existed before the round.
+pub type RoundOp: codec + send {
+    key: Bytes,
+    value: Option[Bytes],
+    prior: bool
+}
+
+// The child's record of what PREPARED shipped and the last round it wrote.
+pub type ShippedImport: send {
+    ranges: List[KeptRange],
+    round: u64,
+    // Roots built by deferred Tiered index builds in `write_prepared`, handed
+    // into `staged.plan` on the first catch-up round.
+    staged_roots: Option[(pages.Roots, u64)]
+}
+
+const ROUND_ROLE: u8 = 9
+
+// A key the round removed or wrote, with its entry before the round's
+// first change to it. `seq` orders a key's notes, so its first one wins.
+pub type Touch {
+    key: Bytes
+    seq: u64
+    prior: Option[Bytes]
+}
+
+fn bytes_order(a: Bytes, b: Bytes) -> Order {
+    if a < b {
+        Less
+    } else if b < a {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+pub fn is_present(found: Option[View[Bytes]]) -> bool {
+    match found {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn ships(ranges: List[KeptRange], id: u32) -> bool {
+    for shipped_range in ranges {
+        if shipped_range.id == id && shipped_range.kind != 0 {
+            return true
+        }
+    }
+    false
+}
+
+pub fn shipped_count(ranges: List[KeptRange]) -> u64 {
+    let mut n = 0u64
+    for shipped_range in ranges {
+        if shipped_range.kind != 0 {
+            n += 1
+        }
+    }
+    n
+}
+
+// Each range PREPARED ships, with the kind its catalog record gives it and its
+// residency in `collections`; a range with no record is dropped (kind 0).
+pub fn shipped_ranges(collections: pages.PageTree, ranges: List[RangeChange]) -> Result[List[KeptRange], types.Failure] {
+    let mut out: List[KeptRange] = list.with_capacity(list.len(ranges))
+    for shipped_range in ranges {
+        let (kind, residency) = match shipped_range.catalog {
+            Some(raw) => {
+                let k = pages.descriptor_kind_byte(indexes.catalog_kind(indexes.decode_catalog(raw)?.record))
+                let res = match std.page.lookup(collections.root, catalog.prefix(shipped_range.id)?) {
+                    Some(desc) => pages.collection_descriptor(desc).residency,
+                    None => ResidentMemory,
+                }
+                (k, res)
+            },
+            None => (0u8, ResidentMemory),
+        }
+        list.push(mut out, KeptRange(id: shipped_range.id, kind: kind, residency: residency))
+    }
+    Ok(take out)
+}
+
+// Notes `key` before the round changes it in `tree`.
+fn note_touch(mut touched: List[Touch], tree: pages.PageTree, key: Bytes) -> Result[(), types.Failure] {
+    let prior = match pages.get_page_row(tree, key) {
+        Some(raw) => Some(types.copied(raw)?),
+        None => None,
+    }
+    let seq = list.len(touched)
+    let note = Touch(key: types.copied(key)?, seq: seq, prior: take prior)
+    types.capacity(list.try_reserve(mut touched, 1))?
+    list.push(mut touched, take note)
+    Ok(())
+}
+
+// The entries a round changed: each touched key's entry before the round
+// against the shipped ranges after it. An entry the round removed and wrote
+// back unchanged is not an op.
+fn round_ops(after: pages.PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], types.Failure] {
+    list.sort(mut touched, fn(a: Touch, b: Touch) -> Order {
+        match bytes_order(a.key, b.key) {
+            Equal => if a.seq < b.seq {
+                Less
+            } else if b.seq < a.seq {
+                Greater
+            } else {
+                Equal
+            },
+            other => other,
+        }
+    })
+    let mut ops: List[RoundOp] = list.new()
+    for i in 0u64 .. list.len(touched) {
+        let note = view touched[i]
+        if i != 0 && touched[i - 1].key == note.key {
+            continue
+        }
+        let new = pages.get_page_row(after, note.key)
+        match new {
+            Some(raw) => {
+                let had = match note.prior {
+                    Some(prior) => {
+                        if prior == raw {
+                            continue
+                        }
+                        true
+                    },
+                    None => false,
+                }
+                list.push(mut ops, RoundOp(key: types.copied(note.key)?, value: Some(types.copied(raw)?), prior: had))
+            },
+            None => {
+                if let Some(_) = note.prior {
+                    list.push(mut ops, RoundOp(key: types.copied(note.key)?, value: None, prior: true))
+                }
+            },
+        }
+    }
+    Ok(take ops)
+}
+
+// Each shipped range's row count in `tree`, in range order.
+pub fn range_totals(tree: pages.PageTree, ranges: List[KeptRange]) -> Result[List[RangeTotal], types.Failure] {
+    let mut out: List[RangeTotal] = list.new()
+    for shipped_range in ranges {
+        if shipped_range.kind == 0 {
+            continue
+        }
+        list.push(mut out, RangeTotal(id: shipped_range.id, rows: range_rows(tree, shipped_range.id)?))
+    }
+    Ok(take out)
+}
+
+pub fn range_rows(tree: pages.PageTree, id: u32) -> Result[u64, types.Failure] {
+    match std.page.lookup(tree.root, catalog.prefix(id)?) {
+        Some(raw) => Ok(pages.collection_descriptor(raw).rows),
+        None => Ok(0u64),
+    }
+}
+
+// The install's ranges, from the kept trees.
+pub fn kept_ranges(collections: pages.PageTree, ranges: List[KeptRange]) -> Result[List[ImportedRange], DeployFailure] {
+    let mut out: List[ImportedRange] = list.with_capacity(list.len(ranges))
+    for shipped_range in ranges {
+        if shipped_range.kind == 0 {
+            list.push(mut out, ImportedRange(id: shipped_range.id, kind: 0, tree: None, slot: None, rows: 0, charge: 0, count: 0, digest: 0, residency: ResidentMemory))
+            continue
+        }
+        let key = deploy_result(catalog.prefix(shipped_range.id))?
+        let Some((slot, desc)) = std.page.collection_slot(collections.root, key) else {
+            return Error(Store(Missing("import range")))
+        }
+        let fields = pages.collection_descriptor(desc)
+        if fields.residency == ResidentMemory {
+            let tree: Option[Arc[std.page.Page]] = match slot {
+                HotPage(child) => {
+                    let (rows, _) = std.page.totals(child)
+                    if rows == 0 {
+                        None
+                    } else {
+                        Some(arc.share(child))
+                    }
+                },
+                ColdPage(_) => return Error(Store(Missing("import range"))),
+            }
+            list.push(mut out, ImportedRange(id: shipped_range.id, kind: shipped_range.kind, tree: take tree, slot: None, rows: fields.rows, charge: fields.row_bytes, count: fields.rows, digest: 0, residency: ResidentMemory))
+        } else {
+            let installed_slot: Option[std.page.Slot] = if fields.rows == 0 {
+                None
+            } else {
+                Some(clone(slot))
+            }
+            list.push(mut out, ImportedRange(id: shipped_range.id, kind: shipped_range.kind, tree: None, slot: take installed_slot, rows: fields.rows, charge: fields.row_bytes, count: fields.rows, digest: 0, residency: ResidentTiered))
+        }
+    }
+    Ok(take out)
+}
+
+// One ROUND file: the round's number, the export stamps it moves the kept
+// import between, and each shipped range's row count at `to`.
+pub type RoundMeta: codec + send {
+    round: u64,
+    from: ExportStampRep,
+    to: ExportStampRep,
+    ops: u64,
+    totals: List[transfer.RangeTotal]
+}
+
+pub fn same_stamp(a: ExportStampRep, b: ExportStampRep) -> bool {
+    a.attempt == b.attempt && a.store_hi == b.store_hi && a.store_lo == b.store_lo && a.opened == b.opened && a.branch == b.branch && a.head == b.head && a.next_table == b.next_table && a.activation == b.activation && a.terminal == b.terminal && a.end == b.end
+}
+
+// Writes ROUND: the meta frame, then one frame per op in key order.
+pub fn write_round(d: Dir, id: types.StoreKey, take meta: RoundMeta, ops: List[RoundOp]) -> Result[(), DeployFailure] waits {
+    let ctx = format.DiskContext(store: id, role: ROUND_ROLE, seq: meta.round)
+    let meta_codec: std.codec.Codec[RoundMeta] = std.codec.of()
+    let mut encoded: Bytes = list.new()
+    std.codec.encode(meta_codec, meta, mut encoded) ?=> |_| Scratch(Limit(Value))
+    if list.len(encoded) > option.unwrap(manifest.disk_kind_limit(0x0086)) {
+        return Error(Scratch(Limit(Value)))
+    }
+    let mut file = scratch_result(open_frames(d, "ROUND", ctx))?
+    scratch_result(write_prepared_payload(mut file, 0x0086, encoded))?
+    let op_codec: std.codec.Codec[RoundOp] = std.codec.of()
+    for op in ops {
+        scratch_result(write_prepared_frame(mut file, 0x0087, op_codec, op))?
+    }
+    scratch_result(finish_frames(take file))
+}
+
+pub opaque type CheckedRound: send {
+    meta: RoundMeta,
+    ops: List[RoundOp],
+}
+
+pub fn round_changes(take checked: CheckedRound) -> (RoundMeta, List[RoundOp]) {
+    let CheckedRound(meta: take meta, ops: take ops) = take checked
+    (take meta, take ops)
+}
+
+pub fn read_round(d: Dir) -> Result[CheckedRound, DeployFailure] waits {
+    let mut file = scratch_result(manifest.disk_io(host.open(d, "ROUND", Read)))?
+    let header = scratch_result(prepared_read(mut file, 72u64))?
+    let head = deploy_result(manifest.disk_read_header("ROUND", header, ROUND_ROLE, None, None))?
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start(), peek: None)
+    let meta_codec: std.codec.Codec[RoundMeta] = std.codec.of()
+    let op_codec: std.codec.Codec[RoundOp] = std.codec.of()
+    let meta = prepared_frame(mut input, 0x0086, meta_codec)?
+    if meta.round == 0 || meta.round != head.context.seq || meta.to.store_hi != head.context.store.hi || meta.to.store_lo != head.context.store.lo || meta.from.store_hi != meta.to.store_hi || meta.from.store_lo != meta.to.store_lo {
+        return Error(ImportMalformed)
+    }
+    let mut ops: List[RoundOp] = list.with_capacity(order.min(meta.ops, 65536u64))
+    for i in 0u64 .. meta.ops {
+        let op = prepared_frame(mut input, 0x0087, op_codec)?
+        if list.len(op.key) < 4 || (i != 0 && !(ops[i - 1u64].key < op.key)) {
+            return Error(ImportMalformed)
+        }
+        if let None = op.value {
+            if !op.prior {
+                return Error(ImportMalformed)
+            }
+        }
+        list.push(mut ops, take op)
+    }
+    let mut rest: Bytes = list.with_capacity(1)
+    if scratch_result(manifest.disk_io(host.read(mut input.file, mut rest)))? != 0 {
+        return Error(ImportMalformed)
+    }
+    let PreparedInput(file: take done, ..) = take input
+    scratch_result(manifest.disk_io(host.close(take done)))?
+    Ok(CheckedRound(meta: take meta, ops: take ops))
+}

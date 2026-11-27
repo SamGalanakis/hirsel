@@ -51,3 +51,12 @@ pub type SchemaPlan: send {
 pub fn schema_plan(take roots: pages.Roots, next_node: u64, next_table: u32, live: u64, ceiling: u64, retained: bool, value_limit: u64) -> SchemaPlan {
     SchemaPlan(roots: take roots, next_node: next_node, next_table: next_table, live: live, ceiling: ceiling, retained: retained, changed: false, superseded: list.new(), defer_tiered: false, retention: list.new(), value_limit: value_limit)
 }
+
+pub fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), types.Failure] {
+    over_ceiling(live_bytes, plan.ceiling)?
+    plan.roots = take roots
+    plan.live = live_bytes
+    plan.next_table = next_table
+    plan.changed = true
+    Ok(())
+}

@@ -197,7 +197,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.accounting.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
     db.accounting.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
-    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
+    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
         if let Ok(cut_ticket) = checkpoint(mut db) {

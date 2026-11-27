@@ -1,0 +1,15 @@
+pub type DeployFailure: send = Store(types.Failure) | Scratch(types.Failure) | ExportMismatch | ImportMalformed | Drift
+
+fn scratch_result[T](take answer: Result[T, types.Failure]) -> Result[T, DeployFailure] {
+    match take answer {
+        Ok(take value) => Ok(take value),
+        Error(take problem) => Error(Scratch(take problem)),
+    }
+}
+
+fn deploy_result[T](take answer: Result[T, types.Failure]) -> Result[T, DeployFailure] {
+    match take answer {
+        Ok(take value) => Ok(take value),
+        Error(take problem) => Error(Store(take problem)),
+    }
+}

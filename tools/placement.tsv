@@ -81,8 +81,8 @@ staged_install_snapshot	store-activation.hirsel	store	store	-
 compare_rewrite	store-activation.hirsel	transfer	transfer	L13
 check_rewrite_indexes	store-activation.hirsel	transfer	transfer	L13
 stage_rewrite	store-activation.hirsel	store	store	-
-stage_system_table	store-activation.hirsel	transfer	transfer	L13
-stage_system_put	store-activation.hirsel	transfer	transfer	L13
+stage_system_table	store-activation.hirsel	transfer	store	-	L13 root boundary: typed Table result and root staging
+stage_system_put	store-activation.hirsel	transfer	store	-	L13 root boundary: typed Table and root staging
 stage_activation	store-activation.hirsel	store	store	-
 activation_install_allowed	store-activation.hirsel	store	store	-
 install_activation	store-activation.hirsel	store	store	-
@@ -285,7 +285,7 @@ follow_moves	store-catchup.hirsel	transfer	transfer	L13
 catch_up_indexes	store-catchup.hirsel	transfer	transfer	L13
 patch_index_ranges	store-catchup.hirsel	transfer	transfer	L13
 patch_entries	store-catchup.hirsel	transfer	transfer	L13
-owned_entry	store-catchup.hirsel	transfer	transfer	L13
+owned_entry_direct	store-catchup.hirsel	transfer	transfer	L13	L13 uses the child pager for Tiered lookup
 contains_bytes	store-catchup.hirsel	transfer	transfer	L13
 CELL_INLINE	store-cell.hirsel	txn	txn	L12
 ValueCollection	store-cell.hirsel	txn	store	-	L12 root boundary: holds root StoreId and Readers
@@ -468,7 +468,7 @@ StepOp	store-export.hirsel	transfer	transfer	L13
 StepsMeta	store-export.hirsel	transfer	transfer	L13
 ReplayStep	store-export.hirsel	transfer	transfer	L13
 STEPS_ROLE	store-export.hirsel	transfer	transfer	L13
-leased_step_base	store-export.hirsel	store	store	-
+build_leased_step	store-export.hirsel	store	store	-	L13 finds the main holder and passes its roots and logged rows to export_step
 record_leased_step	store-export.hirsel	store	store	-
 export_step	store-export.hirsel	transfer	transfer	L13
 state_move	store-export.hirsel	transfer	transfer	L13
@@ -486,7 +486,7 @@ scratch_result	store-export.hirsel	transfer	store	-	public root type in signatur
 deploy_result	store-export.hirsel	transfer	transfer	L13
 copy_export_file	store-export.hirsel	transfer	transfer	L13
 copy_export_prefix	store-export.hirsel	transfer	capture	L7	pull-down transfer -> capture (used by copy_backup_journal)
-export_bytes	store-export.hirsel	transfer	transfer	L13
+export_bytes	store-export.hirsel	transfer	store	-	L13 root boundary: codec of the nominal public ExportStamp
 export_copy	store-export.hirsel	store	store	-
 copy_log_export	store-export.hirsel	transfer	transfer	L13
 begin_export	store-export.hirsel	store	store	-
@@ -505,7 +505,7 @@ append_export_range	store-export.hirsel	transfer	transfer	L13
 Preparation	store-export.hirsel	store	store	-
 open_export	store-export.hirsel	store	store	-
 open_copied	store-export.hirsel	store	store	-
-read_export_stamp	store-export.hirsel	transfer	transfer	L13
+read_export_stamp	store-export.hirsel	transfer	store	-	L13 root boundary: codec and result of the nominal public ExportStamp
 require_empty	store-export.hirsel	transfer	transfer	L13
 copy_restore_file	store-export.hirsel	transfer	transfer	L13
 restore	store-export.hirsel	store	store	-
@@ -1687,7 +1687,7 @@ ShippedImport	store-rounds.hirsel	transfer	transfer	L13
 ValidatedRound	store-rounds.hirsel	store	store	-
 ROUND_ROLE	store-rounds.hirsel	transfer	transfer	L13
 import_pin_slot	store-rounds.hirsel	store	store	-
-orphan_import_pin	store-rounds.hirsel	store	store	-
+orphan_owner3_pins	store-rounds.hirsel	store	store	-	L13 retains Db holder enumeration for import and build pins
 same_stamp	store-rounds.hirsel	transfer	transfer	L13
 keep_import	store-rounds.hirsel	store	store	-
 hold_import	store-rounds.hirsel	store	store	-
@@ -3124,3 +3124,74 @@ CallStreamState	txn-accounting.hirsel	txn	txn	L12	L12 transaction module
 CutDecision	txn-commit.hirsel	txn	txn	L12	L12 transaction module
 ClaimSweepState	txn-claims.hirsel	txn	txn	L12	L12 transaction module
 read_totals	txn-indexes.hirsel	txn	txn	L12	L12 transaction module
+StreamNode	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+StreamBuilder	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+new_stream_builder	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_leaf_row_width	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_compressed	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+clone_stream_node	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_draw_stamp	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_encode_leaf	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_encode_branch	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_branch_fits	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_push_node	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_temporary_root_multi	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_wrap_level	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+stream_finish_range	transfer-builder.hirsel	transfer	transfer	L13	L13 transfer module
+child_cut_tiered	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+clone_replay_value	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+child_apply_tiered_op	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+child_get_row	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+apply_tiered_rewrite_backend	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+apply_queued_rewrites	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+clone_pager_backend	transfer-child.hirsel	transfer	transfer	L13	L13 transfer module
+KeptImportRep	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+TransferState	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+new_state	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+active_lease	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+leased	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+start_lease	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+take_steps	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+record_step	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+move_lease	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+has_import	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+take_import	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+reserve	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+reserved	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+keep_import	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+apply_round	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+target_limits	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+set_target	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+forget_import	transfer-state.hirsel	transfer	transfer	L13	L13 transfer module
+DeployFailure	transfer-errors.hirsel	transfer	transfer	L13	L13 transfer module
+scratch_result	transfer-errors.hirsel	transfer	transfer	L13	L13 transfer module
+MigrateSource	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+QueuedRewrite	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+DeferredMigrate	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+DeferredIndexBuild	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+export_source_map	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+collect_base_descriptors	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+base_descriptors_from_tree	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+read_disk_file_bounded	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+put_collection_with_residency	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+define_empty_tiered_collection	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+tiered_tree_hot_bytes	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+validate_source_map	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+derive_range_residencies	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+read_optional_source_map	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+table_is_tiered	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+read_export_base_descriptors	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+read_collection_map_descriptors	transfer-tiered.hirsel	transfer	transfer	L13	L13 transfer module
+CatchUpChange	transfer-catchup.hirsel	transfer	transfer	L13	L13 transfer module
+ChildCutContext	transfer-catchup.hirsel	transfer	transfer	L13	L13 transfer module
+note_touch_direct	transfer-catchup.hirsel	transfer	transfer	L13	L13 transfer module
+round_ops_direct	transfer-catchup.hirsel	transfer	transfer	L13	L13 transfer module
+ExportStampRep	transfer-export.hirsel	transfer	transfer	L13	L13 transfer module
+copy_tail	transfer-export.hirsel	transfer	transfer	L13	L13 transfer module
+CheckedRound	transfer-rounds.hirsel	transfer	transfer	L13	L13 transfer module
+round_changes	transfer-rounds.hirsel	transfer	transfer	L13	L13 transfer module
+read_round	transfer-rounds.hirsel	transfer	transfer	L13	L13 transfer module
+prepared_read_input	transfer-frames.hirsel	transfer	transfer	L13	L13 transfer module
+PreparedTargetRep	transfer-prepared.hirsel	transfer	transfer	L13	L13 transfer module
+step_collections_covered	transfer-steps.hirsel	transfer	transfer	L13	L13 transfer module
+discard_replayed_collection	transfer-steps.hirsel	transfer	transfer	L13	L13 transfer module

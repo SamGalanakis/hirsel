@@ -300,7 +300,7 @@ fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catal
     let mut roots = pages.share_roots(plan.schema.roots)
     let charge = failure_result_from_rep(catalog.remove_store_collection(mut roots.collections, record.id, mut plan.schema.next_node))?
     // 3150 F2: a removed index supersedes its id (§13.7, D-D7-5).
-    discard_replayed_collection(mut roots.collections, record.id)?
+    failure_result_from_rep(transfer.discard_replayed_collection(mut roots.collections, record.id))?
     failure_result_from_rep(types.capacity(list.try_reserve(mut plan.schema.superseded, 1)))?
     list.push(mut plan.schema.superseded, record.id)
     let mut live_bytes = plan.schema.live

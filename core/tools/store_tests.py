@@ -105,7 +105,7 @@ DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_
                       'index_owner_refused', 'index_bindings_refused', 'index_registry_refused',
                       'index_registration_refused', 'registered_index_refused',
                       'reader_state_refused', 'read_only_state_refused', 'entry_cursor_refused',
-                      'i8_row_escape_refused', 'tx_state_refused')
+                      'i8_row_escape_refused', 'tx_state_refused', 'transfer_state_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
                     'view_tx_write_refused', *DEPENDENT_CONTROLS)
@@ -171,6 +171,7 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'registered_index_refused': [('PROG-2', '`store@1/indexes/RegisteredIndex` is private or opaque')],
             'reader_state_refused': [('PROG-2', '`store@1/read/ReaderState` is private or opaque')],
             'tx_state_refused': [('PROG-2', '`store@1/txn/TxState` is private or opaque')],
+            'transfer_state_refused': [('PROG-2', '`store@1/transfer/TransferState` is private or opaque')],
             'read_only_state_refused': [('PROG-2', '`store@1/read/ReadOnlyState` is private or opaque')],
             'entry_cursor_refused': [('PROG-2', '`store@1/read/EntryCursor` is private or opaque')],
             'i8_row_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],

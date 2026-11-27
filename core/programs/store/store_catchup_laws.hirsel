@@ -354,7 +354,7 @@ fn lcu_build_round(mut db: Db, t: Table[u64, u64], n: u64, mut next_value: u64, 
 
 // The child's copy of OLD after a round is OLD at the round's cut.
 fn lcu_mirrors(db: Db, source: Preparation, by_v: u32) -> Result[(), DeployError] {
-    if list.len(deploy_result(catalog_changes(pages.holder_heads(source.db.holders)[0].roots, pages.holder_heads(db.holders)[0].roots))?) != 0 {
+    if list.len(deploy_result(failure_result_from_rep(transfer.catalog_changes(pages.holder_heads(source.db.holders)[0].roots, pages.holder_heads(db.holders)[0].roots)))?) != 0 {
         fail("L-IX catch-up: the child's catalog is not OLD's at the cut")
     }
     if deploy_result(lix_entries(source.db, by_v))? != deploy_result(lix_entries(db, by_v))? {

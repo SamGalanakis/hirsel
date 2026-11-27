@@ -1,27 +1,4 @@
-type ObjectExportCopy: send {
-    journal: Sender[object_writer.JournalMsg],
-    health: Latest[Health],
-    manifest: pages.HistoryRef,
-    packs: List[pages.HistoryRef],
-    entries: List[pages.HistoryRef],
-}
-
-fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: pages.HistoryRef) -> Result[Bytes, Error] waits {
-    let (take key, take buffer) = disk_allocation(scoped fn() -> Result[(String, Bytes), Error] {
-        Ok((history.history_key(lead, reference), list.with_capacity(reference.len)))
-    })?
-    let (outlet, incoming): (Sender[Result[Bytes, types.Failure]], Receiver[Result[Bytes, types.Failure]]) = channel.new(1)
-    let request = journal.ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet)
-    if let Ok(()) = channel.send(plan.journal, ObjectExportRead(take request)) {
-        if let Ok(take observed) = channel.receive(incoming) {
-            return failure_result_from_rep(take observed)
-        }
-    }
-    failure_result_from_rep(object_writer.health_result(latest.read(plan.health)))?
-    Error(Io(Closed))
-}
-
-fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation: Option[u64]) -> Result[ExportCopy, DeployError] waits {
+fn begin_object_export_copy(mut db: Db, take into: transfer.ExportInto, take attempt: Bytes, activation: Option[u64]) -> Result[ExportCopy, DeployError] waits {
     let receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, receipt))?
     // §12.11.11 M5: export/backup on an attached Place cuts when `sealed` is
@@ -100,8 +77,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     let held = arc.share(job.lease)
     write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[manifest.ExportLease])) {
         let (take sending, take lease) = take grant
-        state.lease = Some(take lease)
-        state.steps = list.new()
+        transfer.start_lease(mut state.transfer, take lease)
         if let ObjectBackend(mut writer) = state.backend {
             object_writer.set_export_lifetime(mut writer, Some(take sending))
         }
@@ -109,7 +85,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     Ok(take job)
 }
 
-fn object_export_capture(db: Db, mut lane: object_writer.ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
+fn object_export_capture(db: Db, mut lane: object_writer.ObjectJournalSession, take into: transfer.ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
     let head = object_writer.paused_head(lane)
     // A backup (no activation) takes the activation the head has.
     let activation = match wanted {
@@ -158,72 +134,10 @@ fn object_export_capture(db: Db, mut lane: object_writer.ObjectJournalSession, t
             journal_end = total
         }
     }
-    let source = ObjectExportCopy(journal: channel.sender(object_sender(disk_state(db))), health: object_writer.health_handle(object_state(db)), manifest: mark.manifest, packs: take packs, entries: take history_entries)
+    let source = transfer.ObjectExportCopy(journal: channel.sender(object_sender(disk_state(db))), health: object_writer.health_handle(object_state(db)), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(failure_result_from_rep(types.copied(attempt)))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation, terminal: head.checkpoint.seq, end: journal_end)
     let lease = arc.new(manifest.ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     object_writer.hold_export(mut lane, take names, take stop)
     Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))
-}
-
-fn export_write(mut file: HostFile, raw: Bytes) -> Result[(), DeployError] waits {
-    match host.write(mut file, raw) {
-        Ok(()) => Ok(()),
-        Error(problem) => Error(Scratch(Io(problem.error))),
-    }
-}
-
-fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String, reference: pages.HistoryRef, role: u8, local: String) -> Result[(), DeployError] waits {
-    let mut raw = deploy_result(object_export_fetch(plan, lead, reference))?
-    let key = history.history_key(lead, reference)
-    let ctx = deploy_result(failure_result_from_rep(history.history_object_context(key, store_key_to_rep(id), role, reference, raw)))?
-    deploy_result(failure_result_from_rep(history.history_object_digest(key, reference, raw)))?
-    let header = deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0))))?
-    for i in 0u64 .. 72 {
-        raw[i] = header[i]
-    }
-    scratch_result(failure_result_from_rep(manifest.disk_write_synced(to, local, raw)))
-}
-
-fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Result[(), DeployError] waits {
-    let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
-    for item in plan.packs {
-        let local = scratch_result(failure_result_from_rep(manifest.paged_pack_path(item.seq)))?
-        object_export_file(plan, to, id, "p-", item, 3, local)?
-    }
-    object_export_file(plan, to, id, "m-", plan.manifest, 1, "MANIFEST")?
-    let local = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", stamp.terminal, ""))))?
-    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: stamp.terminal)
-    let mut output = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(to, local, Write))))?
-    export_write(mut output, deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0))))?)?
-    let mut offset = 72u64
-    for item in plan.entries {
-        let key = history.history_key("e-", item)
-        let mut raw = deploy_result(object_export_fetch(plan, "e-", item))?
-        let (remote, _) = deploy_result(failure_result_from_rep(history.history_entry_context(key, store_key_to_rep(id), item, raw)))?
-        deploy_result(failure_result_from_rep(history.history_object_digest(key, item, raw)))?
-        let first = deploy_result(failure_result_from_rep(manifest.disk_frame_bytes(key, remote, raw, 112)))?
-        if first.kind == 0x0040 {
-            deploy_result(failure_result_from_rep(history.history_check_claim(key, item, raw, first)))?
-            continue
-        }
-        let mut at = 112u64
-        while at < item.len {
-            let frame = deploy_result(failure_result_from_rep(manifest.disk_frame_bytes(key, remote, raw, at)))?
-            if frame.kind == 0x0090 || frame.kind == 0x00C0 {
-                return Error(Store(failure_from_rep(format.disk_fault(key, at, Malformed))))
-            }
-            deploy_result(failure_result_from_rep(manifest.disk_check_frame_kind(key, remote, frame.kind, frame.flags, at)))?
-            let check = deploy_result(failure_result_from_rep(types.capacity(format.disk_check(ctx, offset, list.slice(raw, at, frame.payload), list.slice(raw, frame.payload, frame.end)))))?
-            list.set_word_le(mut raw, at + 8, check)
-            offset += frame.end - at
-            at = frame.end
-        }
-        export_write(mut output, list.slice(raw, 112, item.len))?
-    }
-    if offset != stamp.end {
-        return Error(ExportMismatch)
-    }
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync(mut output))))?
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take output))))
 }

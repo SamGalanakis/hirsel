@@ -1,0 +1,119 @@
+pub type KeptImportRep: send {
+    meta: PreparedMeta,
+    delta: List[CatalogChange],
+    ranges: List[KeptRange],
+    rewrites: List[ActivationRewrite],
+    // The shipped ranges at `meta.base`: the pin's packed pages, plus the
+    // pages each applied round wrote, which no holder references yet.
+    tree: pages.PageTree,
+    digest: Inline[u8, 32],
+    round: u64
+}
+
+pub opaque type TransferState {
+    lease: Option[Arc[manifest.ExportLease]],
+    steps: List[LeaseStep],
+    imported: Option[KeptImportRep],
+    reserving: Option[Inline[u8, 32]],
+    target: Option[manifest.TargetLimits],
+}
+
+pub fn new_state() -> TransferState {
+    TransferState(lease: None, steps: list.new(), imported: None, reserving: None, target: None)
+}
+
+pub fn active_lease(state: TransferState) -> View[Option[Arc[manifest.ExportLease]]] in state {
+    view state.lease
+}
+
+pub fn leased(state: TransferState) -> bool {
+    match state.lease {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn start_lease(mut state: TransferState, take held: Arc[manifest.ExportLease]) {
+    state.lease = Some(take held)
+    state.steps = list.new()
+}
+
+pub fn take_steps(mut state: TransferState) -> List[LeaseStep] {
+    replace(mut state.steps, list.new())
+}
+
+pub fn record_step(mut state: TransferState, take step: LeaseStep) {
+    list.push(mut state.steps, take step)
+}
+
+pub fn move_lease(mut state: TransferState, take advanced: Arc[manifest.ExportLease], steps: List[ExportStep]) {
+    state.lease = Some(take advanced)
+    if let Some(mut kept) = state.imported {
+        rebase_kept_delta(mut kept, steps)
+    }
+}
+
+pub fn has_import(state: TransferState) -> bool {
+    match state.imported {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn take_import(mut state: TransferState) -> Option[KeptImportRep] {
+    replace(mut state.imported, None)
+}
+
+pub fn reserve(mut state: TransferState, digest: Inline[u8, 32]) {
+    state.imported = None
+    state.reserving = Some(digest)
+}
+
+pub fn reserved(state: TransferState, digest: Inline[u8, 32]) -> bool {
+    state.reserving == Some(digest)
+}
+
+pub fn keep_import(mut state: TransferState, take kept: KeptImportRep) {
+    state.imported = Some(take kept)
+    state.reserving = None
+}
+
+pub fn apply_round(mut state: TransferState, take kept: KeptImportRep) {
+    state.imported = Some(take kept)
+}
+
+pub fn target_limits(state: TransferState) -> Option[manifest.TargetLimits] {
+    state.target
+}
+
+pub fn set_target(mut state: TransferState, target: Option[manifest.TargetLimits]) {
+    state.target = target
+}
+
+pub fn forget_import(mut state: TransferState) {
+    state.imported = None
+    state.reserving = None
+    state.lease = None
+    state.steps = list.new()
+}
+
+// The schema commits a round ships moved OLD's records under the kept
+// delta: each change's `before` follows them, so the install still finds
+// the catalog the delta expects.
+fn rebase_kept_delta(mut kept: KeptImportRep, steps: List[ExportStep]) {
+    for step in steps {
+        for op in step.catalog {
+            for i in 0u64 .. list.len(kept.delta) {
+                if kept.delta[i].key == op.key {
+                    kept.delta[i].before = clone(op.value)
+                }
+            }
+        }
+    }
+}
+
+// Outside s_e, each metered draft pays for its admission scope (1),
+// draft_call (1), isolate and its callback (2), issued-cell into_inner (1),
+// log.finish (1), and finish_stage (1). Calls inside core's log.finish take
+// no steps; a prepared reply makes finish_stage skip its data-row scan.
+pub const CALL_FIXED_STEPS: u64 = 7

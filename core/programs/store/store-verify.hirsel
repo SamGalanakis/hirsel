@@ -259,7 +259,7 @@ type VerifyEntries = VerifyMemoryEntries(pages.PageRange) | VerifyTieredEntries(
 
 fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[VerifyEntries, Error] waits {
     let data = pages.holder_heads(db.holders)[0].roots.collections
-    if table_is_tiered(data, id)? {
+    if failure_result_from_rep(transfer.table_is_tiered(data, id))? {
         let (take rows, _) = tiered_rows_after_mode(db, id, clone(cursor), limit, direct)?
         return Ok(VerifyTieredEntries(take rows, 0))
     }
@@ -287,7 +287,7 @@ fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes
 type WalkPoint = WalkResident | WalkReader(Reader) | WalkDirect(Dir)
 
 fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkPoint, Error] waits {
-    if !table_is_tiered(s.roots.collections, id)? {
+    if !failure_result_from_rep(transfer.table_is_tiered(s.roots.collections, id))? {
         return Ok(WalkResident)
     }
     if direct {

@@ -442,3 +442,37 @@ fn optional_store_key_to_rep(take id: Option[StoreId]) -> Option[types.StoreKey]
         None => None,
     }
 }
+
+fn transfer_result[T](take result: Result[T, transfer.DeployFailure]) -> Result[T, DeployError] {
+    match take result {
+        Ok(take value) => Ok(take value),
+        Error(take problem) => Error(match take problem {
+            Store(take item) => Store(failure_from_rep(take item)),
+            Scratch(take item) => Scratch(failure_from_rep(take item)),
+            ExportMismatch => ExportMismatch,
+            ImportMalformed => ImportMalformed,
+            Drift => Drift,
+        }),
+    }
+}
+
+fn export_stamp_to_rep(take stamp: ExportStamp) -> transfer.ExportStampRep {
+    let ExportStamp(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, terminal, end) = take stamp
+    transfer.ExportStampRep(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, terminal, end)
+}
+
+fn prepared_target_to_rep(take target: PreparedTarget) -> transfer.PreparedTargetRep {
+    let PreparedTarget(describe: take describe, release: take release, digest: take digest, resident_limit, pack_bytes, checkpoint_bytes, journal_limit, limits) = take target
+    transfer.PreparedTargetRep(describe: take describe, release: take release, digest: take digest, resident_limit, pack_bytes, checkpoint_bytes, journal_limit, limits: match limits {
+        Some(value) => Some(limits_to_rep(value)),
+        None => None,
+    })
+}
+
+fn prepared_target_from_rep(take target: transfer.PreparedTargetRep) -> PreparedTarget {
+    let transfer.PreparedTargetRep(describe: take describe, release: take release, digest: take digest, resident_limit, pack_bytes, checkpoint_bytes, journal_limit, limits) = take target
+    PreparedTarget(describe: take describe, release: take release, digest: take digest, resident_limit, pack_bytes, checkpoint_bytes, journal_limit, limits: match limits {
+        Some(value) => Some(limits_from_rep(value)),
+        None => None,
+    })
+}

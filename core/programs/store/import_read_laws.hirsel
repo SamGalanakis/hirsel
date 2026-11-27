@@ -25,7 +25,7 @@ fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] wa
     Ok(take out)
 }
 
-fn original_prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
+fn original_prepared_frame[T](mut input: transfer.PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
     let raw = scratch_result(original_prepared_read(mut input.file, 16u64))?
     let n = format.read_le(raw, 4u64, 4u64)
     if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(manifest.disk_kind_limit(kind)) {
@@ -51,8 +51,8 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("PREPARED", header, 6, None, optional_store_key_to_rep(None))))?
     let mut digest = std.sha256.start()
     std.sha256.add(mut digest, header, 0u64, 72u64)
-    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
-    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let mut input = transfer.PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
+    let metadata_codec: std.codec.Codec[transfer.PreparedMeta] = std.codec.of()
     let meta = original_prepared_frame(mut input, 0x0081, metadata_codec)?
     if list.len(meta.base.attempt) != 16 || meta.base.store_hi != head.context.store.hi || meta.base.store_lo != head.context.store.lo || meta.base.opened != head.context.seq || meta.base.branch != 0 || meta.base.next_table == 0 || meta.next_table < meta.base.next_table || list.len(meta.target.digest) != 32 || list.len(meta.target.release) != 32 || list.len(meta.target.describe) == 0 {
         return Error(ImportMalformed)
@@ -61,24 +61,24 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     if meta.changes != 0 || meta.ranges != 0 {
         return Error(ImportMalformed)
     }
-    let delta: List[CatalogChange] = list.new()
-    let needed = deploy_result(changed_ranges(delta, meta.base.next_table, meta.next_table))?
+    let delta: List[transfer.CatalogChange] = list.new()
+    let needed = deploy_result(failure_result_from_rep(transfer.changed_ranges(delta, meta.base.next_table, meta.next_table)))?
     if list.len(needed) != meta.ranges {
         return Error(ImportMalformed)
     }
-    let ranges: List[ValidatedRange] = list.new()
+    let ranges: List[transfer.ValidatedRange] = list.new()
     let mut extra: Bytes = list.new()
     deploy_result(failure_result_from_rep(types.capacity(list.try_reserve(mut extra, 1))))?
     if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut extra))))? != 0 {
         return Error(ImportMalformed)
     }
-    let PreparedInput(file: take done, digest: take hashed, ..) = take input
+    let transfer.PreparedInput(file: take done, digest: take hashed, ..) = take input
     scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: list.new(), digest: std.sha256.finish(hashed), charge: 0, source_map: list.new(), dir: None, rewrites_checked: false))
 }
 
 fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {
-    let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let codec: std.codec.Codec[transfer.PreparedMeta] = std.codec.of()
     let mut left: Bytes = list.new()
     let mut right: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, a.meta, mut left))
@@ -272,11 +272,11 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
         _ => return false,
     }
     let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: 1, lo: 2)), role: 6, seq: 3)
-    let mut prepared_file = result.unwrap(open_frames(d, "PREPARED", ctx))
-    let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456, limits: None), next_table: 1, changes: 0, ranges: 0)
-    let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
-    result.unwrap(write_prepared_frame(mut prepared_file, 0x0081, codec, meta))
-    result.unwrap(finish_frames(take prepared_file))
+    let mut prepared_file = result.unwrap(failure_result_from_rep(transfer.open_frames(d, "PREPARED", ctx)))
+    let meta = transfer.PreparedMeta(base: transfer.ExportStampRep(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: transfer.PreparedTargetRep(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456, limits: None), next_table: 1, changes: 0, ranges: 0)
+    let codec: std.codec.Codec[transfer.PreparedMeta] = std.codec.of()
+    result.unwrap(failure_result_from_rep(transfer.write_prepared_frame(mut prepared_file, 0x0081, codec, meta)))
+    result.unwrap(failure_result_from_rep(transfer.finish_frames(take prepared_file)))
     // AP1b: a 32-byte description and no limits make a 248-byte payload. The four
     // option words start at payload offset 192 (file offset 280).
     let bytes_on_disk = result.unwrap(failure_result_from_rep(manifest.disk_read_paged_file(d, "PREPARED", 336)))

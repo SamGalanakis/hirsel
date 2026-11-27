@@ -53,6 +53,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/codec_storage.hirsel",
+          "modules": [
+            "codec_storage"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/crc64avro.hirsel",
           "modules": [
             "crc64avro"
@@ -175,6 +182,13 @@
           "file": "core/std/set.hirsel",
           "modules": [
             "set"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/sha256.hirsel",
+          "modules": [
+            "sha256"
           ],
           "signatures": true
         },

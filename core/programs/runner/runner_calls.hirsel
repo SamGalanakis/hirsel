@@ -899,6 +899,68 @@ fn test_granted_copied(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), 
     }
 }
 
+fn stamp_budget_place(mut registry: runner.Registry[WireStamp, Hd]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut registry, code.describe(stamp_wire), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn drive_granted_budget_refused(take d: Drive) -> () waits {
+    let stamp_key = key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64())
+    let mut requested: List[Bytes] = list.new()
+    list.push(mut requested, k_write())
+    list.push(mut requested, clone(stamp_key))
+    let write_slot = wire_client.slot(requested, k_write())
+    let stamp_slot = wire_client.slot(requested, take stamp_key)
+    let mut config = runner.wire_defaults(524288u64)
+    config.q = 0u64
+    config.budget = 65536u64
+    config.socket.max_frame = 32768u64
+    let given: runner.Grants[WireStamp, (), WireStamp] = runner.Grants(attempt: None, call: Some(runner.CallMint(mint: runner.Mint(seed: WireStamp(clock: d.clock, offset: 40u64), mint: stamp_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS), entries: granted_list(code.describe(stamp_wire)))), claim: None, bind: None)
+    let running = runner.grant_task(d.tasks, (), take given)
+    let unbound: Option[runner.BindGrant[WireStamp]] = None
+    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, take unbound, runner.grant_calls_of(running), d.head, d.post, code.describe(stamp_budget_place), requested, None, config, 2097152u64))
+    wire_client.send_frame(wire, Call(wire.stream, 0u64, write_slot, 10000u32, u64_arg(5u64)))
+    let transacted = match wire_client.next(wire) {
+        Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == 0u64 => ok_value(done[0u64].outcome) == Some(3u64),
+        _ => false,
+    }
+    want(transacted, "granted budget: the transact returned")
+    wire_client.send_frame(wire, Call(wire.stream, 1u64, stamp_slot, 10000u32, u64_arg(1u64)))
+    let refused = match wire_client.next(wire) {
+        Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == 1u64 => match done[0u64].outcome {
+            Refused(Budget(room)) => room.requested > room.available,
+            _ => false,
+        },
+        _ => false,
+    }
+    want(refused, "granted budget: over-budget call is Refused(Budget)")
+    wire_client.send_frame(wire, Call(wire.stream, 1u64, write_slot, 10000u32, u64_arg(6u64)))
+    let open = match wire_client.next(wire) {
+        Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == 1u64 => match ok_value(done[0u64].outcome) {
+            Some(_) => true,
+            None => false,
+        },
+        _ => false,
+    }
+    want(open, "granted budget: the session stayed open")
+    let _ = wire_client.close(take wire)
+    let _ = task.join(take session)
+    runner.stop_grants(Some(take running))
+}
+
+pub fn law_granted_budget_refused(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_granted_budget_refused)
+}
+
+@test
+fn test_granted_budget_refused(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_granted_budget_refused(c, r, tasks, n) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
 // refusals with L2 and L3, one session with q = 0:
 // - V1, C7, L2: 10,000 malformed calls are answered at once at the last version (0) and
 //   record nothing, so the first valid call still commits at 4;

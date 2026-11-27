@@ -136,6 +136,7 @@ runner@1/runner_calls/test_drain_answers_once src=98fd287cc89940fd sig=4b498a519
 runner@1/runner_calls/test_drain_reopened src=a94ce9aece5df71b sig=f1452f1aaf983124 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_duplicate_own_reply src=fff217d3105753cf sig=37336e1e5f349847 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_fixture_granted src=d43b48c9b3c80f79 sig=92fe1d63ca88e473 run=607dcf6bff52df2b bug=- oracle=- rows=pending
+runner@1/runner_calls/test_granted_budget_refused src=8471dfcefe7c409f sig=c5e41109f85b651d run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner_calls/test_granted_copied src=04b4ce3e3a74df86 sig=e6a2b88d06cbc39b run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner_calls/test_grants_without_triggers src=a42520b55a804e8b sig=4de105b4ecee23e6 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner_calls/test_idle_keeps_runs src=cfadbd52ae12c886 sig=627b588dcd511aa4 run=ea720f3846592392 bug=- oracle=- rows=pending

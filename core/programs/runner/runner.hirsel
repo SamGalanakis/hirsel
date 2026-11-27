@@ -913,9 +913,9 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
             let j = Job(f: f, ca: ca, cr: cr, grant: take g, caller: take caller, arg: take arg, steps: s)
             if let Some(take report) = take notice {
                 let watched = WatchedJob(job: take j, report: take report, tasks: tasks, allowance: n)
-                return Ok(task.spawn(tasks, bytes int.saturating_add(n, 4096u64), take watched, watch_granted))
+                return Ok(task.try_spawn(tasks, bytes int.saturating_add(n, 4096u64), take watched, watch_granted) ?=> |(cap, _)| cap)
             }
-            Ok(task.spawn(tasks, bytes n, take j, adapt_granted))
+            Ok(task.try_spawn(tasks, bytes n, take j, adapt_granted) ?=> |(cap, _)| cap)
         })
     }
     insert_exported(mut r, take key, code.identity(f), take d, Granted(made))

@@ -3,6 +3,16 @@ type SseLawTables: shareable + send {
     option_rows: store.Table[u32, Option[u32]],
 }
 
+@test
+fn http_previous_on_fresh_store(c: Clock, r: Random) -> Result[(), ()] waits {
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 67108864u64)))
+    if let Ok(None) = http_previous(db) {} else {
+        fail("a fresh Store has no previous HTTP activation")
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
 fn sse_law_schema(mut d: store.Declare) -> Result[SseLawTables, store.Error] {
     let unit = store.declare_table(mut d, "units", std.codec.key_u32(), std.codec.of_unit())?
     let nullable: std.codec.Codec[Option[u32]] = std.codec.of()
@@ -116,7 +126,7 @@ fn sse_law_raw(req: std.http.Request, _scratch: Region, mut _out: std.http.Respo
     Ok(Stream(take spec))
 }
 
-fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] waits {
+fn sse_law_serve(take job: SseLawServer) -> Result[(), HttpServeError] waits {
     let SseLawServer(listener: take listener, publisher: take pub_to, clock, random, tasks, frame_limit, lease_ms, stop: take stop) = take job
     let place: StaticFn[fn(mut Registry[(), SseLawTables]) -> Result[(), RegisterError]] = code.describe(sse_law_place)
     let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
@@ -154,11 +164,11 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     served
 }
 
-fn sse_law_start(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64) -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
+fn sse_law_start(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64) -> (Addr, Sender[u64], Task[Result[(), HttpServeError]]) waits {
     sse_law_start_with_lease(to, n, c, r, tasks, frame_limit, 60000u64)
 }
 
-fn sse_law_start_with_lease(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64, lease_ms: u64) -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
+fn sse_law_start_with_lease(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64, lease_ms: u64) -> (Addr, Sender[u64], Task[Result[(), HttpServeError]]) waits {
     let addr = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let (take listener, address) = result.unwrap(host.listen(n, addr, 8u16))
     let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1u64)

@@ -2251,6 +2251,10 @@ Keyset pages are a store read. They are specified in STORE-SPEC v2.25 §1.5 and 
 
 **One owner.** `runner.operate` owns a place from store open to store close. It replaces the sequence that place programs and the runner's harnesses wire by hand today (`store.open`, `place_head`, `mailbox`, `serve`), so the sequence exists once.
 
+`runner.operate_http` takes an already bound listener and a raw route builder. It opens the Store, prepares the selected activation and starts the head and publisher before serving. The same router serves raw routes and the Place's generated bindings, including managed SSE. The caller supplies Store, Place, HTTP, relay and request budgets, plus the credential verifier and mints for authenticated routes. A stop signal closes admission, drains HTTP within `http.drain_ms` and then closes the Store.
+
+For generated subscriptions, Runner requires the eight-byte-rounded sum of `out_cap` and `state_max` to fit `handler_bytes`. It refuses an incompatible configuration before traffic with `HandoffBudget`, which carries all three configured byte counts.
+
 `BucketBacking.cache: Option[(Dir, u64)]` gives the managed head a host directory and a disk byte limit for `store.objects_cache` (STORE §13.2). Keep the directory across process exits to reuse packs on the next open. The Bucket retains the durable state if the cache directory is deleted.
 
 ```hirsel

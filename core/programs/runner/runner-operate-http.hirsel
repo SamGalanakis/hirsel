@@ -1,0 +1,195 @@
+/// Credential checking and the bind and keyed-claim mints for generated routes.
+pub type HttpGrants[G: send, H: shareable + inert + send, S: send]: send {
+    check: Wire[G],
+    bind: Mint[S, H, (), G],
+    claim: Option[Mint[S, H, (), G]],
+}
+
+pub type HttpPlaceConfig[G: send, H: shareable + inert + send, S: send]: send {
+    backing: Backing,
+    options: store.Options,
+    selection: Selection,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
+    listener: Listener,
+    raw: std.router.Builder[HttpConnection[G, H]],
+    http: std.http.Config,
+    relay: RelayConfig,
+    /// None gives generated routes anonymous callers.
+    grants: Option[HttpGrants[G, H, S]],
+    clock: Clock,
+    tasks: Tasks,
+    random: Random,
+    n_place: u64,
+    n_publisher: u64,
+    n_server: u64,
+    state_bytes: u64,
+    request_bytes: u64,
+    frame_bytes: u64,
+    stream_queue: u64,
+}
+
+pub type HttpPlaceError: send = PlaceStart(StartError) | Route(BindError) | RelayFailure(Refusal) | Server(HttpServeError) | ServerTask
+
+type HttpPlaceFront[G: send, H: shareable + inert + send, S: send]: send {
+    listener: Listener,
+    http: std.http.Config,
+    routes: std.router.Router[HttpConnection[G, H]],
+    plans: Arc[HttpRoutes],
+    reads: HttpReadAccess,
+    placing: Placing[G, H],
+    handles: H,
+    relay: RelayConfig,
+    head: Sender[HeadInput],
+    publisher: Sender[PubIn],
+    grants: Option[HttpGrants[G, H, S]],
+    clock: Clock,
+    tasks: Tasks,
+    random: Random,
+    state_bytes: u64,
+    request_bytes: u64,
+    stream_queue: u64,
+    stop: Receiver[()],
+}
+
+/// Opens a Place and serves its generated HTTP routes, subscriptions and raw
+/// routes on one listener. A stop message or sender close stops admission
+/// and drains the listener within http.drain_ms before closing the Store.
+pub fn operate_http[G: send, H: shareable + inert + send, S: send](take config: HttpPlaceConfig[G, H, S], take stop: Receiver[()]) -> Result[(), HttpPlaceError] waits {
+    let HttpPlaceConfig(backing: take backing, options: take options, selection: take selection, place, schema, on_migrate, listener: take listener, raw: take raw, http: take http, relay, grants: take grants, clock, tasks, random, n_place, n_publisher, n_server, state_bytes, request_bytes, frame_bytes, stream_queue) = take config
+    let mut placing = placing_at(place, n_place)
+    let (template, rooms) = match placing.made {
+        Ok(made) => (arc.share(made.0), made.1),
+        Error(problem) => return Error(PlaceStart(Open(Place(clone(problem))))),
+    }
+    let mut has_subscriptions = false
+    for route in template.bindings {
+        if route.binding.mode == Subscribe {
+            has_subscriptions = true
+            break
+        }
+    }
+    check_http_config(http, has_subscriptions, stream_queue) ?=> Server
+    let mail = mailbox(PUBLISHER_INBOX) ?=> |cap| PlaceStart(Full(cap))
+    let persistent = persistent_backing(backing)
+    let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random) ?=> |take problem| PlaceStart(backing_start_error(take problem))
+    let mut owned = take db
+    let prepared = prepare_http_place(mut owned, selection, persistent, placing, on_migrate, schema, tasks, take raw, mail.to, frame_bytes)
+    let (take registered, take handles, take identity, take routes, take plans, take reads) = match take prepared {
+        Ok(take value) => take value,
+        Error(take problem) => {
+            let _ = close_store(take owned)
+            return Error(take problem)
+        },
+    }
+    placing.made = Ok((arc.share(registered.t), rooms))
+    let front_handles: H = clone(handles)
+    let (take head, take publishing) = start_head(take owned, take registered, take identity, take handles, placing, n_place, take mail, tasks, n_publisher, None) ?=> |take problem| PlaceStart(Open(take problem))
+    let (head_to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
+    let job: HttpPlaceFront[G, H, S] = HttpPlaceFront(listener: take listener, http: take http, routes: take routes, plans: take plans, reads: take reads, placing: take placing, handles: take front_handles, relay, head: take head_to, publisher: channel.sender(head.out), grants: take grants, clock, tasks, random, state_bytes, request_bytes, stream_queue, stop: take stop)
+    let run: fn(take HttpPlaceFront[G, H, S]) -> Result[(), HttpPlaceError] waits = run_http_place_front
+    let serving = match task.try_spawn(tasks, bytes n_server, take job, run) {
+        Ok(take running) => take running,
+        Error((cap, _)) => {
+            finish_head(take head, take publishing, Ok(false), None) ?=> |take problem| PlaceStart(Open(take problem))
+            return Error(PlaceStart(Full(cap)))
+        },
+    }
+    if let Error(take problem) = serve_started_head(take head, take publishing, take inbox, tasks, None) {
+        let _ = task.cancel_join(take serving)
+        return Error(PlaceStart(Open(take problem)))
+    }
+    let served = task.join(take serving) ?=> |_| ServerTask
+    let _ = take temporary
+    take served
+}
+
+fn prepare_http_place[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, placing: Placing[G, H], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], tasks: Tasks, take raw: std.router.Builder[HttpConnection[G, H]], pub_to: Sender[PubIn], frame_bytes: u64) -> Result[(Registry[G, H], H, Bytes, std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes], HttpReadAccess), HttpPlaceError] waits {
+    let (take registered, take handles, _, take identity) = head_prepare(mut db, selection, persistent, placing, on_migrate, schema, placing.n_place, tasks) ?=> |take problem| PlaceStart(Open(take problem))
+    let mut reg = take registered
+    let previous = http_previous(db) ?=> |take problem| PlaceStart(Open(Store(take problem)))
+    let retired = http_retirements(db, reg) ?=> |take problem| PlaceStart(Open(take problem))
+    let (take routes, take plans) = http_router_with_retirements(reg, previous, take retired, take raw) ?=> Route
+    if list.len(plans.gone) != 0u64 {
+        edit_template(mut reg, scoped fn(mut t: Template[G]) {
+            for key in plans.gone {
+                let copied = std.http.copy_bytes(key)
+                map.insert(mut t.gone, take copied, ())
+            }
+        })
+    }
+    let mut labels: Map[u32, String] = map.new()
+    let entries = store.catalog_entries(store.snapshot(db)) ?=> |take problem| PlaceStart(Open(Store(take problem)))
+    for entry in entries {
+        http_table_label(mut labels, entry.id, entry.name)
+    }
+    let reads = http_read_labels(pub_to, take labels, frame_bytes)
+    Ok((take reg, take handles, take identity, take routes, take plans, take reads))
+}
+
+type HttpPlaceStop: send {
+    incoming: Receiver[()],
+    outgoing: Sender[u64],
+    clock: Clock,
+    drain_ms: u64,
+}
+
+fn signal_http_place_stop(take job: HttpPlaceStop) waits {
+    let _ = channel.receive(job.incoming)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(job.clock), job.drain_ms)
+    let _ = channel.send(job.outgoing, deadline)
+}
+
+fn run_http_place_front[G: send, H: shareable + inert + send, S: send](take job: HttpPlaceFront[G, H, S]) -> Result[(), HttpPlaceError] waits {
+    let head = channel.sender(job.head)
+    let served = serve_http_place_front(take job)
+    let _ = channel.send(head, HeadFinish)
+    take served
+}
+
+fn serve_http_place_front[G: send, H: shareable + inert + send, S: send](take job: HttpPlaceFront[G, H, S]) -> Result[(), HttpPlaceError] waits {
+    let HttpPlaceFront(listener: take listener, http: take http, routes: take routes, plans: take plans, reads: take reads, placing: take placing, handles: take handles, relay, head: take head, publisher: take pub_to, grants: take grants, clock, tasks, random, state_bytes, request_bytes, stream_queue, stop: take stop) = take job
+    let reg = instantiate(placing) ?=> |take problem| PlaceStart(Open(Place(take problem)))
+    let (take endpoint, take relaying) = start_relay(reg, head, pub_to, clock, tasks, relay) ?=> RelayFailure
+    let (take verifier, take mints) = match take grants {
+        Some(HttpGrants(check: take check, bind: take binding_mint, claim: take claim)) => {
+            let policy: Grants[G, H, S] = Grants(attempt: None, call: None, claim: take claim, bind: Some(take binding_mint))
+            (Some(take check), Some(grant_task(tasks, handles, take policy)))
+        },
+        None => (None, None),
+    }
+    let supplied: Option[BindGrant[G]] = match mints {
+        Some(running) => match take verifier {
+            Some(take check) => grant_binds_of(running, take check),
+            _ => None,
+        },
+        None => None,
+    }
+    let claims = match mints {
+        Some(running) => grant_claims_of(running),
+        None => None,
+    }
+    let make: scoped[view] fn() -> HttpConnection[G, H] = fn() -> HttpConnection[G, H] {
+        let registered = result.unwrap(instantiate(placing))
+        let compiled = arc.share(plans)
+        let binding: Option[BindGrant[G]] = copy_bind_grant(supplied)
+        let relay_copy = relay_endpoint(endpoint)
+        let mut client = http_connection(take registered, take compiled, take binding, take relay_copy, random, clock, tasks, request_bytes)
+        if let Some(claim_mint) = claims {
+            let to_claim = channel.sender(claim_mint)
+            http_grant_claims(mut client, take to_claim)
+        }
+        take client
+    }
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let stop_job = HttpPlaceStop(incoming: take stop, outgoing: take to, clock, drain_ms: http.drain_ms)
+    let watcher = task.spawn(tasks, bytes 512u64, take stop_job, signal_http_place_stop)
+    let mut listeners: List[Listener] = list.with_capacity(1u64)
+    list.push(mut listeners, take listener)
+    let served = http_serve(take listeners, clock, tasks, take http, take routes, plans, reads, state_bytes, make, stream_queue, Some(take from))
+    let _ = task.cancel_join(take watcher)
+    stop_grants(take mints)
+    let _ = task.cancel_join(take relaying)
+    Ok(served ?=> Server)
+}

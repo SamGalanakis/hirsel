@@ -15,10 +15,18 @@ pub opaque resource type HttpReadAccess: send {
 pub fn http_read_access(to: Sender[PubIn], declarations: List[store.DeclaredCollection], frame_limit: u64) -> HttpReadAccess {
     let mut tables: Map[u32, String] = map.new()
     for collection in declarations {
-        let mut name = string.new()
-        openapi_text(mut name, collection.name)
-        map.insert(mut tables, collection.id, take name)
+        http_table_label(mut tables, collection.id, collection.name)
     }
+    http_read_labels(to, take tables, frame_limit)
+}
+
+fn http_table_label(mut tables: Map[u32, String], id: u32, name: String) {
+    let mut label = string.new()
+    openapi_text(mut label, name)
+    map.insert(mut tables, id, take label)
+}
+
+fn http_read_labels(to: Sender[PubIn], take tables: Map[u32, String], frame_limit: u64) -> HttpReadAccess {
     result.unwrap(HttpReadAccess(publisher: channel.sender(to), tables: arc.new(take tables), frame_limit: frame_limit))
 }
 
@@ -265,11 +273,44 @@ type HttpStreamSite: send {
     routes: Arc[HttpRoutes],
 }
 
-/// Serves the generated routes and promotes subscriptions into the configured stream slots.
-pub fn http_serve[G: send, H: shareable + inert + send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H]], plans: Arc[HttpRoutes], reads: HttpReadAccess, state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H], q: u64, take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+pub type HttpHandoffBudget: send {
+    out_cap: u64,
+    state_max: u64,
+    handler_bytes: u64,
+}
+
+pub type HttpServeError: send = HandoffBudget(HttpHandoffBudget) | Transport(std.http.ServeError)
+
+fn check_http_config(cfg: std.http.Config, has_subscriptions: bool, q: u64) -> Result[(), HttpServeError] {
     if q > 4u64 {
-        return Error(Configuration)
+        return Error(Transport(Configuration))
     }
+    if has_subscriptions {
+        let size = int.checked_add(cfg.out_cap, cfg.state_max)
+        let charged = match size {
+            Some(n) => charge.round(n),
+            None => None,
+        }
+        if let Some(n) = charged {
+            if n <= cfg.handler_bytes {
+                return Ok(())
+            }
+        }
+        return Error(HandoffBudget(HttpHandoffBudget(out_cap: cfg.out_cap, state_max: cfg.state_max, handler_bytes: cfg.handler_bytes)))
+    }
+    Ok(())
+}
+
+/// Serves the generated routes and promotes subscriptions into the configured stream slots.
+pub fn http_serve[G: send, H: shareable + inert + send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H]], plans: Arc[HttpRoutes], reads: HttpReadAccess, state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H], q: u64, take stop: Option[Receiver[u64]]) -> Result[(), HttpServeError] waits {
+    let mut has_subscriptions = false
+    for operation in plans.operations {
+        if operation.binding.mode == Subscribe {
+            has_subscriptions = true
+            break
+        }
+    }
+    check_http_config(cfg, has_subscriptions, q)?
     let inbox_size = 1u64 + q
     let format: std.codec.Codec[Outcome] = std.codec.of()
     let shape = result.unwrap(std.codec.describe(format))
@@ -286,7 +327,7 @@ pub fn http_serve[G: send, H: shareable + inert + send](take listeners: List[Lis
         let _ = channel.try_send(reads.publisher, PubIn(e: Drained))
     }
     let request_done: fn(HttpConnection[G, H]) waits = http_request_finished
-    std.http.serve_with_stream_factory(take listeners, clock, tasks, take cfg, take routes, state_bytes, make_connection, request_done, http_needs_retirement, http_retire_connection, 256u64, make, http_stream_drive, retire, take stop)
+    Ok(std.http.serve_with_stream_factory(take listeners, clock, tasks, take cfg, take routes, state_bytes, make_connection, request_done, http_needs_retirement, http_retire_connection, 256u64, make, http_stream_drive, retire, take stop) ?=> Transport)
 }
 
 fn http_stream_notice(take event: std.stream.Delivery) -> WireEvent {

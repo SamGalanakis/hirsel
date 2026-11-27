@@ -1,0 +1,112 @@
+fn operate_http_law_asset(_req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, _state: HttpConnection[(), SseLawTables]) -> Result[std.http.Outcome, std.http.HandlerError] {
+    Ok(Reply(std.http.response(200u16, b"runner asset", false)?))
+}
+
+fn operate_http_law_insert(mut tx: store.Tx, h: SseLawTables, _caller: Caller, take _arg: SseLawValue) -> Result[(), ()] {
+    store.put(mut tx, h.unit_rows, 1u32, ()) ?=> |_| ()
+    store.put(mut tx, h.option_rows, 2u32, None) ?=> |_| ()
+    Ok(())
+}
+
+fn operate_http_law_place(mut r: Registry[(), SseLawTables]) -> Result[(), RegisterError] {
+    sse_law_place(mut r)?
+    transact(mut r, code.describe(operate_http_law_insert), 65536u64, DEFAULT_STEPS)?
+    let entry = http_law_key(r.t.exported[1u64])
+    bind(mut r, HttpBinding(op: "insert", method: Post, path: "/insert", entry: take entry, fields: list.new(), mode: Stream, ok_status: 201u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
+}
+
+fn operate_http_law_mint(_seed: (), _h: SseLawTables, _request: ()) -> Result[(), Capacity] {
+    Ok(())
+}
+
+fn operate_http_law_config(c: Clock, r: Random, tasks: Tasks, cfg: std.http.Config, take listener: Listener) -> HttpPlaceConfig[(), SseLawTables, ()] {
+    let mut raw: std.router.Builder[HttpConnection[(), SseLawTables]] = std.router.builder()
+    result.unwrap(std.router.add(mut raw, "GET", "/", std.router.raw(operate_http_law_asset)))
+    let mint = Mint(seed: (), mint: operate_http_law_mint, mint_bytes: 8192u64, mint_steps: DEFAULT_STEPS)
+    let grants = HttpGrants(check: wire(code.describe(sse_law_bind), 8192u64, DEFAULT_STEPS), bind: take mint, claim: None)
+    HttpPlaceConfig(backing: Memory, options: result.unwrap(store.sized(Memory, 67108864u64)), selection: Reopen, place: code.describe(operate_http_law_place), schema: code.describe(sse_law_schema), on_migrate: None, listener: take listener, raw: take raw, http: clone(cfg), relay: RelayConfig(http_max: 4u64, sends_max: 4u64, positions_max: 4u64, arg_max: 4096u64), grants: Some(take grants), clock: c, tasks, random: r, n_place: HTTP_LAW_PLACE_BYTES, n_publisher: 8388608u64, n_server: 16777216u64, state_bytes: 2097152u64, request_bytes: 65536u64, frame_bytes: 65536u64, stream_queue: 4u64)
+}
+
+type HttpOperateLaw: send {
+    config: HttpPlaceConfig[(), SseLawTables, ()],
+    stop: Receiver[()],
+}
+
+fn operate_http_law_run(take job: HttpOperateLaw) -> Result[(), HttpPlaceError] waits {
+    let HttpOperateLaw(config: take config, stop: take stop) = take job
+    operate_http(take config, take stop)
+}
+
+fn operate_http_law_http() -> std.http.Config {
+    let mut cfg = http_law_config()
+    cfg.sockets_max = 4u64
+    cfg.http_max = 4u64
+    cfg.conns_max = 4u64
+    cfg.ip_sockets_max = 4u64
+    cfg.streams_max = 2u64
+    cfg.reads_max = 1u64
+    cfg.state_max = 8192u64
+    cfg.heartbeat_ms = 20u64
+    cfg.lease_ms = 60000u64
+    take cfg
+}
+
+@test
+fn operate_http_serves_routes_and_stops(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let config = operate_http_law_config(c, r, tasks, operate_http_law_http(), take listener)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let server = task.spawn(tasks, bytes 50331648u64, HttpOperateLaw(config: take config, stop: take stopping), operate_http_law_run)
+    let asset = http_law_exchange(n, c, addr, b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    if asset.status != 200u16 || asset.body != b"runner asset" {
+        fail("operate_http did not serve the raw asset")
+    }
+    let denied = http_law_exchange(n, c, addr, b"GET /read HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    if denied.status != 401u16 {
+        fail("operate_http accepted a generated read without credentials")
+    }
+    let mut events = sse_law_dial(n, c, addr, "/events", false)
+    result.unwrap(std.http_client.finish_request(mut events, 65536u64))
+    if std.http_client.status(std.http_client.head(events)) != 200u16 {
+        fail("operate_http did not open the generated event stream")
+    }
+    let first = sse_law_event(mut events)
+    if first != sse_law_vector(B9_EMPTY, 1u64) {
+        fail("operate_http initial snapshot differs from B-9")
+    }
+    sse_law_check_read(n, c, addr, first)
+    let stream = http_law_stream(host.wall_ms(c), 1u32)
+    let wrote = http_law_post(n, c, addr, "/insert", b"token", stream, 0u64, b"", 1000u32)
+    if wrote.status != 201u16 || !wrote.committed {
+        fail("operate_http did not commit the generated mutation")
+    }
+    let patch = sse_law_event(mut events)
+    if patch != sse_law_vector(B9_INSERTED, 3u64) {
+        fail("operate_http live patch differs from B-9")
+    }
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(result.unwrap(task.join(take server)))
+    if sse_law_body(mut events) != b"" {
+        fail("operate_http left bytes on the stream after shutdown")
+    }
+    std.http_client.close(take events)
+    Ok(())
+}
+
+@test
+fn operate_http_refuses_sse_handoff_over_budget(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, _) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let mut cfg = operate_http_law_http()
+    cfg.out_cap = 8192u64
+    cfg.state_max = 2097152u64
+    cfg.handler_bytes = 262144u64
+    let config = operate_http_law_config(c, r, tasks, cfg, take listener)
+    let (_stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let Error(Server(HandoffBudget(HttpHandoffBudget(out_cap, state_max, handler_bytes)))) = operate_http(take config, take stopping) else {
+        fail("operate_http must refuse an oversized SSE handoff before serving")
+    }
+    if out_cap != 8192u64 || state_max != 2097152u64 || handler_bytes != 262144u64 {
+        fail("the SSE handoff refusal must report the three configured byte counts")
+    }
+    Ok(())
+}

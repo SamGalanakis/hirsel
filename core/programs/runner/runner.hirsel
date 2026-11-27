@@ -922,8 +922,12 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
 }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
+    activation_description_at(db, 0u8)
+}
+
+fn activation_description_at(db: store.Db, key: u8) -> Result[Option[Bytes], store.Error] waits {
     match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
-        Ok(take table) => store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), table, 0u8),
+        Ok(take table) => store.get(store.reader(db, store.READER_PIN_MIN)?, store.snapshot(db), table, key),
         Error(Missing(_)) => Ok(None),
         Error(take problem) => Error(take problem),
     }
@@ -1464,84 +1468,6 @@ pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.
     }
     let _ = run_head(take owned, take r, take replay_identity, take h, made, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
     Ok(())
-}
-
-fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, placing: Placing[G, H], n_place: u64, take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
-    let mut owned = take db
-    let recovery = match startup_claims(mut owned, r) {
-        Ok(take prepared) => take prepared,
-        Error(take problem) => {
-            let _ = close_store(take owned);
-            return Error(take problem)
-        },
-    }
-    let shared = arc.new(take h)
-    let mut images = false
-    for (_, registered) in r.slots {
-        if let Query(..) = registered {
-            images = true;
-            break
-        }
-    }
-    let publishing = start_publisher(owned, images, placing, n_place, arc.share(shared), take mail, tasks, n_publisher)
-    let (out, publisher_task) = match take publishing {
-        Ok(take started) => take started,
-        Error(take problem) => {
-            let _ = close_store(take owned);
-            return Error(take problem)
-        },
-    }
-    if let Some(control) = drain {
-        if !head_advance(control.events, inbox, Published(channel.sender(out))) {
-            let mut stopping = take publisher_task
-            task.cancel(mut stopping)
-            let _ = task.join(take stopping)
-            close_store(take owned)?
-            return Ok(None)
-        }
-    }
-    let mut hd = Head(db: take owned, publish_images: images, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery, upkeep: upkeep())
-    let mut tables: Option[triggers.Tables] = None
-    let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
-    let served = match take health_setup {
-        Ok(()) => serve_head(mut hd, take woken, take drain, mut tables),
-        Error(take problem) => Error(take problem),
-    }
-    for take helper in take helpers {
-        let mut stopping = take helper
-        task.cancel(mut stopping)
-        let _ = task.join(take stopping)
-    }
-    finish_head(take hd, take publisher_task, take served, take tables)
-}
-
-fn finish_head[G: send, H: shareable + inert + send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error], take drained_tables: Option[triggers.Tables]) -> Result[Option[u64], OpenError] waits {
-    let Head(db: take kept, out: take last_word, cut: cut, trigger_drive: take drive, ..) = take head
-    let tables = match take drive {
-        Some(take scheduled) => Some(stop_triggers(take scheduled)),
-        None => take drained_tables,
-    }
-    if let Ok(true) = served {} else {
-        let _ = channel.send(last_word, PubIn(e: Halt))
-    }
-    let stopped = match task.join(take publishing) {
-        Ok(()) => cut,
-        Error(_) => true
-    }
-    match take served {
-        Ok(_) => (),
-        Error(take problem) => return Error(Store(take problem))
-    }
-    if stopped {
-        let _ = close_store(take kept)
-        return Error(PublisherStopped)
-    }
-    let due = match tables {
-        Some(trigger_tables) => next_trigger_due(kept, trigger_tables) ?=> Store,
-        None => None,
-    }
-    close_store(take kept)?
-    Ok(due)
 }
 
 fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64], store.Error] waits {

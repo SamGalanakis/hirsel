@@ -96,7 +96,7 @@ pub(super) fn toolchain_image(
         Ok(image)
     } else {
         super::key(
-            "hirsel.archive-toolchain.v1",
+            "hirsel.archive-toolchain.v2",
             &(image, tool_identity(&options.link)?),
         )
     }
@@ -295,7 +295,7 @@ impl Names<'_> {
 }
 
 fn export_member(names: &Names<'_>) -> Result<Vec<u8>, NativeStop> {
-    use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
+    use object::write::{Mangling, Object, Relocation, StandardSection, Symbol, SymbolSection};
     use object::{BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind, SymbolScope};
     let format = match names.target.object_format() {
         ObjectFormat::Elf => BinaryFormat::Elf,
@@ -306,6 +306,8 @@ fn export_member(names: &Names<'_>) -> Result<Vec<u8>, NativeStop> {
         Arch::Aarch64 => object::Architecture::Aarch64,
     };
     let mut object = Object::new(format, arch, Endianness::Little);
+    // Names already carry the target's exact object symbol prefix.
+    object.set_mangling(Mangling::None);
     if let Some(apple) = names.target.apple() {
         let mut version = object::write::MachOBuildVersion::default();
         version.platform = object::macho::Platform(apple.macho_platform);

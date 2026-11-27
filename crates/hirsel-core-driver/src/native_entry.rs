@@ -19,6 +19,7 @@ mod adapter;
 mod code;
 mod data;
 mod embed;
+pub(crate) use embed::APPLE_MANIFEST_SECTION;
 mod foreign;
 pub(crate) mod launch_config;
 mod report;

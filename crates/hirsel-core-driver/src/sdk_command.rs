@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[path = "sdk_swift.rs"]
+pub(crate) mod swift;
+
 type Error = Box<dyn std::error::Error>;
 
 pub struct Options {
@@ -20,10 +23,12 @@ impl Options {
         let program = invocation
             .positional
             .ok_or_else(|| {
-                format!(
-                    "{} requires a program directory or built executable",
-                    invocation.command.name
-                )
+                let input = if invocation.command.name == "sdk swift" {
+                    "a program directory"
+                } else {
+                    "a program directory or built executable"
+                };
+                format!("{} requires {input}", invocation.command.name)
             })?
             .into();
         let mut out = None;
@@ -70,8 +75,8 @@ impl Options {
                 }
             }
         }
-        if invocation.command.name == "sdk ts" && out.is_none() {
-            return Err("sdk ts requires --output DIR".into());
+        if matches!(invocation.command.name, "sdk ts" | "sdk swift") && out.is_none() {
+            return Err(format!("{} requires --output DIR", invocation.command.name).into());
         }
         Ok(Self {
             program,

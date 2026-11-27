@@ -1,0 +1,17 @@
+[
+  {"name": "ValueChange", "kind": 0, "body": [{"name": "old", "type": [16, [14, [3]]]}, {"name": "new", "type": [14, [3]]}]},
+  {"name": "RowChange", "kind": 0, "body": [{"name": "slot", "type": [5]}, {"name": "key", "type": [14, [3]]}, {"name": "old", "type": [16, [14, [3]]]}, {"name": "new", "type": [16, [14, [3]]]}]},
+  {"name": "Change", "kind": 0, "body": [{"name": "invalidated", "type": [1]}, {"name": "replaced", "type": [1]}, {"name": "value", "type": [16, [19, 0]]}, {"name": "rows", "type": [14, [19, 1]]}]},
+  {"name": "SubEnd", "kind": 1, "body": [{"name": "Server", "fields": [[14, [3]]]}, {"name": "ClientCapacity", "fields": []}]},
+  {"name": "Peer", "kind": 0, "body": [{"name": "peer", "type": [6]}, {"name": "caller", "type": [14, [3]]}, {"name": "state", "type": [16, [14, [3]]]}]},
+  {"name": "PeerState", "kind": 0, "body": [{"name": "peer", "type": [6]}, {"name": "state", "type": [16, [14, [3]]]}]},
+  {"name": "PeersChange", "kind": 0, "body": [{"name": "incarnation", "type": [16, [14, [3]]]}, {"name": "revision", "type": [16, [6]]}, {"name": "renewed", "type": [1]}, {"name": "me", "type": [16, [6]]}, {"name": "joined", "type": [14, [19, 4]]}, {"name": "states", "type": [14, [19, 5]]}, {"name": "left", "type": [14, [6]]}]},
+  {"name": "MessageIn", "kind": 0, "body": [{"name": "from", "type": [6]}, {"name": "message", "type": [14, [3]]}, {"name": "direct", "type": [1]}]},
+  {"name": "RoomEvent", "kind": 1, "body": [{"name": "Admission", "fields": [[19, 2]]}, {"name": "Peers", "fields": [[19, 6]]}, {"name": "Message", "fields": [[19, 7]]}, {"name": "Gap", "fields": [[6]]}, {"name": "Lost", "fields": [[6]]}, {"name": "Full", "fields": []}, {"name": "Ended", "fields": [[19, 3]]}]},
+  {"name": "SessionEnd", "kind": 1, "body": [{"name": "Closed", "fields": []}, {"name": "RuntimeStopped", "fields": []}, {"name": "RuntimeEnded", "fields": [[5], [14, [3]]]}, {"name": "DialRefused", "fields": [[4]]}, {"name": "ClosedByPlace", "fields": [[4]]}]},
+  {"name": "RunnerBudget", "kind": 0, "body": [{"name": "requested", "type": [6]}, {"name": "available", "type": [6]}]},
+  {"name": "RunnerBad", "kind": 0, "body": [{"name": "kind", "type": [5]}, {"name": "at", "type": [6]}]},
+  {"name": "RunnerFault", "kind": 1, "body": [{"name": "Raised", "fields": [[5]]}, {"name": "OutOfBytes", "fields": [[19, 10]]}, {"name": "OutOfTime", "fields": [[6]]}, {"name": "Gone", "fields": []}, {"name": "Conflict", "fields": [[13]]}]},
+  {"name": "RunnerRefusal", "kind": 1, "body": [{"name": "NoEntry", "fields": []}, {"name": "Malformed", "fields": [[19, 11]]}, {"name": "Overloaded", "fields": []}, {"name": "Deadline", "fields": []}, {"name": "Budget", "fields": [[19, 10]]}, {"name": "NotAllowed", "fields": []}, {"name": "RequestMismatch", "fields": []}, {"name": "HistoryUnavailable", "fields": []}, {"name": "StreamFuture", "fields": [[6]]}]},
+  {"name": "WireOutcome", "kind": 1, "body": [{"name": "Returned", "fields": [[14, [3]]]}, {"name": "Failed", "fields": [[19, 12]]}, {"name": "Refused", "fields": [[19, 13]]}, {"name": "Abandoned", "fields": []}, {"name": "InDoubt", "fields": []}]}
+]

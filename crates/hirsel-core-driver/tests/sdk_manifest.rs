@@ -221,3 +221,269 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
         })
     );
 }
+
+#[test]
+fn swift_sdk_writes_one_projection_and_refuses_target_dependent_entries() {
+    use hirsel_core_ids::embed::binding_projection;
+    use hirsel_core_layout::Target;
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let package_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = package_dir.join("../..").canonicalize().unwrap();
+    let input = |name| {
+        root.join(std::env::var_os(name).unwrap())
+            .canonicalize()
+            .unwrap()
+    };
+    let hirsel = package_dir
+        .join(env!("CARGO_BIN_EXE_hirsel"))
+        .canonicalize()
+        .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let prefix = work.path().join("prefix");
+    let kit = input("HIRSEL_SWIFT_LINK_KIT");
+    let mac_embed = input("HIRSEL_SWIFT_MAC_EMBED");
+    let mac_runtime = input("HIRSEL_SWIFT_MAC_RUNTIME");
+    let ios = input("HIRSEL_SWIFT_IOS_EMBED");
+    let apple_targets: Vec<_> = Target::ALL.into_iter().filter_map(Target::apple).collect();
+    for apple in &apple_targets {
+        let mut install = Command::new(&hirsel);
+        install
+            .current_dir(&root)
+            .args(["core-product", "--install"])
+            .arg(&prefix)
+            .args(["--target", apple.triple, "--link-kit"])
+            .arg(&kit);
+        if apple.family == "macos" {
+            install
+                .arg("--runtime")
+                .arg(&mac_runtime)
+                .arg("--embed-runtime")
+                .arg(&mac_embed);
+        } else {
+            install
+                .arg("--embed-runtime")
+                .arg(ios.join(apple.triple).join("libhirsel_core_rt.a"));
+        }
+        run(&mut install);
+    }
+
+    let workspace = work.path().join("workspace");
+    let package = workspace.join("app");
+    let libraries = workspace.join("libraries");
+    let programs = libraries.join("programs");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&programs).unwrap();
+    for name in ["core", "std"] {
+        symlink(root.join("core").join(name), libraries.join(name)).unwrap();
+    }
+    fs::write(
+        workspace.join("hirsel.toml"),
+        "[workspace]\nmembers = [\"store\", \"runner\", \"app\"]\n",
+    )
+    .unwrap();
+    for name in ["runner", "store"] {
+        let staged = workspace.join(name);
+        copy_tree(&root.join("core/programs").join(name), &staged);
+        symlink(staged, programs.join(name)).unwrap();
+    }
+    fs::write(
+        package.join("hirsel.toml"),
+        r#"[package]
+name = "swift_law"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
+
+[sources]
+"main.hirsel" = "main"
+"#,
+    )
+    .unwrap();
+    let source = fs::read_to_string(root.join("sdk/client/tests/packed_consumer.hirsel")).unwrap();
+    let path = package.join("main.hirsel");
+    fs::write(&path, &source).unwrap();
+    let cache = work.path().join("cache");
+    let store = work.path().join("compiler-store");
+    let out = work.path().join("out");
+    let command = |output: &Path| {
+        let mut command = Command::new(prefix.join("hirsel"));
+        command
+            .current_dir(&root)
+            .env("XDG_CACHE_HOME", &cache)
+            .args(["sdk", "swift"])
+            .arg(&package)
+            .arg("--libraries")
+            .arg(&libraries)
+            .arg("--store")
+            .arg(&store)
+            .args(["--limit", "1073741824", "-o"])
+            .arg(output);
+        command
+    };
+    run(&mut command(&out));
+
+    let projection = fs::read(out.join("projection.json")).unwrap();
+    let decoded: Value = serde_json::from_slice(&projection).unwrap();
+    assert_eq!(decoded["version"], 1);
+    assert_eq!(decoded.as_object().unwrap().len(), 3);
+    assert!(decoded.get("launch").is_none());
+    let entries = decoded["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|e| e.get("revision").is_none()));
+    assert_eq!(entries[0]["name"], "packed_reply");
+    let enums = &entries[0]["result"]["definitions"][0]["body"];
+    assert_eq!(enums[0]["fields"][0], json!([16, [16, [5]]]));
+
+    let source_dir = out.join("Sources/SwiftLaw");
+    let generated_entries = fs::read_to_string(source_dir.join("Entries.swift")).unwrap();
+    let fingerprint: &[u8] = &Sha256::digest(&projection)[..];
+    assert!(generated_entries.contains(&format!("let manifest_fp = Data({fingerprint:?})")));
+    let codec = fs::read_to_string(source_dir.join("Codec.swift")).unwrap();
+    assert!(codec.contains("HirselNestedOption<Optional<UInt32>>"));
+    assert!(codec.contains("public indirect enum RoomEvent:"));
+    let runtime = fs::read_to_string(source_dir.join("Runtime.swift")).unwrap();
+    assert!(runtime.contains("clientBytes: UInt64 = 64 * 1024 * 1024"));
+    assert!(runtime.contains("startTimeoutMs: UInt32 = 10_000"));
+    assert!(runtime.contains(".bufferingOldest(buffer)"));
+
+    let bundle = out.join("SwiftLawCore.xcframework");
+    assert_eq!(
+        fs::read_to_string(bundle.join("Info.plist")).unwrap(),
+        include_str!("sdk_manifest/ExpectedInfo.plist")
+    );
+    for apple in apple_targets {
+        let file = format!("manifests/{}.json", apple.xcframework_slice);
+        let manifest = fs::read(out.join(file)).unwrap();
+        let decoded: Value = serde_json::from_slice(&manifest).unwrap();
+        assert_eq!(decoded["version"], 1);
+        assert_eq!(decoded["launch"]["target"], apple.triple);
+        assert_eq!(decoded["launch"]["digest"], json!([]));
+        assert!(decoded["entries"].as_array().unwrap().iter().all(|entry| {
+            entry["revision"]
+                .as_array()
+                .is_some_and(|bytes| bytes.len() == 32)
+        }));
+        assert_eq!(projection, binding_projection(&manifest).unwrap());
+        let slice = bundle.join(apple.xcframework_slice);
+        let archive = fs::read(slice.join("libswift_law.a")).unwrap();
+        let embedded_manifest = manifest_in_archive(&archive);
+        assert_eq!(manifest, embedded_manifest);
+        let digest: &[u8] = &Sha256::digest(&archive)[..];
+        assert!(generated_entries.contains(&format!("Data({digest:?})")));
+        let header = fs::read_to_string(slice.join("Headers/hirsel_product.h")).unwrap();
+        assert!(header.contains("(const volatile uint8_t *)"));
+        let helper = header
+            .lines()
+            .find_map(|line| line.strip_prefix("static inline void "))
+            .unwrap()
+            .split_once('(')
+            .unwrap()
+            .0;
+        assert!(generated_entries.contains(&format!("{helper}()")));
+        let prefix = helper
+            .strip_prefix("hirsel_embed_v1_require_anchor_")
+            .unwrap();
+        check_archive_exports(&archive, prefix);
+        let module = fs::read_to_string(slice.join("Headers/module.modulemap")).unwrap();
+        assert!(module.contains("link framework \"CoreFoundation\""));
+        assert!(module.contains("link framework \"Security\""));
+    }
+    for (file, tests) in [
+        (
+            "CodecVectors.swift",
+            &[
+                "testMixedPartAppliesStateBeforeMessageAndLeave",
+                "testFirstFullPartHasNoPeersEvent",
+                "testNestedSomeNoneAndMalformedBytes",
+            ][..],
+        ),
+        (
+            "CancellationRaces.swift",
+            &[
+                "testCancellationHeldAtCRegistrationBoundary",
+                "testEarlyOutcomeBeforeCReturnsWins",
+                "testAbandonNotLiveLeavesDeliveryInCharge",
+            ][..],
+        ),
+    ] {
+        let text = fs::read_to_string(out.join("Tests/SwiftLawTests").join(file)).unwrap();
+        assert!(tests.iter().all(|name| text.contains(name)));
+    }
+
+    let changed = source.replace(
+        "    runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?",
+        "    if target.os == (Macos : target.Os) {\n        runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?\n    }",
+    );
+    assert_ne!(changed, source);
+    fs::write(path, changed).unwrap();
+    let refused = work.path().join("refused");
+    let result = command(&refused).output().unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("TargetDependentEntries(aarch64-apple-darwin, aarch64-apple-ios)"),
+        "{error}"
+    );
+    assert!(!refused.exists());
+}
+
+fn check_archive_exports(archive: &[u8], prefix: &str) {
+    use hirsel_core_ids::embed::EXPORTS_V1;
+    use object::read::archive::ArchiveFile;
+    use object::{Object, ObjectSymbol};
+
+    let file = ArchiveFile::parse(archive).unwrap();
+    let anchor = format!("_hirsel_embed_v1_anchor_{prefix}");
+    let member = file
+        .members()
+        .map(Result::unwrap)
+        .find(|member| member.name() == b"exports.o")
+        .unwrap();
+    let object = object::File::parse(member.data(archive).unwrap()).unwrap();
+    let symbols = object
+        .symbols()
+        .filter(|symbol| symbol.is_definition())
+        .map(|symbol| symbol.name().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(symbols.contains(anchor.as_str()));
+    for name in EXPORTS_V1 {
+        assert!(
+            symbols.contains(format!("_{name}").as_str()),
+            "missing {name}"
+        );
+    }
+}
+
+fn manifest_in_archive(archive: &[u8]) -> &[u8] {
+    use object::read::archive::ArchiveFile;
+    use object::{Object, ObjectSection};
+    let file = ArchiveFile::parse(archive).unwrap();
+    for member in file.members() {
+        let member = member.unwrap();
+        let object = object::File::parse(member.data(archive).unwrap()).unwrap();
+        if let Some(section) = object.section_by_name("__hirsel_sdk") {
+            return section.data().unwrap();
+        }
+    }
+    panic!("archive has no SDK manifest")
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}

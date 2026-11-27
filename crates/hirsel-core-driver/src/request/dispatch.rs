@@ -53,13 +53,14 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
                 })
                 .last();
             let kind = output_kind(request.command.name, emit.as_deref())?;
+            if request.command.name == "sdk swift" {
+                crate::sdk_command::swift::run(request)?;
+                return conclude(Outcome::Exit(0));
+            }
             for option in &request.options {
                 if let SdkOption::Target(target) = option {
                     admit_target(target, kind)?;
                 }
-            }
-            if request.command.name == "sdk swift" {
-                return Err("sdk swift is not built yet (docs/spec/embed.md)".into());
             }
             crate::sdk_command::run(crate::sdk_command::Options::read(request)?)?;
             conclude(Outcome::Exit(0))

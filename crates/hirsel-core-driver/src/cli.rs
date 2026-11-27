@@ -261,8 +261,11 @@ commands! {
         Sdk(SdkOption), One:
             PackageStore, Locked, Frozen, PlaceTimeout, NPlace, HELP, SourceCore, SourceStd, CoreProduct,
             Release, DebugLines, Backend, Runtime, Cc, Target, Limit, Entry, Libraries, Store, Inputs, Emit;
-    "sdk swift", "sdk swift <program> -o DIR [options]", "Generate Swift bindings (planned).";
-        Sdk(SdkOption), One: HELP, Emit;
+    "sdk swift", "sdk swift <program> -o DIR [options]", "Generate Swift bindings and an Apple XCFramework.";
+        Sdk(SdkOption), One:
+            PackageStore, Locked, Frozen, NPlace, HELP, SourceCore, SourceStd, CoreProduct,
+            Release, DebugLines, Backend, Runtime, Cc, Target, Limit, Output, Entry, Libraries, Store,
+            Inputs, Emit;
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
         Call(CallOption), Tail: PlaceTimeout, NPlace, Url, CallTimeout, CallStream, HELP;
 }

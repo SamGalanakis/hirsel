@@ -1,6 +1,12 @@
 """Repository inputs read by Rust test binaries at runtime."""
 
 TEST_FILES_ENV = {
+    "hirsel-core-driver-test-sdk_manifest": {
+        "HIRSEL_SWIFT_LINK_KIT": "//tools/buck2/native-toolchain:kit",
+        "HIRSEL_SWIFT_MAC_RUNTIME": "//:hirsel-core-rt-archives[aarch64-apple-darwin]",
+        "HIRSEL_SWIFT_MAC_EMBED": "//:hirsel-core-rt-embed-archives[aarch64-apple-darwin]",
+        "HIRSEL_SWIFT_IOS_EMBED": "//:hirsel-core-rt-ios-embed-archives",
+    },
     "hirsel-core-program-tests-test-cranelift_source_aarch64": {
         "HIRSEL_CONTAINED_DRIVER_TESTS": "//:hirsel-core-driver-unittest-harness",
         "HIRSEL_CONTAINED_RUNTIME": "//:hirsel-core-rt-archives[aarch64]",
@@ -50,7 +56,7 @@ TEST_DATA = {
     ],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/programs/ffi_laws/**", "core/programs/wasm_laws/**", "core/programs/sqlite/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/tests/b9-vectors.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
-    "hirsel-core-driver-test-sdk_manifest": ["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/hirsel.toml", "sdk/client/tests/packed_consumer.hirsel"],
+    "hirsel-core-driver-test-sdk_manifest": ["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/hirsel.toml", "core/programs/runner/tests/b9-vectors.hirsel", "sdk/client/tests/packed_consumer.hirsel"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
 }

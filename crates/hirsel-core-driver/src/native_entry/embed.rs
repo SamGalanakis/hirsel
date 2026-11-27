@@ -2,6 +2,8 @@
 use super::*;
 use cranelift_codegen::ir::InstBuilder;
 
+pub(crate) const APPLE_MANIFEST_SECTION: &str = "__hirsel_sdk";
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     object: &mut ObjectModule,
@@ -15,7 +17,18 @@ pub(super) fn emit(
     waits: bool,
 ) -> Result<()> {
     let manifest_len = manifest.len() as u64;
-    let manifest = data::bytes(object, None, manifest.to_vec(), 1)?;
+    let manifest = if target.apple().is_some() {
+        let id = object
+            .declare_data("hirsel_archive_sdk", Linkage::Local, false, false)
+            .map_err(error)?;
+        let mut data = DataDescription::new();
+        data.define(manifest.into());
+        data.set_custom_section(&format!("__TEXT,{APPLE_MANIFEST_SECTION}"));
+        object.define_data(id, &data).map_err(error)?;
+        id
+    } else {
+        data::bytes(object, None, manifest.to_vec(), 1)?
+    };
     let triple = target.triple();
     let target_data = data::bytes(object, None, triple.as_bytes().to_vec(), 1)?;
 

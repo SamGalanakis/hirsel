@@ -7,6 +7,9 @@ use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "archive_laws/ios.rs"]
+mod ios;
+
 const HOST: &str = include_str!("archive_host.c");
 
 struct Fixture {

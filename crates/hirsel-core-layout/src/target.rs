@@ -111,15 +111,13 @@ impl Target {
     /// Whether this target builds the requested native product.
     pub fn admits(self, output: OutputKind) -> Result<(), &'static str> {
         match (self, output) {
-            (
+            (_, OutputKind::StaticLibrary)
+            | (
                 Self::X86_64Linux | Self::Aarch64Linux | Self::Aarch64Darwin,
-                OutputKind::Executable | OutputKind::StaticLibrary,
+                OutputKind::Executable,
             ) => Ok(()),
             (Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::Executable) => {
                 Err("iOS executables require an Xcode-signed app bundle (docs/spec/embed.md)")
-            }
-            (Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::StaticLibrary) => {
-                Err("iOS static libraries land with slice 6 (docs/spec/embed.md)")
             }
         }
     }

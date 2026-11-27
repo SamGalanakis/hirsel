@@ -41,7 +41,6 @@ export_file(name = "link-kit-source", src = "link_kit.py", mode = "reference", v
 export_file(name = "darwin_sync_ban.py", visibility = ["PUBLIC"])
 export_file(name = "darwin_import_law.py", visibility = ["PUBLIC"])
 export_file(name = "ios_proof.py", mode = "reference")
-export_file(name = "ios_probe.rs", mode = "reference")
 toolchain_proof(name = "proof", tools = [":llvm", ":arm", ":qemu", ":valgrind", ":kit"], script = "proof.sh")
 export_file(name = "environment.tsv", visibility = ["PUBLIC"])
 

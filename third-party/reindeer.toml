@@ -24,6 +24,14 @@ execution-platform = false
 target = "aarch64-apple-darwin"
 execution-platform = false
 
+[platform.ios-arm64]
+target = "aarch64-apple-ios"
+execution-platform = false
+
+[platform.ios-sim-arm64]
+target = "aarch64-apple-ios-sim"
+execution-platform = false
+
 [buck]
 file_name = "BUCK"
 platform_compatibility_on_all_targets = true

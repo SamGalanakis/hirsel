@@ -26,7 +26,7 @@ EXTERNAL = {'third_party_rust_library', 'third_party_rust_binary', 'third_party_
 # Reindeer platforms (third-party/reindeer.toml) that only the runtime archives
 # build for: Linux cross-builds the Darwin runtime (tools/buck2/defs.bzl
 # RUNTIME_TARGETS), and nothing else is configured for Darwin.
-CROSS_ONLY_PLATFORMS = {'macos-arm64'}
+CROSS_ONLY_PLATFORMS = {'macos-arm64', 'ios-arm64', 'ios-sim-arm64'}
 
 
 class PlatformValue:

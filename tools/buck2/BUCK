@@ -187,6 +187,25 @@ platform(
     visibility = ["PUBLIC"],
 )
 
+constraint_setting(name = "ios_variant")
+
+constraint_value(name = "ios_device", constraint_setting = ":ios_variant", visibility = ["PUBLIC"])
+constraint_value(name = "ios_simulator", constraint_setting = ":ios_variant", visibility = ["PUBLIC"])
+
+platform(
+    name = "runtime-ios",
+    constraint_values = ["prelude//os/constraints:iphoneos", "prelude//cpu/constraints:arm64",
+                         ":ios_device", ":profile_runtime", ":panic_abort"],
+    visibility = ["PUBLIC"],
+)
+
+platform(
+    name = "runtime-ios-sim",
+    constraint_values = ["prelude//os/constraints:iphoneos", "prelude//cpu/constraints:arm64",
+                         ":ios_simulator", ":profile_runtime", ":panic_abort"],
+    visibility = ["PUBLIC"],
+)
+
 # Cargo's release profile: `--target-platforms //tools/buck2:release`.
 platform(
     name = "release",

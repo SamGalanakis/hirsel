@@ -274,7 +274,8 @@ def accept_fresh(passed, prefix, targets):
             raise ValueError(f'{slot} and {other} declare the same runtime flavour {flavour}')
         slots[flavour] = slot
     rows = registration['runtimes']
-    expected = {(target, *flavour) for target in targets for flavour in slots}
+    expected = {(target, *flavour) for target in targets for flavour, slot in slots.items()
+                if slot in PRODUCT['runtime_targets'][target].get('slots', PRODUCT['runtime_slots'])}
     registered = {(row['target'], row['observation'], row['record'], row['embedded']) for row in rows}
     if registered != expected:
         raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '

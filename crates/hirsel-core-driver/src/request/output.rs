@@ -1,3 +1,5 @@
+use super::flags::CompilerFlags;
+use crate::installation::Flavour;
 use hirsel_core_layout::{OutputKind, Target};
 
 pub(super) fn output_kind(command: &str, emit: Option<&str>) -> Result<OutputKind, String> {
@@ -29,15 +31,30 @@ pub(super) fn default_path(kind: OutputKind) -> std::path::PathBuf {
     .into()
 }
 
-pub(super) fn validate_archive_flags(
-    recording: bool,
-    manifest: bool,
-    charge: bool,
+pub(super) fn validate_target_and_flags(
+    command: &str,
+    output: OutputKind,
+    flags: &CompilerFlags,
 ) -> Result<(), String> {
+    let kind = if matches!(command, "core-product" | "std-product")
+        && !flags.explicit_runtime
+        && flags.additional_runtimes.contains_key(&Flavour::EMBEDDED)
+    {
+        OutputKind::StaticLibrary
+    } else {
+        output
+    };
+    admit_target(&flags.target, kind)?;
+    if output != OutputKind::StaticLibrary {
+        return Ok(());
+    }
     for (enabled, flag) in [
-        (recording, "--recording"),
-        (manifest, "--manifest"),
-        (charge, "--logical-charge-report"),
+        (flags.recording_build, "--recording"),
+        (flags.release_manifest.is_some(), "--manifest"),
+        (
+            flags.logical_charge_report.is_some(),
+            "--logical-charge-report",
+        ),
     ] {
         if enabled {
             return Err(format!(

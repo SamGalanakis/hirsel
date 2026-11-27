@@ -1,0 +1,57 @@
+type PlaceTables: shareable + send {
+    items: store.Table[u64, Bytes],
+}
+
+fn schema(mut d: store.Declare) -> Result[PlaceTables, store.Error] {
+    let table = store.declare_table(mut d, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    Ok(PlaceTables(items: store.finish(mut d, take table)?))
+}
+
+fn register(mut _r: runner.Registry[(), PlaceTables]) -> Result[(), runner.RegisterError] {
+    Ok(())
+}
+
+pub fn main(
+    storage: Dir,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    args: Args,
+    process: Process,
+    errors: Stderr,
+    foreign: Foreign[laws.Laws],
+) -> Result[(), Exit] waits {
+    let reg = code.describe(register)
+    let shape = code.describe(schema)
+    runner.main(args, process, errors, tasks, clock, reg, shape, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let _ = native.touch(foreign)
+        let peer = Addr(ip: V4(0x7f000001u32), port: 443u16)
+        let socket = result.unwrap(host.connect(net, peer, Never))
+        let _ = tls.connect(net, take socket, "localhost", System, list.new(), Never)
+        let cfg: runner.PlaceConfig[(), PlaceTables, ()] = runner.PlaceConfig(
+            backing: Disk(storage),
+            sizes: store.derived_sizes(),
+            selection: runner.launch_selection(args) ?=> Usage,
+            place: reg,
+            n_place: 16777216u64,
+            on_migrate: None,
+            schema: shape,
+            session: runner.wire_defaults(131072u64),
+            max_sessions: 4u64,
+            proxies: list.new(),
+            n_publisher: 8388608u64,
+            listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)),
+            net: net,
+            tasks: tasks,
+            clock: clock,
+            random: random,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64),
+            wire: None,
+            grants: None,
+            triggers: None,
+            idle: None,
+        )
+        Ok(runner.operate_report(take cfg, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
+    })
+}

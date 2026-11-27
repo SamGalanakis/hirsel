@@ -14,12 +14,16 @@ LLVM_SONAME = LLVM_LIBRARY.split("/")[-1]
 MACOS = APPLE_TARGETS["macos"]
 MACOS_TRIPLE = MACOS["triple"]
 MACOS_DEPLOYMENT = {MACOS["deployment_env"]: MACOS["floor"]}
+IOS_CONFIGS = {
+    "root//tools/buck2:ios_device": APPLE_TARGETS["ios"],
+    "root//tools/buck2:ios_simulator": APPLE_TARGETS["ios-simulator"],
+}
 
 # Both trees are ignored local state that tools/buck2/bootstrap.py installs.
 RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = [
     "rust-files/lib/rustlib/src/**",
 ] + ["rust-files/lib/rustlib/{}/**".format(row["triple"]) for row in APPLE_TARGETS.values()])}
-RUST_TARGET = select({
+RUST_TARGET = select({config: row["triple"] for config, row in IOS_CONFIGS.items()} | {
     "prelude//os:macos": MACOS_TRIPLE,
     "DEFAULT": select({
         "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
@@ -27,7 +31,7 @@ RUST_TARGET = select({
     }),
 })
 
-RUST_DEPLOYMENT = select({
+RUST_DEPLOYMENT = select({config: {row["deployment_env"]: row["floor"]} for config, row in IOS_CONFIGS.items()} | {
     "prelude//os:macos": MACOS_DEPLOYMENT,
     "DEFAULT": {},
 })
@@ -41,6 +45,9 @@ DARWIN_STD = {p.removeprefix("rust-files/"): p for p in glob(
 )}
 
 TARGET_STD = select({
+    config: {p.removeprefix("rust-files/"): p for p in glob(["rust-files/lib/rustlib/{}/lib/*".format(row["triple"])])}
+    for config, row in IOS_CONFIGS.items()
+} | {
     "prelude//os:macos": DARWIN_STD,
     "DEFAULT": {},
 })
@@ -55,6 +62,7 @@ trace_std(
     script = "raw_backtrace_std.py",
     panic_image = select({
         "prelude//os:macos": "panic_image_darwin.rs",
+        "prelude//os:iphoneos": "panic_image_darwin.rs",
         "DEFAULT": "panic_image.rs",
     }),
     exec_compatible_with = ["root//tools/buck2:pool_1_1048576"],
@@ -77,17 +85,6 @@ llvm_tree(
     name = "test-rustc",
     srcs = RUST_FILES,
     visibility = ["PUBLIC"],
-)
-
-# Compiler and device std for the native toolchain proof's verifier object.
-llvm_tree(
-    name = "ios-rustc",
-    srcs = {p.removeprefix("rust-files/"): p for p in glob([
-        "rust-files/bin/rustc",
-        "rust-files/lib/*.so*",
-        "rust-files/lib/rustlib/{}/lib/*".format(APPLE_TARGETS["ios"]["triple"]),
-    ])},
-    visibility = ["root//tools/buck2/native-toolchain:"],
 )
 
 # Everything clang and lld need to run: the C toolchain and every link.
@@ -151,10 +148,23 @@ llvm_cxx_tools(
     darwin_include = "darwin-include",
 )
 
+[
+    llvm_cxx_tools(
+        name = "cxx_tools_" + variant,
+        tree = ":clang",
+        fixed_build_date = "fixed-build-date",
+        darwin_target = APPLE_TARGETS[variant]["llvm_triple"],
+        darwin_include = "darwin-include",
+    )
+    for variant in ["ios", "ios-simulator"]
+]
+
 cxx_tools_info_toolchain(
     name = "cxx",
     # Choose before the tools' execution transition discards the target OS and CPU.
     cxx_tools_info = select({
+        "root//tools/buck2:ios_device": ":cxx_tools_ios",
+        "root//tools/buck2:ios_simulator": ":cxx_tools_ios-simulator",
         "prelude//os:macos": ":cxx_tools_darwin",
         "DEFAULT": select({
             "prelude//cpu:arm64": ":cxx_tools_arm",

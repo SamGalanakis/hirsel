@@ -12,7 +12,7 @@ names the crate from any package directory, locally or on the pool, and so do
 CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
-load("@root//tools/toolchain-dist:product.bzl", "HOSTS", "RUNTIME_TARGETS")
+load("@root//tools/toolchain-dist:product.bzl", "EMBED_RUNTIME_TARGETS", "HOSTS", "RUNTIME_TARGETS")
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
 load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
@@ -673,6 +673,9 @@ def _toolchain_bundle_impl(ctx):
         ' > /dev/null; shift {}'.format(len(ctx.attrs.runtimes) + 1)
         for _ in RUNTIME_TARGETS
     ] + [
+        '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" --embed-runtime "$2" > /dev/null; shift 2'
+        for _ in EMBED_RUNTIME_TARGETS
+    ] + [
         'cp "$packages"/*.hpkg "$root/core-packages/"',
         'python3 "$programs" helpers "$product" "$root" "$platform/platform" "$TMPDIR" "$TMPDIR/platform_main"',
         '"$objcopy" --add-section ".hirsel_host=$TMPDIR/platform_main" "$root/hirsel"',
@@ -683,6 +686,9 @@ def _toolchain_bundle_impl(ctx):
         runtimes.append(triple)
         for dep in ctx.attrs.runtimes.values():
             runtimes.append(dep[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
+    for triple in EMBED_RUNTIME_TARGETS:
+        runtimes.append(triple)
+        runtimes.append(ctx.attrs.embed_runtime[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
     bundle_memory = "6G" if DIST_BUNDLE_JOBS > 1 else PRODUCT_MEMORY_LIMIT
     ctx.actions.run(
         cmd_args("/bin/sh", script, compiler, bundle.as_output(), scratch.as_output(),
@@ -704,6 +710,7 @@ hirsel_toolchain_bundle = rule(
     attrs = {
         "hirsel": attrs.dep(),
         "runtimes": attrs.dict(attrs.string(), attrs.dep(), sorted = False),
+        "embed_runtime": attrs.dep(),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
         "_product": attrs.source(default = "root//tools/toolchain-dist:product.toml"),
@@ -862,7 +869,7 @@ _pic_staticlib = rule(
 def hirsel_pic_staticlib(name, library):
     _pic_staticlib(name = name, library = library, visibility = ["PUBLIC"])
 
-def hirsel_core_runtime_archives(name, library, archive_name, shipped = True):
+def hirsel_core_runtime_archives(name, library, archive_name, shipped = True, embed = False):
     """The Core runtime, in its own archive namespace on every runtime target.
 
     Use the library's Cargo-resolved dependencies. A test fixture's archives
@@ -870,14 +877,15 @@ def hirsel_core_runtime_archives(name, library, archive_name, shipped = True):
     holds what a shipped program may import, does not cover them; the Darwin
     sync ban covers every archive.
     """
+    platforms = EMBED_RUNTIME_TARGETS if embed else RUNTIME_TARGETS
     archives = {}
-    for triple, platform in RUNTIME_TARGETS.items():
+    for triple, platform in platforms.items():
         configured = name + "-" + runtime_target_key(triple)
         native.configured_alias(name = configured, actual = library, platform = platform)
         archives[triple] = ":" + configured
     _core_runtime_archives(name = name, archives = archives, archive_name = archive_name,
                            visibility = ["PUBLIC"])
-    darwin = [triple for triple in RUNTIME_TARGETS if triple.endswith("-apple-darwin")]
+    darwin = [triple for triple in platforms if triple.endswith("-apple-darwin")]
     if darwin:
         darwin_archives = [":" + name + "[" + runtime_target_key(triple) + "]" for triple in darwin]
         _darwin_sync_ban(
@@ -1033,7 +1041,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", 
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-shard-1"] + host_targets)
 
-def hirsel_driver_archive_test(name, data, selection):
+def hirsel_driver_archive_test(name, data, selection, ios = False):
     _rust_test(
         name = name,
         harness = "//:hirsel-core-driver-unittest-harness",
@@ -1048,7 +1056,7 @@ def hirsel_driver_archive_test(name, data, selection):
             "HIRSEL_ARCHIVE_RUST": "toolchains//:test-rustc",
             "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
             "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu",
-        },
+        } | ({"HIRSEL_IOS_RUNTIMES": "//:hirsel-core-rt-ios-embed-archives"} if ios else {}),
         labels = ["local-execution", "requires-openat2"],
         exec_compatible_with = [budget_constraint("host")],
         pool = False,

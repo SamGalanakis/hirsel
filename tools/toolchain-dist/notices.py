@@ -599,7 +599,7 @@ def collect_darwin(bundle, llvm_tree):
     sources, llvm = notice_sources(TARGET)
     files = sources['files']
     del files['libexec/hirsel/.hirsel-debug/*.debug']
-    del files['link/kit/*-linux-gnu/*'], files['hirsel.profdata']
+    del files['link/kit/*-linux-gnu/*'], files['link/kit/aarch64-apple-ios*/*.tbd'], files['hirsel.profdata']
     files['bin/ld.lld'] = dict(native='darwin_llvm', contents='the Mach-O linker')
     for path in ('bin/llvm-ar', 'bin/llvm-objcopy'):
         if (llvm_tree / path).is_file():

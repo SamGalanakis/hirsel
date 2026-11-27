@@ -34,7 +34,7 @@ flags! {
     CallTimeout ["--timeout"] "SECONDS" => "Connection and call deadline; default 10 seconds.";
     CallStream ["--stream"] "32-HEX" => "Send once at position zero on this saved stream ID.";
     Recording ["--recording"] => "Include recording support. Set HIRSEL_RECORD when running the executable to record.";
-    EmbedRuntime ["--embed-runtime"] "ARCHIVE" => "Install the embedded runtime slot alongside --runtime.";
+    EmbedRuntime ["--embed-runtime"] "ARCHIVE" => "Install the embedded runtime slot.";
     RecordingRuntime ["--recording-runtime"] "ARCHIVE" => "Install this recording runtime archive alongside --runtime.";
     ProfRuntime ["--prof-runtime"] "ARCHIVE" => "Install the profiling runtime archive alongside --runtime.";
     ProfRecordingRuntime ["--prof-recording-runtime"] "ARCHIVE" => "Install the combined profiling and recording runtime archive.";

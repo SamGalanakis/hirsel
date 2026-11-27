@@ -1,9 +1,8 @@
 """Check the iOS rows as part of the native toolchain proof."""
 
 import json
-import os
 from pathlib import Path
-import shutil
+import re
 import subprocess
 import sys
 
@@ -12,7 +11,8 @@ from link_kit import symbol_names, tbd_exports
 
 def undefined(nm, obj):
     command = [nm, "-u", "--no-demangle", "--format=posix", obj]
-    return {line.split()[0] for line in subprocess.check_output(command, text=True).splitlines() if line}
+    return {line.split()[0] for line in subprocess.check_output(command, text=True).splitlines()
+            if line and not line.endswith(":")}
 
 
 def same_symbols(label, actual, expected):
@@ -29,8 +29,47 @@ def removed_system_name(name):
     }
 
 
+def prove_runtime(llvm, runtime, target, lists):
+    nm = llvm / "bin/llvm-nm"
+    definitions = subprocess.check_output([nm, "--defined-only", "--no-demangle", "--format=posix", runtime], text=True)
+    for symbol in ("CRYPTO_memcmp", "ChaCha20_ctr32_neon"):
+        pattern = rf"^_ring_core_\d+_\d+_\d+__{symbol} [Tt] "
+        if not re.search(pattern, definitions, re.M):
+            raise SystemExit(f"{runtime}: missing native ring definition {symbol}")
+
+    imports = undefined(nm, runtime)
+    for prefix, library in ((("_CF", "_kCF"), "CoreFoundation"), (("_Sec",), "Security")):
+        framework_imports = {name for name in imports if name.startswith(prefix)}
+        if not framework_imports:
+            raise SystemExit(f"{runtime}: no {library} verifier imports")
+        same_symbols(f"{runtime} {library} verifier import coverage", framework_imports - lists[library], set())
+
+    tool = llvm / "bin/llvm-readobj"
+    headers = subprocess.check_output([tool, "--file-headers", "--macho-version-min", runtime], text=True)
+    objects = headers.split("\nFile: ")[1:]
+    if not objects:
+        raise SystemExit(f"{runtime}: no Mach-O objects")
+    platform = target["platform_version_name"].replace("-", "")
+    floor = tuple(map(int, target["floor"].split("."))) + (0,)
+    for header in objects:
+        member = header.splitlines()[0]
+        versions = re.findall(r"Cmd: LC_BUILD_VERSION\s+Size: \d+\s+Platform: (\w+)\s+Version: ([\d.]+)", header)
+        # The pinned device std was built for iOS 10. Its legacy command
+        # identifies the device on arm64. A simulator always has platform 7.
+        if platform == "ios":
+            versions.extend(("ios", version) for version in re.findall(
+                r"Cmd: LC_VERSION_MIN_IPHONEOS\s+Size: \d+\s+Version: ([\d.]+)", header))
+        if ("Format: Mach-O arm64\n" not in header or "FileType: Relocatable" not in header
+                or len(versions) != 1 or versions[0][0] != platform):
+            raise SystemExit(f"{member}: expected one relocatable arm64 {platform} build version")
+        version = tuple(map(int, versions[0][1].split(".")))
+        if version > floor:
+            raise SystemExit(f"{member}: minimum {versions[0][1]} exceeds {target['floor']}")
+    print(f"{target['triple']}: checked {len(objects)} runtime members, ring C and assembly, and verifier imports", flush=True)
+
+
 def main():
-    llvm, kit, work, generator, records, rust, verifier, probe, macos, system, cf, security = map(Path, sys.argv[1:])
+    llvm, kit, work, generator, records, runtimes, macos, system, cf, security = map(Path, sys.argv[1:])
     targets = json.loads(records.read_text())
     manifest = json.loads((kit / "manifest.json").read_text())["targets"]
     lists = {library: set(symbol_names(path)) for library, path in
@@ -45,25 +84,9 @@ def main():
     same_symbols("iOS exclusions", banned, set())
 
     nm = llvm / "bin/llvm-nm"
-    device = next(row for row in targets if not row["llvm_environment"])
-    shutil.copyfile(verifier, work / "apple.rs")
-    shutil.copyfile(probe, work / "ios_probe.rs")
-    obj = work / "ios_probe.o"
-    env = dict(os.environ, **{device["deployment_env"]: device["floor"]})
-    subprocess.run([rust / "bin/rustc", "--target", device["triple"], "--edition=2024", "--crate-type=lib",
-                    "--emit=obj", "-Cpanic=abort", "-Csymbol-mangling-version=v0", "-Dwarnings",
-                    work / "ios_probe.rs", "-o", obj], check=True, env=env)
-    imports = {name for name in undefined(nm, obj) if not name.startswith("__R")}
-    for prefix, library in ((("_CF", "_kCF"), "CoreFoundation"), ("_Sec", "Security")):
-        framework_imports = {name for name in imports if name.startswith(prefix)}
-        if not framework_imports:
-            raise SystemExit(f"iOS verifier object has no {library} imports")
-        same_symbols(f"{library} verifier import coverage", framework_imports - lists[library], set())
-    same_symbols("iOS verifier import coverage", imports - names, set())
-    print(f"{device['triple']}: {len(imports)} verifier imports covered by the iOS lists", flush=True)
-
     for target in targets:
         triple = target["triple"]
+        prove_runtime(llvm, runtimes / triple / "libhirsel_core_rt.a", target, lists)
         row = manifest[triple]
         for field in ("floor", "llvm_triple", "platform_version_name"):
             if row[field] != target[field]:

@@ -76,7 +76,7 @@ compiler_flags = ["--target=aarch64-unknown-linux-gnu", "-nostdlibinc", "-DRING_
 # for aarch64 with ASM_TARGETS' Apple perlasm format, ios64. The toolchain's
 # Darwin clang has no SDK (tools/buck2/toolchains/BUCK cxx_tools_darwin), so
 # ring builds as configure_cc's sysroot-less mode does.
-[['cfg(all(target_arch = "aarch64", target_os = "macos"))'.cxx_library]]
+[['cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "ios")))'.cxx_library]]
 name = "ring-core-aarch64-darwin"
 srcs = [
   "crypto/curve25519/curve25519.c",

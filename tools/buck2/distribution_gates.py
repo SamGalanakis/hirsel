@@ -19,8 +19,11 @@ def archive_slots(reads):
 def runtime_product_bzl(reads, starlark, header):
     product = release_product(reads)
     platforms = {triple: row["platform"] for triple, row in product["runtime_targets"].items()
-                 if "platform" in row}
+                 if "slots" not in row}
+    embed_platforms = {triple: row["platform"] for triple, row in product["runtime_targets"].items()
+                       if "embed-runtime" in row.get("slots", [])}
     return (header + f"RUNTIME_TARGETS = {starlark(platforms, 0)}\n"
+            + f"EMBED_RUNTIME_TARGETS = {starlark(embed_platforms, 0)}\n"
             + f"HOSTS = {starlark(product['hosts'], 0)}\n")
 
 
@@ -45,13 +48,15 @@ def distribution_gates(out, call, Raw, reads, slots):
         for library in ("libSystem", "CoreFoundation", "Security"):
             out.append("\n" + call("export_file", name=f"{family}-{library.lower()}-symbols",
                                    src=f"tools/native-toolchain/{family}/{library}.symbols", visibility=["PUBLIC"]))
-    out.append("\n" + call("export_file", name="apple-trust-source",
-                           src="crates/hirsel-core-rt/src/host/trust/apple.rs", mode="reference", visibility=["PUBLIC"]))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="hirsel-core-rt-ios-embed-archives",
+                            library="//:hirsel-core-rt-embed", archive_name="libhirsel_core_rt.a",
+                            embed=True))
     out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel",
                             packages=toolchain_packages(reads, reads.root)))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes={flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
                                       for flag, slot in slots.items()},
+                            embed_runtime="//:hirsel-core-rt-ios-embed-archives",
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))

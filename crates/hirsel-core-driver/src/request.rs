@@ -145,6 +145,12 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
     // Never use a cc found on PATH.
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
+    let flags = CompilerFlags::read(
+        invocation.options,
+        inspect_library.is_some(),
+        crate::TestCache::default_root(),
+    )?;
+    output::validate_target_and_flags(command, output_kind, &flags)?;
     let CompilerFlags {
         libraries,
         store,
@@ -202,19 +208,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         diagnose,
         mut grants,
         json,
-    } = CompilerFlags::read(
-        invocation.options,
-        inspect_library.is_some(),
-        crate::TestCache::default_root(),
-    )?;
-    admit_target(&target, output_kind)?;
-    if output_kind == OutputKind::StaticLibrary {
-        output::validate_archive_flags(
-            recording_build,
-            release_manifest.is_some(),
-            logical_charge_report.is_some(),
-        )?;
-    }
+    } = flags;
     use crate::installation::{Flavour, Observation};
     let law_baseline = law_baseline
         .as_deref()
@@ -625,8 +619,8 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         return conclude(Outcome::Exit(0));
     }
     if command == "core-product" || command == "std-product" {
-        if link_kit.is_some() && (install_root.is_none() || runtime.is_none()) {
-            return Err("--link-kit requires --install and --runtime".into());
+        if link_kit.is_some() && install_root.is_none() {
+            return Err("--link-kit requires --install".into());
         }
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {

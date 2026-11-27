@@ -28,20 +28,17 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn hirsel_build_refuses_ios_before_reading_source() {
+fn hirsel_build_refuses_ios_executables_before_reading_source() {
     let dir = tempfile::tempdir().unwrap();
     for target in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
-        for (kind, reason) in [
-            ("exe", "iOS executables require an Xcode-signed app bundle"),
-            ("staticlib", "iOS static libraries land with slice 6"),
-        ] {
-            let output = run_in(dir.path(), &["build", "--target", target, "--emit", kind]);
-            assert_eq!(output.status.code(), Some(2));
-            assert_eq!(
-                stderr(&output),
-                format!("hirsel: {target}: {reason} (docs/spec/embed.md)\n")
-            );
-        }
+        let output = run_in(dir.path(), &["build", "--target", target, "--emit", "exe"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "hirsel: {target}: iOS executables require an Xcode-signed app bundle (docs/spec/embed.md)\n"
+            )
+        );
     }
 }
 

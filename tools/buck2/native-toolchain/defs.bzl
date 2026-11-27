@@ -76,7 +76,7 @@ def _proof(ctx):
     command = cmd_args(
         ctx.attrs.interpreter, ctx.attrs.script, trees, APPLE_TARGETS["macos"]["triple"],
         ctx.attrs._ios_proof, ctx.attrs._link_kit_source, ios_targets,
-        ctx.attrs._ios_rustc[DefaultInfo].default_outputs[0], ctx.attrs._verifier, ctx.attrs._probe,
+        ctx.attrs._ios_runtimes[DefaultInfo].default_outputs[0],
         ctx.attrs._macos_libsystem, [ctx.attrs._ios_symbols[library] for library in LIBRARIES],
     )
     return [DefaultInfo(), ExternalRunnerTestInfo(
@@ -92,9 +92,7 @@ _toolchain_proof = rule(impl = _proof, attrs = {
     "interpreter": attrs.string(default = "bash"),
     "_ios_proof": attrs.source(default = "//tools/buck2/native-toolchain:ios_proof.py"),
     "_link_kit_source": attrs.source(default = "//tools/buck2/native-toolchain:link-kit-source"),
-    "_ios_rustc": attrs.dep(default = "@toolchains//:ios-rustc"),
-    "_verifier": attrs.source(default = "root//:apple-trust-source"),
-    "_probe": attrs.source(default = "//tools/buck2/native-toolchain:ios_probe.rs"),
+    "_ios_runtimes": attrs.dep(default = "root//:hirsel-core-rt-ios-embed-archives"),
     "_macos_libsystem": attrs.source(default = DARWIN_SYMBOLS["libSystem"]),
     "_ios_symbols": attrs.dict(attrs.string(), attrs.source(), default = IOS_SYMBOLS),
 })

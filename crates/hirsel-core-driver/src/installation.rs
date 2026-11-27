@@ -684,7 +684,19 @@ pub fn publish(
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
     let root = crate::product::normalized(root);
-    let linked = runtimes.get(&Flavour::PLAIN).map(|(_, target)| *target);
+    let executable = runtimes.get(&Flavour::PLAIN).map(|(_, target)| *target);
+    let linked = executable.or_else(|| {
+        runtimes
+            .get(&Flavour::EMBEDDED)
+            .filter(|(_, target)| {
+                use hirsel_core_layout::Os;
+                match Target::from_triple(target).map(Target::os) {
+                    Some(Os::Ios) => true,
+                    Some(Os::Linux | Os::Macos) | None => false,
+                }
+            })
+            .map(|(_, target)| *target)
+    });
     let runtimes = runtimes
         .into_iter()
         .map(|(flavour, (path, target))| {
@@ -699,7 +711,11 @@ pub fn publish(
                 "installing the {target} runtime requires --link-kit"
             )));
         }
-        (None, Some(_)) => return Err(io::Error::other("--link-kit requires --runtime")),
+        (None, Some(_)) => {
+            return Err(io::Error::other(
+                "--link-kit requires --runtime or an iOS --embed-runtime",
+            ));
+        }
         (None, None) => None,
     };
     // Refuse an incompatible registration before replacing the installed compiler.
@@ -763,7 +779,7 @@ pub fn publish(
             prebuild(&installed, target, &archive, recipe, meter)?;
         }
     }
-    if std && let Some(target) = linked {
+    if std && let Some(target) = executable {
         prebuild_release(&product.image, target, meter)?;
     }
     Ok(product)

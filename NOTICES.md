@@ -14,6 +14,7 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `link/*.json` | the bundle-relative link recipe | Hirsel |
 | `link/kit/*-linux-gnu/*` | glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind | `link-kit-glibc`, `link-kit-llvm` |
 | `link/kit/aarch64-apple-darwin/*.tbd` | link-only text stubs generated from Hirsel's Darwin symbol allowlists | Hirsel |
+| `link/kit/aarch64-apple-ios*/*.tbd` | link-only text stubs generated from Hirsel's iOS symbol allowlists | Hirsel |
 | `core-packages/*` | the core and std package images and the Store source archive | Hirsel |
 | `libexec/hirsel/pin_reader` | the Hirsel offline pin reader, linked with the shipped runtime archive | Hirsel |
 | `libexec/hirsel/store_tool` | the Hirsel store backup and restore tool, linked with the shipped runtime archive | Hirsel |
@@ -2289,6 +2290,10 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   {
    "contents": "link-only text stubs generated from Hirsel's Darwin symbol allowlists",
    "path": "link/kit/aarch64-apple-darwin/*.tbd"
+  },
+  {
+   "contents": "link-only text stubs generated from Hirsel's iOS symbol allowlists",
+   "path": "link/kit/aarch64-apple-ios*/*.tbd"
   },
   {
    "contents": "the core and std package images and the Store source archive",

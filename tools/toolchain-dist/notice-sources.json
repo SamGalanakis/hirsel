@@ -28,6 +28,9 @@
     "link/kit/aarch64-apple-darwin/*.tbd": {
       "contents": "link-only text stubs generated from Hirsel's Darwin symbol allowlists"
     },
+    "link/kit/aarch64-apple-ios*/*.tbd": {
+      "contents": "link-only text stubs generated from Hirsel's iOS symbol allowlists"
+    },
     "core-packages/*": {
       "contents": "the core and std package images and the Store source archive"
     },

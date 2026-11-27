@@ -1,9 +1,8 @@
-//! FFI-3's Mach-O rows: the members of an `aarch64-apple-darwin` archive and
-//! the definitions of a Mach-O link input.
+//! FFI-3's Mach-O rows and the definitions of a Mach-O link input.
 use super::{Member, Symbol, c_name};
 use crate::code_admission::AdmissionError;
 use hirsel_core_ir::decode::{Debit, DecodeResult};
-use hirsel_core_layout::Target;
+use hirsel_core_layout::AppleRecord;
 
 // Mach-O, as LLVM's `BinaryFormat/MachO.h` names it.
 pub(super) const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -282,11 +281,11 @@ impl<'a> MachSection<'a> {
     }
 }
 
-/// A Mach-O member for `aarch64-apple-darwin`, or `None` when it is not a
-/// relocatable arm64 macOS object no later than the floor.
+/// A relocatable arm64 Mach-O member for this Apple platform and floor.
 pub(super) fn parse_member(
     bytes: &[u8],
     name: &str,
+    apple: &AppleRecord,
     budget: &Debit<'_>,
 ) -> DecodeResult<Option<Member>> {
     let Some(file) = MachO::parse(bytes) else {
@@ -303,7 +302,6 @@ pub(super) fn parse_member(
         .map(|(_, command)| (u32_at(command, 8), u32_at(command, 12)));
     let build = match (builds.next(), builds.next()) {
         (Some((Some(platform), Some(minos))), None) => {
-            let apple = Target::Aarch64Darwin.apple().unwrap();
             platform == apple.macho_platform && minos <= apple.macho_minos
         }
         _ => false,
@@ -429,7 +427,7 @@ pub(super) fn definitions(
 
 #[cfg(test)]
 mod tests {
-    /// FFI-3's Mach-O rows and its import check, for `aarch64-apple-darwin`.
+    /// FFI-3's Mach-O rows and its import check on Apple targets.
     /// Each expected line is the spec's diagnostic (docs/spec/foreign.md, FFI-3,
     /// "Mach-O members" and "Imports") filled in by hand: the C name without
     /// Mach-O's leading `_`, the feature named as LLVM's `MachO.h` names it.
@@ -499,18 +497,53 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
                 header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32".into(),
             }],
         };
-        let prefix = |object: ObjectRef| {
+        let prefix_for = |target: &str, object: ObjectRef| {
             format!(
                 "FFI-3: archive object {} of ffi_laws@1/native for {target}",
                 object.hash
             )
         };
-        let admit = |(bytes, object): (Vec<u8>, ObjectRef)| {
+        let prefix = |object| prefix_for(target, object);
+        let admit_for = |target: &str, (bytes, object): (Vec<u8>, ObjectRef)| {
             SealedArchive::open(bytes, object, &module, target, None, &Debit::unlimited())
                 .and_then(|archive| archive.check_headers(object, &leaf, target, None))
                 .map_err(|error| error.to_string())
         };
-        let apple = hirsel_core_layout::Target::Aarch64Darwin.apple().unwrap();
+        let admit = |built| admit_for(target, built);
+        use hirsel_core_layout::Target;
+        for (target, other, earlier) in [
+            (
+                Target::Aarch64Ios,
+                Target::Aarch64IosSim,
+                "arm64-apple-ios17.0",
+            ),
+            (
+                Target::Aarch64IosSim,
+                Target::Aarch64Ios,
+                "arm64-apple-ios17.0-simulator",
+            ),
+        ] {
+            let triple = target.triple();
+            let apple = target.apple().unwrap();
+            let later = apple
+                .llvm_triple
+                .replacen(apple.floor, &format!("{}.1", apple.floor), 1);
+            admit_for(triple, build(apple.llvm_triple, "")).unwrap();
+            admit_for(triple, build(earlier, "")).unwrap();
+            for rejected in [other.llvm_triple(), &later] {
+                let archive = build(rejected, "");
+                let expected = format!(
+                    "{}: member laws.o is not a relocatable object for {triple}",
+                    prefix_for(triple, archive.1),
+                );
+                assert_eq!(
+                    admit_for(triple, archive).unwrap_err(),
+                    expected,
+                    "{rejected}"
+                );
+            }
+        }
+        let apple = Target::Aarch64Darwin.apple().unwrap();
         let arm64 = apple.llvm_triple;
         let arm64e = arm64.replacen("arm64", "arm64e", 1);
         let x86 = arm64.replacen("arm64", "x86_64", 1);

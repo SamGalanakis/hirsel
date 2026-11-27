@@ -37,6 +37,14 @@ pub(crate) fn install_recipe(
         crate::installation::install_file(&std::fs::read(source)?, &root.join(&relative), 0o644)?;
         Ok(relative)
     };
+    let stubs = |row| -> io::Result<Vec<String>> {
+        serde_json::from_value::<DarwinTarget>(row)
+            .map_err(io::Error::other)?
+            .libraries
+            .iter()
+            .map(|path| copy(path))
+            .collect()
+    };
     let target_kind =
         Target::from_triple(target).ok_or_else(|| io::Error::other("no installed link target"))?;
     let args = match target_kind.os() {
@@ -72,20 +80,16 @@ pub(crate) fn install_recipe(
             args
         }
         Os::Macos => {
-            let inputs = &serde_json::from_value::<DarwinTarget>(row).map_err(io::Error::other)?;
-            let apple = target_kind.apple().unwrap();
             let mut args = ["-arch", "arm64"]
                 .into_iter()
-                .chain(apple.platform_version_args())
+                .chain(target_kind.apple().unwrap().platform_version_args())
                 .chain(["-adhoc_codesign", INPUT_MARKER])
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            for path in &inputs.libraries {
-                args.push(copy(path)?);
-            }
+            args.extend(stubs(row)?);
             args
         }
-        Os::Ios => return Err(io::Error::other(format!("no link kit row for {target}"))),
+        Os::Ios => stubs(row)?,
     };
     crate::installation::install_file(linker, &root.join(INSTALLED_LINKER), 0o755)?;
     let relative = Path::new("link").join(format!("{target}.json"));

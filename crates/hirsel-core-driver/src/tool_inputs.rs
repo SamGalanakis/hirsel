@@ -267,15 +267,15 @@ const INSTALLED_RECIPE_SCHEMA: u32 = 3;
 /// The link editor's place in an installation.
 pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
 
-/// An ELF link's interpreter or the flavour ld.lld needs to link Mach-O.
-/// The second argument names the recipe in its identity.
+/// The ELF interpreter or Mach-O flavor, keyed into the recipe's identity.
 fn installed_prefix(target: &str) -> io::Result<[&'static str; 2]> {
     let refuse = || io::Error::other(format!("no installed link target for {target}"));
     match Target::from_triple(target).ok_or_else(refuse)? {
         Target::X86_64Linux => Ok(["-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"]),
         Target::Aarch64Linux => Ok(["-dynamic-linker", "/lib/ld-linux-aarch64.so.1"]),
-        Target::Aarch64Darwin => Ok(["-flavor", "darwin"]),
-        Target::Aarch64Ios | Target::Aarch64IosSim => Err(refuse()),
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {
+            Ok(["-flavor", "darwin"])
+        }
     }
 }
 

@@ -631,23 +631,63 @@ fn l102_owner3_names(db: Db) -> List[String] {
     take names
 }
 
-// L102 (c), second row (F6): an `import` pin no kept import holds, as a
-// crashed deploy leaves it, then a hot build refused past its build cuts,
-// which leaves its `build` pin listed. `close` runs no cut, so the reopen
-// lists both owner-3 pins; the first holder-free cut drops both at once, and
-// `rows` keeps its model rows through it and a further reopen. Red on main:
-// `Tiered(Migrate)` at `index`; with one orphan per cut (`one_orphan_per_cut`)
-// the import pin outlives the cut.
+// The child's release for (c)'s second row: OLD's schema, redeclared.
+fn l102_lease_stage(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
+    let mut decl = declare_export(source, tasks, None)?
+    let rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take rows_decl)?
+    let other_decl = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other_decl)?
+    finish_export_declaration(source, take decl)
+}
+
+// OLD under an export lease with a kept import, then a hot build refused past
+// its build cuts. Before the close both owner-3 pins are listed: the import
+// pin the kept import holds and the build pin the refusal left.
+fn l102_leased_refusal(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks) -> Result[(), DeployError] waits {
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let first = begin_export_copy(mut db, scratch, deploy_result(failure_result_from_rep(types.copied(attempt)))?, 1u64)?
+    let exported = export_copy(take first)?
+    let mut source = open_export(exported.dir, c, attempt, deploy_result(hot_options(65536))?)?
+    let staged = deploy_result(l102_lease_stage(source, tasks))?
+    write_prepared(mut source, staged, exported.dir, PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 268435456u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64, limits: None))?
+    let checked = validate_prepared(exported.dir)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    keep_import(mut db, take assembled)?
+    deploy_result(l102_unique_refused(mut db))?
+    let listed = l102_owner3_names(db)
+    if list.len(listed) != 2 || !list.contains(listed, string.from("build")) || !list.contains(listed, string.from("import")) {
+        fail("L102 (c): the refused build under the lease did not list both owner-3 pins")
+    }
+    Ok(())
+}
+
+// L102 (c), second row (F6): a hot build refused past its build cuts under an
+// export lease with a kept import, then `close`, which runs no cut, as a
+// crash leaves the directory. The kept import and the lease lived only in
+// memory, so the reopen lists both owner-3 pins as orphans; the first
+// holder-free cut drops both at once, and `rows` keeps its model rows through
+// it and a further reopen. Red on main: `Tiered(Migrate)` at `index`; with
+// one orphan per cut (`one_orphan_per_cut`) one pin outlives the cut.
 @test
 fn test_l102_hot_build_two_orphans(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let directory = disk_test_directory(d)
+    let scratch = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, hot_options(65536)?)?
+    let mut staging = install_old(db)?
+    let description = install_fixture_bytes(32u64, 65u8)
+    stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
+    install_activation(mut db, take staging)?
     let _ = hot_seed(mut db, 6000)?
-    let held = snapshot(db)
-    let change = change_pin(mut db, ImportPin, "import", held)?
-    durable(mut db, change)?
-    l102_unique_refused(mut db)?
+    match l102_leased_refusal(mut db, scratch, c, tasks) {
+        Ok(()) => (),
+        Error(Store(take problem)) => return Error(take problem),
+        Error(Scratch(take problem)) => return Error(take problem),
+        Error(_) => fail("L102 (c): the lease and kept import were refused"),
+    }
     close(take db)?
-    let mut again = open(tasks, d, c, r, hot_options(65536)?)?
+    let mut again = open(tasks, directory, c, r, hot_options(65536)?)?
     let listed = l102_owner3_names(again)
     if list.len(listed) != 2 || !list.contains(listed, string.from("build")) || !list.contains(listed, string.from("import")) {
         fail("L102 (c): the reopen does not list both owner-3 pins")
@@ -658,7 +698,7 @@ fn test_l102_hot_build_two_orphans(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     }
     hot_rows(mut again, string.from("rows"), 6000)?
     close(take again)?
-    let mut third = open(tasks, d, c, r, hot_options(65536)?)?
+    let mut third = open(tasks, directory, c, r, hot_options(65536)?)?
     if list.len(l102_owner3_names(third)) != 0 {
         fail("L102 (c): an owner-3 pin is listed after the reopen")
     }

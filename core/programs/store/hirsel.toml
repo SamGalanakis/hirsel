@@ -7,6 +7,12 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"archive-restore-upload.hirsel" = "store"
+"archive-restore-release.hirsel" = "store"
+"archive-restore-bucket.hirsel" = "store"
+"archive-restore-bucket-run.hirsel" = "store"
+"archive-expiry.hirsel" = "store"
+"archive-expiry-verify.hirsel" = "store"
 "transfer-builder.hirsel" = "transfer"
 "transfer-child.hirsel" = "transfer"
 "transfer-state.hirsel" = "transfer"
@@ -304,6 +310,8 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"archive-expiry-laws.hirsel" = "store"
+"archive-restore-bucket-laws.hirsel" = "store"
 "maintenance_verify_white_box.hirsel" = "maintenance"
 "txn-white-box.hirsel" = "txn"
 "object_writer_law_helpers.hirsel" = "object_writer"
@@ -1123,4 +1131,10 @@ limit = 268435456
 limit = 536870912
 
 [tests.runs."store@1/store/test_la5_backup_fresh_child"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la11_bucket_genesis"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la7_expiry_fences"]
 limit = 536870912

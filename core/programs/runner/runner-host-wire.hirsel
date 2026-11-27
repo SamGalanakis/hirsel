@@ -56,3 +56,22 @@ fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
     }
     send_frame(mut output, body, 4294967295u64, Never)
 }
+
+fn host_refusal(why: store.DeployError) -> String {
+    match why {
+        UnsupportedResidency => "UnsupportedResidency",
+        Store(Full(_)) => "Full",
+        Store(Missing(_)) => "Missing",
+        Store(Exists(_)) => "Exists",
+        Store(_) => "Store",
+        Scratch(_) => "Scratch",
+        ExportMismatch => "ExportMismatch",
+        AttemptBusy => "Busy",
+        ImportMalformed => "ImportMalformed",
+        Unsettled => "Unsettled",
+        IdBound => "IdBound",
+        Drift => "Drift",
+        Expired => "Expired",
+        FullNew(_) => "Full(New)",
+    }
+}

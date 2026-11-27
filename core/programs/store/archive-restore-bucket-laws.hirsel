@@ -1,0 +1,97 @@
+@test
+fn test_la11_bucket_genesis(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let sim = df_complete_expired_sim(tasks, c, 334711)
+    let checked = restore_bucket_law(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn restore_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let source = disk_test_directory(d)
+    let backup_dir = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let local_opts = archive_hold_options(true)
+    let mut db = deploy_result(open(tasks, source, sim.time, r, local_opts))?
+    let parent = db.store
+    let rows = deploy_result(archive_hold_table(mut db))?
+    let _ = deploy_result(archive_hold_put(mut db, rows, 1, 0x71, 31))?
+    let capture_attempt = exit_attempt(1)
+    let captured = begin_backup(mut db, backup_dir, clone(capture_attempt))?
+    let _ = export_copy(take captured)?
+    release_export(mut db, capture_attempt)
+    deploy_result(close(take db))?
+    let mut dst = deploy_result(arch_law_sink_client(sim, tasks, 847, "bucket-child/"))?
+    let names = RestoreNamespaces(source_place: None, host_stream: None)
+    let aliases = RestoreNamespaces(source_place: Some(std.object.bucket_config(dst)), host_stream: None)
+    match restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", aliases, work, sim.time, r, local_opts, Latest,[6; 16], DF_OP_MS, plain_restore_release) {
+        Error(Store(Conflict(_))) => (),
+        _ => fail("accepted overlapping source and child namespaces"),
+    }
+    let attempt: Inline[u8, 16] =[7; 16]
+    let result_child = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Latest, attempt, DF_OP_MS, plain_restore_release)?
+    let replayed = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Boundary(result_child.point.token), attempt, DF_OP_MS, plain_restore_release)?
+    if replayed.child != result_child.child || result_child.child == parent {
+        fail("Bucket restore identity or retry")
+    }
+    match restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Latest,[8; 16], DF_OP_MS, plain_restore_release) {
+        Error(Store(Exists(_))) => (),
+        _ => fail("competing genesis changed or adopted the head"),
+    }
+    let mut open_opts = exit_open_opts(false, 1)
+    open_opts.expect = Some(result_child.child)
+    let authority = object_authority(take dst, "bucket", DF_OP_MS)
+    let mut child = match open_authority(tasks, take authority, sim.time, r, open_opts) {
+        Ok(take child_db) => take child_db,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    let own_rows = deploy_result(table(mut child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let old = deploy_result(get(deploy_result(reader(child, 0))?, snapshot(child), own_rows, 1u64))?
+    let Some(payload) = old else {
+        fail("Bucket lost restored row")
+    }
+    if list.len(payload) != 31 || payload[0u64] != 0x71 {
+        fail("Bucket row differs")
+    }
+    let _ = deploy_result(archive_hold_put(mut child, own_rows, 2, 0x72, 31))?
+    let sealed = deploy_result(checkpoint(mut child))?
+    deploy_result(durable(mut child, sealed))?
+    deploy_result(close(take child))?
+    let again = deploy_result(arch_law_sink_client(sim, tasks, 848, "bucket-child/"))?
+    let mut reopened = match open_authority(tasks, object_authority(take again, "bucket", DF_OP_MS), sim.time, r, open_opts) {
+        Ok(take child_db) => take child_db,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    let second = disk_test_directory(d)
+    let after = exit_attempt(3)
+    let backup_job = begin_backup(mut reopened, second, clone(after))?
+    let _ = export_copy(take backup_job)?
+    release_export(mut reopened, after)
+    let RestorePresent(second_tip) = plan_backup_restore(second, Latest)? else {
+        fail("second backup unreadable")
+    }
+    if second_tip.token.parent != result_child.child || second_tip.main_version != version(snapshot(reopened)) {
+        fail("second backup has wrong identity or head")
+    }
+    deploy_result(close(take reopened))?
+    let sid = df_sid_b()
+    let mut svc = deploy_result(df_start_service_host(sim, tasks, r, "spare.test", 849, sid, 2, 0, DF_OP_MS))?
+    let slot = deploy_result(journal_slot(mut svc))?
+    let client = deploy_result(arch_law_sink_client(sim, tasks, 850, "bucket-child/"))?
+    let auth = deploy_result(streamed(object_authority(take client, "bucket", DF_OP_MS), take slot))?
+    let mut attached = match open_authority(tasks, take auth, sim.time, r, open_opts) {
+        Ok(take accepted) => take accepted,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    let (head, witness) = deploy_result(df_head_attach_live(sim, tasks, "spare.test", 851, "bucket-child/"))?
+    let Some(attach) = witness else {
+        fail("restored child has no ATTACH")
+    }
+    let Some(tail) = attach.live else {
+        fail("child has no live tail")
+    }
+    if !format.stream_same(tail.sid, host_stream_id_to_rep(sid)) || head.store != store_key_to_rep(result_child.child) {
+        fail("new slot does not name the child")
+    }
+    deploy_result(close(take attached))?
+    deploy_result(close_journal_service(take svc))
+}

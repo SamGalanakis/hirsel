@@ -1,6 +1,7 @@
 // The platform host's catalog tables, declared once per store.
 pub opaque type Tables {
     groups: store.Table[String, GroupRow],
+    restored_groups: store.Table[u64, RestoredLaunch],
     activations: store.Table[(u64, u64), Bytes],
     wake: store.Table[String, WakeRow],
     dirty: store.Table[String, u64],
@@ -29,6 +30,7 @@ fn declared[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K]
 pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     Ok(Tables(
         groups: declared(mut d, "platform.groups", std.codec.key_string(), std.codec.of())?,
+        restored_groups: declared(mut d, "platform.restored_groups", std.codec.key_u64(), std.codec.of())?,
         activations: declared(mut d, "platform.activations", activation_key(), std.codec.of_bytes())?,
         wake: declared(mut d, "platform.wake", std.codec.key_string(), std.codec.of())?,
         dirty: declared(mut d, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,

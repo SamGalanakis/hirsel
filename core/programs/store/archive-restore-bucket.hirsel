@@ -1,0 +1,167 @@
+pub type RestoreNamespaces: send {
+    source_place: Option[std.object.Bucket],
+    host_stream: Option[std.object.Bucket]
+}
+
+fn restore_disjoint(dest: std.object.Bucket, source: RestoreSource, names: RestoreNamespaces) -> Result[(), Error] {
+    if dest.prefix == "" {
+        return Error(Missing("destination prefix"))
+    }
+    let mut buckets: List[std.object.Bucket] = list.with_capacity(4)
+    list.push(mut buckets, clone(dest))
+    if let ArchivedStore(client, _, _) = source {
+        list.push(mut buckets, std.object.bucket_config(client))
+    }
+    if let Some(place) = names.source_place {
+        list.push(mut buckets, clone(place))
+    }
+    if let Some(stream) = names.host_stream {
+        list.push(mut buckets, clone(stream))
+    }
+    for i in 0u64 .. list.len(buckets) {
+        for j in 0u64 .. i {
+            if format.archive_bucket_overlaps(buckets[i], buckets[j]) {
+                return Error(Conflict("restore namespaces"))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_check_keys(mut dst: std.object.Client, held: Map[String, ()], due: u64) -> Result[(), Error] waits {
+    let mut batch: List[std.object.Entry] = list.with_capacity(std.object.LIST_PAGE_MAX)
+    let mut after = string.new()
+    loop {
+        list.clear(mut batch)
+        let page = std.object.list(mut dst, "", after, mut batch, due) ?=> Remote
+        for member in batch {
+            if !map.contains(held, std.object.key_text(member.key)) {
+                return Error(Exists("restore destination"))
+            }
+        }
+        if !page.truncated {
+            return Ok(())
+        }
+        let next_key = std.object.key_text(page.after)
+        if order.compare(next_key, after) != Greater {
+            return Error(Lost)
+        }
+        after = take next_key
+    }
+}
+
+const RESTORE_RESERVATION: String = "restore-reservation"
+
+fn restore_bucket_reservation(mut dst: std.object.Client, origin: manifest.RestoreOrigin, r: Random, due: u64) -> Result[StoreId, Error] waits {
+    let mut raw: Bytes = list.with_capacity(4096)
+    match history.history_fetch(mut dst, RESTORE_RESERVATION, mut raw, due) {
+        Ok(_) => (),
+        Error(Remote(NotFound)) => {
+            restore_check_keys(mut dst, map.new(), due)?
+            let child = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+            if child == origin.parent {
+                return Error(Foreign)
+            }
+            let mut fence = manifest.page_manifest_empty(types.named_limits(None))
+            fence.origin = Some(origin)
+            let data = failure_result_from_rep(manifest.disk_page_manifest_bytes(child, fence))?
+            let (result_put, _) = std.object.store_if_retry(mut dst, RESTORE_RESERVATION, Absent, take data, due)
+            match take result_put {
+                Ok(_) => (),
+                Error(Uncertain(_)) => (),
+                Error(take problem) => return Error(Remote(take problem)),
+            }
+            let _ = failure_result_from_rep(history.history_fetch(mut dst, RESTORE_RESERVATION, mut raw, due))?
+        },
+        Error(take other) => return Error(failure_from_rep(take other)),
+    }
+    let (id, take fence) = disk_read_page_manifest(RESTORE_RESERVATION, raw)?
+    if id == store_key_from_rep(origin.parent) || !restore_same_origin(fence, origin) {
+        return Error(Exists("restore destination"))
+    }
+    Ok(id)
+}
+
+fn restore_bucket_published(mut dst: std.object.Client, origin: manifest.RestoreOrigin, due: u64) -> Result[Option[StoreId], Error] waits {
+    let mut body = failure_result_from_rep(manifest.disk_read_buffer(history.HISTORY_HEAD_LIMIT))?
+    match history.history_fetch_head(mut dst, mut body, due) {
+        Ok(_) => (),
+        Error(NotFound) => return Ok(None),
+        Error(take e) => return Error(Remote(take e)),
+    }
+    let (take capture, _) = failure_result_from_rep(history.history_decode_head_attach(body))?
+    failure_result_from_rep(history.history_check_namespace(capture, dst))?
+    let head = capture.head
+    let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut dst, head, due))?
+    let m = failure_result_from_rep(history.history_read_manifest(mut dst, head.store, mark, head.checkpoint.seq, due))?
+    if !restore_same_origin(m, origin) {
+        return Error(Exists("head"))
+    }
+    Ok(Some(store_key_from_rep(head.store)))
+}
+
+fn restore_emit_bucket(mut dst: std.object.Client, d: Dir, child: StoreId, origin: manifest.RestoreOrigin, release: RestoreRelease, level_name: String, r: Random, due: u64) -> Result[(), Error] waits {
+    let (owner, take m) = read_page_manifest_file(d)?
+    if owner != child || !restore_same_origin(m, origin) {
+        return Error(Foreign)
+    }
+    let id = store_key_to_rep(child)
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let mut refs: List[pages.HistoryRef] = list.new()
+    let mut held: Map[String, ()] = map.new()
+    expiry_hold(mut held, RESTORE_RESERVATION)?
+    let packs = failure_result_from_rep(manifest.validate_receipt_packs(d, id, "MANIFEST", m))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut refs, list.len(packs))))?
+    for seq in packs {
+        let item = restore_upload_pack(mut dst, d, id, seq, due)?
+        expiry_hold(mut held, failure_result_from_rep(history.history_read_key("p-", item))?)?
+        list.push(mut refs, item)
+    }
+    let root = failure_result_from_rep(history.history_make_locator(mut dst, id, 1, 1, 1, take refs, mut workspace, due))?
+    let mref = failure_result_from_rep(history.history_create_manifest(mut dst, id, 1, 1, m, mut workspace, due))?
+    let ctx = format.DiskContext(store: id, role: 2, seq: 1)
+    let pred = pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
+    let act = history.HistoryActivation(number: release.activation, binding: release.binding)
+    let size = 229 + 32 * list.len(root.rows)
+    failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.packet, size + format.BINDING_BYTES)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, size)))?
+    let base = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, pred, mref, history.HistoryRetention(floor: 1, earlier: list.new()), root, act))?
+    let ekey = failure_result_from_rep(history.history_read_key("e-", base))?
+    failure_result_from_rep(history.history_create(mut dst, ekey, mut workspace.packet, mut workspace.compare, due))?
+    failure_result_from_rep(history.history_check_conditions(mut dst, ekey, mut workspace.packet, due))?
+    let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
+    let head = history.HistoryHead(authority_kind: 1, store: id, pair: history.HistoryPair(epoch: 1, holder), activation: release.activation, entry: base, checkpoint: base, floor: 1, binding: release.binding, origin: None)
+    let (take mark, take entry) = failure_result_from_rep(history.history_checkpoint(mut dst, head, due))?
+    let checked = failure_result_from_rep(history.history_read_manifest(mut dst, id, mark, 1, due))?
+    let located = failure_result_from_rep(history.history_locator(mut dst, head, mark, entry, due))?
+    for chunk in history.locator_chunks(located) {
+        expiry_hold(mut held, failure_result_from_rep(history.history_read_key("l-", chunk))?)?
+    }
+    let mname = failure_result_from_rep(history.history_read_key("m-", mref))?
+    expiry_hold(mut held, mname)?
+    expiry_hold(mut held, ekey)?
+    let _ = failure_result_from_rep(object_writer.history_validate_manifest(mut dst, located, due, id, mname, take checked, None))?
+    match restore_check_keys(mut dst, held, due) {
+        Ok(_) => (),
+        Error(Exists(_)) => {
+            if restore_bucket_published(mut dst, origin, due)? == Some(child) {
+                return Ok(())
+            }
+            return Error(Exists("restore destination"))
+        },
+        Error(take e) => return Error(take e),
+    }
+    let config = history.object_history_config(std.object.bucket_config(dst), string.from(level_name))
+    let metadata = failure_result_from_rep(history.history_config_bytes(config))?
+    failure_result_from_rep(history.history_encode_register_head(mut workspace.body, head, metadata, None))?
+    let sent = history.history_write_head_issue(mut dst, Absent, mut workspace.body, due)
+    match history.history_write_head_finish(mut dst, take sent, mut workspace.body, mut workspace.witness, due) {
+        HistoryApplied(_) => Ok(()),
+        HistoryRefused(take e) => Error(Remote(take e)),
+        _ => match restore_bucket_published(mut dst, origin, due)? {
+            Some(found) if found == child => Ok(()),
+            Some(_) => Error(Exists("head")),
+            None => Error(Undecided),
+        },
+    }
+}

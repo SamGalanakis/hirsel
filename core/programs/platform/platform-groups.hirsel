@@ -16,6 +16,40 @@ pub type NewGroup: send {
     record: Option[operator.Record],
 }
 
+pub type RestoredLaunch: codec + send {
+    activation: u64,
+    assembly: Bytes,
+    binding: Binding,
+    release: Bytes,
+    accepted: bool
+}
+
+pub fn add_restored_group(mut h: Host, spec: NewGroup, restored: store.Restored, description: runner.Describe) -> Result[List[launcher.Request], Refused] waits {
+    let selected = restored.point
+    let child = restored.child
+    let Some(binding) = binding_of(description) else {
+        return Error(Denied("invalid restore Describe"))
+    }
+    if list.len(spec.assembly) != 32 || spec.activation != selected.activation {
+        return Error(Denied("restore selection"))
+    }
+    if selected.activation != 0 {
+        for i in 0u64 .. 32 {
+            if selected.binding[i] != binding.identity[i] {
+                return Error(Denied("restore release binding"))
+            }
+        }
+    } else if selected.binding != ([0u8; 32]) {
+        return Error(Denied("unactivated restore binding"))
+    }
+    let release = runner.described_release(description) ?=> |_| Denied("restore Describe")
+    let intent = RestoredLaunch(activation: selected.activation, assembly: clone(spec.assembly), binding: take binding, release: take release, accepted: false)
+    let added = add_group_turn(mut h, spec, Some((child, take intent)), (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] {
+        Ok(())
+    })
+    turned_result(mut h, take added)
+}
+
 // Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
 // then the launcher binds its listener.
 pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
@@ -27,14 +61,14 @@ pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], 
 // Adds a group and commits `also`'s writes in the same transaction, so a catalog the
 // caller keeps in the host's store names exactly the groups the host has.
 pub fn add_group_with[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut store.Tx, E) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
-    let r = add_group_turn(mut h, spec, env, also)
+    let r = add_group_turn(mut h, spec, None, env, also)
     turned_result(mut h, take r)
 }
 
-fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut store.Tx, E) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
+fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, restore: Option[(store.StoreId, RestoredLaunch)], env: E, also: fn(mut store.Tx, E) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, ((also, store.copy_env(env)), store.copy_env(spec), store.copy_env(t)), fn(mut tx, call_env) -> Result[GroupRow, Refused] {
+        store.run(mut h.db, None, ((also, store.copy_env(env)), store.copy_env(spec), store.copy_env(t), store.copy_env(restore)), fn(mut tx, call_env) -> Result[GroupRow, Refused] {
             if let Some(_) = st(store.fetch(tx, call_env.2 .groups, call_env.1 .name))? {
                 return Error(Exists)
             }
@@ -46,7 +80,21 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
                 }
             }
             let mut meta = meta_of(tx, call_env.2)?
-            let g = GroupRow(tenant: string.from(call_env.1 .tenant), workdir: string.from(call_env.1 .workdir), author: call_env.1 .author, listen: string.from(call_env.1 .listen), front: clone(call_env.1 .front), store: string.from(call_env.1 .store), memory: call_env.1 .memory, assembly: clone(call_env.1 .assembly), activation: call_env.1 .activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1 .args), record: clone(call_env.1 .record), packages: list.new(), source: None)
+            let expected_id = if let Some((child, intent)) = call_env.3 {
+                {
+                    let mut peers = store.range(tx, call_env.2 .groups, Unbounded, Unbounded) ?=> |e| Store(take e)
+                    while let Some((_, peer)) = st(store.next_in(tx, mut peers))? {
+                        if peer.listen == call_env.1 .listen || peer.store_id == Some((child.hi, child.lo)) {
+                            return Error(Exists)
+                        }
+                    }
+                }
+                st(store.put(mut tx, call_env.2 .restored_groups, meta.next_incarnation, intent))?
+                Some((child.hi, child.lo))
+            } else {
+                None
+            }
+            let g = GroupRow(tenant: string.from(call_env.1 .tenant), workdir: string.from(call_env.1 .workdir), author: call_env.1 .author, listen: string.from(call_env.1 .listen), front: clone(call_env.1 .front), store: string.from(call_env.1 .store), memory: call_env.1 .memory, assembly: clone(call_env.1 .assembly), activation: call_env.1 .activation, retained: list.new(), recovery: None, store_id: expected_id, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1 .args), record: clone(call_env.1 .record), packages: list.new(), source: None)
             meta.next_incarnation += 1u64
             st(store.put(mut tx, call_env.2 .meta, 0u64, meta))?
             st(store.put(mut tx, call_env.2 .groups, call_env.1 .name, g))?
@@ -181,4 +229,29 @@ fn decided[R](mut h: Host, take attempted: Result[store.Outcome[R, Refused], sto
         Ok(Stopped(_)) => Error(Missing("commit: the catalog transaction ran out of time")),
         Error(take e) => Error(Store(take e)),
     }
+}
+
+fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option[u64], dirty: bool, disposition: Disposition) -> Result[(), Refused] {
+    if let Some(d) = st(store.fetch(tx, t.active, name))? {
+        finish_request(mut tx, t, name, d, FailedPhase(UnknownGroupClass, "the group was removed", operator.no_report()))?
+    }
+    let _ = st(store.delete(mut tx, t.groups, name))?
+    let _ = st(store.delete(mut tx, t.restored_groups, g.incarnation))?
+    sweep_blobs(mut tx, t, g.incarnation, map.new())?
+    let _ = st(store.delete(mut tx, t.wake, name))?
+    let _ = st(store.delete(mut tx, t.deploys, name))?
+    if let Some(at) = due {
+        let _ = st(store.delete(mut tx, t.due, DueKey(at: at, name: string.from(name))))?
+    }
+    let mut u = usage_of(tx, t, g.tenant)?
+    u.groups -= 1u64
+    if dirty {
+        let _ = st(store.delete(mut tx, t.dirty, name))?
+        let mut meta = meta_of(tx, t)?
+        meta.dirty -= 1u64
+        st(store.put(mut tx, t.meta, 0u64, meta))?
+        u.live -= 1u64
+    }
+    st(store.put(mut tx, t.usage, g.tenant, u))?
+    st(store.put(mut tx, t.retired, name, Retired(workdir: string.from(g.workdir), disposition: disposition)))
 }

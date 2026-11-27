@@ -620,6 +620,24 @@ fn archive_trace_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random, 
     string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":5,\"key\":[\"pack\",3]}\n")
     string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"stage\",\"cursor\":5,\"key\":[\"unit\",5]}\n")
     string.push(mut trace_out, "{\"kind\":\"archive\",\"op\":\"publish\",\"cursor\":5}\n")
+    let mut expired = arch_law_sink_client(sim, tasks, 903, "trace-sink/")?
+    let Some(survivor) = view base_step.head else {
+        fail("trace: missing independent base")
+    }
+    let keep = option.unwrap(survivor.through).gen
+    let expiry = archive_expire(mut expired, db_rec.store, KeepFromBase(keep), None, true, disk_test_directory(d), DF_OP_MS)?
+    if expiry.floor.boundary.base_ordinal != keep || expiry.previous.boundary.base_ordinal >= keep || expiry.deleted == 0 {
+        fail("trace: floor CAS did not move")
+    }
+    string.push(mut trace_out, "{\"kind\":\"expire\",\"op\":\"floor\",\"floor\":5}\n")
+    let before = expiry.previous.boundary
+    let key = format.archive_key(store_key_to_rep(db_rec.store), format.archive_log_manifest_rel(before.base_ordinal, before.base_digest))
+    let mut raw: Bytes = list.with_capacity(1)
+    let due = std.object.deadline_after_ms(expired, DF_OP_MS)
+    match history.history_fetch(mut expired, key, mut raw, due) {
+        Error(Remote(NotFound)) => string.push(mut trace_out, "{\"kind\":\"expire\",\"op\":\"erase\",\"floor\":5,\"key\":[\"unit\",1]}\n"),
+        _ => fail("trace: expired base still readable"),
+    }
     close(take db_rec)?
     let _ = stdout.write(out, trace_out)
     Ok(())

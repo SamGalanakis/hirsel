@@ -3107,30 +3107,6 @@ pub fn deploy_outcome(h: Host, name: String) -> Option[DeployOutcome] waits {
     }
 }
 
-fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option[u64], dirty: bool, disposition: Disposition) -> Result[(), Refused] {
-    if let Some(d) = st(store.fetch(tx, t.active, name))? {
-        finish_request(mut tx, t, name, d, FailedPhase(UnknownGroupClass, "the group was removed", operator.no_report()))?
-    }
-    let _ = st(store.delete(mut tx, t.groups, name))?
-    sweep_blobs(mut tx, t, g.incarnation, map.new())?
-    let _ = st(store.delete(mut tx, t.wake, name))?
-    let _ = st(store.delete(mut tx, t.deploys, name))?
-    if let Some(at) = due {
-        let _ = st(store.delete(mut tx, t.due, DueKey(at: at, name: string.from(name))))?
-    }
-    let mut u = usage_of(tx, t, g.tenant)?
-    u.groups -= 1u64
-    if dirty {
-        let _ = st(store.delete(mut tx, t.dirty, name))?
-        let mut meta = meta_of(tx, t)?
-        meta.dirty -= 1u64
-        st(store.put(mut tx, t.meta, 0u64, meta))?
-        u.live -= 1u64
-    }
-    st(store.put(mut tx, t.usage, g.tenant, u))?
-    st(store.put(mut tx, t.retired, name, Retired(workdir: string.from(g.workdir), disposition: disposition)))
-}
-
 fn finish_retire(mut h: Host, grp: launcher.Group, now: Now, mut out: List[launcher.Request]) waits {
     let Ok(Some(g)) = group_row(h, grp.name) else {
         return

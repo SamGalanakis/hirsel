@@ -1,0 +1,20 @@
+pub type RestoreRelease: send {
+    activation: u64,
+    binding: Inline[u8, 32]
+}
+
+pub fn has_runner_catalog(db: Db) -> Result[bool, Error] {
+    for member in catalog_entries(snapshot(db))? {
+        if string.starts_with(member.name, "hirsel.runner.") {
+            return Ok(true)
+        }
+    }
+    Ok(false)
+}
+
+pub fn plain_restore_release(db: Db) -> Result[RestoreRelease, Error] {
+    if has_runner_catalog(db)? {
+        return Error(Missing("Runner release verifier"))
+    }
+    Ok(RestoreRelease(activation: 0, binding: [0; 32]))
+}

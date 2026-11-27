@@ -107,6 +107,7 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
             if !options.create {
                 return Error(NotFound)
             }
+            refuse_reserved_genesis(d)?
             let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
             let page_record = manifest.page_manifest_empty(types.named_limits(optional_limits_to_rep(options.limits)))
             let mut creation = failure_result_from_rep(journal.disk_creation_block())?

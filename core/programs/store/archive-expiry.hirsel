@@ -1,0 +1,178 @@
+pub type ExpiryCutoff: send = KeepFromBase(u64) | KeepFromTime(u64)
+
+pub type ExpiryResult: send {
+    floor: RestoreToken,
+    previous: RestoreToken,
+    deleted: u64
+}
+
+fn expiry_select(rows: List[format.ArchiveBaseRowRep], cutoff: ExpiryCutoff, protect_at: Option[u64]) -> Result[format.ArchiveBaseRowRep, Error] {
+    let mut selected: Option[format.ArchiveBaseRowRep] = None
+    for row in rows {
+        let qualifies = match cutoff {
+            KeepFromBase(v) => row.base_ordinal <= v,
+            KeepFromTime(t) => row.main_at <= t,
+        }
+        if qualifies {
+            selected = Some(format.archive_base_summary(row))
+        }
+    }
+    let Some(take floor) = take selected else {
+        return Error(Missing("retained base"))
+    }
+    if let Some(ms) = protect_at {
+        if let KeepFromTime(t) = cutoff {
+            if t > ms {
+                return Error(Conflict("PITR window"))
+            }
+        }
+        if floor.main_at > ms {
+            return Error(Conflict("PITR window"))
+        }
+    }
+    Ok(take floor)
+}
+
+fn expiry_candidate(head: format.ArchiveHeadRep, floor: format.ArchiveBaseRowRep) -> Result[format.ArchiveHeadRep, Error] {
+    let mut surviving: List[format.ArchiveIntervalRep] = list.new()
+    for iv in head.intervals {
+        if iv.through.gen >= floor.base_ordinal {
+            let mut retained: format.ArchiveIntervalRep = clone(iv)
+            if iv.first_base.base_ordinal < floor.base_ordinal {
+                retained.first_base = format.archive_base_summary(floor)
+            }
+            failure_result_from_rep(types.capacity(list.try_reserve(mut surviving, 1)))?
+            list.push(mut surviving, take retained)
+        }
+    }
+    let Some(revision) = int.checked_add(head.rev, 1u64) else {
+        return Error(Limit(Manifest))
+    }
+    Ok(format.ArchiveHeadRep(store: head.store, source_kind: head.source_kind, binding_id: head.binding_id, holder_epoch: head.holder_epoch, rev: revision, open_gap: head.open_gap, through: head.through, floor_base: Some(format.archive_base_summary(floor)), index_tail: head.index_tail, intervals: take surviving))
+}
+
+fn expiry_digest_name(raw: Bytes, offset: u64) -> bool {
+    if list.len(raw) != offset + 16 {
+        return false
+    }
+    for i in offset .. list.len(raw) {
+        if !(raw[i] >= b'0' && raw[i] <= b'9') && !(raw[i] >= b'a' && raw[i] <= b'f') {
+            return false
+        }
+    }
+    true
+}
+
+fn expiry_below(name: String, kind: u8, floor: format.ArchiveBaseRowRep) -> bool {
+    let raw = string.as_bytes(name)
+    let frontier = floor.frontier
+    if string.starts_with(name, "index-") {
+        if list.len(raw) != 43 || raw[26] != b'-' || !expiry_digest_name(raw, 27) {
+            return false
+        }
+        let Ok(ord) = int.parse_decimal_span(raw, 6, 26, 18446744073709551615u64) else {
+            return false
+        }
+        return ord > 0 && ord < frontier.first_index_ordinal
+    }
+    if kind == format.ARCHIVE_SOURCE_OBJECTS {
+        let Some(parsed) = object_writer.history_parse_name(name) else {
+            return false
+        }
+        if parsed.epoch > floor.epoch {
+            return false
+        }
+        return match parsed.kind {
+            b'p' => parsed.seq < frontier.next_pack,
+            b'm' => parsed.seq < frontier.next_gen,
+            b'l' => parsed.seq < frontier.next_unit,
+            b'e' => parsed.seq < frontier.next_unit,
+            _ => false,
+        }
+    }
+    if list.len(raw) < 23 || raw[1] != b'-' || raw[22] != b'-' {
+        return false
+    }
+    let Ok(seq) = int.parse_decimal_span(raw, 2, 22, 18446744073709551615u64) else {
+        return false
+    }
+    if seq == 0 {
+        return false
+    }
+    if raw[0] == b'j' {
+        if list.len(raw) != 43 {
+            return false
+        }
+        let Ok(offset) = int.parse_decimal_span(raw, 23, 43, 18446744073709551615u64) else {
+            return false
+        }
+        return seq < frontier.next_unit || (seq == frontier.next_unit && offset < frontier.next_offset)
+    }
+    if !expiry_digest_name(raw, 23) {
+        return false
+    }
+    (raw[0] == b'p' && seq < frontier.next_pack) || (raw[0] == b'm' && seq < frontier.next_gen)
+}
+
+fn expiry_push_namespace(mut src: std.object.Client, id: types.StoreKey) -> String {
+    let cfg = std.object.bucket_config(src)
+    let mut prefix = string.from(cfg.prefix)
+    string.push(mut prefix, format.archive_key(id, ""))
+    std.object.set_prefix(mut src, take prefix)
+}
+
+fn expiry_erase(mut src: std.object.Client, kind: u8, floor: format.ArchiveBaseRowRep, held: Map[String, ()], deadline: u64) -> Result[u64, Error] waits {
+    let mut batch: List[std.object.Entry] = list.with_capacity(1000)
+    let mut after = string.new()
+    let mut removed = 0u64
+    loop {
+        list.clear(mut batch)
+        let page = std.object.list(mut src, "", after, mut batch, deadline) ?=> Remote
+        for entry in batch {
+            let key = std.object.key_text(entry.key)
+            if expiry_below(key, kind, floor) && !map.contains(held, key) {
+                std.object.erase(mut src, key, deadline) ?=> Remote
+                removed += 1
+            }
+        }
+        if !page.truncated {
+            return Ok(removed)
+        }
+        let next_name = std.object.key_text(page.after)
+        if order.compare(next_name, after) != Greater {
+            return Error(failure_from_rep(format.disk_fault("archive-list", 0, Order)))
+        }
+        after = take next_name
+    }
+}
+
+pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: ExpiryCutoff, protected_from_ms: Option[u64], confirm: bool, scratch: Dir, op_ms: u64) -> Result[ExpiryResult, Error] waits {
+    let id = store_key_to_rep(parent)
+    let deadline = std.object.deadline_after_ms(src, op_ms)
+    loop {
+        let Some((take head, tag)) = failure_result_from_rep(history.archive_head_fetch(mut src, id, deadline))? else {
+            return Error(NotFound)
+        }
+        let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
+        let rows = restore_base_rows(mut src, head, idx, deadline)?
+        let floor = expiry_select(rows, cutoff, protected_from_ms)?
+        let previous = restore_base_token(parent, head.source_kind, rows[0u64], head.binding_id)
+        let point = restore_base_token(parent, head.source_kind, floor, head.binding_id)
+        let candidate = expiry_candidate(head, floor)?
+        let held = expiry_verify_survivors(mut src, candidate, parent, scratch, deadline)?
+        let mut removed = 0u64
+        if confirm {
+            // Even a retry at the installed floor fences concurrent changes before deletion.
+            match failure_result_from_rep(history.archive_head_cas(mut src, id, Match(tag), candidate, deadline))? {
+                ArchiveCasConflict(_, _) => continue,
+                ArchiveCasUncertain => return Error(Undecided),
+                ArchiveCasApplied(_) => (),
+            }
+            let prefix = expiry_push_namespace(mut src, id)
+            let res = expiry_erase(mut src, head.source_kind, floor, held, deadline)
+            let _ = std.object.set_prefix(mut src, take prefix)
+            removed = res?
+        }
+        return Ok(ExpiryResult(floor: point, previous, deleted: removed))
+    }
+}

@@ -37,6 +37,14 @@ pub fn append_restore_origin(mut raw: Bytes, ctx: format.DiskContext, origin: Op
     let Some(o) = origin else {
         return Ok(())
     }
+    let body = restore_origin_payload(o)?
+    let frame = types.capacity(format.disk_seal(ctx, list.len(raw), RESTORE_ORIGIN_KIND, 1, body))?
+    types.capacity(list.try_reserve(mut raw, list.len(frame)))?
+    list.append(mut raw, frame)
+    Ok(())
+}
+
+pub fn restore_origin_payload(o: RestoreOrigin) -> Result[Bytes, types.Failure] {
     let mut body: Bytes = list.new()
     types.capacity(list.try_reserve(mut body, RESTORE_ORIGIN_PAYLOAD))?
     list.put_word_le(mut body, o.parent.hi)
@@ -56,10 +64,7 @@ pub fn append_restore_origin(mut raw: Bytes, ctx: format.DiskContext, origin: Op
     for i in 0u64 .. 16 {
         list.push(mut body, o.attempt[i])
     }
-    let frame = types.capacity(format.disk_seal(ctx, list.len(raw), RESTORE_ORIGIN_KIND, 1, body))?
-    types.capacity(list.try_reserve(mut raw, list.len(frame)))?
-    list.append(mut raw, frame)
-    Ok(())
+    Ok(take body)
 }
 
 fn decode_restore_origin(file: String, frame: format.DiskFrame, payload: Bytes, child: types.StoreKey) -> Result[RestoreOrigin, types.Failure] {

@@ -1,0 +1,51 @@
+// Both values must come from the selected image, including when the archive
+// contains no native Bucket head. The running executable may be a later release.
+pub fn restored_release(db: store.Db) -> Result[store.RestoreRelease, store.Error] waits {
+    if !store.has_runner_catalog(db)? {
+        return Ok(store.RestoreRelease(activation: 0, binding: [0; 32]))
+    }
+    let version = activation_version(db)?
+    if version == 0 {
+        return Error(Missing("restored activation"))
+    }
+    let Some(raw) = current_description(db)? else {
+        return Error(Missing("restored Describe"))
+    }
+    let Some(desc) = decode_description(raw) else {
+        return Error(Changed("restored Describe"))
+    }
+    let Some(record) = release_record(db, version)? else {
+        return Error(Missing("restored release"))
+    }
+    let binding = identity_digest(desc) ?=> |_| Changed("restored Describe")
+    let release = http_release_digest(desc.exported, desc.bindings) ?=> |_| Changed("restored release")
+    if binding != record.binding || record.digest != desc.digest || record.n_place != desc.n_place || record.release != release || version > store.version(store.snapshot(db)) {
+        return Error(NotCurrent(version))
+    }
+    let mut hash: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        hash[i] = binding[i]
+    }
+    Ok(store.RestoreRelease(activation: version, binding: hash))
+}
+
+pub fn verified_restored_child(db: store.Db, take recovered: store.Restored) -> Result[store.Restored, store.Error] waits {
+    let mut receipt = take recovered
+    if store.snapshot_identity(store.snapshot(db)) != receipt.child {
+        return Error(Foreign)
+    }
+    if store.version(store.snapshot(db)) != receipt.point.main_version {
+        return Error(NotCurrent(receipt.point.main_version))
+    }
+    let release = restored_release(db)?
+    if receipt.point.activation != 0 && (release.activation != receipt.point.activation || release.binding != receipt.point.binding) {
+        return Error(NotCurrent(receipt.point.activation))
+    }
+    receipt.point.activation = release.activation
+    receipt.point.binding = release.binding
+    Ok(take receipt)
+}
+
+pub fn described_release(description: Describe) -> Result[Bytes, std.codec.EncodeError] {
+    http_release_digest(description.exported, description.bindings)
+}

@@ -1,0 +1,106 @@
+@test
+fn test_la7_expiry_fences(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 33477)
+    let answer = expiry_law_run(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    answer
+}
+
+fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let sink = arch_law_sink_client(sim, tasks, 907, "expiry-run/")?
+    let mut inspect = arch_law_sink_client(sim, tasks, 908, "expiry-run/")?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    let auth = archived(log_authority(src), take sink, a_opts)?
+    let mut db = match open_authority(tasks, take auth, sim.time, r, archive_hold_options(true)) {
+        Ok(take result_db) => take result_db,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let id = db.store
+    let rows = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, rows, 1, 0x11, 64)?
+    let snap = snapshot(db)
+    let pinned_at = pin(mut db, "shared", snap)?
+    durable(mut db, pinned_at)?
+    let base_cut = checkpoint(mut db)?
+    durable(mut db, base_cut)?
+    let _ = archive_drain(mut db, 16)?
+    let RestorePresent(initial) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("initial base")
+    }
+    let _ = archive_hold_put(mut db, rows, 2, 0x22, 64)?
+    let cut2 = checkpoint(mut db)?
+    durable(mut db, cut2)?
+    let _ = archive_drain(mut db, 16)?
+    let Some(head2) = archive_read_head(mut inspect, id, DF_OP_MS)? else {
+        fail("archive head")
+    }
+    let wanted = option.unwrap(head2.through).gen
+    let plan = archive_expire(mut inspect, id, KeepFromBase(wanted), None, false, work, DF_OP_MS)?
+    if plan.floor.boundary.base_ordinal <= plan.previous.boundary.base_ordinal {
+        fail("floor did not advance")
+    }
+    let due = std.object.deadline_after_ms(inspect, DF_OP_MS)
+    let idx = failure_result_from_rep(history.archive_restore_index(mut inspect, head2, due))?
+    let bases = restore_base_rows(mut inspect, head2, idx, due)?
+    let floor = expiry_select(bases, KeepFromBase(wanted), None)?
+    let mut earlier: Map[u64, format.ArchivePackRefRep] = map.new()
+    let mut shared: Option[format.ArchivePackRefRep] = None
+    let mut order_index = list.len(idx.pages)
+    while order_index > 0 {
+        order_index -= 1
+        let page = failure_result_from_rep(history.archive_index_page(mut inspect, head2.store, head2.source_kind, idx.pages[order_index], due))?
+        for item in page.bases {
+            for pack in item.packs {
+                if item.base_ordinal < wanted {
+                    map.insert(mut earlier, pack.seq, pack)
+                } else if let Some(previous) = map.get(earlier, pack.seq) {
+                    if previous.digest == pack.digest && previous.len == pack.len {
+                        shared = Some(pack)
+                    }
+                }
+            }
+        }
+    }
+    let Some(shared_pack) = shared else {
+        fail("fixture did not share a pack across the chosen floor")
+    }
+    let prior = expiry_candidate(head2, floor)?
+    let held = expiry_verify_survivors(mut inspect, prior, id, work, due)?
+    let future = format.archive_log_pack_rel(floor.frontier.next_pack, 0x1234)
+    let key = format.archive_key(store_key_to_rep(id), future)
+    arch_law_put_garbage(mut inspect, key, 3, 16, DF_OP_MS)?
+    let raised = archive_expire(mut inspect, id, KeepFromBase(wanted), None, true, work, DF_OP_MS)?
+    if raised.deleted == 0 || raised.floor != plan.floor {
+        fail("expiry skipped old base")
+    }
+    let shared_key = format.archive_key(store_key_to_rep(id), format.archive_log_pack_rel(shared_pack.seq, shared_pack.digest))
+    let shared_ref = pages.HistoryRef(seq: shared_pack.seq, epoch: 0, len: shared_pack.len, digest: shared_pack.digest)
+    let _ = restore_archive_bytes(mut inspect, shared_key, shared_ref, due)?
+    let mut proof: Bytes = list.with_capacity(16)
+    let _ = failure_result_from_rep(history.history_fetch(mut inspect, key, mut proof, due))?
+    let BelowFloor(_) = plan_archive_restore(mut inspect, id, Boundary(initial.token), DF_OP_MS)? else {
+        fail("expired boundary was not below the floor")
+    }
+    let _ = archive_hold_put(mut db, rows, 3, 0x33, 64)?
+    let cut3 = checkpoint(mut db)?
+    durable(mut db, cut3)?
+    let _ = archive_drain(mut db, 16)?
+    let _ = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, true, work, DF_OP_MS)?
+    let prefix = expiry_push_namespace(mut inspect, store_key_to_rep(id))
+    let _ = expiry_erase(mut inspect, head2.source_kind, floor, held, due)?
+    let _ = std.object.set_prefix(mut inspect, take prefix)
+    let RestorePresent(point) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("late deleter damaged the latest interval")
+    }
+    let _ = archive_expire(mut inspect, id, KeepFromBase(point.token.boundary.base_ordinal), None, false, work, DF_OP_MS)?
+    let last_key = format.archive_key(store_key_to_rep(id), format.archive_log_manifest_rel(point.token.boundary.base_ordinal, point.token.boundary.base_digest))
+    std.object.erase(mut inspect, last_key, due) ?=> Remote
+    match plan_archive_restore(mut inspect, id, Latest, DF_OP_MS) {
+        Error(Lost) => (),
+        _ => fail("missing promised manifest was not Lost"),
+    }
+    close(take db)
+}

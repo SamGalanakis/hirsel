@@ -41,6 +41,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"platform-restored-group-laws.hirsel" = "platform"
 "store_tool_laws.hirsel" = "store_tool"
 "local-laws.hirsel" = "local_laws"
 "local-bucket-laws.hirsel" = "local_laws"
@@ -133,4 +134,7 @@ grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 
 limit = 536870912
 
 [tests.runs."platform@1/store_tool/stats_prints_persisted_scrub_round"]
+limit = 536870912
+
+[tests.runs."platform@1/platform/test_la11_host_adopts_restored_child"]
 limit = 536870912

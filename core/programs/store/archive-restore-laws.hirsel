@@ -58,6 +58,7 @@ fn restore_law_archived(d: Dir, sim: BucketSim, tasks: Tasks, r: Random) -> Resu
     } else {
         fail("L-A4: never allocated branch")
     }
+    restore_law_ties(mut db, t, mut probe_sink, tip.at + 10000)?
     close(take db)?
     let place = arch_law_sink_client(sim, tasks, 105, "restore-place/")?
     let dst = arch_law_sink_client(sim, tasks, 106, "restore-archive/obj/")?
@@ -112,7 +113,8 @@ fn test_la5_backup_fresh_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let mut db = deploy_result(open(tasks, source_dir, c, r, opts))?
     let parent = db.store
     let rows = deploy_result(archive_hold_table(mut db))?
-    let _ = deploy_result(archive_hold_put(mut db, rows, 1, 17, 10))?
+    let parent_ticket = deploy_result(archive_hold_put(mut db, rows, 1, 17, 10))?
+    let parent_position = deploy_result(position(mut db, parent_ticket))?
     let wanted = version(snapshot(db))
     let _ = deploy_result(archive_hold_put(mut db, rows, 2, 34, 10))?
     let backup_attempt = exit_attempt(23)
@@ -121,6 +123,7 @@ fn test_la5_backup_fresh_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     release_export(mut db, backup_attempt)
     let attempt: Inline[u8, 16] =[19; 16]
     let result_child = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
+    restore_law_crash_points(exported, c, r, tasks, opts, result_child.point)?
     let retry = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
     if result_child.child == parent || retry.child != result_child.child {
         fail("restore did not reserve a fresh persistent child identity")
@@ -141,7 +144,148 @@ fn test_la5_backup_fresh_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if let Some(_) = deploy_result(get(read_child, snapshot(child), child_rows, 2u64))? {
         fail("child included later row")
     }
-    let _ = deploy_result(archive_hold_put(mut child, child_rows, 3, 51, 10))?
+    let next_version = wanted + 1
+    let seed = splitmix64(splitmix64(splitmix64(splitmix64(result_child.child.hi) ^ result_child.child.lo) ^ 0u64) ^ next_version)
+    let Committed(written) = deploy_result(run(mut child, None, copy_env(child_rows), fn(mut tx: Tx, own: Table[u64, Bytes]) -> Result[u64, Error] {
+        let entropy = info(mut tx).seed
+        put(mut tx, own, 3, b"child")?
+        Ok(entropy)
+    }))? else {
+        fail("first child write")
+    }
+    if written.value != seed {
+        fail("first child call used the wrong seed")
+    }
     deploy_result(close(take child))?
+    let plan = follower_law_plan(Directory, opts)
+    let service = deploy_result(follower_law_service(tasks, plan, 1))?
+    let mut sources = followers()
+    let owner = deploy_result(follower_owner(service))?
+    let slot = deploy_result(follower_slot(owner, plan))?
+    let mut replica = deploy_result(follower(mut sources, take slot, log_authority(child_dir), c, Some(result_child.child)))?
+    match at_least(mut replica, parent_position, host.mono_ns(c)) {
+        Error(Foreign) => (),
+        _ => fail("parent Position was accepted by the restored child"),
+    }
+    let _ = take replica
+    deploy_result(close_follower_service(take service))?
     deploy_result(close(take db))
+}
+
+// Drive the writer with a backward clock, then adopt a fork at its last
+// recorded time. An ordinary checkpoint after adoption has the same main row.
+fn restore_law_ties(mut db: Db, rows: Table[u64, Bytes], mut sink: std.object.Client, later: u64) -> Result[(), Error] waits {
+    let base_view = snapshot(db)
+    let (child, born) = fork(mut db, "history", base_view)?
+    durable(mut db, born)?
+    let slot = branch_index(db, child)?
+    let keep: Option[fn(Error) -> bool] = None
+    for i in 0u64 .. 2 {
+        let stamp_time = later - i
+        let Committed(done) = append_transaction_at(mut db, slot, stamp_time, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, rows, i + 14, b"tied")
+        })? else {
+            fail("fork write")
+        }
+        durable(mut db, done.ticket)?
+    }
+    let wanted = version(snapshot_of(db, child)?)
+    let adopted = adopt(mut db, child)?
+    durable(mut db, adopted)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    let _ = archive_drain(mut db, 32)?
+    let parent = db.store
+    let RestorePresent(last_live) = resolve_at(mut sink, parent, child.id, later, DF_OP_MS)? else {
+        fail("last live child")
+    }
+    let RestorePresent(same) = plan_archive_restore(mut sink, parent, Version(child.id, wanted), DF_OP_MS)? else {
+        fail("child version")
+    }
+    let Future(high) = resolve_at(mut sink, parent, child.id, later + 1, DF_OP_MS)? else {
+        fail("child future")
+    }
+    if last_live.token != same.token || high.token != last_live.token || last_live.version != wanted || last_live.at != later || last_live.token.boundary.frame_end == 0 {
+        fail("child tie selected removal")
+    }
+    let RestorePresent(on_main) = resolve_at(mut sink, parent, 0, later, DF_OP_MS)? else {
+        fail("adopted main")
+    }
+    let RestorePresent(end_cut) = plan_archive_restore(mut sink, parent, Latest, DF_OP_MS)? else {
+        fail("ordinary cut")
+    }
+    if on_main.token.boundary.base_ordinal <= last_live.token.boundary.base_ordinal || on_main.token.boundary.frame_end != 0 || on_main.version != wanted || on_main.token.boundary.base_ordinal >= end_cut.token.boundary.base_ordinal {
+        fail("main tie selected an ordinary cut")
+    }
+    let _ = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes(), "replacement", std.codec.key_u64(), std.codec.of_bytes())?
+    let schema_version = version(snapshot(db))
+    let _ = archive_drain(mut db, 32)?
+    let RestorePresent(schema_point) = plan_archive_restore(mut sink, parent, Version(0, schema_version), DF_OP_MS)? else {
+        fail("schema version")
+    }
+    if schema_point.token.boundary.base_ordinal <= end_cut.token.boundary.base_ordinal || schema_point.token.boundary.frame_end != 0 {
+        fail("schema transition did not resolve to its own base")
+    }
+    Ok(())
+}
+
+// Reboot the destination with the reservation only, a torn reservation file,
+// an installed fence, a partial child pack, or a complete but fenced image.
+fn restore_law_crash_points(exported: Dir, c: Clock, r: Random, tasks: Tasks, opts: Options, selected: RestorePoint) -> Result[(), DeployError] waits {
+    let attempt: Inline[u8, 16] =[73; 16]
+    let origin = restore_origin_for(selected, attempt)
+    let work = restore_work_name(origin)?
+    for crash_step in 0u64 .. 5 {
+        let (dest, server_task) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(crash_step + 91), 2097152)
+        let mut expected: Option[StoreId] = None
+        {
+            deploy_result(failure_result_from_rep(manifest.disk_io(host.mkdir(dest, work))))?
+            let scratch_dir = deploy_result(failure_result_from_rep(manifest.disk_io(host.open_dir(dest, work))))?
+            if crash_step == 1 {
+                let chosen = types.StoreKey(hi: 73, lo: 41)
+                let mut raw: Bytes = list.with_capacity(16)
+                list.put_word_le(mut raw, chosen.hi)
+                list.put_word_le(mut raw, chosen.lo)
+                deploy_result(failure_result_from_rep(manifest.disk_write_synced(scratch_dir, std.hex.encode(raw), b"torn")))?
+                deploy_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(scratch_dir))))?
+                expected = Some(store_key_from_rep(chosen))
+            }
+            if crash_step >= 2 {
+                let (child, _) = restore_reserve_directory(dest, work, selected, origin, r)?
+                expected = Some(child)
+                if crash_step == 3 {
+                    deploy_result(failure_result_from_rep(manifest.disk_write_synced(dest, "p-1", b"partial")))?
+                }
+                if crash_step == 4 {
+                    let stamp = restore_copy_backup(exported, scratch_dir, selected)?
+                    restore_fold(tasks, scratch_dir, c, r, opts, selected, stamp)?
+                    deploy_result(restore_write_foundation(scratch_dir, dest, child, selected, origin))?
+                }
+            }
+            deploy_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(dest))))?
+        }
+        let mut filesystem = sim_disk_unmount(take dest, take server_task)
+        let mut power = std.sim.world.plan(334700 + crash_step)
+        std.sim.fs.crash(mut filesystem, mut power)
+        let (rebooted, resumed) = sim_disk_mount(tasks, c, take filesystem, std.sim.world.plan(crash_step + 100), 2097152)
+        {
+            match open(tasks, rebooted, c, r, opts) {
+                Error(ExportDirectory) => (),
+                _ => fail("ordinary open saw a partially published child"),
+            }
+        }
+        let recovered = restore(tasks, exported, rebooted, c, r, opts, Version(selected.branch, selected.version), attempt)?
+        if let Some(reserved) = expected {
+            if recovered.child != reserved {
+                fail("retry replaced the reserved identity")
+            }
+        }
+        let mut verified = deploy_result(open(tasks, rebooted, c, r, opts))?
+        if verified.store != recovered.child || version(snapshot(verified)) != selected.main_version {
+            fail("retry reopened wrong child")
+        }
+        deploy_result(close(take verified))?
+        let _ = sim_disk_unmount(take rebooted, take resumed)
+    }
+    Ok(())
 }

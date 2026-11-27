@@ -63,15 +63,24 @@ fn start_current(found: u64, selected: launcher.Selection) -> String {
 }
 
 // Record the first accepted PlaceOpened before any decision that depends on the store.
-fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.PlaceReady, authoritative: bool, gen: u64, claim: Option[(u64, Bytes)]) -> Result[(), Refused] waits {
+fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.PlaceReady, authoritative: bool, gen: u64, claim: Option[(u64, Bytes)], accepting_restore: bool) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, (store.copy_env(authoritative), store.copy_env(incarnation), store.copy_env(name), store.copy_env(ready), store.copy_env(t), store.copy_env(gen), store.copy_env(claim)), fn(mut tx, call_env) -> Result[(), Refused] {
+        store.run(mut h.db, None, (store.copy_env(authoritative), store.copy_env(incarnation), store.copy_env(name), store.copy_env(ready), store.copy_env(t), store.copy_env(gen), store.copy_env(claim), store.copy_env(accepting_restore)), fn(mut tx, call_env) -> Result[(), Refused] {
             let Some(found) = st(store.fetch(tx, call_env.4 .groups, call_env.2))? else {
                 return Error(Unknown)
             }
             if found.incarnation != call_env.1 {
                 return Error(Unknown)
+            }
+            if call_env.7 {
+                let Some(saved) = st(store.fetch(tx, call_env.4 .restored_groups, found.incarnation))? else {
+                    return Error(Unknown)
+                }
+                let mut intent = saved
+                intent.accepted = true
+                intent.activation = call_env.3 .version
+                st(store.put(mut tx, call_env.4 .restored_groups, found.incarnation, intent))?
             }
             let mut g = found
             g.store_id = Some((call_env.3 .store_hi, call_env.3 .store_lo))
@@ -480,6 +489,22 @@ fn failing_last(h: Host, name: String, outcome: String) -> String waits {
     take message
 }
 
+fn check_restored_launch(h: Host, g: GroupRow, ready: runner.PlaceReady, current_gen: bool) -> Result[bool, Refused] waits {
+    let Some(intent) = st(store.get(st(store.reader(h.db, 0u64))?, store.snapshot(h.db), h.t.restored_groups, g.incarnation))? else {
+        return Ok(false)
+    }
+    if intent.accepted && (!current_gen || g.activation != intent.activation || g.assembly != intent.assembly) {
+        return Ok(false)
+    }
+    let Some(read) = read_place(ready.read) else {
+        return Error(Denied("missing restored release evidence"))
+    }
+    if !current_gen || g.assembly != intent.assembly || ready.version == 0 || (intent.activation != 0 && ready.version != intent.activation) || (g.activation != 0 && g.activation != ready.version) || ready.release != intent.release || read.binding != intent.binding.identity || read.n_place != Some(intent.binding.n_place) || read.store_hi != ready.store_hi || read.store_lo != ready.store_lo {
+        return Error(Denied("restored release mismatch"))
+    }
+    Ok(!intent.accepted)
+}
+
 fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
     let Some(g) = current(h, c) else {
         return
@@ -514,9 +539,19 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                 return
             }
         }
+        let accepting_restore = match check_restored_launch(h, g, ready, is_current) {
+            Ok(first) => first,
+            Error(_) => {
+                if is_current {
+                    unsuccessful(mut h, name, "restored release mismatch", false, now, mut out)
+                }
+                list.push(mut out, Kill(clone(c)))
+                return
+            },
+        }
         let claim = opened_claim(ready)
-        if is_none(g.store_id) || (is_current && (g.activation == 0u64 || !is_none(g.recovery))) || has_new_claim(g, gen, claim) {
-            if let Error(_) = record_store(mut h, name, g.incarnation, ready, is_current, gen, claim) {
+        if accepting_restore || is_none(g.store_id) || (is_current && (g.activation == 0u64 || !is_none(g.recovery))) || has_new_claim(g, gen, claim) {
+            if let Error(_) = record_store(mut h, name, g.incarnation, ready, is_current, gen, claim, accepting_restore) {
                 list.push(mut out, Kill(clone(c)))
                 return
             }

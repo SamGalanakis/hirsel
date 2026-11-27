@@ -1720,24 +1720,6 @@ fn host_head[T: send](head: Sender[HeadInput], request: scoped fn(take Sender[T]
     }
 }
 
-fn host_refusal(why: store.DeployError) -> String {
-    match why {
-        Store(Full(_)) => "Full",
-        Store(Missing(_)) => "Missing",
-        Store(Exists(_)) => "Exists",
-        Store(_) => "Store",
-        Scratch(_) => "Scratch",
-        ExportMismatch => "ExportMismatch",
-        AttemptBusy => "Busy",
-        ImportMalformed => "ImportMalformed",
-        Unsettled => "Unsettled",
-        IdBound => "IdBound",
-        Drift => "Drift",
-        Expired => "Expired",
-        FullNew(_) => "Full(New)",
-    }
-}
-
 fn host_export(head: Sender[HeadInput], scratch: Dir, attempt: Bytes, retry: bool) -> Result[store.Exported, store.DeployError] waits {
     let response = host_head(head, scoped fn(take answer: Sender[Result[store.ExportCopy, store.DeployError]]) -> Result[HeadInput, Capacity] {
         let payload = ExportCommand(scratch: scratch, attempt: clone(attempt), retry: retry, answer: take answer)

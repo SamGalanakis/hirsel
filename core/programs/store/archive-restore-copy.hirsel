@@ -102,6 +102,35 @@ fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoin
     if head.binding_id != point.token.binding_id {
         return Error(Store(Foreign))
     }
+    if let Some(floor) = view head.floor_base {
+        if b.base_ordinal < floor.base_ordinal {
+            return Error(Expired)
+        }
+    }
+    let copied = restore_copy_covered(mut src, dir, point, head, due)
+    match take copied {
+        Error(Store(Remote(NotFound))) => (),
+        Error(Store(HistoryMissing(_, _))) => (),
+        result_copy => return take result_copy,
+    }
+    let Some((take new_head, _)) = deploy_result(failure_result_from_rep(history.archive_head_fetch(mut src, id, due)))? else {
+        return Error(Store(Lost))
+    }
+    if new_head.binding_id != point.token.binding_id {
+        return Error(Store(Foreign))
+    }
+    if let Some(floor) = new_head.floor_base {
+        if b.base_ordinal < floor.base_ordinal {
+            return Error(Expired)
+        }
+    }
+    Error(Store(Lost))
+}
+
+fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoint, head: format.ArchiveHeadRep, due: u64) -> Result[ExportStamp, DeployError] waits {
+    let parent = point.token.parent
+    let id = store_key_to_rep(parent)
+    let b = point.token.boundary
     let chain_index = deploy_result(failure_result_from_rep(history.archive_restore_index(mut src, head, due)))?
     let mut found: Option[format.ArchiveBaseRowRep] = None
     let objects = b.source_kind == format.ARCHIVE_SOURCE_OBJECTS
@@ -120,7 +149,7 @@ fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoin
         }
     }
     let Some(take row) = take found else {
-        return Error(Expired)
+        return Error(Store(Lost))
     }
     let (take m, evidence) = deploy_result(restore_archive_manifest(mut src, parent, head.source_kind, row, due))?
     if evidence.number != point.activation || evidence.binding != point.binding {

@@ -1,0 +1,87 @@
+// The child frame checksums already bind the new identity and offsets. Only
+// the fixed-size native HEADER differs between a Directory and object pack.
+fn restore_pack_part(mut file: HostFile, path: String, offset: u64, width: u64, header: Bytes) -> Result[Bytes, Error] waits {
+    let mut part = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, offset, width))?
+    if offset == 0 {
+        for i in 0u64 .. 72 {
+            part[i] = header[i]
+        }
+    }
+    Ok(take part)
+}
+
+fn restore_upload_parts(mut dst: std.object.Client, mut upload: std.object.Upload, mut file: HostFile, path: String, size: u64, width: u64, hdr: Bytes, due: u64) -> Result[(), Error] waits {
+    let mut pos = 0u64
+    while pos < size {
+        let part_length = order.min(width, size - pos)
+        let raw = restore_pack_part(mut file, path, pos, part_length, hdr)?
+        let mut batch: List[Bytes] = list.with_capacity(1)
+        list.push(mut batch, take raw)
+        let (sent, _) = std.object.parts(mut dst, mut upload, take batch, due)
+        let _ = sent ?=> Remote
+        pos += part_length
+    }
+    Ok(())
+}
+
+fn restore_upload_pack(mut dst: std.object.Client, d: Dir, id: types.StoreKey, seq: u64, due: u64) -> Result[pages.HistoryRef, Error] waits {
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
+    let size = (failure_result_from_rep(manifest.disk_io(host.stat_file(mut file)))?).size
+    if size < 72 {
+        return Error(failure_from_rep(format.disk_fault(path, 0, Truncated)))
+    }
+    let mut hdr: Bytes = list.with_capacity(72)
+    failure_result_from_rep(types.capacity(format.history_append_header(mut hdr, format.DiskContext(store: id, role: 3, seq), 1, 1)))?
+    let mut digest = std.check.start()
+    let mut pos = 0u64
+    while pos < size {
+        let width = order.min(65536u64, size - pos)
+        let body = restore_pack_part(mut file, path, pos, width, hdr)?
+        std.check.add(mut digest, body, 0, width)
+        pos += width
+    }
+    let ref = pages.HistoryRef(seq, epoch: 1, len: size, digest: std.check.finish(digest))
+    let name = failure_result_from_rep(history.history_read_key("p-", ref))?
+    let part_size = history.history_part_width(size)
+    if size <= part_size {
+        let raw = restore_pack_part(mut file, path, 0, size, hdr)?
+        let (result_put, _) = std.object.store_if_retry(mut dst, name, Absent, take raw, due)
+        match take result_put {
+            Ok(_) => (),
+            Error(Uncertain(_)) => (),
+            Error(take e) => return Error(Remote(take e)),
+        }
+    } else {
+        let mut upload = std.object.upload(mut dst, name, NoClobber, due) ?=> Remote
+        if let Error(take problem) = restore_upload_parts(mut dst, mut upload, mut file, path, size, part_size, hdr, due) {
+            let _ = std.object.abort(mut dst, take upload, due)
+            return Error(take problem)
+        }
+        match std.object.complete_unresolved(mut dst, upload, due) {
+            Ok(Created(_)) => (),
+            Ok(Exists) => {
+                let _ = std.object.abort(mut dst, take upload, due)
+            },
+            Error(Uncertain(_)) => {
+                let _ = std.object.abort(mut dst, take upload, due)
+            },
+            Error(take e) => {
+                let _ = std.object.abort(mut dst, take upload, due)
+                return Error(Remote(take e))
+            },
+        }
+    }
+    pos = 0
+    while pos < size {
+        let width = order.min(65536u64, size - pos)
+        let (meta, take seen) = restore_range(mut dst, name, pos, pos + width, due)?
+        let want = restore_pack_part(mut file, path, pos, width, hdr)?
+        if meta.size != size || seen != want {
+            return Error(failure_from_rep(format.disk_fault(name, pos, Checksum)))
+        }
+        pos += width
+    }
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))?
+    Ok(ref)
+}

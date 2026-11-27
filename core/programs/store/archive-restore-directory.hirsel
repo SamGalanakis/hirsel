@@ -128,19 +128,37 @@ fn restore_write_foundation(private_dir: Dir, to: Dir, child: StoreId, point: Re
     Ok(())
 }
 
-fn restore_attempt_dir(attempt: Inline[u8, 16]) -> String {
-    let mut hi = 0u64
-    let mut lo = 0u64
-    for i in 0u64 .. 8 {
-        hi = (hi << 8) | int.widen(attempt[i])
-        lo = (lo << 8) | int.widen(attempt[8 + i])
-    }
+fn restore_work_name(origin: manifest.RestoreOrigin) -> Result[String, DeployError] {
+    let body = deploy_result(failure_result_from_rep(manifest.restore_origin_payload(origin)))?
     let mut name = string.from("restore-")
-    string.push(mut name, format.archive_store_hex(types.StoreKey(hi, lo)))
-    take name
+    string.push(mut name, std.hex.encode(body))
+    Ok(take name)
 }
 
-fn restore_check_initial_files(to: Dir, work: String, locked: bool) -> Result[(), DeployError] waits {
+// A crash may leave the origin-named reservation before the EXPORT rename.
+fn refuse_reserved_genesis(d: Dir) -> Result[(), Error] waits {
+    let mut listing = failure_result_from_rep(manifest.disk_io(host.entries(d, None)))?
+    let mut raw: Bytes = list.with_capacity(4096)
+    loop {
+        list.clear(mut raw)
+        if failure_result_from_rep(manifest.disk_io(host.next_entries(mut listing, mut raw)))? == 0 {
+            return Ok(())
+        }
+        let mut pos = 0u64
+        while pos < list.len(raw) {
+            let size: u16 = list.word_le(raw, pos + 1)
+            let start = pos + 3
+            pos = start + int.widen(size)
+            if pos - start == 8u64 + 2u64 * manifest.RESTORE_ORIGIN_PAYLOAD && list.slice(raw, start, start + 8) == b"restore-" {
+                if let Some(_) = std.hex.decode(list.slice(raw, start + 8, pos)) {
+                    return Error(ExportDirectory)
+                }
+            }
+        }
+    }
+}
+
+fn restore_check_initial_files(to: Dir, work: String) -> Result[(), DeployError] waits {
     let mut listing = scratch_result(failure_result_from_rep(manifest.disk_io(host.entries(to, None))))?
     let mut buf: Bytes = list.with_capacity(4096)
     loop {
@@ -154,7 +172,7 @@ fn restore_check_initial_files(to: Dir, work: String, locked: bool) -> Result[()
             let start = pos + 3
             pos = start + int.widen(len)
             let name = list.slice(buf, start, pos)
-            if name != string.as_bytes(work) && (!locked || name != string.as_bytes("LOCK")) {
+            if name != string.as_bytes(work) && name != string.as_bytes("LOCK") {
                 return Error(Scratch(Exists("restore target")))
             }
         }
@@ -181,42 +199,51 @@ fn restore_reserve_directory(to: Dir, work: String, point: RestorePoint, origin:
         scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
         return Ok((id, true))
     }
-    restore_check_initial_files(to, work, true)?
+    restore_check_initial_files(to, work)?
     let private_dir = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
     let contents = match std.dir.list(private_dir, None) {
         Ok(take children) => take children,
         Error(Io(err)) => return Error(Scratch(Io(err))),
         Error(NotUtf8) => return Error(Scratch(Exists("restore target"))),
     }
-    for member in contents {
-        if member.name != "reservation" {
+    // The directory entry reserves the child ID before its contents are written.
+    // Rebuild a torn fence from that ID and the origin in the work directory name.
+    let id = if list.len(contents) == 0 {
+        deploy_result(failure_result_from_rep(types.capacity(types.disk_identity(r))))?
+    } else {
+        let name = string.as_bytes(contents[0u64].name)
+        if list.len(contents) != 1 || list.len(name) != 32 {
             return Error(Scratch(Exists("restore target")))
         }
-        let raw = scratch_result(failure_result_from_rep(manifest.disk_read_file(private_dir, "reservation", 4096)))?
-        let (_, take saved) = match manifest.disk_read_page_manifest("reservation", raw) {
-            Ok(take pair) => take pair,
-            Error(_) => return Error(Scratch(Exists("restore target"))),
-        }
-        if !restore_same_origin(saved, origin) {
+        let Some(words) = std.hex.decode(name) else {
             return Error(Scratch(Exists("restore target")))
         }
+        types.StoreKey(hi: format.read_le(words, 0, 8), lo: format.read_le(words, 8, 8))
     }
-    let id = deploy_result(failure_result_from_rep(types.capacity(types.disk_identity(r))))?
     if id == store_key_to_rep(point.token.parent) {
         return Error(Store(Foreign))
     }
     let mut fence = manifest.page_manifest_empty(types.named_limits(None))
     fence.origin = Some(origin)
     let raw = deploy_result(failure_result_from_rep(manifest.disk_page_manifest_bytes(id, fence)))?
-    scratch_result(failure_result_from_rep(manifest.disk_write_synced(private_dir, "reservation", raw)))?
+    let mut words: Bytes = list.with_capacity(16)
+    list.put_word_le(mut words, id.hi)
+    list.put_word_le(mut words, id.lo)
+    let filename = std.hex.encode(words)
+    if list.len(contents) != 0 && contents[0u64].name != filename {
+        return Error(Scratch(Exists("restore target")))
+    }
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(private_dir, filename, raw)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(private_dir))))?
     let mut source = string.from(work)
-    string.push(mut source, "/reservation")
+    string.push_char(mut source, '/')
+    string.push(mut source, filename)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.rename(to, source, "EXPORT"))))?
     scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     Ok((store_key_from_rep(id), false))
 }
 
-fn restore_directory_locked(tasks: Tasks, mut input: RestoreInput, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16], work: String) -> Result[Restored, DeployError] waits {
+fn restore_directory_locked(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16], work: String) -> Result[Restored, DeployError] waits {
     let origin = restore_origin_for(point, attempt)
     let (child, published) = restore_reserve_directory(to, work, point, origin, r)?
     if !published {
@@ -227,10 +254,7 @@ fn restore_directory_locked(tasks: Tasks, mut input: RestoreInput, to: Dir, c: C
         }
         scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
         let private_dir = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
-        let stamp = match input {
-            RestoreDir(d) => restore_copy_backup(d, private_dir, point)?,
-            RestoreBucket(mut src, ms) => restore_copy_archive(mut src, private_dir, point, ms)?,
-        }
+        let stamp = restore_stage(mut input, private_dir, point)?
         restore_fold(tasks, private_dir, c, r, options, point, stamp)?
         deploy_result(restore_write_foundation(private_dir, to, child, point, origin))?
         scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(to, work))))?
@@ -255,23 +279,23 @@ pub fn restore(tasks: Tasks, from: Dir, to: Dir, c: Clock, r: Random, options: O
     let RestorePresent(point) = plan_backup_restore(from, target)? else {
         return Error(ExportMismatch)
     }
-    let mut input = RestoreDir(from)
+    let mut input = StampedBackup(from)
     restore_directory(tasks, mut input, to, c, r, options, point, attempt)
 }
 
-type RestoreInput = RestoreDir(Dir) | RestoreBucket(std.object.Client, u64)
+pub type RestoreSource = StampedBackup(Dir) | ArchivedStore(std.object.Client, StoreId, u64)
 
 pub fn restore_from_archive(tasks: Tasks, take sink: std.object.Client, parent: StoreId, to: Dir, c: Clock, r: Random, options: Options, target: RestoreTarget, attempt: Inline[u8, 16], op_ms: u64) -> Result[Restored, DeployError] waits {
     let mut src = take sink
     let RestorePresent(point) = deploy_result(plan_archive_restore(mut src, parent, target, op_ms))? else {
         return Error(ExportMismatch)
     }
-    let mut input = RestoreBucket(take src, op_ms)
+    let mut input = ArchivedStore(take src, parent, op_ms)
     restore_directory(tasks, mut input, to, c, r, options, point, attempt)
 }
 
-fn restore_directory(tasks: Tasks, mut input: RestoreInput, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16]) -> Result[Restored, DeployError] waits {
-    let work = restore_attempt_dir(attempt)
+fn restore_directory(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16]) -> Result[Restored, DeployError] waits {
+    let work = restore_work_name(restore_origin_for(point, attempt))?
     let fenced = deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))?
     let published = deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))?
     if fenced || published {
@@ -302,4 +326,11 @@ fn restore_directory(tasks: Tasks, mut input: RestoreInput, to: Dir, c: Clock, r
     let answer = restore_directory_locked(tasks, mut input, to, c, r, options, point, attempt, work)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take lock))))?
     take answer
+}
+
+fn restore_stage(mut input: RestoreSource, private_dir: Dir, point: RestorePoint) -> Result[ExportStamp, DeployError] waits {
+    match input {
+        StampedBackup(d) => restore_copy_backup(d, private_dir, point),
+        ArchivedStore(mut src, _, ms) => restore_copy_archive(mut src, private_dir, point, ms),
+    }
 }

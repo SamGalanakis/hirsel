@@ -1,0 +1,108 @@
+// The allocator fence bounds future publications. Within it, protect each
+// reachable name, including locator chunks and the older MARKs retained by a base.
+fn expiry_hold(mut held: Map[String, ()], name: String) -> Result[(), Error] {
+    failure_result_from_rep(types.capacity(map.try_reserve(mut held, 1)))?
+    map.insert(mut held, string.from(name), ())
+    Ok(())
+}
+
+fn expiry_object_mark(mut src: std.object.Client, parent: StoreId, ref: pages.HistoryRef, scratch: Dir, mut held: Map[String, ()], deadline: u64) -> Result[List[pages.HistoryRef], Error] waits {
+    let id = store_key_to_rep(parent)
+    let key = failure_result_from_rep(history.history_read_key("e-", ref))?
+    let raw = restore_archive_bytes(mut src, format.archive_key(id, key), ref, deadline)?
+    let mark = failure_result_from_rep(history.history_read_mark(key, id, ref, raw))?
+    let mkey = failure_result_from_rep(history.history_read_key("m-", mark.manifest))?
+    let bytes_in = restore_archive_bytes(mut src, format.archive_key(id, mkey), mark.manifest, deadline)?
+    let m = failure_result_from_rep(history.history_decode_manifest(mkey, id, mark, ref.seq, take bytes_in))?
+    let old_prefix = expiry_push_namespace(mut src, id)
+    let locator = history.history_locator_at(mut src, id, ref, mark, raw, deadline)
+    let _ = std.object.set_prefix(mut src, take old_prefix)
+    let located = failure_result_from_rep(take locator)?
+    for chunk in history.locator_chunks(located) {
+        expiry_hold(mut held, failure_result_from_rep(history.history_read_key("l-", chunk))?)?
+    }
+    let path = failure_result_from_rep(history.history_read_key("e-", ref))?
+    failure_result_from_rep(manifest.disk_io(host.mkdir(scratch, path)))?
+    let mark_dir = failure_result_from_rep(manifest.disk_io(host.open_dir(scratch, path)))?
+    for (_, pack_ref) in history.locator_rows(located) {
+        restore_copy_pack(mut src, mark_dir, parent, pack_ref, true, deadline)?
+        expiry_hold(mut held, failure_result_from_rep(history.history_read_key("p-", pack_ref))?)?
+    }
+    let _ = validate_export_manifest(mark_dir, parent, take m, true, true)?
+    failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, path)))?
+    expiry_hold(mut held, key)?
+    expiry_hold(mut held, mkey)?
+    Ok(clone(mark.retained))
+}
+
+fn expiry_base_work(mut src: std.object.Client, head: format.ArchiveHeadRep, idx: history.RestoreIndex, parent: StoreId, row: format.ArchiveBaseRowRep, work: Dir, mut held: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
+    let objects = head.source_kind == format.ARCHIVE_SOURCE_OBJECTS
+    let (take m, _) = restore_archive_manifest(mut src, parent, head.source_kind, row, deadline)?
+    let mut listed: Map[u64, ()] = map.new()
+    let mut pos = idx.pages[0u64].ordinal - row.frontier.first_index_ordinal
+    loop {
+        let page_ref = idx.pages[pos]
+        let page = failure_result_from_rep(history.archive_index_page(mut src, head.store, head.source_kind, page_ref, deadline))?
+        let mut ended = false
+        for part in page.bases {
+            if part.base_ordinal < row.base_ordinal {
+                continue
+            }
+            if part.base_ordinal > row.base_ordinal {
+                ended = true
+                break
+            }
+            {
+                for p in part.packs {
+                    if map.contains(listed, p.seq) {
+                        return Error(failure_from_rep(format.disk_fault("archive-index", page.ordinal, Order)))
+                    }
+                    failure_result_from_rep(types.capacity(map.try_reserve(mut listed, 1)))?
+                    map.insert(mut listed, p.seq, ())
+                    let ref = pages.HistoryRef(seq: p.seq, epoch: p.epoch, len: p.len, digest: p.digest)
+                    restore_copy_pack(mut src, work, parent, ref, objects, deadline)?
+                    let name = if objects {
+                        failure_result_from_rep(history.history_read_key("p-", ref))?
+                    } else {
+                        format.archive_log_pack_rel(p.seq, p.digest)
+                    }
+                    expiry_hold(mut held, name)?
+                }
+            }
+        }
+        if ended || pos == 0 {
+            break
+        }
+        pos -= 1
+    }
+    let refs = failure_result_from_rep(manifest.validate_receipt_packs(work, head.store, "MANIFEST", m))?
+    if list.len(refs) != map.len(listed) {
+        return Error(Lost)
+    }
+    let _ = validate_export_manifest(work, parent, take m, true, true)?
+    if objects {
+        let earlier = expiry_object_mark(mut src, parent, restore_base_ref(row), work, mut held, deadline)?
+        for retained in earlier {
+            let _ = expiry_object_mark(mut src, parent, retained, work, mut held, deadline)?
+        }
+    } else {
+        expiry_hold(mut held, format.archive_log_manifest_rel(row.base_ordinal, row.digest))?
+    }
+    Ok(())
+}
+
+fn expiry_verify_survivors(mut src: std.object.Client, head: format.ArchiveHeadRep, parent: StoreId, scratch: Dir, deadline: u64) -> Result[Map[String, ()], Error] waits {
+    let _ = restore_archive_scan(mut src, head, Latest, deadline)?
+    let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
+    let rows = restore_base_rows(mut src, head, idx, deadline)?
+    let mut held: Map[String, ()] = map.new()
+    for row in rows {
+        let mut name = string.with_capacity(64)
+        string.push(mut name, "expiry-")
+        let dir = failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut name)))?
+        let checked = expiry_base_work(mut src, head, idx, parent, row, dir, mut held, deadline)
+        failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, name)))?
+        checked?
+    }
+    Ok(take held)
+}

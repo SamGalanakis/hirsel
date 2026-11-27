@@ -9,6 +9,11 @@ fn restore_base_rows(mut sink: std.object.Client, head: format.ArchiveHeadRep, i
         p -= 1
         let page = failure_result_from_rep(history.archive_index_page(mut sink, head.store, head.source_kind, idx.pages[p], deadline))?
         for row in page.bases {
+            if let Some(floor) = view head.floor_base {
+                if row.base_ordinal < floor.base_ordinal {
+                    continue
+                }
+            }
             if row.pack_continuation {
                 if list.len(rows) == 0 || !restore_same_base(row, rows[list.len(rows) - 1]) {
                     return Error(failure_from_rep(format.disk_fault("archive-index", page.ordinal, Order)))

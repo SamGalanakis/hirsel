@@ -6508,7 +6508,7 @@ pub fn release_export(mut db: Db, attempt: Bytes)                               
 
 `target` must be empty. A target with any entry is refused `Scratch(Exists("backup target"))`, and nothing is leased. The stamp's `activation` is the source's own: 0 for a Directory store, which knows no activation, and the head's activation for a Bucket store, whose capture then never refuses `Drift`. The stamp is source evidence. Runner verifies the restored activation and release before adoption. The returned `ExportCopy` writes into `target` itself, and its `Exported.name` is empty. An `ExportCopy` from `begin_export_copy` still makes a scratch subdirectory, unchanged.
 
-**Writable restore (specified, pending implementation).** The source is read-only. Both archive and stamped backup use the same planner, bounded replay and streaming checkpoint emitter. A backup offers only the states derivable from its stamped base through its exact `EXPORT.end`. A restore from an archive needs only the committed sink keys.
+**Writable restore.** The source is read-only. Both archive and stamped backup use the same planner, bounded replay and streaming checkpoint emitter. A backup offers only the states derivable from its stamped base through its exact `EXPORT.end`. A restore from an archive needs only the committed sink keys.
 
 **Planning.** `Latest` names the last complete physical boundary advertised by the source. `Version(branch, v)` names a covered state at exactly that branch version. When cut-only transitions share that version, select the last such covered transition in source order. `Boundary(token)` selects the exact source identity, checkpoint/generation and digest, unit and complete frame end (or the independent post-cut base itself). A token from another source is refused. `--plan`<!-- doc-ref: planned --> returns the resolved token, branch/version/time, required base, source identity and destination compatibility before writing anything. Pin the token on retry so a moving `Latest` cannot change the selected state.
 
@@ -6717,7 +6717,7 @@ It prints `changed X` for each changed index identity, each scrub fault, `findin
 
 ### 15.7 Point-in-time archive
 
-This is the ratified recovery contract. The archive and fresh-identity restore await runtime implementation. A bounded background lane of the source holder copies stable native units to an independently credentialed Bucket at `<sink-prefix>/<StoreId-32hex>/`. Source, host stream, archive and restore destination must be disjoint. The holder can read archive objects, create immutable units and conditionally write the archive head. Only the expiry operator has DELETE. Automatic Bucket lifecycle deletion is incompatible with a recovery promise.
+A bounded background lane of the source holder copies stable native units to an independently credentialed Bucket at `<sink-prefix>/<StoreId-32hex>/`. Source, host stream, archive and restore destination must be disjoint. For an offline restore to Bucket, the caller supplies the source Place and host stream Bucket namespaces from trusted configuration, or records their absence for a Directory or standalone Place. Store compares all supplied prefixes with the archive and destination before writing. The holder can read archive objects, create immutable units and conditionally write the archive head. Only the expiry operator has DELETE. Automatic Bucket lifecycle deletion is incompatible with a recovery promise.
 
 | Key | Contents and authority |
 |---|---|

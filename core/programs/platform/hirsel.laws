@@ -40,6 +40,7 @@ platform@1/platform/reservation_generations src=22efd3f0cd73ded3 sig=0a6b5c92a09
 platform@1/platform/source_blob_checked src=5f20b79f059b51b4 sig=7c65350a5377d2cd run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/source_blobs_rooted_across_crash src=9b787d5622df5f45 sig=5aaf8e0ddf01b1bf run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/source_by_content src=86533e243ce9a6d5 sig=4a847726f6f06d29 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+platform@1/platform/test_la11_host_adopts_restored_child src=20424a2c25f75257 sig=8ff42b14c2dcf410 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 platform@1/platform/untrusted_source_admission src=7a08c1441368b9be sig=75a63f1b425e926d run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/wake_arrival_during_drain src=6ea27fa9732b4110 sig=6b7fb9bf82ffefb4 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/wake_dirty_capacity src=200065f5d3842da9 sig=ea3fc2bb77d18e28 run=b1818af2b24835d3 bug=- oracle=- rows=pending

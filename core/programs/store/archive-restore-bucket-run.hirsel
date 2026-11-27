@@ -1,0 +1,64 @@
+fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.object.Client, work: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], level_name: String, deadline: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
+    let mut point = selected
+    let origin = restore_origin_for(point, attempt)
+    let stamp = restore_stage(mut source, work, point)?
+    let recovered = open_copied(work, c, stamp.attempt, options, false)?
+    for branch_head in pages.holder_heads(recovered.db.holders) {
+        if pages.tiered_collections(branch_head.roots.collections.root) {
+            return Error(UnsupportedResidency)
+        }
+    }
+    for pin_row in pages.holder_pins(recovered.db.holders) {
+        if pages.tiered_collections(pin_row.roots.collections.root) {
+            return Error(UnsupportedResidency)
+        }
+    }
+    let native = point.token.boundary.source_kind == format.ARCHIVE_SOURCE_OBJECTS || point.activation != 0
+    let release = if native && !deploy_result(has_runner_catalog(recovered.db))? {
+        RestoreRelease(activation: point.activation, binding: point.binding)
+    } else {
+        deploy_result(verify(recovered.db))?
+    }
+    if native && (release.activation != point.activation || release.binding != point.binding) {
+        return Error(ExportMismatch)
+    }
+    point.activation = release.activation
+    point.binding = release.binding
+    let _ = take recovered
+    if let Some(published) = deploy_result(restore_bucket_published(mut dst, origin, deadline))? {
+        return Ok(Restored(child: published, point, attempt))
+    }
+    restore_fold(tasks, work, c, r, options, point, stamp)?
+    let (_, take checked) = deploy_result(read_page_manifest_file(work))?
+    if let Error(_) = manifest.require_object_memory_manifest(checked) {
+        return Error(UnsupportedResidency)
+    }
+    let child = deploy_result(restore_bucket_reservation(mut dst, origin, r, deadline))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(work, "foundation"))))?
+    let foundation = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(work, "foundation"))))?
+    deploy_result(restore_write_foundation(work, foundation, child, point, origin))?
+    deploy_result(restore_emit_bucket(mut dst, foundation, child, origin, release, level_name, r, deadline))?
+    // The head now carries the reservation's identity and provenance.
+    let _ = std.object.erase(mut dst, RESTORE_RESERVATION, deadline)
+    Ok(Restored(child, point, attempt))
+}
+
+pub fn restore_to_bucket(tasks: Tasks, take input: RestoreSource, mut destination: std.object.Client, level_name: String, namespaces: RestoreNamespaces, scratch: Dir, c: Clock, r: Random, options: Options, target: RestoreTarget, attempt: Inline[u8, 16], op_ms: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
+    let mut source = take input
+    deploy_result(restore_disjoint(std.object.bucket_config(destination), source, namespaces))?
+    let resolution = match source {
+        StampedBackup(d) => plan_backup_restore(d, target)?,
+        ArchivedStore(mut src, parent, ms) => deploy_result(plan_archive_restore(mut src, parent, target, ms))?,
+    }
+    let RestorePresent(point) = take resolution else {
+        return Error(ExportMismatch)
+    }
+    let deadline = std.object.deadline_after_ms(destination, op_ms)
+    deploy_result(failure_result_from_rep(history.history_check_endpoint(mut destination, deadline)))?
+    let mut tmp = string.with_capacity(64)
+    string.push(mut tmp, "restore-")
+    let work = scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut tmp))))?
+    let answer_out = restore_bucket_staged(tasks, mut source, mut destination, work, c, r, options, point, attempt, level_name, deadline, verify)
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, tmp))))?
+    take answer_out
+}

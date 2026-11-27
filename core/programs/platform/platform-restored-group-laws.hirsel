@@ -1,0 +1,118 @@
+fn restore_law_dir(d: Dir) -> Dir waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "adoption-")
+    result.unwrap(host.mkdtemp(d, mut name))
+}
+
+fn restored_setup(d: Dir, c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, desc: runner.Describe) -> store.Restored waits {
+    let source = restore_law_dir(d)
+    let captured = restore_law_dir(d)
+    let mut opts = result.unwrap(store.sized(Directory, 2147483648u64))
+    opts.create = true
+    let mut db = result.unwrap(store.open(tasks, source, c, rnd, opts))
+    let binding = result.unwrap(runner.identity_digest(desc))
+    let release = result.unwrap(runner.described_release(desc))
+    let mut raw: Bytes = list.new()
+    let codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    result.unwrap(std.codec.encode(codec, desc, mut raw))
+    let rec = runner.ReleaseRecord(release: take release, digest: clone(desc.digest), binding: clone(binding), n_place: desc.n_place, prepared: list.new())
+    let mut staged = result.unwrap(store.stage_migration(db, tasks, code.describe(object_install_noop)))
+    let rc: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+    result.unwrap(store.stage_activation(mut staged, 1, None, raw, rc, rec))
+    result.unwrap(store.install_bound_activation(mut db, take staged, 1, binding))
+    let mut nonce: Bytes = list.with_capacity(16)
+    list.fill(mut nonce, 16, 23u8)
+    let job = result.unwrap(store.begin_backup(mut db, captured, clone(nonce)))
+    let _ = result.unwrap(store.export_copy(take job))
+    store.release_export(mut db, nonce)
+    result.unwrap(store.close(take db))
+    let mut bucket_client = recovery_bucket_wire_client(sim.endpoint, sim.time, tasks, 3347)
+    let _ = std.object.set_prefix(mut bucket_client, "restored/")
+    let namespaces = store.RestoreNamespaces(source_place: None, host_stream: None)
+    let scratch = restore_law_dir(d)
+    match store.restore_to_bucket(tasks, StampedBackup(captured), mut bucket_client, "bucket", namespaces, scratch, sim.time, rnd, opts, Latest,[99; 16], 30000, store.plain_restore_release) {
+        Error(Store(Missing(_))) => (),
+        _ => fail("plain verifier admitted a Runner catalog"),
+    }
+    let receipt = result.unwrap(store.restore_to_bucket(tasks, StampedBackup(captured), mut bucket_client, "bucket", namespaces, scratch, sim.time, rnd, opts, Latest,[99; 16], 30000, runner.restored_release))
+    if receipt.point.activation != 1 {
+        fail("Directory Runner activation was lost on Bucket publication")
+    }
+    receipt
+}
+
+fn saw_accept(requests: List[launcher.Request]) -> bool {
+    for req in requests {
+        if let Command(_, HostStoreAccepted) = req {
+            return true
+        }
+    }
+    false
+}
+
+fn restored_report(registered: store.Restored, desc: runner.Describe) -> runner.PlaceReady {
+    let read = runner.PlaceRead(store_hi: registered.child.hi, store_lo: registered.child.lo, binding: result.unwrap(runner.identity_digest(desc)), n_place: Some(desc.n_place), prepared: list.new(), witness_present: true, claim: None)
+    let mut payload: Bytes = list.new()
+    let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
+    result.unwrap(std.codec.encode(codec, read, mut payload))
+    runner.PlaceReady(version: registered.point.activation, store_hi: registered.child.hi, store_lo: registered.child.lo, release: result.unwrap(runner.described_release(desc)), retain_from: 0, ready_ns: 0, read: take payload)
+}
+
+fn start_restored(mut fixture: Rig, restored: store.Restored, desc: runner.Describe) waits {
+    let spec = NewGroup(name: "restored", tenant: "t", workdir: "group", author: Trusted, listen: "127.0.0.1:8020", front: None, store: "restored/", memory: None, assembly: image(), activation: restored.point.activation, args: list.new(), record: None)
+    let added = must(add_restored_group(mut fixture.h, spec, restored, desc), "restore registration")
+    pump(mut fixture, take added)
+    op_wake(mut fixture, "restored")
+    let launch = view fixture.sent[list.len(fixture.sent) - 1]
+    let ServingMode(_, selection) = launch.mode else {
+        fail("expected child Start")
+    }
+    if selection.store_id != Some((restored.child.hi, restored.child.lo)) || selection.activation != restored.point.activation || launch.assembly != spec.assembly {
+        fail("first Start lacked the durable restore selection")
+    }
+}
+
+@test
+fn test_la11_host_adopts_restored_child(d: Dir, c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "restored/head", from: 1, count: 1, until: At(0), then: ApplyLoseReply))
+    let sim = recovery_bucket_with(tasks, c, 33471, take holds)
+    let desc = describe_of(image())
+    let restored = restored_setup(d, c, rnd, tasks, sim, desc)
+    let RecoveryBucket(server: take server, clock_task: take ticking, stopping: take stopping, ..) = take sim
+    result.unwrap(channel.send(stopping, ()))
+    let events = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take ticking))
+    let mut applied_genesis = false
+    let mut readback = false
+    for req in events.requests {
+        if req.key == "restored/head" && req.method == "PUT" && req.applied {
+            applied_genesis = true
+        }
+        if applied_genesis && req.key == "restored/head" && req.method == "GET" {
+            readback = true
+        }
+    }
+    expect(readback, "genesis lost-reply schedule did not fire")
+    for case in 0u64 .. 3 {
+        let mut before = rig(c, rnd, 2)
+        start_restored(mut before, restored, desc)
+        let ch = last(before, "restored")
+        let mut fixture = restart(take before, 2)
+        let mut report = restored_report(restored, desc)
+        if case == 0 {
+            report.store_lo += 1
+        }
+        if case == 1 {
+            report.release = image_two()
+        }
+        let replies = apply(mut fixture, Got(Placed(clone(ch), PlaceOpened(clone(report)))))
+        expect(saw_accept(replies) == (case == 2), "identity or release acceptance after host restart")
+        if case == 2 {
+            let mut recovered_host = restart(take fixture, 2)
+            let replay = apply(mut recovered_host, Got(Placed(clone(ch), PlaceOpened(clone(report)))))
+            expect(saw_accept(replay), "host lost durable acceptance of repeated PlaceOpened")
+        }
+    }
+    Ok(())
+}

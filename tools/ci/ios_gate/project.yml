@@ -11,8 +11,6 @@ targets:
     type: application
     platform: [iOS, macOS]
     sources: [Host.swift]
-    dependencies:
-      - package: SimGate
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES

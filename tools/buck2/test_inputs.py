@@ -1,6 +1,9 @@
 """Repository inputs read by Rust test binaries at runtime."""
 
 TEST_FILES_ENV = {
+    "hirsel-compiler-unittest": {
+        "HIRSEL_COMPILER_WORKER": "//:hirsel-core-driver-bin-hirsel",
+    },
     "hirsel-core-driver-test-sdk_manifest": {
         "HIRSEL_SWIFT_LINK_KIT": "//tools/buck2/native-toolchain:kit",
         "HIRSEL_SWIFT_MAC_RUNTIME": "//:hirsel-core-rt-archives[aarch64-apple-darwin]",

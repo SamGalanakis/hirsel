@@ -11,9 +11,9 @@ pub(crate) const CONTENT_LIMIT: usize = 64 << 20;
 pub(crate) const ARCHIVE_LIMIT_MIB: usize = 512;
 pub(crate) const ARCHIVE_LIMIT: usize = ARCHIVE_LIMIT_MIB << 20;
 const FILE_LIMIT: usize = 65_536;
-const PACKAGE_LIMIT: usize = 4096;
+pub(crate) const PACKAGE_LIMIT: usize = 4096;
 mod archive;
-const CHARGE: &str = "charge-v1";
+pub(crate) const CHARGE: &str = "charge-v1";
 
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {
     TOOLCHAIN

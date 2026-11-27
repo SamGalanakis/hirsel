@@ -17,7 +17,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+pub mod check_library;
 mod host;
+
+pub use check_library::{
+    AuthorityCard, AuthorityVerdict, CarriedAuthority, CheckLibraryCaps, CheckLibraryRequest,
+    CheckedBinding, CheckedHeader, CheckedLibrary, HistoryRow, InterfaceItem, InterfaceModule,
+    InterfaceV1, LibraryEntry, ReachedAuthority, canonical_json, parse_digest,
+};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -26,7 +33,7 @@ mod tests;
 
 /// The exit status of a worker whose memory limit refused an allocation
 /// (`hirsel_guard::EXIT_STATUS`).
-const MEMORY_STATUS: i32 = 71;
+pub(crate) const MEMORY_STATUS: i32 = 71;
 /// How a worker's standard error names a release that cannot be a module.
 const UNSUPPORTED: &str = "module: unsupported: ";
 /// The most of a worker's standard error a refusal carries.
@@ -99,18 +106,18 @@ struct Seats {
 }
 
 pub struct Service {
-    worker: PathBuf,
-    scratch: PathBuf,
+    pub(crate) worker: PathBuf,
+    pub(crate) scratch: PathBuf,
     caps: Caps,
     workers: usize,
     queue: usize,
     seats: Mutex<Seats>,
     freed: Condvar,
-    jobs: AtomicU64,
+    pub(crate) jobs: AtomicU64,
 }
 
 /// A running worker's seat, given back when it drops.
-struct Seat<'a>(&'a Service);
+pub(crate) struct Seat<'a>(&'a Service);
 
 impl Drop for Seat<'_> {
     fn drop(&mut self) {
@@ -120,7 +127,7 @@ impl Drop for Seat<'_> {
 }
 
 /// A job's directory, removed when it drops.
-struct Job(PathBuf);
+pub(crate) struct Job(pub(crate) PathBuf);
 
 impl Drop for Job {
     fn drop(&mut self) {
@@ -128,7 +135,7 @@ impl Drop for Job {
     }
 }
 
-fn unavailable(error: impl std::fmt::Display) -> Refusal {
+pub(crate) fn unavailable(error: impl std::fmt::Display) -> Refusal {
     Refusal::Unavailable(error.to_string())
 }
 
@@ -154,7 +161,7 @@ impl Service {
         }
     }
 
-    fn seat(&self) -> Result<Seat<'_>, Refusal> {
+    pub(crate) fn seat(&self) -> Result<Seat<'_>, Refusal> {
         let mut seats = self.seats.lock().unwrap();
         if seats.running >= self.workers {
             if seats.waiting >= self.queue {
@@ -169,6 +176,24 @@ impl Service {
         }
         seats.running += 1;
         Ok(Seat(self))
+    }
+
+    /// Run one isolated, target-independent registry library check (`registry.md` §2)
+    /// using the normative [`CheckLibraryCaps::REGISTRY`] caps.
+    pub fn check_library(
+        &self,
+        request: &CheckLibraryRequest<'_>,
+    ) -> Result<CheckedLibrary, Refusal> {
+        self.check_library_with_caps(request, CheckLibraryCaps::REGISTRY)
+    }
+
+    /// Run one isolated, target-independent registry library check with explicit caps.
+    pub fn check_library_with_caps(
+        &self,
+        request: &CheckLibraryRequest<'_>,
+        caps: CheckLibraryCaps,
+    ) -> Result<CheckedLibrary, Refusal> {
+        check_library::run(self, request, caps)
     }
 
     pub fn compile(&self, request: &Request<'_>) -> Result<Built, Refusal> {

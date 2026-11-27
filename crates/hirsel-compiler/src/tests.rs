@@ -195,3 +195,784 @@ fn a_full_queue_answers_busy_and_a_queued_request_runs_later() {
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// G22: Registry check_library boundary, graph/history rules, and confinement
+// ---------------------------------------------------------------------------
+
+enum TestBinding {
+    Toolchain,
+    Exact(ContentHash),
+    Floor {
+        tested: ContentHash,
+        minor: u32,
+        patch: u32,
+    },
+}
+
+fn c_leb(out: &mut Vec<u8>, mut value: usize) {
+    while value >= 128 {
+        out.push((value as u8 & 127) | 128);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn c_frame(out: &mut Vec<u8>, bytes: &[u8]) {
+    c_leb(out, bytes.len());
+    out.extend_from_slice(bytes);
+}
+
+/// Independent Phase 0 canonical C v3 encoder (`docs/spec/packages.md` §1).
+fn encode_c_v3(
+    name: &str,
+    major: u32,
+    minor: u32,
+    patch: u32,
+    pre: &str,
+    bindings: &[(&str, &str, u32, TestBinding)],
+    files: &[(&str, &[&str], &[u8])],
+) -> (ContentHash, Vec<u8>) {
+    let mut out = Vec::new();
+    c_leb(&mut out, 3); // C v3
+    c_frame(&mut out, name.as_bytes());
+    for n in [major, minor, patch] {
+        c_leb(&mut out, n as usize);
+    }
+    c_frame(&mut out, pre.as_bytes());
+    c_frame(&mut out, b"charge-v1");
+    c_leb(&mut out, bindings.len());
+    for (alias, dep_name, dep_major, binding) in bindings {
+        c_frame(&mut out, alias.as_bytes());
+        c_frame(&mut out, dep_name.as_bytes());
+        c_leb(&mut out, *dep_major as usize);
+        match binding {
+            TestBinding::Toolchain => c_leb(&mut out, 0),
+            TestBinding::Exact(root) => {
+                c_leb(&mut out, 1);
+                out.extend_from_slice(&root.0);
+            }
+            TestBinding::Floor {
+                tested,
+                minor,
+                patch,
+            } => {
+                c_leb(&mut out, 2);
+                out.extend_from_slice(&tested.0);
+                c_leb(&mut out, *minor as usize);
+                c_leb(&mut out, *patch as usize);
+            }
+        }
+    }
+    c_leb(&mut out, files.len());
+    for (path, module, bytes) in files {
+        c_frame(&mut out, path.as_bytes());
+        c_leb(&mut out, module.len());
+        for part in *module {
+            c_frame(&mut out, part.as_bytes());
+        }
+        c_frame(&mut out, bytes);
+    }
+    c_leb(&mut out, 0); // foreign modules
+    let root = ContentHash::of_parts("hirsel.library-root.v1", [&out[..]]);
+    (root, out)
+}
+
+/// Build a well-formed C v3 payload whose total encoded length is `exact_len` bytes,
+/// carrying a pinned contained WebAssembly foreign module row sized to hit `exact_len`.
+fn encode_c_v3_exact_size(name: &str, exact_len: usize) -> (ContentHash, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+
+    let (_, mut prefix) = encode_c_v3(
+        name,
+        1,
+        0,
+        0,
+        "",
+        &[],
+        &[
+            (
+                "ext.hirsel",
+                &["ext"],
+                b"pub fn noop(f: Foreign[lib.Box]) -> u64\n",
+            ),
+            (
+                "lib.hirsel",
+                &["lib"],
+                b"pub opaque type Box {}\npub fn ok() -> u64 { 1 }\n",
+            ),
+        ],
+    );
+    prefix.pop(); // replace 0 foreign-module count with 1 contained wasm module
+    c_leb(&mut prefix, 1);
+    c_leb(&mut prefix, 1);
+    c_frame(&mut prefix, b"ext");
+    c_frame(&mut prefix, b"ext_");
+    c_leb(&mut prefix, 1);
+    c_frame(&mut prefix, b"ext.wasm");
+    let mut wasm_len = exact_len - prefix.len() - 40;
+    loop {
+        let mut wasm = vec![0u8; wasm_len];
+        wasm[..8].copy_from_slice(b"\0asm\x01\x00\x00\x00");
+        let pin: [u8; 32] = Sha256::digest(&wasm).into();
+        let mut out = Vec::with_capacity(exact_len + 16);
+        out.extend_from_slice(&prefix);
+        out.extend_from_slice(&pin);
+        c_frame(&mut out, &wasm);
+        if out.len() == exact_len {
+            let root = ContentHash::of_parts("hirsel.library-root.v1", [&out[..]]);
+            return (root, out);
+        }
+        wasm_len = if out.len() > exact_len {
+            wasm_len - (out.len() - exact_len)
+        } else {
+            wasm_len + (exact_len - out.len())
+        };
+    }
+}
+
+fn real_worker_path() -> PathBuf {
+    let raw = std::env::var_os("HIRSEL_COMPILER_WORKER")
+        .expect("HIRSEL_COMPILER_WORKER must point to hirsel driver binary");
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() {
+        path
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path)
+            .canonicalize()
+            .expect("resolve HIRSEL_COMPILER_WORKER")
+    }
+}
+
+fn assert_scratch_empty(scratch: &Path) {
+    if !scratch.exists() {
+        return;
+    }
+    let left: Vec<_> = std::fs::read_dir(scratch)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "zero bytes may persist in scratch after check_library, found {left:?}"
+    );
+}
+
+#[test]
+fn g22_check_library_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch");
+    let worker = real_worker_path();
+    let real_service = Service::new(worker, scratch.clone(), Caps::HOST, 1, 0);
+
+    // -----------------------------------------------------------------------
+    // 1. Exact 64 MiB raw C reaches decoding & checks; 64 MiB + 1 refuses
+    //    Limit(Input) before spawning/decoding.
+    // -----------------------------------------------------------------------
+    const SIXTY_FOUR_MIB: usize = 64 << 20;
+    let (exact_64_root, exact_64_bytes) =
+        encode_c_v3_exact_size("github.com/acme/exact64", SIXTY_FOUR_MIB);
+    assert_eq!(exact_64_bytes.len(), SIXTY_FOUR_MIB);
+    let exact_64_result = real_service.check_library(&CheckLibraryRequest {
+        root: exact_64_root,
+        content: &exact_64_bytes,
+        closure: &[],
+        history: &[],
+    });
+    assert_scratch_empty(&scratch);
+
+    // 64 MiB + 1 byte must refuse Limit(Input) BEFORE spawning (even with absent worker).
+    let absent_service = Service::new(
+        dir.path().join("never-spawned"),
+        dir.path().join("never-scratch"),
+        Caps::HOST,
+        1,
+        0,
+    );
+    let mut over_64_bytes = exact_64_bytes;
+    over_64_bytes.push(0);
+    assert_eq!(over_64_bytes.len(), SIXTY_FOUR_MIB + 1);
+    assert_eq!(
+        absent_service.check_library(&CheckLibraryRequest {
+            root: ContentHash([0; 32]),
+            content: &over_64_bytes,
+            closure: &[],
+            history: &[],
+        }),
+        Err(Refusal::Limit(Limit::Input))
+    );
+    drop(over_64_bytes);
+
+    // >4,096 packages and >64 MiB history metadata also refuse Limit(Input) before spawning.
+    let tiny = [0u8; 1];
+    let many: Vec<LibraryEntry<'_>> = (0..4096)
+        .map(|_| LibraryEntry {
+            root: ContentHash([1; 32]),
+            content: &tiny,
+        })
+        .collect();
+    assert_eq!(
+        absent_service.check_library(&CheckLibraryRequest {
+            root: ContentHash([0; 32]),
+            content: &tiny,
+            closure: &many,
+            history: &[],
+        }),
+        Err(Refusal::Limit(Limit::Input))
+    );
+    let huge_origin = format!("https://{}.example", "a".repeat(32 << 20));
+    let huge_history = [
+        HistoryRow {
+            origin: huge_origin.clone(),
+            identity: "github.com/acme/a@1".into(),
+            version: "1.0.0".into(),
+            root: ContentHash([2; 32]),
+        },
+        HistoryRow {
+            origin: huge_origin,
+            identity: "github.com/acme/b@1".into(),
+            version: "1.0.0".into(),
+            root: ContentHash([3; 32]),
+        },
+    ];
+    assert_eq!(
+        absent_service.check_library(&CheckLibraryRequest {
+            root: ContentHash([0; 32]),
+            content: &tiny,
+            closure: &[],
+            history: &huge_history,
+        }),
+        Err(Refusal::Limit(Limit::Input))
+    );
+    assert!(!dir.path().join("never-scratch").exists());
+
+    // -----------------------------------------------------------------------
+    // 2 & 3. Independently constructed valid graph + refusal matrix.
+    // -----------------------------------------------------------------------
+    let (leaf_root, leaf_bytes) = encode_c_v3(
+        "github.com/acme/leaf",
+        1,
+        2,
+        3,
+        "",
+        &[],
+        &[(
+            "leaf.hirsel",
+            &["leaf"],
+            b"pub fn add(a: u64, b: u64) -> u64 { a + b }\n",
+        )],
+    );
+    let (exact_root, exact_bytes) = encode_c_v3(
+        "github.com/acme/exactdep",
+        0,
+        1,
+        0,
+        "alpha.1",
+        &[],
+        &[(
+            "exactdep.hirsel",
+            &["exactdep"],
+            b"pub fn tag() -> u64 { 7 }\n",
+        )],
+    );
+    let (head_root, head_bytes) = encode_c_v3(
+        "github.com/acme/head",
+        2,
+        0,
+        0,
+        "",
+        &[
+            (
+                "dep",
+                "github.com/acme/exactdep",
+                0,
+                TestBinding::Exact(exact_root),
+            ),
+            (
+                "leaf",
+                "github.com/acme/leaf",
+                1,
+                TestBinding::Floor {
+                    tested: leaf_root,
+                    minor: 2,
+                    patch: 3,
+                },
+            ),
+        ],
+        &[(
+            "head.hirsel",
+            &["head"],
+            b"/// Combine leaf and dep.\npub fn compute(x: u64) -> u64 {\n    leaf.add(x, dep.tag())\n}\n\npub fn with_clock(_c: Clock) -> u64 {\n    1\n}\n",
+        )],
+    );
+    fn req<'a>(
+        root: ContentHash,
+        content: &'a [u8],
+        closure: &'a [LibraryEntry<'a>],
+        history: &'a [HistoryRow],
+    ) -> CheckLibraryRequest<'a> {
+        CheckLibraryRequest {
+            root,
+            content,
+            closure,
+            history,
+        }
+    }
+    fn entry<'a>(root: ContentHash, content: &'a [u8]) -> LibraryEntry<'a> {
+        LibraryEntry { root, content }
+    }
+    fn hist(identity: &str, version: &str, root: ContentHash) -> HistoryRow {
+        HistoryRow {
+            origin: "https://pkg.hirsel.ai".into(),
+            identity: identity.into(),
+            version: version.into(),
+            root,
+        }
+    }
+    let valid_closure = [
+        entry(exact_root, &exact_bytes),
+        entry(leaf_root, &leaf_bytes),
+    ];
+    let valid_history = [
+        hist("github.com/acme/leaf@1", "1.2.3", leaf_root),
+        hist("github.com/acme/exactdep@0", "0.1.0-alpha.1", exact_root),
+    ];
+
+    // Valid check returns exact CheckedLibrary.
+    let checked = real_service
+        .check_library(&req(head_root, &head_bytes, &valid_closure, &valid_history))
+        .expect("valid head + closure + verified history must check");
+    assert_eq!(checked.root, head_root.to_string());
+    assert_eq!(
+        checked.header,
+        CheckedHeader {
+            identity: "github.com/acme/head@2".into(),
+            version: "2.0.0".into(),
+            charge: "charge-v1".into(),
+        }
+    );
+    // Bindings must be returned in canonical C order (sorted by alias).
+    assert_eq!(
+        checked.bindings,
+        vec![
+            CheckedBinding::Exact {
+                alias: "dep".into(),
+                id: "github.com/acme/exactdep@0".into(),
+                tested_root: exact_root.to_string(),
+            },
+            CheckedBinding::Floor {
+                alias: "leaf".into(),
+                id: "github.com/acme/leaf@1".into(),
+                tested_root: leaf_root.to_string(),
+                bound_version: "1.2.3".into(),
+            },
+        ]
+    );
+    // InterfaceV1 must match unfiltered inspect output.
+    assert_eq!(checked.interface.version, 1);
+    assert_eq!(
+        checked.interface.package,
+        hirsel_core_ids::PackageId {
+            name: "github.com/acme/head".into(),
+            version: "2".into(),
+        }
+    );
+    assert_eq!(checked.interface.modules.len(), 1);
+    let head_mod = &checked.interface.modules[0];
+    assert_eq!(head_mod.path, vec!["head"]);
+    assert!(!head_mod.extends_core);
+    assert_eq!(head_mod.items.len(), 2);
+    assert_eq!(head_mod.items[0].name, "compute");
+    assert_eq!(head_mod.items[0].kind, "function");
+    assert_eq!(
+        head_mod.items[0].definition,
+        "github.com/acme/head@2/head/compute"
+    );
+    assert_eq!(
+        head_mod.items[0].doc.as_deref(),
+        Some("Combine leaf and dep.")
+    );
+    assert_eq!(head_mod.items[1].name, "with_clock");
+    assert_eq!(head_mod.items[1].doc, None);
+    // Authority Card must reflect §11 CoreIR analysis.
+    assert_eq!(
+        checked.authority.carried.get("head/with_clock"),
+        Some(&CarriedAuthority {
+            takes: vec!["Clock".into()],
+            returns: vec![],
+        })
+    );
+    assert!(checked.authority.reached.contains_key("head/compute"));
+    assert!(checked.authority.reached.contains_key("head/with_clock"));
+    assert_eq!(
+        checked.authority.verdict,
+        AuthorityVerdict::Status("conditional".into())
+    );
+    // RFC 8785 canonical JSON round-trips with no trailing newline.
+    let canonical = checked.to_canonical_json().unwrap();
+    assert!(!canonical.ends_with('\n'));
+    assert_eq!(
+        serde_json::from_str::<CheckedLibrary>(&canonical).unwrap(),
+        checked
+    );
+    assert_scratch_empty(&scratch);
+
+    // 2a. Wrong head root & wrong closure root refuse.
+    let mut bad_head_root = head_root;
+    bad_head_root.0[0] ^= 1;
+    assert!(matches!(
+        real_service.check_library(&req(
+            bad_head_root,
+            &head_bytes,
+            &valid_closure,
+            &valid_history
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+    let mut bad_leaf_root = leaf_root;
+    bad_leaf_root.0[0] ^= 1;
+    let bad_closure = [valid_closure[0], entry(bad_leaf_root, &leaf_bytes)];
+    assert!(matches!(
+        real_service.check_library(&req(head_root, &head_bytes, &bad_closure, &valid_history)),
+        Err(Refusal::Rejected(_))
+    ));
+
+    // 2b. Missing logged floor history refuses.
+    assert!(matches!(
+        real_service.check_library(&req(
+            head_root,
+            &head_bytes,
+            &valid_closure,
+            &valid_history[1..]
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+
+    // 2c. False child version: header claims 1.2.4 while floor binds 1.2.3, and
+    //     header claims 1.2.3 while verified history says 1.2.2.
+    let (false_leaf_root, false_leaf_bytes) = encode_c_v3(
+        "github.com/acme/leaf",
+        1,
+        2,
+        4,
+        "",
+        &[],
+        &[(
+            "leaf.hirsel",
+            &["leaf"],
+            b"pub fn add(a: u64, b: u64) -> u64 { a + b }\n",
+        )],
+    );
+    let (head_fv_root, head_fv_bytes) = encode_c_v3(
+        "github.com/acme/head",
+        2,
+        0,
+        0,
+        "",
+        &[(
+            "leaf",
+            "github.com/acme/leaf",
+            1,
+            TestBinding::Floor {
+                tested: false_leaf_root,
+                minor: 2,
+                patch: 3,
+            },
+        )],
+        &[(
+            "head.hirsel",
+            &["head"],
+            b"pub fn f(x: u64) -> u64 { leaf.add(x, 1) }\n",
+        )],
+    );
+    assert!(matches!(
+        real_service.check_library(&req(
+            head_fv_root,
+            &head_fv_bytes,
+            &[entry(false_leaf_root, &false_leaf_bytes)],
+            &[hist("github.com/acme/leaf@1", "1.2.3", false_leaf_root)],
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+    assert!(matches!(
+        real_service.check_library(&req(
+            head_root,
+            &head_bytes,
+            &valid_closure,
+            &[hist("github.com/acme/leaf@1", "1.2.2", leaf_root)],
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+
+    // 2d. Mismatched exact-child history, missing closure entry, and extra closure entry refuse.
+    let bad_exact_hist = [
+        valid_history[0].clone(),
+        hist("github.com/acme/exactdep@0", "0.1.1", exact_root),
+    ];
+    assert!(matches!(
+        real_service.check_library(&req(
+            head_root,
+            &head_bytes,
+            &valid_closure,
+            &bad_exact_hist
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+    assert!(matches!(
+        real_service.check_library(&req(
+            head_root,
+            &head_bytes,
+            &valid_closure[1..],
+            &valid_history[..1]
+        )),
+        Err(Refusal::Rejected(_))
+    ));
+    let (extra_root, extra_bytes) = encode_c_v3(
+        "github.com/acme/extra",
+        1,
+        0,
+        0,
+        "",
+        &[],
+        &[("extra.hirsel", &["extra"], b"pub fn z() -> u64 { 0 }\n")],
+    );
+    let extra_closure = [
+        valid_closure[0],
+        valid_closure[1],
+        entry(extra_root, &extra_bytes),
+    ];
+    assert!(matches!(
+        real_service.check_library(&req(head_root, &head_bytes, &extra_closure, &valid_history)),
+        Err(Refusal::Rejected(_))
+    ));
+
+    // 2e. Dependency cycle (A@1 -> B@1 -> A@1) refuses cleanly.
+    let (a_leaf_root, a_leaf_bytes) = encode_c_v3(
+        "github.com/acme/cyca",
+        1,
+        0,
+        0,
+        "",
+        &[],
+        &[("cyca.hirsel", &["cyca"], b"pub fn base() -> u64 { 1 }\n")],
+    );
+    let (b_root, b_bytes) = encode_c_v3(
+        "github.com/acme/cycb",
+        1,
+        0,
+        0,
+        "",
+        &[(
+            "a",
+            "github.com/acme/cyca",
+            1,
+            TestBinding::Exact(a_leaf_root),
+        )],
+        &[(
+            "cycb.hirsel",
+            &["cycb"],
+            b"pub fn mid() -> u64 { a.base() }\n",
+        )],
+    );
+    let (a_head_root, a_head_bytes) = encode_c_v3(
+        "github.com/acme/cyca",
+        1,
+        0,
+        1,
+        "",
+        &[("b", "github.com/acme/cycb", 1, TestBinding::Exact(b_root))],
+        &[(
+            "cyca.hirsel",
+            &["cyca"],
+            b"pub fn top() -> u64 { b.mid() }\n",
+        )],
+    );
+    let cyc_closure = [entry(b_root, &b_bytes), entry(a_leaf_root, &a_leaf_bytes)];
+    let cycle_err = real_service
+        .check_library(&req(a_head_root, &a_head_bytes, &cyc_closure, &[]))
+        .unwrap_err();
+    assert!(
+        matches!(&cycle_err, Refusal::Rejected(msg) if msg.contains("cycle")),
+        "expected cycle rejection, got {cycle_err:?}"
+    );
+    assert_scratch_empty(&scratch);
+
+    // -----------------------------------------------------------------------
+    // 4. Real confined worker fixture: network/socket denial, credential/home/
+    //    env/FD isolation, CPU/wall/memory/output caps, queue busy, and zero
+    //    bytes installed on refusal.
+    // -----------------------------------------------------------------------
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let secret_file = fixture_dir.path().join("service-secret.txt");
+    std::fs::write(&secret_file, b"TOP_SECRET_CREDENTIAL_DO_NOT_LEAK").unwrap();
+
+    let run_fixture = |script: &str, caps: CheckLibraryCaps| -> Refusal {
+        let fdir = tempfile::tempdir().unwrap();
+        let bin = fdir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let worker = bin.join("worker");
+        std::fs::write(&worker, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fscratch = fdir.path().join("scratch");
+        let svc = Service::new(worker, fscratch.clone(), Caps::HOST, 1, 0);
+        let result = svc
+            .check_library_with_caps(&req(leaf_root, &leaf_bytes, &[], &[]), caps)
+            .unwrap_err();
+        assert_scratch_empty(&fscratch);
+        result
+    };
+
+    let base_caps = CheckLibraryCaps {
+        cpu_seconds: 5,
+        memory_bytes: 128 << 20,
+        wall_ms: 10_000,
+        output_bytes: 4096,
+        ..CheckLibraryCaps::REGISTRY
+    };
+
+    // 4a. Host secret/home/credential file read must be denied by OS confinement.
+    let read_secret_script = format!(
+        "if /bin/cat {:?} >/dev/null 2>&1; then echo 'LEAKED_SECRET' >&2; exit 1; fi\n\
+         echo 'confinement-denied-secret' >&2; exit 1",
+        secret_file.display()
+    );
+    assert_eq!(
+        run_fixture(&read_secret_script, base_caps),
+        Refusal::Rejected("confinement-denied-secret\n".into())
+    );
+
+    // 4b. Inherited host env vars must not leak; HOME/XDG must stay in private scratch.
+    let env_script = "\
+        for line in $(/usr/bin/env); do\n\
+            key=${line%%=*}\n\
+            case \"$key\" in\n\
+                HIRSEL_MEMORY_LIMIT|HOME|TMPDIR|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|PWD|SHLVL|_) ;;\n\
+                *) echo \"ENV_LEAK:$key\" >&2; exit 1 ;;\n\
+            esac\n\
+        done\n\
+        case \"$HOME\" in\n\
+            */check-*) echo 'env-clean' >&2; exit 1 ;;\n\
+            *) echo \"BAD_HOME=$HOME\" >&2; exit 1 ;;\n\
+        esac";
+    assert_eq!(
+        run_fixture(env_script, base_caps),
+        Refusal::Rejected("env-clean\n".into())
+    );
+
+    // 4c. Extra inherited non-CLOEXEC file descriptor must be closed before worker runs.
+    let raw_secret_fd = {
+        use std::os::fd::IntoRawFd;
+        let file = std::fs::File::open(&secret_file).unwrap();
+        let raw = file.into_raw_fd();
+        // SAFETY: raw is a live descriptor opened above.
+        unsafe { libc::fcntl(raw, libc::F_SETFD, 0) };
+        raw
+    };
+    let fd_script = format!(
+        "if {{ /bin/cat <&{raw_secret_fd}; }} >/dev/null 2>&1; then echo 'FD_LEAK' >&2; exit 1; fi\n\
+         echo 'fd-closed' >&2; exit 1"
+    );
+    let fd_res = run_fixture(&fd_script, base_caps);
+    // SAFETY: close the parent test descriptor now.
+    unsafe { libc::close(raw_secret_fd) };
+    assert_eq!(fd_res, Refusal::Rejected("fd-closed\n".into()));
+
+    // 4d. Network & Unix socket creation must be denied by OS confinement.
+    if Path::new("/usr/bin/python3").is_file() {
+        let socket_script = "\
+/usr/bin/python3 -S -c '
+import errno, socket, sys
+for family in (socket.AF_INET, socket.AF_UNIX):
+    try:
+        s = socket.socket(family, socket.SOCK_STREAM)
+        s.close()
+        sys.stderr.write(f\"SOCKET_ALLOWED_{family}\\n\")
+        sys.exit(1)
+    except OSError as e:
+        if e.errno not in (errno.EPERM, errno.EACCES):
+            sys.stderr.write(f\"UNEXPECTED_ERRNO_{e.errno}\\n\")
+            sys.exit(1)
+sys.stderr.write(\"sockets-denied\\n\")
+sys.exit(1)
+'";
+        assert_eq!(
+            run_fixture(socket_script, base_caps),
+            Refusal::Rejected("sockets-denied\n".into())
+        );
+    }
+
+    // 4e. Enforced CPU, wall, memory, output, diagnostics, unsupported, and busy caps.
+    assert_eq!(
+        run_fixture(
+            "while :; do :; done",
+            CheckLibraryCaps {
+                cpu_seconds: 1,
+                ..base_caps
+            }
+        ),
+        Refusal::Limit(Limit::Cpu)
+    );
+    let wall_start = Instant::now();
+    assert_eq!(
+        run_fixture(
+            "/bin/sleep 60",
+            CheckLibraryCaps {
+                wall_ms: 250,
+                ..base_caps
+            }
+        ),
+        Refusal::Limit(Limit::Wall)
+    );
+    assert!(wall_start.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        run_fixture("exit 71", base_caps),
+        Refusal::Limit(Limit::Memory)
+    );
+    assert_eq!(
+        run_fixture("/usr/bin/printf '%4097s' ''", base_caps),
+        Refusal::Limit(Limit::Output)
+    );
+    let noisy = run_fixture("/usr/bin/printf '%131072s' '' >&2; exit 1", base_caps);
+    match noisy {
+        Refusal::Rejected(msg) => {
+            assert_eq!(msg.len(), CheckLibraryCaps::REGISTRY.diagnostics_bytes)
+        }
+        other => panic!("expected truncated Refusal::Rejected, got {other:?}"),
+    }
+    assert_eq!(
+        run_fixture(
+            "echo 'check_library: unsupported: missing toolchain pkg' >&2; exit 2",
+            base_caps
+        ),
+        Refusal::Unsupported("missing toolchain pkg".into())
+    );
+
+    // Queue busy law on check_library.
+    let busy_dir = tempfile::tempdir().unwrap();
+    let busy_bin = busy_dir.path().join("bin");
+    std::fs::create_dir_all(&busy_bin).unwrap();
+    let busy_worker = busy_bin.join("worker");
+    let busy_scratch = busy_dir.path().join("scratch");
+    std::fs::write(&busy_worker, "#!/bin/sh\n/bin/sleep 1\nexit 71\n").unwrap();
+    std::fs::set_permissions(&busy_worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let busy_service = Service::new(busy_worker, busy_scratch.clone(), Caps::HOST, 1, 0);
+    let leaf_req = req(leaf_root, &leaf_bytes, &[], &[]);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| busy_service.check_library_with_caps(&leaf_req, base_caps));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            busy_service.check_library_with_caps(&leaf_req, base_caps),
+            Err(Refusal::Busy)
+        );
+        assert_eq!(first.join().unwrap(), Err(Refusal::Limit(Limit::Memory)));
+    });
+    assert_scratch_empty(&busy_scratch);
+    let checked_64 =
+        exact_64_result.expect("a well-formed 64 MiB raw C must reach decoding and check");
+    assert_eq!(checked_64.root, exact_64_root.to_string());
+    assert_eq!(checked_64.header.identity, "github.com/acme/exact64@1");
+    assert_eq!(checked_64.header.version, "1.0.0");
+    assert_eq!(checked_64.header.charge, "charge-v1");
+}

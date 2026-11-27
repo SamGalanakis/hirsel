@@ -90,7 +90,30 @@ fn bindings(resolution: &Resolution) -> BTreeMap<Id, Vec<BindingRow>> {
     rows
 }
 
-fn card_json(card: &Card) -> serde_json::Value {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct CarriedProjection {
+    pub(crate) takes: Vec<&'static str>,
+    pub(crate) returns: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ReachedProjection<'a> {
+    pub(crate) kinds: Vec<&'static str>,
+    pub(crate) provided: Vec<&'static str>,
+    pub(crate) contained: &'a std::collections::BTreeSet<String>,
+    pub(crate) unresolved: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct CardProjection<'a> {
+    pub(crate) carried: BTreeMap<&'a str, CarriedProjection>,
+    pub(crate) reached: BTreeMap<&'a str, ReachedProjection<'a>>,
+    pub(crate) verdict: crate::reachability::authority::Verdict,
+}
+
+/// Reusable §11 CoreIR authority card projection shared by `hirsel audit`,
+/// registry `check_library`, and Slice I's audit output.
+pub(crate) fn project_card(card: &Card) -> CardProjection<'_> {
     let carried = card
         .exports
         .iter()
@@ -98,10 +121,11 @@ fn card_json(card: &Card) -> serde_json::Value {
             let carried = info.carried;
             (carried.takes | carried.returns != 0).then(|| {
                 (
-                    export,
-                    serde_json::json!({
-                        "takes": names(carried.takes), "returns": names(carried.returns),
-                    }),
+                    export.as_str(),
+                    CarriedProjection {
+                        takes: names(carried.takes),
+                        returns: names(carried.returns),
+                    },
                 )
             })
         })
@@ -111,19 +135,25 @@ fn card_json(card: &Card) -> serde_json::Value {
         .iter()
         .map(|(export, info)| {
             (
-                export,
-                serde_json::json!({
-                    "kinds": names(info.reached.kinds),
-                    "provided": names(info.reached.provided),
-                    "contained": info.reached.contained,
-                    "unresolved": info.reached.unresolved,
-                }),
+                export.as_str(),
+                ReachedProjection {
+                    kinds: names(info.reached.kinds),
+                    provided: names(info.reached.provided),
+                    contained: &info.reached.contained,
+                    unresolved: info.reached.unresolved.as_deref(),
+                },
             )
         })
         .collect::<BTreeMap<_, _>>();
-    serde_json::json!({
-        "carried": carried, "reached": reached, "verdict": card.verdict(),
-    })
+    CardProjection {
+        carried,
+        reached,
+        verdict: card.verdict(),
+    }
+}
+
+pub(crate) fn card_json(card: &Card) -> serde_json::Value {
+    serde_json::to_value(project_card(card)).expect("authority card projection serializes")
 }
 
 fn print_card(card: &Card) {

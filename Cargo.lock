@@ -915,6 +915,9 @@ dependencies = [
  "hirsel-guard",
  "hirsel-mod",
  "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "tempfile",
 ]
 

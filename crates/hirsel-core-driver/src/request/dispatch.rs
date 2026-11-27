@@ -1,6 +1,12 @@
 use super::*;
 
+#[path = "../check_library.rs"]
+mod check_library;
+
 pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
+    if args.len() == 1 && args[0] == check_library::WORKER_ARG {
+        return conclude(Outcome::Exit(check_library::run_worker()));
+    }
     let invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
             print!("{help}");
@@ -140,6 +146,9 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
 /// request's store (`crate::resident`). Process setup (allocator guard,
 /// signal dispositions, inherited descriptors) is the caller's.
 pub fn main(args: Vec<String>) -> ! {
+    if args.len() == 1 && args[0] == check_library::WORKER_ARG {
+        std::process::exit(check_library::run_worker());
+    }
     if let Some(code) = crate::resident::submit(&args) {
         std::process::exit(code);
     }

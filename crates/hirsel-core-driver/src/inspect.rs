@@ -189,27 +189,36 @@ impl Inspection {
 }
 
 #[derive(Serialize)]
-struct Interface<'a> {
-    version: u32,
-    package: PackageId,
-    modules: Vec<Module<'a>>,
+pub(crate) struct Interface<'a> {
+    pub(crate) version: u32,
+    pub(crate) package: PackageId,
+    pub(crate) modules: Vec<Module<'a>>,
 }
 
 #[derive(Serialize)]
-struct Module<'a> {
-    path: Vec<String>,
-    extends_core: bool,
-    items: Vec<Declaration<'a>>,
+pub(crate) struct Module<'a> {
+    pub(crate) path: Vec<String>,
+    pub(crate) extends_core: bool,
+    pub(crate) items: Vec<Declaration<'a>>,
 }
 
 #[derive(Serialize)]
-struct Declaration<'a> {
-    definition: String,
-    name: String,
-    kind: &'static str,
-    signature: &'a str,
+pub(crate) struct Declaration<'a> {
+    pub(crate) definition: String,
+    pub(crate) name: String,
+    pub(crate) kind: &'static str,
+    pub(crate) signature: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    doc: Option<String>,
+    pub(crate) doc: Option<String>,
+}
+
+/// The unfiltered `InterfaceV1` projection for `package` (identical to
+/// `hirsel inspect --interface --json` without `--module` or `--filter`).
+pub(crate) fn unfiltered_interface<'a>(
+    product: &'a CheckProduct,
+    package: PackageId,
+) -> io::Result<Interface<'a>> {
+    interface(product, package, None, None)
 }
 
 impl Interface<'_> {

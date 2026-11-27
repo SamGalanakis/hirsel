@@ -1,6 +1,7 @@
 """Exercise the nightly wrapper and the missed-run check against a fixture board."""
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import sqlite3
@@ -24,6 +25,99 @@ class BoardFreshnessTest(unittest.TestCase):
         self.assertIn("%h/.cargo/bin", path)
         self.assertIn("%h/.local/share/mise/shims", path)
         self.assertLess(path.index("%h/.local/bin"), path.index("%h/.cargo/bin"))
+
+    def test_board_environment_resolves_wrapped_cargo_and_mise_npm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            local_bin = home / ".local/bin"
+            cargo_bin = home / ".cargo/bin"
+            node_bin = home / ".local/share/mise/installs/node/25.2.1/bin"
+            for directory_path in (local_bin, cargo_bin, node_bin):
+                directory_path.mkdir(parents=True)
+
+            def executable(path, text):
+                path.write_text(text)
+                path.chmod(0o755)
+
+            executable(local_bin / "cargo", """#!/bin/bash
+if [[ -z ${KILN_REAL_CARGO:-} ]]; then
+  printf 'cargo wrapper: no real cargo found after fixture-kiln on PATH\\n' >&2
+  exit 127
+fi
+exec "$KILN_REAL_CARGO" "$@"
+""")
+            executable(cargo_bin / "cargo", """#!/bin/bash
+printf 'fixture-cargo:%s\\n' "$*"
+""")
+            executable(local_bin / "mise", f"""#!/bin/bash
+if [[ $1 == which ]]; then
+  case $2 in
+    node) printf '%s\\n' {shlex.quote(str(node_bin / 'node'))}; exit 0 ;;
+    npm) printf '%s\\n' {shlex.quote(str(node_bin / 'npm'))}; exit 0 ;;
+  esac
+fi
+exit 1
+""")
+            executable(node_bin / "node", """#!/bin/bash
+printf 'fixture-node:%s\\n' "$*"
+""")
+            executable(node_bin / "npm", """#!/bin/bash
+printf 'fixture-npm:%s\\n' "$*"
+""")
+
+            environment = {"HOME": str(home), "PATH": f"{local_bin}:/usr/local/bin:/usr/bin:/bin"}
+            helper = TOOLS / "board-environment.sh"
+            for command, expected in (
+                (("cargo", "+1.99.0", "--version"), "fixture-cargo:+1.99.0 --version"),
+                (("npm", "--version"), "fixture-npm:--version"),
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run([helper, *command], env=environment,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), expected)
+
+    def test_sfu_prepare_web_resolves_npm_through_mise_under_systemd_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            local_bin = home / ".local/bin"
+            node_bin = home / ".local/share/mise/installs/node/25.2.1/bin"
+            local_bin.mkdir(parents=True)
+            node_bin.mkdir(parents=True)
+            npm_log = home / "npm.log"
+
+            def executable(path, text):
+                path.write_text(text)
+                path.chmod(0o755)
+
+            executable(local_bin / "mise", f"""#!/bin/bash
+if [[ $1 == which && $2 == npm ]]; then
+  printf '%s\\n' {shlex.quote(str(node_bin / 'npm'))}
+  exit 0
+fi
+exit 1
+""")
+            executable(node_bin / "npm", f"""#!/bin/bash
+printf '%s\\n' "$*" >>{shlex.quote(str(npm_log))}
+""")
+            compiler = home / "hirsel"
+            executable(compiler, """#!/bin/bash
+case $1 in
+  build) exit 0 ;;
+  sdk) [[ $2 == ts ]] && exit 0 ;;
+esac
+printf 'unexpected compiler command: %s\\n' "$*" >&2
+exit 2
+""")
+
+            environment = {"HOME": str(home), "PATH": f"{local_bin}:/usr/local/bin:/usr/bin:/bin"}
+            run_py = TOOLS.parent / "core/programs/webrtc_sfu/service/run.py"
+            result = subprocess.run(
+                [sys.executable, run_py, "--hirsel", compiler, "--work", home / "work", "--build-only"],
+                env=environment, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("exec --yes --package=esbuild@0.25.12", npm_log.read_text())
 
     def test_pruning_keeps_referenced_and_in_progress_runs(self):
         with tempfile.TemporaryDirectory() as directory:

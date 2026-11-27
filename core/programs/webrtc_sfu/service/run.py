@@ -7,6 +7,7 @@ TURN relay in one Hirsel process on 127.0.0.1, serving the call page at http://<
 """
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -79,14 +80,42 @@ def build(compiler, work, web, prefix=()):
     return executable
 
 
+def same_executable(left, right):
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def mise_executable(name, mise):
+    result = subprocess.run([mise, "which", name], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    candidate = Path(result.stdout.strip())
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def host_executable(name):
+    found = shutil.which(name)
+    mise = shutil.which("mise")
+    if mise and (found is None or same_executable(found, mise)):
+        resolved = mise_executable(name, mise)
+        if resolved:
+            return resolved
+    return found or name
+
+
 def prepare_web(compiler, executable, web):
     """The SDK bindings `hirsel sdk ts` writes for this place, the page, and its bundle."""
     generated = web / "generated"
     generated.mkdir(parents=True, exist_ok=True)
     subprocess.run([compiler, "sdk", "ts", executable, "--output", generated, "--n-place", N_PLACE], check=True, cwd=ROOT)
     shutil.copyfile(PROGRAM / "index.html", web / "index.html")
+    npm = host_executable("npm")
     subprocess.run([
-        "npm", "exec", "--yes", "--package=esbuild@0.25.12", "--", "esbuild", PROGRAM / "page.ts", "--bundle",
+        npm, "exec", "--yes", "--package=esbuild@0.25.12", "--", "esbuild", PROGRAM / "page.ts", "--bundle",
         "--format=esm", f"--alias:generated={generated}", f"--outfile={web / 'client.js'}",
     ], check=True, cwd=ROOT)
 

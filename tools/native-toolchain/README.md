@@ -116,8 +116,10 @@ or BOLT) whose minos is the link kit's `DARWIN_FLOOR`; it checks each Mach-O's
 loaded libraries (libSystem, libc++ and libz only), search paths, minos and ad
 hoc signature, and that no build path is left in ld.lld or the dylib. On a Mac,
 `tools/buck2/bootstrap_llvm.py` materializes this archive as the tree that
-`.cargo/config.toml` names as `LLVM_SYS_231_PREFIX`; clang and the C++ headers
-come from the command line tools (`xcrun`).
+`.cargo/config.toml` names as `LLVM_SYS_231_PREFIX`. The same bootstrap
+adds clang, its resource directory and `ld64.lld` from the upstream LLVM
+macOS arm64 release pinned as `darwin_clang`. C-driver links use the macOS
+SDK for system headers and libraries.
 
 ## Publishing LLVM build inputs
 

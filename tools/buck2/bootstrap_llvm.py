@@ -6,10 +6,9 @@ headers, and their stock shared library. This script adds the independently
 pinned ld.lld and engine libLLVM and flattens symlinks (Buck2 hashes a link,
 not its target).
 
-On a Mac, the tree is the `darwin_llvm` archive alone: the compiler's
-libLLVM.23.1.dylib, the ld.lld that loads it through @loader_path/../lib,
-llvm-config, llvm-ar, llvm-objdump and the headers. Clang and the C++ headers come from the Xcode
-command line tools.
+On a Mac, the `darwin_llvm` archive supplies libLLVM, the installed linker's
+ld.lld, the LLVM tools and headers. The upstream `darwin_clang` archive adds
+clang, its resource directory and ld64.lld for C-driver links.
 
 The static LLVM component archives are left out: llvm-sys links libLLVM
 dynamically (`force-dynamic`). Remote workers receive the tree as an action
@@ -71,12 +70,16 @@ LINUX_REQUIRED = (
     "bin/hirsel-llvm-ar",
 )
 DARWIN_REQUIRED = (
+    "bin/clang",
+    "bin/ld64.lld",
     "bin/ld.lld",
     "bin/llvm-config",
     "bin/llvm-ar",
     "bin/llvm-objdump",
     MACOS["llvm_library"],
     "lib/libLLVM-23.dylib",
+    "lib/clang/23/include/stddef.h",
+    "lib/clang/23/lib/darwin/libclang_rt.osx.a",
     "include/llvm-c/Core.h",
 )
 REQUIRED = DARWIN_REQUIRED if DARWIN else LINUX_REQUIRED
@@ -141,19 +144,27 @@ def fetch(pin: dict, directory: pathlib.Path) -> pathlib.Path:
         except OSError as error:
             print(f"{url}: {error}", file=sys.stderr)
             continue
-        if path.stat().st_size == pin["size"] and hashlib.sha256(path.read_bytes()).hexdigest() == pin["sha256"]:
+        with path.open("rb") as downloaded:
+            verified = (path.stat().st_size == pin["size"]
+                        and hashlib.file_digest(downloaded, "sha256").hexdigest() == pin["sha256"])
+        if verified:
             return path
         print(f"{url}: size or SHA-256 differs from the lock", file=sys.stderr)
     raise SystemExit(f"could not fetch a verified {pin['name']}")
 
 
-def fetch_built(record: str, directory: pathlib.Path) -> pathlib.Path:
-    """Fetch one of the binaries built from the locked source archive."""
+def lock_records() -> dict[str, list[str]]:
     records = {}
     for line in LOCK.read_text(encoding="utf-8").splitlines():
         fields = line.split()
         if fields and not fields[0].startswith("#"):
             records[fields[0]] = fields[1:]
+    return records
+
+
+def fetch_built(record: str, directory: pathlib.Path) -> pathlib.Path:
+    """Fetch one of the binaries built from the locked source archive."""
+    records = lock_records()
     sha256, size, asset = records[record]
     pool = records["asset_pool"][0]
     return fetch({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
@@ -184,7 +195,23 @@ def build_darwin(stage: pathlib.Path) -> None:
         with tarfile.open(fetch_built("darwin_llvm", scratch)) as archive:
             archive.extractall(tree, filter="data")
         place_tree(tree, stage)
-    for name in ("ld.lld", "llvm-config", "llvm-ar", "llvm-objdump"):
+        records = lock_records()
+        sha256, size, url = records["darwin_clang"]
+        (version,) = records["llvm_version"]
+        major = version.split(".", 1)[0]
+        name = url.rsplit("/", 1)[-1]
+        prefix = name.removesuffix(".tar.xz")
+        release = fetch({"name": name, "urls": [url], "size": int(size), "sha256": sha256}, scratch)
+        tools = (f"{prefix}/bin/clang-{major}", f"{prefix}/bin/lld")
+        resources = f"{prefix}/lib/clang/{major}"
+        with tarfile.open(release, mode="r|xz") as archive:
+            members = (member for member in archive
+                       if member.name in tools or member.name.startswith(resources + "/"))
+            archive.extractall(scratch, members=members, filter="data")
+        place(scratch / tools[0], stage / "bin/clang")
+        place(scratch / tools[1], stage / "bin/ld64.lld")
+        place_tree(scratch / resources, stage / "lib/clang" / major)
+    for name in ("clang", "ld64.lld", "ld.lld", "llvm-config", "llvm-ar", "llvm-objdump"):
         tool_version(stage / "bin" / name)
 
 

@@ -1,6 +1,8 @@
 // Relay authentication, connection state and protocol work, beside socket reservations.
 const RELAY_WORK_BYTES: u64 = 67108864
 
+const STREAM_WRITE_NS: u64 = 20000000
+
 /// The sockets, policy and channels for one TURN relay task.
 pub type Start: send {
     net: Net,
@@ -90,11 +92,11 @@ fn now_of(clock: Clock) -> turn.Now {
     turn.Now(mono_ns: host.mono_ns(clock), unix_s: host.wall_ms(clock) / 1000)
 }
 
-fn send_all(mut writer: WriteHalf, data: Bytes) -> bool waits {
+fn send_all(mut writer: WriteHalf, data: Bytes, until: Until) -> bool waits {
     let end = list.len(data)
     let mut pos = 0u64
     while pos < end {
-        let Ok(count) = host.send_pair(mut writer, list.slice(data, pos, end), b"", Never) else {
+        let Ok(count) = host.send_pair(mut writer, list.slice(data, pos, end), b"", until) else {
             return false
         }
         if count == 0 {
@@ -200,7 +202,8 @@ fn to_client(mut s: Runtime, o: turn.Origin, data: Bytes) -> Result[(), turn.Tur
     match o.ingress {
         Udp(_) => send_datagram(mut s.server, o.client, data)?,
         Stream(conn) => if let Some(i) = stream_index(s, conn) {
-            if !send_all(mut s.streams[i].writer, data) {
+            let until = At(s.clock, host.mono_ns(s.clock) + STREAM_WRITE_NS)
+            if !send_all(mut s.streams[i].writer, data, until) {
                 disconnect(mut s, conn)
             }
         },

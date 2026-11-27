@@ -1247,8 +1247,9 @@ negotiated `vad=off`, and the score never reads it in any case.
 - beside the score, the home unit keeps a **murmur** by the same steps over every audible
   level, `l ≤ 102` (the faintest level whose `amp` is not 0), in place of `l ≤ 35`: its
   own counted duration and loudest level, the same 160 ms floor and the same smoothing.
-  It reads no `V` bit either, and an 800 ms expiry sets it to 0 with the score. A muted
-  leg (level 127) or one without the extension has murmur 0. The murmur ranks only the
+  It reads no `V` bit either, and an 800 ms expiry sets it to 0 with the score. A measured
+  level of 127 contributes no audible duration. A packet with audio payload and no level
+  contributes at level 80, below the speaking threshold. The murmur ranks only the
   audio gate's free slots (below); speakers, `Event.Speakers` and `V` read the score
   alone.
 
@@ -2717,8 +2718,8 @@ W12 and W13 in `speaker_laws.hirsel`):
   estimate.
 - **Scores.** Durations are counted in RTP ticks at the publication's clock rate, so 400 ms
   is 19,200 ticks at 48 kHz. The first packet, and the first after an 800 ms expiry, adds no
-  duration. A packet without the level extension counts as level 127. An expiry resets the
-  whole window, not only the score.
+  duration. A packet without the level extension counts as level 80 when it carries audio
+  payload and as level 127 otherwise. An expiry resets the whole window, not only the score.
 - **Speakers.** Ticks fall on multiples of 400 ms of the router clock and are armed only
   after a score changed. `count` is the number of entries in `top`. Each entry is one
   publication, named by its owner's participant ID. Equal score and participant fall back to

@@ -707,8 +707,7 @@ fn measure(mut r: Router, pi: u64, e: u64, len: u64, now: u64, mut out: peer.Out
 }
 
 // ---- Scores ----
-// One packet of audio publication `pi` on its home unit (RTC-6, the speaker score).
-// A packet with no level reads as silence.
+// RTC-6: unmeasured audio uses -80 dBov, which contributes only to the murmur.
 fn observe(mut r: Router, pi: u64, m: peer.MediaIn, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     if r.publications[pi].codec != Opus || r.publications[pi].clock == 0 {
         return Ok(())
@@ -727,6 +726,7 @@ fn observe(mut r: Router, pi: u64, m: peer.MediaIn, now: u64, mut out: peer.Outb
     r.publications[pi].voice.observed += d
     let l = match m.audio_level {
         Some(x) => x,
+        None if m.payload_len > 0 => 80u8,
         None => 127u8,
     }
     if l <= ACTIVE_LEVEL {

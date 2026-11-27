@@ -119,3 +119,7 @@ limit = 268435456
 [tests.runs."webrtc_sfu@1/laws/idle_relay_waits_until_shutdown"]
 limit = 134217728
 grants = ["Tasks", "Stdout"]
+
+[tests.runs."webrtc_sfu@1/laws/stalled_turn_stream_releases_healthy_media"]
+limit = 134217728
+grants = ["Tasks", "Stdout"]

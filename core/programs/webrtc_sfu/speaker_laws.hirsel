@@ -451,3 +451,47 @@ fn quiet_speakers_fill_free_slots() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+/// bug: treat an audio packet without the optional RTP level as digital silence and hold its down-track indefinitely.
+/// oracle: once a 400 ms window closes, the only sender with audible media takes the one forwarding slot. Measured 127 is silent. Missing levels neither set a speaker score nor appear in outgoing RTP.
+@test
+fn audio_forward_without_level() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(180))
+    result.unwrap(router.open_room(mut r, room_id(), speaker_limits(1)))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut silent = admit(mut r, 181, speaker_offer(b" vad=on"), 1)
+    let mut active = admit(mut r, 182, speaker_offer(b" vad=on"), 2)
+    let mut listener = admit(mut r, 183, listener_offer(b"3", b" vad=on"), 3)
+    let muted = result.unwrap(router.publish(mut r, room_id(), silent.who, 0))
+    let unleveled = result.unwrap(router.publish(mut r, room_id(), active.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room_id(), listener.who, muted, 0, base, 0, mut out))
+    result.unwrap(router.subscribe(mut r, room_id(), listener.who, unleveled, 1, base, 0, mut out))
+    let (ssrc, _) = option.unwrap(router.track_ssrcs(r, room_id(), listener.who, unleveled))
+    for k in 0u64 .. 22u64 {
+        let now = round_at(k)
+        let _ = router.poll(mut r, now, mut out)
+        peer.clear_outbox(mut out)
+        let quiet = voiced(mut silent.cs, k, 127, false)
+        feed(mut r, now, silent.who, silent.at, quiet, mut out)
+        if list.len(received(mut listener, out)) != 0 {
+            fail("measured level 127 took the forwarding slot")
+        }
+        peer.clear_outbox(mut out)
+        let packet = media_carrying(mut active.cs, MEDIA_SSRC, int.truncate(k), int.truncate(960 * k), b"a", 111, b"\x78\x30\x2c\x33")
+        feed(mut r, now, active.who, active.at, packet, mut out)
+        let got = received(mut listener, out)
+        if k >= 20 {
+            let g = one(got, "audio without a level takes the available forwarding slot")
+            if g.h.ssrc != ssrc || ext_value(g, 3, AudioLevel) != None {
+                fail("audio without a level was rewritten as measured audio")
+            }
+        } else if list.len(got) != 0 {
+            fail("the gate opened before the first window closed")
+        }
+    }
+    if router.speaker_score(r, room_id(), muted) != Some(0) || router.speaker_score(r, room_id(), unleveled) != Some(0) {
+        fail("silent or unmeasured audio changed the speaker score")
+    }
+    Ok(())
+}

@@ -55,17 +55,23 @@ type Leg {
 }
 
 fn relay_leg(mut rl: turn.Relay, now: turn.Now, stream: bool, source: Addr, conn: u64, creds: signal.SessionCredentials) -> Leg {
-    let mut c = turn.client_defaults()
     let o = if stream {
-        c.transport = Stream
         result.unwrap(turn.connected(mut rl, conn, RELAY_LISTEN, source, now))
         turn.Origin(ingress: Stream(conn), client: source)
     } else {
         turn.Origin(ingress: Udp(RELAY_LISTEN), client: source)
     }
-    let password = result.unwrap(secret.seal(copy_of(creds.turn_password), "digest"))
-    let cl = result.unwrap(turn.client(c, RELAY_LISTEN, copy_of(creds.turn_username), take password))
+    let cl = relay_client(stream, creds)
     Leg(cl: take cl, o: o, stream: stream, up: list.new(), down: list.new(), fu: turn.framer(), fd: turn.framer())
+}
+
+fn relay_client(stream: bool, creds: signal.SessionCredentials) -> turn.Client {
+    let mut c = turn.client_defaults()
+    if stream {
+        c.transport = Stream
+    }
+    let password = result.unwrap(secret.seal(copy_of(creds.turn_password), "digest"))
+    result.unwrap(turn.client(c, RELAY_LISTEN, copy_of(creds.turn_username), take password))
 }
 
 /// The messages in bytes, whole: framed when the leg is a stream, else bytes itself.
@@ -437,6 +443,172 @@ fn idle_relay_waits_until_shutdown(tasks: Tasks, out: Stdout) -> Result[(), turn
     clock.advance_to(mut time, until - 1)
     if clock.idle(mut time) != Some(until) {
         fail("idle relay woke during the idle interval")
+    }
+    clock.advance_to(mut time, until)
+    let _ = take revoke
+    result.unwrap(task.join(take relay))
+}
+
+// Socket IDs in this virtual Net are 1..3 for UDP, 4 for the listener, and 5..6
+// for the clients. Pending reads and accepts use their socket ID as the key.
+// Pending writes use ID + 8 so a stream can have both directions in flight.
+type RelayNet {
+    port: Served[NetOp],
+    pending: Map[u64, Call[NetOp]],
+    binds: u64,
+    slow_read_closed: bool,
+    slow_write_closed: bool
+}
+
+fn relay_net_drain(mut net: RelayNet) waits {
+    while let Some(take op) = provide.next(mut net.port) {
+        let key = match provide.net_op(op) {
+            UdpBind(..) => {
+                let addr = match net.binds {
+                    0 => RELAY_LISTEN,
+                    1 => RELAY_POOL_1,
+                    2 => RELAY_POOL_2,
+                    _ => fail("the virtual relay bound an extra socket"),
+                }
+                net.binds += 1
+                result.unwrap(provide.reply(mut net.port, take op, provide.net_reply(UdpSockets(first: net.binds, count: 1, addr))))
+                continue
+            },
+            Listen(addr: addr, backlog: _) => {
+                result.unwrap(provide.reply(mut net.port, take op, provide.net_reply(Listener(4, addr))))
+                continue
+            },
+            Accept(listener: listener) => listener,
+            Recv(socket: socket, ..) => socket,
+            UdpRecv(socket: socket, ..) => socket,
+            Send(socket: socket, ..) => socket + 8,
+            Released(id: 5, part: Read) => {
+                net.slow_read_closed = true
+                continue
+            },
+            Released(id: 5, part: Write) => {
+                net.slow_write_closed = true
+                continue
+            },
+            _ => fail("unexpected operation on the virtual TURN network"),
+        }
+        map.insert(mut net.pending, key, take op)
+    }
+}
+
+fn relay_net_call(mut net: RelayNet, key: u64) -> Call[NetOp] {
+    let Some(take op) = map.remove(mut net.pending, key) else {
+        fail("the relay did not issue the expected socket operation")
+    }
+    take op
+}
+
+fn relay_net_send(mut net: RelayNet, socket: u64) -> Bytes waits {
+    let op = relay_net_call(mut net, socket + 8)
+    let Send(prefix: prefix, tail: tail, ..) = provide.net_op(op) else {
+        fail("expected a TURN TCP write")
+    }
+    let mut data: Bytes = list.with_capacity(prefix + tail)
+    provide.payload(op, 1, mut data)
+    provide.payload(op, 2, mut data)
+    result.unwrap(provide.reply(mut net.port, take op, provide.net_reply(Count(prefix + tail))))
+    relay_net_drain(mut net)
+    take data
+}
+
+fn relay_net_request(mut net: RelayNet, socket: u64, mut client: turn.Client, rnd: Random) waits {
+    let mut wire: Bytes = list.with_capacity(1500)
+    list.fill(mut wire, 1500, 0)
+    let Send(n) = result.unwrap(turn.poll(mut client, tnow(0), rnd, mut wire)) else {
+        fail("the client had no TURN request")
+    }
+    let mut read = relay_net_call(mut net, socket)
+    if provide.fill(mut net.port, mut read, list.slice(wire, 0, n)) != n {
+        fail("the virtual TCP read did not fit the request")
+    }
+    result.unwrap(provide.reply(mut net.port, take read, provide.net_reply(Count(n))))
+    relay_net_drain(mut net)
+    let mut response = relay_net_send(mut net, socket)
+    let _ = result.unwrap(turn.receive(mut client, tnow(0), rnd, mut response))
+}
+
+fn relay_net_open(mut net: RelayNet, socket: u64, rnd: Random) -> turn.Client waits {
+    let accept = relay_net_call(mut net, 4)
+    let from = Addr(ip: V4(0xc6336401), port: int.narrow(50000u64 + socket))
+    result.unwrap(provide.reply(mut net.port, take accept, provide.net_reply(Socket(socket, from))))
+    relay_net_drain(mut net)
+    let creds = result.unwrap(signal.mint_session(master("mac"), rnd, b"test", MINT_UNIX, plan()))
+    let mut client = relay_client(true, creds)
+    relay_net_request(mut net, socket, mut client, rnd)
+    relay_net_request(mut net, socket, mut client, rnd)
+    let _ = result.unwrap(turn.bind(mut client, SFU_MEDIA, tnow(0)))
+    relay_net_request(mut net, socket, mut client, rnd)
+    take client
+}
+
+fn relay_net_datagram(mut net: RelayNet, client: turn.Client, payload: Bytes) {
+    let Allocated(allocation) = turn.client_state(client) else {
+        fail("the virtual TURN client has no allocation")
+    }
+    let key = if allocation.relayed == RELAY_POOL_1 {
+        2u64
+    } else {
+        3u64
+    }
+    let mut read = relay_net_call(mut net, key)
+    let n = provide.fill(mut net.port, mut read, payload)
+    let mut packets: List[UdpStaged] = list.with_capacity(1)
+    list.push(mut packets, UdpStaged(peer: SFU_MEDIA, len: n, appended: n, ecn: 0))
+    if n != list.len(payload) || provide.fill_packets(mut net.port, mut read, take packets) != 1 {
+        fail("could not stage a datagram on the virtual allocation")
+    }
+    result.unwrap(provide.reply(mut net.port, take read, provide.net_reply(UdpPackets(count: 1))))
+}
+
+/// bug: a TCP client that stops reading parks the relay inside its write, keeping another client's queued media from reaching it.
+/// oracle: a virtual Net holds one TCP write pending and delivers media to both bound allocations. The stalled connection releases both socket halves within 100 ms and the healthy client receives its original media bytes.
+@test
+fn stalled_turn_stream_releases_healthy_media(tasks: Tasks, out: Stdout) -> Result[(), turn.TurnError] waits {
+    let until = 1000u64 * MS
+    let sockets = option.unwrap(signal.relay_socket_plan(2, 1200, 1))
+    let (test_clock, take hand) = provide.clock(0, MINT_UNIX * 1000)
+    let mut time = take hand
+    let (net, take port) = provide.net(bytes 4194304)
+    let mut served = RelayNet(port: take port, pending: map.new(), binds: 0, slow_read_closed: false, slow_write_closed: false)
+    let (revoke, revokes): (Sender[signal.RelayRevoke], Receiver[signal.RelayRevoke]) = channel.new(1)
+    let (ready, started): (Sender[()], Receiver[()]) = channel.new(1)
+    let rnd = provide.random(11)
+    let job = turn_runtime.Start(net, clock: test_clock, random: rnd, tasks, out, listen: RELAY_LISTEN, master: master("mac kdf"), nonce: master("mac"), plan: plan(), sockets, revokes: take revokes, ready: take ready, until)
+    let relay = task.spawn(tasks, bytes turn_runtime.reserve_bytes(sockets), take job, turn_runtime.run)
+    relay_net_drain(mut served)
+    result.unwrap(channel.try_receive(started))
+    let slow = relay_net_open(mut served, 5, rnd)
+    let mut healthy = relay_net_open(mut served, 6, rnd)
+    relay_net_datagram(mut served, slow, b"one")
+    relay_net_drain(mut served)
+    let stalled = relay_net_call(mut served, 13)
+    relay_net_datagram(mut served, healthy, b"two")
+    relay_net_drain(mut served)
+    let Some(due) = clock.idle(mut time) else {
+        fail("the outstanding TCP write registered no deadline")
+    }
+    if due > 100 * MS {
+        fail("the outstanding TCP write blocked the relay beyond 100 ms")
+    }
+    clock.advance_to(mut time, due)
+    relay_net_drain(mut served)
+    let Error(Withdrawn) = provide.reply(mut served.port, take stalled, provide.net_reply(Count(0))) else {
+        fail("the stalled write stayed live after its deadline")
+    }
+    if !served.slow_read_closed || !served.slow_write_closed {
+        fail("the stalled TURN connection did not release both halves")
+    }
+    let mut data = relay_net_send(mut served, 6)
+    let Ok(Data(from, range)) = turn.receive(mut healthy, tnow(due / MS), rnd, mut data) else {
+        fail("the healthy TURN client did not receive relayed media")
+    }
+    if from != SFU_MEDIA || !same(list.slice(data, range.lo, range.hi), b"two") {
+        fail("the healthy TURN client received different media")
     }
     clock.advance_to(mut time, until)
     let _ = take revoke

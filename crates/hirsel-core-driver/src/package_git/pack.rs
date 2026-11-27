@@ -501,11 +501,12 @@ impl Pack {
                 }
             };
             let entry = &self.entries[index];
+            let is_leaf = !by_offset.contains_key(&index) && by_id.is_empty();
             let id = if let Some(base) = base
-                && entry.result > memo_budget
+                && (is_leaf || entry.result > memo_budget)
             {
-                // An uncachable result need only be hashed here. Keep one
-                // base for adjacent deltas so their reads share its allocation.
+                // A leaf or an uncachable result only needs a hash here.
+                // Keep one base so adjacent deltas share its allocation.
                 if large_base.as_ref().is_none_or(|(saved, _)| *saved != base) {
                     drop(large_base.take());
                     large_base = Some((base, self.materialize(base)?));

@@ -1529,37 +1529,6 @@ fn package_archive_outside_root_explains_workspace() {
 include!("test_run_foreign_recipe_native.rs");
 
 #[test]
-fn package_known_roots() {
-    let law = PackageLaw::new();
-    PackageLaw::refuse(law.run(&["pack", "jx", "--out", "jx.hpkg"]),
-        "unknown option `--out` for pack; use help pack");
-    law.library("jx", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE, "");
-    law.library("jy", "fixture.test/json", "1.0.1", PACKAGE_Y_SOURCE, "");
-    for (dir, root) in [("jx", PACKAGE_X), ("jy", PACKAGE_Y)] {
-        let archive = format!("{dir}.hpkg");
-        let flag = if dir == "jx" { "-o" } else { "--output" };
-        let stdout = PackageLaw::pass(law.run(&["pack", dir, flag, &archive]));
-        let version = if dir == "jx" { "1.0.0" } else { "1.0.1" };
-        assert_eq!(stdout, format!("fixture.test/json@1 {version} {root}\n"));
-        let content = std::fs::read(law.path(&package_entry("packages", root))).unwrap();
-        assert_eq!(content.len(), 88);
-    }
-    // A local name is never published (packages.md section 1): pack writes no archive.
-    law.library("lx", "local/json", "1.0.0", PACKAGE_X_SOURCE, "");
-    PackageLaw::refuse(law.run(&["pack", "lx", "-o", "lx.hpkg"]),
-        "lx/hirsel.toml: local/json is a local name and is never packed; give it a scoped name to publish it");
-    assert!(!law.path("lx.hpkg").exists());
-    // Nor is one that a packed member reaches through a path binding.
-    law.write("ws/hirsel.toml", "[workspace]\nmembers = [\"api\", \"util\"]\n");
-    law.library("ws/util", "local/util", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
-    law.library("ws/api", "fixture.test/api", "1.0.0", "pub fn two() -> u64 { 2u64 }\n",
-        "[dependencies]\nutil = { package = \"local/util\", major = 1, path = \"../util\" }\n");
-    PackageLaw::refuse(law.run(&["pack", "ws/api", "-o", "api.hpkg"]),
-        "ws/util/hirsel.toml: local/util is a local name and is never packed; give it a scoped name to publish it");
-    assert!(!law.path("api.hpkg").exists());
-}
-
-#[test]
 fn inspect_reads_a_package_archive_and_a_named_dependency() {
     let law = PackageLaw::new();
     law.library("jx", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE, "");

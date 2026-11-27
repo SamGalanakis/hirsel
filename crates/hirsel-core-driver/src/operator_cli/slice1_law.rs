@@ -7,6 +7,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    os::fd::AsRawFd,
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -191,7 +192,8 @@ pub(super) fn resolve_identify_read() {
         assert_eq!(
             out.status.code(),
             Some(exit),
-            "{}\n{}",
+            "{args:?}: {}\n{}\n{}",
+            out.status,
             String::from_utf8_lossy(&out.stderr),
             String::from_utf8_lossy(&out.stdout)
         );
@@ -202,13 +204,23 @@ pub(super) fn resolve_identify_read() {
     let status = cli(&["no-such-command", "--json"])
         .stdin(slave.try_clone().unwrap())
         .stderr(slave.try_clone().unwrap())
-        .stdout(slave)
+        .stdout(slave.try_clone().unwrap())
         .status()
         .unwrap();
-    assert_eq!(status.code(), Some(2));
+    assert_eq!(status.code(), Some(2), "{status}");
+    // Darwin can discard unread output when the last slave closes. Keep ours
+    // open while draining the master after the child exits.
+    // SAFETY: the test owns the live PTY master.
+    assert_eq!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
     let mut bytes = Vec::new();
     let result = fs::File::from(master).read_to_end(&mut bytes);
-    assert!(result.is_ok() || result.unwrap_err().raw_os_error() == Some(libc::EIO));
+    assert!(result.is_ok() || result.unwrap_err().kind() == std::io::ErrorKind::WouldBlock);
+    drop(slave);
     assert_eq!(document(&bytes, 2), unknown);
     let guest = cli(&["no-such-command", "--", "--json"]).output().unwrap();
     assert_eq!(guest.status.code(), Some(2));

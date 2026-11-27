@@ -23,9 +23,10 @@ fn crash_arm_options(arm: CrashArm, floor: u64) -> Result[Options, Error] {
         Blobs => {
             options.probe_budget = 65536
         },
-        // Two rows per cut: the probe of the 160-row pack spans many cuts.
+        // One PACK_INDEX row per cut keeps the four-frame fixture mid-probe
+        // across the first checkpoint and the cut that crashes.
         MidProbe => {
-            options.probe_budget = 2
+            options.probe_budget = 1
         },
         _ => (),
     }

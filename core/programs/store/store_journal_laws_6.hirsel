@@ -97,7 +97,7 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
         return Error(1u64)
     }
     let replied = result.unwrap(run(mut before, None, raw, fn(mut tx, tok) -> Result[(), Error] {
-        reply(mut tx, tok, 0u64, clone(b"reply"))
+        failure_result_from_rep(txn.reply(mut tx.inner, tok, 0u64, clone(b"reply")))
     }))
     let Committed(saved) = replied else {
         return Error(2u64)
@@ -133,12 +133,12 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
 fn count_stream_effect(mut db: Db, key: Bytes, effect: u64) -> Ticket waits {
     let saved = result.unwrap(run(mut db, None, (copy_env(key), effect), fn(mut tx, args) -> Result[(), Error] {
         let row = failure_result_from_rep(catalog.logical_key(1u32, types.key_word(args.1)))?
-        let prior = match pages.get_page_row(tx.roots.collections, row) {
+        let prior = match pages.get_page_row(txn.tx_roots(tx.inner).collections, row) {
             Some(value) => decode_word(value),
             None => 0u64,
         }
         put_bytes(mut tx, 1u32, types.key_word(args.1), types.key_word(prior + 1u64))?
-        reply(mut tx, args.0, 0u64, types.key_word(args.1))
+        failure_result_from_rep(txn.reply(mut tx.inner, args.0, 0u64, types.key_word(args.1)))
     }))
     let Committed(done) = saved else {
         fail("stream effect did not commit")

@@ -221,7 +221,7 @@ fn rerun_attempt[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
         RolledBack(Committed(_)) => fail("store: re-run committed"),
         DraftFault(_) => return RoomRefused,
         Prepared(take ready) => {
-            let Prepared(outcome: take outcome, ops: take ops, ..) = take ready
+            let txn.Prepared(outcome: take outcome, ops: take ops, ..) = take ready
             match take outcome {
                 Ok(take answer) => (take answer, take ops),
                 Error(take answer) => (take answer, pages.new_data_rows()),

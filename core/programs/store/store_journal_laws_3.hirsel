@@ -864,7 +864,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
         }
         // §2.4:26-byte section prelude +16*(1+4+12+4+4)+stored values.
         let expected = 16 + 26 + 16 * 25 + 15 * 1048576 + call_env
-        if tx.frame_bytes != Some(expected) {
+        if txn.tx_frame_bytes(tx.inner) != Some(expected) {
             fail("disk L29 arithmetic")
         }
         Ok(expected)

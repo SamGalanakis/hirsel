@@ -317,10 +317,10 @@ pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -
 }
 
 fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
-    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))
+    failure_result_from_rep(catalog.readable(txn.tx_roots(tx.inner), t.catalog_key, t.catalog_page, t.id))
 }
 
 fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
@@ -340,25 +340,25 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
     check_table_read(tx, t)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let n = if tx_tiered_descriptor(tx, t.id)? {
-        tx_tiered_count(tx, t.id, low, high)?
+    let n = if failure_result_from_rep(txn.tx_tiered_descriptor(tx.inner, t.id))? {
+        failure_result_from_rep(txn.tx_tiered_count(tx.inner, t.id, low, high))?
     } else {
-        let data = transaction_collection_pages(tx)?
+        let data = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
         failure_result_from_rep(catalog.count_page_rows(data, t.id, low, high))?
     }
-    note_read(tx, Span(take low, take high))?
+    failure_result_from_rep(txn.note_read(tx.inner, Span(take low, take high)))?
     Ok(n)
 }
 
 fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
-    let tree = transaction_collection_pages(tx)?
-    let tiered = tx_tiered_rows(tx, t.id, low, high, true)?
+    let tree = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
+    let tiered = failure_result_from_rep(txn.tx_tiered_rows(tx.inner, t.id, low, high, true))?
     let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
         None
     } else {
         failure_result_from_rep(catalog.collection_cursor(tree, t.id, low, high, reverse))?
     }
-    Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
+    Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner), low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
 }
 
 pub opaque scoped type TxRows[K, V] {
@@ -371,13 +371,13 @@ pub opaque scoped type TxRows[K, V] {
     high: Bytes,
     reverse: bool,
     log_tail: Option[txn.LogRangeTail],
-    tiered: Option[TxTieredRows]
+    tiered: Option[txn.TxTieredRows]
 }
 
 // Before decoding an attempted row, record it and the gap traversed to find it.
 // Exhaustion records the remainder once. An unused cursor observes no keys.
 pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Error] {
-    if !types.same(tx.store.hi, tx.store.lo, r.owner.store.hi, r.owner.store.lo) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, r.owner.store.hi, r.owner.store.lo) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || txn.tx_own(tx.inner) != r.depth {
         return Error(Foreign)
     }
     if let Some(mut cursor) = r.cursor {
@@ -393,12 +393,12 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
         }
     }
     let mut found = match r.tiered {
-        Some(mut tiered) => next_tiered_in(tx.roots.collections, tx.attempt, tx.pins, tiered.collection, tiered.staged, mut tiered.from, mut tiered.to, r.reverse)?,
+        Some(mut tiered) => next_tiered_in(txn.tx_roots(tx.inner).collections, txn.tx_attempt(tx.inner), txn.tx_pins(tx.inner), tiered.collection, tiered.staged, mut tiered.from, mut tiered.to, r.reverse)?,
         None => None,
     }
     if let None = found {
         if let Some(mut tail) = r.log_tail {
-            found = next_log_range_tail(tx, mut tail)?
+            found = failure_result_from_rep(txn.next_log_range_tail(tx.inner, mut tail))?
         }
     }
     match take found {
@@ -459,10 +459,10 @@ pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
 }
 
 fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
-    if !types.same(tx.store.hi, tx.store.lo, ix.store.hi, ix.store.lo) {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
-    failure_result_from_rep(catalog.index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))
+    failure_result_from_rep(catalog.index_readable(txn.tx_roots(tx.inner), ix.catalog_key, ix.catalog_page, ix.id, ix.public))
 }
 
 pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
@@ -479,10 +479,10 @@ pub fn lookup_prefix[J, K, V, P, Q](tx: Tx, ix: Index[J, K, V, P], q: Q, take ke
 }
 
 fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take high: Bytes) -> Result[IndexRows[K, V], Error] in tx {
-    let tree = transaction_collection_pages(tx)?
+    let tree = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
     let (take cursor, cold) = open_index_cursor(tree, ix.id, low, high)?
     let rows = PageRows(cursor: take cursor, data: take tree, decoder: index_decoder(ix))
-    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?, tiered_index: if cold {
+    Ok(IndexRows(rows: take rows, reads: txn.tx_reads(tx.inner), low: take low, high: take high, tiered: tx_index_tiered(tx)?, tiered_index: if cold {
         Some(ix.id)
     } else {
         None
@@ -512,9 +512,9 @@ pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Boun
     check_index_read(tx, ix)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
-    let tree = transaction_collection_pages(tx)?
-    let input = read.TieredReadInput(attempt: tx.attempt, pins: tx.pins, below: view tx.below, ops: view tx.ops)
-    Ok(IndexEntries(cursor: read.entry_cursor(take tree), read: take input, reads: tx.reads, low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
+    let tree = failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?
+    let input = read.TieredReadInput(attempt: txn.tx_attempt(tx.inner), pins: txn.tx_pins(tx.inner), below: txn.tx_below(tx.inner), ops: txn.tx_ops(tx.inner))
+    Ok(IndexEntries(cursor: read.entry_cursor(take tree), read: take input, reads: txn.tx_reads(tx.inner), low: take low, high: take high, id: ix.id, kind: ix.kind, key: ix.key, primary: ix.primary, payload: clone(ix.payload), payload_codec: ix.payload_codec, lendable: ix.lendable))
 }
 
 pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {

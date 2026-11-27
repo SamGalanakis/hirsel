@@ -15,3 +15,842 @@ pub fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -
     }
     newest
 }
+
+pub opaque scoped type TxState[Event: inert + shareable + send] {
+    store: types.StoreKey,
+    indexes: View[indexes.IndexRegistry],
+    roots: pages.Roots,
+    base_collection: Option[TxCollection],
+    bases: pages.TailBases,
+    ids: u64,
+    private_from: u64,
+    resident: u64,
+    retain_old: bool,
+    frame_tail: u64,
+    reads: View[core.Log[Event]],
+    issued: View[core.Cell[u64]],
+    observed_info: View[core.Cell[bool]],
+    // The attempt record and the pin map it reads (§13.3, v2.81). The call's
+    // driver owns both, outside the body's isolation and step bound.
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
+    refusal: Option[Capacity],
+    // The index error that makes this transaction abort-only.
+    index_conflict: Option[IndexStop],
+    // (table, index) of each remove whose absent target proved an index
+    // wrong (§I.3). The transaction fails, and the index is demoted.
+    drift: Option[List[(u32, u32)]],
+    frame_bytes: Option[u64],
+    // The recorded limits (§11.1 AP4a) every check in the body reads.
+    limits: types.LimitsRep,
+    wrote: bool,
+    ops: pages.DataOps,
+    view_tree: core.Cell[Option[TxView]],
+    // The streams section's ops (§1.8). `extra_bytes` is that section with
+    // its 5-byte head, when it has ops, plus the CALL section's bytes.
+    stream_ops: pages.DataOps,
+    keyed: Option[format.KeyedDraft],
+    extra_bytes: u64,
+    call: Option[format.CallSection],
+    // Layers beneath `ops`, oldest first. The last `own` are this Tx's own
+    // staged writes, frozen when it entered a callback; the rest are shared
+    // with the transactions it runs inside. `rows` and `streams` count the
+    // distinct keys staged across `ops` and every layer: a key's slot is the
+    // one it took when first staged, and a new key takes the next.
+    below: List[Arc[pages.Staged]],
+    own: u64,
+    rows: u64,
+    cell_rows: u64,
+    trim_rows: u64,
+    streams: u64
+}
+
+// The layer and row name the next staged op. Replacements of consumed
+// slots are kept separately because DataOps coalesces edits by key.
+pub type TxView {
+    tree: pages.PageTree,
+    first: u64,
+    draw: u64,
+    layer: u64,
+    row: u64,
+    dirty: Option[Arc[TxViewDirty]],
+    popped: Option[u64]
+}
+
+pub type TxViewDirty: shareable + send {
+    slots: Map[u64, ()]
+}
+
+pub fn share_tx_view(cache: core.Cell[Option[TxView]]) -> Option[TxView] {
+    cell.with(cache, (), fn(mut state: Option[TxView], take _unit: ()) -> Option[TxView] {
+        let Some(v) = view state else {
+            return None
+        }
+        Some(TxView(tree: pages.share_page_tree(v.tree), first: v.first, draw: v.draw, layer: v.layer, row: v.row, dirty: clone(v.dirty), popped: v.popped))
+    })
+}
+
+pub fn completed_tx_view(take state: Option[TxView], layers: u64, rows: u64) -> Option[TxView] {
+    let Some(take v) = take state else {
+        return None
+    }
+    if let None = v.dirty {
+        if v.layer == layers && v.row == rows {
+            return Some(take v)
+        }
+    }
+    None
+}
+
+pub fn mark_tx_view_slot(cache: core.Cell[Option[TxView]], layer: u64, slot: Option[u64]) {
+    let Some(at) = slot else {
+        return
+    }
+    cell.with(cache, (layer, at), fn(mut state: Option[TxView], take edit: (u64, u64)) -> () {
+        let Some(take held) = replace(mut state, None) else {
+            return
+        }
+        let mut v = take held
+        if v.layer == edit.0 && v.popped == Some(edit.1) {
+            v.popped = None
+        }
+        if v.layer == edit.0 && edit.1 < v.row {
+            if let Some(mut dirty) = v.dirty {
+                let reserved = arc.with_unique(mut dirty, scoped fn(mut pending: TxViewDirty) -> Result[(), Capacity] {
+                    add_tx_view_slot(mut pending.slots, edit.1)
+                })
+                if let Some(Ok(())) = reserved {} else {
+                    return
+                }
+            } else {
+                let mut slots: Map[u64, ()] = map.new()
+                if let Error(_) = add_tx_view_slot(mut slots, edit.1) {
+                    return
+                }
+                v.dirty = Some(arc.new(TxViewDirty(slots: take slots)))
+            }
+        }
+        state = Some(take v)
+    })
+}
+
+pub fn add_tx_view_slot(mut slots: Map[u64, ()], at: u64) -> Result[(), Capacity] {
+    if let Some(_) = map.get(slots, at) {
+        return Ok(())
+    }
+    map.try_reserve(mut slots, 1)?
+    Ok(map.insert(mut slots, at, ()))
+}
+
+pub fn transaction_collection_pages[Event: inert + shareable + send](tx: TxState[Event]) -> Result[pages.PageTree, types.Failure] {
+    let ready = current_tx_view(tx)?
+    let share = pages.share_page_tree(ready.tree)
+    cell.set(tx.view_tree, Some(take ready))
+    Ok(take share)
+}
+
+pub fn current_tx_view[Event: inert + shareable + send](tx: TxState[Event]) -> Result[TxView, types.Failure] {
+    // Take the cache out while editing it. An error or an interrupted bound
+    // can discard the working tree without leaving a partially applied view.
+    let mut v = match cell.replace(tx.view_tree, None) {
+        Some(take ready) => take ready,
+        None => {
+            let Some(first) = int.checked_add(tx.ids, 1) else {
+                return Error(Limit(Ids))
+            }
+            TxView(tree: pages.share_page_tree(tx.roots.collections), first: first, draw: first, layer: 0, row: 0, dirty: None, popped: None)
+        },
+    }
+    let memory_only = match tx.attempt {
+        Some(_) => true,
+        None => false,
+    }
+    let layers = list.len(tx.below)
+    while v.layer < layers {
+        let layer = view tx.below[v.layer]
+        advance_tx_view(mut v, layer.ops.rows, memory_only)?
+        v.layer += 1
+        v.row = 0
+    }
+    advance_tx_view(mut v, tx.ops.rows, memory_only)?
+    Ok(take v)
+}
+
+pub fn advance_tx_view(mut v: TxView, rows: pages.DataRows, memory_only: bool) -> Result[(), types.Failure] {
+    // A Log only appends, so first-write order is sequence order within a
+    // Log. Table and index edits on different keys commute in this view.
+    if let Some(take dirty) = replace(mut v.dirty, None) {
+        for (slot, _) in dirty.slots {
+            materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw)?
+        }
+    }
+    for slot in v.row .. pages.data_row_count(rows) {
+        if v.popped != Some(slot) {
+            materialize_row(mut v.tree, pages.data_row(rows, slot), memory_only, v.first, mut v.draw)?
+        }
+    }
+    v.popped = None
+    v.row = pages.data_row_count(rows)
+    Ok(())
+}
+
+pub type Drafted[R, E] {
+    roots: pages.Roots,
+    ids: u64,
+    resident: u64,
+    frame_tail: u64,
+    refusal: Option[Capacity],
+    index_conflict: Option[IndexStop],
+    drift: Option[List[(u32, u32)]],
+    frame_bytes: Option[u64],
+    wrote: bool,
+    ops: pages.DataOps,
+    view_tree: core.Cell[Option[TxView]],
+    stream_ops: pages.DataOps,
+    extra_bytes: u64,
+    call: Option[format.CallSection],
+    rows: u64,
+    cell_rows: u64,
+    trim_rows: u64,
+    streams: u64,
+    result: Result[R, E]
+}
+
+// A callback's Tx, less its shares of the layers beneath, so the parent's own
+// layers are unique again when `install` folds them back.
+pub fn drafted_tx[Event: inert + shareable + send, R, E](take draft: TxState[Event], take result: Result[R, E]) -> Drafted[R, E] {
+    let TxState(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, ..) = take draft
+    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result)
+}
+
+// Moves what `tx` has staged into a layer its callback shares, leaving `tx`
+// an empty overlay over the same rows. The callback starts with nothing owned
+// to copy. When it overruns, restore this overlay once the work is dropped.
+pub fn freeze[Event: inert + shareable + send](mut tx: TxState[Event]) {
+    let layer = pages.Staged(ops: replace(mut tx.ops, pages.empty_ops()), stream_ops: replace(mut tx.stream_ops, pages.empty_ops()), call: replace(mut tx.call, None))
+    list.push(mut tx.below, arc.new(take layer))
+    tx.own += 1
+}
+
+pub fn restore_frozen[Event: inert + shareable + send](mut tx: TxState[Event]) {
+    let Some(take top) = list.pop(mut tx.below) else {
+        return
+    }
+    match arc.try_unwrap(take top) {
+        Ok(pages.Staged(ops: take ops, stream_ops: take stream_ops, call: take call)) => {
+            tx.ops = take ops
+            tx.stream_ops = take stream_ops
+            tx.call = take call
+            tx.own -= 1
+        },
+        Error(take shared) => list.push(mut tx.below, take shared),
+    }
+}
+
+// Folds `tx`'s own layers back into its ops, oldest first, then the writes
+// staged over them. Replacements keep their slots and new keys append in
+// first-write order, so every slot, and the frame-tail slot, stays put.
+pub fn fold_own[Event: inert + shareable + send](mut tx: TxState[Event]) {
+    let mut frozen: List[pages.Staged] = list.new()
+    while tx.own != 0 {
+        let Some(top) = list.pop(mut tx.below) else {
+            break
+        }
+        let layer = match arc.try_unwrap(take top) {
+            Ok(take mine) => take mine,
+            Error(take shared) => pages.Staged(ops: clone(shared.ops), stream_ops: clone(shared.stream_ops), call: clone(shared.call)),
+        }
+        list.push(mut frozen, take layer)
+        tx.own -= 1
+    }
+    let Some(oldest) = list.pop(mut frozen) else {
+        return
+    }
+    let pages.Staged(ops: take ops, stream_ops: take stream_ops, call: take call) = take oldest
+    let mut data = take ops
+    let mut streams = take stream_ops
+    let mut held = take call
+    while let Some(take newer) = list.pop(mut frozen) {
+        let pages.Staged(ops: take o, stream_ops: take so, call: take c) = take newer
+        fold_ops(mut data, tx.below, false, None, take o)
+        fold_ops(mut streams, tx.below, true, None, take so)
+        if let Some(take section) = c {
+            held = Some(take section)
+        }
+    }
+    fold_ops(mut data, tx.below, false, None, replace(mut tx.ops, pages.empty_ops()))
+    fold_ops(mut streams, tx.below, true, None, replace(mut tx.stream_ops, pages.empty_ops()))
+    if let Some(take section) = replace(mut tx.call, None) {
+        held = Some(take section)
+    }
+    tx.ops = take data
+    tx.stream_ops = take streams
+    tx.call = take held
+}
+
+// Stages `newer`'s rows over `ops` in their first-write order.
+pub fn fold_ops(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams: bool, cache: Option[View[core.Cell[Option[TxView]]]], take newer: pages.DataOps) {
+    let pages.DataOps(rows: take rows, cells: take cells, logs: take logs, ..) = take newer
+    fold_cell_edits(mut ops.cells, below, cells)
+    for (id, state) in logs {
+        map.insert(mut ops.logs, id, state)
+    }
+    let staged = pages.data_row_count(rows)
+    let pages.DataRows(first: take first, rest: take rest, ..) = take rows
+    let mut head = take first
+    // Moved, not copied: the frame-tail key keeps the spare room it was made with.
+    for slot in 0u64 .. order.min(staged, 2) {
+        let format.DataOp(key: take key, value: take value, prior: prior, ..) = replace(mut head[slot], format.DataOp(key: list.new(), value: None, trim: None, prior: None))
+        let mut ignored = 0u64
+        let (_, replaced) = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
+        if let Some(c) = cache {
+            mark_tx_view_slot(c, list.len(below), replaced)
+        }
+    }
+    for take op in take rest {
+        let format.DataOp(key: take key, value: take value, prior: prior, ..) = take op
+        let mut ignored = 0u64
+        let (_, replaced) = save_data_op(mut ops, below, streams, mut ignored, take key, take value, prior)
+        if let Some(c) = cache {
+            mark_tx_view_slot(c, list.len(below), replaced)
+        }
+    }
+}
+
+// Installs a callback's return. Streams, the CALL record, ids and a refusal
+// stay on a typed Error too; table writes and their frame-tail slot install
+// only on Ok.
+pub fn install[Event: inert + shareable + send, R, E](mut tx: TxState[Event], take d: Drafted[R, E]) -> Result[R, E] {
+    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result) = take d
+    fold_own(mut tx)
+    tx.ids = ids
+    tx.refusal = refusal
+    tx.index_conflict = take conflict
+    fold_ops(mut tx.stream_ops, tx.below, true, None, take stream_ops)
+    tx.streams = streams
+    tx.extra_bytes = extra_bytes
+    if let Some(take section) = call {
+        tx.call = Some(take section)
+    }
+    if let Ok(_) = result {
+        tx.roots = take roots
+        let layers = list.len(tx.below)
+        let complete = completed_tx_view(cell.into_inner(take cached), layers + 1, pages.data_row_count(ops.rows))
+        if let Some(take ready) = take complete {
+            fold_ops(mut tx.ops, tx.below, false, None, take ops)
+            let mut view_tree = take ready
+            view_tree.layer = layers
+            view_tree.row = pages.data_row_count(tx.ops.rows)
+            cell.set(tx.view_tree, Some(take view_tree))
+        } else {
+            fold_ops(mut tx.ops, tx.below, false, Some(view tx.view_tree), take ops)
+        }
+        tx.rows = rows
+        tx.cell_rows = cell_rows
+        tx.trim_rows = trim_rows
+        tx.frame_tail = frame_tail
+        tx.resident = resident
+        tx.frame_bytes = frame_bytes
+        tx.wrote = wrote
+    }
+    // The evidence of a proven-wrong index stays however the callback
+    // ended, as its abort-only flag does.
+    if let Some(take seen) = take drift {
+        indexes.stage_drift(mut tx.drift, take seen)
+    }
+    take result
+}
+
+// Stages one row in `ops` and returns its slot: `next_slot`, the next one, for a
+// key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
+// staged keeps its slot there, so `ops` holds the replacement uncounted.
+// The second result names a replaced slot in this layer, if any.
+pub fn save_data_op(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[format.StagedValue], prior: Option[u32]) -> (u64, Option[u64]) {
+    if let Some(slot) = pages.op_slot(ops, key) {
+        if slot < 2 {
+            ops.rows.first[slot].value = take value
+            ops.rows.first[slot].prior = prior
+        } else {
+            ops.rows.rest[slot - 2].value = take value
+            ops.rows.rest[slot - 2].prior = prior
+        }
+        return (pages.OPEN_FRAME_TAIL, Some(slot))
+    }
+    let mut beneath = false
+    for layer in below {
+        let found = if streams {
+            pages.op_slot(layer.stream_ops, key)
+        } else {
+            pages.op_slot(layer.ops, key)
+        }
+        if let Some(_) = found {
+            beneath = true
+        }
+    }
+    let at = next_slot
+    if !beneath {
+        next_slot += 1
+    }
+    let slot_order = pages.data_row_count(ops.rows)
+    let hashed = map.len(ops.slots) != 0
+    if hashed {
+        map.insert(mut ops.slots, clone(key), slot_order)
+    }
+    pages.push_data_row(mut ops.rows, format.DataOp(key: take key, value: take value, trim: None, prior: prior))
+    if !hashed && slot_order >= pages.SCANNED_OPS && !pages.rows_ascending(ops.rows) {
+        // Match the final capacity of the old doubling sequence without
+        // growing the map while the long ascending prefix is already held.
+        let bits = 64u32 - int.leading_zeros(slot_order)
+        map.reserve(mut ops.slots, 1u64 << int.widen(bits))
+        for slot in 0u64 .. slot_order + 1 {
+            map.insert(mut ops.slots, clone(pages.data_row(ops.rows, slot).key), slot)
+        }
+    }
+    if beneath {
+        (pages.OPEN_FRAME_TAIL, None)
+    } else {
+        (at, None)
+    }
+}
+
+pub fn put_frame[Event: inert + shareable + send](tx: TxState[Event], key: Bytes, value: Bytes, frame: Option[u64]) -> Result[Option[u64], types.Failure] {
+    if list.len(key) > KEY_LIMIT {
+        return Error(Limit(Key))
+    }
+    let size = list.len(value)
+    if size > tx.limits.value {
+        return Error(Limit(Value))
+    }
+    indexes.edit_frame(tx.ops, tx.below, tx.extra_bytes, key, Some(size), frame, types.transaction_limit(tx.limits))
+}
+
+pub fn apply_put[Event: inert + shareable + send](mut tx: TxState[Event], take p: Bytes, take val: Bytes, tail: bool) -> Result[(), types.Failure] {
+    let charge = memory_data_charge(tx, p, val)
+    let (old_charge, height, prior) = put_charge(mut tx, p)?
+    let _ = reserve_ids(mut tx, height)?
+    let value = pages.stage_value(take val, tx.roots.collections.inline)
+    let (slot_order, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value), prior)
+    mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
+    if tail {
+        tx.frame_tail = slot_order
+    }
+    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
+    tx.wrote = true
+    Ok(())
+}
+
+pub type TxCollection {
+    id: u32,
+    map_stamp: u64,
+    root: Arc[std.page.Page],
+    kind: std.page_descriptor.CollectionKind
+}
+
+pub fn cache_collection[Event: inert + shareable + send](mut tx: TxState[Event], key: Bytes) -> Result[(), types.Failure] {
+    let id: u32 = list.word_be(key, 0)
+    let stamp = pages.tree_stamp(tx.roots.collections)
+    if let Some(held) = view tx.base_collection {
+        if held.id == id && held.map_stamp == stamp {
+            return Ok(())
+        }
+    }
+    let collection = {
+        let Some((root, descriptor)) = std.page.collection_entry(tx.roots.collections.root, list.slice(key, 0, 4)) else {
+            return Error(Stale(id))
+        }
+        TxCollection(id: id, map_stamp: stamp, root: arc.share(root), kind: pages.collection_descriptor(descriptor).kind)
+    }
+    tx.base_collection = Some(take collection)
+    Ok(())
+}
+
+pub fn cached_write_height[Event: inert + shareable + send](tx: TxState[Event], held: TxCollection) -> u64 {
+    let child_depth: u64 = int.widen(std.page.level(std.page.image_of(held.root)))
+    tree_height(tx.roots.collections) + child_depth + 1
+}
+
+pub fn put_charge[Event: inert + shareable + send](mut tx: TxState[Event], key: Bytes) -> Result[(u64, u64, Option[u32]), types.Failure] {
+    if let Some(_) = tx.attempt {
+        let previous = transaction_row(tx, key)?
+        let height = transaction_write_height(tx, key)?
+        let charge = match previous {
+            Some(value) => memory_data_charge(tx, key, value),
+            None => 0,
+        }
+        return Ok((if tx.retain_old {
+            0u64
+        } else {
+            charge
+        }, height, None))
+    }
+    cache_collection(mut tx, key)?
+    let Some(held) = view tx.base_collection else {
+        fail("store: collection cache is empty")
+    }
+    // Both retention modes find the previous charge, so a body takes the
+    // same steps on a live store and on a replay fork that retains rows;
+    // the selection takes none.
+    let (previous, prior) = match staged_op(tx, key) {
+        Some(op) => (match op.value {
+            Some(value) => entry(key, format.staged_bytes(value)),
+            None => 0u64,
+        }, op.prior),
+        None => {
+            let base = std.page.lookup(held.root, list.slice(key, 4, list.len(key)))
+            let charge = match base {
+                Some(value) => entry(key, value),
+                None => 0u64,
+            }
+            (charge, if held.kind == CellCollection || held.kind == LogCollection {
+                None
+            } else {
+                Some(format.stored_prior(base))
+            })
+        },
+    }
+    let old = if tx.retain_old {
+        0u64
+    } else {
+        previous
+    }
+    Ok((old, cached_write_height(tx, held), prior))
+}
+
+pub fn row_refund[Event: inert + shareable + send](tx: TxState[Event], key: Bytes, value: Bytes) -> indexes.DataRefund {
+    // Both retention modes take the same steps, as in put_charge.
+    let previous = memory_data_charge(tx, key, value)
+    let prior: Option[u32] = if let Some(_) = tx.attempt {
+        None
+    } else if let Some(op) = staged_op(tx, key) {
+        op.prior
+    } else {
+        Some(format.stored_prior(Some(view value)))
+    }
+    indexes.DataRefund(charge: if tx.retain_old {
+        0u64
+    } else {
+        previous
+    }, prior: prior)
+}
+
+pub fn delete_refund[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[indexes.DataRefund], types.Failure] {
+    Ok(match transaction_row(tx, key)? {
+        Some(value) => Some(row_refund(tx, key, value)),
+        None => None
+    })
+}
+
+pub fn apply_delete[Event: inert + shareable + send](mut tx: TxState[Event], take p: Bytes, refund: indexes.DataRefund) -> Result[(), types.Failure] {
+    stage_delete(mut tx, take p, refund, false)
+}
+
+pub fn stage_delete[Event: inert + shareable + send](mut tx: TxState[Event], take p: Bytes, refund: indexes.DataRefund, popped: bool) -> Result[(), types.Failure] {
+    let height = transaction_write_height(tx, p)?
+    let _ = reserve_ids(mut tx, height)?
+    let (_, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None, refund.prior)
+    if popped {
+        if let None = replaced {
+            // The primary is already absent from the working tree. Index
+            // removals staged before it may still need to be applied.
+            cell.with(tx.view_tree, pages.data_row_count(tx.ops.rows) - 1, fn(mut state: Option[TxView], take slot: u64) -> () {
+                if let Some(mut cached) = state {
+                    if cached.row == slot {
+                        cached.row += 1
+                    } else {
+                        cached.popped = Some(slot)
+                    }
+                }
+            })
+        }
+    } else {
+        mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
+    }
+    tx.resident = int.saturating_sub(tx.resident, refund.charge)
+    Ok(())
+}
+
+pub fn pop_tx_view_edge(mut cached: TxView, collection: u32, prefix_key: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
+    let Some(empty_root) = view cached.tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    let first = cached.first
+    let mut row: Option[(Bytes, Arc[Bytes])] = None
+    pages.page_result(std.page.edit_collection(mut cached.tree.root, prefix_key, first, mut cached.draw, scoped fn(mut root: Arc[std.page.Page], mut draw: u64) -> Result[(), std.page.Error] {
+        row = std.page.pop_edge_with_empty(mut root, empty_root, reverse, first, mut draw)?
+        Ok(())
+    }))?
+    match take row {
+        Some((suffix, take value)) => Ok(Some((catalog.logical_key(collection, suffix)?, take value))),
+        None => Ok(None),
+    }
+}
+
+pub fn tree_height(tree: pages.PageTree) -> u64 {
+    let height: u64 = int.widen(std.page.level(std.page.image_of(tree.root)))
+    height + 1
+}
+
+pub fn collection_write_height(tree: pages.PageTree, key: Bytes) -> u64 {
+    let map_height = tree_height(tree)
+    let Some(root) = std.page.collection_child(tree.root, list.slice(key, 0, 4)) else {
+        return map_height
+    }
+    let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
+    map_height + height + 1
+}
+
+pub fn transaction_write_height[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[u64, types.Failure] {
+    let tree = view tx.roots.collections
+    let Some(attempt) = tx.attempt else {
+        return Ok(collection_write_height(tree, key))
+    }
+    if pager.tiered_stopped(attempt) {
+        return Error(Missed)
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
+        return Error(Stale(list.word_be(key, 0)))
+    }
+    if pages.collection_descriptor(descriptor).residency == ResidentMemory {
+        return Ok(collection_write_height(tree, key))
+    }
+    pager.tiered_seek(attempt, SeekKey(types.copied(list.slice(key, 4, list.len(key)))?))
+    let root = pager.tiered_point_page(attempt, tx.pins, edge, None)?
+    pager.tiered_seek(attempt, SeekOperation)
+    Ok(tree_height(tree) + int.widen(std.page.level(std.page.image_of(root))) + 1)
+}
+
+pub fn transaction_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
+    if let Some(attempt) = tx.attempt {
+        if pager.tiered_blocked(attempt) {
+            return Error(Missed)
+        }
+    }
+    match staged_row(tx, key) {
+        Some(staged) => Ok(staged),
+        None => match tx.attempt {
+            Some(_) => tx_page_row(tx, key),
+            None => Ok(pages.get_page_row(tx.roots.collections, key)),
+        },
+    }
+}
+
+pub fn staged_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Option[Option[View[Bytes]]] in tx {
+    let Some(op) = staged_op(tx, key) else {
+        return None
+    }
+    Some(match op.value {
+        Some(raw) => Some(format.staged_bytes(raw)),
+        None => None,
+    })
+}
+
+// The row this Tx or a layer beneath it staged for key, if any.
+pub fn staged_op[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Option[View[format.DataOp]] in tx {
+    if let Some(slot) = pages.op_slot(tx.ops, key) {
+        return Some(pages.data_row(tx.ops.rows, slot))
+    }
+    if let Some(at) = newest_layer(tx.below, false, key) {
+        let layer = view tx.below[at]
+        if let Some(slot) = pages.op_slot(layer.ops, key) {
+            return Some(pages.data_row(layer.ops.rows, slot))
+        }
+    }
+    None
+}
+
+pub fn check_write_attempt[Event: inert + shareable + send](tx: TxState[Event]) -> Result[(), types.Failure] {
+    if let Some(attempt) = tx.attempt {
+        if pager.tiered_stopped(attempt) {
+            return Error(Missed)
+        }
+    }
+    Ok(())
+}
+
+pub fn memory_data_charge[Event: inert + shareable + send](tx: TxState[Event], key: Bytes, raw: Bytes) -> u64 {
+    if let Some(_) = tx.attempt {
+        if pager.tiered_data_key(tx.roots.collections, key) {
+            return 0
+        }
+    }
+    entry(key, raw)
+}
+
+// Reserve the stamp interval before a page edit can allocate. The cell keeps
+// the high watermark even if the body exits under a capacity failure; after an
+// overrun's rollback a later reservation may end lower and puts the higher back.
+pub fn reserve_ids[Event: inert + shareable + send](mut tx: TxState[Event], height: u64) -> Result[u64, types.Failure] {
+    let Some(end) = int.checked_add(tx.ids, 6 * height + 2) else {
+        return Error(Limit(Ids))
+    }
+    let high = cell.replace(tx.issued, end)
+    if high > end {
+        let _ = cell.replace(tx.issued, high)
+    }
+    let first = tx.ids + 1
+    tx.ids = end
+    Ok(first)
+}
+
+pub fn note_read[Event: inert + shareable + send](tx: TxState[Event], take seen: Event) -> Result[(), types.Failure] {
+    log.append(tx.reads, take seen)
+    Ok(())
+}
+
+// A Tiered row is resolved before its Point is logged, so the first touch's
+// count precedes the logical append on every path (§13.3).
+pub fn fetch_logical[Event: inert + shareable + send](tx: TxState[Event], take key: Bytes, point_event: fn(take Bytes) -> Event) -> Result[Option[View[Bytes]], types.Failure] in tx {
+    let found = match staged_row(tx, key) {
+        Some(staged) => staged,
+        None => tx_page_row(tx, key)?,
+    }
+    log.append(tx.reads, point_event(take key))
+    Ok(found)
+}
+
+pub scoped type TxViews[Event: inert + shareable + send] {
+    indexes: View[indexes.IndexRegistry],
+    reads: View[core.Log[Event]],
+    issued: View[core.Cell[u64]],
+    observed_info: View[core.Cell[bool]],
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
+}
+
+pub type TxStart {
+    store: types.StoreKey,
+    ids: u64,
+    resident: u64,
+    retain_old: bool,
+    journaled: bool,
+    limits: types.LimitsRep,
+}
+
+pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], base: pages.Roots, bases: pages.TailBases, start: TxStart) -> TxState[Event] in scope {
+    let (frame_bytes, frame_tail) = if start.journaled {
+        (Some(42u64), pages.OPEN_FRAME_TAIL)
+    } else {
+        (None, pages.NO_FRAME_TAIL)
+    }
+    TxState(store: start.store, indexes: scope.indexes, roots: pages.share_roots(base), base_collection: None, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+}
+
+pub fn fork_tx[Event: inert + shareable + send](tx: TxState[Event]) -> TxState[Event] in tx {
+    TxState(store: tx.store, indexes: tx.indexes, roots: pages.share_roots(tx.roots), base_collection: None, bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+}
+
+pub fn tx_roots[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.Roots] in tx {
+    view tx.roots
+}
+
+pub fn tx_bases[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.TailBases] in tx {
+    view tx.bases
+}
+
+pub fn tx_attempt[Event: inert + shareable + send](tx: TxState[Event]) -> View[Option[core.Cell[pager.TieredTouchSet]]] in tx {
+    tx.attempt
+}
+
+pub fn tx_pins[Event: inert + shareable + send](tx: TxState[Event]) -> View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]] in tx {
+    tx.pins
+}
+
+pub fn tx_below[Event: inert + shareable + send](tx: TxState[Event]) -> View[List[Arc[pages.Staged]]] in tx {
+    view tx.below
+}
+
+pub fn tx_ops[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.DataOps] in tx {
+    view tx.ops
+}
+
+pub fn tx_stream_ops[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.DataOps] in tx {
+    view tx.stream_ops
+}
+
+pub fn tx_reads[Event: inert + shareable + send](tx: TxState[Event]) -> View[core.Log[Event]] in tx {
+    tx.reads
+}
+
+pub fn tx_own[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.own
+}
+
+pub fn tx_private_from[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.private_from
+}
+
+pub fn tx_ids[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.ids
+}
+
+pub fn tx_resident[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.resident
+}
+
+pub fn tx_rows[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.rows
+}
+
+pub fn tx_wrote[Event: inert + shareable + send](tx: TxState[Event]) -> bool {
+    tx.wrote
+}
+
+pub fn tx_frame_tail[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.frame_tail
+}
+
+pub fn tx_frame_bytes[Event: inert + shareable + send](tx: TxState[Event]) -> Option[u64] {
+    tx.frame_bytes
+}
+
+pub fn tx_extra_bytes[Event: inert + shareable + send](tx: TxState[Event]) -> u64 {
+    tx.extra_bytes
+}
+
+pub fn tx_limits[Event: inert + shareable + send](tx: TxState[Event]) -> types.LimitsRep {
+    tx.limits
+}
+
+pub fn tx_retain_old[Event: inert + shareable + send](tx: TxState[Event]) -> bool {
+    tx.retain_old
+}
+
+pub fn tx_refusal[Event: inert + shareable + send](tx: TxState[Event]) -> Option[Capacity] {
+    tx.refusal
+}
+
+pub fn tx_index_conflict[Event: inert + shareable + send](tx: TxState[Event]) -> View[Option[IndexStop]] in tx {
+    view tx.index_conflict
+}
+
+pub fn tx_keyed[Event: inert + shareable + send](tx: TxState[Event]) -> View[Option[format.KeyedDraft]] in tx {
+    view tx.keyed
+}
+
+pub fn tx_call[Event: inert + shareable + send](tx: TxState[Event]) -> View[Option[format.CallSection]] in tx {
+    view tx.call
+}
+
+pub fn tx_view_tree[Event: inert + shareable + send](tx: TxState[Event]) -> View[core.Cell[Option[TxView]]] in tx {
+    view tx.view_tree
+}
+
+pub fn tx_issued[Event: inert + shareable + send](tx: TxState[Event]) -> View[core.Cell[u64]] in tx {
+    tx.issued
+}
+
+pub fn tx_observed_info[Event: inert + shareable + send](tx: TxState[Event]) -> View[core.Cell[bool]] in tx {
+    tx.observed_info
+}
+
+pub fn set_tx_refusal[Event: inert + shareable + send](mut tx: TxState[Event], take value: Option[Capacity]) {
+    tx.refusal = take value
+}
+
+pub fn set_tx_keyed[Event: inert + shareable + send](mut tx: TxState[Event], take value: Option[format.KeyedDraft]) {
+    tx.keyed = take value
+}
+
+pub fn take_tx_refusal[Event: inert + shareable + send](mut tx: TxState[Event]) -> Option[Capacity] {
+    replace(mut tx.refusal, None)
+}

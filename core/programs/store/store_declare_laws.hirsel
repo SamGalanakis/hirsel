@@ -512,12 +512,12 @@ fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[()
     let _ = delete(mut tx, items, 2)?
     put(mut tx, items, 4, (3, 4))?
     put(mut tx, items, 1, (1, 2))?
-    let before = (tx.resident, tx.frame_bytes, tx.ids, tx.rows)
+    let before = (txn.tx_resident(tx.inner), txn.tx_frame_bytes(tx.inner), txn.tx_ids(tx.inner), txn.tx_rows(tx.inner))
     match put(mut tx, items, 3, (1, 4)) {
         Error(Conflict(name)) if name == "z_first" => (),
         _ => return Error(MigrationFault),
     }
-    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before {
+    if (txn.tx_resident(tx.inner), txn.tx_frame_bytes(tx.inner), txn.tx_ids(tx.inner), txn.tx_rows(tx.inner)) != before {
         return Error(MigrationFault)
     }
     match delete(mut tx, items, 1) {
@@ -528,7 +528,7 @@ fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[()
         Error(Conflict(name)) if name == "z_first" => (),
         _ => return Error(MigrationFault),
     }
-    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before {
+    if (txn.tx_resident(tx.inner), txn.tx_frame_bytes(tx.inner), txn.tx_ids(tx.inner), txn.tx_rows(tx.inner)) != before {
         return Error(MigrationFault)
     }
     Ok(())
@@ -545,7 +545,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let attempt = pager.call_attempt(pages.tiered_collections(pages.holder_heads(db.holders)[0].roots.collections.root), pager.pin_partition(db.pager), 0)
     let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        tx.frame_bytes = Some(42)
+        txn.set_tx_frame_bytes(mut tx.inner, Some(42))
         put_conflict_sequence(mut tx, items)
     })
     match take staged {
@@ -787,18 +787,18 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         let mut found = 0u64
         let mut target: Bytes = list.new()
         {
-            let mut cursor = byte_cursor(tx.roots.collections, Included(failure_result_from_rep(catalog.prefix(index_id))?), failure_result_from_rep(catalog.prefix(index_id + 1))?)?
+            let mut cursor = byte_cursor(txn.tx_roots(tx.inner).collections, Included(failure_result_from_rep(catalog.prefix(index_id))?), failure_result_from_rep(catalog.prefix(index_id + 1))?)?
             while let Some((row_key, _)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
                 found += 1
                 target = failure_result_from_rep(types.copied(row_key))?
             }
         }
-        let Some(refund) = delete_refund(tx, target)? else {
+        let Some(refund) = failure_result_from_rep(txn.delete_refund(tx.inner, target))? else {
             return Error(Missing("bucket entry"))
         }
-        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes, types.transaction_limit(limits_to_rep(tx.limits)))?
-        apply_delete(mut tx, take target, refund)?
-        tx.frame_bytes = frame
+        let frame = edit_frame(txn.tx_ops(tx.inner), txn.tx_below(tx.inner), txn.tx_extra_bytes(tx.inner), target, None, txn.tx_frame_bytes(tx.inner), types.transaction_limit(txn.tx_limits(tx.inner)))?
+        failure_result_from_rep(txn.apply_delete(mut tx.inner, take target, refund))?
+        txn.set_tx_frame_bytes(mut tx.inner, frame)
         Ok(found)
     })?
     match take cut {

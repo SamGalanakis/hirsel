@@ -21,7 +21,7 @@ fn write_stream_control(mut tx: Tx, control: txn.StreamControl) -> Result[(), Er
             std.codec.put_u64(t, mut raw)
         },
     }
-    stream_write(mut tx, list.new(), take raw, 0u64)
+    failure_result_from_rep(txn.stream_write(mut tx.inner, list.new(), take raw, 0u64))
 }
 
 fn caller_streams(tree: pages.PageTree, caller_prefix: Bytes) -> Result[CallerStreams, Error] {
@@ -57,7 +57,7 @@ fn write_caller_streams(mut tx: Tx, take caller_prefix: Bytes, streams: CallerSt
             std.codec.put_key_u64(id.n, mut raw)
         },
     }
-    stream_write(mut tx, take caller_prefix, take raw, 0u64)
+    failure_result_from_rep(txn.stream_write(mut tx.inner, take caller_prefix, take raw, 0u64))
 }
 
 fn stream_before(a: StreamId, b: StreamId) -> bool {
@@ -73,7 +73,7 @@ type StreamChanges {
 
 fn write_stream_changes(mut tx: Tx, edits: StreamChanges) -> Result[(), Error] {
     for key in edits.deletes {
-        stream_edit(mut tx, failure_result_from_rep(types.copied(key))?, None, 0u64)?
+        failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(key))?, None, 0u64))?
     }
     write_caller_streams(mut tx, failure_result_from_rep(types.copied(edits.caller_prefix))?, edits.caller)?
     write_stream_control(mut tx, edits.control)
@@ -107,7 +107,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
         }
     }
     let existing = match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, key) {
-        Some(raw) => Some(stream_state(raw)?),
+        Some(raw) => Some(failure_result_from_rep(txn.stream_state(raw))?),
         None => None,
     }
     if let Some(state) = existing {
@@ -209,9 +209,9 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
     let no_reply: Option[fn(Error) -> bool] = None
     let settled = store_body_at(mut db, 0u64, at, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
         for key in deletes {
-            stream_edit(mut tx, failure_result_from_rep(types.copied(key))?, None, 0u64)?
+            failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(key))?, None, 0u64))?
         }
-        stream_edit(mut tx, failure_result_from_rep(types.copied(caller_prefix))?, None, 0u64)?
+        failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(caller_prefix))?, None, 0u64))?
         write_stream_control(mut tx, control)
     })?
     match take settled {
@@ -350,13 +350,13 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     let no_reply: Option[fn(Error) -> bool] = None
     let settled = store_body_at(mut db, 0u64, at, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
         for key in deletes {
-            stream_edit(mut tx, failure_result_from_rep(types.copied(key))?, None, 0u64)?
+            failure_result_from_rep(txn.stream_edit(mut tx.inner, failure_result_from_rep(types.copied(key))?, None, 0u64))?
         }
         for edit in edits {
             let key = failure_result_from_rep(types.copied(edit.caller_prefix))?
             match edit.metadata {
                 Some(metadata) => write_caller_streams(mut tx, take key, metadata)?,
-                None => stream_edit(mut tx, take key, None, 0u64)?,
+                None => failure_result_from_rep(txn.stream_edit(mut tx.inner, take key, None, 0u64))?,
             }
         }
         write_stream_control(mut tx, control)
@@ -372,135 +372,8 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     }
 }
 
-fn stream_bytes(p: u64, request: RequestDigest, replied: bool, answer: Bytes) -> Result[Bytes, Error] {
-    let size = if replied {
-        list.len(answer)
-    } else {
-        0u64
-    }
-    let mut value: Bytes = list.with_capacity(41 + size)
-    failure_result_from_rep(types.capacity(format.le(mut value, p, 8)))?
-    for byte in request.b {
-        list.push(mut value, byte)
-    }
-    if replied {
-        failure_result_from_rep(types.capacity(format.le(mut value, 2, 1)))?
-        list.append(mut value, answer)
-    } else {
-        failure_result_from_rep(types.capacity(format.le(mut value, 1, 1)))?
-    }
-    Ok(take value)
-}
-
 fn stored_reply(raw: Bytes) -> Result[Stored, Error] {
     Ok(Stored(reply: failure_result_from_rep(types.copied(list.slice(raw, 41, list.len(raw))))?))
-}
-
-type StreamState {
-    p: u64,
-    digest: RequestDigest,
-    state: u8
-}
-
-fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
-    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let mut b: Inline[u8, 32] =[0u8; 32]
-    for i in 0u64 .. 32 {
-        b[i] = raw[8 + i]
-    }
-    Ok(StreamState(p: format.read_le(raw, 0, 8), digest: RequestDigest(b: b), state: raw[40]))
-}
-
-// One write to the streams tree, charged and sized like a data write.
-fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) -> Result[(), Error] {
-    stream_edit(mut tx, take key, Some(take value), call_size)
-}
-
-fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size: u64) -> Result[(), Error] {
-    if list.len(key) > 4096 {
-        return Error(Limit(Key))
-    }
-    let (charge, payload) = match view value {
-        Some(raw) => {
-            if list.len(raw) > 1048576 {
-                return Error(Limit(Value))
-            }
-            (txn.entry(key, raw), 4u64 + list.len(raw))
-        },
-        None => (0u64, 0u64),
-    }
-    let mut extra = 0u64
-    if let Some(frame_bytes) = tx.frame_bytes {
-        let control_staged = pages.old_data_op_size(tx.stream_ops, tx.below, true, b"") != 0u64
-        let section_is_new = if list.len(key) == 0u64 {
-            !control_staged
-        } else {
-            tx.streams == 0u64 || (tx.streams == 1u64 && control_staged)
-        }
-        let head = if section_is_new {
-            5u64
-        } else {
-            0u64
-        }
-        let data_head = if tx.rows + tx.cell_rows + tx.trim_rows == 0 {
-            5u64
-        } else {
-            0u64
-        }
-        extra = int.saturating_add(tx.extra_bytes - pages.old_data_op_size(tx.stream_ops, tx.below, true, key), head + 5 + list.len(key) + payload + call_size)
-        if int.saturating_add(frame_bytes, extra) - data_head - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
-            return Error(Limit(Transaction))
-        }
-    }
-    // As in apply_put: both retention modes take the same steps.
-    let previous = match transaction_stream(tx, key) {
-        Some(old) => txn.entry(key, old),
-        None => 0
-    }
-    let old_charge = if tx.retain_old {
-        0u64
-    } else {
-        previous
-    }
-    let height = tree_height(tx.roots.streams)
-    let _ = reserve_ids(mut tx, height)?
-    let raw = match take value {
-        Some(take encoded) => Some(pages.stage_value(take encoded, tx.roots.streams.inline)),
-        None => None,
-    }
-    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw, None)
-    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
-    tx.extra_bytes = extra
-    tx.wrote = true
-    Ok(())
-}
-
-fn reply_row(tx: Tx, stream: Bytes, p: u64, output: Bytes) -> Result[(Bytes, Bytes), Error] {
-    // The reply keeps the digest bound at p (AH1).
-    let held = match transaction_stream(tx, stream) {
-        Some(raw) => {
-            let at = stream_state(raw)?
-            if at.p == p && at.state == 1 {
-                Some(at.digest)
-            } else {
-                None
-            }
-        },
-        None => None
-    }
-    let d = match held {
-        Some(d) => d,
-        None => return Error(Missing("reply"))
-    }
-    let value = stream_bytes(p, d, true, output)?
-    Ok((failure_result_from_rep(types.copied(stream))?, take value))
-}
-
-fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
-    let (take key, take value) = reply_row(tx, stream, p, r)?
-    stream_write(mut tx, take key, take value, 0)
 }
 
 pub opaque type Completion {
@@ -550,7 +423,7 @@ pub fn admit_while(mut db: Db, stream: StreamKey, p: u64, d: RequestDigest, prot
     admit_stream(mut db, stream, key, p, d, at, protected)
 }
 
-fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: RequestDigest, state: StreamState, at: u64, age: Option[u64], control: txn.StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
+fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: RequestDigest, state: txn.StreamState, at: u64, age: Option[u64], control: txn.StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
     let latest = state.p
     if p < latest {
         // AH2: one state per stream keeps no digest below latest.
@@ -565,7 +438,7 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
         }
     }
     // AH1: at latest the digest is compared before any other answer.
-    if state.digest != d {
+    if RequestDigest(b: state.digest) != d {
         return Ok(RequestMismatch)
     }
     if state.state == 2 {
@@ -620,8 +493,8 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         if let Some(stream_delta) = edits {
             write_stream_changes(mut tx, stream_delta)?
         }
-        let value = stream_bytes(p, d, false, list.new())?
-        stream_write(mut tx, failure_result_from_rep(types.copied(stream))?, take value, 0)
+        let value = failure_result_from_rep(txn.stream_bytes(p, d.b, false, list.new()))?
+        failure_result_from_rep(txn.stream_write(mut tx.inner, failure_result_from_rep(types.copied(stream))?, take value, 0))
     })?
     let admitted = match take outcome {
         Committed(done) => done.ticket,
@@ -639,24 +512,4 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     } else {
         Admitted(take completion)
     })
-}
-
-// Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
-// F2: the account after only the reply writes `ops`, against the base `streams` tree.
-fn stream_live(db: Db, streams: pages.PageTree, ops: pages.DataOps) -> Result[u64, Capacity] {
-    let retained = retaining(db)
-    let mut live_bytes = db.accounting.resident
-    for slot in 0u64 .. pages.data_row_count(ops.rows) {
-        let operation = pages.data_row(ops.rows, slot)
-        let k = operation.key
-        if let Some(raw) = operation.value {
-            if !retained {
-                if let Some(old) = pages.get_page_row(streams, k) {
-                    live_bytes = int.saturating_sub(live_bytes, txn.entry(k, old))
-                }
-            }
-            live_bytes = int.saturating_add(live_bytes, txn.entry(k, format.staged_bytes(raw)))
-        }
-    }
-    Ok(live_bytes)
 }

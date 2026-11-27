@@ -65,17 +65,17 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // The effect and its reply in one commit.
     let replied = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if !missing_is(reply(mut tx, call_env, 1, list.new()), "reply") {
+        if !missing_is(failure_result_from_rep(txn.reply(mut tx.inner, call_env, 1, list.new())), "reply") {
             return Error(1)
         }
         if let Error(_) = put_bytes(mut tx, 1, types.key_word(1), types.key_word(11)) {
             return Error(2)
         }
-        if let Error(_) = reply(mut tx, call_env, 0, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r0"))))) {
+        if let Error(_) = failure_result_from_rep(txn.reply(mut tx.inner, call_env, 0, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r0")))))) {
             return Error(3)
         }
         // Ruling 2: position 0 is now Replied, so a second reply is refused.
-        if !missing_is(reply(mut tx, call_env, 0, list.new()), "reply") {
+        if !missing_is(failure_result_from_rep(txn.reply(mut tx.inner, call_env, 0, list.new())), "reply") {
             return Error(4)
         }
         Ok(())
@@ -119,12 +119,14 @@ pub fn law_streams(c: Clock) -> bool waits {
         if let Error(_) = put_bytes(mut tx, 1, types.key_word(2), types.key_word(22)) {
             return Error(1)
         }
-        if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r1"))))) {
+        if let Error(_) = failure_result_from_rep(txn.reply(mut tx.inner, call_env, 1, result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("r1")))))) {
             return Error(2)
         }
         // A 113-byte reply frame plus the 5-byte data head and one 33-byte put.
         let ci = info(mut tx)
-        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 151 {
+        if list.len(result.unwrap(txn.test_encode_rows(mut tx.inner, scoped fn(mut rows: pages.DataRows, streams: pages.DataRows, call: Option[format.CallSection]) -> Result[Bytes, Capacity] {
+            encode_sections(ci, mut rows, streams, None, 1, 72)
+        }))) != 151 {
             return Error(3)
         }
         Error(7)
@@ -166,7 +168,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     let faulted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, call_env, 2, list.new()) {
+        if let Error(_) = failure_result_from_rep(txn.reply(mut tx.inner, call_env, 2, list.new())) {
             return Error(1)
         }
         fail("L13 injected fault")
@@ -187,7 +189,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     let ceiling = db.accounting.ceiling
     db.accounting.ceiling = db.accounting.resident - 1
     let over = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, call_env, 2, types.key_word(9)) {
+        if let Error(_) = failure_result_from_rep(txn.reply(mut tx.inner, call_env, 2, types.key_word(9))) {
             return Error(1)
         }
         Ok(())
@@ -197,7 +199,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         _ => return false
     }
     let over_abort = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, call_env, 2, types.key_word(9)) {
+        if let Error(_) = failure_result_from_rep(txn.reply(mut tx.inner, call_env, 2, types.key_word(9))) {
             return Error(1)
         }
         Error(9)
@@ -239,7 +241,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     // Recording checks the admission, revision, and one-CALL-per-frame rule.
     let unadmitted = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
-        if !missing_is(reply(mut tx, string.as_bytes("t"), 0, list.new()), "reply") {
+        if !missing_is(failure_result_from_rep(txn.reply(mut tx.inner, string.as_bytes("t"), 0, list.new())), "reply") {
             return Error(1)
         }
         if !missing_is(reply_recorded(mut tx, 3, list.new(), call_for(call_env, 32)), "reply") {
@@ -281,18 +283,24 @@ pub fn law_streams(c: Clock) -> bool waits {
             return Error(1)
         }
         let ci = info(mut tx)
-        let one = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72)))
+        let one = list.len(result.unwrap(txn.test_encode_rows(mut tx.inner, scoped fn(mut rows: pages.DataRows, streams: pages.DataRows, call: Option[format.CallSection]) -> Result[Bytes, Capacity] {
+            encode_sections(ci, mut rows, streams, None, 1, 72)
+        })))
         if one != 113 {
             return Error(2)
         }
-        let two = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
+        let two = list.len(result.unwrap(txn.test_encode_rows(mut tx.inner, scoped fn(mut rows: pages.DataRows, streams: pages.DataRows, call: Option[format.CallSection]) -> Result[Bytes, Capacity] {
+            encode_sections(ci, mut rows, streams, call, 1, 72)
+        })))
         if two != 258 {
             return Error(4)
         }
         if let Error(_) = put_bytes(mut tx, 1, types.key_word(4), types.key_word(44)) {
             return Error(5)
         }
-        let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
+        let three = list.len(result.unwrap(txn.test_encode_rows(mut tx.inner, scoped fn(mut rows: pages.DataRows, streams: pages.DataRows, call: Option[format.CallSection]) -> Result[Bytes, Capacity] {
+            encode_sections(ci, mut rows, streams, call, 1, 72)
+        })))
         if three != 296 {
             return Error(6)
         }
@@ -381,7 +389,7 @@ fn stream_quota_preserves_eviction_floor(c: Clock) -> Result[(), u64] waits {
     }
     let raw = result.unwrap(stream_key_bytes(first))
     let committed = result.unwrap(run(mut db, None, raw, fn(mut tx, key) -> Result[(), Error] {
-        reply(mut tx, key, 0u64, clone(b"result"))
+        failure_result_from_rep(txn.reply(mut tx.inner, key, 0u64, clone(b"result")))
     }))
     if let Committed(_) = committed {} else {
         return Error(4u64)
@@ -413,7 +421,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let same_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 21)?;
-        Ok(pages.data_row_count(tx.ops.rows))
+        Ok(pages.data_row_count(txn.tx_ops(tx.inner).rows))
     }))
     match take same_j {
         Committed(done) => if done.value != 1 {
@@ -423,7 +431,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let changed_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 22)?;
-        Ok(pages.data_row_count(tx.ops.rows))
+        Ok(pages.data_row_count(txn.tx_ops(tx.inner).rows))
     }))
     match take changed_j {
         Committed(done) => done.value == 7,

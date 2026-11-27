@@ -185,3 +185,97 @@ pub fn settlement_cut(accounting: AccountingState, tiered: Option[u64], has_fram
         PreCut
     }
 }
+
+// A successful body or an application error with a reply to commit.
+pub type Prepared[R, A] {
+    outcome: Result[R, A],
+    roots: pages.Roots,
+    tiered: Option[u64],
+    plan: Option[pager.TieredWritePlan],
+    live: u64,
+    frame: Option[Bytes],
+    ops: pages.DataRows,
+    order: format.DataOrder,
+    base_stamp: u64,
+    frame_tail: u64,
+    stream_ops: pages.DataRows,
+    keyed: Option[format.KeyedDraft],
+    first_stamp: u64,
+    prepared_roots: bool,
+    observed_info: bool,
+    skipped: bool,
+    call: Option[format.CallSection]
+}
+
+pub type BodyDraft[R, A] = BodyPrepared(Prepared[R, A]) | OutOfRoom(types.CapacityRep) | BodyAborted(A) | DuplicateIndex(String) | BodyDrifted(String, List[(u32, u32)])
+
+pub fn finish_body[Event: inert + shareable + send, R, A](take state: TxState[Event], take outcome: Result[R, A], keep_reply: Option[fn(A) -> bool], base: pages.Roots, resident: u64, tiered_bytes: u64, tiered: bool, observed: core.Cell[bool]) -> BodyDraft[R, A] {
+    let mut tx = take state
+    if tx.own != 0 {
+        fold_own(mut tx)
+    }
+    if let Some(c) = tx.refusal {
+        return OutOfRoom(Allocation(c))
+    }
+    // A proven-wrong index fails the call however the body ended (§I.3).
+    if let Some((take name, take evidence)) = take_drift(mut tx) {
+        return BodyDrifted(take name, take evidence)
+    }
+    let value: Result[R, A] = match take outcome {
+        Ok(take v) => {
+            if let Some(Duplicate(take name)) = replace(mut tx.index_conflict, None) {
+                return DuplicateIndex(take name)
+            }
+            Ok(take v)
+        },
+        Error(take a) => {
+            let keep = match keep_reply {
+                Some(decide) => decide(a),
+                None => true
+            }
+            let keyed_reply = match tx.keyed {
+                Some(_) => true,
+                None => false
+            }
+            if !keep || (pages.data_row_count(tx.stream_ops.rows) == 0 && !keyed_reply) {
+                return BodyAborted(take a)
+            }
+            // F2 keeps the streams and CALL writes with the old data roots.
+            let live_bytes = match stream_live(resident, tx.retain_old, base.streams, tx.stream_ops) {
+                Ok(n) => n,
+                Error(c) => return OutOfRoom(Allocation(c))
+            }
+            tx.resident = live_bytes
+            tx.roots.collections = pages.share_page_tree(base.collections)
+            tx.roots.catalog = pages.share_page_tree(base.catalog)
+            tx.ops = pages.empty_ops()
+            tx.rows = 0
+            tx.frame_tail = pages.NO_FRAME_TAIL
+            Error(take a)
+        }
+    }
+    let mut first_stamp = tx.private_from
+    let mut rows = match seal_log_trims(mut tx, mut first_stamp) {
+        Ok(take operations) => take operations,
+        Error(Full(problem)) => return OutOfRoom(problem),
+        Error(_) => fail("store: invalid staged Log trim"),
+    }
+    if let Some(keyed) = tx.keyed {
+        tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
+    }
+    let TxState(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
+    let saw_info = cell.replace(observed, false)
+    let pages.DataOps(cells: take cells, ..) = take ops
+    seal_cell_edits(mut rows, cells)
+    let order = match pages.data_order(rows) {
+        Ok(take sorted) => take sorted,
+        Error(problem) => return OutOfRoom(Allocation(problem)),
+    }
+    let pages.DataOps(rows: take stream_rows, ..) = take stream_ops
+    let tiered_total = if tiered {
+        Some(tiered_bytes)
+    } else {
+        None
+    }
+    BodyPrepared(Prepared(outcome: take value, roots: take roots, tiered: tiered_total, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: pages.tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
+}

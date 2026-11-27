@@ -195,47 +195,6 @@ fn stopped_pending(take pending_run: Pending, take stop: Stop) -> Served {
     Failed(take pending, take stop)
 }
 
-fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
-    let tree = view tx.roots.collections
-    if list.len(key) < 4 {
-        return Ok(None)
-    }
-    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
-        return Ok(None)
-    }
-    let fields = pages.collection_descriptor(descriptor)
-    if fields.residency != ResidentTiered {
-        return Ok(pages.get_page_row(tree, key))
-    }
-    if fields.kind == LogCollection {
-        if list.len(key) != 12 {
-            return Ok(None)
-        }
-        let sequence: u64 = list.word_be(key, 4)
-        let window = pager.descriptor_bounds(descriptor)
-        if sequence < window.first || sequence >= window.next {
-            return Ok(None)
-        }
-    }
-    if let Some(row) = pager.tiered_replayed_row(tree, key) {
-        return Ok(match row.now {
-            ReplayPut(value) => Some(view value),
-            ReplayAbsent => None,
-        })
-    }
-    // The call made its attempt record because its head has this collection.
-    let Some(attempt) = tx.attempt else {
-        fail("store: a Tiered row read without an attempt record")
-    }
-    let inner = list.slice(key, 4, list.len(key))
-    pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(inner))?))
-    pager.tiered_reading(attempt, ValuesAt)
-    let backing = pager.TieredBorrowedRoot(edge: edge, pins: tx.pins)
-    let found = pager.tiered_point_bytes(attempt, backing, inner) ?=> failure_from_rep
-    pager.tiered_seek(attempt, SeekOperation)
-    Ok(found)
-}
-
 pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
     read_access(r, s)?
     let tiered = captured_tiered(s.roots.collections, s.bases, s.branch)
@@ -284,7 +243,9 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = indexes.empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: pages.share_roots(s.roots), base_collection: None, bases: pages.share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: pages.NO_FRAME_TAIL, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+            let scope = txn.TxViews(indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+            let start = txn.TxStart(store: types.StoreKey(hi: s.store.hi, lo: s.store.lo), ids: 0, resident: 0, retain_old: false, journaled: false, limits: types.default_limits())
+            let tx = Tx(inner: txn.begin_tx(scope, s.roots, s.bases, start), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
             body(tx, env)
         }
         match steps {
@@ -305,5 +266,29 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
         },
         Ok(Ok(Error(e))) => Stopped(e, take seen),
         Ok(Ok(Ok(take value))) => Seen(Seen(value: take value, version: s.head, reads: take seen))
+    }
+}
+
+fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+    let observed_info: core.Cell[bool] = cell.new(false)
+    let scope = txn.TxViews(indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+    let start = txn.TxStart(store: types.StoreKey(hi: db.store.hi, lo: db.store.lo), ids: pages.holder_next_node(db.holders), resident: db.accounting.resident, retain_old: retaining(db), journaled: if let Some(_) = db.disk {
+        true
+    } else {
+        false
+    }, limits: types.LimitsRep(frame: db.limits.frame, value: db.limits.value, meta: db.limits.meta))
+    let mut tx = Tx(inner: txn.begin_tx(scope, base, pages.holder_bases(db.holders), start), info: ci)
+    let outcome = body(mut tx)
+    let Tx(inner: take state, ..) = take tx
+    match txn.finish_body(take state, take outcome, keep_reply, base, db.accounting.resident, db.accounting.tiered, if let Some(_) = attempt {
+        true
+    } else {
+        false
+    }, observed_info) {
+        BodyPrepared(take prepared) => Prepared(take prepared),
+        OutOfRoom(problem) => RolledBack(Refused(capacity_from_rep(problem))),
+        BodyAborted(take value) => RolledBack(Aborted(Undone(value: take value, ticket: None))),
+        DuplicateIndex(take name) => RolledBack(Failed(Conflict(take name))),
+        BodyDrifted(take name, take evidence) => Drifted(take name, take evidence),
     }
 }

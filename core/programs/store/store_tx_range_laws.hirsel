@@ -308,7 +308,7 @@ fn ascending_draft_slots() -> Result[(), Error] {
     let mut next_slot = 0u64
     for i in 0u64 .. 999 {
         let key = failure_result_from_rep(catalog.logical_key(1, types.key_word(i + 2)))?
-        let _ = save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
+        let _ = txn.save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
         if i == 7 || i == 8 || i == 998 {
             if map.len(ops.slots) != 0 || !pages.rows_ascending(ops.rows) {
                 return Error(Missing("ascending draft allocated a slot map"))
@@ -324,7 +324,7 @@ fn ascending_draft_slots() -> Result[(), Error] {
     // The row list already has room. The map needs one 1,024-entry backing
     // and a rounded 16-byte key copy for each of the 1,000 rows.
     let promoted = bound bytes 65152 {
-        let _ = save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
+        let _ = txn.save_data_op(mut ops, below, false, mut next_slot, take key, None, None)
     }
     if let Error(problem) = promoted {
         return failure_result_from_rep(types.capacity(Error(problem)))

@@ -100,7 +100,7 @@ pub fn law_frame_size(c: Clock) -> bool {
         if operation % 5 == 0 {
             if model[k].present {
                 size = result.unwrap(edit_frame(ops, below, 0, physical, None, size, 16777280))
-                let _ = save_data_op(mut ops, below, false, mut rows, take physical, None, None)
+                let _ = txn.save_data_op(mut ops, below, false, mut rows, take physical, None, None)
                 model[k].present = false
                 model[k].op = 2
                 model[k].size = 0
@@ -114,7 +114,7 @@ pub fn law_frame_size(c: Clock) -> bool {
             let mut value: Bytes = list.with_capacity(width)
             list.fill(mut value, width, int.truncate(operation))
             size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size, 16777280))
-            let _ = save_data_op(mut ops, below, false, mut rows, take physical, Some(PageValue(take value)), None)
+            let _ = txn.save_data_op(mut ops, below, false, mut rows, take physical, Some(PageValue(take value)), None)
             model[k].present = true
             model[k].op = 1
             model[k].size = width

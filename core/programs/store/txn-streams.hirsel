@@ -65,3 +65,168 @@ pub fn stream_prefix_end(caller_prefix: Bytes) -> Option[Bytes] {
     }
     None
 }
+
+pub fn transaction_stream[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Option[View[Bytes]] in tx {
+    if let Some(slot) = pages.op_slot(tx.stream_ops, key) {
+        return match pages.data_row(tx.stream_ops.rows, slot).value {
+            Some(raw) => Some(format.staged_bytes(raw)),
+            None => None,
+        }
+    }
+    if let Some(at) = newest_layer(tx.below, true, key) {
+        let layer = view tx.below[at]
+        if let Some(slot) = pages.op_slot(layer.stream_ops, key) {
+            return match pages.data_row(layer.stream_ops.rows, slot).value {
+                Some(raw) => Some(format.staged_bytes(raw)),
+                None => None,
+            }
+        }
+    }
+    pages.get_page_row(tx.roots.streams, key)
+}
+
+// One write to the streams tree, charged and sized like a data write.
+pub fn stream_write[Event: inert + shareable + send](mut tx: TxState[Event], take key: Bytes, take value: Bytes, call_size: u64) -> Result[(), types.Failure] {
+    stream_edit(mut tx, take key, Some(take value), call_size)
+}
+
+pub fn stream_edit[Event: inert + shareable + send](mut tx: TxState[Event], take key: Bytes, take value: Option[Bytes], call_size: u64) -> Result[(), types.Failure] {
+    if list.len(key) > 4096 {
+        return Error(Limit(Key))
+    }
+    let (charge, payload) = match view value {
+        Some(raw) => {
+            if list.len(raw) > 1048576 {
+                return Error(Limit(Value))
+            }
+            (entry(key, raw), 4u64 + list.len(raw))
+        },
+        None => (0u64, 0u64),
+    }
+    let mut extra = 0u64
+    if let Some(frame_bytes) = tx.frame_bytes {
+        let control_staged = pages.old_data_op_size(tx.stream_ops, tx.below, true, b"") != 0u64
+        let section_is_new = if list.len(key) == 0u64 {
+            !control_staged
+        } else {
+            tx.streams == 0u64 || (tx.streams == 1u64 && control_staged)
+        }
+        let head = if section_is_new {
+            5u64
+        } else {
+            0u64
+        }
+        let data_head = if tx.rows + tx.cell_rows + tx.trim_rows == 0 {
+            5u64
+        } else {
+            0u64
+        }
+        extra = int.saturating_add(tx.extra_bytes - pages.old_data_op_size(tx.stream_ops, tx.below, true, key), head + 5 + list.len(key) + payload + call_size)
+        if int.saturating_add(frame_bytes, extra) - data_head - 16 > types.transaction_limit(tx.limits) {
+            return Error(Limit(Transaction))
+        }
+    }
+    // As in apply_put: both retention modes take the same steps.
+    let previous = match transaction_stream(tx, key) {
+        Some(old) => entry(key, old),
+        None => 0
+    }
+    let old_charge = if tx.retain_old {
+        0u64
+    } else {
+        previous
+    }
+    let height = tree_height(tx.roots.streams)
+    let _ = reserve_ids(mut tx, height)?
+    let raw = match take value {
+        Some(take encoded) => Some(pages.stage_value(take encoded, tx.roots.streams.inline)),
+        None => None,
+    }
+    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw, None)
+    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
+    tx.extra_bytes = extra
+    tx.wrote = true
+    Ok(())
+}
+
+pub fn reply_row[Event: inert + shareable + send](tx: TxState[Event], stream: Bytes, p: u64, output: Bytes) -> Result[(Bytes, Bytes), types.Failure] {
+    // The reply keeps the digest bound at p (AH1).
+    let held = match transaction_stream(tx, stream) {
+        Some(raw) => {
+            let at = stream_state(raw)?
+            if at.p == p && at.state == 1 {
+                Some(at.digest)
+            } else {
+                None
+            }
+        },
+        None => None
+    }
+    let d = match held {
+        Some(d) => d,
+        None => return Error(Missing("reply"))
+    }
+    let value = stream_bytes(p, d, true, output)?
+    Ok((types.copied(stream)?, take value))
+}
+
+pub fn reply[Event: inert + shareable + send](mut tx: TxState[Event], stream: Bytes, p: u64, take r: Bytes) -> Result[(), types.Failure] {
+    let (take key, take value) = reply_row(tx, stream, p, r)?
+    stream_write(mut tx, take key, take value, 0)
+}
+
+// Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
+// F2: the account after only the reply writes `ops`, against the base `streams` tree.
+fn stream_live(resident: u64, retained: bool, streams: pages.PageTree, ops: pages.DataOps) -> Result[u64, Capacity] {
+    let mut live_bytes = resident
+    for slot in 0u64 .. pages.data_row_count(ops.rows) {
+        let operation = pages.data_row(ops.rows, slot)
+        let k = operation.key
+        if let Some(raw) = operation.value {
+            if !retained {
+                if let Some(old) = pages.get_page_row(streams, k) {
+                    live_bytes = int.saturating_sub(live_bytes, entry(k, old))
+                }
+            }
+            live_bytes = int.saturating_add(live_bytes, entry(k, format.staged_bytes(raw)))
+        }
+    }
+    Ok(live_bytes)
+}
+
+pub type StreamState {
+    p: u64,
+    digest: Inline[u8, 32],
+    state: u8
+}
+
+pub fn stream_state(raw: Bytes) -> Result[StreamState, types.Failure] {
+    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
+        return Error(pages.malformed(0))
+    }
+    let mut b: Inline[u8, 32] =[0u8; 32]
+    for i in 0u64 .. 32 {
+        b[i] = raw[8 + i]
+    }
+    Ok(StreamState(p: format.read_le(raw, 0, 8), digest: b, state: raw[40]))
+}
+
+pub fn stream_bytes(p: u64, request: Inline[u8, 32], replied: bool, answer: Bytes) -> Result[Bytes, types.Failure] {
+    let size = if replied {
+        list.len(answer)
+    } else {
+        0u64
+    }
+    let mut value: Bytes = list.with_capacity(41 + size)
+    types.capacity(format.le(mut value, p, 8))?
+    for byte in request {
+        list.push(mut value, byte)
+    }
+    if replied {
+        types.capacity(format.le(mut value, 2, 1))?
+        list.append(mut value, answer)
+    } else {
+        types.capacity(format.le(mut value, 1, 1))?
+    }
+    Ok(take value)
+}

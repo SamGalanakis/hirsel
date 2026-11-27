@@ -154,32 +154,32 @@ fn claim_terminal_credit(ceiling: u64, policy: KeyedPolicy, admitted_width: u64)
 
 fn stage_claim_admit(mut tx: Tx, address: txn.ClaimAddress, d: RequestDigest, args: Bytes, policy: KeyedPolicy, credit: format.KeyedCredit) -> Result[(), Error] {
     let mut edits: List[format.KeyedEdit] = list.new()
-    if let Some(raw) = pages.keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
+    if let Some(raw) = pages.keyed_lookup(txn.tx_roots(tx.inner).keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
-        failure_result_from_rep(txn.forget_claim(tx.roots, mut edits, address.full, row.expiry))?
+        failure_result_from_rep(txn.forget_claim(txn.tx_roots(tx.inner), mut edits, address.full, row.expiry))?
     }
-    if txn.claim_count_after(tx.roots, edits, txn.CLAIM_PCOUNT, address.principal) >= policy.principal_keys_max {
-        failure_result_from_rep(txn.reclaim_claim_scope(tx.roots, mut edits, txn.CLAIM_PEXP, address.principal, tx.info.at))?
+    if txn.claim_count_after(txn.tx_roots(tx.inner), edits, txn.CLAIM_PCOUNT, address.principal) >= policy.principal_keys_max {
+        failure_result_from_rep(txn.reclaim_claim_scope(txn.tx_roots(tx.inner), mut edits, txn.CLAIM_PEXP, address.principal, tx.info.at))?
     }
-    if txn.claim_count_after(tx.roots, edits, txn.CLAIM_COUNT, address.op) >= policy.keys_max {
-        failure_result_from_rep(txn.reclaim_claim_scope(tx.roots, mut edits, txn.CLAIM_EXP, address.op, tx.info.at))?
+    if txn.claim_count_after(txn.tx_roots(tx.inner), edits, txn.CLAIM_COUNT, address.op) >= policy.keys_max {
+        failure_result_from_rep(txn.reclaim_claim_scope(txn.tx_roots(tx.inner), mut edits, txn.CLAIM_EXP, address.op, tx.info.at))?
     }
-    let op_count = txn.claim_count_after(tx.roots, edits, txn.CLAIM_COUNT, address.op)
-    let principal_count = txn.claim_count_after(tx.roots, edits, txn.CLAIM_PCOUNT, address.principal)
+    let op_count = txn.claim_count_after(txn.tx_roots(tx.inner), edits, txn.CLAIM_COUNT, address.op)
+    let principal_count = txn.claim_count_after(txn.tx_roots(tx.inner), edits, txn.CLAIM_PCOUNT, address.principal)
     if principal_count >= policy.principal_keys_max {
         return Error(Full(Resident(Capacity(requested: principal_count + 1, available: policy.principal_keys_max))))
     }
     if op_count >= policy.keys_max {
         return Error(Full(Resident(Capacity(requested: op_count + 1, available: policy.keys_max))))
     }
-    if let None = pages.keyed_lookup(tx.roots.keyed, txn.KEYED_OPS, address.op) {
+    if let None = pages.keyed_lookup(txn.tx_roots(tx.inner).keyed, txn.KEYED_OPS, address.op) {
         failure_result_from_rep(txn.append_claim_edit(mut edits, txn.KEYED_OPS, address.op, Some(keyed_policy_bytes(policy)?)))?
     }
     failure_result_from_rep(txn.append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args))))?
     failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_OPEN, address.full, Some(list.new())))?
     failure_result_from_rep(txn.set_claim_count(mut edits, txn.CLAIM_COUNT, address.op, op_count + 1))?
     failure_result_from_rep(txn.set_claim_count(mut edits, txn.CLAIM_PCOUNT, address.principal, principal_count + 1))?
-    tx.keyed = Some(format.KeyedDraft(edits: take edits, after: credit))
+    txn.set_tx_keyed(mut tx.inner, Some(format.KeyedDraft(edits: take edits, after: credit)))
     Ok(())
 }
 
@@ -252,7 +252,7 @@ fn stage_claim_reply(mut tx: Tx, key: Bytes, digest: RequestDigest, retention_ms
     failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_EXP, failure_result_from_rep(txn.claim_index_key(list.slice(key, 0, op_end), expiry, key))?, Some(list.new())))?
     failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_PEXP, failure_result_from_rep(txn.claim_index_key(list.slice(key, 0, principal_end), expiry, key))?, Some(list.new())))?
     failure_result_from_rep(txn.append_claim_edit(mut edits, txn.CLAIM_OPEN, key, None))?
-    tx.keyed = Some(format.KeyedDraft(edits: take edits, after: credit))
+    txn.set_tx_keyed(mut tx.inner, Some(format.KeyedDraft(edits: take edits, after: credit)))
     Ok(())
 }
 

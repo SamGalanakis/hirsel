@@ -248,7 +248,7 @@ pub fn sweep_claims(mut db: Db, mut cursor: ClaimSweep, bound_op: scoped[view] f
         let keep: Option[fn(Error) -> bool] = None
         let held = db.call_streams.keyed_credit
         let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
-            tx.keyed = Some(format.KeyedDraft(edits: clone(edits), after: held))
+            txn.set_tx_keyed(mut tx.inner, Some(format.KeyedDraft(edits: clone(edits), after: held)))
             Ok(())
         })?
         match take outcome {

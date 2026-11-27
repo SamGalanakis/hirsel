@@ -81,7 +81,7 @@ fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: M
                 },
             }
             part += 1
-            let _ = save_data_op(mut operations, no_layers, false, mut row_count, take key, Some(pages.stage_value(take value, tree.inline)), None)
+            let _ = txn.save_data_op(mut operations, no_layers, false, mut row_count, take key, Some(pages.stage_value(take value, tree.inline)), None)
         }
     }
     let order = failure_result_from_rep(types.capacity(pages.data_order(operations.rows)))?

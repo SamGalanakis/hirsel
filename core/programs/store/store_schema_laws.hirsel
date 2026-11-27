@@ -752,20 +752,20 @@ fn reject_999(_k: u64, v: u64) -> Result[List[u64], Capacity] {
 }
 
 fn write_state(tx: Tx) -> (u64, u64, u64, Option[u64], u64, bool) {
-    let node = pages.tree_stamp(tx.roots.collections)
-    (node, tx.ids, tx.resident, tx.frame_bytes, tx.rows, tx.wrote)
+    let node = pages.tree_stamp(txn.tx_roots(tx.inner).collections)
+    (node, txn.tx_ids(tx.inner), txn.tx_resident(tx.inner), txn.tx_frame_bytes(tx.inner), txn.tx_rows(tx.inner), txn.tx_wrote(tx.inner))
 }
 
 fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_limit: bool) -> bool waits {
     let watermark = pages.holder_next_node(db.holders)
     let out = result.unwrap(run(mut db, None, (copy_env(frame_limit), copy_env(t), copy_env(value)), fn(mut tx, call_env) -> Result[bool, Error] {
-        let previous_extra = tx.extra_bytes
-        let previous_frame = tx.frame_bytes
+        let previous_extra = txn.tx_extra_bytes(tx.inner)
+        let previous_frame = txn.tx_frame_bytes(tx.inner)
         if call_env.0 {
-            tx.frame_bytes = Some(42u64)
+            txn.set_tx_frame_bytes(mut tx.inner, Some(42u64))
             // U1: header42 + primary35 + two (delete29 + put33) + delete29.
             // The last index put is the only edit that exceeds this allowance.
-            tx.extra_bytes = 16777280 - (42 + 35 + 2 * (29 + 33) + 29 - 16)
+            txn.set_tx_extra_bytes(mut tx.inner, 16777280 - (42 + 35 + 2 * (29 + 33) + 29 - 16))
         }
         let prior = write_state(tx)
         let rejected = match put(mut tx, call_env.1, 1, call_env.2) {
@@ -774,8 +774,8 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
             _ => false
         }
         let unchanged = write_state(tx) == prior
-        tx.extra_bytes = previous_extra
-        tx.frame_bytes = previous_frame
+        txn.set_tx_extra_bytes(mut tx.inner, previous_extra)
+        txn.set_tx_frame_bytes(mut tx.inner, previous_frame)
         Ok(rejected && unchanged && fetch(tx, call_env.1, 1)? == Some(99u64))
     }))
     match take out {

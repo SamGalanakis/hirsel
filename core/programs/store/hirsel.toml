@@ -7,6 +7,8 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"txn-indexes.hirsel" = "txn"
+"txn-tiered-read.hirsel" = "txn"
 "txn-reexec.hirsel" = "txn"
 "txn-state.hirsel" = "txn"
 "txn-log.hirsel" = "txn"
@@ -266,6 +268,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"txn-white-box.hirsel" = "txn"
 "object_writer_law_helpers.hirsel" = "object_writer"
 "history-white-box.hirsel" = "history"
 "tiered_lineage_laws_white_box.hirsel" = "manifest"

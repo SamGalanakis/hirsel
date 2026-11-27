@@ -645,34 +645,11 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
     Ok(())
 }
 
-// A Unique key two rows claim, or an index a remove proved wrong (§I.3).
-type IndexStop: send = Duplicate(String) | Drifted(String)
-
-fn index_stop_error(stop: IndexStop) -> Result[Error, Error] {
+fn index_stop_error(stop: txn.IndexStop) -> Result[Error, Error] {
     match stop {
         Duplicate(name) => Ok(Conflict(failure_result_from_rep(catalog.named(name))?)),
         Drifted(name) => Ok(Drift(failure_result_from_rep(catalog.named(name))?)),
     }
-}
-
-// The drift that fails a transaction, with the (table, index) pairs its
-// removes proved wrong, or None when no remove did. A Duplicate stays.
-fn take_drift(mut tx: Tx) -> Option[(String, List[(u32, u32)])] {
-    let drifted = match tx.index_conflict {
-        Some(Drifted(_)) => true,
-        _ => false,
-    }
-    if !drifted {
-        return None
-    }
-    let Some(Drifted(take name)) = replace(mut tx.index_conflict, None) else {
-        return None
-    }
-    let evidence = match replace(mut tx.drift, None) {
-        Some(take seen) => take seen,
-        None => list.new(),
-    }
-    Some((take name, take evidence))
 }
 
 // Bytes [at, at + 8) of `key` as a big-endian word, zero past its end: two

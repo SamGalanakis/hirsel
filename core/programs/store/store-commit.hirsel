@@ -175,7 +175,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
             if map.contains(db.call_streams.admits, drafted_reply.key) {
                 let settled = match drafted_reply.value {
                     None => true,
-                    Some(raw) => result.unwrap(stream_state(format.staged_bytes(raw))).state == 2u8,
+                    Some(raw) => result.unwrap(txn.stream_state(format.staged_bytes(raw))).state == 2u8,
                 }
                 if settled {
                     let _ = map.remove(mut db.call_streams.admits, drafted_reply.key)
@@ -249,7 +249,7 @@ fn keyed_draft_empty(db: Db, keyed: Option[format.KeyedDraft]) -> bool {
     }
 }
 
-fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], settlement: Option[format.Settlement], prepared: Prepared[R, A]) -> bool {
+fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], settlement: Option[format.Settlement], prepared: txn.Prepared[R, A]) -> bool {
     if force_frame || prepared.observed_info {
         return false
     }

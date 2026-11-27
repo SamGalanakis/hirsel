@@ -1,18 +1,3 @@
-// Tx reads of Tiered collections (§13.3; v2.59 #13: Tx cursors step through
-// the attempt). A range steps one row at a time: the nearest staged row
-// caps the search below it, which reads the replay overlay over the Cold
-// tree through the call's attempt. Staged rows of Tiered collections are not
-// materialized into the Tx's page tree; Log appends are read through the
-// Log tail.
-// A Tx cursor over one Tiered collection. `from` and `to` bound the rows
-// the cursor has not returned.
-type TxTieredRows {
-    collection: u32,
-    staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]],
-    from: Bytes,
-    to: Bytes
-}
-
 // What an index cursor needs to read Tiered primaries without its Tx.
 pub opaque scoped type TxIndexTiered {
     attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
@@ -20,101 +5,11 @@ pub opaque scoped type TxIndexTiered {
     staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]
 }
 
-fn tx_tiered_descriptor(tx: Tx, collection: u32) -> Result[bool, Error] {
-    if let None = tx.attempt {
-        return Ok(false)
-    }
-    let Some(descriptor) = std.page.lookup(tx.roots.collections.root, failure_result_from_rep(catalog.prefix(collection))?) else {
-        return Ok(false)
-    }
-    Ok(pages.collection_descriptor(descriptor).residency == ResidentTiered)
-}
-
-fn tx_tiered_rows(tx: Tx, collection: u32, low: Bytes, high: Bytes, staged: bool) -> Result[Option[TxTieredRows], Error] {
-    if !tx_tiered_descriptor(tx, collection)? {
-        return Ok(None)
-    }
-    let rows = if staged {
-        tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
-    } else {
-        std.omap.new()
-    }
-    Ok(Some(TxTieredRows(collection: collection, staged: take rows, from: failure_result_from_rep(types.copied(low))?, to: failure_result_from_rep(types.copied(high))?)))
-}
-
 fn tx_index_tiered(tx: Tx) -> Result[Option[TxIndexTiered], Error] in tx {
-    if let None = tx.attempt {
+    if let None = txn.tx_attempt(tx.inner) {
         return Ok(None)
     }
-    Ok(Some(TxIndexTiered(attempt: tx.attempt, pins: tx.pins, staged: tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, None)?)))
-}
-
-// The rows of a Tiered table in [low, high): the committed count by rank
-// difference over the replay overlay, then each staged op's change.
-fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u64, Error] {
-    let tree = view tx.roots.collections
-    let id = failure_result_from_rep(catalog.prefix(collection))?
-    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) else {
-        return Error(Stale(collection))
-    }
-    let Some(attempt) = tx.attempt else {
-        fail("store: a Tiered Tx read without an attempt record")
-    }
-    tx_tiered_stopped(attempt)?
-    // An empty range counts no row, as count_at and a Memory table's count
-    // do; its two ranks would otherwise subtract below zero.
-    if high <= low {
-        return Ok(0u64)
-    }
-    let overlay = match tree.replay {
-        Some(replay) => std.omap.get(replay.collections, collection),
-        None => None,
-    }
-    let start = list.slice(low, 4, list.len(low))
-    let end = list.slice(high, 4, list.len(high))
-    let before = if low == id {
-        0u64
-    } else {
-        pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(start))?))
-        let rank = failure_result_from_rep(pager.tiered_page_rank(attempt, tx.pins, edge, None, start))?
-        pager.tiered_seek(attempt, SeekOperation)
-        rank
-    }
-    let committed = if list.slice(high, 0, 4) != id {
-        let omitted = failure_result_from_rep(pager.tiered_count_overlay(overlay, id, low, before))?
-        let rows: u64 = pages.collection_descriptor(descriptor).rows
-        let Some(total) = int.checked_sub(rows, omitted) else {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        total
-    } else {
-        pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(end))?))
-        let through = failure_result_from_rep(pager.tiered_page_rank(attempt, tx.pins, edge, None, end))?
-        pager.tiered_seek(attempt, SeekOperation)
-        let Some(base_count) = int.checked_sub(through, before) else {
-            return Error(failure_from_rep(pages.malformed(0)))
-        }
-        failure_result_from_rep(pager.tiered_count_overlay(overlay, low, high, base_count))?
-    }
-    let staged = tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
-    let mut total = committed
-    let mut cursor = std.omap.range(staged, Included(failure_result_from_rep(types.copied(low))?), Excluded(failure_result_from_rep(types.copied(high))?))
-    while let Some((key, value)) = std.omap.next(mut cursor) {
-        let had = match tx_page_row(tx, key)? {
-            Some(_) => true,
-            None => false,
-        }
-        let has = match value {
-            Some(_) => true,
-            None => false,
-        }
-        if had && !has {
-            total -= 1
-        } else if has && !had {
-            total += 1
-        }
-    }
-    Ok(total)
+    Ok(Some(TxIndexTiered(attempt: txn.tx_attempt(tx.inner), pins: txn.tx_pins(tx.inner), staged: tx_tiered_staged(txn.tx_roots(tx.inner).collections, txn.tx_below(tx.inner), txn.tx_ops(tx.inner), None)?)))
 }
 
 // An index row's primary when its table is Tiered: the staged op, else the
@@ -155,7 +50,7 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: p
 pub fn fetch_many[K, V](tx: Tx, t: Table[K, V], keys: List[K]) -> Result[List[Option[V]], Error] {
     let mut rows: List[Option[V]] = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut rows, list.len(keys))))?
-    let Some(attempt) = tx.attempt else {
+    let Some(attempt) = txn.tx_attempt(tx.inner) else {
         for k in keys {
             list.push(mut rows, fetch(tx, t, k)?)
         }

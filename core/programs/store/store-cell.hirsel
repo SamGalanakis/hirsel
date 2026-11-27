@@ -106,25 +106,10 @@ fn readable_value[V](store_id: StoreId, roots: pages.Roots, schema_binding: Valu
     failure_result_from_rep(catalog.readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id))
 }
 
-fn cell_edit(tx: Tx, id: u32) -> Option[View[pages.CellEdit]] in tx {
-    if let Some(edit) = map.get(tx.ops.cells, id) {
-        return Some(edit)
-    }
-    txn.lower_cell_edit(tx.below, id)
-}
-
-fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
-    match cell_edit(tx, id) {
-        Some(CellPut(value)) => Some(format.staged_bytes(value)),
-        Some(CellDelete) => None,
-        _ => txn.cell_page_row(tx.roots.collections, key),
-    }
-}
-
 pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
-    readable_value(tx.store, tx.roots, c.binding)?
-    note_read(tx, Point(failure_result_from_rep(types.copied(c.key))?))?
-    let value = match cell_current(tx, c.binding.id, c.key) {
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), c.binding)?
+    failure_result_from_rep(txn.note_read(tx.inner, Point(failure_result_from_rep(types.copied(c.key))?)))?
+    let value = match txn.cell_current(tx.inner, c.binding.id, c.key) {
         Some(raw) => Some(row_value(c.binding.readers, c.binding.id, raw)?),
         None => None,
     }
@@ -141,94 +126,19 @@ pub fn cell_get[V](r: Reader, s: Snapshot, c: Cell[V]) -> Result[Option[V], Erro
 }
 
 pub fn cell_set[V](mut tx: Tx, c: Cell[V], v: V) -> Result[(), Error] {
-    readable_value(tx.store, tx.roots, c.binding)?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), c.binding)?
     let mut raw: Bytes = list.new()
     list.put_word_le(mut raw, c.binding.readers.current)
     std.codec.encode(c.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > tx.limits.value {
+    if list.len(raw) > txn.tx_limits(tx.inner).value {
         return Error(Limit(Value))
     }
-    stage_cell(mut tx, c.binding.id, Some(take raw))
+    failure_result_from_rep(txn.stage_cell(mut tx.inner, c.binding.id, Some(take raw)))
 }
 
 pub fn cell_clear[V](mut tx: Tx, c: Cell[V]) -> Result[(), Error] {
-    readable_value(tx.store, tx.roots, c.binding)?
-    stage_cell(mut tx, c.binding.id, None)
-}
-
-fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Error] {
-    let key = failure_result_from_rep(catalog.prefix(id))?
-    let (reverts, old_width, old_charge) = {
-        let current = cell_current(tx, id, key)
-        if txn.cell_matches(current, wanted) {
-            return Ok(())
-        }
-        let previous = cell_edit(tx, id)
-        let was = if tx.retain_old {
-            match previous {
-                Some(CellPut(raw)) => txn.cell_charge(Some(format.staged_bytes(raw))),
-                _ => 0u64,
-            }
-        } else {
-            txn.cell_charge(current)
-        }
-        (txn.cell_matches(pages.get_page_row(tx.roots.collections, key), wanted), txn.cell_wire_size(previous), was)
-    }
-    let (new_width, new_charge) = match view wanted {
-        Some(raw) => (17 + list.len(raw), 70 + format.round8(list.len(raw))),
-        None => (13u64, 0u64),
-    }
-    let effective_width = if reverts {
-        0u64
-    } else {
-        new_width
-    }
-    let old_count = if old_width == 0 {
-        0u64
-    } else {
-        1u64
-    }
-    let new_count = if effective_width == 0 {
-        0u64
-    } else {
-        1u64
-    }
-    let cell_rows = tx.cell_rows - old_count + new_count
-    let frame: Option[u64] = match tx.frame_bytes {
-        None => None,
-        Some(current) => {
-            let after = current - old_width + effective_width
-            let data_head = if tx.streams != 0 && tx.rows + cell_rows + tx.trim_rows == 0 {
-                5u64
-            } else {
-                0u64
-            }
-            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > types.transaction_limit(limits_to_rep(tx.limits)) {
-                return Error(Limit(Transaction))
-            }
-            Some(after)
-        },
-    }
-    if reverts {
-        txn.remove_cell_edit(mut tx.ops.cells, tx.below, id)
-    } else {
-        let height = collection_write_height(tx.roots.collections, key)
-        let _ = reserve_ids(mut tx, height)?
-        let edit: pages.CellEdit = match take wanted {
-            Some(take raw) => CellPut(pages.stage_value(take raw, tx.roots.collections.inline)),
-            None => CellDelete,
-        }
-        map.insert(mut tx.ops.cells, id, take edit)
-    }
-    let added = if tx.retain_old && reverts {
-        0u64
-    } else {
-        new_charge
-    }
-    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), added)
-    tx.frame_bytes = frame
-    tx.cell_rows = cell_rows
-    Ok(())
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), c.binding)?
+    failure_result_from_rep(txn.stage_cell(mut tx.inner, c.binding.id, None))
 }
 
 pub fn published_cell[V](c: Cell[V], change: Change) -> Result[Option[Bytes], Error] {

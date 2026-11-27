@@ -82,9 +82,9 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
     let at = keyed_time(db)
     let no_reply: Option[fn(Error) -> bool] = None
     let settled = store_body_at(mut db, 0u64, at, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        check_write_attempt(tx)?
+        failure_result_from_rep(txn.check_write_attempt(tx.inner))?
         for (id, floor) in floors {
-            trim_log_floor(mut tx, id, floor)?
+            failure_result_from_rep(txn.trim_log_floor(mut tx.inner, id, floor))?
         }
         Ok(())
     })?
@@ -105,100 +105,29 @@ fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Erro
     Ok(LogBounds(first: window.first, next: window.next))
 }
 
-fn transaction_log_state(tx: Tx, id: u32) -> Result[pages.LogState, Error] {
-    if let Some(existing) = staged_log_state(tx, id) {
-        return Ok(existing)
-    }
-    let tree = view tx.roots.collections
-    let key = failure_result_from_rep(catalog.prefix(id))?
-    let Some(descriptor) = std.page.lookup(tree.root, key) else {
-        return Error(Stale(id))
-    }
-    let head = pager.descriptor_bounds(descriptor)
-    let height = if pages.collection_descriptor(descriptor).residency == ResidentTiered {
-        transaction_write_height(tx, failure_result_from_rep(pager.log_key(id, head.next))?)?
-    } else {
-        collection_write_height(tree, key)
-    }
-    let staged_bounds = pages.LogBoundsRep(first: head.first, next: head.next)
-    Ok(pages.LogState(head: staged_bounds, limits: staged_bounds, height: height))
-}
-
-fn staged_log_state(tx: Tx, id: u32) -> Option[pages.LogState] {
-    if let Some(existing) = map.get(tx.ops.logs, id) {
-        return Some(existing)
-    }
-    let mut layer = list.len(tx.below)
-    while layer > 0 {
-        layer -= 1
-        if let Some(existing) = map.get(tx.below[layer].ops.logs, id) {
-            return Some(existing)
-        }
-    }
-    None
-}
-
 fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
-    if let Some(existing) = staged_log_state(tx, id) {
+    if let Some(existing) = txn.staged_log_state(tx.inner, id) {
         return Ok(LogBounds(first: existing.limits.first, next: existing.limits.next))
     }
-    committed_log_bounds(tx.roots.collections, id)
-}
-
-pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
-    check_write_attempt(tx)?
-    readable_value(tx.store, tx.roots, l.binding)?
-    let id = l.binding.id
-    let mut current = transaction_log_state(tx, id)?
-    let seq = current.limits.next
-    let Some(following) = int.checked_add(seq, 1) else {
-        return Error(Limit(Ids))
-    }
-    let mut raw: Bytes = list.new()
-    list.put_word_le(mut raw, l.binding.readers.current)
-    std.codec.encode(l.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > tx.limits.value {
-        return Error(Limit(Value))
-    }
-    let frame: Option[u64] = match tx.frame_bytes {
-        None => None,
-        Some(before) => {
-            let after = before + 25 + list.len(raw)
-            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
-                return Error(Limit(Transaction))
-            }
-            Some(after)
-        },
-    }
-    let key = failure_result_from_rep(pager.log_key(id, seq))?
-    let _ = reserve_ids(mut tx, current.height)?
-    let charge = memory_data_charge(tx, key, raw)
-    let staged = pages.stage_value(take raw, tx.roots.collections.inline)
-    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged), None)
-    current.limits.next = following
-    map.insert(mut tx.ops.logs, id, current)
-    tx.frame_bytes = frame
-    tx.resident = int.saturating_add(tx.resident, charge)
-    tx.wrote = true
-    Ok(seq)
+    committed_log_bounds(txn.tx_roots(tx.inner).collections, id)
 }
 
 pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
-    readable_value(tx.store, tx.roots, l.binding)?
-    note_read(tx, Point(failure_result_from_rep(catalog.prefix(l.binding.id))?))?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
+    failure_result_from_rep(txn.note_read(tx.inner, Point(failure_result_from_rep(catalog.prefix(l.binding.id))?)))?
     transaction_log_bounds(tx, l.binding.id)
 }
 
 pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error] {
-    readable_value(tx.store, tx.roots, l.binding)?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
     let key = failure_result_from_rep(pager.log_key(l.binding.id, seq))?
     let current = transaction_log_bounds(tx, l.binding.id)?
     if seq < current.first || seq >= current.next {
-        note_read(tx, Point(take key))?
+        failure_result_from_rep(txn.note_read(tx.inner, Point(take key)))?
         return Ok(None)
     }
-    let row = transaction_row(tx, key)?
-    note_read(tx, Point(take key))?
+    let row = (txn.transaction_row(tx.inner, key) ?=> failure_from_rep)
+    failure_result_from_rep(txn.note_read(tx.inner, Point(take key)))?
     decode_log_row(l, row)
 }
 
@@ -217,17 +146,17 @@ fn decode_log_last[V](l: Log[V], seq: u64, raw: Option[View[Bytes]]) -> Result[O
 }
 
 pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
-    readable_value(tx.store, tx.roots, l.binding)?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
     let id = l.binding.id
     let current = transaction_log_bounds(tx, id)?
     if current.first == current.next {
-        note_read(tx, Span(failure_result_from_rep(catalog.prefix(id))?, failure_result_from_rep(catalog.prefix(id + 1))?))?
+        failure_result_from_rep(txn.note_read(tx.inner, Span(failure_result_from_rep(catalog.prefix(id))?, failure_result_from_rep(catalog.prefix(id + 1))?)))?
         return Ok(None)
     }
     let seq = current.next - 1
     let key = failure_result_from_rep(pager.log_key(id, seq))?
-    let row = transaction_row(tx, key)?
-    note_read(tx, Span(take key, failure_result_from_rep(catalog.prefix(id + 1))?))?
+    let row = (txn.transaction_row(tx.inner, key) ?=> failure_from_rep)
+    failure_result_from_rep(txn.note_read(tx.inner, Span(take key, failure_result_from_rep(catalog.prefix(id + 1))?)))?
     decode_log_last(l, seq, row)
 }
 
@@ -275,125 +204,32 @@ pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[
 }
 
 pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[TxRows[u64, V], Error] in tx {
-    readable_value(tx.store, tx.roots, l.binding)?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
     let id = l.binding.id
-    let head = committed_log_bounds(tx.roots.collections, id)?
+    let head = committed_log_bounds(txn.tx_roots(tx.inner).collections, id)?
     let current = transaction_log_bounds(tx, id)?
     let lower = order.max(log_endpoint(lo, false), current.first)
     let upper = order.min(log_endpoint(hi, true), current.next)
     let committed_low = failure_result_from_rep(pager.log_key(id, lower))?
     let committed_high = failure_result_from_rep(pager.log_key(id, order.min(upper, head.next)))?
     // Staged appends are read through the tail, so a Tiered cursor stages none.
-    let tiered = tx_tiered_rows(tx, id, committed_low, committed_high, false)?
+    let tiered = failure_result_from_rep(txn.tx_tiered_rows(tx.inner, id, committed_low, committed_high, false))?
     let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
         None
     } else {
-        failure_result_from_rep(catalog.collection_cursor(tx.roots.collections, id, committed_low, committed_high, false))?
+        failure_result_from_rep(catalog.collection_cursor(txn.tx_roots(tx.inner).collections, id, committed_low, committed_high, false))?
     }
     let tail = txn.LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
     let codec = std.codec.key_u64()
     let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
     let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
-    Ok(TxRows(cursor: take cursor, decoder: log_decoder(l), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
-}
-
-fn next_log_range_tail(tx: Tx, mut tail: txn.LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    if tail.seq >= tail.end {
-        return Ok(None)
-    }
-    let key = failure_result_from_rep(pager.log_key(tail.id, tail.seq))?
-    let Some(raw) = transaction_row(tx, key)? else {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let body = arc.new(failure_result_from_rep(types.copied(raw))?)
-    tail.seq += 1
-    Ok(Some((take key, take body)))
+    Ok(TxRows(cursor: take cursor, decoder: log_decoder(l), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner), low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
 }
 
 pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
-    check_write_attempt(tx)?
-    readable_value(tx.store, tx.roots, l.binding)?
-    trim_log_floor(mut tx, l.binding.id, seq)
-}
-
-fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
-    let mut current = transaction_log_state(tx, id)?
-    let floor = order.min(order.max(seq, current.limits.first), current.limits.next)
-    if floor == current.limits.first {
-        return Ok(())
-    }
-    let mut masked_charge = 0u64
-    let mut masked_wire = 0u64
-    for old_seq in order.max(current.head.next, current.limits.first) .. floor {
-        let key = failure_result_from_rep(pager.log_key(id, old_seq))?
-        let Some(raw) = transaction_row(tx, key)? else {
-            fail("store: missing staged Log append")
-        }
-        masked_charge += memory_data_charge(tx, key, raw)
-        if let Some(_) = tx.frame_bytes {
-            masked_wire += 25 + list.len(raw)
-        }
-    }
-    let first_trim = current.limits.first == current.head.first
-    let frame: Option[u64] = match tx.frame_bytes {
-        None => None,
-        Some(before) => {
-            let added = if first_trim {
-                21u64
-            } else {
-                0u64
-            }
-            let after = before - masked_wire + added
-            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
-                return Error(Limit(Transaction))
-            }
-            Some(after)
-        },
-    }
-    let _ = reserve_ids(mut tx, current.height)?
-    current.limits.first = floor
-    map.insert(mut tx.ops.logs, id, current)
-    if first_trim {
-        tx.trim_rows += 1
-    }
-    tx.frame_bytes = frame
-    tx.resident = int.saturating_sub(tx.resident, masked_charge)
-    Ok(())
-}
-
-fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
-    let mut operations = pages.new_data_rows()
-    let first = draw
-    let states = replace(mut tx.ops.logs, map.new())
-    for (id, state) in states {
-        if state.limits.first == state.head.first {
-            continue
-        }
-        let key = failure_result_from_rep(catalog.prefix(id))?
-        // A Tiered Log's floor is staged by the Tiered write plan, whose
-        // `TieredDropped` figure the frame carries (§13.3).
-        let dropped = if pager.tiered_data_key(tx.roots.collections, key) {
-            0u64
-        } else {
-            let removed = failure_result_from_rep(txn.trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw))?
-            if !tx.retain_old {
-                tx.resident = int.saturating_sub(tx.resident, removed)
-            }
-            removed
-        }
-        pages.push_data_row(mut operations, format.DataOp(key: take key, value: None, trim: Some(format.JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
-    }
-    if pages.data_row_count(operations) == 0 {
-        return Ok(replace(mut tx.ops.rows, pages.new_data_rows()))
-    }
-    tx.frame_tail = pages.NO_FRAME_TAIL
-    for slot in 0u64 .. pages.data_row_count(tx.ops.rows) {
-        let op = pages.data_row(tx.ops.rows, slot)
-        if !txn.masked_log_append(states, op.key) {
-            pages.push_data_row(mut operations, clone(op))
-        }
-    }
-    Ok(take operations)
+    failure_result_from_rep(txn.check_write_attempt(tx.inner))?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
+    failure_result_from_rep(txn.trim_log_floor(mut tx.inner, l.binding.id, seq))
 }
 
 pub fn published_log[V](l: Log[V], change: Change) -> Result[Option[Bytes], Error] {
@@ -533,4 +369,11 @@ fn log_endpoint(limit: Bound[u64], high: bool) -> u64 {
         Excluded(n) => Excluded(n),
     }
     txn.log_endpoint(endpoint, high)
+}
+
+pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
+    failure_result_from_rep(txn.check_write_attempt(tx.inner))?
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), l.binding)?
+    let id = l.binding.id
+    failure_result_from_rep(txn.append_log(mut tx.inner, id, l.binding.readers.current, l.binding.readers.codec, v))
 }

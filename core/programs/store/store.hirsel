@@ -283,53 +283,8 @@ pub type Page[K, V]: send {
 pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
 pub opaque scoped type Tx {
-    store: StoreId,
-    indexes: View[indexes.IndexRegistry],
-    roots: pages.Roots,
-    base_collection: Option[TxCollection],
-    bases: pages.TailBases,
-    ids: u64,
-    private_from: u64,
-    resident: u64,
-    retain_old: bool,
-    frame_tail: u64,
-    reads: View[core.Log[Read]],
-    issued: View[core.Cell[u64]],
-    observed_info: View[core.Cell[bool]],
-    // The attempt record and the pin map it reads (§13.3, v2.81). The call's
-    // driver owns both, outside the body's isolation and step bound.
-    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
-    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
-    refusal: Option[Capacity],
-    // The index error that makes this transaction abort-only.
-    index_conflict: Option[IndexStop],
-    // (table, index) of each remove whose absent target proved an index
-    // wrong (§I.3). The transaction fails, and the index is demoted.
-    drift: Option[List[(u32, u32)]],
-    frame_bytes: Option[u64],
-    // The recorded limits (§11.1 AP4a) every check in the body reads.
-    limits: StoreLimits,
-    wrote: bool,
-    ops: pages.DataOps,
-    view_tree: core.Cell[Option[TxView]],
+    inner: txn.TxState[Read],
     info: CallInfo,
-    // The streams section's ops (§1.8). `extra_bytes` is that section with
-    // its 5-byte head, when it has ops, plus the CALL section's bytes.
-    stream_ops: pages.DataOps,
-    keyed: Option[format.KeyedDraft],
-    extra_bytes: u64,
-    call: Option[format.CallSection],
-    // Layers beneath `ops`, oldest first. The last `own` are this Tx's own
-    // staged writes, frozen when it entered a callback; the rest are shared
-    // with the transactions it runs inside. `rows` and `streams` count the
-    // distinct keys staged across `ops` and every layer: a key's slot is the
-    // one it took when first staged, and a new key takes the next.
-    below: List[Arc[pages.Staged]],
-    own: u64,
-    rows: u64,
-    cell_rows: u64,
-    trim_rows: u64,
-    streams: u64
 }
 
 pub opaque type Snapshot: shareable + send {
@@ -645,8 +600,8 @@ fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError]
         return serve_before(check_keyed_completion(db, complete, keyed))
     }
     if let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, complete.stream) {
-        let state = serve_before(stream_state(raw))?
-        if state.p == complete.p && state.state == 1 && state.digest == complete.request {
+        let state = serve_before(failure_result_from_rep(txn.stream_state(raw)))?
+        if state.p == complete.p && state.state == 1 && RequestDigest(b: state.digest) == complete.request {
             return Ok(())
         }
     }
@@ -692,7 +647,7 @@ fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallR
         let call = format.KeyedCallSection(record: keyed_call_record_to_rep(clone(keyed.record)), settlement: settlement)
         return stage_claim_reply(mut tx, complete.stream, complete.request, keyed.policy.retention_ms, output, remaining, Some(take call))
     }
-    let size = if let Some(_) = tx.frame_bytes {
+    let size = if let Some(_) = txn.tx_frame_bytes(tx.inner) {
         match rec {
             Some(value) => format.call_section_bytes(value.key, value.args, value.revision, value.code, settlement),
             None => 0u64,
@@ -700,19 +655,18 @@ fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallR
     } else {
         0u64
     }
-    let (take key, take value) = reply_row(tx, complete.stream, complete.p, output)?
-    stream_write(mut tx, take key, take value, size)
+    let (take key, take value) = failure_result_from_rep(txn.reply_row(tx.inner, complete.stream, complete.p, output))?
+    failure_result_from_rep(txn.stream_write(mut tx.inner, take key, take value, size))
 }
 
 fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64, credit: Option[format.KeyedCredit], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
     let returned = body(mut tx)
-    if let Some(problem) = tx.refusal {
-        tx.refusal = None
+    if let Some(problem) = txn.take_tx_refusal(mut tx.inner) {
         return Error(BodyStop(OutOfBytes(problem)))
     }
     let (success, take output) = match take returned {
         Ok(take payload) => {
-            match tx.index_conflict {
+            match txn.tx_index_conflict(tx.inner) {
                 Some(Duplicate(name)) => return Error(BodyStop(Conflict(clone(name)))),
                 Some(Drifted(name)) => return Error(StoreFailure(Drift(clone(name)))),
                 None => (),
@@ -831,7 +785,7 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
 }
 
 pub fn info(mut tx: Tx) -> CallInfo {
-    cell.set(tx.observed_info, true)
+    cell.set(txn.tx_observed_info(tx.inner), true)
     tx.info
 }
 
@@ -946,28 +900,7 @@ type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | DraftError(Error) | La
 
 // Drifted: a remove proved an index wrong; the call fails with `Drift`
 // and its driver counts and demotes the indexes (§I.3).
-type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A]) | DraftFault(Error) | Drifted(String, List[(u32, u32)])
-
-// A successful body or an application error with a reply to commit.
-type Prepared[R, A] {
-    outcome: Result[R, A],
-    roots: pages.Roots,
-    tiered: Option[u64],
-    plan: Option[pager.TieredWritePlan],
-    live: u64,
-    frame: Option[Bytes],
-    ops: pages.DataRows,
-    order: format.DataOrder,
-    base_stamp: u64,
-    frame_tail: u64,
-    stream_ops: pages.DataRows,
-    keyed: Option[format.KeyedDraft],
-    first_stamp: u64,
-    prepared_roots: bool,
-    observed_info: bool,
-    skipped: bool,
-    call: Option[format.CallSection]
-}
+type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(txn.Prepared[R, A]) | DraftFault(Error) | Drifted(String, List[(u32, u32)])
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
@@ -1032,82 +965,6 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     }
 }
 
-fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let (frame_bytes, initial_tail) = match db.disk {
-        Some(_) => (Some(42u64), pages.OPEN_FRAME_TAIL),
-        None => (None, pages.NO_FRAME_TAIL),
-    }
-    let observed_info: core.Cell[bool] = cell.new(false)
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: pages.share_roots(base), base_collection: None, bases: pages.share_tail_bases(pages.holder_bases(db.holders)), ids: pages.holder_next_node(db.holders), private_from: int.saturating_add(pages.holder_next_node(db.holders), 1), resident: db.accounting.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
-    let outcome = body(mut tx)
-    if tx.own != 0 {
-        fold_own(mut tx)
-    }
-    if let Some(c) = tx.refusal {
-        return RolledBack(Refused(Allocation(c)))
-    }
-    // A proven-wrong index fails the call however the body ended (§I.3).
-    if let Some((take name, take evidence)) = take_drift(mut tx) {
-        return Drifted(take name, take evidence)
-    }
-    let value: Result[R, A] = match take outcome {
-        Ok(take v) => {
-            if let Some(Duplicate(take name)) = replace(mut tx.index_conflict, None) {
-                return RolledBack(Failed(Conflict(take name)))
-            }
-            Ok(take v)
-        },
-        Error(take a) => {
-            let keep = match keep_reply {
-                Some(decide) => decide(a),
-                None => true
-            }
-            let keyed_reply = match tx.keyed {
-                Some(_) => true,
-                None => false
-            }
-            if !keep || (pages.data_row_count(tx.stream_ops.rows) == 0 && !keyed_reply) {
-                return RolledBack(Aborted(Undone(value: take a, ticket: None)))
-            }
-            // F2 keeps the streams and CALL writes with the old data roots.
-            let live_bytes = match stream_live(db, base.streams, tx.stream_ops) {
-                Ok(n) => n,
-                Error(c) => return RolledBack(Refused(Allocation(c)))
-            }
-            tx.resident = live_bytes
-            tx.roots.collections = pages.share_page_tree(base.collections)
-            tx.roots.catalog = pages.share_page_tree(base.catalog)
-            tx.ops = pages.empty_ops()
-            tx.rows = 0
-            tx.frame_tail = pages.NO_FRAME_TAIL
-            Error(take a)
-        }
-    }
-    let mut first_stamp = tx.private_from
-    let mut rows = match seal_log_trims(mut tx, mut first_stamp) {
-        Ok(take operations) => take operations,
-        Error(Full(problem)) => return RolledBack(Refused(problem)),
-        Error(_) => fail("store: invalid staged Log trim"),
-    }
-    if let Some(keyed) = tx.keyed {
-        tx.resident = txn.keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
-    }
-    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
-    let saw_info = cell.replace(observed_info, false)
-    let pages.DataOps(cells: take cells, ..) = take ops
-    txn.seal_cell_edits(mut rows, cells)
-    let order = match pages.data_order(rows) {
-        Ok(take sorted) => take sorted,
-        Error(problem) => return RolledBack(Refused(Allocation(problem))),
-    }
-    let pages.DataOps(rows: take stream_rows, ..) = take stream_ops
-    let tiered = match attempt {
-        Some(_) => Some(db.accounting.tiered),
-        None => None,
-    }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: pages.tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
-}
-
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
     let prepared = match take finished {
         RolledBack(take o) => return Over(take o),
@@ -1115,7 +972,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, skipped: skipped, ..) = take prepared
+    let txn.Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, skipped: skipped, ..) = take prepared
     // A draft without a Tiered plan makes no call here: the draft's step
     // overhead is fixed (§13.3 call reserves).
     let freed = match take plan {
@@ -1212,39 +1069,7 @@ fn covered(db: Db, mark: Mark) -> bool {
 }
 
 pub fn body_capacity(mut tx: Tx, problem: Capacity) {
-    tx.refusal = Some(problem)
-}
-
-// Reserve the stamp interval before a page edit can allocate. The cell keeps
-// the high watermark even if the body exits under a capacity failure; after an
-// overrun's rollback a later reservation may end lower and puts the higher back.
-fn reserve_ids(mut tx: Tx, height: u64) -> Result[u64, Error] {
-    let Some(end) = int.checked_add(tx.ids, 6 * height + 2) else {
-        return Error(Limit(Ids))
-    }
-    let high = cell.replace(tx.issued, end)
-    if high > end {
-        let _ = cell.replace(tx.issued, high)
-    }
-    let first = tx.ids + 1
-    tx.ids = end
-    Ok(first)
-}
-
-fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
-    log.append(tx.reads, take read)
-    Ok(())
-}
-
-// A Tiered row is resolved before its Point is logged, so the first touch's
-// count precedes the logical append on every path (§13.3).
-fn fetch_logical(tx: Tx, take key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
-    let found = match staged_row(tx, key) {
-        Some(staged) => staged,
-        None => tx_page_row(tx, key)?,
-    }
-    log.append(tx.reads, Point(take key))
-    Ok(found)
+    txn.set_tx_refusal(mut tx.inner, Some(problem))
 }
 
 // Stream value (section 1.8): position u64 LE, state u8 (1 Admitted,
@@ -1278,25 +1103,6 @@ fn test_db(c: Clock, cap: u64) -> Db {
     let mut opts = result.unwrap(sized(Memory, 1074790400u64))
     opts.resident_limit = cap
     memory_at(c, StoreId(hi: 1, lo: 2), opts)
-}
-
-fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
-    if let Some(slot) = pages.op_slot(tx.stream_ops, key) {
-        return match pages.data_row(tx.stream_ops.rows, slot).value {
-            Some(raw) => Some(format.staged_bytes(raw)),
-            None => None,
-        }
-    }
-    if let Some(at) = txn.newest_layer(tx.below, true, key) {
-        let layer = view tx.below[at]
-        if let Some(slot) = pages.op_slot(layer.stream_ops, key) {
-            return match pages.data_row(layer.stream_ops.rows, slot).value {
-                Some(raw) => Some(format.staged_bytes(raw)),
-                None => None,
-            }
-        }
-    }
-    pages.get_page_row(tx.roots.streams, key)
 }
 
 pub type RowSchemas: codec + shareable + send {
@@ -1359,23 +1165,23 @@ fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], 
 }
 
 fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, indexes.Catalog)], Error] {
-    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))?
-    bound_indexes(tx, t.id, t.readers.current)
+    failure_result_from_rep(catalog.readable(txn.tx_roots(tx.inner), t.catalog_key, t.catalog_page, t.id))?
+    failure_result_from_rep(txn.bound_indexes(tx.inner, t.id, t.readers.current))
 }
 
 /// Borrow the stored schema tag and codec bytes, including any staged write.
 pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx {
-    if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))?
+    failure_result_from_rep(catalog.readable(txn.tx_roots(tx.inner), t.catalog_key, t.catalog_page, t.id))?
     let mut p: Bytes = list.with_capacity(12)
     list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
-    fetch_logical(tx, take p)
+    Ok(txn.fetch_logical(tx.inner, take p, point_event) ?=> failure_from_rep)
 }
 
 pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
@@ -1741,8 +1547,8 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 }
 
 fn check_table_write[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, indexes.Catalog)], Error] {
-    check_write_attempt(tx)?
-    if let Some(stop) = tx.index_conflict {
+    failure_result_from_rep(txn.check_write_attempt(tx.inner))?
+    if let Some(stop) = txn.tx_index_conflict(tx.inner) {
         return Error(index_stop_error(stop)?)
     }
     writable(tx, t)
@@ -1750,16 +1556,16 @@ fn check_table_write[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, indexes.
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let indexes = check_table_write(tx, t)?
-    let tail = tx.frame_tail == pages.OPEN_FRAME_TAIL
+    let tail = txn.tx_frame_tail(tx.inner) == pages.OPEN_FRAME_TAIL
     let mut p = failure_result_from_rep(catalog.prefixed(t.id, 8, tail))?
     std.codec.encode_key(t.key, k, mut p)
-    put_impl(mut tx, t, indexes, take p, v, tail)
+    failure_result_from_rep(txn.put_impl(mut tx.inner, t.id, t.readers.current, t.readers.codec, indexes, take p, v, tail, point_event))
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     let indexes = check_table_write(tx, t)?
     let key = failure_result_from_rep(catalog.encode_key(t.key, k))?
-    delete_impl(mut tx, t.id, t.readers.current, indexes, key)
+    failure_result_from_rep(txn.delete_impl(mut tx.inner, t.id, t.readers.current, indexes, key, point_event))
 }
 
 type OldAccount {
@@ -2789,4 +2595,8 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
         Ok(Committed(receipt)) => receipt.reply == types.key_word(7) && accounts(db).exact && db.accounting.checkpointed == cut + 1,
         _ => false,
     }
+}
+
+fn point_event(take key: Bytes) -> Read {
+    Point(take key)
 }

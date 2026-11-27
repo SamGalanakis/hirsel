@@ -102,8 +102,8 @@ pub fn sweep_expired(mut db: Db, limits: Limits) -> Result[Swept, Error] waits {
     let no_reply: Option[fn(Error) -> bool] = None
     let settled = store_body_at(mut db, 0u64, now, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
         for row in due {
-            let indexes = bound_indexes(tx, row.table, row.schema)?
-            if !delete_impl(mut tx, row.table, row.schema, indexes, row.primary)? {
+            let indexes = failure_result_from_rep(txn.bound_indexes(tx.inner, row.table, row.schema))?
+            if !failure_result_from_rep(txn.delete_impl(mut tx.inner, row.table, row.schema, indexes, row.primary, point_event))? {
                 return Error(expiry_drift(mut tx, row.table)?)
             }
         }
@@ -120,10 +120,10 @@ pub fn sweep_expired(mut db: Db, limits: Limits) -> Result[Swept, Error] waits {
 
 // The expiry index of `owner` names a row it does not have.
 fn expiry_drift(mut tx: Tx, owner: u32) -> Result[Error, Error] {
-    let record = catalog_entry_in(tx.roots.catalog, failure_result_from_rep(catalog.catalog_index_key(owner, EXPIRY_INDEX))?)?
+    let record = catalog_entry_in(txn.tx_roots(tx.inner).catalog, failure_result_from_rep(catalog.catalog_index_key(owner, EXPIRY_INDEX))?)?
     let mut seen: List[(u32, u32)] = list.new()
     list.push(mut seen, (owner, record.id))
-    Ok(drift_stop(mut tx, take seen))
+    Ok(failure_from_rep(txn.drift_stop(mut tx.inner, take seen)))
 }
 
 // The due rows of the first expiry indexes in catalog order, up to the limits.

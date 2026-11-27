@@ -65,13 +65,13 @@ pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, 
 
 /// The totals of group `g`; a group no row is in has count and sum 0.
 pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
-    if !types.same(tx.store.hi, tx.store.lo, a.store.hi, a.store.lo) {
+    if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, a.store.hi, a.store.lo) {
         return Error(Foreign)
     }
-    failure_result_from_rep(catalog.index_readable(tx.roots, a.catalog_key, a.catalog_page, a.id, a.public))?
+    failure_result_from_rep(catalog.index_readable(txn.tx_roots(tx.inner), a.catalog_key, a.catalog_page, a.id, a.public))?
     let mut k = failure_result_from_rep(catalog.prefix(a.id))?
     std.codec.encode_key(a.key, g, mut k)
-    match fetch_logical(tx, take k)? {
+    match (txn.fetch_logical(tx.inner, take k, point_event) ?=> failure_from_rep) {
         Some(raw) => {
             let (members, sum) = group_totals(raw)?
             Ok(Totals(count: members, sum: sum))
@@ -125,81 +125,6 @@ fn extract_aggregate[G, K, V](extractor: AggregateExtractor[G, K, V], raw: Bytes
     }
     let (take keys, _, take sums) = failure_result_from_rep(indexes.merged_groups(take parts))?
     Ok(indexes.IndexValue(keys: take keys, payload: list.new(), sums: take sums))
-}
-
-// The group rows a write changes: for each group the old or new row is in,
-// its count and sum less the old row's part and plus the new row's. The
-// edits are planned against the transaction's rows before any is applied;
-// a claimed row whose old part is not in its group's totals is drift.
-fn plan_aggregate_edit(tx: Tx, mut edits: indexes.IndexEdits, mut frame: Option[u64], record: indexes.Catalog, primary: Bytes, take old: Option[indexes.IndexValue], take new: Option[indexes.IndexValue]) -> Result[(), Error] {
-    if !indexes.index_claims(catalog_index(record)?.state, primary) {
-        return Ok(())
-    }
-    let (take old_keys, take old_sums) = match take old {
-        Some(indexes.IndexValue(keys: take keys, sums: take sums, ..)) => (take keys, take sums),
-        None => (list.new(), list.new()),
-    }
-    let (take new_keys, take new_sums) = match take new {
-        Some(indexes.IndexValue(keys: take keys, sums: take sums, ..)) => (take keys, take sums),
-        None => (list.new(), list.new()),
-    }
-    let mut i = 0u64
-    let mut j = 0u64
-    while i < list.len(old_keys) || j < list.len(new_keys) {
-        let take_old = i < list.len(old_keys) && (j >= list.len(new_keys) || old_keys[i] <= new_keys[j])
-        let take_new = j < list.len(new_keys) && (i >= list.len(old_keys) || new_keys[j] <= old_keys[i])
-        let key = if take_old {
-            failure_result_from_rep(types.copied(old_keys[i]))?
-        } else {
-            failure_result_from_rep(types.copied(new_keys[j]))?
-        }
-        let (less_count, less_sum) = if take_old {
-            (1u64, old_sums[i])
-        } else {
-            (0u64, 0u64)
-        }
-        let (more_count, more_sum) = if take_new {
-            (1u64, new_sums[j])
-        } else {
-            (0u64, 0u64)
-        }
-        if take_old {
-            i += 1
-        }
-        if take_new {
-            j += 1
-        }
-        if less_count == more_count && less_sum == more_sum {
-            continue
-        }
-        let (members, sum) = match transaction_row(tx, key)? {
-            Some(raw) => group_totals(raw)?,
-            None => (0u64, 0u64),
-        }
-        if less_count > members || less_sum > sum {
-            indexes.stage_index_drift(mut edits, record)
-            return Ok(())
-        }
-        let next_count = members - less_count + more_count
-        let Some(next_sum) = int.checked_add(sum - less_sum, more_sum) else {
-            return Error(Limit(Value))
-        }
-        if next_count == 0 {
-            if next_sum != 0 {
-                indexes.stage_index_drift(mut edits, record)
-                return Ok(())
-            }
-            if let Some(refund) = delete_refund(tx, key)? {
-                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
-                indexes.push_index_edit(mut edits, RemoveRow(take key, refund))
-            }
-            continue
-        }
-        let value = totals_bytes(next_count, next_sum)?
-        frame = put_frame(tx, key, value, frame)?
-        indexes.push_index_edit(mut edits, StoreRow(take key, take value))
-    }
-    Ok(())
 }
 
 // A build chunk's totals: each row's groups and values, gathered and

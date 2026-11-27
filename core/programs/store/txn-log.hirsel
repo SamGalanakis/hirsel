@@ -80,3 +80,164 @@ pub fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected:
     pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids))?
     Ok(dropped)
 }
+
+pub fn staged_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[pages.LogState] {
+    if let Some(existing) = map.get(tx.ops.logs, id) {
+        return Some(existing)
+    }
+    let mut layer = list.len(tx.below)
+    while layer > 0 {
+        layer -= 1
+        if let Some(existing) = map.get(tx.below[layer].ops.logs, id) {
+            return Some(existing)
+        }
+    }
+    None
+}
+
+pub fn transaction_log_state[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Result[pages.LogState, types.Failure] {
+    if let Some(existing) = staged_log_state(tx, id) {
+        return Ok(existing)
+    }
+    let tree = view tx.roots.collections
+    let key = catalog.prefix(id)?
+    let Some(descriptor) = std.page.lookup(tree.root, key) else {
+        return Error(Stale(id))
+    }
+    let head = pager.descriptor_bounds(descriptor)
+    let height = if pages.collection_descriptor(descriptor).residency == ResidentTiered {
+        transaction_write_height(tx, pager.log_key(id, head.next)?)?
+    } else {
+        collection_write_height(tree, key)
+    }
+    let staged_bounds = pages.LogBoundsRep(first: head.first, next: head.next)
+    Ok(pages.LogState(head: staged_bounds, limits: staged_bounds, height: height))
+}
+
+pub fn next_log_range_tail[Event: inert + shareable + send](tx: TxState[Event], mut tail: LogRangeTail) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
+    if tail.seq >= tail.end {
+        return Ok(None)
+    }
+    let key = pager.log_key(tail.id, tail.seq)?
+    let Some(raw) = transaction_row(tx, key)? else {
+        return Error(pages.malformed(0))
+    }
+    let body = arc.new(types.copied(raw)?)
+    tail.seq += 1
+    Ok(Some((take key, take body)))
+}
+
+pub fn trim_log_floor[Event: inert + shareable + send](mut tx: TxState[Event], id: u32, seq: u64) -> Result[(), types.Failure] {
+    let mut current = transaction_log_state(tx, id)?
+    let floor = order.min(order.max(seq, current.limits.first), current.limits.next)
+    if floor == current.limits.first {
+        return Ok(())
+    }
+    let mut masked_charge = 0u64
+    let mut masked_wire = 0u64
+    for old_seq in order.max(current.head.next, current.limits.first) .. floor {
+        let key = pager.log_key(id, old_seq)?
+        let Some(raw) = transaction_row(tx, key)? else {
+            fail("store: missing staged Log append")
+        }
+        masked_charge += memory_data_charge(tx, key, raw)
+        if let Some(_) = tx.frame_bytes {
+            masked_wire += 25 + list.len(raw)
+        }
+    }
+    let first_trim = current.limits.first == current.head.first
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(before) => {
+            let added = if first_trim {
+                21u64
+            } else {
+                0u64
+            }
+            let after = before - masked_wire + added
+            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(tx.limits) {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    let _ = reserve_ids(mut tx, current.height)?
+    current.limits.first = floor
+    map.insert(mut tx.ops.logs, id, current)
+    if first_trim {
+        tx.trim_rows += 1
+    }
+    tx.frame_bytes = frame
+    tx.resident = int.saturating_sub(tx.resident, masked_charge)
+    Ok(())
+}
+
+pub fn seal_log_trims[Event: inert + shareable + send](mut tx: TxState[Event], mut draw: u64) -> Result[pages.DataRows, types.Failure] {
+    let mut operations = pages.new_data_rows()
+    let first = draw
+    let states = replace(mut tx.ops.logs, map.new())
+    for (id, state) in states {
+        if state.limits.first == state.head.first {
+            continue
+        }
+        let key = catalog.prefix(id)?
+        // A Tiered Log's floor is staged by the Tiered write plan, whose
+        // `TieredDropped` figure the frame carries (§13.3).
+        let dropped = if pager.tiered_data_key(tx.roots.collections, key) {
+            0u64
+        } else {
+            let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
+            if !tx.retain_old {
+                tx.resident = int.saturating_sub(tx.resident, removed)
+            }
+            removed
+        }
+        pages.push_data_row(mut operations, format.DataOp(key: take key, value: None, trim: Some(format.JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
+    }
+    if pages.data_row_count(operations) == 0 {
+        return Ok(replace(mut tx.ops.rows, pages.new_data_rows()))
+    }
+    tx.frame_tail = pages.NO_FRAME_TAIL
+    for slot in 0u64 .. pages.data_row_count(tx.ops.rows) {
+        let op = pages.data_row(tx.ops.rows, slot)
+        if !masked_log_append(states, op.key) {
+            pages.push_data_row(mut operations, clone(op))
+        }
+    }
+    Ok(take operations)
+}
+
+pub fn append_log[Event: inert + shareable + send, V](mut tx: TxState[Event], id: u32, schema: u16, codec: std.codec.Codec[V], v: V) -> Result[u64, types.Failure] {
+    let mut current = transaction_log_state(tx, id)?
+    let seq = current.limits.next
+    let Some(following) = int.checked_add(seq, 1u64) else {
+        return Error(Limit(Ids))
+    }
+    let mut raw: Bytes = list.new()
+    list.put_word_le(mut raw, schema)
+    std.codec.encode(codec, v, mut raw) ?=> |_| Limit(Value)
+    if list.len(raw) > tx.limits.value {
+        return Error(Limit(Value))
+    }
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(before) => {
+            let after = before + 25 + list.len(raw)
+            if int.saturating_add(after, tx.extra_bytes) - 16 > types.transaction_limit(tx.limits) {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    let key = pager.log_key(id, seq)?
+    let _ = reserve_ids(mut tx, current.height)?
+    let charge = memory_data_charge(tx, key, raw)
+    let staged = pages.stage_value(take raw, tx.roots.collections.inline)
+    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged), None)
+    current.limits.next = following
+    map.insert(mut tx.ops.logs, id, current)
+    tx.frame_bytes = frame
+    tx.resident = int.saturating_add(tx.resident, charge)
+    tx.wrote = true
+    Ok(seq)
+}

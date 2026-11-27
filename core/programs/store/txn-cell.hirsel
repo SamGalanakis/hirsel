@@ -97,3 +97,93 @@ pub fn apply_cell(mut tree: pages.PageTree, key: Bytes, raw: Option[View[Bytes]]
     let descriptor = pages.cell_record(root, inline)?
     pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take root), tree.inline, first, mut ids))
 }
+
+pub fn cell_edit[Event: inert + shareable + send](tx: TxState[Event], id: u32) -> Option[View[pages.CellEdit]] in tx {
+    if let Some(edit) = map.get(tx.ops.cells, id) {
+        return Some(edit)
+    }
+    lower_cell_edit(tx.below, id)
+}
+
+pub fn cell_current[Event: inert + shareable + send](tx: TxState[Event], id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
+    match cell_edit(tx, id) {
+        Some(CellPut(value)) => Some(format.staged_bytes(value)),
+        Some(CellDelete) => None,
+        _ => cell_page_row(tx.roots.collections, key),
+    }
+}
+
+pub fn stage_cell[Event: inert + shareable + send](mut tx: TxState[Event], id: u32, take wanted: Option[Bytes]) -> Result[(), types.Failure] {
+    let key = catalog.prefix(id)?
+    let (reverts, old_width, old_charge) = {
+        let current = cell_current(tx, id, key)
+        if cell_matches(current, wanted) {
+            return Ok(())
+        }
+        let previous = cell_edit(tx, id)
+        let was = if tx.retain_old {
+            match previous {
+                Some(CellPut(raw)) => cell_charge(Some(format.staged_bytes(raw))),
+                _ => 0u64,
+            }
+        } else {
+            cell_charge(current)
+        }
+        (cell_matches(pages.get_page_row(tx.roots.collections, key), wanted), cell_wire_size(previous), was)
+    }
+    let (new_width, new_charge) = match view wanted {
+        Some(raw) => (17 + list.len(raw), 70 + format.round8(list.len(raw))),
+        None => (13u64, 0u64),
+    }
+    let effective_width = if reverts {
+        0u64
+    } else {
+        new_width
+    }
+    let old_count = if old_width == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let new_count = if effective_width == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let cell_rows = tx.cell_rows - old_count + new_count
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(current) => {
+            let after = current - old_width + effective_width
+            let data_head = if tx.streams != 0 && tx.rows + cell_rows + tx.trim_rows == 0 {
+                5u64
+            } else {
+                0u64
+            }
+            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > types.transaction_limit(tx.limits) {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    if reverts {
+        remove_cell_edit(mut tx.ops.cells, tx.below, id)
+    } else {
+        let height = collection_write_height(tx.roots.collections, key)
+        let _ = reserve_ids(mut tx, height)?
+        let edit: pages.CellEdit = match take wanted {
+            Some(take raw) => CellPut(pages.stage_value(take raw, tx.roots.collections.inline)),
+            None => CellDelete,
+        }
+        map.insert(mut tx.ops.cells, id, take edit)
+    }
+    let added = if tx.retain_old && reverts {
+        0u64
+    } else {
+        new_charge
+    }
+    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), added)
+    tx.frame_bytes = frame
+    tx.cell_rows = cell_rows
+    Ok(())
+}

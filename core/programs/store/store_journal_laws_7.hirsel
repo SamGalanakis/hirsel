@@ -117,7 +117,7 @@ pub fn journal_law_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) 
             list.fill(mut value, call_env, 0u8)
             put_bytes(mut tx, 1, types.key_word(k), value)?
         }
-        Ok(option.unwrap(tx.frame_bytes))
+        Ok(option.unwrap(txn.tx_frame_bytes(tx.inner)))
     }))
     let Committed(x) = take done else {
         return false

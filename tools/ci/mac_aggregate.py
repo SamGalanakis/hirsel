@@ -3,12 +3,13 @@
 
 import json
 import os
-import sys
 
 JOBS = {
     "plan": "planner",
     "cross": "Linux image build",
     "mac": "Mac checks",
+    "mac_driver_inputs": "Mac driver fixtures",
+    "mac_driver": "Native Mac driver unittests",
     "nightly_cross": "nightly Linux corpus",
     "nightly_native": "nightly cross/native comparison",
 }
@@ -46,7 +47,10 @@ def aggregate(jobs):
         state = jobs.get(job, {})
         result = state.get("result", "missing")
         reason = reasons.get(f"{job}_reason", "").strip()
-        if result == "success":
+        if job == "mac_driver" and result == "success" and state.get("outputs", {}).get("tests") != "success":
+            detail = "missing successful driver test step"
+            failures["mac-mac_driver"] = f"{label}: {detail}."
+        elif result == "success":
             detail = "passed"
         elif result == "skipped" and reason:
             detail = f"skipped · {reason}"

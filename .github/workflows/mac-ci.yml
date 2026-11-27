@@ -30,6 +30,8 @@ jobs:
       control: ${{ steps.plan.outputs.control }}
       cross_reason: ${{ steps.plan.outputs.cross_reason }}
       mac_reason: ${{ steps.plan.outputs.mac_reason }}
+      mac_driver_inputs_reason: ${{ steps.plan.outputs.mac_driver_inputs_reason }}
+      mac_driver_reason: ${{ steps.plan.outputs.mac_driver_reason }}
       nightly_cross_reason: ${{ steps.plan.outputs.nightly_reason }}
       nightly_native_reason: ${{ steps.plan.outputs.nightly_reason }}
     steps:
@@ -48,9 +50,12 @@ jobs:
             case "$CONTROL" in
               linux-platform)
                 echo 'cross_reason=The platform negative control needs no image artifacts.'
+                echo 'mac_driver_inputs_reason=The platform negative control needs no driver fixtures.'
+                echo 'mac_driver_reason=The platform negative control exercises the Mac laws job.'
                 ;;
               unexplained-skip)
                 echo 'mac_reason=The aggregator negative control skips the Linux image build.'
+                echo 'mac_driver_inputs_reason=The aggregator negative control needs no driver fixtures.'
                 ;;
             esac
             if [[ "$SCHEDULE" == '30 3 * * *' ]]; then
@@ -157,6 +162,83 @@ jobs:
       - name: Remove temporary credentials and check tracked files
         id: hygiene
         if: ${{ always() && steps.platform.outcome == 'success' }}
+        run: |
+          keychain="$RUNNER_TEMP/hirsel-ci.keychain-db"
+          if [[ -f "$keychain" ]]; then security delete-keychain "$keychain"; fi
+          git diff --exit-code
+
+  mac_driver_inputs:
+    name: Cross-build Mac driver fixtures
+    needs: plan
+    if: ${{ needs.plan.outputs.mac_driver_inputs_reason == '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned build tools
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+      - name: Export the Darwin link kit and driver runtime archives
+        run: python3 tools/ci/mac_native.py export-driver-inputs "$RUNNER_TEMP/driver-inputs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-driver-inputs
+          path: ${{ runner.temp }}/driver-inputs
+          if-no-files-found: error
+          retention-days: 3
+
+  mac_driver:
+    name: Run native Mac driver unittests
+    needs: [plan, mac_driver_inputs]
+    if: ${{ needs.plan.outputs.mac_driver_reason == '' && needs.plan.outputs.control != 'unexplained-skip' }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      tests: ${{ steps.driver_tests.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert arm64 macOS 26
+        id: driver_platform
+        run: tools/ci/mac_assert.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-driver-inputs
+          path: ${{ runner.temp }}/driver-inputs
+      - name: Bootstrap a throwaway keychain
+        run: tools/ci/mac_keychain.sh
+      - name: Build the checked driver and its unittest harness
+        env:
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,${{ github.workspace }}/tools/buck2/toolchains/llvm-files/lib
+        run: |
+          apple=$(python3 tools/buck2/apple_records.py macos deployment_env floor)
+          read -r deployment_env floor <<< "$apple"
+          export "$deployment_env=$floor"
+          rustup toolchain install --no-self-update
+          python3 tools/buck2/bootstrap_llvm.py
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          clang=$(xcrun --sdk macosx --find clang)
+          printf '#!/bin/bash\nexec %q -isysroot %q "$@"\n' "$clang" "$sdk" > "$RUNNER_TEMP/fixture-cc"
+          chmod +x "$RUNNER_TEMP/fixture-cc"
+          python3 tools/ci/mac_native.py build-driver "$RUNNER_TEMP/driver-binaries.json"
+          # Some driver laws invoke the pinned clang directly for their C files.
+          printf -- '-isysroot\n"%s"\n' "$sdk" > tools/buck2/toolchains/llvm-files/bin/clang.cfg
+      - name: Run each default driver case with the SDK environment scrubbed
+        id: driver_tests
+        env:
+          CC: ${{ runner.temp }}/fixture-cc
+          LLVM_SYS_231_PREFIX: ${{ github.workspace }}/tools/buck2/toolchains/llvm-files
+        run: |
+          ulimit -n 65536
+          tools/ci/mac_scrub.sh python3 tools/ci/mac_native.py run-driver \
+            "$RUNNER_TEMP/driver-binaries.json" "$RUNNER_TEMP/driver-inputs"
+      - name: Remove temporary credentials and check tracked files
+        if: ${{ always() && steps.driver_platform.outcome == 'success' }}
         run: |
           keychain="$RUNNER_TEMP/hirsel-ci.keychain-db"
           if [[ -f "$keychain" ]]; then security delete-keychain "$keychain"; fi
@@ -307,7 +389,7 @@ jobs:
 
   aggregate:
     name: Strict Mac CI result
-    needs: [plan, cross, mac, nightly_cross, nightly_native]
+    needs: [plan, cross, mac, mac_driver_inputs, mac_driver, nightly_cross, nightly_native]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -317,6 +399,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Test the Mac CI gate
+        run: |
+          python3 tools/ci/test_mac_aggregate.py
+          python3 tools/ci/test_mac_native.py
       - name: Require a result or a planned exclusion for every job
         id: aggregate
         env:

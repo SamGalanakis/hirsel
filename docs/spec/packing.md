@@ -192,15 +192,15 @@ sections the entry reaches. A reply is a module (its bytes, digest and key) or o
 
 | refusal | when | cached |
 |---|---|---|
-| `Rejected(diagnostics)` | the source does not check: the worker's exit status is 1 | by request digest |
-| `Unsupported(reason)` | the worker's exit status is 2 and it names the reason the release cannot be a module: it reaches a `foreign` or `exec` row, needs writable or thread-local data, needs an import outside the row table, or asks for policy bits or a target the `Compiler` does not build | by request digest |
+| `Rejected(diagnostics)` | the typed module build result reports checker rejection | by request digest |
+| `Unsupported(reason)` | the typed module build result gives the reason the release cannot be a module: it reaches a `foreign` or `exec` row, needs writable or thread-local data, needs an import outside the row table, or asks for policy bits or a target the `Compiler` does not build | by request digest |
 | `Limit(Input)` | the request exceeds `input_bytes` | no |
 | `Limit(Cpu)` | the worker used more than `cpu_seconds` of processor time | by request digest and caps |
 | `Limit(Memory)` | the worker needed more than `memory_bytes` | by request digest and caps |
 | `Limit(Wall)` | the worker ran longer than `wall_ms` | no |
 | `Limit(Output)` | the module exceeds `output_bytes` | by request digest and caps |
 | `Busy` | the service's bounded queue is full | no |
-| `Unavailable` | the worker or the service ended for any other reason, a tool failure with exit status 2 among them | no |
+| `Unavailable` | the worker or the service ended for any other reason, including an explicit tool refusal, a missing or malformed result, or disagreement with process termination | no |
 
 **Caps.** A service has five caps, all required, with these defaults under `hirsel host`:
 `cpu_seconds = 10`, `memory_bytes = 512 MiB`, `wall_ms = 20 000`, `input_bytes = 16 MiB`,

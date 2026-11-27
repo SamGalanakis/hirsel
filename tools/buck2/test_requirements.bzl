@@ -69,6 +69,7 @@ OPENAT2_TEST_CASES = {
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
+        "operator_cli::laws::slice1_resolve_identify_read",
         "native::tests::profiler_replay_memory_peaks_match_the_runtime_metrics",
         "native::tests::profiler_replays_an_explicit_inputs_entry_and_checks_its_identity",
         "native::tests::two_dir_grants_pass_relative_and_inherited_directories",

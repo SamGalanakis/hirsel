@@ -1,10 +1,17 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ReadContract {
+    Help,
+    Operation,
+}
+
 #[derive(Debug)]
 pub struct CommandSpec {
     pub name: &'static str,
     pub(super) usage: &'static str,
     pub(super) description: &'static str,
+    pub(crate) contract: Option<ReadContract>,
     pub(super) schema: &'static dyn CommandSchema,
 }
 
@@ -21,6 +28,8 @@ pub enum NoOption {}
 
 #[derive(Debug)]
 pub enum Invocation {
+    OpGet(Request<OpGetOption>),
+    Help(Request<HelpOption>),
     Compiler(Request<CompilerOption>),
     Simple(Request<NoOption>),
     Lsp(Request<NoOption>),
@@ -96,6 +105,7 @@ pub(super) enum Positionals {
     One,
     Pair,
     Many,
+    Operation,
     Tail,
     Sql,
 }
@@ -106,6 +116,8 @@ pub(super) trait CommandSchema: std::fmt::Debug + Sync {
         command: &'static CommandSpec,
         arguments: &mut dyn Iterator<Item = String>,
     ) -> Result<Action, String>;
+
+    fn describe(&self) -> serde_json::Value;
 
     fn write_help(&self, out: &mut String);
 }

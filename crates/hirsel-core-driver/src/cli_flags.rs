@@ -2,6 +2,7 @@
 use super::{Flag, Switch, Value};
 
 flags! {
+    Context ["--context"] "NAME|/FILE" => "Select a trusted workstation context or absolute job pin file.";
     AddRoot ["--root"] "sha256:HEX" => "Require this archive head root.";
     AddAs ["--as"] "ALIAS" => "Bind the dependency under this alias.";
     AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's [workspace.dependencies].";

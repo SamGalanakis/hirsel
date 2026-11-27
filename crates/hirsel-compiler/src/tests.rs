@@ -122,18 +122,21 @@ fn a_worker_that_breaks_a_cap_ends_as_that_limit() {
 fn a_worker_s_end_is_classified_and_its_module_is_checked() {
     assert_eq!(
         refusal(
-            "echo 'module: unsupported: the release reaches hirsel_core_exec_spawn' >&2; exit 2",
+            "echo '{\"Unsupported\":\"the release reaches hirsel_core_exec_spawn\"}'; exit 1",
             caps()
         ),
         Refusal::Unsupported("the release reaches hirsel_core_exec_spawn".into())
     );
     assert_eq!(
-        refusal("echo 'main.hirsel:1:1: no' >&2; exit 1", caps()),
+        refusal(
+            "echo '\"Rejected\"'; echo 'main.hirsel:1:1: no' >&2; exit 1",
+            caps()
+        ),
         Refusal::Rejected("main.hirsel:1:1: no\n".into())
     );
     // The tool's other failures say nothing about the source, so nothing caches them.
     assert_eq!(
-        refusal("echo 'hirsel: no runtime' >&2; exit 2", caps()),
+        refusal("echo 'hirsel: no runtime' >&2; exit 1", caps()),
         Refusal::Unavailable("hirsel: no runtime\n".into())
     );
     assert!(matches!(
@@ -149,7 +152,10 @@ fn a_worker_s_end_is_classified_and_its_module_is_checked() {
     let dir = tempfile::tempdir().unwrap();
     let bytes = module(Target::X86_64Linux);
     std::fs::write(dir.path().join("module"), &bytes).unwrap();
-    let copy = format!("/bin/cp {}/module \"${{10}}\"", dir.path().display());
+    let copy = format!(
+        "/bin/cp {}/module \"${{10}}\" && echo '\"Built\"'",
+        dir.path().display()
+    );
     let service = service(dir.path(), &copy, caps(), 1, 0);
     let built = service.compile(&request(Target::X86_64Linux)).unwrap();
     assert_eq!(built.bytes, bytes);

@@ -58,3 +58,47 @@ fn ungated(input: operator.Input) -> operator.BeginInput {
         SourceInput(b) => SourceBegin(clone(b), false),
     }
 }
+
+// The same private state path can acquire a new catalog while old receipts survive.
+// Check the guard at host dispatch, including a Begin that could otherwise reserve D.
+@test
+fn replaced_catalog(d: Dir, c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut prefix = string.with_capacity(64u64)
+    string.push(mut prefix, "catalog-pin-")
+    let root = result.unwrap(host.mkdtemp(d, mut prefix))
+    result.unwrap(host.mkdir(root, "catalog"))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let first = result.unwrap(host.open_dir(root, "catalog"))
+    let db = result.unwrap(store.open(tasks, first, c, rnd, options))
+    let original = store.identity(db)
+    let now = Now(wall_ms: T0, mono_ns: SECOND_NS)
+    let mut a = rig_on(take db, launcher.fake(), 4u64, now)
+    add(mut a, "g", "t")
+    let Rig(h: take first_host, ..) = take a
+    let _ = result.unwrap(store.close(close(take first_host)))
+    let reopened = result.unwrap(store.open(tasks, first, c, rnd, options))
+    expect(store.identity(reopened) == original, "reopen changed the authority")
+    let _ = result.unwrap(store.close(take reopened))
+    result.unwrap(host.remove_tree(root, "catalog"))
+    result.unwrap(host.mkdir(root, "catalog"))
+    let second = result.unwrap(host.open_dir(root, "catalog"))
+    let other = result.unwrap(store.open(tasks, second, c, rnd, options))
+    let replacement_id = store.identity(other)
+    expect(replacement_id != original, "catalog replacement reused the authority")
+    let mut b = rig_on(take other, launcher.fake(), 4u64, now)
+    add(mut b, "g", "t")
+    let g = option.unwrap(must(group_row(b.h, "g"), "group"))
+    let id = request_id(77u64)
+    let candidate: operator.Ask = BeginAsk(clone(id), group_of("g", g.incarnation), AttestedBegin(image_two()), list.new(), list.new(), runner.fate.none())
+    send(mut b, 1u64, PinnedAsk(original.hi, original.lo, operator.ask_bytes(candidate)))
+    expect(errored(b, 1u64, ConflictClass) && admits(b) == 0u64, "a pinned write reached the replacement catalog")
+    let query = operator.ask_bytes(StatusAsk(clone(id)))
+    send(mut b, 2u64, PinnedAsk(original.hi, original.lo, clone(query)))
+    expect(errored(b, 2u64, ConflictClass), "a pinned read reached the replacement catalog")
+    send(mut b, 3u64, PinnedAsk(replacement_id.hi, replacement_id.lo, take query))
+    expect(errored(b, 3u64, UnknownRequestClass), "the refused write left a request row")
+    let Rig(h: take second_host, ..) = take b
+    let _ = result.unwrap(store.close(close(take second_host)))
+    result.unwrap(host.remove_tree(d, prefix))
+    Ok(())
+}

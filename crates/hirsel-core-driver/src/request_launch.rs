@@ -175,7 +175,33 @@ pub(super) fn finish(
     metrics: Option<PathBuf>,
     remote: Option<&crate::store::remote::Remote>,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if json {
+    if command == "build"
+        && std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new(hirsel_core_ids::module_build::WORKER))
+    {
+        use hirsel_core_ids::module_build::ModuleBuild;
+        let reply = if let Some(reason) = &output.module_unsupported {
+            ModuleBuild::Unsupported(reason.clone())
+        } else if !output.resources.is_empty() || !output.incomplete.is_empty() {
+            ModuleBuild::ToolRefusal
+        } else if !output.diagnostics.is_empty() {
+            ModuleBuild::Rejected
+        } else if output.native.is_some() && output.stopped.is_none() {
+            ModuleBuild::Built
+        } else {
+            ModuleBuild::ToolRefusal
+        };
+        render_diagnostics(
+            sources,
+            &output.diagnostics,
+            &output.incomplete,
+            &output.resources,
+        );
+        if let Some(stop) = &output.stopped {
+            eprintln!("{stop}");
+        }
+        println!("{}", serde_json::to_string(&reply)?);
+    } else if json {
         println!("{}", serde_json::to_string(output)?);
     } else {
         render_diagnostics(

@@ -17,7 +17,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if matches!(command.name, "prof" | "lean" | "sdk" | "fleet") {
+        if matches!(command.name, "op" | "prof" | "lean" | "sdk" | "fleet") {
             let prefix = format!("{} ", command.name);
             for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
                 result.push_str(&format!(
@@ -38,4 +38,23 @@ pub fn help(command: Option<&CommandSpec>) -> String {
         result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");
         result
     }
+}
+
+pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
+    use super::types::ReadContract;
+    use serde_json::json;
+    let mut spec = command.schema.describe();
+    spec["name"] = json!(command.name);
+    spec["usage"] = json!(command.usage);
+    spec["description"] = json!(command.description);
+    if let Some(contract) = command.contract {
+        let (target, authority, predicate, receipt) = match contract {
+            ReadContract::Help => ("none", "local", "command schema read", false),
+            ReadContract::Operation => ("host", "operator_uid", "catalog row read", true),
+        };
+        spec["result"] = json!({"type":"finite", "v":1, "contract":"read",
+            "target_kind":target, "authority":authority, "completion":predicate,
+            "receipt":receipt, "credential_bearing":false, "mutually_exclusive":[]});
+    }
+    spec
 }

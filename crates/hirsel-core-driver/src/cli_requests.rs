@@ -1,6 +1,17 @@
 //! Typed arguments shared by commands with the same interpreter.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HelpOption {
+    Json,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpGetOption {
+    Context(String),
+    Json,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddOption {
     AddDryRun,
     AddRoot(String),

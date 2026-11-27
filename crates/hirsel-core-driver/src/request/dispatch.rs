@@ -3,14 +3,44 @@ use super::*;
 #[path = "../check_library.rs"]
 mod check_library;
 
-pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
+pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if args.len() == 1 && args[0] == check_library::WORKER_ARG {
         return conclude(Outcome::Exit(check_library::run_worker()));
     }
-    let invocation = match crate::cli::parse(args.into_iter())? {
+    let json = args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json");
+    if args.first().is_some_and(|arg| arg == "--json") {
+        let end = args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(args.len());
+        args[..end].rotate_left(1);
+    }
+    let parsed = crate::cli::parse(args.iter().cloned());
+    let action = match parsed {
+        Ok(action) => action,
+        Err(detail) => {
+            let name = args
+                .iter()
+                .take_while(|arg| !arg.starts_with('-'))
+                .take(if args.first().is_some_and(|arg| arg == "op") {
+                    2
+                } else {
+                    1
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            return conclude(Outcome::Exit(operator_cli::finite::invalid(
+                &name, detail, json,
+            )));
+        }
+    };
+    let invocation = match action {
         crate::cli::Action::Help(help) => {
-            print!("{help}");
-            return conclude(Outcome::Exit(0));
+            return conclude(Outcome::Exit(operator_cli::finite::schema_help(help, json)));
         }
         crate::cli::Action::Version => {
             crate::installation::print_version()?;
@@ -19,6 +49,8 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     match invocation {
+        Invocation::OpGet(request) => conclude(Outcome::Exit(operator_cli::finite::get(request))),
+        Invocation::Help(request) => conclude(Outcome::Exit(operator_cli::finite::help(request))),
         Invocation::Attach(request) => {
             conclude(crate::prof_command::attach(request).map(|()| Outcome::Exit(0))?)
         }
@@ -163,7 +195,33 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
 /// exit with its status, through a resident compiler when one serves the
 /// request's store (`crate::resident`). Process setup (allocator guard,
 /// signal dispositions, inherited descriptors) is the caller's.
-pub fn main(args: Vec<String>) -> ! {
+pub fn main(mut args: Vec<String>) -> ! {
+    if args
+        .first()
+        .is_some_and(|arg| arg == hirsel_core_ids::module_build::WORKER)
+    {
+        args[0] = "build".into();
+        let error = run(args)
+            .err()
+            .expect("a one-shot worker exits in conclude");
+        use hirsel_core_ids::module_build::ModuleBuild;
+        let rejected = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .and_then(|cause| cause.downcast_ref::<crate::RejectedCheck>())
+            .is_some_and(|r| {
+                r.product.resources.is_empty()
+                    && r.product.incomplete.is_empty()
+                    && !r.product.diagnostics.is_empty()
+            });
+        let reply = if rejected {
+            ModuleBuild::Rejected
+        } else {
+            ModuleBuild::ToolRefusal
+        };
+        println!("{}", serde_json::to_string(&reply).unwrap());
+        std::process::exit(report_request_error(error.as_ref()));
+    }
     if args.len() == 1 && args[0] == check_library::WORKER_ARG {
         std::process::exit(check_library::run_worker());
     }
@@ -178,4 +236,43 @@ pub fn main(args: Vec<String>) -> ! {
         Err(e) => e,
     };
     std::process::exit(report_request_error(error.as_ref()))
+}
+
+fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let emit = invocation
+        .options
+        .extract_if(.., |option| matches!(option, Opt::Emit(_)))
+        .filter_map(|option| match option {
+            Opt::Emit(value) => Some(value),
+            _ => None,
+        })
+        .last();
+    let output_kind = output_kind(invocation.command.name, emit.as_deref())?;
+    let profile = matches!(invocation.command.name, "prof run" | "prof replay")
+        .then(|| crate::prof_command::Run::read(&mut invocation))
+        .transpose()?;
+    let command = launch::fleet_cli::prepare(&mut invocation)?;
+    if command == "replay"
+        && invocation
+            .options
+            .iter()
+            .any(|option| matches!(option, Opt::HostState(_)))
+    {
+        return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
+    }
+    let (package_mode, package_store, pack_out) = packages::options(&mut invocation, command);
+    let transport = package_mode.transport();
+    let remote = crate::store::remote::for_request(&transport)?;
+    let store = crate::package_store::PackageStore::with_transport(package_store, transport);
+    if matches!(command, "lock" | "fetch" | "pack") {
+        return packages::run(invocation, store, package_mode, pack_out, remote);
+    }
+    run_compiler_request(
+        invocation,
+        command,
+        output_kind,
+        profile,
+        PackageInput::Discover(package_mode, store),
+        remote,
+    )
 }

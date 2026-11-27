@@ -3,6 +3,52 @@
 Run `hirsel help` for the command catalog. Use `hirsel help <command>` for
 the options accepted by a command.
 
+## Operator reads
+
+`hirsel op get host/CATALOG/REQUEST [--context NAME|/ABSOLUTE/FILE] [--json]`
+reads the host's committed Status row. CATALOG is the 32 hex digits of the
+catalog Directory StoreId (high word first). REQUEST is the 16-byte caller ID
+in hex. Both survive a host restart. The row names the group and incarnation
+of the original request, including after a name is reused.
+
+An absolute job file contains one complete host pin. A named context selects
+a record under `[contexts.NAME]` in `$XDG_CONFIG_HOME/hirsel/config.toml`
+(fallback `~/.config/hirsel/config.toml`). With no explicit selection, the
+workstation file must set `default = "NAME"`. A job pin has this shape:
+
+```toml
+kind = "host"
+state = "/srv/hirsel/private"
+authority = "c01d3dedc01d3dedc01d3dedc01d3ded"
+uid = 1001
+group = "orders"
+incarnation = "17"
+```
+
+The last two fields narrow the read and are optional. Preflight prints the
+chosen file and pin on stderr. Resolution never reads a project manifest or
+registry route. The client verifies the private directory, socket and peer UID,
+then sends Identify on that connection. The host returns its StoreId. After
+checking the pin the client sends Pinned(high, low, encoded request). The host
+checks the ID against its open catalog before dispatch, including for writes.
+A missing pin, an invalid locator or a changed identity stops the exchange.
+
+Converted finite commands write one v1 JSON document and newline on stdout
+under `--json`. The document contains `v, command, contract, exit, target,
+operation, outcome, result, error, next`. Unknown commands and parser errors
+use the same document on terminals and pipes. A guest argument after `--`
+cannot select the renderer. IDs use hex and u64 counters use decimal strings.
+The four exits are 0 for a completed read, 1 for a definitive negative result,
+2 for invalid or stale input and 75 for a blocked or unresolved request.
+Reading a known failed operation succeeds. Its phase and effect describe the
+observed operation. Pending and reconciling installations report possible
+effects, and Installed reports committed even when the first start failed.
+A failed read carries a code, detail, retry disposition and optional field.
+
+`hirsel help --json` lists the declared grammar. `hirsel help op get --json`
+returns that command's declaration, including its read contract, target,
+authority, completion, receipt and output properties. Both work offline.
+
 ## Output paths
 
 Build, pack, and SDK generation accept `-o` or `--output`. Use a file

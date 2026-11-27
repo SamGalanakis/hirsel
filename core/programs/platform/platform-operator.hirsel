@@ -1,0 +1,84 @@
+// One frame from operator connection `conn` (launch.md "The operator socket"). Answers
+// go out through `answers`; a malformed or out-of-phase frame ends only this exchange.
+pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Request] waits {
+    h.clock_s = now.wall_ms / 1000u64
+    let mut out: List[launcher.Request] = list.new()
+    let Some(frame) = operator.decode_ask(body) else {
+        refuse(mut h, conn, ProtocolClass, "the frame is not one operator request")
+        return out
+    }
+    let catalog = store.identity(h.db)
+    let ask = match frame {
+        PinnedAsk(hi, lo, inner) => {
+            if hi != catalog.hi || lo != catalog.lo {
+                refuse(mut h, conn, ConflictClass, "catalog identity changed")
+                return out
+            }
+            let Some(take decoded) = operator.decode_ask(inner) else {
+                refuse(mut h, conn, ProtocolClass, "invalid pinned request")
+                return out
+            }
+            take decoded
+        },
+        _ => take frame,
+    }
+    match ask {
+        IdentifyAsk => say(mut h, conn, CatalogAnswer(catalog.hi, catalog.lo), false),
+        PinnedAsk(_, _, _) => refuse(mut h, conn, ProtocolClass, "nested pinned request"),
+        // A deploy waits for the session's inventory to be reconciled, so it can neither
+        // race the adoption of a pending deploy nor bind a group twice.
+        BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BeginAsk(d, g, input, foreign, exec, held) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, now, mut out),
+        DecideAsk(_, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        DecideAsk(d, decision, verdict) => decide(mut h, conn, d, decision, verdict, now, mut out),
+        DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
+            Some(name) if list.len(chunk) > 0u64 && receiving(h, name) => received(mut h, name, d, chunk),
+            Some(_) if list.len(chunk) > 0u64 => list.push(mut out, AdmitData(a, clone(chunk))),
+            _ => refuse(mut h, conn, ProtocolClass, "no open upload of this request and attempt on this connection"),
+        },
+        EndAsk(d, a) => match upload_of(h, conn, d, a) {
+            Some(name) if receiving(h, name) => end_received(mut h, name, d, now, mut out),
+            Some(name) => {
+                let mut v = vol_read(h, name)
+                if let Some(take adm) = replace(mut v.admit, None) {
+                    let mut x = take adm
+                    x.ended = true
+                    v.admit = Some(take x)
+                }
+                vol_put(mut h, name, take v)
+                list.push(mut out, AdmitEnd(a))
+            },
+            None => refuse(mut h, conn, ProtocolClass, "no open upload of this request and attempt on this connection"),
+        },
+        ConfirmAsk(d, a, hash) => confirm(mut h, conn, d, a, hash, mut out),
+        StatusAsk(d) => match request_row(h, d) {
+            Ok(Some(r)) => {
+                let p = phase_of(h, d, r)
+                say(mut h, conn, state_answer(d, r, p), true)
+            },
+            Ok(None) => refuse(mut h, conn, UnknownRequestClass, "no request has this ID"),
+            Error(_) => refuse(mut h, conn, StoreClass, "the catalog could not be read"),
+        },
+        ResolveAsk(id) => if list.len(id) != 16u64 {
+            refuse(mut h, conn, InvalidClass, "a recording ID is 16 bytes")
+        } else {
+            match resolve_pin(h, id, now.wall_ms / 1000u64) {
+                Ok(found) => say(mut h, conn, PinAnswer(found), true),
+                Error(_) => refuse(mut h, conn, StoreClass, "the catalog could not be read"),
+            }
+        },
+        LookupAsk(name) => match group_row(h, name) {
+            Ok(Some(_)) if registering(h, name) => refuse(mut h, conn, UnknownGroupClass, "the group is still registering"),
+            Ok(Some(g)) => say(mut h, conn, GroupAnswer(group_of(name, g.incarnation)), true),
+            Ok(None) => refuse(mut h, conn, UnknownGroupClass, "no group has this name"),
+            Error(_) => refuse(mut h, conn, StoreClass, "the catalog could not be read"),
+        },
+        RegisterAsk(_, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        RegisterAsk(d, spec, input, foreign, exec) => register(mut h, conn, ask, d, spec, input, foreign, exec, now, mut out),
+        BackupAsk(_) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BackupAsk(name) => backup_ask(mut h, conn, name, mut out),
+    }
+    notify(mut h)
+    drain_later(mut h, mut out)
+    turned(mut h, take out)
+}

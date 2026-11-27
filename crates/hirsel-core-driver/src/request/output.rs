@@ -19,6 +19,8 @@ pub(super) struct Output<'a> {
     pub(super) resources: Vec<crate::ResourceDiagnostic<'a>>,
     pub(super) image: Option<String>,
     pub(super) native: Option<BuildProduct>,
+    #[serde(skip)]
+    pub(super) module_unsupported: Option<String>,
     pub(super) stopped: Option<String>,
     pub(super) reachable: Option<ReachableOutput<'a>>,
 }
@@ -207,6 +209,7 @@ pub(super) fn answer_hit(
         image: None,
         native,
         stopped,
+        module_unsupported: None,
         reachable,
     };
     super::finish(

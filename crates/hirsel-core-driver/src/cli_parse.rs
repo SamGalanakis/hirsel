@@ -1,11 +1,9 @@
 use super::help_text::{is_help, named};
-use super::{
-    Argument, CommandSchema, CommandSpec, Invocation, Kind, Positionals, Request, Schema, help,
-};
+use super::{Argument, CommandSchema, CommandSpec, Invocation, Kind, Positionals, Request, Schema};
 use std::fmt::Write;
 
 pub enum Action {
-    Help(String),
+    Help(Option<&'static CommandSpec>),
     Version,
     Invoke(Invocation),
 }
@@ -53,9 +51,10 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                     Kind::Value(metavar, parse) => parse(
                         arguments
                             .next()
+                            .filter(|value| command.contract.is_none() || !value.starts_with('-'))
                             .ok_or_else(|| format!("{argument} requires {metavar}"))?,
                     ),
-                    Kind::Help => return Ok(Action::Help(help(Some(command)))),
+                    Kind::Help => return Ok(Action::Help(Some(command))),
                     Kind::RefuseMem => {
                         return Err(
                             "attach cannot see earlier allocations; use 'hirsel prof run --mem'"
@@ -93,7 +92,36 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                 return Err(format!("unexpected argument `{argument}` for {name}"));
             }
         }
+        if matches!(self.positionals, Positionals::Operation) {
+            crate::operator_cli::operation_id(request.positional.as_deref())?;
+        }
         Ok(Action::Invoke((self.wrap)(request)))
+    }
+
+    fn describe(&self) -> serde_json::Value {
+        use serde_json::json;
+        let flags: Vec<_> = self
+            .options
+            .iter()
+            .filter_map(|a| {
+                let value = match a.kind {
+                    Kind::RefuseMem => return None,
+                    Kind::Value(m, _) | Kind::OptionalMem(m, _) => Some(m),
+                    _ => None,
+                };
+                Some(json!({"names":a.flag.names,"value":value,"description":a.flag.description}))
+            })
+            .collect();
+        let operands = match self.positionals {
+            Positionals::Operation => "host/CATALOG/REQUEST",
+            Positionals::None => "none",
+            Positionals::One => "one",
+            Positionals::Pair => "pair",
+            Positionals::Many => "many",
+            Positionals::Sql => "sql",
+            Positionals::Tail => "guest_tail",
+        };
+        json!({"options": flags, "operands": operands})
     }
 
     fn write_help(&self, out: &mut String) {
@@ -111,10 +139,10 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter().peekable();
     let Some(mut name) = arguments.next() else {
-        return Ok(Action::Help(help(None)));
+        return Ok(Action::Help(None));
     };
     if is_help(&name) {
-        return Ok(Action::Help(help(None)));
+        return Ok(Action::Help(None));
     }
     if name == "--version" {
         return if arguments.next().is_none() {
@@ -125,44 +153,21 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
     }
     if matches!(
         name.as_str(),
-        "prof" | "laws" | "lean" | "sdk" | "store" | "coverage" | "tapes" | "fleet"
+        "op" | "prof" | "laws" | "lean" | "sdk" | "store" | "coverage" | "tapes" | "fleet"
     ) {
         match arguments.next() {
-            None => return Ok(Action::Help(help(Some(named(&name)?)))),
+            None => return Ok(Action::Help(Some(named(&name)?))),
             Some(subcommand) if is_help(&subcommand) => {
-                return Ok(Action::Help(help(Some(named(&name)?))));
+                return Ok(Action::Help(Some(named(&name)?)));
             }
             Some(subcommand) => name.push_str(&format!(" {subcommand}")),
         }
     }
     let command = named(&name)?;
-    if name == "help" {
-        let target = arguments
-            .next()
-            .map(|mut name| {
-                if is_help(&name) {
-                    Ok(command)
-                } else {
-                    if matches!(
-                        name.as_str(),
-                        "prof" | "laws" | "lean" | "sdk" | "store" | "coverage" | "tapes" | "fleet"
-                    ) && let Some(subcommand) = arguments.next()
-                    {
-                        name.push_str(&format!(" {subcommand}"));
-                    }
-                    named(&name)
-                }
-            })
-            .transpose()?;
-        if arguments.next().is_some() {
-            return Err("help takes at most one command".into());
-        }
-        return Ok(Action::Help(help(target)));
-    }
     if matches!(name.as_str(), "tape" | "manifest") {
         match arguments.next().as_deref() {
             Some("show") => {}
-            Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
+            Some("--help" | "-h") => return Ok(Action::Help(Some(command))),
             _ => return Err(format!("expected: hirsel {}", command.usage)),
         }
     }

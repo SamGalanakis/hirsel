@@ -35,8 +35,6 @@ mod tests;
 /// The exit status of a worker whose memory limit refused an allocation
 /// (`hirsel_guard::EXIT_STATUS`).
 pub(crate) const MEMORY_STATUS: i32 = 71;
-/// How a worker's standard error names a release that cannot be a module.
-const UNSUPPORTED: &str = "module: unsupported: ";
 /// The most of a worker's standard error a refusal carries.
 const DIAGNOSTICS: usize = 64 << 10;
 
@@ -241,9 +239,10 @@ impl Service {
         };
         write().map_err(unavailable)?;
 
+        let result = job.0.join("module-result");
         let mut command = Command::new(&self.worker);
         command
-            .arg("build")
+            .arg(hirsel_core_ids::module_build::WORKER)
             .arg(&source)
             .args(["--target", request.target.triple(), "--backend"])
             .arg(match request.backend {
@@ -261,7 +260,7 @@ impl Service {
             .env("HOME", &job.0)
             .current_dir(&job.0)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(std::fs::File::create(&result).map_err(unavailable)?)
             .stderr(Stdio::piped())
             .process_group(0);
         let (cpu, file) = (
@@ -310,24 +309,33 @@ impl Service {
             return Err(Refusal::Limit(Limit::Output));
         }
         match (status.code(), status.signal()) {
-            (Some(0), _) => {}
             (Some(MEMORY_STATUS), _) => return Err(Refusal::Limit(Limit::Memory)),
             (_, Some(libc::SIGXCPU)) => return Err(Refusal::Limit(Limit::Cpu)),
             (_, Some(libc::SIGXFSZ)) => return Err(Refusal::Limit(Limit::Output)),
-            // The tool's own two failures: 1 is a source that does not check, 2 is
-            // everything else it reports, of which only this one is about the release.
-            (Some(1), _) => return Err(Refusal::Rejected(said)),
-            (Some(2), _) => {
-                let unsupported = said.lines().find_map(|line| line.strip_prefix(UNSUPPORTED));
-                return Err(match unsupported {
-                    Some(reason) => Refusal::Unsupported(reason.to_owned()),
-                    None => Refusal::Unavailable(said),
-                });
-            }
-            _ => {
+            (None, _) => {
                 return Err(Refusal::Unavailable(format!(
                     "the worker ended with {status}"
                 )));
+            }
+            _ => {}
+        }
+        use hirsel_core_ids::module_build::ModuleBuild;
+        let reply = std::fs::File::open(&result).map_err(unavailable)?;
+        if reply.metadata().map_err(unavailable)?.len() > DIAGNOSTICS as u64 {
+            return Err(Refusal::Unavailable("oversized module worker reply".into()));
+        }
+        match (status.success(), serde_json::from_reader(reply)) {
+            (true, Ok(ModuleBuild::Built)) => {}
+            (false, Ok(ModuleBuild::Rejected)) => return Err(Refusal::Rejected(said)),
+            (false, Ok(ModuleBuild::Unsupported(reason))) => {
+                return Err(Refusal::Unsupported(reason));
+            }
+            _ => {
+                return Err(Refusal::Unavailable(if said.is_empty() {
+                    format!("worker ended with {status} without a completed module")
+                } else {
+                    said
+                }));
             }
         }
         let bytes = std::fs::read(&output).map_err(unavailable)?;

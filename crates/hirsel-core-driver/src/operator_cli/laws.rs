@@ -246,3 +246,11 @@ fn source_walk_manifest_approvals_and_refusals() {
         )
     );
 }
+
+#[test]
+fn slice1_resolve_identify_read() {
+    slice1::resolve_identify_read();
+}
+
+#[path = "slice1_law.rs"]
+mod slice1;

@@ -16,6 +16,7 @@ runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir"
 "platform-recovery.hirsel" = "platform"
 "platform-preview.hirsel" = "platform"
 "platform-admitted.hirsel" = "platform"
+"platform-operator.hirsel" = "platform"
 "platform-groups.hirsel" = "platform"
 "platform-front.hirsel" = "platform"
 "platform-source.hirsel" = "platform"
@@ -92,6 +93,9 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."platform@1/platform/bucket_activation_witness_distinguishes_prepared"]
+limit = 134217728
+
+[tests.runs."platform@1/platform/replaced_catalog"]
 limit = 134217728
 
 [tests.runs."platform@1/platform/bucket_moved_activation_recovery"]

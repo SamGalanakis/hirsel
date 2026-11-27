@@ -60,11 +60,12 @@ const HELP: Flag = Flag {
 
 macro_rules! commands {
     ($($name:literal, $usage:literal, $description:literal;
-        $request:ident($ty:ident), $positionals:ident: $($option:ident),*;)*) => {
+        $([$contract:ident])? $request:ident($ty:ident), $positionals:ident: $($option:ident),*;)*) => {
         pub static COMMANDS: &[CommandSpec] = &[$(CommandSpec {
             name: $name,
             usage: $usage,
             description: $description,
+            contract: commands!(@contract $($contract)?),
             schema: &Schema::<$ty> {
                 positionals: Positionals::$positionals,
                 options: &[$(argument!($ty, $option)),*],
@@ -72,11 +73,17 @@ macro_rules! commands {
             },
         }),*];
     };
+    (@contract $name:ident) => { Some(types::ReadContract::$name) };
+    (@contract) => { None };
 }
 
 commands! {
-    "help", "help [command]", "Show commands or help for one command.";
-        Simple(NoOption), One: HELP;
+    "help", "help [COMMAND PATH] [--json]", "Show commands or help for one command.";
+        [Help] Help(HelpOption), Many: HELP, Json;
+    "op", "op <get>", "Inspect an operator request.";
+        Simple(NoOption), None: HELP;
+    "op get", "op get host/CATALOG/REQUEST [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
+        [Operation] OpGet(OpGetOption), Operation: HELP, Context, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HELP, Json, SourceCore, SourceStd, CoreProduct, Entry, Libraries,
@@ -278,7 +285,7 @@ commands! {
 #[path = "cli_help.rs"]
 mod help_text;
 pub use help_text::help;
-pub(crate) use help_text::named;
+pub(crate) use help_text::{describe, named};
 #[path = "cli_parse.rs"]
 mod parsing;
 pub use parsing::{Action, parse};

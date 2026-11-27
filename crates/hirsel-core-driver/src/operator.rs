@@ -236,7 +236,7 @@ pub(crate) struct Connection {
 }
 
 /// The operator UID: this process's effective UID.
-fn operator_uid() -> u32 {
+pub(crate) fn operator_uid() -> u32 {
     // SAFETY: geteuid has no preconditions.
     unsafe { libc::geteuid() }
 }

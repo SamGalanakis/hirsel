@@ -26,44 +26,6 @@ mod packages;
 mod release;
 use flags::CompilerFlags;
 pub(crate) use release::local_admission_limits;
-fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let emit = invocation
-        .options
-        .extract_if(.., |option| matches!(option, Opt::Emit(_)))
-        .filter_map(|option| match option {
-            Opt::Emit(value) => Some(value),
-            _ => None,
-        })
-        .last();
-    let output_kind = output_kind(invocation.command.name, emit.as_deref())?;
-    let profile = matches!(invocation.command.name, "prof run" | "prof replay")
-        .then(|| crate::prof_command::Run::read(&mut invocation))
-        .transpose()?;
-    let command = launch::fleet_cli::prepare(&mut invocation)?;
-    if command == "replay"
-        && invocation
-            .options
-            .iter()
-            .any(|option| matches!(option, Opt::HostState(_)))
-    {
-        return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
-    }
-    let (package_mode, package_store, pack_out) = packages::options(&mut invocation, command);
-    let transport = package_mode.transport();
-    let remote = crate::store::remote::for_request(&transport)?;
-    let store = crate::package_store::PackageStore::with_transport(package_store, transport);
-    if matches!(command, "lock" | "fetch" | "pack") {
-        return packages::run(invocation, store, package_mode, pack_out, remote);
-    }
-    run_compiler_request(
-        invocation,
-        command,
-        output_kind,
-        profile,
-        PackageInput::Discover(package_mode, store),
-        remote,
-    )
-}
 
 fn run_compiler_request(
     mut invocation: Request<Opt>,
@@ -1108,6 +1070,7 @@ fn run_compiler_request(
         return conclude(Outcome::Test(Box::new(session)));
     }
     let mut stopped = None;
+    let mut module_unsupported = None;
     // A build whose executable is stored though writing it to the output
     // failed (D3).
     let mut undelivered = None;
@@ -1216,6 +1179,9 @@ fn run_compiler_request(
                 if let crate::NativeStop::ForeignRecording { site, .. } = &e {
                     eprintln!("{site}: recording refusal site");
                 }
+                if let crate::NativeStop::Module(reason) = &e {
+                    module_unsupported = Some(reason.clone());
+                }
                 stopped = Some(e.to_string());
                 None
             }
@@ -1251,6 +1217,7 @@ fn run_compiler_request(
         },
         image: image.map(|i| i.identity.to_string()),
         native,
+        module_unsupported,
         stopped: stopped.or_else(|| {
             reach
                 .as_ref()

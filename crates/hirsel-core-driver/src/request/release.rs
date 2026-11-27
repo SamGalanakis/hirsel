@@ -92,6 +92,10 @@ impl Report {
                 eprintln!("{line}");
             }
         }
+        let module_unsupported = match &built {
+            Err(NativeStop::Module(reason)) => Some(reason.clone()),
+            _ => None,
+        };
         let (native, undelivered, stopped) = match built {
             Ok(build) => (Some(build), None, None),
             Err(NativeStop::Output { product, error }) => (
@@ -136,6 +140,7 @@ impl Report {
             resources: Vec::new(),
             image: None,
             native,
+            module_unsupported,
             stopped,
             reachable: Some(ReachableOutput {
                 bodies: self.bodies,

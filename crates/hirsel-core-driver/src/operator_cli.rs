@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod context;
 mod conversation;
+pub(crate) mod finite;
+pub(crate) use context::operation_id;
 #[cfg(test)]
 mod laws;
 mod preview;

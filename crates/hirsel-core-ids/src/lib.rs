@@ -12,6 +12,7 @@ pub mod encoding;
 pub mod hex;
 pub mod host_op;
 pub mod launch;
+pub mod module_build;
 pub mod published;
 pub mod work_steps;
 

@@ -126,6 +126,10 @@ BeginAsk(Bytes, launcher.Group, BeginInput, List[String], List[String], runner.f
 // Backup(group): back up the named group's store through its running serving place, or
 // return its store path when the group is cold (STORE-SPEC §15.4).
     | BackupAsk(String)
+// Read the catalog StoreId. The connection remains open for the pinned exchange.
+    | IdentifyAsk
+// Compare the StoreId on the host that executes the enclosed request.
+    | PinnedAsk(u64, u64, Bytes)
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.
@@ -253,7 +257,7 @@ StateAnswer(Bytes, launcher.Group, Input, Phase)
     | BackupAnswer(launcher.Group, u64, u64, u64, String)
 // BackupOffline(store_path): the registered group has no running serving place; the CLI backs
 // up `store_path` offline.
-    | BackupOfflineAnswer(String)
+    | BackupOfflineAnswer(String) | CatalogAnswer(u64, u64)
 
 pub fn terminal(p: Phase) -> bool {
     match p {

@@ -1,26 +1,21 @@
-type HistoryRetention {
-    floor: u64,
-    earlier: List[pages.HistoryRef]
-}
-
-fn history_retain(previous: HistoryMark, prior: pages.HistoryRef, current_seq: u64, retain: u8) -> Result[HistoryRetention, Error] {
+fn history_retain(previous: history.HistoryMark, prior: pages.HistoryRef, current_seq: u64, retain: u8) -> Result[history.HistoryRetention, Error] {
     if retain == 0 {
         return Error(Missing("retain"))
     }
     if retain == 1 {
-        return Ok(HistoryRetention(floor: current_seq, earlier: list.new()))
+        return Ok(history.HistoryRetention(floor: current_seq, earlier: list.new()))
     }
     let preceding = list.len(previous.retained)
     let room: u64 = int.widen(retain - 1)
     let kept = order.min(room, preceding + 1)
-    disk_allocation(scoped fn() -> Result[HistoryRetention, Error] {
+    disk_allocation(scoped fn() -> Result[history.HistoryRetention, Error] {
         let mut earlier: List[pages.HistoryRef] = list.with_capacity(kept)
         for i in preceding + 1 - kept .. preceding {
             list.push(mut earlier, previous.retained[i])
         }
         list.push(mut earlier, prior)
         let floor = earlier[0].seq
-        Ok(HistoryRetention(floor, earlier: take earlier))
+        Ok(history.HistoryRetention(floor, earlier: take earlier))
     })
 }
 
@@ -71,7 +66,7 @@ type ReclaimPass {
     floor: u64,
     generation: u64,
     next_pack: u64,
-    chain: List[HistoryLink],
+    chain: List[history.HistoryLink],
     live: Map[String, ()],
     leased: Map[String, ()]
 }
@@ -119,37 +114,37 @@ fn history_dead_upload(pass: ReclaimPass, key: String) -> bool {
 }
 
 type ObjectReclaimCapture: send {
-    head: HistoryHead,
+    head: history.HistoryHead,
     recovered: pages.HistoryRef,
     generation: u64,
     next_pack: u64
 }
 
 fn live_reclaim_name(mut live_bytes: Map[String, ()], lead: String, item: pages.HistoryRef) -> Result[(), Error] {
-    let name = history_key(lead, item)
+    let name = history.history_key(lead, item)
     failure_result_from_rep(types.capacity(map.try_reserve(mut live_bytes, 1)))?
     map.insert(mut live_bytes, take name, ())
     Ok(())
 }
 
-fn live_reclaim_checkpoint(mut client: std.object.Client, captured: HistoryHead, reference: pages.HistoryRef, mark: HistoryMark, raw: Bytes, mut live_bytes: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
+fn live_reclaim_checkpoint(mut client: std.object.Client, captured: history.HistoryHead, reference: pages.HistoryRef, mark: history.HistoryMark, raw: Bytes, mut live_bytes: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
     let mut at = captured
     at.checkpoint = reference
-    let located = history_locator(mut client, at, mark, raw, deadline)?
+    let located = failure_result_from_rep(history.history_locator(mut client, at, mark, raw, deadline))?
     live_reclaim_name(mut live_bytes, "m-", mark.manifest)?
-    for item in located.chunks {
+    for item in history.locator_chunks(located) {
         live_reclaim_name(mut live_bytes, "l-", item)?
     }
-    for (_, item) in located.rows {
+    for (_, item) in history.locator_rows(located) {
         live_reclaim_name(mut live_bytes, "p-", item)?
     }
     Ok(())
 }
 
-fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mark: HistoryMark, deadline: u64) -> Result[(u64, List[HistoryLink]), Error] waits {
+fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mark: history.HistoryMark, deadline: u64) -> Result[(u64, List[history.HistoryLink]), Error] waits {
     let at = fixed.head
     if at.floor <= fixed.recovered.seq {
-        let chain = history_suffix(mut client, at, fixed.recovered, deadline)?
+        let chain = failure_result_from_rep(history.history_suffix(mut client, at, fixed.recovered, deadline))?
         return Ok((fixed.recovered.seq, take chain))
     }
     let first = if list.len(mark.retained) == 0 {
@@ -157,10 +152,10 @@ fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mar
     } else {
         mark.retained[0]
     }
-    let suffix = history_suffix(mut client, at, first, deadline)?
-    let chain = disk_allocation(scoped fn() -> Result[List[HistoryLink], Error] {
-        let mut refs: List[HistoryLink] = list.with_capacity(1 + list.len(suffix))
-        list.push(mut refs, HistoryLink(epoch: first.epoch, len: first.len, digest: first.digest))
+    let suffix = failure_result_from_rep(history.history_suffix(mut client, at, first, deadline))?
+    let chain = disk_allocation(scoped fn() -> Result[List[history.HistoryLink], Error] {
+        let mut refs: List[history.HistoryLink] = list.with_capacity(1 + list.len(suffix))
+        list.push(mut refs, history.HistoryLink(epoch: first.epoch, len: first.len, digest: first.digest))
         for item in suffix {
             list.push(mut refs, item)
         }
@@ -171,8 +166,8 @@ fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mar
 
 fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, deadline: u64) -> Result[ReclaimPass, Error] waits {
     let at = fixed.head
-    let (take selected_mark, take selected_bytes) = history_checkpoint(mut client, at, deadline)?
-    let manifest = history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline)?
+    let (take selected_mark, take selected_bytes) = failure_result_from_rep(history.history_checkpoint(mut client, at, deadline))?
+    let manifest = failure_result_from_rep(history.history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline))?
     if manifest.archive_on != 0 || manifest.archive.stamp != 0 {
         return Error(Unsupported(1))
     }
@@ -180,10 +175,10 @@ fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, d
     let mut keep: Map[String, ()] = map.new()
     live_reclaim_checkpoint(mut client, at, at.checkpoint, selected_mark, selected_bytes, mut keep, deadline)?
     for item in selected_mark.retained {
-        let path = history_key("e-", item)
-        let raw = history_read_object(mut client, path, item, deadline)?
-        let mark = disk_allocation(scoped fn() -> Result[HistoryMark, Error] {
-            history_read_mark(path, at.store, item, raw)
+        let path = history.history_key("e-", item)
+        let raw = failure_result_from_rep(history.history_read_object(mut client, path, item, deadline))?
+        let mark = disk_allocation(scoped fn() -> Result[history.HistoryMark, Error] {
+            failure_result_from_rep(history.history_read_mark(path, at.store, item, raw))
         })?
         live_reclaim_checkpoint(mut client, at, item, mark, raw, mut keep, deadline)?
     }
@@ -223,7 +218,7 @@ fn sweep_start() -> manifest.SweepCursor {
 }
 
 fn history_entry_cursor(mark: manifest.SweepCursor) -> String {
-    history_key("e-", pages.HistoryRef(seq: mark.position, epoch: mark.epoch, len: 0, digest: mark.digest))
+    history.history_key("e-", pages.HistoryRef(seq: mark.position, epoch: mark.epoch, len: 0, digest: mark.digest))
 }
 
 fn history_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, mut members: List[std.object.Entry], deadline: u64) -> Result[(), Error] waits {
@@ -474,7 +469,7 @@ fn preview_reclaim_uploads(mut lane: ObjectJournalSession, pass: ReclaimPass, mu
 }
 
 fn record_object_lane_failure(mut db: Db, lane: ObjectJournalSession, problem: Error) {
-    if let Some(_) = lane.register.terminal {
+    if let Some(_) = history.register_terminal(lane.register) {
         let saved: Error = clone(problem)
         write_disk(mut db.disk, take saved, scoped fn(mut state: DiskState, take terminal: Error) {
             if let Some(mut object_writer) = state.object {
@@ -536,7 +531,7 @@ pub fn reclaim_preview(mut db: Db, max_items: u64) -> Result[ReclaimList, Error]
     let store_id = db.store
     let (take paused, take resume) = take_object_journal(mut db)?
     let mut lane = take paused
-    let fixed = ObjectReclaimCapture(head: lane.register.head, recovered, generation, next_pack)
+    let fixed = ObjectReclaimCapture(head: history.register_head(lane.register), recovered, generation, next_pack)
     let outcome = preview_on_lane(mut lane, store_id, fixed, max_items)
     if let Error(problem) = outcome {
         record_object_lane_failure(mut db, lane, problem)
@@ -644,7 +639,7 @@ pub fn reclaim_purge(mut db: Db, plan: ReclaimList) -> Result[PurgeReport, Recla
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let (take paused, take resume) = take_object_journal(mut db) ?=> Store
     let mut lane = take paused
-    let fixed = ObjectReclaimCapture(head: lane.register.head, recovered, generation, next_pack)
+    let fixed = ObjectReclaimCapture(head: history.register_head(lane.register), recovered, generation, next_pack)
     let outcome = purge_on_lane(mut lane, fixed, plan)
     if let Error(problem) = outcome {
         record_object_lane_failure(mut db, lane, problem)

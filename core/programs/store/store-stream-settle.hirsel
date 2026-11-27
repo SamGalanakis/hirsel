@@ -26,9 +26,9 @@ fn stream_poll_head(mut lane: ObjectJournalSession) -> Result[Option[(u64, Optio
         None => return Ok(None),
     }
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    let _ = history_fetch(mut lane.client, "head", mut lane.buffers.witness, due)?
-    let (take capture, take attach) = history_decode_head_attach(lane.buffers.witness)?
-    if capture.head.pair.epoch > lane.register.head.pair.epoch {
+    let _ = failure_result_from_rep(history.history_fetch(mut lane.client, "head", mut lane.buffers.witness, due))?
+    let (take capture, take attach) = failure_result_from_rep(history.history_decode_head_attach(lane.buffers.witness))?
+    if capture.head.pair.epoch > history.register_head(lane.register).pair.epoch {
         return Ok(Some((capture.head.pair.epoch, stream_find_sealed_cutoff(attach, sid, inc))))
     }
     Ok(None)
@@ -37,27 +37,21 @@ fn stream_poll_head(mut lane: ObjectJournalSession) -> Result[Option[(u64, Optio
 // Publishes one settle head write, with or without a new GROUP entry in
 // `lane.buffers.packet` (`has_entry`). Updates `lane.register` only on Applied.
 fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc: u64, has_entry: bool, take next_attach: Option[format.Attach], drop_attach: bool, deadline: u64) -> Result[SettleOutcome, Error] waits {
-    let mut candidate = lane.register.head
+    let mut candidate = history.register_head(lane.register)
     if has_entry {
-        let next_pos = history_next_id(candidate.entry.seq)?
-        candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, lane.buffers.packet)
+        let next_pos = failure_result_from_rep(history.history_next_id(candidate.entry.seq))?
+        candidate.entry = history.history_new_ref(next_pos, candidate.pair.epoch, lane.buffers.packet)
         pager.history_fill_key(mut lane.buffers.key, "e-", candidate.entry)
         list.clear(mut lane.buffers.compare)
         failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
-        history_create(mut lane.client, lane.buffers.key, mut lane.buffers.packet, mut lane.buffers.compare, deadline)?
+        failure_result_from_rep(history.history_create(mut lane.client, lane.buffers.key, mut lane.buffers.packet, mut lane.buffers.compare, deadline))?
     }
-    history_encode_register_head(mut lane.buffers.body, candidate, lane.authority, next_attach)?
-    let issued_head = history_write_head_issue(mut lane.client, Match(lane.register.tag), mut lane.buffers.body, deadline)
-    match history_write_head_finish(mut lane.client, take issued_head, mut lane.buffers.body, mut lane.buffers.witness, deadline) {
-        HistoryApplied(tag) => {
-            lane.register.head = candidate
-            lane.register.tag = tag
-            lane.register.attach = take next_attach
-            Ok(SettleApplied)
-        },
+    let written = failure_result_from_rep(history.publish_register_head(mut lane.client, mut lane.register, candidate, lane.authority, take next_attach, mut lane.buffers, deadline))?
+    match take written {
+        HistoryApplied(_) => Ok(SettleApplied),
         HistoryConflict(_) => {
-            let (take moved, take moved_attach) = history_decode_head_attach(lane.buffers.witness)?
-            if moved.head.pair.epoch > lane.register.head.pair.epoch {
+            let (take moved, take moved_attach) = failure_result_from_rep(history.history_decode_head_attach(lane.buffers.witness))?
+            if moved.head.pair.epoch > history.register_head(lane.register).pair.epoch {
                 return Ok(SettleFenced(moved.head.pair.epoch, stream_find_sealed_cutoff(moved_attach, sid, inc)))
             }
             Ok(SettleNotApplied)
@@ -94,7 +88,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
     // Under archival (§12.11.11 M6), no entry is written above `sealed[0].at`
     // until all sealed tails are rewritten in order via the sealed cursor.
     if lane.archive_on != 0 {
-        let has_sealed = match view lane.register.attach {
+        let has_sealed = match history.register_attach(lane.register) {
             Some(a) => list.len(a.sealed) != 0,
             None => false,
         }
@@ -109,7 +103,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
         Some(link) => (string.from(link.root), link.last_batch_seq, clone(link.commit_batches)),
         None => return Ok(SettleApplied),
     }
-    let live_tail = match lane.register.attach {
+    let live_tail = match history.register_attach(lane.register) {
         Some(attach_now) => match attach_now.live {
             Some(r) => r,
             None => return Ok(SettleApplied),
@@ -118,7 +112,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
     }
     let sid = live_tail.sid
     let inc = live_tail.inc
-    let head = lane.register.head
+    let head = history.register_head(lane.register)
     let store = head.store
     let epoch = head.pair.epoch
     let dir = stream_key(root, stream_dir(host_stream_id_from_rep(sid)))
@@ -188,7 +182,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
             } else {
                 0
             }
-            let batch_ctx = format.DiskContext(store: store_key_to_rep(store), role: format.ROLE_BATCH, seq)
+            let batch_ctx = format.DiskContext(store: store, role: format.ROLE_BATCH, seq)
             let mut at = 0u64
             let mut fidx = 0u64
             while at < list.len(buffers.slice) {
@@ -201,7 +195,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
                     } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
                         let width = frame.end - at
                         if entry_frames > 0 && entry_bytes + width > group_bytes {
-                            let step_attach = match lane.register.attach {
+                            let step_attach = match history.register_attach(lane.register) {
                                 Some(cur_attach) => stream_settle_attach(cur_attach, host_stream_id_from_rep(sid), inc, cursor_seq, cursor_frame)?,
                                 None => return Ok(SettleNotApplied),
                             }
@@ -214,10 +208,10 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
                             entry_bytes = 0
                         }
                         if entry_frames == 0 {
-                            let group_ctx = history_group_context(lane.register.head)?
-                            history_packet_header(mut lane.buffers.packet, group_ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
+                            let group_ctx = history_group_context(history.register_head(lane.register))?
+                            failure_result_from_rep(history.history_packet_header(mut lane.buffers.packet, group_ctx, history.register_head(lane.register).pair.epoch, history.register_head(lane.register).authority_kind, history.register_head(lane.register).entry))?
                         }
-                        let group_ctx = history_group_context(lane.register.head)?
+                        let group_ctx = history_group_context(history.register_head(lane.register))?
                         object_journal_add(mut lane, group_ctx, list.slice(buffers.slice, at, frame.end))?
                         entry_frames += 1
                         entry_bytes += width
@@ -244,7 +238,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
         None
     } else {
         let final_seq = order.max(next_seq, order.max(live_tail.from_seq, cursor_seq))
-        match lane.register.attach {
+        match history.register_attach(lane.register) {
             Some(cur_attach) => Some(stream_settle_attach(cur_attach, host_stream_id_from_rep(sid), inc, final_seq, 0)?),
             None => return Ok(SettleNotApplied),
         }

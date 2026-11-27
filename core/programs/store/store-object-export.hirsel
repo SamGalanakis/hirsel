@@ -14,7 +14,7 @@ type ObjectExportCopy: send {
 fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: pages.HistoryRef, take buffer: Bytes) -> Result[Bytes, Error] waits {
     let mut raw = take buffer
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    match history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due) {
+    match failure_result_from_rep(history.history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due)) {
         Ok(()) => Ok(take raw),
         Error(HistoryMissing(..)) => {
             object_journal_fresh_probe(mut lane, due)?
@@ -26,7 +26,7 @@ fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: pa
 
 fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: pages.HistoryRef) -> Result[Bytes, Error] waits {
     let (take key, take buffer) = disk_allocation(scoped fn() -> Result[(String, Bytes), Error] {
-        Ok((history_key(lead, reference), list.with_capacity(reference.len)))
+        Ok((history.history_key(lead, reference), list.with_capacity(reference.len)))
     })?
     let (outlet, incoming): (Sender[Result[Bytes, types.Failure]], Receiver[Result[Bytes, types.Failure]]) = channel.new(1)
     let request = journal.ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet)
@@ -64,7 +64,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
         }
         match stream_settle(mut lane, last_seq, last_seq + 1, false, group_bytes, group_commits) {
             Ok(SettleApplied) => {
-                let fseq = match view lane.register.attach {
+                let fseq = match history.register_attach(lane.register) {
                     Some(a) => match a.live {
                         Some(r) => r.from_seq,
                         None => 0u64,
@@ -73,15 +73,15 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
                 }
                 object_journal_stream_trim_batches(mut lane, fseq)
                 if let Some(link) = view lane.stream {
-                    slot_report_head(link, lane.register.head.store, lane.register.attach, last_seq)
+                    slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), last_seq)
                 }
                 None
             },
             Ok(SettleFenced(moved_epoch, cutoff)) => {
                 if let Some(link) = view lane.stream {
-                    slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                    slot_report(link, ReportFenced(link.slot, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
                 }
-                Some(Fenced(lane.register.head.pair.epoch))
+                Some(Fenced(history.register_head(lane.register).pair.epoch))
             },
             Ok(SettleNotApplied) => Some(Undecided),
             Error(take problem) => Some(take problem),
@@ -119,7 +119,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
 }
 
 fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
-    let head = lane.register.head
+    let head = history.register_head(lane.register)
     // A backup (no activation) takes the activation the head has.
     let activation = match wanted {
         Some(given) => given,
@@ -130,24 +130,24 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     }
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
     deploy_result(object_journal_fresh_probe(mut lane, due))?
-    let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
-    let suffix = deploy_result(history_suffix(mut lane.client, head, head.checkpoint, due))?
+    let (take mark, _) = deploy_result(failure_result_from_rep(history.history_checkpoint(mut lane.client, head, due)))?
+    let suffix = deploy_result(failure_result_from_rep(history.history_suffix(mut lane.client, head, head.checkpoint, due)))?
     let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[pages.HistoryRef], List[pages.HistoryRef], Map[String, ()]), Error] {
         let locator = object_state(db).locator
-        let mut packs: List[pages.HistoryRef] = list.with_capacity(map.len(locator.rows))
+        let mut packs: List[pages.HistoryRef] = list.with_capacity(map.len(history.locator_rows(locator)))
         let mut history_entries: List[pages.HistoryRef] = list.with_capacity(list.len(suffix))
         let mut names: Map[String, ()] = map.new()
         live_reclaim_name(mut names, "m-", mark.manifest)?
         live_reclaim_name(mut names, "e-", head.checkpoint)?
-        for chunk in locator.chunks {
+        for chunk in history.locator_chunks(locator) {
             live_reclaim_name(mut names, "l-", chunk)?
         }
-        for (_, item) in locator.rows {
+        for (_, item) in history.locator_rows(locator) {
             list.push(mut packs, item)
             live_reclaim_name(mut names, "p-", item)?
         }
         for suffix_index in 0u64 .. list.len(suffix) {
-            let item = history_length(suffix[suffix_index], head.checkpoint.seq + 1 + suffix_index)
+            let item = history.history_length(suffix[suffix_index], head.checkpoint.seq + 1 + suffix_index)
             list.push(mut history_entries, item)
             live_reclaim_name(mut names, "e-", item)?
         }
@@ -155,11 +155,11 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     }))?
     let mut journal_end = 72u64
     for item in history_entries {
-        let key = history_key("e-", item)
+        let key = history.history_key("e-", item)
         if item.len < 128 {
             return Error(Store(failure_from_rep(format.disk_fault(key, 112, Truncated))))
         }
-        deploy_result(history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due))?
+        deploy_result(failure_result_from_rep(history.history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due)))?
         let frame = deploy_result(failure_result_from_rep(manifest.disk_read_frame_head(key, lane.buffers.compare, 112)))?
         if frame.kind != 0x0040 {
             let Some(total) = int.checked_add(journal_end, item.len - 112) else {
@@ -185,9 +185,9 @@ fn export_write(mut file: HostFile, raw: Bytes) -> Result[(), DeployError] waits
 
 fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String, reference: pages.HistoryRef, role: u8, local: String) -> Result[(), DeployError] waits {
     let mut raw = deploy_result(object_export_fetch(plan, lead, reference))?
-    let key = history_key(lead, reference)
-    let ctx = deploy_result(history_object_context(key, id, role, reference, raw))?
-    deploy_result(history_object_digest(key, reference, raw))?
+    let key = history.history_key(lead, reference)
+    let ctx = deploy_result(failure_result_from_rep(history.history_object_context(key, store_key_to_rep(id), role, reference, raw)))?
+    deploy_result(failure_result_from_rep(history.history_object_digest(key, reference, raw)))?
     let header = deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0))))?
     for i in 0u64 .. 72 {
         raw[i] = header[i]
@@ -208,13 +208,13 @@ fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Re
     export_write(mut output, deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0))))?)?
     let mut offset = 72u64
     for item in plan.entries {
-        let key = history_key("e-", item)
+        let key = history.history_key("e-", item)
         let mut raw = deploy_result(object_export_fetch(plan, "e-", item))?
-        let (remote, _) = deploy_result(history_entry_context(key, id, item, raw))?
-        deploy_result(history_object_digest(key, item, raw))?
+        let (remote, _) = deploy_result(failure_result_from_rep(history.history_entry_context(key, store_key_to_rep(id), item, raw)))?
+        deploy_result(failure_result_from_rep(history.history_object_digest(key, item, raw)))?
         let first = deploy_result(failure_result_from_rep(manifest.disk_frame_bytes(key, remote, raw, 112)))?
         if first.kind == 0x0040 {
-            deploy_result(history_check_claim(key, item, raw, first))?
+            deploy_result(failure_result_from_rep(history.history_check_claim(key, item, raw, first)))?
             continue
         }
         let mut at = 112u64

@@ -115,7 +115,7 @@ fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
     let mut raw: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
     let head = format.DiskContext(store: store_key_to_rep(id), role: 7, seq: 1)
     failure_result_from_rep(types.capacity(format.history_append_header(mut raw, head, 2, 1)))?
-    match history_head_frame(format_header(head, raw, 9u32)?) {
+    match failure_result_from_rep(history.history_head_frame(format_header(head, raw, 9u32)?)) {
         Error(Unsupported(9)) => (),
         _ => return Error(Missing("bucket head format refusal")),
     }
@@ -124,7 +124,7 @@ fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
     failure_result_from_rep(types.capacity(format.history_append_header(mut raw, manifest, 2, 1)))?
     let old = format_header(manifest, raw, 9u32)?
     let reference = pages.HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
-    match history_object_context("m-1", id, 1, reference, old) {
+    match failure_result_from_rep(history.history_object_context("m-1", store_key_to_rep(id), 1, reference, old)) {
         Error(Unsupported(9)) => Ok(()),
         _ => Error(Missing("bucket object format refusal")),
     }

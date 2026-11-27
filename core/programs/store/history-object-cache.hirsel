@@ -1,0 +1,141 @@
+pub const OBJECTS_CACHE_DIR: String = "objects-cache"
+
+pub const PACK_CACHE_INCOMING: String = "incoming"
+
+pub fn pack_cache_directory(cache: Option[pager.ObjectsCache]) -> Option[pager.ObjectsCache] waits {
+    let Some(location) = cache else {
+        return None
+    }
+    if location.capacity_bytes == 0 {
+        return None
+    }
+    let directory = match std.dir.narrow(location.dir, OBJECTS_CACHE_DIR) {
+        Ok(directory) => directory,
+        Error(NotFound) => {
+            match std.dir.create_dir(location.dir, OBJECTS_CACHE_DIR) {
+                Ok(()) => (),
+                Error(Exists) => (),
+                Error(_) => return None,
+            }
+            let Ok(directory) = std.dir.narrow(location.dir, OBJECTS_CACHE_DIR) else {
+                return None
+            }
+            directory
+        },
+        Error(_) => return None,
+    }
+    Some(pager.ObjectsCache(dir: directory, capacity_bytes: location.capacity_bytes))
+}
+
+pub fn pack_cache_lock(d: Dir) -> Option[std.file.Lock] waits {
+    let Ok(take file) = host.open(d, "lock", ReadWrite) else {
+        return None
+    }
+    match std.file.try_lock(take file) {
+        Ok(take locked) => Some(take locked),
+        Error(_) => None,
+    }
+}
+
+pub fn pack_cache_read(cache: pager.ObjectsCache, path: String, width: u64, expected: Option[u64], mut raw: Bytes) -> bool waits {
+    let Some(take locked) = pack_cache_lock(cache.dir) else {
+        return false
+    }
+    let Ok(take opened) = host.open(cache.dir, path, Read) else {
+        return false
+    }
+    let mut file = take opened
+    let trailer = if expected == None {
+        8u64
+    } else {
+        0u64
+    }
+    let stored_width = width + trailer
+    if let Ok(status) = host.stat_file(mut file) {
+        if status.size == stored_width {
+            while list.len(raw) < stored_width {
+                let Ok(read) = host.read(mut file, mut raw) else {
+                    break
+                }
+                if read == 0 {
+                    break
+                }
+            }
+            if list.len(raw) == stored_width {
+                let digest = match expected {
+                    Some(value) => value,
+                    None => format.read_le(raw, width, 8),
+                }
+                if digest == std.check.xxh3(raw, 0, width) {
+                    list.truncate(mut raw, width)
+                    return true
+                }
+            }
+        }
+    }
+    drop(take file)
+    let _ = host.remove(cache.dir, path)
+    drop(take locked)
+    false
+}
+
+pub fn pack_cache_publish(d: Dir, path: String, take file: HostFile) waits {
+    if let Ok(()) = host.close(take file) {
+        let _ = host.rename(d, PACK_CACHE_INCOMING, path)
+    }
+}
+
+pub fn pack_cache_open(cache: pager.ObjectsCache, path: String, width: u64) -> Option[HostFile] waits {
+    if width > cache.capacity_bytes {
+        return None
+    }
+    let Ok(take opened) = host.open(cache.dir, path, Read) else {
+        return None
+    }
+    let mut file = take opened
+    if let Ok(status) = host.stat_file(mut file) {
+        if status.size == width {
+            return Some(take file)
+        }
+    }
+    None
+}
+
+fn pack_cache_span(mut file: HostFile, offset: u64, width: u64, mut raw: Bytes) -> bool waits {
+    list.clear(mut raw)
+    while list.len(raw) < width {
+        let Ok(received) = host.read_at(mut file, offset + list.len(raw), mut raw) else {
+            return false
+        }
+        if received == 0 {
+            return false
+        }
+    }
+    list.truncate(mut raw, width)
+    true
+}
+
+pub fn pack_cache_write_payload(mut file: HostFile, raw: Bytes, with_trailer: bool) -> bool waits {
+    if let Error(_) = std.file.write_all(mut file, raw) {
+        return false
+    }
+    if !with_trailer {
+        return true
+    }
+    let Ok(take allocated) = manifest.disk_read_buffer(8) else {
+        return false
+    }
+    let mut trailer = take allocated
+    list.put_word_le(mut trailer, std.check.xxh3(raw, 0, list.len(raw)))
+    match std.file.write_all(mut file, trailer) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+pub fn pack_cache_discard(cache: pager.ObjectsCache, path: String) waits {
+    if let Some(take locked) = pack_cache_lock(cache.dir) {
+        let _ = host.remove(cache.dir, path)
+        drop(take locked)
+    }
+}

@@ -236,11 +236,11 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
     let owner = StoreId(hi: 3, lo: 4)
     let funding = pager.TieredPagerFunding(cache_bytes: exact.cache_bytes, writer_pin_bytes: exact.writer_pin_bytes, pager_task_bytes: exact.pager_task_bytes, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(d), funding, 1)?
-    let _ = failure_result_from_rep(pager.pager_reader_grant(requests, VALUE_LIMIT + MIB))?
+    let _ = failure_result_from_rep(pager.pager_reader_grant(requests, VALUE_LIMIT + history.MIB))?
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
     // W + U now demands one extra cache byte at the same q. K stays fixed.
-    overrides.readers = Some(VALUE_LIMIT + MIB + 1)
+    overrides.readers = Some(VALUE_LIMIT + history.MIB + 1)
     overrides.resident_limit = Some(floor + 1)
     let readers_fit = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
     if readers_fit.cache_bytes != 52232192 + 1 || readers_fit.writer_pin_bytes != 34471936 {
@@ -252,13 +252,13 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
     // leaves 97,091,584 for C, between W + U = 84,869,120 and 4q = 256 MiB.
     overrides.resident_limit = Some(268030824)
     let mid = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
-    if (mid.cache_bytes, mid.writer_pin_bytes, mid.dirty_bytes, mid.pager_task_bytes) != (97091584u64, 64 * MIB, 64 * MIB, 16 * MIB) {
+    if (mid.cache_bytes, mid.writer_pin_bytes, mid.dirty_bytes, mid.pager_task_bytes) != (97091584u64, 64 * history.MIB, 64 * history.MIB, 16 * history.MIB) {
         fail("L70: the cache must use the remainder after maximizing the quotas")
     }
     // An 88 MiB override is between W + U and the remainder at this q.
-    overrides.cache_bytes = Some(88 * MIB)
+    overrides.cache_bytes = Some(88 * history.MIB)
     let fixed = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
-    if fixed.cache_bytes != 88 * MIB || fixed.writer_pin_bytes != 64 * MIB {
+    if fixed.cache_bytes != 88 * history.MIB || fixed.writer_pin_bytes != 64 * history.MIB {
         fail("L70: the cache override must replace the derived cache")
     }
     // The cache at the floor is already exactly W + U.

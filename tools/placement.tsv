@@ -682,7 +682,7 @@ AUTHORITY_LIMIT	store-history.hirsel	history	history	L7
 history_append_text	store-history.hirsel	history	history	L7
 history_config_bytes	store-history.hirsel	history	history	L7
 history_encode_head	store-history.hirsel	history	history	L7
-history_claim_head	store-history.hirsel	history	history	L7
+history_claim_head	store-history.hirsel	history	store	-	public ClaimAuth argument keeps the declaration at the root
 object_history_config	store-history.hirsel	history	history	L7
 INDEX_CHUNK	store-index-build.hirsel	maintenance	maintenance	L14
 resident_rows_after	store-index-build.hirsel	maintenance	maintenance	L14
@@ -1651,7 +1651,8 @@ RecordedClaim	store-reexec.hirsel	store	store	-
 recorded_claim	store-reexec.hirsel	store	store	-
 HistoryWrite	store-register.hirsel	history	history	L7
 history_fetch_head	store-register.hirsel	history	history	L7
-history_write_head	store-register.hirsel	history	history	L7
+history_write_head_issue	store-register.hirsel	history	history	L7	current split issue and finish operations
+history_write_head_finish	store-register.hirsel	history	history	L7	current split issue and finish operations
 HistoryRegister	store-register.hirsel	history	history	L7
 history_encode_register_head	store-register.hirsel	history	history	L7
 history_authority_end	store-register.hirsel	history	history	L7
@@ -1677,7 +1678,7 @@ HistoryClaimResult	store-register.hirsel	history	history	L7
 history_claim_saved	store-register.hirsel	history	history	L7
 history_claim_same	store-register.hirsel	history	history	L7
 history_claim_changed	store-register.hirsel	history	history	L7
-history_replace_claim	store-register.hirsel	history	history	L7
+history_replace_claim	store-register.hirsel	history	store	-	public ClaimAuth argument keeps the declaration at the root
 KeptRange	store-rounds.hirsel	transfer	transfer	L13
 KeptImport	store-rounds.hirsel	store	store	-
 RoundMeta	store-rounds.hirsel	transfer	transfer	L13

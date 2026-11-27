@@ -45,7 +45,7 @@ fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]
     }
     let checkpointed = db.checkpointed
     let inventory_read = disk_allocation(scoped fn() -> Result[Arc[pages.TieredReadInventory], Error] {
-        recovered_tiered_inventory(manifest.pack_locations(installed), None, checkpointed, next_stamp)
+        failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), None, checkpointed, next_stamp))
     })
     let paging = match take inventory_read {
         Ok(take ready) => take ready,

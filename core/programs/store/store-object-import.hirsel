@@ -12,11 +12,11 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     }
     let ObjectAuthorityConfig(client: take connected, level_name: take level_name, op_ms, ..) = take settings
     let mut client = take connected
-    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(client), take level_name))?
+    let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(client), take level_name)))?
     let deadline = std.object.deadline_after_ms(client, op_ms)
-    let mut workspace = history_buffers(65536)?
-    history_check_endpoint(mut client, deadline)?
-    match history_fetch(mut client, "head", mut workspace.witness, deadline) {
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    failure_result_from_rep(history.history_check_endpoint(mut client, deadline))?
+    match failure_result_from_rep(history.history_fetch(mut client, "head", mut workspace.witness, deadline)) {
         Ok(_) => return Error(Exists("authority")),
         Error(Remote(NotFound)) => (),
         Error(take problem) => return Error(take problem),
@@ -29,14 +29,14 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     draft.store = store_key_from_rep(id)
     catalog.restore_fence(mut draft.schema, 1)
     let (manifest, take locator) = history_import_base(mut client, draft, options, mut workspace, deadline)?
-    match history_publish_base(mut client, store_key_from_rep(id), store_key_from_rep(holder), 1, metadata, manifest, locator, mut workspace, deadline, None) {
+    match failure_result_from_rep(history.history_publish_base(mut client, store_key_to_rep(store_key_from_rep(id)), store_key_to_rep(store_key_from_rep(holder)), 1, metadata, manifest, locator, mut workspace, deadline, None)) {
         Ok(_) => Ok(store_key_from_rep(id)),
         Error(Exists(existing)) if existing == "head" => Error(Lost),
         Error(take problem) => Error(take problem),
     }
 }
 
-fn history_import_base(mut client: std.object.Client, draft: Db, options: Options, mut workspace: HistoryBuffers, deadline: u64) -> Result[(pages.HistoryRef, HistoryLocateRoot), Error] waits {
+fn history_import_base(mut client: std.object.Client, draft: Db, options: Options, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(pages.HistoryRef, history.HistoryLocateRoot), Error] waits {
     let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(draft, NoHolderChange)
     })?
@@ -47,11 +47,11 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
     let limit = order.max(options.pack_bytes, manifest.page_manifest_file_size(manifest.MANIFEST_LIMIT, 1))
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit))?
-    let no_packs = empty_history_locator()
+    let no_packs = history.empty_history_locator()
     let (take layout, take refs) = history_write_page_cut(mut client, draft.store, 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline)?
     fill_cut_manifest(mut buffers.out, draft, NoHolderChange, participants.roots, 1, 1, 1, layout, next_stamp, base.account, seal_page_manifest_file)?
     let (_, take page_record) = disk_read_page_manifest("MANIFEST", buffers.out)?
-    let uploaded = history_create_manifest(mut client, draft.store, 1, 1, page_record, mut workspace, deadline)?
-    let locator = history_make_locator(mut client, draft.store, 1, 1, 1, take refs, mut workspace, deadline)?
+    let uploaded = failure_result_from_rep(history.history_create_manifest(mut client, store_key_to_rep(draft.store), 1, 1, page_record, mut workspace, deadline))?
+    let locator = failure_result_from_rep(history.history_make_locator(mut client, store_key_to_rep(draft.store), 1, 1, 1, take refs, mut workspace, deadline))?
     Ok((uploaded, take locator))
 }

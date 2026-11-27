@@ -531,14 +531,14 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         let key = stream_key(place_prefix, "head")
         let mut scratch = replace(mut s.lane.compare, list.new())
         let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-            let _ = history_fetch(mut c, key, mut scratch, deadline)?
+            let _ = failure_result_from_rep(history.history_fetch(mut c, key, mut scratch, deadline))?
             Ok(())
         })
         s.lane.compare = take scratch
         if let Error(_) = fetched {
             continue
         }
-        let Ok((take capture, take attach)) = history_decode_head_attach(s.lane.compare) else {
+        let Ok((take capture, take attach)) = failure_result_from_rep(history.history_decode_head_attach(s.lane.compare)) else {
             continue
         }
         // Only the pin's own Store may record ranges or authorize an ask.

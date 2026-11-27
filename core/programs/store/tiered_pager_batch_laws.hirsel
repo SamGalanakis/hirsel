@@ -15,9 +15,9 @@ fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: 
         list.push(mut written, TieredBlob(reference))
     }
     let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
-    let object_ref = history_new_ref(pack_seq, 1, raw)
+    let object_ref = history.history_new_ref(pack_seq, 1, raw)
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let (take stored, _) = std.object.store(mut client, history_key("p-", object_ref), take raw, deadline)
+    let (take stored, _) = std.object.store(mut client, history.history_key("p-", object_ref), take raw, deadline)
     let _ = stored ?=> |problem| Remote(problem)
     Ok((object_ref, pack, take written))
 }
@@ -39,7 +39,7 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks, cache: Option[pager.Ob
     list.push(mut siblings, clone(large_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
     let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, ahead: NoAhead, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
-    let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, pack_cache_directory(cache))
+    let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, history.pack_cache_directory(cache))
     let runs = if let None = cache {
         2u64
     } else {
@@ -122,7 +122,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
     let (take raw, leaf_pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
     let leaves = pages.HistoryRef(seq: 9, epoch: 1, len: list.len(raw), digest: 88)
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let (take stored, _) = std.object.store(mut client, history_key("p-", leaves), take raw, deadline)
+    let (take stored, _) = std.object.store(mut client, history.history_key("p-", leaves), take raw, deadline)
     let _ = stored ?=> |problem| Remote(problem)
     let mut ids = 0u64
     let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()

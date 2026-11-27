@@ -168,7 +168,7 @@ fn replay_base_state(take validated: manifest.ValidatedPageManifest) -> Result[(
         }
     }
     if has_cold {
-        let manifest.LoadedPageStore(manifest: take selected, holders: take holders, ..) = rebuild_page_store(take validated, None)?
+        let manifest.LoadedPageStore(manifest: take selected, holders: take holders, ..) = failure_result_from_rep(history.rebuild_page_store(take validated, None))?
         let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
             failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
         })?

@@ -276,7 +276,7 @@ fn weak_notify_strong(notices: List[Sender[WeakNotice]]) {
     }
 }
 
-fn weak_publish(p: WeakPublisher, head: HistoryHead, created: u64, seq: u64) {
+fn weak_publish(p: WeakPublisher, head: history.HistoryHead, created: u64, seq: u64) {
     latest.publish(p.progress, arc.new(LevelProgress(epoch: head.pair.epoch, position: created, seq)))
     let _ = channel.try_send(p.commands, WakeLevels)
 }

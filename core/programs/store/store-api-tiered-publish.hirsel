@@ -130,7 +130,7 @@ fn drain_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]],
         return Error(Io(Closed))
     }
     let kept = list.len(queue.added)
-    let drained = match recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp) {
+    let drained = match failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp)) {
         Ok(paging) => {
             let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
             failure_result_from_rep(pager.drain_cut_queue(source, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut queue, moving, budget))
@@ -151,27 +151,6 @@ fn drain_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]],
         },
         Error(take problem) => Error(take problem),
     }
-}
-
-// Step 5's images, built before the rename so the swap allocates nothing.
-// Each sealed tree reads its Cold roots through the new generation's packs.
-// The cut settles (§13.7): the live Tiered account becomes the published X.
-fn prepare_tiered_install(mut cut_stage: pager.TieredCutStage, installed: manifest.PageLocations, generation: u64, next_stamp: u64) -> Result[u64, Error] {
-    let settled = failure_result_from_rep(pager.cut_tiered_account(cut_stage.roots))?
-    if pager.tiered_cut_stage_empty(cut_stage) {
-        return Ok(settled)
-    }
-    let paging = recovered_tiered_inventory(installed, None, generation, next_stamp)?
-    for slot in 0u64 .. list.len(cut_stage.roots) {
-        let had_paging = match view cut_stage.roots[slot].collections.paging {
-            Some(_) => true,
-            None => false,
-        }
-        if had_paging || pages.tiered_collections(cut_stage.roots[slot].collections.root) {
-            cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
-        }
-    }
-    Ok(settled)
 }
 
 // Step 5: each participant's Tiered images replace its Hot ones, in the

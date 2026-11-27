@@ -276,8 +276,8 @@ fn sim_law_invalid_declarations(tasks: Tasks, r: Random, sim: BucketSim, mut wor
 fn sim_law_bad_header(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 606, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut wire: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let old = history_fetch(mut client, "head", mut wire, due)?
+    let mut wire: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let old = failure_result_from_rep(history.history_fetch(mut client, "head", mut wire, due))?
     // AUTHORITY begins with style and four length-prefixed strings.
     let mut cursor = 241u64
     for _ in 0u64 .. 4 {

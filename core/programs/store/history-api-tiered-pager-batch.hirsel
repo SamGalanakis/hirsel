@@ -1,0 +1,54 @@
+pub fn plan_bucket_batch(misses: List[pager.TieredBucketTarget], deadline: u64) -> Result[pager.TieredBucketBatch, types.Failure] {
+    let mut requests: List[pager.TieredBucketGet] = list.new()
+    let mut members: List[List[u64]] = list.new()
+    let mut start = 0u64
+    while start < list.len(misses) {
+        let pack = misses[start].pack
+        let mut stop = start
+        let mut wanted: List[pager.TieredDemand] = list.new()
+        while stop < list.len(misses) && misses[stop].pack.seq == pack.seq {
+            let item = view misses[stop]
+            list.push(mut wanted, pager.TieredDemand(target: clone(item.edge), direction: item.direction))
+            stop += 1
+        }
+        let options = pager.tiered_bucket_windows(history_key("p-", pack), pack, wanted)?
+        for take window in take options {
+            let pager.TieredBucketWindow(range: extent, demands: take indices) = take window
+            let mut absolute: List[u64] = list.with_capacity(list.len(indices))
+            for member in indices {
+                list.push(mut absolute, start + member)
+            }
+            list.push(mut requests, pager.TieredBucketGet(pack_ref: pack, window: extent, deadline: deadline))
+            list.push(mut members, take absolute)
+        }
+        start = stop
+    }
+    Ok(pager.TieredBucketBatch(requests: take requests, members: take members))
+}
+
+pub fn unpack_bucket_window(owner: types.StoreKey, next_stamp: u64, misses: List[pager.TieredBucketTarget], request: pager.TieredBucketGet, members: List[u64], response: Result[Bytes, types.Failure], mut outcomes: List[Option[Result[Arc[format.TieredFrame], types.Failure]]]) -> bool {
+    let path = match history_read_key("p-", request.pack_ref) {
+        Ok(take name) => take name,
+        Error(take problem) => {
+            for member in members {
+                outcomes[misses[member].slot] = Some(Error(clone(problem)))
+            }
+            return false
+        },
+    }
+    let mut valid = true
+    for member in members {
+        let target = view misses[member]
+        let delivered = match response {
+            Ok(raw) => manifest.disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], types.Failure] {
+                manifest.read_tiered_frame(path, owner, target.edge, raw, request.window.lo, next_stamp)
+            }),
+            Error(problem) => Error(clone(problem)),
+        }
+        if let Error(_) = delivered {
+            valid = false
+        }
+        outcomes[target.slot] = Some(take delivered)
+    }
+    valid
+}

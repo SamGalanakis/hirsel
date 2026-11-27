@@ -94,7 +94,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         let Some(schema_binding) = target_binding else {
             return Error(Store(Missing("binding")))
         }
-        Some(HistoryActivation(number: release_at, binding: schema_binding))
+        Some(history.HistoryActivation(number: release_at, binding: schema_binding))
     } else {
         None
     }

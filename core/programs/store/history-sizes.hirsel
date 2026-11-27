@@ -1,0 +1,8 @@
+pub const MIB: u64 = 1048576
+
+pub fn size_or(overridden: Option[u64], derived: u64) -> u64 {
+    match overridden {
+        Some(n) => n,
+        None => derived
+    }
+}

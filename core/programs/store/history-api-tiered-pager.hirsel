@@ -1,0 +1,39 @@
+pub fn checked_tiered_pager_target(input: pager.TieredPagerInput, demand: pager.TieredPagerTarget) -> Result[(String, format.TieredFrameId), types.Failure] {
+    let expected = format.tiered_frame_id(demand.edge)
+    let path = match input {
+        PagerLocal(_) => manifest.paged_pack_path(expected.pack)?,
+        PagerObjects(..) => {
+            let file = manifest.paged_pack_path(expected.pack)?
+            let Some(item) = demand.object else {
+                return Error(format.disk_fault(file, expected.offset, Dangling(expected.stamp)))
+            }
+            if item.seq != expected.pack || item.len != demand.inventory.payload_bytes {
+                return Error(format.disk_fault(file, expected.offset, Malformed))
+            }
+            history_key("p-", item)
+        },
+    }
+    let expected_class = if expected.kind == 0x0021 {
+        3u8
+    } else {
+        4u8
+    }
+    if demand.inventory.class != expected_class || expected.stamp == 0 || expected.stamp >= demand.next_stamp {
+        return Error(format.disk_fault(path, expected.offset, Malformed))
+    }
+    let Some(maximum) = manifest.disk_kind_limit(expected.kind) else {
+        fail("store: unknown Tiered frame kind")
+    }
+    if expected.len > maximum {
+        return Error(format.disk_fault(path, expected.offset, Checksum))
+    }
+    let data_end = demand.inventory.index
+    let width = 16 + expected.len
+    if expected.offset < 72 || expected.offset >= data_end {
+        return Error(format.disk_fault(path, expected.offset, Dangling(expected.stamp)))
+    }
+    if width > data_end - expected.offset {
+        return Error(format.disk_fault(path, expected.offset, Checksum))
+    }
+    Ok((take path, expected))
+}

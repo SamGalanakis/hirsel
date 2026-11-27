@@ -46,7 +46,7 @@ type FollowerCommand: send {
     reply: Sender[Result[FollowerResponse, Error]]
 }
 
-type FollowerSource = DirectorySource(Dir, Clock) | ObjectSource(ObjectPackRead)
+type FollowerSource = DirectorySource(Dir, Clock) | ObjectSource(history.ObjectPackRead)
 
 fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
     let (take command, take answer) = failure_result_from_rep(types.capacity(bound bytes follower_request_bytes() {
@@ -186,7 +186,7 @@ fn initial_follow_capture(mut source: FollowerSource, mut progress: LogCapturePr
         ObjectSource(mut remote) => {
             history_check_follower_path(remote.client)?;
             let initial = object_follow_capture(mut remote, None, expect, ceiling, false)
-            remote.locator = empty_history_locator()
+            remote.locator = history.empty_history_locator()
             take initial
         },
     }
@@ -199,7 +199,7 @@ fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCapture
         ObjectSource(mut remote) => {
             remote.deadline = deadline
             let applied_state = object_follow_capture(mut remote, Some(arc.share(previous)), expected, ceiling, require_fresh)
-            remote.locator = empty_history_locator()
+            remote.locator = history.empty_history_locator()
             let selected = applied_state?
             if let Some(candidate) = selected {
                 if let Some(regressed_id) = behind_branch(candidate.state, previous.state) {
@@ -218,7 +218,7 @@ fn floor_follow_capture(mut source: FollowerSource, previous: FollowCapture, cei
         ObjectSource(mut remote) => {
             remote.deadline = deadline
             let historical = object_follow_floor(mut remote, Some(previous.store), room, at_most)
-            remote.locator = empty_history_locator()
+            remote.locator = history.empty_history_locator()
             take historical
         },
     }
@@ -254,7 +254,7 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     let mut source = match take transport {
         DirectoryFollow(directory, c) => DirectorySource(directory, c),
         ObjectFollow(take requests, kind, take stream_root, cache) => {
-            let mut remote = history_reader(std.object.attach(take requests, None), due)
+            let mut remote = history.history_reader(std.object.attach(take requests, None), due)
             remote.authority_kind = kind
             remote.stream_root = take stream_root
             remote.cache = cache
@@ -295,14 +295,14 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
         (Bucket(lanes), SimAuthority(take config)) => object_follow_transport(take config, lanes, 2)?,
         _ => return Error(Missing("follower_kind")),
     }
-    let minted = history_next_id(source.issued)?
+    let minted = failure_result_from_rep(history.history_next_id(source.issued))?
     let recovered = request_follower(slot, Bind(take transport, expect, due))?
     let Captured(Some(take captured)) = take recovered else {
         return Error(NotFound)
     }
     task.check_cancel()
     source.issued = minted
-    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, pager: None, slot: take slot, workers: take workers, on_log, op_ms, clock: c, capture: take captured, stopped: None))
+    Ok(Follower(open: history.HISTORY_OPEN_LIMIT | minted, pager: None, slot: take slot, workers: take workers, on_log, op_ms, clock: c, capture: take captured, stopped: None))
 }
 
 fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {

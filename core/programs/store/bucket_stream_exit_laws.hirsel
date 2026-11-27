@@ -78,12 +78,12 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
             fail("L90-E: archive segment entry positions not contiguous/ascending")
         }
         expected_seq += 1
-        let ekey = stream_key(place_prefix, history_key("e-", item))
+        let ekey = stream_key(place_prefix, history.history_key("e-", item))
         let Some(eobj) = map.get(report.objects, ekey) else {
             fail("L90-E: archive segment names missing entry object")
         }
-        let (ctx, _) = history_entry_context(ekey, store, item, eobj.data)?
-        history_object_digest(ekey, item, eobj.data)?
+        let (ctx, _) = failure_result_from_rep(history.history_entry_context(ekey, store_key_to_rep(store), item, eobj.data))?
+        failure_result_from_rep(history.history_object_digest(ekey, item, eobj.data))?
         if i > 0 {
             let mut at = 112u64
             while at < list.len(eobj.data) {

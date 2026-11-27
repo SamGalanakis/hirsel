@@ -258,7 +258,7 @@ fn q5_verify(operation: Q5Operation, fault: Q5Fault, observed: Q5Observation, re
             // The other claimant is the same Store, a validated successor (§12.3).
             (ClaimWrite, Error(Store(Superseded(actual)))) => {
                 let final_write = report.head_writes[list.len(report.head_writes) - 1]
-                let won = result.unwrap(history_decode_head(final_write.data)).head.pair
+                let won = result.unwrap(failure_result_from_rep(history.history_decode_head(final_write.data))).head.pair
                 if !history_claim_matches_pair(actual, won) {
                     fail("L54-M: Superseded did not name the claimant that won")
                 }
@@ -334,12 +334,12 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
     let _ = failure_result_from_rep(types.capacity(types.disk_identity(predict))) ?=> Store
     let identity_bytes = failure_result_from_rep(types.capacity(types.disk_identity(predict))) ?=> Store
     let mut manifest: Bytes = list.new()
-    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, store_key_from_rep(identity_bytes), 1, default_limits()))?
+    let manifest_ref = deploy_result(failure_result_from_rep(history.history_manifest_packet(mut manifest, store_key_to_rep(store_key_from_rep(identity_bytes)), 1, limits_to_rep(default_limits()))))?
     let mut entry_bytes: Bytes = list.new()
-    let no_packs = HistoryLocateRoot(depth: 0, rows: list.new())
-    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, store_key_from_rep(identity_bytes), 1, manifest_ref, no_packs))?
-    let manifest_name = history_key("m-", manifest_ref)
-    let entry_name = history_key("e-", checkpoint_ref)
+    let no_packs = history.HistoryLocateRoot(depth: 0, rows: list.new())
+    let checkpoint_ref = deploy_result(failure_result_from_rep(history.history_genesis_packet(mut entry_bytes, store_key_to_rep(store_key_from_rep(identity_bytes)), 1, manifest_ref, no_packs)))?
+    let manifest_name = history.history_key("m-", manifest_ref)
+    let entry_name = history.history_key("e-", checkpoint_ref)
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
     let hold = match phase {
         AfterManifest => std.sim.s3.Hold(method: "PUT", key: clone(entry_name), from: 1, count: 1, until: Never, then: Drop),

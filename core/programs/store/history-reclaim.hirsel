@@ -1,0 +1,4 @@
+pub type HistoryRetention {
+    floor: u64,
+    earlier: List[pages.HistoryRef]
+}

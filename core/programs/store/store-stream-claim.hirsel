@@ -45,7 +45,7 @@ fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut b
     let head_key = stream_key(place_prefix, "head")
     let mut head_scratch: Bytes = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut head_scratch, order.max(65776u64, list.len(head_witness)))))?
-    let _ = history_fetch(mut client, head_key, mut head_scratch, deadline)?
+    let _ = failure_result_from_rep(history.history_fetch(mut client, head_key, mut head_scratch, deadline))?
     let head_changed = head_scratch != head_witness
     if format.stream_pair_below(inc, seq, lane.reg.low_inc, lane.reg.low_seq) {
         if head_changed {
@@ -293,7 +293,7 @@ fn stream_claim_abandon(mut client: std.object.Client, mut side: ClaimStream, de
 // only `live` at the register's current incarnation with no sealed tail;
 // every other ATTACH refuses before any write. `workspace.witness` holds
 // step 1's head bytes on entry.
-fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
+fn stream_open_attached[T](mut read_source: history.ObjectPackRead, mut link: SlotLink, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     let mut lane = stream_lane(link.sid, authority_kind, link.max_rows, holder)?
     lane.dir = stream_key(link.root, stream_dir(link.sid))
     let mut side = ClaimStream(lane: take lane, buffers: stream_tail_buffers()?, granted: None, token: None)
@@ -306,7 +306,7 @@ fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         match take attempt {
             Ok(Some(take done)) => return Ok(take done),
             Ok(None) => {
-                let _ = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)?
+                let _ = failure_result_from_rep(history.history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline))?
             },
             Error(take problem) => return Error(take problem),
         }
@@ -388,21 +388,21 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
 // entries interleaved with `attach.sealed` at each `st.at`, then the entries
 // past the last sealed tail through `head.entry.seq`. Returns `None` if a
 // sealed-tail 404 observed a moved head.
-fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: format.Attach, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, mut buffers: TailBuffers, ceiling: u64) -> Result[Option[pager.JournalReplay], Error] waits {
+fn stream_load_settled(mut read_source: history.ObjectPackRead, head: history.HistoryHead, attach: format.Attach, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, mut buffers: TailBuffers, ceiling: u64) -> Result[Option[pager.JournalReplay], Error] waits {
     if list.len(attach.sealed) == 0 {
         return Ok(Some(history_load_admitted(mut read_source, head, ceiling)?))
     }
     let deadline = read_source.deadline
-    let chain = history_suffix(mut read_source.client, head, head.checkpoint, deadline)?
-    let (take mark, take checkpoint_data) = history_checkpoint(mut read_source.client, head, deadline)?
-    let page_record = history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline)?
+    let chain = failure_result_from_rep(history.history_suffix(mut read_source.client, head, head.checkpoint, deadline))?
+    let (take mark, take checkpoint_data) = failure_result_from_rep(history.history_checkpoint(mut read_source.client, head, deadline))?
+    let page_record = failure_result_from_rep(history.history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline))?
     let (take replay, take checkpoint_state) = history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take page_record, ceiling)?
     let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
         Ok(manifest.located_owners(checkpoint_state.manifest))
     })?
     let manifest.LoadedPageStore(manifest: take loaded_manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
     let pages = manifest.recovered_pack_disk(loaded_manifest, take locations, take lists, take owners, list.new())
-    read_source.admitted_base = Some(HistoryOpenBase(generation: loaded_manifest.generation, fence: loaded_manifest.fence, recorded_after: loaded_manifest.branches[0].version, sweep: loaded_manifest.sweep, archive_on: loaded_manifest.archive_on, pages: take pages))
+    read_source.admitted_base = Some(history.recovered_open_base(loaded_manifest, take pages))
     let mut recovered = take replay
     let base_seq = head.checkpoint.seq
     let mut done_seq = base_seq
@@ -417,7 +417,7 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
             history_apply_suffix(mut read_source.client, head, done_seq, part, mut recovered, ceiling, deadline)?
             done_seq = st.at
         }
-        if !stream_apply_sealed_tail(mut read_source.client, mut buffers, root, place_prefix, head_witness, authority_kind, st, head.store, mut recovered, ceiling, deadline)? {
+        if !stream_apply_sealed_tail(mut read_source.client, mut buffers, root, place_prefix, head_witness, authority_kind, st, store_key_from_rep(head.store), mut recovered, ceiling, deadline)? {
             return Ok(None)
         }
     }
@@ -432,9 +432,9 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
 
 // One attempt, steps 1–7. `None`: the claim's pair moved position, the row
 // is abandoned, and the claim restarts from a fresh head.
-fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, mut options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(HistoryRegister, pager.JournalReplay, T, Bytes)], Error] waits {
+fn stream_claim_attempt[T](mut read_source: history.ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, mut options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(history.HistoryRegister, pager.JournalReplay, T, Bytes)], Error] waits {
     let deadline = read_source.deadline
-    let (take capture, take attached) = history_decode_head_attach(workspace.witness)?
+    let (take capture, take attached) = failure_result_from_rep(history.history_decode_head_attach(workspace.witness))?
     let auth = history_check_open(read_source.client, capture, requested_levels, authority_kind, options)?
     options.claim_auth = Some(clone(auth))
     let Some(take attach) = take attached else {
@@ -456,33 +456,31 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         let replay = take loaded_settled
         failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), replay.limits))?
         if let None = side.granted {
-            let grant = slot_attach(mut link, store, epoch + 1, place_prefix, limits_from_rep(replay.limits))?
+            let grant = slot_attach(mut link, store_key_from_rep(store), epoch + 1, place_prefix, limits_from_rep(replay.limits))?
             side.granted = Some(grant)
         }
-        let Some((take admitted, tag)) = stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)? else {
+        let Some((take admitted, tag)) = stream_claim_final_head(mut read_source, store_key_from_rep(store), replay, mut workspace, prepare_writer)? else {
             return Ok(None)
         }
         let claimed = history_claim_head(head, holder, auth)?
-        let authority_end = history_authority_end(workspace.witness)?
+        let authority_end = failure_result_from_rep(history.history_authority_end(workspace.witness))?
         let authority = failure_result_from_rep(types.copied(list.slice(workspace.witness, 240, authority_end)))?
-        history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach)))?
-        let issued_head = history_write_head_issue(mut read_source.client, Match(tag), mut workspace.body, deadline)
-        let written = history_write_head_finish(mut read_source.client, take issued_head, mut workspace.body, mut workspace.witness, deadline)
-        let applied_tag = match take written {
-            HistoryApplied(t) => t,
-            HistoryConflict(_) => {
-                let (take moved, _) = history_decode_head_attach(workspace.witness)?
-                if !history_pair_matches(moved.head.pair, head.pair) {
-                    return Error(history_superseded_by(read_source.client, store, workspace.witness))
+        let prepared = failure_result_from_rep(history.prepare_register_head(mut workspace.body, claimed, authority, Some(take attach)))?
+        let written = history.write_prepared_register(mut read_source.client, Match(tag), take prepared, mut workspace.body, mut workspace.witness, deadline)
+        let mut reg = match take written {
+            RegisterClaimApplied(take opened) => take opened,
+            RegisterClaimConflict => {
+                let (take moved, _) = failure_result_from_rep(history.history_decode_head_attach(workspace.witness))?
+                if !history.history_pair_matches(moved.head.pair, head.pair) {
+                    return Error(history_superseded_by(read_source.client, store_key_from_rep(store), workspace.witness))
                 }
                 return Ok(None)
             },
-            HistoryRefused(take problem) => return Error(Remote(take problem)),
-            HistoryUndecided => return Error(Undecided),
+            RegisterClaimRefused(take problem) => return Error(Remote(take problem)),
+            RegisterClaimUndecided => return Error(Undecided),
         }
-        let mut reg = HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach))
         let archive_on = match view read_source.admitted_base {
-            Some(base) => base.archive_on,
+            Some(base) => history.open_base_archive_on(base),
             None => 0u64,
         }
         if archive_on != 0 {
@@ -521,15 +519,15 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         }
         if side.lane.reg.inc > tail.inc {
             no_hold = true
-            return stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
+            return stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store_key_from_rep(store), epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
         }
         if side.lane.reg.collecting {
             return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed)))
         }
-        if !stream_tail_prescan_xindex(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, mut cursor, mut replay, ceiling, deadline)? {
+        if !stream_tail_prescan_xindex(mut c, mut side, place_prefix, workspace.witness, tail, store_key_from_rep(store), epoch, mut cursor, mut replay, ceiling, deadline)? {
             return Ok(false)
         }
-        match stream_tail_scan(mut c, mut side.lane, mut side.buffers, place_prefix, workspace.witness, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
+        match stream_tail_scan(mut c, mut side.lane, mut side.buffers, place_prefix, workspace.witness, tail, store_key_from_rep(store), epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
             StopHeadMoved => Ok(false),
             _ => Ok(true),
         }
@@ -540,7 +538,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let (inc_b, next_b) = match side.granted {
         Some(grant) => grant,
         None => {
-            let grant = slot_attach(mut link, store, epoch + 1, place_prefix, limits_from_rep(replay.limits))?
+            let grant = slot_attach(mut link, store_key_from_rep(store), epoch + 1, place_prefix, limits_from_rep(replay.limits))?
             side.granted = Some(grant)
             grant
         },
@@ -549,7 +547,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         // Step 3: the hold, the one thing written before H.
         let token = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
         let held = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, Error] waits {
-            stream_reg_write(mut side.lane, mut c, Hold(format.RegRow(store: store_key_to_rep(store), epoch, token, rev_hold: 0, abandoned: false), tail.inc), deadline)
+            stream_reg_write(mut side.lane, mut c, Hold(format.RegRow(store: store, epoch, token, rev_hold: 0, abandoned: false), tail.inc), deadline)
         })
         match take held {
             Ok(Written) => {
@@ -558,7 +556,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             Ok(Moved) => {
                 no_hold = true
                 let moved_ok = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
-                    stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
+                    stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store_key_from_rep(store), epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
                 })?
                 if !moved_ok {
                     return Ok(None)
@@ -573,9 +571,9 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         }
     }
     let decided = if no_hold {
-        stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)
+        stream_claim_final_head(mut read_source, store_key_from_rep(store), replay, mut workspace, prepare_writer)
     } else {
-        stream_claim_hold_scope(mut read_source, mut side, place_prefix, tail, store, epoch, mut cursor, mut replay, options, mut workspace, prepare_writer)
+        stream_claim_hold_scope(mut read_source, mut side, place_prefix, tail, store_key_from_rep(store), epoch, mut cursor, mut replay, options, mut workspace, prepare_writer)
     }
     let (take admitted, tag) = match take decided {
         Ok(Some(take ready)) => take ready,
@@ -593,33 +591,30 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     // e). Once H is sent the row stays Held.
     let next_slot = format.StreamRef(sid: host_stream_id_to_rep(link.sid), inc: inc_b, from_seq: next_b, from_frame: 0)
     let built = stream_claim_candidate(head, attach, tail, cursor, next_slot, holder, auth, mut workspace)
-    let (claimed, take attach_next, take authority) = match take built {
+    let (claimed, next_live, take prepared, take authority) = match take built {
         Ok(take ready) => take ready,
         Error(take problem) => {
             stream_claim_abandon(mut read_source.client, mut side, deadline)
             return Error(take problem)
         },
     }
-    let next_live = attach_next.live
-    let issued_head = history_write_head_issue(mut read_source.client, Match(tag), mut workspace.body, deadline)
-    let written = history_write_head_finish(mut read_source.client, take issued_head, mut workspace.body, mut workspace.witness, deadline)
-    let applied_tag = match take written {
-        HistoryApplied(t) => t,
-        HistoryConflict(_) => {
+    let written = history.write_prepared_register(mut read_source.client, Match(tag), take prepared, mut workspace.body, mut workspace.witness, deadline)
+    let mut reg = match take written {
+        RegisterClaimApplied(take opened) => take opened,
+        RegisterClaimConflict => {
             stream_claim_abandon(mut read_source.client, mut side, deadline)
-            let (take moved, _) = history_decode_head_attach(workspace.witness)?
-            if !history_pair_matches(moved.head.pair, head.pair) {
-                return Error(history_superseded_by(read_source.client, store, workspace.witness))
+            let (take moved, _) = failure_result_from_rep(history.history_decode_head_attach(workspace.witness))?
+            if !history.history_pair_matches(moved.head.pair, head.pair) {
+                return Error(history_superseded_by(read_source.client, store_key_from_rep(store), workspace.witness))
             }
             return Ok(None)
         },
         // H may yet apply or was refused: the row stays Held (rule e).
-        HistoryRefused(take problem) => return Error(Remote(take problem)),
-        HistoryUndecided => return Error(Undecided),
+        RegisterClaimRefused(take problem) => return Error(Remote(take problem)),
+        RegisterClaimUndecided => return Error(Undecided),
     }
     // Step 7: the CLAIM rides S_B when `live` is Some, or is written as a
     // chain entry when sealed overflow entered direct service (`live = None`).
-    let mut reg = HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach_next))
     match next_live {
         Some(_) => {
             slot_claim_frame(mut workspace.packet, claimed.pair.epoch, holder)
@@ -632,7 +627,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         },
         None => {
             let archive_on = match view read_source.admitted_base {
-                Some(base) => base.archive_on,
+                Some(base) => history.open_base_archive_on(base),
                 None => 0u64,
             }
             if archive_on != 0 {
@@ -651,7 +646,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
 // Steps 4 and 5 under the hold: every failure here abandons the row (rule
 // e). `None`: the claim's pair moved position. Otherwise the writer's
 // prepared state and the tag H matches.
-fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, place_prefix: String, tail: format.StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: pager.JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+fn stream_claim_hold_scope[T](mut read_source: history.ObjectPackRead, mut side: ClaimStream, place_prefix: String, tail: format.StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: pager.JournalReplay, options: Options, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
     let deadline = read_source.deadline
     let Some(token) = side.token else {
         return Error(failure_from_rep(format.disk_fault("reg", 0, Malformed)))
@@ -676,19 +671,19 @@ fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimSt
 
 // Step 5: prepares the writer state and re-reads `head`; exact step 1 bytes go
 // on with its tag, another pair returns `Lost`, and a same-pair move restarts.
-fn stream_claim_final_head[T](mut read_source: ObjectPackRead, store: StoreId, replay: pager.JournalReplay, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+fn stream_claim_final_head[T](mut read_source: history.ObjectPackRead, store: StoreId, replay: pager.JournalReplay, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
     let deadline = read_source.deadline
     let admitted = prepare_writer(store, replay)?
-    let tag = match history_fetch_head(mut read_source.client, mut workspace.compare, deadline) {
+    let tag = match history.history_fetch_head(mut read_source.client, mut workspace.compare, deadline) {
         Ok(found) => found,
         Error(take problem) => return Error(Remote(take problem)),
     }
     if workspace.compare == workspace.witness {
         return Ok(Some((take admitted, tag)))
     }
-    let (take first, _) = history_decode_head_attach(workspace.witness)?
-    let (take moved, _) = history_decode_head_attach(workspace.compare)?
-    if !history_pair_matches(moved.head.pair, first.head.pair) {
+    let (take first, _) = failure_result_from_rep(history.history_decode_head_attach(workspace.witness))?
+    let (take moved, _) = failure_result_from_rep(history.history_decode_head_attach(workspace.compare))?
+    if !history.history_pair_matches(moved.head.pair, first.head.pair) {
         return Error(history_superseded_by(read_source.client, store, workspace.compare))
     }
     Ok(None)
@@ -697,7 +692,7 @@ fn stream_claim_final_head[T](mut read_source: ObjectPackRead, store: StoreId, r
 // Step 6's candidate: `old.sealed` copied with the incumbent's tail appended
 // only when non-empty (Fable §3), the claimed head with its ORIGIN, and H's
 // bytes in `workspace.body`. Writes nothing.
-fn stream_claim_candidate(head: HistoryHead, attach: format.Attach, tail: format.StreamRef, cursor: TailScan, next_slot: format.StreamRef, holder: StoreId, auth: ClaimAuth, mut workspace: HistoryBuffers) -> Result[(HistoryHead, format.Attach, Bytes), Error] {
+fn stream_claim_candidate(head: history.HistoryHead, attach: format.Attach, tail: format.StreamRef, cursor: TailScan, next_slot: format.StreamRef, holder: StoreId, auth: ClaimAuth, mut workspace: history.HistoryBuffers) -> Result[(history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes), Error] {
     let mut sealed: List[format.SealedTail] = disk_allocation(scoped fn() -> Result[List[format.SealedTail], Error] {
         let mut out: List[format.SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
         for st in attach.sealed {
@@ -715,8 +710,8 @@ fn stream_claim_candidate(head: HistoryHead, attach: format.Attach, tail: format
     }
     let attach_next = format.Attach(settles: attach.settles, live: next_live, sealed: take sealed)
     let claimed = history_claim_head(head, holder, auth)?
-    let authority_end = history_authority_end(workspace.witness)?
+    let authority_end = failure_result_from_rep(history.history_authority_end(workspace.witness))?
     let authority = failure_result_from_rep(types.copied(list.slice(workspace.witness, 240, authority_end)))?
-    history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach_next)))?
-    Ok((claimed, take attach_next, take authority))
+    let prepared = failure_result_from_rep(history.prepare_register_head(mut workspace.body, claimed, authority, Some(take attach_next)))?
+    Ok((claimed, next_live, take prepared, take authority))
 }

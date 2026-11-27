@@ -545,7 +545,7 @@ fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
         return Ok(())
     }
     let mut lane = object_journal_begin(take owned_io)
-    let head = lane.register.head
+    let head = history.register_head(lane.register)
     let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
     let checked = teardown_validate_bucket_checkpoint(mut lane.client, head, deadline)
     let _ = return_object_journal(take lane, resume)
@@ -558,15 +558,15 @@ fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
     }
 }
 
-fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(), Error] waits {
+fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: history.HistoryHead, deadline: u64) -> Result[(), Error] waits {
     if head.checkpoint.seq == 0 {
         return Ok(())
     }
-    let (take mark, take checkpoint_data) = history_checkpoint(mut client, head, deadline)?
-    let manifest = history_read_manifest(mut client, head.store, mark, head.checkpoint.seq, deadline)?
-    let locator = history_locator(mut client, head, mark, checkpoint_data, deadline)?
-    let name = history_read_key("m-", mark.manifest)?
-    let _ = validate_bucket_graph(mut client, locator, deadline, head.store, name, take manifest, true, None)?
+    let (take mark, take checkpoint_data) = failure_result_from_rep(history.history_checkpoint(mut client, head, deadline))?
+    let manifest = failure_result_from_rep(history.history_read_manifest(mut client, head.store, mark, head.checkpoint.seq, deadline))?
+    let locator = failure_result_from_rep(history.history_locator(mut client, head, mark, checkpoint_data, deadline))?
+    let name = failure_result_from_rep(history.history_read_key("m-", mark.manifest))?
+    let _ = validate_bucket_graph(mut client, locator, deadline, store_key_from_rep(head.store), name, take manifest, true, None)?
     Ok(())
 }
 

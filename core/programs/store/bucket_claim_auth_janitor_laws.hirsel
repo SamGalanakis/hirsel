@@ -5,7 +5,7 @@
 // distinct outcomes, each with zero writes to the Place's head.
 // Sets up X on S_A with no head task and B's Held row for (X, e), and returns
 // the orphan ask Host A's service raises at `hold_ms`.
-fn janitor_bind_orphan(s: BucketSim, tasks: Tasks, r: Random, mut svc_a: JournalService, token: StoreId) -> Result[(StoreId, HistoryPair), Error] waits {
+fn janitor_bind_orphan(s: BucketSim, tasks: Tasks, r: Random, mut svc_a: JournalService, token: StoreId) -> Result[(StoreId, history.HistoryPair), Error] waits {
     stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
     let mut x_a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 87, string.from("pX/"))?
     bucket_law_commit(mut x_a, 1)?
@@ -108,8 +108,8 @@ fn janitor_wrong_store_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), 
     stream_gc_make_place(s, tasks, r, 92, string.from("pZ/"))?
     let mut client = stream_service_client(s, tasks, 93, "", "us-east-1")?
     let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
-    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let _ = history_fetch(mut client, "pZ/head", mut raw, due)?
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let _ = failure_result_from_rep(history.history_fetch(mut client, "pZ/head", mut raw, due))?
     let (stored, _) = std.object.store(mut client, "pX/head", take raw, due)
     let _ = stored ?=> |problem| Remote(problem)
     // Asks raised from X's own head before the replacement are dropped; the

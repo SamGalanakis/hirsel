@@ -1,4 +1,4 @@
-fn recovered_tiered_inventory(locations: manifest.PageLocations, locator: Option[View[HistoryLocator]], generation: u64, next_stamp: u64) -> Result[Arc[pages.TieredReadInventory], Error] {
+pub fn recovered_tiered_inventory(locations: manifest.PageLocations, locator: Option[View[HistoryLocator]], generation: u64, next_stamp: u64) -> Result[Arc[pages.TieredReadInventory], types.Failure] {
     let rows = match locator {
         Some(remote) => Some(view remote.rows),
         None => None,
@@ -7,17 +7,17 @@ fn recovered_tiered_inventory(locations: manifest.PageLocations, locator: Option
     Ok(arc.new(pages.TieredReadInventory(packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp)))
 }
 
-fn rebuild_page_store(take validated: manifest.ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[manifest.LoadedPageStore, Error] {
-    let locations = disk_allocation(scoped fn() -> Result[manifest.PageLocations, Error] {
-        failure_result_from_rep(manifest.rebuild_page_locations(validated))
+pub fn rebuild_page_store(take validated: manifest.ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[manifest.LoadedPageStore, types.Failure] {
+    let locations = manifest.disk_allocation(scoped fn() -> Result[manifest.PageLocations, types.Failure] {
+        manifest.rebuild_page_locations(validated)
     })?
     let manifest.ValidatedPageManifest(manifest: take page_record, graph: take resolved, lineage: take rows, allow_tiered, ..) = take validated
     let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+    let empty_collection = manifest.disk_allocation(fn() -> Result[Arc[std.page.Page], types.Failure] {
         Ok(std.page.empty(0, 0, Collection))
     })?
-    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
-    let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[pages.PageRoots], manifest.PagedLists), Error] {
+    let page_nodes = manifest.attach_page_graph(mut graph, empty_collection)?
+    let (take holders, take lists) = manifest.disk_allocation(scoped fn() -> Result[(List[pages.PageRoots], manifest.PagedLists), types.Failure] {
         let mut all = manifest.attach_manifest_holders(page_record, page_nodes, empty_collection)
         if allow_tiered {
             let mut paging: Option[Arc[pages.TieredReadInventory]] = None

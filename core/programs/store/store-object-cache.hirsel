@@ -15,45 +15,6 @@ pub fn objects_cache(take a: Authority, d: Dir, capacity_bytes: u64) -> Authorit
     }
 }
 
-const OBJECTS_CACHE_DIR: String = "objects-cache"
-
-const PACK_CACHE_INCOMING: String = "incoming"
-
-fn pack_cache_directory(cache: Option[pager.ObjectsCache]) -> Option[pager.ObjectsCache] waits {
-    let Some(location) = cache else {
-        return None
-    }
-    if location.capacity_bytes == 0 {
-        return None
-    }
-    let directory = match std.dir.narrow(location.dir, OBJECTS_CACHE_DIR) {
-        Ok(directory) => directory,
-        Error(NotFound) => {
-            match std.dir.create_dir(location.dir, OBJECTS_CACHE_DIR) {
-                Ok(()) => (),
-                Error(Exists) => (),
-                Error(_) => return None,
-            }
-            let Ok(directory) = std.dir.narrow(location.dir, OBJECTS_CACHE_DIR) else {
-                return None
-            }
-            directory
-        },
-        Error(_) => return None,
-    }
-    Some(pager.ObjectsCache(dir: directory, capacity_bytes: location.capacity_bytes))
-}
-
-fn pack_cache_lock(d: Dir) -> Option[std.file.Lock] waits {
-    let Ok(take file) = host.open(d, "lock", ReadWrite) else {
-        return None
-    }
-    match std.file.try_lock(take file) {
-        Ok(take locked) => Some(take locked),
-        Error(_) => None,
-    }
-}
-
 // A fixed listing buffer keeps RAM independent of the directory's capacity.
 fn pack_cache_scan(d: Dir, requested: u64, evict: bool) -> Result[u64, Error] waits {
     let mut listing = failure_result_from_rep(manifest.disk_io(host.entries(d, None)))?
@@ -106,7 +67,7 @@ fn pack_cache_scan(d: Dir, requested: u64, evict: bool) -> Result[u64, Error] wa
 
 fn pack_cache_room(cache: pager.ObjectsCache, incoming: u64) -> Result[(), Error] waits {
     // A cancelled or crashed writer can leave only this one staging file.
-    match host.remove(cache.dir, PACK_CACHE_INCOMING) {
+    match host.remove(cache.dir, history.PACK_CACHE_INCOMING) {
         Ok(()) => (),
         Error(NotFound) => (),
         Error(problem) => return Error(Io(problem)),
@@ -122,52 +83,10 @@ fn pack_cache_room(cache: pager.ObjectsCache, incoming: u64) -> Result[(), Error
 }
 
 fn pack_cache_trim(cache: pager.ObjectsCache) waits {
-    if let Some(take locked) = pack_cache_lock(cache.dir) {
+    if let Some(take locked) = history.pack_cache_lock(cache.dir) {
         let _ = pack_cache_room(cache, 0)
         drop(take locked)
     }
-}
-
-fn pack_cache_read(cache: pager.ObjectsCache, path: String, width: u64, expected: Option[u64], mut raw: Bytes) -> bool waits {
-    let Some(take locked) = pack_cache_lock(cache.dir) else {
-        return false
-    }
-    let Ok(take opened) = host.open(cache.dir, path, Read) else {
-        return false
-    }
-    let mut file = take opened
-    let trailer = if expected == None {
-        8u64
-    } else {
-        0u64
-    }
-    let stored_width = width + trailer
-    if let Ok(status) = host.stat_file(mut file) {
-        if status.size == stored_width {
-            while list.len(raw) < stored_width {
-                let Ok(read) = host.read(mut file, mut raw) else {
-                    break
-                }
-                if read == 0 {
-                    break
-                }
-            }
-            if list.len(raw) == stored_width {
-                let digest = match expected {
-                    Some(value) => value,
-                    None => format.read_le(raw, width, 8),
-                }
-                if digest == std.check.xxh3(raw, 0, width) {
-                    list.truncate(mut raw, width)
-                    return true
-                }
-            }
-        }
-    }
-    drop(take file)
-    let _ = host.remove(cache.dir, path)
-    drop(take locked)
-    false
 }
 
 fn pack_cache_write(cache: pager.ObjectsCache, path: String, raw: Bytes, with_trailer: bool) waits {
@@ -183,10 +102,10 @@ fn pack_cache_write(cache: pager.ObjectsCache, path: String, raw: Bytes, with_tr
         return
     }
     let mut file = take staging
-    if pack_cache_write_payload(mut file, raw, with_trailer) {
-        pack_cache_publish(cache.dir, path, take file)
+    if history.pack_cache_write_payload(mut file, raw, with_trailer) {
+        history.pack_cache_publish(cache.dir, path, take file)
     }
-    let _ = host.remove(cache.dir, PACK_CACHE_INCOMING)
+    let _ = host.remove(cache.dir, history.PACK_CACHE_INCOMING)
     drop(take locked)
 }
 
@@ -194,7 +113,7 @@ fn pack_cache_stage(cache: pager.ObjectsCache, path: String, width: u64) -> Opti
     if width > cache.capacity_bytes {
         return None
     }
-    let Some(take locked) = pack_cache_lock(cache.dir) else {
+    let Some(take locked) = history.pack_cache_lock(cache.dir) else {
         return None
     }
     if let Ok(status) = host.stat(cache.dir, path) {
@@ -208,84 +127,23 @@ fn pack_cache_stage(cache: pager.ObjectsCache, path: String, width: u64) -> Opti
     if let Error(_) = pack_cache_room(cache, width) {
         return None
     }
-    let Ok(take file) = host.open(cache.dir, PACK_CACHE_INCOMING, CreateNew) else {
+    let Ok(take file) = host.open(cache.dir, history.PACK_CACHE_INCOMING, CreateNew) else {
         return None
     }
     Some((take locked, take file))
 }
 
-fn pack_cache_publish(d: Dir, path: String, take file: HostFile) waits {
-    if let Ok(()) = host.close(take file) {
-        let _ = host.rename(d, PACK_CACHE_INCOMING, path)
-    }
-}
-
-fn pack_cache_open(cache: pager.ObjectsCache, path: String, width: u64) -> Option[HostFile] waits {
-    if width > cache.capacity_bytes {
-        return None
-    }
-    let Ok(take opened) = host.open(cache.dir, path, Read) else {
-        return None
-    }
-    let mut file = take opened
-    if let Ok(status) = host.stat_file(mut file) {
-        if status.size == width {
-            return Some(take file)
-        }
-    }
-    None
-}
-
-fn pack_cache_span(mut file: HostFile, offset: u64, width: u64, mut raw: Bytes) -> bool waits {
-    list.clear(mut raw)
-    while list.len(raw) < width {
-        let Ok(received) = host.read_at(mut file, offset + list.len(raw), mut raw) else {
-            return false
-        }
-        if received == 0 {
-            return false
-        }
-    }
-    list.truncate(mut raw, width)
-    true
-}
-
-fn pack_cache_write_payload(mut file: HostFile, raw: Bytes, with_trailer: bool) -> bool waits {
-    if let Error(_) = std.file.write_all(mut file, raw) {
-        return false
-    }
-    if !with_trailer {
-        return true
-    }
-    let Ok(take allocated) = failure_result_from_rep(manifest.disk_read_buffer(8)) else {
-        return false
-    }
-    let mut trailer = take allocated
-    list.put_word_le(mut trailer, std.check.xxh3(raw, 0, list.len(raw)))
-    match std.file.write_all(mut file, trailer) {
-        Ok(()) => true,
-        Error(_) => false,
-    }
-}
-
-fn pack_cache_discard(cache: pager.ObjectsCache, path: String) waits {
-    if let Some(take locked) = pack_cache_lock(cache.dir) {
-        let _ = host.remove(cache.dir, path)
-        drop(take locked)
-    }
-}
-
 fn history_read_pack(mut client: std.object.Client, path: String, reference: pages.HistoryRef, cache: pager.ObjectsCache, mut raw: Bytes, deadline: u64) -> Result[(), Error] waits {
-    if pack_cache_read(cache, path, reference.len, Some(reference.digest), mut raw) {
+    if history.pack_cache_read(cache, path, reference.len, Some(reference.digest), mut raw) {
         return Ok(())
     }
     list.clear(mut raw)
-    match history_fetch(mut client, path, mut raw, deadline) {
+    match failure_result_from_rep(history.history_fetch(mut client, path, mut raw, deadline)) {
         Ok(_) => (),
         Error(Remote(NotFound)) => return Error(failure_from_rep(pager.history_missing_object(path, reference))),
         Error(take problem) => return Error(take problem),
     }
-    history_object_digest(path, reference, raw)?
+    failure_result_from_rep(history.history_object_digest(path, reference, raw))?
     pack_cache_write(cache, path, raw, false)
     Ok(())
 }

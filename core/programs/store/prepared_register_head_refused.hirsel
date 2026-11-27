@@ -1,0 +1,3 @@
+fn forge_prepared_head(head: store.history.HistoryHead, take raw: Bytes) -> store.history.PreparedRegisterHead {
+    store.history.PreparedRegisterHead(head, attach: None, raw: take raw)
+}

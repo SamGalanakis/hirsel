@@ -42,7 +42,7 @@ fn run_tiered_pager(take launch: pager.TieredPagerStart) waits {
     let mut input: pager.TieredPagerInput = match take authority {
         PagerDirectory(d) => PagerLocal(d),
         PagerBucket(take requests, op_ms, cache) => {
-            let local = pack_cache_directory(cache)
+            let local = history.pack_cache_directory(cache)
             if let Some(directory) = local {
                 pack_cache_trim(directory)
             }
@@ -346,48 +346,8 @@ fn tiered_pager_point_frame(mut input: pager.TieredPagerInput, mut private_cache
     tiered_pager_frame(mut input, mut private_cache, owner, target)
 }
 
-fn checked_tiered_pager_target(input: pager.TieredPagerInput, demand: pager.TieredPagerTarget) -> Result[(String, format.TieredFrameId), Error] {
-    let expected = format.tiered_frame_id(demand.edge)
-    let path = match input {
-        PagerLocal(_) => failure_result_from_rep(manifest.paged_pack_path(expected.pack))?,
-        PagerObjects(..) => {
-            let file = failure_result_from_rep(manifest.paged_pack_path(expected.pack))?
-            let Some(item) = demand.object else {
-                return Error(failure_from_rep(format.disk_fault(file, expected.offset, Dangling(expected.stamp))))
-            }
-            if item.seq != expected.pack || item.len != demand.inventory.payload_bytes {
-                return Error(failure_from_rep(format.disk_fault(file, expected.offset, Malformed)))
-            }
-            history_key("p-", item)
-        },
-    }
-    let expected_class = if expected.kind == 0x0021 {
-        3u8
-    } else {
-        4u8
-    }
-    if demand.inventory.class != expected_class || expected.stamp == 0 || expected.stamp >= demand.next_stamp {
-        return Error(failure_from_rep(format.disk_fault(path, expected.offset, Malformed)))
-    }
-    let Some(maximum) = manifest.disk_kind_limit(expected.kind) else {
-        fail("store: unknown Tiered frame kind")
-    }
-    if expected.len > maximum {
-        return Error(failure_from_rep(format.disk_fault(path, expected.offset, Checksum)))
-    }
-    let data_end = demand.inventory.index
-    let width = 16 + expected.len
-    if expected.offset < 72 || expected.offset >= data_end {
-        return Error(failure_from_rep(format.disk_fault(path, expected.offset, Dangling(expected.stamp))))
-    }
-    if width > data_end - expected.offset {
-        return Error(failure_from_rep(format.disk_fault(path, expected.offset, Checksum)))
-    }
-    Ok((take path, expected))
-}
-
 fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: pager.TieredCache, owner: StoreId, demand: pager.TieredPagerTarget) -> Result[Arc[format.TieredFrame], Error] waits {
-    let (take path, expected) = checked_tiered_pager_target(input, demand)?
+    let (take path, expected) = failure_result_from_rep(history.checked_tiered_pager_target(input, demand))?
     if let Some(take found) = failure_result_from_rep(pager.tiered_cache_lookup(mut private_cache, path, demand.edge))? {
         return Ok(take found)
     }

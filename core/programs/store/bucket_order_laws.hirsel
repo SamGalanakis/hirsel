@@ -257,11 +257,11 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
         }
         map.insert(mut requests, event.request, ())
         // Attach-aware: a streamed Place's heads carry ATTACH (§12.11.2).
-        let (captured, attach) = history_decode_head_attach(event.data)?
+        let (captured, attach) = failure_result_from_rep(history.history_decode_head_attach(event.data))?
         let current = captured.head
         if let Some(previous_index) = map.get(last_head, event.key) {
             let prior = view report.head_writes[previous_index]
-            let (prior_capture, prior_attach) = history_decode_head_attach(prior.data)?
+            let (prior_capture, prior_attach) = failure_result_from_rep(history.history_decode_head_attach(prior.data))?
             let previous = prior_capture.head
             let attached = match (prior_attach, attach) {
                 (None, None) => false,
@@ -270,8 +270,8 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
             let Some(precondition) = event.if_match else {
                 fail("VP1: HEAD replaced without an If-Match")
             }
-            let prior_authority = list.slice(prior.data, 240, history_authority_end(prior.data)?)
-            let authority = list.slice(event.data, 240, history_authority_end(event.data)?)
+            let prior_authority = list.slice(prior.data, 240, failure_result_from_rep(history.history_authority_end(prior.data))?)
+            let authority = list.slice(event.data, 240, failure_result_from_rep(history.history_authority_end(event.data))?)
             if precondition != prior.etag || event.if_none_match != None || !types.same(previous.store.hi, previous.store.lo, current.store.hi, current.store.lo) || prior.etag == event.etag || prior_authority != authority {
                 fail("VP1: HEAD did not condition on its predecessor or changed the authority")
             }
@@ -285,33 +285,33 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
                 }
                 // An attached Place may rewrite only ATTACH (a settle that
                 // moved no entry): every history field stays put.
-                if attached && history_ref_matches(current.entry, previous.entry) {
-                    if !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+                if attached && history.history_ref_matches(current.entry, previous.entry) {
+                    if !history.history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
                         fail("VP1: an ATTACH-only HEAD update changed the history")
                     }
                 } else {
                     if current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
                         fail("VP1: HEAD did not advance the incumbent's prefix")
                     }
-                    if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
+                    if !history.history_ref_matches(current.checkpoint, previous.checkpoint) && !history.history_ref_matches(current.checkpoint, current.entry) {
                         fail("VP1: HEAD did not publish the checkpoint at its new entry")
                     }
                     // Reclaim can erase earlier entries. Where an entry remains,
                     // the bucket's bytes must link to the previous applied tip.
                     let offset = string.byte_len(event.key) - 4
                     let mut entry_key = string.from(string.slice(event.key, 0, offset))
-                    string.push(mut entry_key, history_key("e-", current.entry))
+                    string.push(mut entry_key, history.history_key("e-", current.entry))
                     if let Some(stored_entry) = map.get(report.objects, entry_key) {
-                        let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
-                        if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
+                        let (_, link) = failure_result_from_rep(history.history_entry_context(entry_key, current.store, current.entry, stored_entry.data))?
+                        if !history.history_ref_matches(history.history_length(link, current.entry.seq - 1), previous.entry) {
                             fail("VP1: the applied advance omitted its predecessor")
                         }
                     }
                 }
-            } else if current.pair.epoch != previous.pair.epoch + 1 || !history_ref_matches(current.entry, previous.entry) || !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+            } else if current.pair.epoch != previous.pair.epoch + 1 || !history.history_ref_matches(current.entry, previous.entry) || !history.history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
                 fail("VP1: a claim reused an epoch, applied from a stale epoch, or changed the inherited prefix")
             }
-        } else if event.if_match != None || event.if_none_match != Some("*") || current.pair.epoch != 1 || current.entry.seq != 1 || !history_ref_matches(current.entry, current.checkpoint) {
+        } else if event.if_match != None || event.if_none_match != Some("*") || current.pair.epoch != 1 || current.entry.seq != 1 || !history.history_ref_matches(current.entry, current.checkpoint) {
             fail("VP1: genesis was not a create-only checkpoint")
         }
         map.insert(mut last_head, string.from(event.key), i)
@@ -329,13 +329,13 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
 }
 
 type WitnessCut {
-    head: HistoryHead,
+    head: history.HistoryHead,
     manifest: pages.HistoryRef,
     manifest_bytes: Bytes,
     entry_bytes: Bytes
 }
 
-fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: pages.HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
+fn witness_cut(id: StoreId, pair: history.HistoryPair, pos: u64, predecessor: pages.HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
     let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     page_record.generation = generation
     page_record.first_live = pos
@@ -343,12 +343,12 @@ fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: pages.Hist
     page_record.branches[0u64].version = rows_version
     let mut raw_manifest = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
     bucket_m2_object_header(mut raw_manifest, id, 1, generation)?
-    let reference = history_new_ref(generation, pair.epoch, raw_manifest)
+    let reference = history.history_new_ref(generation, pair.epoch, raw_manifest)
     let mut raw_entry: Bytes = list.with_capacity(1024)
-    let retained = HistoryRetention(floor: pos, earlier: list.new())
-    let locate = HistoryLocateRoot(depth: 0, rows: list.new())
-    let entry_ref = history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
-    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32], origin: None)
+    let retained = history.HistoryRetention(floor: pos, earlier: list.new())
+    let locate = history.HistoryLocateRoot(depth: 0, rows: list.new())
+    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate))?
+    let header = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -360,9 +360,9 @@ fn witness_create(mut client: std.object.Client, key: String, data: Bytes, due: 
     Ok(meta.etag)
 }
 
-fn witness_publish(mut client: std.object.Client, selected: HistoryHead, declaration: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
-    let mut data: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    history_encode_head(mut data, selected, declaration)?
+fn witness_publish(mut client: std.object.Client, selected: history.HistoryHead, declaration: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
+    let mut data: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    failure_result_from_rep(history.history_encode_head(mut data, selected, declaration))?
     let (result, _) = std.object.store_if(mut client, "head", precondition, take data, due)
     let Applied(meta) = result ?=> Remote else {
         fail("L52-W: a fixture head lost its precondition")
@@ -371,8 +371,8 @@ fn witness_publish(mut client: std.object.Client, selected: HistoryHead, declara
 }
 
 fn witness_install_cut(mut client: std.object.Client, cut: WitnessCut, metadata: Bytes, precondition: std.object.Precondition, due: u64) -> Result[std.object.ETag, Error] waits {
-    let _ = witness_create(mut client, history_key("m-", cut.manifest), cut.manifest_bytes, due)?
-    let _ = witness_create(mut client, history_key("e-", cut.head.entry), cut.entry_bytes, due)?
+    let _ = witness_create(mut client, history.history_key("m-", cut.manifest), cut.manifest_bytes, due)?
+    let _ = witness_create(mut client, history.history_key("e-", cut.head.entry), cut.entry_bytes, due)?
     witness_publish(mut client, cut.head, metadata, precondition, due)
 }
 
@@ -436,15 +436,15 @@ fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u
 
 fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool) -> Result[(), Error] waits {
     let id = StoreId(hi: 9, lo: 10)
-    let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12))
+    let pair = history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 11, lo: 12))
     let previous = pages.HistoryRef(seq: 19, epoch: 1, len: 112, digest: 0)
     let first = witness_cut(id, pair, 20, previous, 1, 0)?
-    let manifest_key = history_key("m-", first.manifest)
+    let manifest_key = history.history_key("m-", first.manifest)
     let mut group: Bytes = list.with_capacity(1024)
     bucket_m2_law_commit_packet(mut group, first.head, 1)?
-    let group_ref = history_new_ref(21, 1, group)
+    let group_ref = history.history_new_ref(21, 1, group)
     let later = witness_cut(id, pair, 22, group_ref, 2, 1)?
-    let entry_key = history_key("e-", later.head.entry)
+    let entry_key = history.history_key("e-", later.head.entry)
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
     list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(manifest_key), from: 1, count: 1, until: Applied("DELETE", clone(manifest_key), 1), then: Apply))
     if lost_marker {
@@ -452,14 +452,14 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
     }
     let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
     let mut publisher = bucket_law_client_with(sim, tasks, "s3.test", 19, true)?
-    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(publisher), "bucket"))?
+    let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(publisher), "bucket")))?
     let due = std.object.deadline_after_ms(publisher, BUCKET_LAW_OP_MS)
     let first_tag = witness_install_cut(mut publisher, first, metadata, Absent, due)?
     let claimant = WitnessClaimant(tasks, r, clock: sim.time, endpoint: sim.endpoint)
     let pending_claim = task.spawn(tasks, bytes 33554432, take claimant, witness_claim)
     result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", manifest_key, 1))
     if lost_marker {
-        let _ = witness_create(mut publisher, history_key("e-", group_ref), group, due)?
+        let _ = witness_create(mut publisher, history.history_key("e-", group_ref), group, due)?
         let mut head21 = first.head
         head21.entry = group_ref
         let group_tag = witness_publish(mut publisher, head21, metadata, Match(first_tag), due)?
@@ -485,7 +485,7 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
     let _ = take publisher
     let report = bucket_law_report(take sim)
     let final_write = report.head_writes[list.len(report.head_writes) - 1]
-    if !history_claim_matches_pair(deposer, history_decode_head(final_write.data)?.head.pair) {
+    if !history_claim_matches_pair(deposer, failure_result_from_rep(history.history_decode_head(final_write.data))?.head.pair) {
         fail("L52-W: Superseded did not name C's pair")
     }
     if lost_marker {
@@ -497,27 +497,27 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
         }
         let body = view report.head_writes[3].data
         let reference = pages.HistoryRef(seq: format.read_le(body, 120, 8), epoch: format.read_le(body, 128, 8), len: format.read_le(body, 136, 8), digest: format.read_le(body, 144, 8))
-        let claimed_entry = history_key("e-", reference)
+        let claimed_entry = history.history_key("e-", reference)
         witness_ceiling_check(report, manifest_key, 22, claimed_entry)?
     }
     trust_bucket_report(report)
 }
 
 fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> Result[(), Error] waits {
-    let mut history = std.sim.history.new(seed)
+    let mut model_history = std.sim.history.new(seed)
     // The witness commits below carry no operations, so each model projection is empty.
-    std.sim.history.model(mut history, 0, b"")
-    std.sim.history.model(mut history, 1, b"")
+    std.sim.history.model(mut model_history, 0, b"")
+    std.sim.history.model(mut model_history, 1, b"")
     let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let read_source = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
-    let mut writer = history_reader(take initial_client, 0)
-    let mut workspace = history_buffers(1024)?
-    let authority = history_config_bytes(object_history_config(std.object.bucket_config(writer.client), "bucket"))?
+    let mut writer = history.history_reader(take initial_client, 0)
+    let mut workspace = failure_result_from_rep(history.history_buffers(1024))?
+    let authority = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(writer.client), "bucket")))?
     let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let mut source = followers()
     let mut settings = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
-    settings.expect = Some(held.head.store)
+    settings.expect = Some(store_key_from_rep(history.register_head(held).store))
     // Writer selection never constrains a read-only follower.
     settings.activation = Some(17)
     settings.binding = Some(list.new())
@@ -525,28 +525,28 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> R
     let service = follower_law_service(tasks, plan, 1)?
     let mut followed = follower(mut source, follower_slot(follower_owner(service)?, plan)?, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings.expect)?
     let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
-    let initial = std.sim.history.request(history, 1, Fresh)
+    let initial = std.sim.history.request(model_history, 1, Fresh)
     let genesis = fresh(mut followed, deadline)?
-    std.sim.history.check(std.sim.history.read(mut history, initial, version(genesis), b""))
+    std.sim.history.check(std.sim.history.read(mut model_history, initial, version(genesis), b""))
     let genesis_head = follower_head(followed)?
     if version(genesis) != 0 || genesis_head.claim.epoch != 1 || genesis_head.activation != 0 || list.len(genesis_head.binding) != 32 {
         fail("fresh did not preserve the initial capture")
     }
-    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 1)?
-    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+    bucket_m2_law_commit_packet(mut workspace.packet, history.register_head(held), 1)?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline))? else {
         fail("the first group did not advance")
     }
-    let requested = std.sim.history.request(history, 1, Follower(1))
-    let advanced = at_least(mut followed, Position(store: held.head.store, branch: 0, version: 1), deadline)?
-    std.sim.history.check(std.sim.history.read(mut history, requested, version(advanced), b""))
+    let requested = std.sim.history.request(model_history, 1, Follower(1))
+    let advanced = at_least(mut followed, Position(store: store_key_from_rep(history.register_head(held).store), branch: 0, version: 1), deadline)?
+    std.sim.history.check(std.sim.history.read(mut model_history, requested, version(advanced), b""))
     if version(advanced) != 1 || version(genesis) != 0 {
         fail("catch-up did not publish its applied version privately")
     }
-    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 2)?
-    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+    bucket_m2_law_commit_packet(mut workspace.packet, history.register_head(held), 2)?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline))? else {
         fail("the second group did not advance")
     }
-    let final_item = history_key("e-", held.head.entry)
+    let final_item = history.history_key("e-", history.register_head(held).entry)
     match std.object.erase(mut writer.client, final_item, deadline) {
         Error(take problem) => return Error(Remote(take problem)),
         Ok(()) => (),
@@ -558,7 +558,7 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> R
     } else {
         fail("a missing live entry was accepted or classified as reclaimed")
     }
-    let current = applied(followed, Branch(store: held.head.store, id: 0))?
+    let current = applied(followed, Branch(store: store_key_from_rep(history.register_head(held).store), id: 0))?
     if current.version != 1 {
         fail("failed catch-up changed the published state")
     }
@@ -668,10 +668,10 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
 
 // Every ORIGIN field, so a same-epoch advance that rewrote any byte of the
 // 49-byte payload is caught.
-fn bucket_law_same_origin(a: Option[HistoryOrigin], b: Option[HistoryOrigin]) -> bool {
+fn bucket_law_same_origin(a: Option[history.HistoryOrigin], b: Option[history.HistoryOrigin]) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(x), Some(y)) => x.epoch == y.epoch && x.class == y.class && x.permit_epoch == y.permit_epoch && history_origin_same_bytes(x.attempt, y.attempt) && history_origin_same_bytes(x.permit_attempt, y.permit_attempt),
+        (Some(x), Some(y)) => x.epoch == y.epoch && x.class == y.class && x.permit_epoch == y.permit_epoch && history.history_origin_same_bytes(x.attempt, y.attempt) && history.history_origin_same_bytes(x.permit_attempt, y.permit_attempt),
         _ => false,
     }
 }

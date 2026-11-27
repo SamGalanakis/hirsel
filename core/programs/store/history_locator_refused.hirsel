@@ -1,0 +1,3 @@
+fn forge_locator() -> store.history.HistoryLocator {
+    store.history.HistoryLocator(rows: map.new(), chunks: list.new(), reuse: map.new(), last_pack: 0)
+}

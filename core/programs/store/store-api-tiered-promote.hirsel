@@ -27,7 +27,7 @@ fn promote_cut_holder(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMe
         return Error(Io(Closed))
     }
     let installed = disk_state(db).packs
-    let paging = recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp)?
+    let paging = failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp))?
     let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
     let captured_packs = match view roots[at].collections.paging {

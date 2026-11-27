@@ -81,7 +81,7 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
         return Error(Foreign)
     }
     let (_, take selected) = read_selected_page_manifest(directory)?
-    let loaded = rebuild_page_store(take selected, None)?
+    let loaded = failure_result_from_rep(history.rebuild_page_store(take selected, None))?
     if loaded.manifest.generation != 2 || loaded.manifest.next_pack != 3 || loaded.manifest.account_memory != 78 || list.len(loaded.holders) != 1 || pages.one_page_account(loaded.holders[0u64]) != 78 || !law_generation_locations(loaded.locations) {
         return Error(Foreign)
     }

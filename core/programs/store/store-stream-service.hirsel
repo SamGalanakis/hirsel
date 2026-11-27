@@ -436,7 +436,7 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
                 return Ok(None)
             }
             let _ = failure_result_from_rep(format.stream_header(mut lane.body, host_stream_id_to_rep(lane.sid), ROLE_PROBE, 0, 0, lane.authority_kind))?
-            history_create(mut client, probe, mut lane.body, mut lane.compare, deadline)?
+            failure_result_from_rep(history.history_create(mut client, probe, mut lane.body, mut lane.compare, deadline))?
             let first = format.StreamRegister(rev: 1, sid: host_stream_id_to_rep(lane.sid), inc: 0, holder: store_key_to_rep(StoreId(hi: 0, lo: 0)), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
             failure_result_from_rep(format.stream_register_encode(mut lane.body, first, lane.authority_kind))?
             let (take created, take buffer) = std.object.store_if_retry(mut client, reg, Absent, replace(mut lane.body, list.new()), deadline)
@@ -456,7 +456,7 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
         return Ok(None)
     }
     let _ = failure_result_from_rep(format.stream_header(mut lane.body, host_stream_id_to_rep(lane.sid), ROLE_PROBE, 0, 0, lane.authority_kind))?
-    history_check_conditions(mut client, probe, mut lane.body, deadline)?
+    failure_result_from_rep(history.history_check_conditions(mut client, probe, mut lane.body, deadline))?
     let old_inc = lane.reg.inc
     let mut won = false
     for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
@@ -547,7 +547,7 @@ fn stream_batch_put(mut lane: StreamLane, mut client: std.object.Client, slices:
     match take outcome {
         Ok(Applied(_)) => Ok(()),
         Ok(Mismatch) => {
-            if let Error(_) = history_fetch(mut client, key, mut lane.compare, deadline) {
+            if let Error(_) = failure_result_from_rep(history.history_fetch(mut client, key, mut lane.compare, deadline)) {
                 return Error(stream_latch(mut lane, Unreachable))
             }
             if lane.compare == lane.body {

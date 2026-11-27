@@ -67,20 +67,20 @@ fn group_override(group: u64) -> Overrides {
 fn directory_writer_need_is_sizing_boundary() -> Result[(), ()] {
     let mut o = derived_sizes()
     check_directory_sizing_boundary(o)
-    o.resident_limit = Some(64 * MIB)
+    o.resident_limit = Some(64 * history.MIB)
     check_directory_sizing_boundary(o)
-    o.resident_limit = Some(512 * MIB)
+    o.resident_limit = Some(512 * history.MIB)
     o.limits = Some(small_place_limits())
     check_directory_sizing_boundary(o)
-    o.resident_limit = Some(4 * 1024 * MIB)
+    o.resident_limit = Some(4 * 1024 * history.MIB)
     o.limits = None
     check_directory_sizing_boundary(o)
-    o.resident_limit = Some(12 * 1024 * MIB)
+    o.resident_limit = Some(12 * 1024 * history.MIB)
     o.group_commits = Some(4u32)
     check_directory_sizing_boundary(o)
-    o.pack_bytes = Some(64 * MIB)
-    o.checkpoint_bytes = Some(2 * MIB)
-    o.journal_limit = Some(32 * MIB)
+    o.pack_bytes = Some(64 * history.MIB)
+    o.checkpoint_bytes = Some(2 * history.MIB)
+    o.journal_limit = Some(32 * history.MIB)
     check_directory_sizing_boundary(o)
     Ok(())
 }
@@ -157,10 +157,10 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
 fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
-    o.resident_limit = Some(MIB)
+    o.resident_limit = Some(history.MIB)
     o.limits = Some(small_place_limits())
     let need = 1823920u64
-    if directory_writer_need(o) != need || need > 2 * MIB {
+    if directory_writer_need(o) != need || need > 2 * history.MIB {
         fail("§11.1 AP4a: the small Directory Place need")
     }
     o.limits = None
@@ -232,7 +232,7 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let writer_need = 72785708u64
     let need = 72787222u64
     let place = result.unwrap(planned(kind, need, o))
-    if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
+    if planned_bytes(place) != need || planned_options(place).resident_limit != history.MIB {
         fail("§1.1: the Bucket place plan at its exact share")
     }
     let capture = option.unwrap(planned_capture(place))
@@ -288,7 +288,7 @@ fn small_bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result
     let writer_need = 6201156u64
     let need = 6202670u64
     let place = result.unwrap(planned(kind, need, o))
-    if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
+    if planned_bytes(place) != need || planned_options(place).resident_limit != history.MIB {
         fail("§11.1 AP4a: the small Bucket place plan at its exact share")
     }
     let writer = result.unwrap(writer_plan(kind, planned_options(place)))

@@ -5,7 +5,7 @@
 // - watches foreign streams whose pins this host needs cleared and elects a
 //   Collecting incarnation (`kind = 1`) once a Serving token or Collecting rev
 //   stays unchanged for `4 * hold_ms` (with A4 election recheck).
-type JanitorAsk: send = JanitorOrphanHold(StoreId, String, HistoryPair) | JanitorStragglerPin(StoreId, String, HistoryPair)
+type JanitorAsk: send = JanitorOrphanHold(StoreId, String, history.HistoryPair) | JanitorStragglerPin(StoreId, String, history.HistoryPair)
 
 // Opens a Place streamed on the service's reserved slot (never refused by
 // `max_pins` or ordinary `max_slots`, §12.11.8 A5) and closes it so H raises
@@ -170,14 +170,14 @@ fn stream_collecting_sweep(mut lane: StreamLane, mut gc: StreamGcState, mut pref
         let key = stream_key(place_prefix, "head")
         let mut scratch = replace(mut lane.compare, list.new())
         let fetched = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-            let _ = history_fetch(mut c, key, mut scratch, deadline)?
+            let _ = failure_result_from_rep(history.history_fetch(mut c, key, mut scratch, deadline))?
             Ok(())
         })
         lane.compare = take scratch
         if let Error(_) = fetched {
             continue
         }
-        let Ok((_, take attach)) = history_decode_head_attach(lane.compare) else {
+        let Ok((_, take attach)) = failure_result_from_rep(history.history_decode_head_attach(lane.compare)) else {
             continue
         }
         let ranges = stream_attach_head_ranges(attach, lane.sid)

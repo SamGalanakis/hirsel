@@ -1,0 +1,20 @@
+// Step 5's images, built before the rename so the swap allocates nothing.
+// Each sealed tree reads its Cold roots through the new generation's packs.
+// The cut settles (§13.7): the live Tiered account becomes the published X.
+pub fn prepare_tiered_install(mut cut_stage: pager.TieredCutStage, installed: manifest.PageLocations, generation: u64, next_stamp: u64) -> Result[u64, types.Failure] {
+    let settled = pager.cut_tiered_account(cut_stage.roots)?
+    if pager.tiered_cut_stage_empty(cut_stage) {
+        return Ok(settled)
+    }
+    let paging = recovered_tiered_inventory(installed, None, generation, next_stamp)?
+    for slot in 0u64 .. list.len(cut_stage.roots) {
+        let had_paging = match view cut_stage.roots[slot].collections.paging {
+            Some(_) => true,
+            None => false,
+        }
+        if had_paging || pages.tiered_collections(cut_stage.roots[slot].collections.root) {
+            cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
+        }
+    }
+    Ok(settled)
+}

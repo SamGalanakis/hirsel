@@ -91,10 +91,14 @@ def crash_inputs(root):
     return inputs(root, package='store-crash', with_tests=('store', 'runner'))
 
 
+DEPENDENT_CONTROLS = ('journal_input_refused', 'holder_table_refused', 'declare_state_refused',
+                      'pack_disk_state_refused', 'pager_state_refused', 'disk_pager_state_refused',
+                      'record_retention_refused', 'dir_journal_state_refused',
+                      'history_register_refused', 'history_locator_refused', 'history_open_base_refused',
+                      'history_pack_stream_refused', 'prepared_register_head_refused')
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
-                    'view_tx_write_refused', 'journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused',
-                    'pager_state_refused', 'disk_pager_state_refused', 'record_retention_refused', 'dir_journal_state_refused')
+                    'view_tx_write_refused', *DEPENDENT_CONTROLS)
 
 
 def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
@@ -104,11 +108,13 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
         source = dict(
             file=str(root / ('core/programs/store/' + control + '.hirsel')),
             modules=[control], signatures=False)
-        if control in ('journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused',
-                       'pager_state_refused', 'disk_pager_state_refused', 'record_retention_refused', 'dir_journal_state_refused'):
+        if control in DEPENDENT_CONTROLS:
+            dependencies = ['core', 'store']
+            if control in ('history_register_refused', 'history_pack_stream_refused'):
+                dependencies.append('std')
             negative['packages'].append({
                 'package': {'name': control, 'version': '1'},
-                'dependencies': [{'name': 'core', 'version': '1'}, {'name': 'store', 'version': '1'}],
+                'dependencies': [{'name': name, 'version': '1'} for name in dependencies],
                 'sources': [source],
             })
         else:
@@ -129,6 +135,11 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'disk_pager_state_refused': [('PROG-2', '`store@1/pager/DiskPagerState` is private or opaque')],
             'record_retention_refused': [('PROG-2', '`store@1/journal/RecordRetention` is private or opaque')],
             'dir_journal_state_refused': [('PROG-2', '`store@1/journal/DirJournalState` is private or opaque')],
+            'history_register_refused': [('PROG-2', '`store@1/history/HistoryRegister` is private or opaque')],
+            'history_locator_refused': [('PROG-2', '`store@1/history/HistoryLocator` is private or opaque')],
+            'history_open_base_refused': [('PROG-2', '`store@1/history/HistoryOpenBase` is private or opaque')],
+            'history_pack_stream_refused': [('PROG-2', '`store@1/history/HistoryPackStream` is private or opaque')],
+            'prepared_register_head_refused': [('PROG-2', '`store@1/history/PreparedRegisterHead` is private or opaque')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

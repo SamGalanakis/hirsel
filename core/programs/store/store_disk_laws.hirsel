@@ -494,7 +494,7 @@ fn disk_test_frames() -> Result[(), ()] {
 fn disk_load(d: Dir, ceiling: u64) -> Result[manifest.DiskLoaded, Error] waits {
     let (id, take page_record) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take page_record)?
-    let loaded = disk_loaded(id, take validated)?
+    let loaded = failure_result_from_rep(history.disk_loaded(store_key_to_rep(id), take validated))?
     failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }
@@ -502,7 +502,7 @@ fn disk_load(d: Dir, ceiling: u64) -> Result[manifest.DiskLoaded, Error] waits {
 fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[manifest.DiskLoaded, Error] waits {
     let (id, take page_record) = disk_read_page_manifest("MANIFEST", raw)?
     let validated = validate_page_manifest(d, id, take page_record)?
-    let loaded = disk_loaded(id, take validated)?
+    let loaded = failure_result_from_rep(history.disk_loaded(store_key_to_rep(id), take validated))?
     failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }

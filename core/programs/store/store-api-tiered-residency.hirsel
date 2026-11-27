@@ -42,7 +42,7 @@ pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] wai
 fn admit_tiered_plan(db: Db) -> Result[(), Error] {
     let o = disk_state(db).options
     if !tiered_open_funded(o) {
-        let requested = int.saturating_add(tiered_plan_reserve(o), 64 * MIB)
+        let requested = int.saturating_add(tiered_plan_reserve(o), 64 * history.MIB)
         return Error(Full(Resident(Capacity(requested: requested, available: o.resident_limit))))
     }
     failure_result_from_rep(catalog.over_ceiling(db.resident, tiered_memory_room(o)))

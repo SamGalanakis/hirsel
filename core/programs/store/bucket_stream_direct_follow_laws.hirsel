@@ -109,12 +109,12 @@ fn df_follower_rows(f: Follower, rows_tbl: Table[u64, Bytes]) -> Result[u64, Err
     }
 }
 
-fn df_head_attach_live(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, place_prefix: String) -> Result[(HistoryHead, Option[format.Attach]), Error] waits {
+fn df_head_attach_live(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, place_prefix: String) -> Result[(history.HistoryHead, Option[format.Attach]), Error] waits {
     let mut client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 1)?
-    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
     let due = std.object.deadline_after_ms(client, DF_OP_MS)
-    let _ = history_fetch(mut client, "head", mut raw, due)?
-    let (take cap, take attach) = history_decode_head_attach(raw)?
+    let _ = failure_result_from_rep(history.history_fetch(mut client, "head", mut raw, due))?
+    let (take cap, take attach) = failure_result_from_rep(history.history_decode_head_attach(raw))?
     let _ = take client
     Ok((cap.head, take attach))
 }
@@ -541,7 +541,7 @@ fn df_l90_n_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] wait
             let idx = round * 16 + j
             let slot = journal_slot(mut svc2)?
             let job = BlastReopenJob(endpoint: s.endpoint, time: s.time, r, tasks, slot: take slot, seed: 500 + idx, place_prefix: df_place_prefix(idx))
-            let h = match task.try_spawn(tasks, bytes (16 * MIB), take job, df_blast_reopen_only) {
+            let h = match task.try_spawn(tasks, bytes (16 * history.MIB), take job, df_blast_reopen_only) {
                 Ok(take running) => take running,
                 Error(_) => fail("L90-N: failed to spawn reopen worker"),
             }

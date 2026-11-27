@@ -1,0 +1,227 @@
+pub type HistoryLink {
+    epoch: u64,
+    len: u64,
+    digest: u64
+}
+
+pub type HistoryMark {
+    manifest: pages.HistoryRef,
+    floor: u64,
+    retained: List[pages.HistoryRef],
+    depth: u8,
+    locate_at: u64,
+    locate_end: u64
+}
+
+pub fn history_object_context(path: String, id: types.StoreKey, role: u8, reference: pages.HistoryRef, raw: Bytes) -> Result[format.DiskContext, types.Failure] {
+    if list.len(raw) < 72 {
+        return Error(format.disk_fault(path, 0, Truncated))
+    }
+    let stored_id = types.StoreKey(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8))
+    if raw[28] != role || format.read_le(raw, 48, 8) != reference.epoch || format.read_le(raw, 56, 8) != reference.seq || !types.same(stored_id.hi, stored_id.lo, id.hi, id.lo) {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    let ctx = format.DiskContext(store: id, role, seq: reference.seq)
+    let header = manifest.history_frame(path, ctx, raw, 0, 0x0001)?
+    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || format.read_le(raw, 30, 2) != 0 || format.read_le(raw, 64, 8) != 0 {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    let disk_version = format.read_le(raw, 24, 4)
+    if disk_version != format.DISK_FORMAT {
+        return Error(Unsupported(disk_version))
+    }
+    if raw[29] != 1 && raw[29] != 2 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    Ok(ctx)
+}
+
+pub fn history_object_digest(path: String, reference: pages.HistoryRef, raw: Bytes) -> Result[(), types.Failure] {
+    if list.len(raw) != reference.len {
+        return Error(format.disk_fault(path, 0, Truncated))
+    }
+    if std.check.xxh3(raw, 0, list.len(raw)) != reference.digest {
+        return Error(format.disk_fault(path, 0, Checksum))
+    }
+    Ok(())
+}
+
+pub fn history_entry_context(path: String, id: types.StoreKey, reference: pages.HistoryRef, raw: Bytes) -> Result[(format.DiskContext, HistoryLink), types.Failure] {
+    let ctx = history_object_context(path, id, 2, reference, raw)?
+    let link = manifest.history_frame(path, ctx, raw, 72, 0x00B0)?
+    if link.end != 112 {
+        return Error(format.disk_fault(path, 72, Malformed))
+    }
+    let prev = HistoryLink(epoch: format.read_le(raw, 88, 8), len: format.read_le(raw, 96, 8), digest: format.read_le(raw, 104, 8))
+    if reference.seq == 1 {
+        if prev.epoch != 0 || prev.len != 0 || prev.digest != 0 {
+            return Error(format.disk_fault(path, 72, Malformed))
+        }
+    } else if prev.epoch == 0 || prev.epoch > reference.epoch || prev.len < 112 || prev.len > HISTORY_ENTRY_READ_LIMIT {
+        return Error(format.disk_fault(path, 72, Malformed))
+    }
+    Ok((ctx, prev))
+}
+
+pub fn history_length(link: HistoryLink, seq: u64) -> pages.HistoryRef {
+    pages.HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
+}
+
+pub fn history_range(mut client: std.object.Client, path: String, reference: pages.HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), types.Failure] waits {
+    list.clear(mut buffer)
+    let (take result, take raw) = std.object.fetch_range(mut client, path, lo, hi, replace(mut buffer, list.new()), deadline)
+    buffer = take raw
+    match take result {
+        Ok(meta) => {
+            if meta.size != reference.len || list.len(buffer) != hi - lo {
+                return Error(format.disk_fault(path, lo, Truncated))
+            }
+            Ok(())
+        },
+        Error(NotFound) => Error(pager.history_missing_object(path, reference)),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+pub fn history_read_key(lead: String, reference: pages.HistoryRef) -> Result[String, types.Failure] {
+    // The longest object key has 60 bytes. The String rounds up to 64.
+    types.capacity(bound bytes 64 {
+        history_key(lead, reference)
+    })
+}
+
+pub fn history_link_slots(rows: u64) -> Result[List[HistoryLink], types.Failure] {
+    let charge = size_or(int.checked_mul(rows, 24), 18446744073709551615u64)
+    let mut refs: List[HistoryLink] = types.capacity(bound bytes charge {
+        list.with_capacity(rows)
+    })?
+    list.fill(mut refs, rows, HistoryLink(epoch: 0, len: 0, digest: 0))
+    Ok(take refs)
+}
+
+pub fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: pages.HistoryRef, deadline: u64) -> Result[List[HistoryLink], types.Failure] waits {
+    let end = head.entry.seq
+    if from.seq > end {
+        return Error(format.disk_fault("head", 72, Malformed))
+    }
+    let row_count = end - from.seq
+    let mut refs = history_link_slots(row_count)?
+    let mut prefix_buffer: Bytes = manifest.disk_read_buffer(112)?
+    let mut current = head.entry
+    while current.seq > from.seq {
+        let name = history_read_key("e-", current)?
+        let leaf = HistoryLink(epoch: current.epoch, len: current.len, digest: current.digest)
+        let _ = list.set(mut refs, current.seq - from.seq - 1, leaf)
+        history_range(mut client, name, current, 0, 112, mut prefix_buffer, deadline)?
+        let (_, predecessor) = history_entry_context(name, head.store, current, prefix_buffer)?
+        current = history_length(predecessor, current.seq - 1)
+    }
+    if !history_ref_matches(current, from) {
+        return Error(format.disk_fault("head", 72, Malformed))
+    }
+    Ok(take refs)
+}
+
+pub fn history_read_object(mut client: std.object.Client, path: String, reference: pages.HistoryRef, deadline: u64) -> Result[Bytes, types.Failure] waits {
+    let mut raw = manifest.disk_read_buffer(reference.len)?
+    match history_fetch(mut client, path, mut raw, deadline) {
+        Ok(_) => (),
+        Error(Remote(NotFound)) => return Error(pager.history_missing_object(path, reference)),
+        Error(take problem) => return Error(take problem),
+    }
+    Ok(take raw)
+}
+
+pub fn history_read_mark(path: String, id: types.StoreKey, reference: pages.HistoryRef, raw: Bytes) -> Result[HistoryMark, types.Failure] {
+    let (ctx, _) = history_entry_context(path, id, reference, raw)?
+    history_object_digest(path, reference, raw)?
+    let mark = manifest.history_frame(path, ctx, raw, 112, 0x0090)?
+    let size = mark.end - mark.payload
+    if size < 45 || size > 8173 {
+        return Error(format.disk_fault(path, 112, Malformed))
+    }
+    let row = list.slice(raw, mark.payload, mark.end)
+    let page_record = pages.HistoryRef(seq: format.read_le(row, 0, 8), epoch: format.read_le(row, 8, 8), len: format.read_le(row, 24, 8), digest: format.read_le(row, 16, 8))
+    let floor = format.read_le(row, 32, 8)
+    let depth = row[40]
+    let row_count = format.read_le(row, 41, 4)
+    if page_record.seq == 0 || page_record.epoch == 0 || page_record.epoch > reference.epoch || page_record.len < 88 || page_record.len > manifest.MANIFEST_LIMIT + 88 + 20 || depth > 3 || row_count > 254 || size != 45 + 32 * row_count {
+        return Error(format.disk_fault(path, 112, Malformed))
+    }
+    let mut retained = manifest.disk_allocation(scoped fn() -> Result[List[pages.HistoryRef], types.Failure] {
+        Ok(list.with_capacity(row_count))
+    })?
+    let mut final_item = 0u64
+    for i in 0u64 .. row_count {
+        let at = 45 + 32 * i
+        let earlier = pages.HistoryRef(seq: format.read_le(row, at, 8), epoch: format.read_le(row, at + 8, 8), len: format.read_le(row, at + 24, 8), digest: format.read_le(row, at + 16, 8))
+        if earlier.seq <= final_item || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
+            return Error(format.disk_fault(path, 112, Malformed))
+        }
+        final_item = earlier.seq
+        list.push(mut retained, earlier)
+    }
+    let oldest = if row_count == 0 {
+        reference.seq
+    } else {
+        retained[0].seq
+    }
+    if floor != oldest {
+        return Error(format.disk_fault(path, 112, Malformed))
+    }
+    let locator = manifest.history_frame(path, ctx, raw, mark.end, 0x00C0)?
+    if locator.end != list.len(raw) || (locator.end - locator.payload) > 1048576 || (locator.end - locator.payload) % 32 != 0 {
+        return Error(format.disk_fault(path, mark.end, Malformed))
+    }
+    Ok(HistoryMark(manifest: page_record, floor, retained: take retained, depth, locate_at: locator.payload, locate_end: locator.end))
+}
+
+pub fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(HistoryMark, Bytes), types.Failure] waits {
+    let name = history_read_key("e-", head.checkpoint)?
+    let raw = history_read_object(mut client, name, head.checkpoint, deadline)?
+    let mark = manifest.disk_allocation(scoped fn() -> Result[HistoryMark, types.Failure] {
+        history_read_mark(name, head.store, head.checkpoint, raw)
+    })?
+    if mark.floor != head.floor {
+        return Error(format.disk_fault(name, 112, Malformed))
+    }
+    Ok((take mark, take raw))
+}
+
+pub fn history_decode_manifest(name: String, id: types.StoreKey, mark: HistoryMark, checkpoint_seq: u64, take bytes_in: Bytes) -> Result[manifest.PageManifest, types.Failure] {
+    let mut raw = take bytes_in
+    let local = manifest.disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        let ctx = history_object_context(name, id, 1, mark.manifest, raw)?
+        history_object_digest(name, mark.manifest, raw)?
+        types.capacity(format.disk_header_bytes(ctx, 0, 0))
+    })?
+    // An AP14 directory HEADER has the same checksum binding, so its parser
+    // can check the rest of the already authenticated object unchanged.
+    for i in 0u64 .. 72 {
+        raw[i] = local[i]
+    }
+    manifest.disk_allocation(scoped fn() -> Result[manifest.PageManifest, types.Failure] {
+        let (_, take page_record) = manifest.disk_read_page_manifest(name, raw)?
+        if page_record.first_live != checkpoint_seq || page_record.prev_first != checkpoint_seq {
+            return Error(format.disk_fault(name, 72, Malformed))
+        }
+        let cursor = page_record.sweep
+        if cursor.position >= mark.floor || (cursor.position == 0 && (cursor.epoch != 0 || cursor.digest != 0)) || (cursor.position != 0 && cursor.epoch == 0) {
+            return Error(format.disk_fault(name, 72, Malformed))
+        }
+        Ok(take page_record)
+    })
+}
+
+pub fn history_read_manifest(mut client: std.object.Client, id: types.StoreKey, mark: HistoryMark, checkpoint_seq: u64, deadline: u64) -> Result[manifest.PageManifest, types.Failure] waits {
+    let name = history_read_key("m-", mark.manifest)?
+    let raw = history_read_object(mut client, name, mark.manifest, deadline)?
+    history_decode_manifest(name, id, mark, checkpoint_seq, take raw)
+}
+
+pub fn history_check_claim(path: String, reference: pages.HistoryRef, raw: Bytes, frame: format.DiskFrame) -> Result[(), types.Failure] {
+    if frame.flags != 1 || frame.end != list.len(raw) || frame.end - frame.payload != 24 || format.read_le(raw, frame.payload, 8) != reference.epoch {
+        return Error(format.disk_fault(path, 112, Malformed))
+    }
+    Ok(())
+}

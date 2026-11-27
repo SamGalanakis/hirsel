@@ -211,14 +211,14 @@ pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activa
         for i in 0u64 .. 32 {
             digest[i] = schema_binding[i]
         }
-        Some(HistoryActivation(number: activation, binding: digest))
+        Some(history.HistoryActivation(number: activation, binding: digest))
     } else {
         None
     }
     install_activation_layout(mut db, take staged, update)
 }
 
-fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[HistoryActivation]) -> Result[(), Error] waits {
+fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[history.HistoryActivation]) -> Result[(), Error] waits {
     if !catalog.same_declaration_base(staged.inner, declaration_base(db)) {
         return Error(Foreign)
     }
@@ -266,7 +266,7 @@ fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, 
 // `drop_pin` is the import pin an install removes in the same cut (§3.5a).
 // A plan with hot Tiered builds runs them first, and the cut drops the build
 // pin instead (§13.10a); an install's plan never queues one.
-fn publish_schema_plan_binding(mut db: Db, take staged: SchemaPlan, activation: Option[HistoryActivation], drop_pin: Option[u64]) -> Result[Ticket, Error] waits {
+fn publish_schema_plan_binding(mut db: Db, take staged: SchemaPlan, activation: Option[history.HistoryActivation], drop_pin: Option[u64]) -> Result[Ticket, Error] waits {
     let mut prepared = take staged
     let mut dropped = drop_pin
     if list.len(prepared.pending_migrates) != 0 || list.len(prepared.pending_indexes) != 0 {

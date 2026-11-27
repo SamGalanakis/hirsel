@@ -3,18 +3,18 @@
 // and marks its predecessor as superseded. The latter makes reversing any
 // adjacent pair observable even when a cold restart replays the whole suffix.
 type ReplicationWriter {
-    source: ObjectPackRead,
-    register: HistoryRegister,
+    source: history.ObjectPackRead,
+    register: history.HistoryRegister,
     replay: pager.JournalReplay,
     authority: Bytes,
-    buffers: HistoryBuffers
+    buffers: history.HistoryBuffers
 }
 
 fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expected: Option[StoreId]) -> Result[ReplicationWriter, Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "spare.test", seed, true, 1)?
-    let authority = history_config_bytes(object_history_config(std.object.bucket_config(client), "bucket"))?
-    let mut source = history_reader(take client, 0)
-    let mut buffers = history_buffers(1024)?
+    let authority = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(client), "bucket")))?
+    let mut source = history.history_reader(take client, 0)
+    let mut buffers = failure_result_from_rep(history.history_buffers(1024))?
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.create = match expected {
         Some(_) => false,
@@ -42,9 +42,9 @@ fn replication_stream_row(mut raw: Bytes, key: u64, value: u64) {
     list.put_word_le(mut raw, value)
 }
 
-fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, value: u64) -> Result[(), Error] {
-    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq: history_next_id(head.entry.seq)?)
-    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
+fn replication_packet(mut raw: Bytes, head: history.HistoryHead, entry_version: u64, value: u64) -> Result[(), Error] {
+    let ctx = format.DiskContext(store: head.store, role: 2, seq: failure_result_from_rep(history.history_next_id(head.entry.seq))?)
+    failure_result_from_rep(history.history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry))?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
     list.put_word_le(mut raw, entry_version)
@@ -65,14 +65,14 @@ fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, val
 }
 
 fn replication_advance(mut writer: ReplicationWriter, entry_version: u64, value: u64) -> Result[(), Error] waits {
-    replication_packet(mut writer.buffers.packet, writer.register.head, entry_version, value)?
+    replication_packet(mut writer.buffers.packet, history.register_head(writer.register), entry_version, value)?
     let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
-    let verdict = history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due)?
+    let verdict = failure_result_from_rep(history.history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due))?
     let HistoryApplied(_) = verdict else {
         return Error(Undecided)
     }
-    let head = writer.register.head
-    history_apply_entry(history_key("e-", head.entry), head.store, head.entry, writer.buffers.packet, mut writer.replay, 1048576)
+    let head = history.register_head(writer.register)
+    history_apply_entry(history.history_key("e-", head.entry), store_key_from_rep(head.store), head.entry, writer.buffers.packet, mut writer.replay, 1048576)
 }
 
 fn replication_open_follower(mut ids: Followers, tasks: Tasks, owner: FollowerOwner, plan: FollowerPlan, sim: BucketSim, host_name: String, seed: u64, store: StoreId, op_ms: u64) -> Result[Follower, Error] waits {
@@ -153,12 +153,12 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: Followe
     let mut plan = std.sim.world.plan(seed)
     let r = provide.random(seed)
     let mut writer = replication_writer(tasks, r, sim, seed, None)?
-    let store = writer.register.head.store
+    let store = history.register_head(writer.register).store
     let mut ids = followers()
     let service = bucket_law_start_followers(tasks, follow_plan, 3, "replication service")
     let owner = follower_owner(service)?
-    let mut first = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
-    let mut second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
+    let mut first = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store_key_from_rep(store), BUCKET_LAW_OP_MS)?
+    let mut second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store_key_from_rep(store), BUCKET_LAW_OP_MS)?
     let mut expected: List[Inline[u8, 32]] = list.with_capacity(7)
     list.push(mut expected,[0u8; 32])
     replication_check("writer", seed, writer.replay.state.tips[0], 0, expected)
@@ -167,12 +167,12 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: Followe
     let restart = 2 + std.sim.world.pick(mut plan, 3)
     for n in 1u64 .. 7 {
         if n == restart {
-            let replacement = replication_writer(tasks, r, sim, n, Some(store))?
+            let replacement = replication_writer(tasks, r, sim, n, Some(store_key_from_rep(store)))?
             replication_check("reclaimed writer", seed, replacement.replay.state.tips[0], n - 1, expected)
-            let old_epoch = writer.register.head.pair.epoch
-            replication_packet(mut writer.buffers.packet, writer.register.head, n, 0)?
+            let old_epoch = history.register_head(writer.register).pair.epoch
+            replication_packet(mut writer.buffers.packet, history.register_head(writer.register), n, 0)?
             let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
-            if let Error(Fenced(epoch)) = history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due) {
+            if let Error(Fenced(epoch)) = failure_result_from_rep(history.history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due)) {
                 if epoch != old_epoch {
                     replication_failure("writer", seed, n, "wrong epoch after stale CAS")
                 }
@@ -184,7 +184,7 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: Followe
             replication_follow(mut second, "second follower after claim", seed, n - 1, expected)
             // Primary connections are partitioned. The spare endpoint still
             // serves the same register and objects to the remaining nodes.
-            let blocked = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "s3.test", seed, store, 100)
+            let blocked = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "s3.test", seed, store_key_from_rep(store), 100)
             if let Error(Remote(Retriable(_))) = blocked {} else {
                 replication_failure("restarting follower", seed, n - 1, "partition did not refuse its capture")
             }
@@ -198,7 +198,7 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: Followe
         replication_check("writer", seed, writer.replay.state.tips[0], n, expected)
         replication_follow(mut first, "first follower", seed, n, expected)
         if n == restart {
-            second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", n, store, BUCKET_LAW_OP_MS)?
+            second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", n, store_key_from_rep(store), BUCKET_LAW_OP_MS)?
             replication_check("cold follower", seed, second.capture.state.tips[0], n, expected)
         } else {
             replication_check("lagging follower", seed, second.capture.state.tips[0], n - 1, expected)

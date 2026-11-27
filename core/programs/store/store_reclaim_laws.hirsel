@@ -32,21 +32,21 @@ fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> R
     close(take seed)?
     let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let after_seed = history_decode_head(workspace.witness)?
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let after_seed = failure_result_from_rep(history.history_decode_head(workspace.witness))?
     if after_seed.head.floor < 2 {
         fail("retain-one seed checkpoint did not advance floor past entry 1")
     }
-    let dead_sweep = history_key("e-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xaaaa))
-    let dead_manifest = history_key("m-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xbbbb))
-    let dead_pack = history_key("p-", pages.HistoryRef(seq: 50, epoch: 1, len: 1, digest: 0xcccc))
+    let dead_sweep = history.history_key("e-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xaaaa))
+    let dead_manifest = history.history_key("m-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xbbbb))
+    let dead_pack = history.history_key("p-", pages.HistoryRef(seq: 50, epoch: 1, len: 1, digest: 0xcccc))
     let mut sweep_bytes = string.into_bytes(string.from("sweep"))
     let mut manifest_bytes = string.into_bytes(string.from("manifest!"))
     let mut pack_bytes = string.into_bytes(string.from("pack-dead-123"))
-    history_create(mut witness, dead_sweep, mut sweep_bytes, mut workspace.compare, deadline)?
-    history_create(mut witness, dead_manifest, mut manifest_bytes, mut workspace.compare, deadline)?
-    history_create(mut witness, dead_pack, mut pack_bytes, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut witness, dead_sweep, mut sweep_bytes, mut workspace.compare, deadline))?
+    failure_result_from_rep(history.history_create(mut witness, dead_manifest, mut manifest_bytes, mut workspace.compare, deadline))?
+    failure_result_from_rep(history.history_create(mut witness, dead_pack, mut pack_bytes, mut workspace.compare, deadline))?
     // Two duplicate pending uploads under the same old-epoch key, plus one current-epoch upload.
     let dead_upload = pending_pack_name(60, 1)
     let live_upload = pending_pack_name(61, 2)
@@ -68,14 +68,14 @@ fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> R
         fail("reclaim preview fixture write did not commit")
     }
     durable(mut writer, receipt.ticket)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let current = history_decode_head(workspace.witness)?
-    let dead_live_range = history_key("e-", pages.HistoryRef(seq: current.head.entry.seq, epoch: 2, len: 1, digest: 0xdddd))
-    let future_entry = history_key("e-", pages.HistoryRef(seq: current.head.entry.seq + 1, epoch: 2, len: 1, digest: 0xeeee))
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let current = failure_result_from_rep(history.history_decode_head(workspace.witness))?
+    let dead_live_range = history.history_key("e-", pages.HistoryRef(seq: current.head.entry.seq, epoch: 2, len: 1, digest: 0xdddd))
+    let future_entry = history.history_key("e-", pages.HistoryRef(seq: current.head.entry.seq + 1, epoch: 2, len: 1, digest: 0xeeee))
     let mut orphan_bytes = string.into_bytes(string.from("orphan-live"))
     let mut future_bytes = string.into_bytes(string.from("future"))
-    history_create(mut witness, dead_live_range, mut orphan_bytes, mut workspace.compare, deadline)?
-    history_create(mut witness, future_entry, mut future_bytes, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut witness, dead_live_range, mut orphan_bytes, mut workspace.compare, deadline))?
+    failure_result_from_rep(history.history_create(mut witness, future_entry, mut future_bytes, mut workspace.compare, deadline))?
     // Hand-derived exact byte total of the four dead objects (uploads have 0 bytes).
     let expected_bytes = 5u64 + 9u64 + 13u64 + 11u64
     Ok((take writer, take witness, take dead_sweep, take dead_live_range, take dead_manifest, take dead_pack, take dead_upload, take live_upload, take future_entry, expected_bytes))
@@ -146,9 +146,9 @@ fn bucket_test_m2_reclaim_preview_and_purge(c: Clock, r: Random, tasks: Tasks) -
     }
     // Preview + refused purges must leave every dead object and pending upload untouched.
     let deadline_dry = std.object.deadline_after_ms(witness_dry, BUCKET_LAW_OP_MS)
-    let mut ws_dry = history_buffers(65536)?
+    let mut ws_dry = failure_result_from_rep(history.history_buffers(65536))?
     for name in[string.from(dead_sweep), string.from(dead_live_range), string.from(dead_manifest), string.from(dead_pack), string.from(future_entry)] {
-        let _ = history_fetch(mut witness_dry, name, mut ws_dry.compare, deadline_dry)?
+        let _ = failure_result_from_rep(history.history_fetch(mut witness_dry, name, mut ws_dry.compare, deadline_dry))?
     }
     let _ = take witness_dry
     close(take writer_dry)?
@@ -184,16 +184,16 @@ fn bucket_test_m2_reclaim_preview_and_purge(c: Clock, r: Random, tasks: Tasks) -
         fail("reclaim_purge report disagreed with hand-derived oracle")
     }
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
-    let mut ws = history_buffers(65536)?
+    let mut ws = failure_result_from_rep(history.history_buffers(65536))?
     for gone in[p_sweep, p_live_range, p_manifest, p_pack] {
-        if let Error(Remote(NotFound)) = history_fetch(mut witness, gone, mut ws.compare, deadline) {} else {
+        if let Error(Remote(NotFound)) = failure_result_from_rep(history.history_fetch(mut witness, gone, mut ws.compare, deadline)) {} else {
             fail("reclaim_purge left a planned dead object behind")
         }
     }
-    let _ = history_fetch(mut witness, p_future, mut ws.compare, deadline)?
-    let _ = history_fetch(mut witness, "head", mut ws.witness, deadline)?
-    let current = history_decode_head(ws.witness)?
-    let mut cold = history_reader(take witness, deadline)
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, p_future, mut ws.compare, deadline))?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut ws.witness, deadline))?
+    let current = failure_result_from_rep(history.history_decode_head(ws.witness))?
+    let mut cold = history.history_reader(take witness, deadline)
     let recovered = history_paged_capture(mut cold, current.head, 1048576)?
     let _ = take cold
     if recovered.state.tips[0].head == 0u64 {

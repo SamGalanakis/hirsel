@@ -384,7 +384,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: pager.pager_state(o.writer_pin_bytes), indexes: empty_index_registry(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
+    Db(store: id, pager: pager.pager_state(o.writer_pin_bytes), indexes: empty_index_registry(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: history.size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -1883,11 +1883,6 @@ fn catalog_recharge(live_bytes: u64, roots: pages.Roots, key: Bytes, value: Byte
     int.saturating_add(int.saturating_sub(live_bytes, old_charge), entry(key, value))
 }
 
-fn disk_loaded(id: StoreId, take validated: manifest.ValidatedPageManifest) -> Result[manifest.DiskLoaded, Error] {
-    let manifest.LoadedPageStore(manifest: take page_record, holders: take all, lists: take lists, locations: take locations) = rebuild_page_store(take validated, None)?
-    Ok(manifest.DiskLoaded(store: store_key_to_rep(id), manifest: take page_record, all: take all, lists: take lists, locations: take locations))
-}
-
 pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     stage_migration(source.db, tasks, configure)
 }
@@ -2074,7 +2069,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[journal.D
             failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
             failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
             let validated = select_page_manifest(d, id, take page_record)?
-            let loaded = disk_loaded(id, take validated)?
+            let loaded = failure_result_from_rep(history.disk_loaded(store_key_to_rep(id), take validated))?
             // §13.8: a catalog with a Tiered collection opens only on a funded
             // plan, refused before the journal is read or a task is started.
             if !tiered_open_funded(options) && pages.holders_tiered(loaded.all) {
@@ -2508,7 +2503,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
     let PreparedDiskCut(pages: take prepared_pages, compaction: take compaction, removals: take removals, manifest: take page_record) = take prepared
-    let settled_tiered = prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), generation, next_stamp)?
+    let settled_tiered = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), generation, next_stamp))?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = manifest.resident_location_charge(manifest.pack_locations(prepared_pages))

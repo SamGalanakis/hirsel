@@ -314,7 +314,7 @@ fn bucket_stream_unhold_idle_settle(c: Clock, r: Random, tasks: Tasks) -> Result
     // Check that head write #6 (0-indexed: #5 among applied head writes) raised `settles` to 1.
     let mut saw_settles = false
     for w in report.head_writes {
-        if let Ok((_, Some(a))) = history_decode_head_attach(w.data) {
+        if let Ok((_, Some(a))) = failure_result_from_rep(history.history_decode_head_attach(w.data)) {
             if a.settles == 1 {
                 saw_settles = true
             }
@@ -380,7 +380,7 @@ fn bucket_stream_orphan_hold_close(c: Clock, r: Random, tasks: Tasks) -> Result[
     let Some(final_head) = map.get(report.objects, "p1/head") else {
         fail("L90-O(1): p1/head missing")
     }
-    let (_, take attach) = history_decode_head_attach(final_head.data)?
+    let (_, take attach) = failure_result_from_rep(history.history_decode_head_attach(final_head.data))?
     if let Some(_) = attach {
         fail("L90-O(1): close did not drop ATTACH")
     }
@@ -459,12 +459,12 @@ fn stream_crash_after_h_before_claim(c: Clock, r: Random, tasks: Tasks) -> Resul
     stream_unhold_raw_hold(s, tasks, 250, store_id, epoch_a, StoreId(hi: 93, lo: 1))?
     let mut raw_client = stream_service_client(s, tasks, 251, "p1/", "us-east-1")?
     let due = std.object.deadline_after_ms(raw_client, UNHOLD_OP_MS)
-    let mut head_bytes: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let tag = match history_fetch_head(mut raw_client, mut head_bytes, due) {
+    let mut head_bytes: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let tag = match history.history_fetch_head(mut raw_client, mut head_bytes, due) {
         Ok(t) => t,
         Error(e) => return Error(Remote(e)),
     }
-    let (take capture, take attached) = history_decode_head_attach(head_bytes)?
+    let (take capture, take attached) = failure_result_from_rep(history.history_decode_head_attach(head_bytes))?
     let Some(old_attach) = take attached else {
         fail("L90-X(step 6): expected ATTACH")
     }
@@ -475,13 +475,13 @@ fn stream_crash_after_h_before_claim(c: Clock, r: Random, tasks: Tasks) -> Resul
     list.push(mut sealed, format.SealedTail(tail: old_live, cutoff: 3, at: capture.head.entry.seq))
     let new_attach = format.Attach(settles: old_attach.settles, live: Some(format.StreamRef(sid: host_stream_id_to_rep(stream_law_sid()), inc: 1, from_seq: 4, from_frame: 0)), sealed: take sealed)
     let claimed = history_claim_head(capture.head, StoreId(hi: 93, lo: 2), bucket_law_adopt_auth())?
-    let auth_end = history_authority_end(head_bytes)?
+    let auth_end = failure_result_from_rep(history.history_authority_end(head_bytes))?
     let authority = failure_result_from_rep(types.copied(list.slice(head_bytes, 240, auth_end)))?
-    let mut out_head: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    history_encode_register_head(mut out_head, claimed, authority, Some(take new_attach))?
-    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let issued_head = history_write_head_issue(mut raw_client, Match(tag), mut out_head, due)
-    match history_write_head_finish(mut raw_client, take issued_head, mut out_head, mut witness, due) {
+    let mut out_head: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    failure_result_from_rep(history.history_encode_register_head(mut out_head, claimed, authority, Some(take new_attach)))?
+    let mut witness: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let issued_head = history.history_write_head_issue(mut raw_client, Match(tag), mut out_head, due)
+    match history.history_write_head_finish(mut raw_client, take issued_head, mut out_head, mut witness, due) {
         HistoryApplied(_) => (),
         _ => fail("L90-X(step 6): simulated B's H did not apply"),
     }

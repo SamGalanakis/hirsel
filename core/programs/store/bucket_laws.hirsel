@@ -424,10 +424,10 @@ fn bucket_test_read_only_capture(c: Clock, r: Random, tasks: Tasks) -> Result[()
     checked
 }
 
-fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
-    let seq = history_next_id(head.entry.seq)?
-    let ctx = format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq)
-    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
+fn bucket_m2_law_commit_packet(mut raw: Bytes, head: history.HistoryHead, version_number: u64) -> Result[(), Error] {
+    let seq = failure_result_from_rep(history.history_next_id(head.entry.seq))?
+    let ctx = format.DiskContext(store: head.store, role: 2, seq)
+    failure_result_from_rep(history.history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry))?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
     list.put_word_le(mut raw, version_number)
@@ -441,41 +441,41 @@ fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number
 fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(pages.HistoryRef, pages.HistoryRef), Error] waits {
     let mut first = bucket_law_client(sim, tasks, "s3.test", 1)?
     let mut second = bucket_law_client(sim, tasks, "s3.test", 2)?
-    let config = object_history_config(std.object.bucket_config(first), "bucket")
-    let metadata = history_config_bytes(config)?
-    let mut a_buffers = history_buffers(1024)?
-    let mut b_buffers = history_buffers(1024)?
+    let config = history.object_history_config(std.object.bucket_config(first), "bucket")
+    let metadata = failure_result_from_rep(history.history_config_bytes(config))?
+    let mut a_buffers = failure_result_from_rep(history.history_buffers(1024))?
+    let mut b_buffers = failure_result_from_rep(history.history_buffers(1024))?
     let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
-    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buffers, due, default_limits(), None)?
-    history_claim_packet(mut a_buffers.packet, a.head)?
-    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+    let mut a = failure_result_from_rep(history.history_publish_genesis(mut first, store_key_to_rep(StoreId(hi: 9, lo: 10)), store_key_to_rep(StoreId(hi: 11, lo: 12)), 1, metadata, mut a_buffers, due, limits_to_rep(default_limits()), None))?
+    failure_result_from_rep(history.history_claim_packet(mut a_buffers.packet, history.register_head(a)))?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut first, mut a, metadata, mut a_buffers, due))? else {
         fail("genesis CLAIM did not advance")
     }
-    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 1)?
-    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+    bucket_m2_law_commit_packet(mut a_buffers.packet, history.register_head(a), 1)?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut first, mut a, metadata, mut a_buffers, due))? else {
         fail("first commit did not advance")
     }
-    let _ = history_fetch(mut second, "head", mut b_buffers.witness, due)?
-    let captured = history_decode_head(b_buffers.witness)?
+    let _ = failure_result_from_rep(history.history_fetch(mut second, "head", mut b_buffers.witness, due))?
+    let captured = failure_result_from_rep(history.history_decode_head(b_buffers.witness))?
     let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), bucket_law_adopt_auth(), mut b_buffers, due, None)? else {
         fail("second holder failed to claim")
     }
     let mut b = take claimed
-    history_claim_packet(mut b_buffers.packet, b.head)?
-    let HistoryApplied(_) = history_register_advance(mut second, mut b, metadata, mut b_buffers, due)? else {
+    failure_result_from_rep(history.history_claim_packet(mut b_buffers.packet, history.register_head(b)))?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut second, mut b, metadata, mut b_buffers, due))? else {
         fail("second holder's CLAIM did not advance")
     }
-    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 2)?
-    let orphan = history_new_ref(4, 1, a_buffers.packet)
-    let refused = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)
+    bucket_m2_law_commit_packet(mut a_buffers.packet, history.register_head(a), 2)?
+    let orphan = history.history_new_ref(4, 1, a_buffers.packet)
+    let refused = failure_result_from_rep(history.history_register_advance(mut first, mut a, metadata, mut a_buffers, due))
     if let Error(Fenced(1)) = refused {} else {
         fail("the stale holder's advance did not return Fenced")
     }
-    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 3)?
-    if let Error(Fenced(1)) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due) {} else {
+    bucket_m2_law_commit_packet(mut a_buffers.packet, history.register_head(a), 3)?
+    if let Error(Fenced(1)) = failure_result_from_rep(history.history_register_advance(mut first, mut a, metadata, mut a_buffers, due)) {} else {
         fail("the stale holder lost its terminal error")
     }
-    Ok((b.head.entry, orphan))
+    Ok((history.register_head(b).entry, orphan))
 }
 
 // L53 register portion. An obsolete If-Match may leave immutable debris.
@@ -489,11 +489,11 @@ fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] wait
     let _ = bucket_m2_law_register(tasks, sim)?
     let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut head_buf: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    let _ = history_fetch(mut client, "head", mut head_buf, due)?
-    let captured = history_decode_head(head_buf)?
+    let mut head_buf: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let _ = failure_result_from_rep(history.history_fetch(mut client, "head", mut head_buf, due))?
+    let captured = failure_result_from_rep(history.history_decode_head(head_buf))?
     let history_head = captured.head
-    let mut source = history_reader(take client, due)
+    let mut source = history.history_reader(take client, due)
     let replay = history_paged_capture(mut source, history_head, 1048576)?
     if replay.state.tips[0].head != 1 {
         fail("recovery did not apply exactly the published suffix")
@@ -512,12 +512,12 @@ fn bucket_m2_law_retained() -> Result[(), Error] {
     let twenty_four = pages.HistoryRef(seq: 24, epoch: 2, len: 189, digest: 24)
     let mut earlier: List[pages.HistoryRef] = list.with_capacity(1)
     list.push(mut earlier, ten)
-    let before = HistoryMark(manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
+    let before = history.HistoryMark(manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
     let cut = history_retain(before, twenty, 24, 1)?
     if cut.floor != 24 || list.len(cut.earlier) != 0 {
         fail("retain 1 kept an older checkpoint")
     }
-    let short = HistoryMark(manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
+    let short = history.HistoryMark(manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
     let widened = history_retain(short, twenty_four, 28, 3)?
     if widened.floor != 24 || list.len(widened.earlier) != 1 || widened.earlier[0].seq != 24 {
         fail("raising retain revived a checkpoint")
@@ -530,11 +530,11 @@ fn bucket_m2_law_retained() -> Result[(), Error] {
 @test
 fn bucket_test_m2_reclaim_candidates() -> Result[(), Error] {
     bucket_m2_law_retained()?
-    let mut chain: List[HistoryLink] = list.with_capacity(4)
-    list.push(mut chain, HistoryLink(epoch: 1, len: 42, digest: 21))
-    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 22))
-    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 23))
-    list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 24))
+    let mut chain: List[history.HistoryLink] = list.with_capacity(4)
+    list.push(mut chain, history.HistoryLink(epoch: 1, len: 42, digest: 21))
+    list.push(mut chain, history.HistoryLink(epoch: 2, len: 42, digest: 22))
+    list.push(mut chain, history.HistoryLink(epoch: 2, len: 42, digest: 23))
+    list.push(mut chain, history.HistoryLink(epoch: 2, len: 42, digest: 24))
     let mut live_bytes: Map[String, ()] = map.new()
     map.insert(mut live_bytes, string.from("p-00000000000000000002-00000000000000000001-0000000000000002"), ())
     let mut leased: Map[String, ()] = map.new()
@@ -582,7 +582,7 @@ fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> R
 fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: pages.HistoryRef, refs: List[pages.HistoryRef]) -> Result[pages.HistoryRef, Error] {
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     let empty = pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
-    history_packet_header(mut raw, ctx, 1, 1, empty)?
+    failure_result_from_rep(history.history_packet_header(mut raw, ctx, 1, 1, empty))?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, manifest.seq)
     list.put_word_le(mut raw, manifest.epoch)
@@ -595,13 +595,13 @@ fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: pages.HistoryRef,
     let at = list.len(raw)
     list.fill(mut raw, 16, 0u8)
     for item in refs {
-        history_ref_encode(mut raw, item)
+        history.history_ref_encode(mut raw, item)
     }
     failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, at, 0x00C0)))?
-    Ok(history_new_ref(1, 1, raw))
+    Ok(history.history_new_ref(1, 1, raw))
 }
 
-fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(ObjectPackRead, HistoryHead), Error] waits {
+fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(history.ObjectPackRead, history.HistoryHead), Error] waits {
     let (id, take selected) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take selected)?
     let manifest.ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
@@ -617,10 +617,10 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
         let file = failure_result_from_rep(manifest.paged_pack_path(seq))?
         let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(d, file, 1048576))?
         bucket_m2_object_header(mut raw, id, 3, seq)?
-        let item = history_new_ref(seq, 1, raw)
-        let name = history_key("p-", item)
+        let item = history.history_new_ref(seq, 1, raw)
+        let name = history.history_key("p-", item)
         let mut buffer: Bytes = list.with_capacity(item.len)
-        history_create(mut client, name, mut raw, mut buffer, due)?
+        failure_result_from_rep(history.history_create(mut client, name, mut raw, mut buffer, due))?
         list.push(mut refs, item)
     }
     if kinds != 7 {
@@ -631,14 +631,14 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     })
     let mut raw_manifest = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
     bucket_m2_object_header(mut raw_manifest, id, 1, page_record.generation)?
-    let base = history_new_ref(page_record.generation, 1, raw_manifest)
+    let base = history.history_new_ref(page_record.generation, 1, raw_manifest)
     let mut compare: Bytes = list.with_capacity(65536)
-    history_create(mut client, history_key("m-", base), mut raw_manifest, mut compare, due)?
+    failure_result_from_rep(history.history_create(mut client, history.history_key("m-", base), mut raw_manifest, mut compare, due))?
     let mut raw_entry: Bytes = list.with_capacity(65536)
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
-    history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
-    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
-    let source = history_reader(take client, due)
+    failure_result_from_rep(history.history_create(mut client, history.history_key("e-", entry_ref), mut raw_entry, mut compare, due))?
+    let head = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
+    let source = history.history_reader(take client, due)
     Ok((take source, head))
 }
 
@@ -648,8 +648,8 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let id = head.store
     let replay = history_paged_capture(mut source, head, 1048576)?
     let root = view replay.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: pages.share_roots(root.roots), watermark: 1, bases: pages.no_tail_bases())
-    let rows = catalog_handle(id, root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
+    let snap = Snapshot(store: store_key_from_rep(id), open: 0, branch: 0, head: root.head, roots: pages.share_roots(root.roots), watermark: 1, bases: pages.no_tail_bases())
+    let rows = catalog_handle(store_key_from_rep(id), root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
     if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
     }
@@ -733,42 +733,42 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     let mut new_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let mut endpoint_only = bucket_law_client(sim, tasks, "s3.test", 3)?
     let deadline = std.object.deadline_after_ms(old, BUCKET_LAW_OP_MS)
-    if let Error(Endpoint(Insecure)) = history_check_endpoint(mut endpoint_only, deadline) {} else {
+    if let Error(Endpoint(Insecure)) = failure_result_from_rep(history.history_check_endpoint(mut endpoint_only, deadline)) {} else {
         fail("a plain-http endpoint that is not the simulator was accepted")
     }
     let _ = take endpoint_only
     // STORE §12.2: any https endpoint is accepted, whoever runs it.
     let mut elsewhere = bucket_law_https_client(sim, tasks, "s3.test", 4)?
-    history_check_endpoint(mut elsewhere, deadline)?
+    failure_result_from_rep(history.history_check_endpoint(mut elsewhere, deadline))?
     let _ = take elsewhere
-    history_check_endpoint(mut old, deadline)?
-    history_check_endpoint(mut new_client, deadline)?
-    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(old), "bucket"))?
-    let mut first = history_buffers(1024)?
-    let mut successor = history_buffers(1024)?
+    failure_result_from_rep(history.history_check_endpoint(mut old, deadline))?
+    failure_result_from_rep(history.history_check_endpoint(mut new_client, deadline))?
+    let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(old), "bucket")))?
+    let mut first = failure_result_from_rep(history.history_buffers(1024))?
+    let mut successor = failure_result_from_rep(history.history_buffers(1024))?
     let id = StoreId(hi: 9, lo: 10)
     let holder = StoreId(hi: 13, lo: 14)
-    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), 1, metadata, mut first, deadline, default_limits(), None)?
-    let unchanged = history_probe_head(mut old, previous.tag, mut first.witness, deadline)?
+    let previous = failure_result_from_rep(history.history_publish_genesis(mut old, store_key_to_rep(id), store_key_to_rep(StoreId(hi: 11, lo: 12)), 1, metadata, mut first, deadline, limits_to_rep(default_limits()), None))?
+    let unchanged = failure_result_from_rep(history.history_probe_head(mut old, history.register_tag(previous), mut first.witness, deadline))?
     if let Some(_) = unchanged {
         fail("unchanged conditional head probe returned a body")
     }
     if list.len(first.witness) != 0 {
         fail("304 returned head bytes")
     }
-    let _ = history_fetch(mut new_client, "head", mut successor.witness, deadline)?
-    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, bucket_law_adopt_auth(), mut successor, deadline, None)? else {
+    let _ = failure_result_from_rep(history.history_fetch(mut new_client, "head", mut successor.witness, deadline))?
+    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, history.register_head(previous), holder, bucket_law_adopt_auth(), mut successor, deadline, None)? else {
         fail("second holder failed to claim")
     }
     let mut active = take claimed
-    history_claim_packet(mut successor.packet, active.head)?
-    let HistoryApplied(_) = history_register_advance(mut new_client, mut active, metadata, mut successor, deadline)? else {
+    failure_result_from_rep(history.history_claim_packet(mut successor.packet, history.register_head(active)))?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut new_client, mut active, metadata, mut successor, deadline))? else {
         fail("second holder's claim did not advance")
     }
-    let Some((take capture, tag)) = history_probe_head(mut old, previous.tag, mut first.witness, deadline)? else {
+    let Some((take capture, tag)) = failure_result_from_rep(history.history_probe_head(mut old, history.register_tag(previous), mut first.witness, deadline))? else {
         fail("conditional head probe hid a foreign advance")
     }
-    if capture.head.pair.epoch != 2 || !types.same(capture.head.pair.holder.hi, capture.head.pair.holder.lo, holder.hi, holder.lo) || capture.head.entry.seq != 2 || tag == previous.tag {
+    if capture.head.pair.epoch != 2 || !types.same(capture.head.pair.holder.hi, capture.head.pair.holder.lo, holder.hi, holder.lo) || capture.head.entry.seq != 2 || tag == history.register_tag(previous) {
         fail("conditional head probe returned the wrong capture")
     }
     Ok(())
@@ -782,18 +782,18 @@ fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[
 fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
     let mut source = take loaded
-    let mut workspace = history_buffers(1024)?
-    let cfg = object_history_config(std.object.bucket_config(source.client), "bucket")
-    let authority = history_config_bytes(cfg)?
-    history_encode_head(mut workspace.body, head, authority)?
-    let issued_head = history_write_head_issue(mut source.client, Absent, mut workspace.body, source.deadline)
-    let HistoryApplied(tag) = history_write_head_finish(mut source.client, take issued_head, mut workspace.body, mut workspace.witness, source.deadline) else {
+    let mut workspace = failure_result_from_rep(history.history_buffers(1024))?
+    let cfg = history.object_history_config(std.object.bucket_config(source.client), "bucket")
+    let authority = failure_result_from_rep(history.history_config_bytes(cfg))?
+    failure_result_from_rep(history.history_encode_head(mut workspace.body, head, authority))?
+    let issued_head = history.history_write_head_issue(mut source.client, Absent, mut workspace.body, source.deadline)
+    let HistoryApplied(tag) = history.history_write_head_finish(mut source.client, take issued_head, mut workspace.body, mut workspace.witness, source.deadline) else {
         fail("could not publish the checkpoint fixture")
     }
-    let mut incumbent = HistoryRegister(head, tag, terminal: None, attach: None)
+    let mut incumbent = history.fixture_register(head, tag)
     let mut requested = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     requested.create = false
-    requested.expect = Some(head.store)
+    requested.expect = Some(store_key_from_rep(head.store))
     requested.claim_auth = Some(bucket_law_adopt_auth())
     requested.resident_limit = 0
     let small = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
@@ -806,17 +806,17 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
     if let Error(NotCurrent(0)) = stale {} else {
         fail("the claim ignored the requested activation")
     }
-    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 3)?
-    let HistoryApplied(_) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline)? else {
+    bucket_m2_law_commit_packet(mut workspace.packet, history.register_head(incumbent), 3)?
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline))? else {
         fail("the refused open fenced the incumbent")
     }
     requested.activation = Some(0)
     let (take claimed, take loaded_state) = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)?
-    if claimed.head.pair.epoch != 2 || claimed.head.entry.seq != 3 || loaded_state.state.tips[0].head != 3 {
+    if history.register_head(claimed).pair.epoch != 2 || history.register_head(claimed).entry.seq != 3 || loaded_state.state.tips[0].head != 3 {
         fail("open did not serve the admitted suffix after advancing CLAIM")
     }
-    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 4)?
-    if let Error(Fenced(1)) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline) {} else {
+    bucket_m2_law_commit_packet(mut workspace.packet, history.register_head(incumbent), 4)?
+    if let Error(Fenced(1)) = failure_result_from_rep(history.history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline)) {} else {
         fail("a fenced holder advanced after the admitted claim")
     }
     Ok(())
@@ -866,25 +866,25 @@ fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env
     trust_seed_deploy_gate("bucket_test_m2_genesis_debris", bucket_m2_genesis_debris_run(d, c, tasks, seed_grant))
 }
 
-fn check_cached_reopen(tasks: Tasks, sim: BucketSim, head: HistoryHead, cache: Option[pager.ObjectsCache]) -> Result[(), Error] waits {
+fn check_cached_reopen(tasks: Tasks, sim: BucketSim, head: history.HistoryHead, cache: Option[pager.ObjectsCache]) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut source = history_reader(take client, due)
+    let mut source = history.history_reader(take client, due)
     source.cache = cache
     let replay = history_paged_capture(mut source, head, 1048576)?
     let tip = view replay.state.tips[0]
-    let snap = Snapshot(store: head.store, open: 0, branch: 0, head: tip.head, roots: pages.share_roots(tip.roots), watermark: 1, bases: pages.no_tail_bases())
-    let rows = catalog_handle(head.store, tip.roots.catalog, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let snap = Snapshot(store: store_key_from_rep(head.store), open: 0, branch: 0, head: tip.head, roots: pages.share_roots(tip.roots), watermark: 1, bases: pages.no_tail_bases())
+    let rows = catalog_handle(store_key_from_rep(head.store), tip.roots.catalog, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("cache changed the recovered row")
     }
     let mut marker: Bytes = list.with_capacity(64)
-    let _ = history_fetch(mut source.client, "cache-sample-end", mut marker, due)
+    let _ = failure_result_from_rep(history.history_fetch(mut source.client, "cache-sample-end", mut marker, due))
     Ok(())
 }
 
 fn corrupt_one_cached_pack(d: Dir, partial: bool) waits {
-    let dir = result.unwrap(std.dir.narrow(d, OBJECTS_CACHE_DIR))
+    let dir = result.unwrap(std.dir.narrow(d, history.OBJECTS_CACHE_DIR))
     for member in result.unwrap(std.dir.list(dir, None)) {
         if string.starts_with(member.name, "p-") && (string.byte_len(member.name) > 60) == partial {
             let mut file = result.unwrap(host.open(dir, member.name, ReadWrite))
@@ -958,7 +958,7 @@ fn bucket_test_pack_cache(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant:
     let arms: Inline[Option[pager.ObjectsCache], 4] =[None, None, Some(local), Some(local)]
     for i in 0u64 .. BUCKET_LAW_ROUNDS {
         if i != 0 {
-            result.unwrap(std.dir.remove_all(local.dir, OBJECTS_CACHE_DIR))
+            result.unwrap(std.dir.remove_all(local.dir, history.OBJECTS_CACHE_DIR))
         }
         for cache in arms {
             check_cached_reopen(tasks, sim, head, cache)?

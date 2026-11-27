@@ -1,8 +1,8 @@
 type ObjectJournalStart: send {
     requests: std.object.Requests,
-    register: HistoryRegister,
+    register: history.HistoryRegister,
     authority: Bytes,
-    buffers: HistoryBuffers,
+    buffers: history.HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
     sweep: manifest.SweepCursor,
@@ -29,9 +29,9 @@ type ObjectJournalTask: send {
     reclaims: Option[Latest[ReclaimFailures]]
 }
 
-fn history_group_context(head: HistoryHead) -> Result[format.DiskContext, Error] {
-    let seq = history_next_id(head.entry.seq)?
-    Ok(format.DiskContext(store: store_key_to_rep(head.store), role: 2, seq))
+fn history_group_context(head: history.HistoryHead) -> Result[format.DiskContext, Error] {
+    let seq = failure_result_from_rep(history.history_next_id(head.entry.seq))?
+    Ok(format.DiskContext(store: head.store, role: 2, seq))
 }
 
 fn history_group_append(mut packet: Bytes, ctx: format.DiskContext, frame: Bytes) -> Result[(), Error] {
@@ -41,26 +41,26 @@ fn history_group_append(mut packet: Bytes, ctx: format.DiskContext, frame: Bytes
     failure_result_from_rep(types.capacity(format.history_seal(mut packet, ctx, at, kind)))
 }
 
-fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    let result = history_probe_head(mut client, register.tag, mut workspace.witness, deadline)?
+fn history_probe_writer(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    let result = failure_result_from_rep(history.history_probe_head(mut client, history.register_tag(register), mut workspace.witness, deadline))?
     if let Some((capture, _)) = result {
-        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(register.head.store)), store_key_to_rep(capture.head.store)))?
-        if !history_pair_matches(capture.head.pair, register.head.pair) {
-            let fenced: Error = Fenced(register.head.pair.epoch)
-            register.terminal = Some(HistoryFault(clone(fenced)))
+        failure_result_from_rep(manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store))?
+        if !history.history_pair_matches(capture.head.pair, history.register_head(register).pair) {
+            let fenced: Error = Fenced(history.register_head(register).pair.epoch)
+            history.fence_register(mut register, failure_to_rep(clone(fenced)))
             return Error(fenced)
         }
     }
     Ok(())
 }
 
-fn history_probe_writer_attach(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
-    let result = history_probe_head_attach(mut client, register.tag, mut workspace.witness, deadline)?
+fn history_probe_writer_attach(mut client: std.object.Client, mut register: history.HistoryRegister, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    let result = failure_result_from_rep(history.history_probe_head_attach(mut client, history.register_tag(register), mut workspace.witness, deadline))?
     if let Some((capture, _)) = result {
-        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(register.head.store)), store_key_to_rep(capture.head.store)))?
-        if !history_pair_matches(capture.head.pair, register.head.pair) {
-            let fenced: Error = Fenced(register.head.pair.epoch)
-            register.terminal = Some(HistoryFault(clone(fenced)))
+        failure_result_from_rep(manifest.check_expected_store(Some(history.register_head(register).store), capture.head.store))?
+        if !history.history_pair_matches(capture.head.pair, history.register_head(register).pair) {
+            let fenced: Error = Fenced(history.register_head(register).pair.epoch)
+            history.fence_register(mut register, failure_to_rep(clone(fenced)))
             return Error(fenced)
         }
     }
@@ -69,9 +69,9 @@ fn history_probe_writer_attach(mut client: std.object.Client, mut register: Hist
 
 type ObjectJournalSession {
     client: std.object.Client,
-    register: HistoryRegister,
+    register: history.HistoryRegister,
     authority: Bytes,
-    buffers: HistoryBuffers,
+    buffers: history.HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
     sweep: manifest.SweepCursor,
@@ -98,15 +98,15 @@ fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart
 
 fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    let mut candidate = lane.register.head
-    let next_position = history_next_id(candidate.entry.seq)?
-    candidate.entry = history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
+    let mut candidate = history.register_head(lane.register)
+    let next_position = failure_result_from_rep(history.history_next_id(candidate.entry.seq))?
+    candidate.entry = history.history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
     let weak_barrier = view lane.weak
-    let advanced = history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due, scoped fn(created: u64) {
+    let advanced = failure_result_from_rep(history.history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due, scoped fn(created: u64) {
         if let Some(publisher) = weak_barrier {
             weak_publish(publisher, candidate, created, sequence)
         }
-    })
+    }))
     match take advanced {
         Ok(HistoryApplied(_)) => Ok(()),
         Error(take e) => Error(take e),
@@ -206,12 +206,12 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut stream_awaiting_fence = false
     let mut stream_queued: List[(Bytes, u64)] = list.new()
     if let Some(link) = lane.stream {
-        slot_report_head(link, lane.register.head.store, lane.register.attach, link.last_batch_seq)
+        slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), link.last_batch_seq)
     }
     loop {
-        if let Some(terminal) = lane.register.terminal {
+        if let Some(terminal) = history.register_terminal(lane.register) {
             return match terminal {
-                HistoryFault(problem) => Error(clone(problem)),
+                HistoryFault(problem) => Error(failure_from_rep(clone(problem))),
                 HistoryUnknown => Error(Undecided),
             }
         }
@@ -261,7 +261,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
         reclaim_due = true
         match take selected {
             Frame(take raw, sequence) => {
-                let use_stream = match lane.register.attach {
+                let use_stream = match history.register_attach(lane.register) {
                     Some(a) => match a.live {
                         Some(_) => true,
                         None => false,
@@ -283,20 +283,20 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 // Under archival (§12.11.11 M6), a direct-service entry rewrites
                 // any remaining sealed tails in order before writing above them.
                 if lane.archive_on != 0 {
-                    let has_sealed = match view lane.register.attach {
+                    let has_sealed = match history.register_attach(lane.register) {
                         Some(a) => list.len(a.sealed) != 0,
                         None => false,
                     }
                     if has_sealed {
                         match stream_settle_sealed(mut lane, input.group_bytes, input.group_commits)? {
                             SettleApplied => (),
-                            SettleFenced(_, _) => return Error(Fenced(lane.register.head.pair.epoch)),
+                            SettleFenced(_, _) => return Error(Fenced(history.register_head(lane.register).pair.epoch)),
                             SettleNotApplied => return Error(Undecided),
                         }
                     }
                 }
-                let ctx = history_group_context(lane.register.head)?
-                history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
+                let ctx = history_group_context(history.register_head(lane.register))?
+                failure_result_from_rep(history.history_packet_header(mut lane.buffers.packet, ctx, history.register_head(lane.register).pair.epoch, history.register_head(lane.register).authority_kind, history.register_head(lane.register).entry))?
                 object_journal_add(mut lane, ctx, raw)?
                 let mut group_size = list.len(raw)
                 let mut last_sequence = sequence
@@ -323,7 +323,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
                 object_journal_advance(mut lane, last_sequence)?
                 written += group_size
-                if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
+                if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, history.register_head(lane.register).entry.seq - history.register_head(lane.register).checkpoint.seq)) {
                     return Ok(())
                 }
                 if let Some(publisher) = lane.weak {
@@ -346,7 +346,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                             if through >= in_seq {
                                 stream_in_flight = None
                                 written += in_bytes
-                                if let Error(_) = channel.send(input.acks, ObjectJournaled(in_seq, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
+                                if let Error(_) = channel.send(input.acks, ObjectJournaled(in_seq, written, history.register_head(lane.register).entry.seq - history.register_head(lane.register).checkpoint.seq)) {
                                     return Ok(())
                                 }
                                 let _ = channel.try_send(input.synced, ())
@@ -366,7 +366,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                             if let Ok(Some((moved_epoch, cutoff))) = stream_poll_head(mut lane) {
                                 stream_awaiting_fence = true
                                 if let Some(link) = lane.stream {
-                                    slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                                    slot_report(link, ReportFenced(link.slot, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
                                 }
                             }
                         }
@@ -378,7 +378,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                             match take settled {
                                 Ok(SettleApplied) => {
                                     object_journal_stream_advance_batch(mut lane, through_seq, false)
-                                    let (fseq, fframe) = match lane.register.attach {
+                                    let (fseq, fframe) = match history.register_attach(lane.register) {
                                         Some(a) => match a.live {
                                             Some(r) => (r.from_seq, r.from_frame),
                                             None => (0u64, 0u32),
@@ -387,14 +387,14 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                                     }
                                     object_journal_stream_trim_batches(mut lane, fseq)
                                     if let Some(link) = lane.stream {
-                                        slot_report_head(link, lane.register.head.store, lane.register.attach, through_seq)
-                                        slot_report(link, ReportSettled(link.slot, settle_id, true, lane.register.head.entry.seq, fseq, fframe))
+                                        slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), through_seq)
+                                        slot_report(link, ReportSettled(link.slot, settle_id, true, history.register_head(lane.register).entry.seq, fseq, fframe))
                                     }
                                 },
                                 Ok(SettleFenced(moved_epoch, cutoff)) => {
                                     stream_awaiting_fence = true
                                     if let Some(link) = lane.stream {
-                                        slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                                        slot_report(link, ReportFenced(link.slot, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
                                     }
                                 },
                                 _ => {
@@ -410,7 +410,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                             if let Some((_, in_bytes)) = stream_in_flight {
                                 written += in_bytes
                             }
-                            let _ = channel.send(input.acks, ObjectJournaled(ok_through, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq))
+                            let _ = channel.send(input.acks, ObjectJournaled(ok_through, written, history.register_head(lane.register).entry.seq - history.register_head(lane.register).checkpoint.seq))
                             let _ = channel.try_send(input.synced, ())
                         }
                         if missing {
@@ -424,7 +424,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             },
             ObjectClose(take close_reply) => {
                 let close_info: Option[u64] = match lane.stream {
-                    Some(link) => match lane.register.attach {
+                    Some(link) => match history.register_attach(lane.register) {
                         Some(_) => Some(link.last_batch_seq),
                         None => None,
                     },
@@ -436,8 +436,8 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         Ok(SettleApplied) => {
                             if let Some(link) = lane.stream {
                                 let no_attach: Option[format.Attach] = None
-                                slot_report_head(link, lane.register.head.store, no_attach, last_seq)
-                                slot_report(link, ReportDetached(link.slot, lane.register.head.pair.epoch))
+                                slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), no_attach, last_seq)
+                                slot_report(link, ReportDetached(link.slot, history.register_head(lane.register).pair.epoch))
                             }
                             let done_ok: Result[(), Error] = Ok(())
                             let _ = channel.send(close_reply, take done_ok)
@@ -445,9 +445,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         },
                         Ok(SettleFenced(moved_epoch, cutoff)) => {
                             if let Some(link) = lane.stream {
-                                slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                                slot_report(link, ReportFenced(link.slot, history.register_head(lane.register).pair.epoch, moved_epoch, cutoff))
                             }
-                            let problem: Error = Fenced(lane.register.head.pair.epoch)
+                            let problem: Error = Fenced(history.register_head(lane.register).pair.epoch)
                             let _ = channel.send(close_reply, Error(clone(problem)))
                             return Error(take problem)
                         },
@@ -505,8 +505,8 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             },
             ObjectSkipFence(take destination) => {
                 let observed: Result[(), Error] = if stream_awaiting_fence {
-                    let fenced: Error = Fenced(lane.register.head.pair.epoch)
-                    lane.register.terminal = Some(HistoryFault(clone(fenced)))
+                    let fenced: Error = Fenced(history.register_head(lane.register).pair.epoch)
+                    history.fence_register(mut lane.register, failure_to_rep(clone(fenced)))
                     Error(fenced)
                 } else {
                     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
@@ -550,18 +550,18 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
 }
 
 fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Result[(), Error] waits {
-    let is_attached = match view lane.register.attach {
+    let is_attached = match history.register_attach(lane.register) {
         Some(_) => true,
         None => false,
     }
     if !is_attached {
         return history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
     }
-    let live_opt: Option[format.StreamRef] = match view lane.register.attach {
+    let live_opt: Option[format.StreamRef] = match history.register_attach(lane.register) {
         Some(a) => a.live,
         None => None,
     }
-    let head = lane.register.head
+    let head = history.register_head(lane.register)
     let store = head.store
     let epoch = head.pair.epoch
     if let Some(tail) = live_opt {
@@ -573,17 +573,17 @@ fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Resul
             if reg.inc != tail.inc || reg.collecting {
                 return Error(Latched(Superseded))
             }
-            if stream_follow_reg_has_row(reg, store, epoch) {
-                return Error(Behind(Position(store, branch: 0, version: 0)))
+            if stream_follow_reg_has_row(reg, store_key_from_rep(store), epoch) {
+                return Error(Behind(Position(store: store_key_from_rep(store), branch: 0, version: 0)))
             }
         }
     }
-    let _ = history_fetch(mut lane.client, "head", mut lane.buffers.witness, due)?
-    let (take capture, _) = history_decode_head_attach(lane.buffers.witness)?
-    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store)), store_key_to_rep(capture.head.store)))?
-    if !history_pair_matches(capture.head.pair, head.pair) {
+    let _ = failure_result_from_rep(history.history_fetch(mut lane.client, "head", mut lane.buffers.witness, due))?
+    let (take capture, _) = failure_result_from_rep(history.history_decode_head_attach(lane.buffers.witness))?
+    failure_result_from_rep(manifest.check_expected_store(Some(store), capture.head.store))?
+    if !history.history_pair_matches(capture.head.pair, head.pair) {
         let fenced: Error = Fenced(epoch)
-        lane.register.terminal = Some(HistoryFault(clone(fenced)))
+        history.fence_register(mut lane.register, failure_to_rep(clone(fenced)))
         return Error(fenced)
     }
     Ok(())

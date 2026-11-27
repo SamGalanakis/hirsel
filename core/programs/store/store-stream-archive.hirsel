@@ -6,29 +6,23 @@ const KIND_ARCHIVE_ROWS: u16 = 0x00E1
 
 const ARCHIVE_ROWS_PER_FRAME: u64 = 32768
 
-fn stream_sealed_publish(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, has_entry: bool, take next_attach: Option[format.Attach], deadline: u64) -> Result[SettleOutcome, Error] waits {
-    let mut candidate = register.head
+fn stream_sealed_publish(mut client: std.object.Client, mut register: history.HistoryRegister, authority: Bytes, mut buffers: history.HistoryBuffers, has_entry: bool, take next_attach: Option[format.Attach], deadline: u64) -> Result[SettleOutcome, Error] waits {
+    let mut candidate = history.register_head(register)
     if has_entry {
-        let next_pos = history_next_id(candidate.entry.seq)?
-        candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, buffers.packet)
+        let next_pos = failure_result_from_rep(history.history_next_id(candidate.entry.seq))?
+        candidate.entry = history.history_new_ref(next_pos, candidate.pair.epoch, buffers.packet)
         pager.history_fill_key(mut buffers.key, "e-", candidate.entry)
         list.clear(mut buffers.compare)
         failure_result_from_rep(types.capacity(list.try_reserve(mut buffers.compare, list.len(buffers.packet))))?
-        history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline)?
+        failure_result_from_rep(history.history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline))?
     }
-    history_encode_register_head(mut buffers.body, candidate, authority, next_attach)?
-    let issued_head = history_write_head_issue(mut client, Match(register.tag), mut buffers.body, deadline)
-    match history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, deadline) {
-        HistoryApplied(tag) => {
-            register.head = candidate
-            register.tag = tag
-            register.attach = take next_attach
-            Ok(SettleApplied)
-        },
+    let written = failure_result_from_rep(history.publish_register_head(mut client, mut register, candidate, authority, take next_attach, mut buffers, deadline))?
+    match take written {
+        HistoryApplied(_) => Ok(SettleApplied),
         HistoryConflict(_) => {
-            let (take moved, take moved_attach) = history_decode_head_attach(buffers.witness)?
-            if moved.head.pair.epoch > register.head.pair.epoch {
-                let cutoff = match view register.attach {
+            let (take moved, take moved_attach) = failure_result_from_rep(history.history_decode_head_attach(buffers.witness))?
+            if moved.head.pair.epoch > history.register_head(register).pair.epoch {
+                let cutoff = match history.register_attach(register) {
                     Some(a) => match a.live {
                         Some(r) => stream_find_sealed_cutoff(moved_attach, host_stream_id_from_rep(r.sid), r.inc),
                         None => None,
@@ -128,24 +122,24 @@ fn stream_sealed_fetch_slice(mut client: std.object.Client, mut buffers: TailBuf
     })
 }
 
-// Rewrites every sealed tail in `register.attach.sealed` in order as GROUP
+// Rewrites every sealed tail in `history.register_attach(register).sealed` in order as GROUP
 // entries using the §12.11.11 M4 sealed cursor: each entry's head write moves
 // `sealed[0].tail.(from_seq, from_frame)` past the frames the entry holds, sets
 // `at` of every remaining sealed entry to the new head position, and drops
 // `sealed[0]` with its last frame.
-fn stream_settle_sealed_core(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, root: String, op_ms: u64, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, Error] waits {
+fn stream_settle_sealed_core(mut client: std.object.Client, mut register: history.HistoryRegister, authority: Bytes, mut buffers: history.HistoryBuffers, root: String, op_ms: u64, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, Error] waits {
     let mut tail_bufs = stream_tail_buffers()?
     loop {
-        let first_opt: Option[format.SealedTail] = match view register.attach {
+        let first_opt: Option[format.SealedTail] = match history.register_attach(register) {
             Some(a) if list.len(a.sealed) != 0 => Some(a.sealed[0u64]),
             _ => None,
         }
         let Some(st) = first_opt else {
             return Ok(SettleApplied)
         }
-        let store = register.head.store
+        let store = history.register_head(register).store
         let due_ep = std.object.deadline_after_ms(client, op_ms)
-        let tail_epoch = stream_sealed_tail_epoch(mut client, mut tail_bufs, root, st, store, due_ep)?
+        let tail_epoch = stream_sealed_tail_epoch(mut client, mut tail_bufs, root, st, store_key_from_rep(store), due_ep)?
         let dir = stream_key(root, stream_dir(host_stream_id_from_rep(st.tail.sid)))
         let mut entry_frames = 0u64
         let mut entry_bytes = 0u64
@@ -157,14 +151,14 @@ fn stream_settle_sealed_core(mut client: std.object.Client, mut register: Histor
             format.stream_batch_key(mut name, st.tail.inc, seq)
             let key = stream_key(dir, name)
             let due = std.object.deadline_after_ms(client, op_ms)
-            let fetched = stream_sealed_fetch_slice(mut client, mut tail_bufs, key, host_stream_id_from_rep(st.tail.sid), st.tail.inc, seq, store, tail_epoch, due)?
+            let fetched = stream_sealed_fetch_slice(mut client, mut tail_bufs, key, host_stream_id_from_rep(st.tail.sid), st.tail.inc, seq, store_key_from_rep(store), tail_epoch, due)?
             if let Some(row) = fetched {
                 let skip: u64 = if seq == st.tail.from_seq {
                     int.widen(st.tail.from_frame)
                 } else {
                     0
                 }
-                let batch_ctx = format.DiskContext(store: store_key_to_rep(store), role: format.ROLE_BATCH, seq)
+                let batch_ctx = format.DiskContext(store: store, role: format.ROLE_BATCH, seq)
                 let mut at = 0u64
                 let mut fidx = 0u64
                 while at < list.len(tail_bufs.slice) {
@@ -177,8 +171,8 @@ fn stream_settle_sealed_core(mut client: std.object.Client, mut register: Histor
                         } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
                             let width = frame.end - at
                             if entry_frames > 0 && (entry_frames >= group_commits || entry_bytes + width > group_bytes) {
-                                let next_pos = history_next_id(register.head.entry.seq)?
-                                let step_attach = match view register.attach {
+                                let next_pos = failure_result_from_rep(history.history_next_id(history.register_head(register).entry.seq))?
+                                let step_attach = match history.register_attach(register) {
                                     Some(cur) => stream_sealed_step_attach(cur, cursor_seq, cursor_frame, next_pos, false)?,
                                     None => return Ok(SettleNotApplied),
                                 }
@@ -191,10 +185,10 @@ fn stream_settle_sealed_core(mut client: std.object.Client, mut register: Histor
                                 entry_bytes = 0
                             }
                             if entry_frames == 0 {
-                                let group_ctx = history_group_context(register.head)?
-                                history_packet_header(mut buffers.packet, group_ctx, register.head.pair.epoch, register.head.authority_kind, register.head.entry)?
+                                let group_ctx = history_group_context(history.register_head(register))?
+                                failure_result_from_rep(history.history_packet_header(mut buffers.packet, group_ctx, history.register_head(register).pair.epoch, history.register_head(register).authority_kind, history.register_head(register).entry))?
                             }
-                            let group_ctx = history_group_context(register.head)?
+                            let group_ctx = history_group_context(history.register_head(register))?
                             failure_result_from_rep(types.capacity(list.try_reserve(mut buffers.packet, width + format.BINDING_BYTES)))?
                             history_group_append(mut buffers.packet, group_ctx, list.slice(tail_bufs.slice, at, frame.end))?
                             entry_frames += 1
@@ -220,11 +214,11 @@ fn stream_settle_sealed_core(mut client: std.object.Client, mut register: Histor
             seq += 1
         }
         let next_pos = if entry_frames > 0 {
-            history_next_id(register.head.entry.seq)?
+            failure_result_from_rep(history.history_next_id(history.register_head(register).entry.seq))?
         } else {
-            register.head.entry.seq
+            history.register_head(register).entry.seq
         }
-        let done_attach = match view register.attach {
+        let done_attach = match history.register_attach(register) {
             Some(cur) => stream_sealed_step_attach(cur, cursor_seq, cursor_frame, next_pos, true)?,
             None => return Ok(SettleNotApplied),
         }
@@ -244,7 +238,7 @@ fn stream_settle_sealed(mut lane: ObjectJournalSession, group_bytes: u64, group_
     let outcome = stream_settle_sealed_core(mut lane.client, mut lane.register, lane.authority, mut lane.buffers, root, lane.op_ms, group_bytes, group_commits)?
     if let SettleApplied = outcome {
         if let Some(link) = view lane.stream {
-            slot_report_head(link, lane.register.head.store, lane.register.attach, link.last_batch_seq)
+            slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), link.last_batch_seq)
         }
     }
     Ok(outcome)
@@ -253,17 +247,17 @@ fn stream_settle_sealed(mut lane: ObjectJournalSession, group_bytes: u64, group_
 // Writes create-only archive segment `a-<cut_seq>-<epoch>-<digest>` (§13.9)
 // naming every chain entry in `[old.checkpoint.seq, cut_seq)` in ascending
 // position (history) order.
-fn history_write_archive_segment(mut client: std.object.Client, old: HistoryHead, cut_seq: u64, epoch: u64, authority_kind: u8, mut workspace: HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, Error] waits {
-    let suffix = history_suffix(mut client, old, old.checkpoint, deadline)?
+fn history_write_archive_segment(mut client: std.object.Client, old: history.HistoryHead, cut_seq: u64, epoch: u64, authority_kind: u8, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, Error] waits {
+    let suffix = failure_result_from_rep(history.history_suffix(mut client, old, old.checkpoint, deadline))?
     let mut seg_refs: List[pages.HistoryRef] = disk_allocation(scoped fn() -> Result[List[pages.HistoryRef], Error] {
         let mut list_refs: List[pages.HistoryRef] = list.with_capacity(1 + list.len(suffix))
         list.push(mut list_refs, old.checkpoint)
         for i in 0u64 .. list.len(suffix) {
-            list.push(mut list_refs, history_length(suffix[i], old.checkpoint.seq + 1 + i))
+            list.push(mut list_refs, history.history_length(suffix[i], old.checkpoint.seq + 1 + i))
         }
         Ok(take list_refs)
     })?
-    let ctx = format.DiskContext(store: store_key_to_rep(old.store), role: ROLE_ARCHIVE, seq: cut_seq)
+    let ctx = format.DiskContext(store: old.store, role: ROLE_ARCHIVE, seq: cut_seq)
     let mut raw: Bytes = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(72 + 40 + 32 * list.len(seg_refs) + format.BINDING_BYTES))
     })?
@@ -286,11 +280,11 @@ fn history_write_archive_segment(mut client: std.object.Client, old: HistoryHead
         list.append(mut raw, failure_result_from_rep(types.capacity(format.disk_seal(ctx, at, KIND_ARCHIVE_ROWS, 1, payload)))?)
         pos += chunk
     }
-    let seg_ref = history_new_ref(cut_seq, epoch, raw)
-    let key = history_key("a-", seg_ref)
+    let seg_ref = history.history_new_ref(cut_seq, epoch, raw)
+    let key = history.history_key("a-", seg_ref)
     list.clear(mut workspace.compare)
     failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, list.len(raw))))?
-    history_create(mut client, key, mut raw, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut client, key, mut raw, mut workspace.compare, deadline))?
     Ok(seg_ref)
 }
 
@@ -324,8 +318,8 @@ fn history_parse_archive_name(key: String) -> Option[HistoryName] {
 
 // Decodes and validates an archive segment `a-<cut_seq>-<epoch>-<digest>`.
 fn history_decode_archive_segment(key: String, store: StoreId, reference: pages.HistoryRef, raw: Bytes) -> Result[List[pages.HistoryRef], Error] {
-    let ctx = history_object_context(key, store, ROLE_ARCHIVE, reference, raw)?
-    history_object_digest(key, reference, raw)?
+    let ctx = failure_result_from_rep(history.history_object_context(key, store_key_to_rep(store), ROLE_ARCHIVE, reference, raw))?
+    failure_result_from_rep(history.history_object_digest(key, reference, raw))?
     let mut out: List[pages.HistoryRef] = list.new()
     let mut at = 72u64
     while at < list.len(raw) {

@@ -1,8 +1,8 @@
-type HistoryWitness = HistoryEvicted(HistoryCapture) | HistoryWitnessLost | HistoryWitnessDeadline
+pub type HistoryWitness = HistoryEvicted(HistoryCapture) | HistoryWitnessLost | HistoryWitnessDeadline
 
 // A missing pack, manifest or chunk belongs to the checkpoint that named
 // it. Checking another retained locator would answer for a different capture.
-fn history_witness(mut client: std.object.Client, capture: HistoryHead, required_pair: Option[HistoryPair], file: String, missing_seq: Option[u64], mut observed: Bytes, deadline: u64) -> Result[HistoryWitness, Error] waits {
+pub fn history_witness(mut client: std.object.Client, capture: HistoryHead, required_pair: Option[HistoryPair], file: String, missing_seq: Option[u64], mut observed: Bytes, deadline: u64) -> Result[HistoryWitness, types.Failure] waits {
     while std.object.deadline_after_ms(client, 0) < deadline {
         let _ = history_fetch(mut client, "head", mut observed, deadline)?
         if let Some(pair) = required_pair {
@@ -12,13 +12,13 @@ fn history_witness(mut client: std.object.Client, capture: HistoryHead, required
             }
         }
         let witness = history_decode_head(observed)?
-        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(capture.store)), store_key_to_rep(witness.head.store)))?
+        manifest.check_expected_store(Some(capture.store), witness.head.store)?
         history_check_namespace(witness, client)?
         if let Some(seq) = missing_seq {
             if seq < witness.head.floor {
                 return Ok(HistoryEvicted(take witness))
             }
-            return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
+            return Error(format.disk_fault(file, 0, Absent))
         }
         let marker = history_checkpoint(mut client, witness.head, deadline)
         let mark = match take marker {
@@ -27,11 +27,11 @@ fn history_witness(mut client: std.object.Client, capture: HistoryHead, required
             Error(take failure) => return Error(take failure),
         }
         if history_ref_matches(witness.head.checkpoint, capture.checkpoint) {
-            return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
+            return Error(format.disk_fault(file, 0, Absent))
         }
         for retained in mark.retained {
             if history_ref_matches(retained, capture.checkpoint) {
-                return Error(failure_from_rep(format.disk_fault(file, 0, Absent)))
+                return Error(format.disk_fault(file, 0, Absent))
             }
         }
         return Ok(HistoryEvicted(take witness))

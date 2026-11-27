@@ -410,11 +410,11 @@ fn stream_push_janitor_ask(mut s: StreamService, take ask: JanitorAsk) {
     for existing in s.janitor_asks {
         let same_ask = match existing {
             JanitorOrphanHold(sa, _, pa) => match ask {
-                JanitorOrphanHold(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history_pair_matches(pa, pb),
+                JanitorOrphanHold(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history.history_pair_matches(pa, pb),
                 _ => false,
             },
             JanitorStragglerPin(sa, _, pa) => match ask {
-                JanitorStragglerPin(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history_pair_matches(pa, pb),
+                JanitorStragglerPin(sb, _, pb) => types.same(sa.hi, sa.lo, sb.hi, sb.lo) && history.history_pair_matches(pa, pb),
                 _ => false,
             },
         }
@@ -445,14 +445,14 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, age
     let key = stream_key(place_prefix, "head")
     let mut scratch = replace(mut s.lane.compare, list.new())
     let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-        let _ = history_fetch(mut c, key, mut scratch, deadline)?
+        let _ = failure_result_from_rep(history.history_fetch(mut c, key, mut scratch, deadline))?
         Ok(())
     })
     s.lane.compare = take scratch
     if let Error(_) = fetched {
         return Ok(())
     }
-    let Ok((take capture, take attach)) = history_decode_head_attach(s.lane.compare) else {
+    let Ok((take capture, take attach)) = failure_result_from_rep(history.history_decode_head_attach(s.lane.compare)) else {
         return Ok(())
     }
     // A different Store at the remembered prefix is not this row's Place:

@@ -25,7 +25,7 @@ fn follower_law_service(tasks: Tasks, plan: FollowerPlan, slots: u64) -> Result[
 // Keep the original Bucket fixture allowance for the simulator, clients,
 // writers and test state. Reserve the simultaneous follower slots beside it.
 fn bucket_law_fixture_bytes(plan: FollowerPlan, slots: u64) -> u64 {
-    128 * MIB + follower_law_service_bytes(plan, slots) + follower_starter_bytes()
+    128 * history.MIB + follower_law_service_bytes(plan, slots) + follower_starter_bytes()
 }
 
 fn bucket_law_capacity(site: String, problem: Capacity) -> Never {
@@ -69,9 +69,9 @@ fn follower_catch_up_fits(take lagged: Follower, budget: u64, due: u64, wanted: 
     }
 }
 
-fn follower_steps_group(mut writer: ObjectPackRead, mut held: HistoryRegister, mut buffers: HistoryBuffers, declaration: Bytes, due: u64, wanted: u64) -> Result[(), Error] waits {
-    bucket_m2_law_commit_packet(mut buffers.packet, held.head, wanted)?
-    if let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, declaration, mut buffers, due)? {
+fn follower_steps_group(mut writer: history.ObjectPackRead, mut held: history.HistoryRegister, mut buffers: history.HistoryBuffers, declaration: Bytes, due: u64, wanted: u64) -> Result[(), Error] waits {
+    bucket_m2_law_commit_packet(mut buffers.packet, history.register_head(held), wanted)?
+    if let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut writer.client, mut held, declaration, mut buffers, due))? {
         return Ok(())
     }
     fail("L85: the GROUP did not apply")
@@ -84,10 +84,10 @@ fn follower_steps_open(mut ids: Followers, owner: FollowerOwner, plan: FollowerP
 
 fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim, plan: FollowerPlan) -> Result[u64, Error] waits {
     let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 901, true, 1)?
-    let mut source = history_reader(take connected, 0)
-    let mut scratch = history_buffers(1024)?
+    let mut source = history.history_reader(take connected, 0)
+    let mut scratch = failure_result_from_rep(history.history_buffers(1024))?
     let options = bucket_law_options(true)
-    let declaration = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
+    let declaration = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(source.client), "bucket")))?
     let (take opened, _) = history_open_register(mut source, sim.time, r, options, "bucket", mut scratch, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let service = bucket_law_start_followers(tasks, plan, 2, "L85 follower_steps service")
@@ -235,11 +235,11 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     // MEM-24 rounds the 7-byte payload to 8 bytes.
     let destination = option.unwrap(charge.seq(bytes[u8], list.len(content)))
     let mut compared = failure_result_from_rep(manifest.disk_read_buffer(destination))?
-    let object_ref = history_new_ref(1, 1, content)
+    let object_ref = history.history_new_ref(1, 1, content)
     for name in["p-1", "m-1"] {
-        history_create(mut client, name, mut content, mut compared, due)?
+        failure_result_from_rep(history.history_create(mut client, name, mut content, mut compared, due))?
         let refused = failure_result_from_rep(types.capacity(bound bytes destination - 1 {
-            history_read_object(mut client, name, object_ref, due)
+            failure_result_from_rep(history.history_read_object(mut client, name, object_ref, due))
         }))?
         if let Error(Full(Allocation(cause))) = refused {
             if cause.requested != destination || cause.available != destination - 1 {
@@ -249,17 +249,17 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
             fail("L85: a one-byte-short destination read was admitted")
         }
         let accepted = failure_result_from_rep(types.capacity(bound bytes destination {
-            history_read_object(mut client, name, object_ref, due)
+            failure_result_from_rep(history.history_read_object(mut client, name, object_ref, due))
         }))?
         if accepted? != content {
             fail("L85: the exactly funded destination did not read its object")
         }
     }
-    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: pages.HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
+    let observed = history.HistoryHead(authority_kind: 1, store: types.StoreKey(hi: 0, lo: 1), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 2, lo: 3)), activation: 0, entry: pages.HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
     // 171 links at three u64 fields each need 4,104 bytes.
-    let suffix = option.unwrap(charge.seq(bytes[HistoryLink], observed.entry.seq - object_ref.seq))
+    let suffix = option.unwrap(charge.seq(bytes[history.HistoryLink], observed.entry.seq - object_ref.seq))
     let denied = failure_result_from_rep(types.capacity(bound bytes 4096 {
-        history_suffix(mut client, observed, object_ref, due)
+        failure_result_from_rep(history.history_suffix(mut client, observed, object_ref, due))
     }))?
     if let Error(Full(Allocation(cause))) = denied {
         if cause.requested != suffix || cause.available != 4096 {
@@ -269,19 +269,19 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
         fail("L85: 171 suffix rows fit in 4,096 bytes")
     }
     let accepted = failure_result_from_rep(types.capacity(bound bytes 4096 {
-        history_link_slots(170)
+        failure_result_from_rep(history.history_link_slots(170))
     }))?
     if list.len(accepted?) != 170 {
         fail("L85: 170 suffix rows did not fit")
     }
-    let mut locator = empty_history_locator()
+    let mut locator = history.empty_history_locator()
     let excessive = pages.HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
-    map.insert(mut locator.rows, 1, excessive)
+    history.fixture_set_pack(mut locator, excessive)
     let pack = pages.PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
     let bad = failure_result_from_rep(types.capacity(bound bytes key_room {
-        history_load_data_pack(mut client, locator, due, None, observed.store, 1, pack, 1)
+        history_load_data_pack(mut client, locator, due, None, store_key_from_rep(observed.store), 1, pack, 1)
     }))?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
         fail("L85: the known format error consumed another key allocation")
@@ -451,7 +451,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     if follower_law_room() != before_bind {
         fail("L85: the worker retained its bind reply")
     }
-    if opened.open != HISTORY_OPEN_LIMIT | 1 {
+    if opened.open != history.HISTORY_OPEN_LIMIT | 1 {
         fail("L85: the failed open drew a follower number")
     }
     let captured = snapshot_follower(opened, follower_main(opened))?
@@ -800,7 +800,7 @@ type FollowerCancelApply: send {
 
 fn follower_cancel_apply(take job: FollowerCancelApply) waits {
     let FollowerCancelApply(slot: take slot, capture: take capture, clock: current_clock, published: take published, hold: take hold) = take job
-    let mut replica = Follower(open: HISTORY_OPEN_LIMIT | 1, pager: None, slot: take slot, workers: None, on_log: true, op_ms: 0, clock: current_clock, capture: take capture, stopped: None)
+    let mut replica = Follower(open: history.HISTORY_OPEN_LIMIT | 1, pager: None, slot: take slot, workers: None, on_log: true, op_ms: 0, clock: current_clock, capture: take capture, stopped: None)
     let due = clock.deadline_after_ms(host.mono_ns(current_clock), BUCKET_LAW_OP_MS)
     let _ = result.unwrap(catch_up(mut replica, due))
     result.unwrap(channel.send(published, result.unwrap(snapshot_follower(replica, follower_main(replica)))))

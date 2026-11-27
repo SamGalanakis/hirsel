@@ -25,7 +25,7 @@ fn stream_elect_decode_head_attach(report: std.sim.s3.Report, key: String) -> Re
     let Some(obj) = map.get(report.objects, key) else {
         fail("head object is missing")
     }
-    let (_, take attached) = history_decode_head_attach(obj.data)?
+    let (_, take attached) = failure_result_from_rep(history.history_decode_head_attach(obj.data))?
     let Some(take attach) = take attached else {
         fail("head object is missing ATTACH")
     }

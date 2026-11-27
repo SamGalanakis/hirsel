@@ -50,7 +50,7 @@ fn stream_service_start(s: BucketSim, tasks: Tasks, c: Clock, r: Random, plan: S
 fn stream_service_marker(s: BucketSim, tasks: Tasks, take key: String) -> Result[(), Error] waits {
     let mut client = stream_service_client(s, tasks, 99, "", "us-east-1")?
     let mut raw: Bytes = list.with_capacity(64)
-    match history_fetch(mut client, key, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)) {
+    match failure_result_from_rep(history.history_fetch(mut client, key, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS))) {
         Error(Remote(NotFound)) => Ok(()),
         _ => fail("a marker key was found"),
     }
@@ -157,7 +157,7 @@ fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(
     if list.len(report.head_writes) != 2 {
         fail("expected genesis head write and close settle head write")
     }
-    let (_, take attach) = history_decode_head_attach(report.head_writes[0u64].data)?
+    let (_, take attach) = failure_result_from_rep(history.history_decode_head_attach(report.head_writes[0u64].data))?
     let Some(a) = attach else {
         fail("the streamed genesis head has no ATTACH")
     }
@@ -168,7 +168,7 @@ fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(
     if a.settles != 0 || list.len(a.sealed) != 0 || !format.stream_same(tail.sid, host_stream_id_to_rep(stream_law_sid())) || tail.inc != 1 || tail.from_seq != 1 || tail.from_frame != 0 {
         fail("the streamed genesis ATTACH is not {0, (S, 1, (1, 0)), []}")
     }
-    let (_, take closed_attach) = history_decode_head_attach(report.head_writes[1u64].data)?
+    let (_, take closed_attach) = failure_result_from_rep(history.history_decode_head_attach(report.head_writes[1u64].data))?
     if let Some(_) = closed_attach {
         fail("the close settle head still carries ATTACH")
     }

@@ -1,0 +1,7 @@
+pub fn fixture_set_pack(mut locator: HistoryLocator, item: pages.HistoryRef) {
+    map.insert(mut locator.rows, item.seq, item)
+}
+
+pub fn fixture_register(head: HistoryHead, tag: std.object.ETag) -> HistoryRegister {
+    HistoryRegister(head, tag, terminal: None, attach: None)
+}

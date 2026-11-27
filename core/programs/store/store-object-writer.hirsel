@@ -7,11 +7,11 @@ type ObjectWriterState {
     export_lifetime: Option[Sender[()]],
     watch: Option[Task[()]],
     terminal: Sender[()],
-    locator: HistoryLocator,
+    locator: history.HistoryLocator,
     levels: List[String],
     weak: Option[WeakWaiters],
-    pair: HistoryPair,
-    origin: Option[HistoryOrigin],
+    pair: history.HistoryPair,
+    origin: Option[history.HistoryOrigin],
     recovered: pages.HistoryRef,
     entries: u64,
     failed: Option[Error],
@@ -107,10 +107,10 @@ fn object_writer_journal_room(group: u64) -> u64 {
 
 type ObjectWriterOpen {
     db: Db,
-    register: HistoryRegister,
+    register: history.HistoryRegister,
     metadata: Bytes,
-    workspace: HistoryBuffers,
-    blank: HistoryOpenBase,
+    workspace: history.HistoryBuffers,
+    blank: history.HistoryOpenBase,
     start: Sender[ObjectJournalStart],
     frames: Sender[JournalMsg],
     journal_received: Receiver[journal.Ack],
@@ -129,7 +129,7 @@ type ObjectWriterOpen {
     link: Option[SlotLink]
 }
 
-fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8, stream: Option[JournalSlot]) -> Result[ObjectWriterOpen, Error] waits {
+fn prepare_object_writer(tasks: Tasks, mut read_source: history.ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8, stream: Option[JournalSlot]) -> Result[ObjectWriterOpen, Error] waits {
     let group_room: u64 = int.widen(options.group_bytes)
     if authority_kind == 2 && !std.object.simulated(read_source.client) {
         return Error(Endpoint(NotSimulator))
@@ -141,7 +141,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
     if name_count > 15 {
         return Error(Limit(Name))
     }
-    let declaration = disk_allocation(scoped fn() -> Result[HistoryConfig, Error] {
+    let declaration = disk_allocation(scoped fn() -> Result[history.HistoryConfig, Error] {
         let mut names_in_order: List[String] = list.with_capacity(name_count + 1)
         if let Some((names, _)) = sim {
             for name in names {
@@ -149,10 +149,10 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
             }
         }
         list.push(mut names_in_order, string.from(level_name))
-        Ok(HistoryConfig(place: std.object.bucket_config(read_source.client), levels: take names_in_order))
+        Ok(history.HistoryConfig(place: std.object.bucket_config(read_source.client), levels: take names_in_order))
     })?
-    let genesis_authority = history_config_bytes(declaration)?
-    let mut workspace = history_buffers(object_writer_entry_room(group_room))?
+    let genesis_authority = failure_result_from_rep(history.history_config_bytes(declaration))?
+    let mut workspace = failure_result_from_rep(history.history_buffers(object_writer_entry_room(group_room)))?
     let (take channels, (take start, take starting), take health_state, (take health_tx, take health_rx), (take idle_send, take idle_receive)) = disk_allocation(scoped fn() -> Result[(JournalChannels, (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]), Latest[Health], (Sender[()], Receiver[()]), (Sender[()], Receiver[()])), Error] {
         let startup: (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
         let initial_health: Health = Ok(0)
@@ -201,9 +201,8 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
-    let mut blank = disk_allocation(fn() -> Result[HistoryOpenBase, Error] {
-        let page_disk = manifest.genesis_pack_disk()
-        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), archive_on: 0, pages: take page_disk))
+    let mut blank = disk_allocation(fn() -> Result[history.HistoryOpenBase, Error] {
+        Ok(history.genesis_open_base())
     })?
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] {
         Ok(clone(options))
@@ -234,11 +233,11 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
     // The journaled forks after the checkpoint wait for the next cut's rows.
     let pager.JournalReplay(forked: take forked, ..) = take opened
     if let Some(mut admitted) = read_source.admitted_base {
-        manifest.set_pack_forks(mut admitted.pages, take forked)
+        history.set_open_base_forks(mut admitted, take forked)
     } else {
-        manifest.set_pack_forks(mut blank.pages, take forked)
+        history.set_open_base_forks(mut blank, take forked)
     }
-    let HistoryConfig(levels: take names_in_order, ..) = take declaration
+    let history.HistoryConfig(levels: take names_in_order, ..) = take declaration
     Ok(ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, options: take held_options, levels: take names_in_order, weak: take weak, link: take link))
 }
 
@@ -258,19 +257,19 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         return Error(Refusal(error: Unsupported(0), authority: wrap_object_authority(take config, authority_kind)))
     }
     let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache) = take config
-    let mut read_source = history_reader(take client, 0)
+    let mut read_source = history.history_reader(take client, 0)
     read_source.cache = cache
     let prepared = match prepare_object_writer(tasks, mut read_source, c, r, options, level_name, op_ms, sim, authority_kind, stream) {
         Ok(take ready) => take ready,
         Error(take problem) => {
-            let ObjectPackRead(client: take returned, ..) = take read_source
+            let history.ObjectPackRead(client: take returned, ..) = take read_source
             return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), authority_kind)))
         },
     }
     let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, options: take held_options, levels: take names_in_order, weak: take weak, link: take link) = take prepared
     let mut db = take started
-    let head = register.head
-    let (attached, attached_sid, has_sealed, force_open_cut) = match register.attach {
+    let head = history.register_head(register)
+    let (attached, attached_sid, has_sealed, force_open_cut) = match history.register_attach(register) {
         Some(a) => {
             let live_missing = match a.live {
                 None => true,
@@ -295,12 +294,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         },
         None => (false, None, false, false),
     }
-    let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
+    let history.ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
     let (take requests, take workers) = std.object.split(take owned_client)
-    let HistoryOpenBase(generation, fence, recorded_after, sweep, archive_on, pages: take pages) = match take base {
+    let (generation, fence, recorded_after, sweep, archive_on, take pages) = history.open_base_parts(match take base {
         Some(take admitted) => take admitted,
         None => take blank,
-    }
+    })
     let (take publisher, take waiters) = match take weak {
         Some(WeakWriterOpen(publisher: take publisher, waiters: take waiters)) => (Some(take publisher), Some(take waiters)),
         None => (None, None),
@@ -430,7 +429,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     let mut lane = take paused
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit)
     if let Error(problem) = outcome {
-        if let Some(_) = lane.register.terminal {
+        if let Some(_) = history.register_terminal(lane.register) {
             let saved: Error = clone(problem)
             write_disk(mut db.disk, take saved, scoped fn(mut state: DiskState, take terminal: Error) {
                 if let Some(mut object_writer) = state.object {
@@ -449,7 +448,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     // sealing the window's archive segment so the segment names every commit.
     let was_archived = lane.archive_on != 0
     if was_archived {
-        let is_att = match view lane.register.attach {
+        let is_att = match history.register_attach(lane.register) {
             Some(_) => true,
             None => false,
         }
@@ -462,7 +461,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             }
             match stream_settle(mut lane, last_seq, last_seq + 1, false, group_bytes, group_commits)? {
                 SettleApplied => {
-                    let fseq = match view lane.register.attach {
+                    let fseq = match history.register_attach(lane.register) {
                         Some(a) => match a.live {
                             Some(r) => r.from_seq,
                             None => 0u64,
@@ -471,16 +470,16 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
                     }
                     object_journal_stream_trim_batches(mut lane, fseq)
                     if let Some(link) = view lane.stream {
-                        slot_report_head(link, lane.register.head.store, lane.register.attach, last_seq)
+                        slot_report_head(link, store_key_from_rep(history.register_head(lane.register).store), history.register_attach(lane.register), last_seq)
                     }
                 },
-                SettleFenced(_, _) => return Error(Fenced(lane.register.head.pair.epoch)),
+                SettleFenced(_, _) => return Error(Fenced(history.register_head(lane.register).pair.epoch)),
                 SettleNotApplied => return Error(Undecided),
             }
         }
     }
-    let old = lane.register.head
-    let seq = history_next_id(old.entry.seq)?
+    let old = history.register_head(lane.register)
+    let seq = failure_result_from_rep(history.history_next_id(old.entry.seq))?
     let next_archive_on = match object_state(db).pending_archive_on {
         Some(true) => if was_archived {
             lane.archive_on
@@ -495,7 +494,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         _ => None,
     }
     let now = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    let (take previous, _) = history_checkpoint(mut lane.client, old, now)?
+    let (take previous, _) = failure_result_from_rep(history.history_checkpoint(mut lane.client, old, now))?
     let retained = history_retain(previous, old.checkpoint, seq, disk_state(db).options.retain)?
     let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(db, delta)
@@ -512,9 +511,9 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     }
     let manifest_bytes = cut_manifest_size(db, delta)
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut workspace = history_buffers(65536)?
-    let cache_dir = pack_cache_directory(object_state(db).cache)
-    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(manifest.PackDiskState, HistoryLocator, u64), Error] waits {
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let cache_dir = history.pack_cache_directory(object_state(db).cache)
+    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(manifest.PackDiskState, history.HistoryLocator, u64), Error] waits {
         let cut_plan = {
             let installed = disk_state(db).packs
             plan_page_cut(base, participants.holders, manifest.pack_lists(installed), manifest.no_cut_queue(), cut_lineage_rows(db, delta, participants.branches, list.new())?, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?
@@ -522,10 +521,10 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, manifest_bytes, limit))?
         // Once upload starts, this epoch must never issue these numbers again,
         // even if a refused cut leaves orphaned objects.
-        let generation = history_next_id(lane.issued_generation)?
+        let generation = failure_result_from_rep(history.history_next_id(lane.issued_generation))?
         lane.issued_generation = generation
         lane.next_pack = cut_plan.lists.run_packs.next_pack
-        let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, cache_dir, mut buffers, mut workspace, now)?
+        let (take layout, take refs) = history_write_page_cut(mut lane.client, store_key_from_rep(old.store), old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, cache_dir, mut buffers, mut workspace, now)?
         fill_cut_manifest(mut buffers.out, db, delta, participants.roots, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _, _) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
             failure_result_from_rep(journal.cut_retirement(layout, participants.holders, None, list.new(), pager.no_tiered_compaction(), None, seq, seq))
@@ -537,20 +536,14 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         if was_archived {
             let _ = history_write_archive_segment(mut lane.client, old, seq, old.pair.epoch, old.authority_kind, mut workspace, now)?
         }
-        let mut candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
-            let mut located = empty_history_locator()
-            failure_result_from_rep(types.capacity(map.try_reserve(mut located.rows, list.len(refs))))?
-            for item in refs {
-                map.insert(mut located.rows, item.seq, item)
-                located.last_pack = item.seq
-            }
-            Ok(take located)
+        let mut candidate_locator = disk_allocation(scoped fn() -> Result[history.HistoryLocator, Error] {
+            failure_result_from_rep(history.locator_for_cut(refs))
         })?
         if let Some(_) = target {
             let checked = disk_allocation(scoped fn() -> Result[manifest.PageManifest, Error] {
                 Ok(clone(page_record))
             })?
-            match history_validate_manifest(mut lane.client, candidate_locator, now, old.store, "prepared MANIFEST", take checked, None) {
+            match history_validate_manifest(mut lane.client, candidate_locator, now, store_key_from_rep(old.store), "prepared MANIFEST", take checked, None) {
                 Ok(_) => (),
                 Error(HistoryMissing(take name, _)) => {
                     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, now)?
@@ -559,15 +552,14 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
                 Error(take problem) => return Error(take problem),
             }
         }
-        let locate_root = history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, object_state(db).locator, mut candidate_locator, mut workspace, now)?
-        let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, page_record, mut workspace, now)?
+        let locate_root = failure_result_from_rep(history.history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, object_state(db).locator, mut candidate_locator, mut workspace, now))?
+        let installed = failure_result_from_rep(history.history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, page_record, mut workspace, now))?
         // A cut of an attached Place consumes every sealed tail and the live
         // tail into the checkpoint (§12.11.11): a normal cut resets ATTACH to
         // `sealed := []`, `live := (S, inc, (next_seq, 0))`; a close cut drops
         // ATTACH completely. Restore the previous ATTACH if publish does not apply.
         let drop_on_cut = object_state(db).drop_attach_on_cut
-        let prior_attach = replace(mut lane.register.attach, None)
-        let cut_attach: Option[format.Attach] = match prior_attach {
+        let cut_attach: Option[format.Attach] = match history.register_attach(lane.register) {
             Some(old_attach) => if drop_on_cut {
                 None
             } else {
@@ -578,26 +570,19 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             },
             None => None,
         }
-        lane.register.attach = take cut_attach
-        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)
+        let advanced = failure_result_from_rep(history.history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, take cut_attach, mut workspace, now))
         match take advanced {
             Ok(HistoryApplied(_)) => {
                 if let Some(link) = lane.stream {
-                    slot_report_head(link, old.store, lane.register.attach, link.last_batch_seq)
+                    slot_report_head(link, store_key_from_rep(old.store), history.register_attach(lane.register), link.last_batch_seq)
                     if drop_on_cut {
                         slot_report(link, ReportDetached(link.slot, old.pair.epoch))
                     }
                 }
                 Ok((take pages, take candidate_locator, generation))
             },
-            Ok(_) => {
-                lane.register.attach = take prior_attach
-                Error(Undecided)
-            },
-            Error(take problem) => {
-                lane.register.attach = take prior_attach
-                Error(take problem)
-            },
+            Ok(_) => Error(Undecided),
+            Error(take problem) => Error(take problem),
         }
     })
     pages.set_next_node(mut db.holders, next_stamp - 1)
@@ -609,14 +594,14 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     }
     let dropped_attach = object_state(db).drop_attach_on_cut
     lane.archive_on = next_archive_on
-    let next_sid = match lane.register.attach {
+    let next_sid = match history.register_attach(lane.register) {
         Some(a) => match a.live {
             Some(tail) => Some(tail.sid),
             None => None,
         },
         None => None,
     }
-    write_disk(mut db.disk, (take candidate_pages, take locator), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, HistoryLocator)) {
+    write_disk(mut db.disk, (take candidate_pages, take locator), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, history.HistoryLocator)) {
         let (take installed, take installed_locator) = take installation
         manifest.install_pack_cut(mut state.packs, take installed)
         state.retention = journal.record_retention(seq, recorded_after)
@@ -650,8 +635,8 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     db.settled = db.changes
     install_holder_delta(mut db, take delta)
     let authority = object_state(db)
-    lane.reclaim = Some(ObjectReclaimCapture(head: lane.register.head, recovered: authority.recovered, generation, next_pack: manifest.pack_next(disk_state(db).packs)))
-    Ok(Ticket(store: old.store, open: old.pair.epoch, mark: Cut(generation)))
+    lane.reclaim = Some(ObjectReclaimCapture(head: history.register_head(lane.register), recovered: authority.recovered, generation, next_pack: manifest.pack_next(disk_state(db).packs)))
+    Ok(Ticket(store: store_key_from_rep(old.store), open: old.pair.epoch, mark: Cut(generation)))
 }
 
 // §13.9: toggles archival retention on an objects@1 or sim@1 store via a cut,

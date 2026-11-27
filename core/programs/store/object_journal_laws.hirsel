@@ -28,11 +28,11 @@ fn check_fetch_parts(sim: BucketSim, tasks: Tasks) -> Result[(), Error] waits {
 
 fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let first_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
-    let mut source = history_reader(take first_client, 0)
-    let mut workspace = history_buffers(1024)?
-    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
+    let mut source = history.history_reader(take first_client, 0)
+    let mut workspace = failure_result_from_rep(history.history_buffers(1024))?
+    let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(source.client), "bucket")))?
     let (take held, _) = history_open_register(mut source, sim.time, r, object_law_options(0), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
-    let initial_head = held.head
+    let initial_head = history.register_head(held)
     let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
     let (acks, delivered): (Sender[journal.Ack], Receiver[journal.Ack]) = channel.new(4)
@@ -47,7 +47,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
         expected_bytes += list.len(frame)
         result.unwrap(channel.send(send_to, Frame(take frame, n)))
     }
-    let ObjectPackRead(client: take client, ..) = take source
+    let history.ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
     let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), archive_on: 0, issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
     result.unwrap(channel.send(init, take opened))
@@ -58,10 +58,10 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
         fail("the worker did not release exactly the group's frame bytes")
     }
     let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
-    let mut successor = history_reader(take next_client, 0)
-    let mut next_buffers = history_buffers(1024)?
+    let mut successor = history.history_reader(take next_client, 0)
+    let mut next_buffers = failure_result_from_rep(history.history_buffers(1024))?
     let (take next_claim, take state) = history_open_register(mut successor, sim.time, r, object_law_options(0), "bucket", mut next_buffers, BUCKET_LAW_OP_MS)?
-    if state.state.tips[0].head != 2 || next_claim.head.entry.seq != 4 {
+    if state.state.tips[0].head != 2 || history.register_head(next_claim).entry.seq != 4 {
         fail("cold claim did not recover both frames in exactly one entry")
     }
     result.unwrap(channel.send(send_to, IdleCheck))
@@ -219,31 +219,31 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     options.retain = 1
     let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let old = history_decode_head(workspace.witness)?
-    let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
-    let orphan = history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
-    let future = history_key("e-", pages.HistoryRef(seq: 4, epoch: 1, len: 1, digest: 0x3344))
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let old = failure_result_from_rep(history.history_decode_head(workspace.witness))?
+    let (take initial_mark, _) = failure_result_from_rep(history.history_checkpoint(mut witness, old.head, deadline))?
+    let orphan = history.history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let future = history.history_key("e-", pages.HistoryRef(seq: 4, epoch: 1, len: 1, digest: 0x3344))
     let mut candidate = string.into_bytes(string.from("x"))
-    history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
-    history_create(mut witness, future, mut candidate, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline))?
+    failure_result_from_rep(history.history_create(mut witness, future, mut candidate, mut workspace.compare, deadline))?
     let _ = law_table(mut writer, "kept", std.codec.key_u64(), std.codec.of_u64())?
     reclaim_barrier(writer)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let current = history_decode_head(workspace.witness)?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let current = failure_result_from_rep(history.history_decode_head(workspace.witness))?
     if current.head.entry.seq != 3 || current.head.floor != 3 {
         fail("retain-one cut did not move the floor to three")
     }
-    let obsolete_checkpoint = history_key("e-", old.head.checkpoint)
-    let obsolete_manifest = history_key("m-", initial_mark.manifest)
+    let obsolete_checkpoint = history.history_key("e-", old.head.checkpoint)
+    let obsolete_manifest = history.history_key("m-", initial_mark.manifest)
     for name in[obsolete_checkpoint, obsolete_manifest, orphan] {
-        if let Error(Remote(NotFound)) = history_fetch(mut witness, name, mut workspace.compare, deadline) {} else {
+        if let Error(Remote(NotFound)) = failure_result_from_rep(history.history_fetch(mut witness, name, mut workspace.compare, deadline)) {} else {
             fail("reclaim left a dead key from the captured history")
         }
     }
-    let _ = history_fetch(mut witness, future, mut workspace.compare, deadline)?
-    let mut cold = history_reader(take witness, deadline)
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, future, mut workspace.compare, deadline))?
+    let mut cold = history.history_reader(take witness, deadline)
     let restored = history_paged_capture(mut cold, current.head, 1048576)?
     if restored.state.tips[0].head != 1 {
         fail("reclaim removed part of the current checkpoint")
@@ -287,12 +287,12 @@ fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, o
     options.retain = 1
     let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let old = history_decode_head(workspace.witness)?
-    let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let old = failure_result_from_rep(history.history_decode_head(workspace.witness))?
+    let (take initial_mark, _) = failure_result_from_rep(history.history_checkpoint(mut witness, old.head, deadline))?
     let mut candidate = string.into_bytes(string.from("x"))
-    history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline))?
     let _ = law_table(mut writer, "kept", std.codec.key_u64(), std.codec.of_u64())?
     result.unwrap(std.sim.s3.requested(sim.endpoint, "DELETE", orphan, RECLAIM_DELETE_ATTEMPTS))
     if !journal_turn(writer)? {
@@ -316,13 +316,13 @@ fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, o
     if retried.reclaim_pending {
         fail("attention still reports the retried reclaim as pending")
     }
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let current = history_decode_head(workspace.witness)?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let current = failure_result_from_rep(history.history_decode_head(workspace.witness))?
     if current.head.entry.seq != 3 || current.head.floor != 3 {
         fail("the retry ran after another cut, not on its own")
     }
-    let dead_checkpoint = history_key("e-", old.head.checkpoint)
-    let dead_manifest = history_key("m-", initial_mark.manifest)
+    let dead_checkpoint = history.history_key("e-", old.head.checkpoint)
+    let dead_manifest = history.history_key("m-", initial_mark.manifest)
     close(take writer)?
     Ok((take dead_checkpoint, take dead_manifest))
 }
@@ -331,7 +331,7 @@ const RECLAIM_DELETE_ATTEMPTS: u64 = 5
 
 @test
 fn bucket_test_m2_reclaim_retry(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let orphan = history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let orphan = history.history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
     let mut holds: List[std.sim.s3.Hold] = list.new()
     list.push(mut holds, std.sim.s3.Hold(method: "DELETE", key: clone(orphan), from: 1, count: RECLAIM_DELETE_ATTEMPTS, until: At(0), then: Drop))
     let sim = bucket_law_sim_holds(tasks, c, 535, None, list.new(), take holds, std.sim.world.plan(535))
@@ -354,7 +354,7 @@ fn bucket_test_m2_reclaim_retry(c: Clock, r: Random, tasks: Tasks) -> Result[(),
 }
 
 fn sweep_fixture_name(epoch: u64, digest: u64) -> String {
-    history_key("e-", pages.HistoryRef(seq: 1, epoch, len: 1, digest))
+    history.history_key("e-", pages.HistoryRef(seq: 1, epoch, len: 1, digest))
 }
 
 fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -370,40 +370,40 @@ fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     let mut writer = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
     let mut octets = string.into_bytes(string.from("x"))
     for digest in 1u64 .. 1002 {
         let key = sweep_fixture_name(2, digest)
-        history_create(mut witness, key, mut octets, mut workspace.compare, deadline)?
+        failure_result_from_rep(history.history_create(mut witness, key, mut octets, mut workspace.compare, deadline))?
     }
     let _ = checkpoint(mut writer)?
     reclaim_barrier(writer)?
     let leftover = sweep_fixture_name(2, 1000)
-    let _ = history_fetch(mut witness, leftover, mut workspace.compare, deadline)?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, leftover, mut workspace.compare, deadline))?
     let _ = checkpoint(mut writer)?
     reclaim_barrier(writer)?
-    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
-    let selected = history_decode_head(workspace.witness)?
-    let (take mark, _) = history_checkpoint(mut witness, selected.head, deadline)?
-    let manifest = history_read_manifest(mut witness, selected.head.store, mark, selected.head.checkpoint.seq, deadline)?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let selected = failure_result_from_rep(history.history_decode_head(workspace.witness))?
+    let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut witness, selected.head, deadline))?
+    let manifest = failure_result_from_rep(history.history_read_manifest(mut witness, selected.head.store, mark, selected.head.checkpoint.seq, deadline))?
     // The first page contained genesis at epoch 1 and 999 epoch-2 keys.
     if manifest.sweep.position != 1 || manifest.sweep.epoch != 2 || manifest.sweep.digest != 999 {
         fail("the cut did not record the last fully examined key of the first page")
     }
-    if let Error(Remote(NotFound)) = history_fetch(mut witness, leftover, mut workspace.compare, deadline) {} else {
+    if let Error(Remote(NotFound)) = failure_result_from_rep(history.history_fetch(mut witness, leftover, mut workspace.compare, deadline)) {} else {
         fail("the resumed sweep missed the next key at the same position")
     }
     close(take writer)?
     let late = sweep_fixture_name(1, 7)
-    history_create(mut witness, late, mut octets, mut workspace.compare, deadline)?
+    failure_result_from_rep(history.history_create(mut witness, late, mut octets, mut workspace.compare, deadline))?
     let third = bucket_law_authority(sim, tasks, "s3.test", 4)?
     let mut successor = open_authority(tasks, take third, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = checkpoint(mut successor)?
     reclaim_barrier(successor)?
-    let _ = history_fetch(mut witness, late, mut workspace.compare, deadline)?
+    let _ = failure_result_from_rep(history.history_fetch(mut witness, late, mut workspace.compare, deadline))?
     let _ = checkpoint(mut successor)?
     reclaim_barrier(successor)?
-    if let Error(Remote(NotFound)) = history_fetch(mut witness, late, mut workspace.compare, deadline) {} else {
+    if let Error(Remote(NotFound)) = failure_result_from_rep(history.history_fetch(mut witness, late, mut workspace.compare, deadline)) {} else {
         fail("the sweep did not wrap to remove a late key behind the durable cursor")
     }
     close(take successor)
@@ -418,7 +418,7 @@ fn bucket_test_m2_sweep_cursor(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 }
 
 fn pending_pack_name(seq: u64, epoch: u64) -> String {
-    history_key("p-", pages.HistoryRef(seq, epoch, len: 0, digest: seq))
+    history.history_key("p-", pages.HistoryRef(seq, epoch, len: 0, digest: seq))
 }
 
 fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -477,11 +477,11 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim, options
     let saved = snapshot_follower(follower_view, main_line)?
     let mut inspector = bucket_law_client_lanes(sim, tasks, "s3.test", 813, true, 1)?
     let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
-    let mut scratch = history_buffers(1024)?
-    let _ = history_fetch(mut inspector, "head", mut scratch.witness, due)?
-    let captured = history_decode_head(scratch.witness)?
-    let (take mark, _) = history_checkpoint(mut inspector, captured.head, due)?
-    let missing = history_key("m-", mark.manifest)
+    let mut scratch = failure_result_from_rep(history.history_buffers(1024))?
+    let _ = failure_result_from_rep(history.history_fetch(mut inspector, "head", mut scratch.witness, due))?
+    let captured = failure_result_from_rep(history.history_decode_head(scratch.witness))?
+    let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut inspector, captured.head, due))?
+    let missing = history.history_key("m-", mark.manifest)
     if version(saved) != 1 || captured.head.checkpoint.seq != 3 {
         fail("L59: the initial follower did not load the schema checkpoint")
     }
@@ -490,12 +490,12 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim, options
         Ok(()) => (),
         Error(take problem) => return Error(Remote(take problem)),
     }
-    match history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due) {
+    match failure_result_from_rep(history.history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due)) {
         Error(Corrupt(Fault(file: name, why: Absent, ..))) if name == missing => (),
         _ => fail("L59: a missing retained MANIFEST did not report corruption"),
     }
     bucket_law_round(mut writer, 8)?
-    let HistoryEvicted(newer) = history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due)? else {
+    let HistoryEvicted(newer) = failure_result_from_rep(history.history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due))? else {
         fail("L59: a missing MANIFEST was still counted as live after eviction")
     }
     if newer.head.floor != 5 || newer.head.checkpoint.seq != 7 {
@@ -567,7 +567,7 @@ type RetentionFixture {
     pack_name: String,
 }
 
-fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixture, Error] waits {
+fn retention_fixture(d: Dir, predecessor: history.HistoryHead) -> Result[RetentionFixture, Error] waits {
     let (id, take source) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take source)?
     let manifest.ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
@@ -581,9 +581,9 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
         let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
         let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(d, path, 1048576))?
         bucket_m2_object_header(mut raw, id, 3, seq)?
-        let item = history_new_ref(seq, 1, raw)
+        let item = history.history_new_ref(seq, 1, raw)
         if pack.class == 1 {
-            victim = history_key("p-", item)
+            victim = history.history_key("p-", item)
         }
         list.push(mut objects, (item, take raw))
         list.push(mut refs, item)
@@ -596,11 +596,11 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     })
     let mut raw_manifest = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
     bucket_m2_object_header(mut raw_manifest, id, 1, page_record.generation)?
-    let base = history_new_ref(page_record.generation, 1, raw_manifest)
+    let base = history.history_new_ref(page_record.generation, 1, raw_manifest)
     let mut raw_entry: Bytes = list.with_capacity(1024)
-    let retained = HistoryRetention(floor: 2, earlier: list.new())
-    let locate = HistoryLocateRoot(depth: 0, rows: take refs)
-    let entry_ref = history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate)?
+    let retained = history.HistoryRetention(floor: 2, earlier: list.new())
+    let locate = history.HistoryLocateRoot(depth: 0, rows: take refs)
+    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate))?
     let mut selected = predecessor
     selected.entry = entry_ref
     selected.checkpoint = entry_ref
@@ -611,11 +611,11 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
 
 fn retention_base(id: StoreId) -> Result[WitnessCut, Error] {
     let mut raw_manifest: Bytes = list.with_capacity(1024)
-    let base = history_manifest_packet(mut raw_manifest, id, 1, default_limits())?
+    let base = failure_result_from_rep(history.history_manifest_packet(mut raw_manifest, store_key_to_rep(id), 1, limits_to_rep(default_limits())))?
     let mut raw_entry: Bytes = list.with_capacity(1024)
-    let entry_ref = history_genesis_packet(mut raw_entry, id, 1, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18))
-    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
+    let entry_ref = failure_result_from_rep(history.history_genesis_packet(mut raw_entry, store_key_to_rep(id), 1, base, history.HistoryLocateRoot(depth: 0, rows: list.new())))?
+    let pair = history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 17, lo: 18))
+    let selected = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: selected, manifest: base, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -630,11 +630,11 @@ fn retention_case_holds(case: RetentionCase, old: RetentionFixture) -> List[std.
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
     match case {
         LostWitness => {
-            let key = history_key("e-", old.selected.head.entry)
+            let key = history.history_key("e-", old.selected.head.entry)
             list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(key), from: 2, count: 1, until: Applied("DELETE", take key, 1), then: Apply))
         },
         RetryCold => {
-            let key = history_key("e-", old.selected.head.entry)
+            let key = history.history_key("e-", old.selected.head.entry)
             list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(key), from: 1, count: 1, until: Applied("DELETE", take key, 1), then: Apply))
         },
         DeletedAfterCut => {
@@ -759,13 +759,13 @@ fn retention_rows(mirror: Follower, visible: Snapshot, saved: Snapshot) -> Resul
 
 fn retention_writes(mut client: std.object.Client, fixture: RetentionFixture, declaration: Bytes, tag: std.object.ETag, due: u64, omit_manifest: bool) -> Result[std.object.ETag, Error] waits {
     for (item, raw) in fixture.packs {
-        let _ = witness_create(mut client, history_key("p-", item), raw, due)?
+        let _ = witness_create(mut client, history.history_key("p-", item), raw, due)?
     }
     let old = view fixture.selected
     if !omit_manifest {
         return witness_install_cut(mut client, old, declaration, Match(tag), due)
     }
-    let _ = witness_create(mut client, history_key("e-", old.head.entry), old.entry_bytes, due)?
+    let _ = witness_create(mut client, history.history_key("e-", old.head.entry), old.entry_bytes, due)?
     witness_publish(mut client, old.head, declaration, Match(tag), due)
 }
 
@@ -833,7 +833,7 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
     let mut inspector = bucket_law_client_with(sim, tasks, "s3.test", 90, true)?
     let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
-    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(inspector), "bucket"))?
+    let metadata = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(inspector), "bucket")))?
     let mut tag = witness_install_cut(mut inspector, base, metadata, Absent, due)?
     let stages_pack = retention_is_pack_case(case)
     let cold_first = retention_case_is_cold(case)
@@ -855,7 +855,7 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
         tag = retention_writes(mut inspector, fixture, metadata, tag, due, !stages_pack)?
         result.unwrap(channel.send(go, ()))
     }
-    let marker = history_key("e-", fixture.selected.head.entry)
+    let marker = history.history_key("e-", fixture.selected.head.entry)
     if stages_pack {
         result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", fixture.pack_name, 1))
         retention_writer(sim, tasks, r, case, fixture.pack_name, mut inspector, due)?

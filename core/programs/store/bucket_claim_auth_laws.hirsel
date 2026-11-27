@@ -329,32 +329,32 @@ fn two_claimants_run(s: BucketSim, tasks: Tasks, holder1: StoreId, holder2: Stor
     let mut c0 = bucket_law_client_with(s, tasks, "s3.test", 1, true)?
     let mut c1 = bucket_law_client_with(s, tasks, "s3.test", 2, true)?
     let mut c2 = bucket_law_client_with(s, tasks, "s3.test", 3, true)?
-    let meta = history_config_bytes(object_history_config(std.object.bucket_config(c0), "bucket"))?
-    let mut b0 = history_buffers(1024)?
-    let mut b1 = history_buffers(1024)?
-    let mut b2 = history_buffers(1024)?
+    let meta = failure_result_from_rep(history.history_config_bytes(history.object_history_config(std.object.bucket_config(c0), "bucket")))?
+    let mut b0 = failure_result_from_rep(history.history_buffers(1024))?
+    let mut b1 = failure_result_from_rep(history.history_buffers(1024))?
+    let mut b2 = failure_result_from_rep(history.history_buffers(1024))?
     let due = std.object.deadline_after_ms(c0, BUCKET_LAW_OP_MS)
-    let a = history_publish_genesis(mut c0, StoreId(hi: 90, lo: 1), StoreId(hi: 91, lo: 1), 1, meta, mut b0, due, default_limits(), None)?
-    let pair_a = claim_from_pair(a.head.pair)?
+    let a = failure_result_from_rep(history.history_publish_genesis(mut c0, store_key_to_rep(StoreId(hi: 90, lo: 1)), store_key_to_rep(StoreId(hi: 91, lo: 1)), 1, meta, mut b0, due, limits_to_rep(default_limits()), None))?
+    let pair_a = claim_from_pair(history.register_head(a).pair)?
     let auth = ClaimAuth(expect: Some(pair_a), attempt: clone(att), class: Permit)
     // Both claimants fetch the same genesis head and its ETag before either writes H.
-    let m1 = history_fetch(mut c1, "head", mut b1.witness, due)?
-    let m2 = history_fetch(mut c2, "head", mut b2.witness, due)?
-    let cap1 = history_decode_head(b1.witness)?
-    let cap2 = history_decode_head(b2.witness)?
+    let m1 = failure_result_from_rep(history.history_fetch(mut c1, "head", mut b1.witness, due))?
+    let m2 = failure_result_from_rep(history.history_fetch(mut c2, "head", mut b2.witness, due))?
+    let cap1 = failure_result_from_rep(history.history_decode_head(b1.witness))?
+    let cap2 = failure_result_from_rep(history.history_decode_head(b2.witness))?
     let cand1 = history_claim_head(cap1.head, holder1, clone(auth))?
     let cand2 = history_claim_head(cap2.head, holder2, auth)?
-    let auth_end1 = history_authority_end(b1.witness)?
-    let auth_end2 = history_authority_end(b2.witness)?
-    history_encode_register_head(mut b1.body, cand1, list.slice(b1.witness, 240, auth_end1), None)?
-    history_encode_register_head(mut b2.body, cand2, list.slice(b2.witness, 240, auth_end2), None)?
+    let auth_end1 = failure_result_from_rep(history.history_authority_end(b1.witness))?
+    let auth_end2 = failure_result_from_rep(history.history_authority_end(b2.witness))?
+    failure_result_from_rep(history.history_encode_register_head(mut b1.body, cand1, list.slice(b1.witness, 240, auth_end1), None))?
+    failure_result_from_rep(history.history_encode_register_head(mut b2.body, cand2, list.slice(b2.witness, 240, auth_end2), None))?
     let mut winners = 0u64
-    let issued_head = history_write_head_issue(mut c1, Match(m1.etag), mut b1.body, due)
-    if let HistoryApplied(_) = history_write_head_finish(mut c1, take issued_head, mut b1.body, mut b1.witness, due) {
+    let issued_head = history.history_write_head_issue(mut c1, Match(m1.etag), mut b1.body, due)
+    if let HistoryApplied(_) = history.history_write_head_finish(mut c1, take issued_head, mut b1.body, mut b1.witness, due) {
         winners += 1
     }
-    let issued_second = history_write_head_issue(mut c2, Match(m2.etag), mut b2.body, due)
-    if let HistoryApplied(_) = history_write_head_finish(mut c2, take issued_second, mut b2.body, mut b2.witness, due) {
+    let issued_second = history.history_write_head_issue(mut c2, Match(m2.etag), mut b2.body, due)
+    if let HistoryApplied(_) = history.history_write_head_finish(mut c2, take issued_second, mut b2.body, mut b2.witness, due) {
         winners += 1
     }
     let _ = take c0
@@ -389,7 +389,7 @@ fn bucket_origin_survives_advance_cut_settle_and_head_view(c: Clock, r: Random, 
     // carried the EXACT same 49-byte ORIGIN payload byte-for-byte!
     let mut epoch3_count = 0u64
     for hw in report.head_writes {
-        let (take cap, _) = history_decode_head_attach(hw.data)?
+        let (take cap, _) = failure_result_from_rep(history.history_decode_head_attach(hw.data))?
         if cap.head.pair.epoch == 3 {
             let n = list.len(hw.data)
             let payload = list.slice(hw.data, n - manifest.ORIGIN_PAYLOAD_BYTES, n)
@@ -504,75 +504,75 @@ fn origin_and_head_view_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[Byt
 // is read back and no CLAIM entry follows.
 fn permit_h_then_crash(s: BucketSim, tasks: Tasks, r: Random, take expect: Claim, take attempt: Bytes) -> Result[(), Error] waits {
     let mut client = bucket_law_client_with(s, tasks, "s3.test", 70, true)?
-    let mut buffers = history_buffers(1024)?
+    let mut buffers = failure_result_from_rep(history.history_buffers(1024))?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let fetched = history_fetch(mut client, "head", mut buffers.witness, due)?
-    let captured = history_decode_head(buffers.witness)?
+    let fetched = failure_result_from_rep(history.history_fetch(mut client, "head", mut buffers.witness, due))?
+    let captured = failure_result_from_rep(history.history_decode_head(buffers.witness))?
     let holder = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let candidate = history_claim_head(captured.head, store_key_from_rep(holder), ClaimAuth(expect: Some(take expect), attempt: take attempt, class: Permit))?
-    let authority_end = history_authority_end(buffers.witness)?
-    history_encode_register_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end), None)?
-    let issued_head = history_write_head_issue(mut client, Match(fetched.etag), mut buffers.body, due)
-    let _ = history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, due)
+    let authority_end = failure_result_from_rep(history.history_authority_end(buffers.witness))?
+    failure_result_from_rep(history.history_encode_register_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end), None))?
+    let issued_head = history.history_write_head_issue(mut client, Match(fetched.etag), mut buffers.body, due)
+    let _ = history.history_write_head_finish(mut client, take issued_head, mut buffers.body, mut buffers.witness, due)
     let _ = take client
     Ok(())
 }
 
 fn origin_o4_malformed_checks() -> Result[(), Error] {
-    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
-    let payload = history_config_bytes(config)?
+    let config = history.object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
+    let payload = failure_result_from_rep(history.history_config_bytes(config))?
     let id = StoreId(hi: 9, lo: 10)
     let base = pages.HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
-    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
     let att: Inline[u8, 16] =[1; 16]
     let zeros: Inline[u8, 16] =[0; 16]
     // 1. Epoch 2 missing ORIGIN -> Malformed.
-    let e2_no_orig = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
-    history_encode_head(mut raw, e2_no_orig, payload)?
-    match history_decode_head(raw) {
+    let e2_no_orig = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 2, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
+    failure_result_from_rep(history.history_encode_head(mut raw, e2_no_orig, payload))?
+    match failure_result_from_rep(history.history_decode_head(raw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("O4: epoch 2 head without ORIGIN was accepted"),
     }
     // 2. Epoch 1 with ORIGIN -> Malformed.
-    let e1_with_orig = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 1, attempt: att, class: 0, permit_epoch: 1, permit_attempt: att)))
-    history_encode_head(mut raw, e1_with_orig, payload)?
-    match history_decode_head(raw) {
+    let e1_with_orig = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(history.HistoryOrigin(epoch: 1, attempt: att, class: 0, permit_epoch: 1, permit_attempt: att)))
+    failure_result_from_rep(history.history_encode_head(mut raw, e1_with_orig, payload))?
+    match failure_result_from_rep(history.history_decode_head(raw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("O4: epoch 1 head with ORIGIN was accepted"),
     }
     // 3. ORIGIN.epoch != HEAD.epoch -> Malformed.
-    let bad_epoch = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 3, permit_attempt: att)))
-    history_encode_head(mut raw, bad_epoch, payload)?
-    match history_decode_head(raw) {
+    let bad_epoch = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 2, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(history.HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 3, permit_attempt: att)))
+    failure_result_from_rep(history.history_encode_head(mut raw, bad_epoch, payload))?
+    match failure_result_from_rep(history.history_decode_head(raw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("O4: mismatched ORIGIN.epoch was accepted"),
     }
     // 4. Permit with permit_epoch != epoch -> Malformed.
-    let bad_permit = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 3, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 2, permit_attempt: att)))
-    history_encode_head(mut raw, bad_permit, payload)?
-    match history_decode_head(raw) {
+    let bad_permit = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 3, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(history.HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 2, permit_attempt: att)))
+    failure_result_from_rep(history.history_encode_head(mut raw, bad_permit, payload))?
+    match failure_result_from_rep(history.history_decode_head(raw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("O4: Permit with mismatched permit_epoch was accepted"),
     }
     // 5. Continue with permit_epoch == 0 and non-zero permit_attempt -> Malformed.
-    let bad_cont = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: att)))
-    history_encode_head(mut raw, bad_cont, payload)?
-    match history_decode_head(raw) {
+    let bad_cont = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 2, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(history.HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: att)))
+    failure_result_from_rep(history.history_encode_head(mut raw, bad_cont, payload))?
+    match failure_result_from_rep(history.history_decode_head(raw)) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("O4: Continue with zero permit_epoch and non-zero permit_attempt was accepted"),
     }
     // 6. Valid Continue from genesis (permit_epoch=0, permit_attempt=zeros) -> accepted!
-    let good_cont = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: zeros)))
-    history_encode_head(mut raw, good_cont, payload)?
-    let _ = history_decode_head(raw)?
+    let good_cont = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 2, holder: types.StoreKey(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(history.HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: zeros)))
+    failure_result_from_rep(history.history_encode_head(mut raw, good_cont, payload))?
+    let _ = failure_result_from_rep(history.history_decode_head(raw))?
     // 7. The same head under the pre-ORIGIN format word 10, its HEADER
     // resealed so only the format differs, is refused Unsupported(10).
-    let mut old: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let mut old: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
     list.append(mut old, list.slice(raw, 0, 72))
     list.set_word_le(mut old, 24, 10u32)
     failure_result_from_rep(types.capacity(format.history_seal(mut old, format.DiskContext(store: store_key_to_rep(id), role: 7, seq: format.read_le(raw, 56, 8)), 0, 0x0001)))?
     list.append(mut old, list.slice(raw, 72, list.len(raw)))
-    match history_decode_head(old) {
+    match failure_result_from_rep(history.history_decode_head(old)) {
         Error(Unsupported(10)) => (),
         _ => fail("old-format head was not refused Unsupported(10)"),
     }

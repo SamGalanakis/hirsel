@@ -243,9 +243,9 @@ fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: pages.HistoryRef, wind
     data[7290u64] = 17
     data[261071u64] = 29
     let until = std.object.deadline_after_ms(source, BUCKET_LAW_OP_MS)
-    let (take stored, _) = std.object.store(mut source, history_key("p-", item), take data, until)
+    let (take stored, _) = std.object.store(mut source, history.history_key("p-", item), take data, until)
     let _ = stored ?=> |problem| Remote(problem)
-    let raw = read_tiered_bucket_window(mut source, item, window, until)?
+    let raw = failure_result_from_rep(history.read_tiered_bucket_window(mut source, item, window, until))?
     if list.len(raw) != 253782 || raw[0u64] != 17 || raw[253781u64] != 29 {
         fail("L84: provider did not return the expected merged byte range")
     }
@@ -466,14 +466,14 @@ fn l84_parallel_read(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits 
     raw[300000u64] = 5
     raw[431071u64] = 6
     let until = std.object.deadline_after_ms(source, BUCKET_LAW_OP_MS)
-    let (take stored, _) = std.object.store(mut source, history_key("p-", item), take raw, until)
+    let (take stored, _) = std.object.store(mut source, history.history_key("p-", item), take raw, until)
     let _ = stored ?=> |problem| Remote(problem)
     let mut requests: List[pager.TieredBucketGet] = list.new()
     let near = pager.TieredRange(lo: 72, hi: 131144)
     list.push(mut requests, pager.TieredBucketGet(pack_ref: item, window: near, deadline: until))
     list.push(mut requests, pager.TieredBucketGet(pack_ref: missing_pack, window: near, deadline: until))
     list.push(mut requests, pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: 300000, hi: 431072), deadline: until))
-    let received = read_tiered_bucket_windows(mut source, requests, 2)?
+    let received = failure_result_from_rep(history.read_tiered_bucket_windows(mut source, requests, 2))?
     if list.len(received) != 3 {
         fail("L84: a range response disappeared")
     }
@@ -665,7 +665,7 @@ fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     // There is no p-8 to read. The root and inventory must come only from
     // the Memory map and list pages.
     let verified = validate_directory_graph(fixtures, owner, clone(page_record), true)?
-    let loaded = rebuild_page_store(take verified, None)?
+    let loaded = failure_result_from_rep(history.rebuild_page_store(take verified, None))?
     let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: recovery forced or discarded the Cold root")
     }
@@ -794,21 +794,21 @@ fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
     Ok(())
 }
 
-fn l68_object_pack(mut source: ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
+fn l68_object_pack(mut source: history.ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
     let (take raw, ptr) = l68_page_pack(owner, seq, stamp, payload_bytes)?
     let mut object_bytes = take raw
-    history_copy_header(mut object_bytes, format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: seq), 1, 1)?
-    let item = history_new_ref(seq, 1, object_bytes)
-    let (take stored, _) = std.object.store(mut source.client, history_key("p-", item), take object_bytes, source.deadline)
+    failure_result_from_rep(history.history_copy_header(mut object_bytes, format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: seq), 1, 1))?
+    let item = history.history_new_ref(seq, 1, object_bytes)
+    let (take stored, _) = std.object.store(mut source.client, history.history_key("p-", item), take object_bytes, source.deadline)
     let _ = stored ?=> |problem| Remote(problem)
-    map.insert(mut source.locator.rows, seq, item)
+    history.fixture_set_pack(mut source.locator, item)
     Ok(ptr)
 }
 
 fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client(model, tasks, "s3.test", 68)?
     let until = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut source = history_reader(take client, until)
+    let mut source = history.history_reader(take client, until)
     let owner = StoreId(hi: 3, lo: 4)
     let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     page_record.next_pack = 11
@@ -819,9 +819,9 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     page_record.pack_root = l68_object_pack(mut source, owner, 10, 101, l68_inventory_wire(168)?)?
     let cold = pages.HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
     // The locator names the Tiered pack, but the test never uploads it.
-    map.insert(mut source.locator.rows, 8u64, cold)
+    history.fixture_set_pack(mut source.locator, cold)
     let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(page_record), true, None)?
-    let loaded = rebuild_page_store(take verified, Some(view source.locator))?
+    let loaded = failure_result_from_rep(history.rebuild_page_store(take verified, Some(view source.locator)))?
     let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
     }
@@ -842,7 +842,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     }
     let mut truncated = cold
     truncated.len = 219
-    map.insert(mut source.locator.rows, 8u64, truncated)
+    history.fixture_set_pack(mut source.locator, truncated)
     let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", take page_record, true, None) else {
         fail("L68: a Tiered locator width differing from the pack row was accepted")
     }

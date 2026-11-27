@@ -19,7 +19,7 @@ pub fn sim_authority(take c: std.object.Client, declared: SimLevels, take sync: 
 }
 
 type ObjectFollowHead: shareable + send {
-    current: HistoryHead,
+    current: history.HistoryHead,
     tag: std.object.ETag,
     next_node: u64,
     attach: Option[format.Attach],
@@ -58,7 +58,7 @@ pub type HeadView {
     origin: Option[Origin]
 }
 
-fn claim_from_pair(pair: HistoryPair) -> Result[Claim, Error] {
+fn claim_from_pair(pair: history.HistoryPair) -> Result[Claim, Error] {
     disk_allocation(scoped fn() -> Result[Claim, Error] {
         let mut owner: Bytes = list.with_capacity(16)
         list.put_word_le(mut owner, pair.holder.hi)
@@ -75,7 +75,7 @@ fn claim_class_from_tag(tag: u8) -> ClaimClass {
     }
 }
 
-fn origin_from_history(o: HistoryOrigin) -> Result[Origin, Error] {
+fn origin_from_history(o: history.HistoryOrigin) -> Result[Origin, Error] {
     disk_allocation(scoped fn() -> Result[Origin, Error] {
         let mut attempt: Bytes = list.with_capacity(16)
         let _ = bytebuf.append_inline(mut attempt, o.attempt, 0, 16)
@@ -85,7 +85,7 @@ fn origin_from_history(o: HistoryOrigin) -> Result[Origin, Error] {
     })
 }
 
-fn history_head_view(current: HistoryHead) -> Result[HeadView, Error] {
+fn history_head_view(current: history.HistoryHead) -> Result[HeadView, Error] {
     let claim = claim_from_pair(current.pair)?
     let origin = match current.origin {
         Some(o) => Some(origin_from_history(o)?),
@@ -94,7 +94,7 @@ fn history_head_view(current: HistoryHead) -> Result[HeadView, Error] {
     disk_allocation(scoped fn() -> Result[HeadView, Error] {
         let mut opaque_binding: Bytes = list.with_capacity(32)
         let _ = bytebuf.append_inline(mut opaque_binding, current.binding, 0, 32)
-        Ok(HeadView(store: current.store, activation: current.activation, binding: take opaque_binding, claim: clone(claim), origin: clone(origin)))
+        Ok(HeadView(store: store_key_from_rep(current.store), activation: current.activation, binding: take opaque_binding, claim: clone(claim), origin: clone(origin)))
     })
 }
 
@@ -112,17 +112,17 @@ pub fn follower_head(f: Follower) -> Result[HeadView, Error] {
 pub fn head_view(mut client: std.object.Client, expect: Option[StoreId], op_ms: u64) -> Result[HeadView, Error] waits {
     let deadline = std.object.deadline_after_ms(client, op_ms)
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+        Ok(list.with_capacity(history.HISTORY_HEAD_LIMIT))
     })?
-    let outcome = history_fetch(mut client, "head", mut scratch, deadline)
+    let outcome = failure_result_from_rep(history.history_fetch(mut client, "head", mut scratch, deadline))
     match take outcome {
         Ok(_) => (),
         Error(Remote(NotFound)) => return Error(NotFound),
         Error(take problem) => return Error(take problem),
     }
-    let (take capture, _) = history_decode_head_attach(scratch)?
-    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expect), store_key_to_rep(capture.head.store)))?
-    history_check_namespace(capture, client)?
+    let (take capture, _) = failure_result_from_rep(history.history_decode_head_attach(scratch))?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expect), capture.head.store))?
+    failure_result_from_rep(history.history_check_namespace(capture, client))?
     history_head_view(capture.head)
 }
 
@@ -183,31 +183,31 @@ fn history_check_follower_path(client: std.object.Client) -> Result[(), Error] {
     })
 }
 
-fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], mut scratch: Bytes) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
+fn object_follow_head(mut source: history.ObjectPackRead, previous: Option[Arc[FollowCapture]], mut scratch: Bytes) -> Result[Option[(history.HistoryCapture, std.object.ETag)], Error] waits {
     if let Some(capture) = previous {
         let Some(old) = view capture.remote else {
             fail("object follower missing remote head")
         }
-        return history_probe_head(mut source.client, old.tag, mut scratch, source.deadline)
+        return failure_result_from_rep(history.history_probe_head(mut source.client, old.tag, mut scratch, source.deadline))
     }
-    let outcome = history_fetch(mut source.client, "head", mut scratch, source.deadline)
+    let outcome = failure_result_from_rep(history.history_fetch(mut source.client, "head", mut scratch, source.deadline))
     let tag = match take outcome {
         Ok(meta) => meta.etag,
         Error(Remote(NotFound)) => return Error(NotFound),
         Error(take problem) => return Error(take problem),
     }
-    let latest = history_decode_head(scratch)?
+    let latest = failure_result_from_rep(history.history_decode_head(scratch))?
     if latest.head.authority_kind != source.authority_kind {
         return Error(Unsupported(int.widen(latest.head.authority_kind)))
     }
     if source.authority_kind == 1 {
-        history_check_endpoint(mut source.client, source.deadline)?
+        failure_result_from_rep(history.history_check_endpoint(mut source.client, source.deadline))?
     }
-    history_check_namespace(latest, source.client)?
+    failure_result_from_rep(history.history_check_namespace(latest, source.client))?
     Ok(Some((take latest, tag)))
 }
 
-fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previous: Option[Arc[FollowCapture]], ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
+fn object_follow_replay(mut source: history.ObjectPackRead, latest: history.HistoryHead, previous: Option[Arc[FollowCapture]], ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
     if let Some(old_capture) = previous {
         let Some(old) = view old_capture.remote else {
             fail("object follower missing remote head")
@@ -222,19 +222,19 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
     history_paged_capture(mut source, latest, ceiling)
 }
 
-fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn object_follow_capture(mut source: history.ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
     if let Some(_) = source.stream_root {
         return stream_follow_capture(mut source, previous, expected, ceiling, require_fresh)
     }
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+        Ok(list.with_capacity(history.HISTORY_HEAD_LIMIT))
     })?
     let fetched = object_follow_head(mut source, previous, mut scratch)?
     let Some((take head_capture, tag)) = take fetched else {
         return Ok(None)
     }
     let latest = head_capture.head
-    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(latest.store)))?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), latest.store))?
     let old_charge = if let Some(old_capture) = previous {
         let Some(old) = view old_capture.remote else {
             fail("object follower missing remote head")
@@ -242,9 +242,9 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         if latest.floor < old.current.floor || latest.entry.seq < old.current.entry.seq {
             return Error(failure_from_rep(format.disk_fault("head", 72, Order)))
         }
-        if history_ref_matches(latest.entry, old.current.entry) {
+        if history.history_ref_matches(latest.entry, old.current.entry) {
             return disk_allocation(scoped fn() -> Result[Option[Arc[FollowCapture]], Error] {
-                Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)), log_id: 0, watermark: old_capture.watermark))))
+                Ok(Some(arc.new(FollowCapture(store: store_key_from_rep(latest.store), state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)), log_id: 0, watermark: old_capture.watermark))))
             })
         }
         old_capture.resident
@@ -256,7 +256,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         Ok(take ready) => take ready,
         Error(Full(Resident(cap))) => return Error(Full(Resident(Capacity(requested: int.saturating_add(old_charge, cap.requested), available: ceiling)))),
         Error(HistoryMissing(take file, missing_seq)) => {
-            let witness = history_witness(mut source.client, latest, None, file, missing_seq, mut scratch, source.deadline)?
+            let witness = failure_result_from_rep(history.history_witness(mut source.client, latest, None, file, missing_seq, mut scratch, source.deadline))?
             if let HistoryEvicted(newer) = witness {
                 return Error(Reclaimed(newer.head.floor))
             }
@@ -270,24 +270,24 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let resident = failure_result_from_rep(journal.journal_account(replay))?
     let pager.JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: latest, tag, next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)
-    Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
+    Ok(Some(follow_capture(store_key_from_rep(latest.store), take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
 }
 
-fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: HistoryMark, raw: Bytes, at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
-    let manifest = history_read_manifest(mut source.client, captured.store, mark, captured.checkpoint.seq, source.deadline)?
+fn object_floor_loaded(mut source: history.ObjectPackRead, captured: history.HistoryHead, mark: history.HistoryMark, raw: Bytes, at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let manifest = failure_result_from_rep(history.history_read_manifest(mut source.client, captured.store, mark, captured.checkpoint.seq, source.deadline))?
     if manifest.branches[0u64].version > at_most {
         return Ok(None)
     }
     let (take recovered, _) = history_open_checkpoint(mut source, captured, mark, raw, take manifest, ceiling)?
     let resident = failure_result_from_rep(journal.journal_account(recovered))?
     let pager.JournalReplay(state: take state, next_node: stamp, ..) = take recovered
-    Ok(Some(follow_capture(captured.store, take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(stamp))?)?))
+    Ok(Some(follow_capture(store_key_from_rep(captured.store), take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(stamp))?)?))
 }
 
-fn check_floor_missing[T](mut source: ObjectPackRead, captured: HistoryHead, take loaded: Result[T, Error], mut scratch: Bytes) -> Result[T, Error] waits {
+fn check_floor_missing[T](mut source: history.ObjectPackRead, captured: history.HistoryHead, take loaded: Result[T, Error], mut scratch: Bytes) -> Result[T, Error] waits {
     match take loaded {
         Error(HistoryMissing(file, missing)) => {
-            let witness = history_witness(mut source.client, captured, None, file, missing, mut scratch, source.deadline)?
+            let witness = failure_result_from_rep(history.history_witness(mut source.client, captured, None, file, missing, mut scratch, source.deadline))?
             match witness {
                 HistoryEvicted(newer) => Error(Reclaimed(newer.head.floor)),
                 _ => Error(Remote(Retriable(Deadline))),
@@ -298,17 +298,17 @@ fn check_floor_missing[T](mut source: ObjectPackRead, captured: HistoryHead, tak
     }
 }
 
-fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn object_follow_floor(mut source: history.ObjectPackRead, expected: Option[StoreId], ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+        Ok(list.with_capacity(history.HISTORY_HEAD_LIMIT))
     })?
     let fetched = object_follow_head(mut source, None, mut scratch)?
     let Some((take current, _)) = take fetched else {
         return Error(NotFound)
     }
     let head = current.head
-    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(head.store)))?
-    let latest_mark = history_checkpoint(mut source.client, head, source.deadline)
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), head.store))?
+    let latest_mark = failure_result_from_rep(history.history_checkpoint(mut source.client, head, source.deadline))
     let (take mark, take raw) = check_floor_missing(mut source, head, take latest_mark, mut scratch)?
     let latest = object_floor_loaded(mut source, head, mark, raw, at_most, ceiling)
     if let Some(take chosen) = check_floor_missing(mut source, head, take latest, mut scratch)? {
@@ -320,10 +320,10 @@ fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ce
         let reference = mark.retained[remaining]
         let mut older = head
         older.checkpoint = reference
-        let name = history_read_key("e-", reference)?
-        let older_mark = history_read_object(mut source.client, name, reference, source.deadline)
+        let name = failure_result_from_rep(history.history_read_key("e-", reference))?
+        let older_mark = failure_result_from_rep(history.history_read_object(mut source.client, name, reference, source.deadline))
         let earlier_raw = check_floor_missing(mut source, older, take older_mark, mut scratch)?
-        let earlier = history_read_mark(name, head.store, reference, earlier_raw)?
+        let earlier = failure_result_from_rep(history.history_read_mark(name, head.store, reference, earlier_raw))?
         let selected = object_floor_loaded(mut source, older, earlier, earlier_raw, at_most, ceiling)
         if let Some(take chosen) = check_floor_missing(mut source, older, take selected, mut scratch)? {
             return Ok(Some(take chosen))

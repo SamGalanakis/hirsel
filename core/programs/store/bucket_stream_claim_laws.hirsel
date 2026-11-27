@@ -96,7 +96,7 @@ fn bucket_stream_claim_admission(c: Clock, r: Random, tasks: Tasks) -> Result[()
 fn stream_q4_rows(s: BucketSim, tasks: Tasks, reg: String) -> Result[List[format.RegRow], Error] waits {
     let mut client = stream_service_client(s, tasks, 98, "", "us-east-1")?
     let mut raw: Bytes = list.with_capacity(256)
-    let _ = history_fetch(mut client, reg, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS))?
+    let _ = failure_result_from_rep(history.history_fetch(mut client, reg, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)))?
     let mut body = failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(stream_law_sid()), 0))?
     Ok(replace(mut body.rows, list.new()))
 }

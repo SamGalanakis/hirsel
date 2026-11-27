@@ -1,0 +1,4 @@
+pub fn disk_loaded(id: types.StoreKey, take validated: manifest.ValidatedPageManifest) -> Result[manifest.DiskLoaded, types.Failure] {
+    let manifest.LoadedPageStore(manifest: take page_record, holders: take all, lists: take lists, locations: take locations) = rebuild_page_store(take validated, None)?
+    Ok(manifest.DiskLoaded(store: id, manifest: take page_record, all: take all, lists: take lists, locations: take locations))
+}

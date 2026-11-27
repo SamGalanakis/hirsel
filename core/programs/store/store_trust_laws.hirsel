@@ -41,13 +41,13 @@ fn trust_store(mut db: Db) -> Result[(), Error] waits {
 fn trust_bucket_sim(tasks: Tasks, sim: BucketSim, host_name: String) -> Result[(), Error] waits {
     let mut client = bucket_law_client_with(sim, tasks, host_name, 991, true)?
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    match history_fetch(mut client, "head", mut raw, deadline) {
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    match failure_result_from_rep(history.history_fetch(mut client, "head", mut raw, deadline)) {
         Ok(_) => (),
         Error(Remote(NotFound)) => return Ok(()),
         Error(take problem) => return Error(take problem),
     }
-    let captured = history_decode_head(raw)?
+    let captured = failure_result_from_rep(history.history_decode_head(raw))?
     teardown_validate_bucket_checkpoint(mut client, captured.head, deadline)
 }
 
@@ -63,31 +63,31 @@ fn trust_bucket_report(report: std.sim.s3.Report) -> Result[(), Error] {
     let Some(stored_head) = map.get(report.objects, "head") else {
         return Ok(())
     }
-    let captured = history_decode_head(stored_head.data)?
+    let captured = failure_result_from_rep(history.history_decode_head(stored_head.data))?
     let head = captured.head
     if head.checkpoint.seq == 0 {
         return Ok(())
     }
-    let cp_key = history_key("e-", head.checkpoint)
+    let cp_key = history.history_key("e-", head.checkpoint)
     let Some(stored_cp) = map.get(report.objects, cp_key) else {
         return Error(Corrupt(Fault(file: cp_key, offset: 0, why: Absent)))
     }
-    history_object_digest(cp_key, head.checkpoint, stored_cp.data)?
-    let mark = history_read_mark(cp_key, head.store, head.checkpoint, stored_cp.data)?
-    let manifest_key = history_key("m-", mark.manifest)
+    failure_result_from_rep(history.history_object_digest(cp_key, head.checkpoint, stored_cp.data))?
+    let mark = failure_result_from_rep(history.history_read_mark(cp_key, head.store, head.checkpoint, stored_cp.data))?
+    let manifest_key = history.history_key("m-", mark.manifest)
     let Some(stored_manifest) = map.get(report.objects, manifest_key) else {
         return Error(Corrupt(Fault(file: manifest_key, offset: 0, why: Absent)))
     }
-    let _ = history_decode_manifest(manifest_key, head.store, mark, head.checkpoint.seq, clone(stored_manifest.data))?
+    let _ = failure_result_from_rep(history.history_decode_manifest(manifest_key, head.store, mark, head.checkpoint.seq, clone(stored_manifest.data)))?
     if mark.depth == 0 {
         let mut at = mark.locate_at
         while at < mark.locate_end {
             let item = pages.HistoryRef(seq: format.read_le(stored_cp.data, at, 8), epoch: format.read_le(stored_cp.data, at + 8, 8), len: format.read_le(stored_cp.data, at + 16, 8), digest: format.read_le(stored_cp.data, at + 24, 8))
-            let pack_key = history_key("p-", item)
+            let pack_key = history.history_key("p-", item)
             let Some(stored_pack) = map.get(report.objects, pack_key) else {
                 return Error(Corrupt(Fault(file: pack_key, offset: 0, why: Absent)))
             }
-            history_object_digest(pack_key, item, stored_pack.data)?
+            failure_result_from_rep(history.history_object_digest(pack_key, item, stored_pack.data))?
             at += 32
         }
     }
@@ -401,8 +401,8 @@ fn bucket_m2_register_fence_run(c: Clock, tasks: Tasks, seed_grant: Env, out: St
     result.unwrap(stdout.write(out, trace))
     let (committed, orphan) = observed?
     let published = option.unwrap(map.get(report.objects, "head"))
-    let final_capture = history_decode_head(published.data)?
-    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history_key("e-", orphan)) || report.writes != 11 {
+    let final_capture = failure_result_from_rep(history.history_decode_head(published.data))?
+    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history.history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history.history_key("e-", orphan)) || report.writes != 11 {
         fail("the fenced advance appeared in the register")
     }
     Ok(())
@@ -418,14 +418,14 @@ fn bucket_m2_link_recovery_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Resul
     let test_id = StoreId(hi: 9, lo: 10)
     let mut raw: Bytes = list.with_capacity(1024)
     let largest = pages.HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
-    let fitted = history_genesis_packet(mut raw, test_id, 1, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
+    let fitted = failure_result_from_rep(history.history_genesis_packet(mut raw, store_key_to_rep(test_id), 1, largest, history.HistoryLocateRoot(depth: 0, rows: list.new())))?
+    let admitted = failure_result_from_rep(history.history_read_mark("max MANIFEST", store_key_to_rep(test_id), fitted, raw))?
     if admitted.manifest.len != wire_limit {
         fail("the max legal MANIFEST wire length was refused")
     }
     let excess = pages.HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
-    let too_large = history_genesis_packet(mut raw, test_id, 1, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
+    let too_large = failure_result_from_rep(history.history_genesis_packet(mut raw, store_key_to_rep(test_id), 1, excess, history.HistoryLocateRoot(depth: 0, rows: list.new())))?
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = failure_result_from_rep(history.history_read_mark("oversize MANIFEST", store_key_to_rep(test_id), too_large, raw)) {} else {
         fail("one byte above the wire limit was admitted for GET")
     }
     Ok(())
@@ -447,11 +447,11 @@ fn bucket_m2_retry_budget_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Result
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 39), None, take faults)
     let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
     let mut body = string.into_bytes(string.from("proposed head"))
-    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let mut witness: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
     let start = host.mono_ns(sim.time)
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let issued_head = history_write_head_issue(mut client, Absent, mut body, due)
-    let outcome = history_write_head_finish(mut client, take issued_head, mut body, mut witness, due)
+    let issued_head = history.history_write_head_issue(mut client, Absent, mut body, due)
+    let outcome = history.history_write_head_finish(mut client, take issued_head, mut body, mut witness, due)
     let elapsed = host.mono_ns(sim.time) - start
     let _ = take client
     let report = bucket_law_finish(take sim)
@@ -484,7 +484,7 @@ fn bucket_m2_admitted_claim_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     let report = bucket_law_finish(take sim)
     checked?
     let visible = option.unwrap(map.get(report.objects, "head"))
-    let selected = history_decode_head(visible.data)?
+    let selected = failure_result_from_rep(history.history_decode_head(visible.data))?
     if selected.head.entry.seq != 3 || selected.head.pair.epoch != 2 {
         fail("a refused claim or fenced advance changed the visible head")
     }

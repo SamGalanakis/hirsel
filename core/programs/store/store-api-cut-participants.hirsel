@@ -3,7 +3,7 @@ type ProposedMain {
     head: u64,
     at: u64,
     tables: u32,
-    activation: Option[HistoryActivation],
+    activation: Option[history.HistoryActivation],
     // The owner-3 pin slot a publishing cut removes with the replacement:
     // the import pin at install (§3.5a "The kept import"), the build pin at a
     // hot build's publish (§13.10a "Hot Tiered builds").

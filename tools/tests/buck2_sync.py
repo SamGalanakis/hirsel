@@ -328,6 +328,11 @@ class CargoUnits(unittest.TestCase):
         self.assertEqual(ast.literal_eval(standalone['features']), ['standalone'])
         _, archive = targets['hirsel-core-rt-archives']
         self.assertEqual(ast.literal_eval(archive['library']), '//:hirsel-core-rt-standalone')
+        kind, embed = targets['hirsel-core-rt-embed']
+        self.assertEqual(kind, 'hirsel_library')
+        self.assertEqual(ast.literal_eval(embed['features']), [])
+        _, archive = targets['hirsel-core-rt-embed-archives']
+        self.assertEqual(ast.literal_eval(archive['library']), '//:hirsel-core-rt-embed')
 
     def test_dev_features_fork_transitive_users_but_share_unchanged_leaves(self):
         from cargo_units import Resolution, calls, literal

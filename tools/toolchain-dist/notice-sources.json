@@ -48,6 +48,14 @@
       "native": "static_lld",
       "contents": "the linker, a static PIE (tools/native-toolchain/build-static-lld)"
     },
+    "bin/llvm-ar": {
+      "native": "bootstrap_llvm",
+      "contents": "the static library archiver"
+    },
+    "bin/llvm-objcopy": {
+      "native": "bootstrap_llvm",
+      "contents": "the static library symbol rewriter"
+    },
     "hirsel.profdata": {
       "contents": "the profile a PGO build of the compiler used (PGO builds only)"
     }
@@ -96,6 +104,12 @@
       ],
       "static_note": "A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh."
     },
+    "bootstrap_llvm": {
+      "licenses": ["llvm/LICENSE.TXT"],
+      "source_dirs": ["llvm/tools/llvm-ar", "llvm/tools/llvm-objcopy"],
+      "static": [],
+      "static_note": "The archive tools load the shipped LLVM library and the system C and C++ libraries."
+    },
     "darwin_llvm": {
       "licenses": [
         "llvm/LICENSE.TXT",
@@ -104,10 +118,12 @@
       "source_dirs": [
         "llvm/lib",
         "llvm/include",
+        "llvm/tools/llvm-ar",
+        "llvm/tools/llvm-objcopy",
         "lld"
       ],
       "static": [],
-      "static_note": "A Mac host's compiler LLVM library and bin/ld.lld, built by tools/native-toolchain/build-libllvm-darwin with the Xcode command line tools against the macOS SDK. They load libSystem, libc++ and libz from the system and link no third-party runtime statically."
+      "static_note": "The Mac linker, archive tools and LLVM library use the macOS SDK and load their system libraries dynamically."
     }
   },
   "native_text_rule": "From the locked source archive (source_url, source_sha256): each component's licenses, every file under its source_dirs named LICENSE/COPYING/COPYRIGHT/NOTICE, and every text file there that contains 'copyright', outside test, unittests, docs and utils directories.",

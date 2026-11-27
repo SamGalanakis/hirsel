@@ -436,7 +436,7 @@ def citations(text):
     return rows
 
 
-def check_bundle(bundle, sources, inventory, llvm_tree=None):
+def check_bundle(bundle, sources, inventory, llvm_tree=None, *, bootstrap_tree=None):
     """Every shipped file is in exactly one `files` class, and each native file is its pin."""
     allowed = set(sources['bundle_entries']) | OPTIONAL_ENTRIES | {'notices', 'hirsel-build.json'}
     present = {p.name for p in bundle.iterdir()}
@@ -452,9 +452,11 @@ def check_bundle(bundle, sources, inventory, llvm_tree=None):
         if len(classes) != 1:
             raise ValueError(f'{path}: {"no notice covers this shipped file" if not classes else "classified twice: " + str(classes)}')
     for row in inventory['native']:
-        # Darwin pins a tree archive, whose two shipped members were verified
-        # when the builder unpacked it.
-        pinned = llvm_tree / row['path'] if llvm_tree is not None else None
+        # Compare members of a pinned tool archive with the verified unpacked tree.
+        tree = llvm_tree
+        if row['lock'] == 'bootstrap_llvm':
+            tree = bootstrap_tree or ROOT / 'tools/buck2/toolchains/llvm-files'
+        pinned = tree / row['path'] if tree is not None else None
         digest = sha256(pinned) if pinned else row['sha256']
         size = pinned.stat().st_size if pinned else row['size']
         if files.get(row['path']) != digest or (bundle / row['path']).stat().st_size != size:
@@ -599,6 +601,11 @@ def collect_darwin(bundle, llvm_tree):
     del files['libexec/hirsel/.hirsel-debug/*.debug']
     del files['link/kit/*-linux-gnu/*'], files['hirsel.profdata']
     files['bin/ld.lld'] = dict(native='darwin_llvm', contents='the Mach-O linker')
+    for path in ('bin/llvm-ar', 'bin/llvm-objcopy'):
+        if (llvm_tree / path).is_file():
+            files[path]['native'] = 'darwin_llvm'
+        else:
+            del files[path]
     files[llvm] = dict(native='darwin_llvm', contents="the compiler's LLVM library")
     files['libexec/hirsel/*.dSYM/*'] = dict(contents='detached debug information for the platform executables')
     sources.update(

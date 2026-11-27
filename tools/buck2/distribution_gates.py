@@ -68,4 +68,5 @@ def distribution_gates(out, call, Raw, reads, slots):
                                   "//third-party:NOTICES.md", "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
                                   *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/") for path in distribution_license_paths(reads))],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
+                                       "HIRSEL_DISTRIBUTION_LLVM": "//tools/buck2/native-toolchain:llvm",
                                        "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))

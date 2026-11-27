@@ -268,24 +268,27 @@ def accept_fresh(passed, prefix, targets):
             continue
         observation = config['observation']
         record = 'record' in config['features']
-        if other := slots.get((observation, record)):
-            raise ValueError(f'{slot} and {other} declare the same runtime flavour {(observation, record)}')
-        slots[observation, record] = slot
+        embedded = 'standalone' not in config['features']
+        flavour = (observation, record, embedded)
+        if other := slots.get(flavour):
+            raise ValueError(f'{slot} and {other} declare the same runtime flavour {flavour}')
+        slots[flavour] = slot
     rows = registration['runtimes']
-    expected = {(target, observation, record, False) for target in targets for observation, record in slots}
+    expected = {(target, *flavour) for target in targets for flavour in slots}
     registered = {(row['target'], row['observation'], row['record'], row['embedded']) for row in rows}
     if registered != expected:
         raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
                          f'extra {sorted(registered - expected)}')
     labels = {
-        (observation, record): f"{observation_labels[observation]}{'recording ' if record else ''}runtime"
-        for observation, record in slots
+        (observation, record, embedded): ('embed runtime' if embedded else
+            f"{observation_labels[observation]}{'recording ' if record else ''}runtime")
+        for observation, record, embedded in slots
     }
     for row in rows:
         if not (prefix / row['path']).is_file():
             raise ValueError(f"registered runtime is missing: {row['path']}")
     runtimes = {
-        f"{labels[row['observation'], row['record']]} {row['target']} {Path(row['path']).parent.name}"
+        f"{labels[row['observation'], row['record'], row['embedded']]} {row['target']} {Path(row['path']).parent.name}"
         for row in rows
     }
     lines = passed.stdout.splitlines()

@@ -404,15 +404,15 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict, slots=None) 
     if name != 'hirsel-core-rt':
         return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                     library=f'//:{name}', archive_name=archive)
-    # A language executable owns its process allocator. The ordinary
-    # rlib remains embeddable beside a host's allocator or hirsel_guard.
+    # The embed slot uses the host allocator.
     slots = archive_slots(READS) if slots is None else slots
     deps = declared_deps(package, packages)
     rules = []
     for slot in [*slots.values(), {"buck_suffix": "-allocation-count",
                                   "features": ["standalone", "allocation-count"]}]:
         suffix = slot['buck_suffix']
-        library = f'{name}-standalone{suffix}'
+        standalone = '-standalone' if 'standalone' in slot['features'] else ''
+        library = f'{name}{standalone}{suffix}'
         rules.append(call('hirsel_library', name=library, deps=deps,
                           **{**attrs, 'features': slot['features']}))
         rules.append(call('hirsel_core_runtime_archives', name=f'{name}{suffix}-archives',

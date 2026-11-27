@@ -166,6 +166,9 @@ def file_class(relative):
     if relative == 'bin/ld.lld':
         return dict(filetype=MH_EXECUTE, dylibs={LIBSYSTEM, LIBCXX, LIBZ, LIBLLVM_ID},
                     rpaths=['@loader_path/../lib'], init=None)
+    if relative in {'bin/llvm-ar', 'bin/llvm-objcopy'}:
+        return dict(filetype=MH_EXECUTE, dylibs={LIBSYSTEM, LIBCXX, LIBLLVM_ID},
+                    rpaths=['@loader_path/../lib'], init=None)
     if relative == LIBLLVM:
         return dict(filetype=MH_DYLIB, dylibs={LIBSYSTEM, LIBCXX, LIBZ}, rpaths=[], init=None, id=LIBLLVM_ID)
     if relative.startswith('libexec/hirsel/') or relative.startswith('witness/'):
@@ -333,8 +336,9 @@ def runtimes(work, env):
         shutil.rmtree(slots_root)
 
     def build_slot(slot, features, target_dir, slot_env):
+        feature_args = ['--features', ','.join(features)] if features else []
         run(['cargo', 'rustc', '--locked', '--lib', '-p', 'hirsel-core-rt', '--target', TARGET,
-             '--profile', 'hirsel-runtime', '--crate-type', 'staticlib', '--features', ','.join(features),
+             '--profile', 'hirsel-runtime', '--crate-type', 'staticlib', '--no-default-features', *feature_args,
              *config_args,
              '--', '--cfg', 'hirsel_runtime_size', '-Zcrate-attr=feature(optimize_attribute)'],
             cwd=ROOT, env=slot_env)

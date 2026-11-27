@@ -19,6 +19,8 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `libexec/hirsel/store_tool` | the Hirsel store backup and restore tool, linked with the shipped runtime archive | Hirsel |
 | `libexec/hirsel/.hirsel-debug/*.debug` | detached debug information for the platform executables | Hirsel |
 | `bin/ld.lld` | the linker, a static PIE (tools/native-toolchain/build-static-lld) | native component `static_lld`, below |
+| `bin/llvm-ar` | the static library archiver | native component `bootstrap_llvm`, below |
+| `bin/llvm-objcopy` | the static library symbol rewriter | native component `bootstrap_llvm`, below |
 | `hirsel.profdata` | the profile a PGO build of the compiler used (PGO builds only) | Hirsel |
 | `lib/libLLVM.so.23.1` | the compiler's LLVM library (tools/native-toolchain/build-libllvm) | native component `engine_llvm`, below |
 
@@ -299,6 +301,22 @@ llvm-23.lock `static_lld`: `ld.lld-23.1.5-elf-macho-static-pie-manylinux_2_28-x8
 | `llvm/lib/Support/xxhash.cpp` | `699389b388a56d0caf330bb872739b2e23d51a22b7e2f758f2c11fac9936752d` |
 | `llvm/lib/Transforms/Utils/LowerCommentStringPass.cpp` | `32efac8529ff3b355a215f5df6df7b3de6bdc470f45144ed8aca0ac0f4f1929d` |
 | `llvm/lib/Transforms/Utils/SCCPSolver.cpp` | `db491fca6872d48e1b7bf86a21e9f2644f8e6c1681c33643126c507d7d59d30b` |
+
+### `bin/llvm-ar`
+
+llvm-23.lock `bootstrap_llvm`: `llvm-23.1.5-bootstrap-manylinux_2_28-x86_64.tar.xz`, 41391580 bytes, SHA-256 `54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: . The archive tools load the shipped LLVM library and the system C and C++ libraries.
+
+| Source file | SHA-256 |
+|---|---|
+| `llvm/LICENSE.TXT` | `8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee` |
+
+### `bin/llvm-objcopy`
+
+llvm-23.lock `bootstrap_llvm`: `llvm-23.1.5-bootstrap-manylinux_2_28-x86_64.tar.xz`, 41391580 bytes, SHA-256 `54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: . The archive tools load the shipped LLVM library and the system C and C++ libraries.
+
+| Source file | SHA-256 |
+|---|---|
+| `llvm/LICENSE.TXT` | `8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee` |
 
 ### `lib/libLLVM.so.23.1`
 
@@ -2294,6 +2312,16 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    "path": "bin/ld.lld"
   },
   {
+   "contents": "the static library archiver",
+   "native": "bootstrap_llvm",
+   "path": "bin/llvm-ar"
+  },
+  {
+   "contents": "the static library symbol rewriter",
+   "native": "bootstrap_llvm",
+   "path": "bin/llvm-objcopy"
+  },
+  {
    "contents": "the profile a PGO build of the compiler used (PGO builds only)",
    "path": "hirsel.profdata"
   },
@@ -2511,6 +2539,44 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
     {
      "path": "llvm/lib/Transforms/Utils/SCCPSolver.cpp",
      "sha256": "db491fca6872d48e1b7bf86a21e9f2644f8e6c1681c33643126c507d7d59d30b"
+    }
+   ]
+  },
+  {
+   "asset": "llvm-23.1.5-bootstrap-manylinux_2_28-x86_64.tar.xz",
+   "lock": "bootstrap_llvm",
+   "note": "The archive tools load the shipped LLVM library and the system C and C++ libraries.",
+   "path": "bin/llvm-ar",
+   "sha256": "54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4",
+   "size": 41391580,
+   "source": {
+    "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
+    "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"
+   },
+   "static": [],
+   "texts": [
+    {
+     "path": "llvm/LICENSE.TXT",
+     "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee"
+    }
+   ]
+  },
+  {
+   "asset": "llvm-23.1.5-bootstrap-manylinux_2_28-x86_64.tar.xz",
+   "lock": "bootstrap_llvm",
+   "note": "The archive tools load the shipped LLVM library and the system C and C++ libraries.",
+   "path": "bin/llvm-objcopy",
+   "sha256": "54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4",
+   "size": 41391580,
+   "source": {
+    "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
+    "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"
+   },
+   "static": [],
+   "texts": [
+    {
+     "path": "llvm/LICENSE.TXT",
+     "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee"
     }
    ]
   },

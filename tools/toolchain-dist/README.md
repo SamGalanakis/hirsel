@@ -78,11 +78,10 @@ derives it from Cargo.lock, Cargo metadata, the Buck link graph,
 installation (by default it builds `//:hirsel-toolchain`). The archive is
 `HIRSEL_LLVM_SOURCE_ARCHIVE`, or the copy under `$XDG_CACHE_HOME/hirsel/llvm-source`,
 downloaded from `source_url` and checked against `source_sha256` when absent.
-`notice-sources.json` classifies every file an installation ships (`files`):
-first-party, linked crates (the compiler and the runtime archive, by their
-workspace package and link root) or a native pin (`lib/libLLVM.so.23.1`,
-`bin/ld.lld`). A native pin's notices are the LLVM source tree's license and
-copyright-bearing files (`native_text_rule`) and the texts of the C and C++
+`notice-sources.json` classifies shipped files in `files`. The compiler and
+runtime archives name their workspace packages and link roots. The LLVM library,
+linker and archive tools name their native pins. A native pin's notices are the
+LLVM source tree's license and copyright-bearing files (`native_text_rule`) and the texts of the C and C++
 runtimes it links statically. The manylinux_2_28 build host's AlmaLinux
 runtime notices and the pinned link kit's source notices are in `licenses/`.
 
@@ -157,10 +156,10 @@ RELEASE_TAG=v0.0.0-local tools/toolchain-dist/build --host aarch64-apple-darwin 
 ```
 
 `darwin_host.py` builds with Cargo what Buck2 builds on Linux, from the same pins:
-the compiler in Cargo's `dist` profile against the pinned LLVM tree, the six runtime
-archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, with
+the compiler in Cargo's `dist` profile against the pinned LLVM tree, the standalone
+and embed runtime archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, with
 `tools/buck2/profile.bzl`'s runtime flags), and the Darwin link kit's text stubs. The
-bundle ships `hirsel`, `bin/ld.lld` and `lib/libLLVM.23.1.dylib` from the pinned
+bundle ships `hirsel`, the linker and archive tools, and `lib/libLLVM.23.1.dylib` from the pinned
 tree, the runtimes and link kit for `aarch64-apple-darwin` only, the core and std
 images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
 come from `toolchain_programs.py`, which Buck2's bundle runs too. Every Mach-O is
@@ -177,16 +176,17 @@ The build then checks the bundle, as
 `tools/toolchain-dist/build --host aarch64-apple-darwin --check-fresh PREFIX` does
 for any unpacked bundle. Each Mach-O's load commands must match its file class:
 
-| File | Loads exactly | LC_RPATH | Other |
+| File | Linked libraries | LC_RPATH | Other |
 |---|---|---|---|
 | `hirsel` | libSystem, CoreFoundation, Security, libiconv | none | |
 | `bin/ld.lld` | libSystem, libc++, libz, `@rpath/libLLVM.23.1.dylib` | `@loader_path/../lib` | same bytes as the pinned tree |
+| `bin/llvm-ar`, `bin/llvm-objcopy` | libSystem, libc++, `@rpath/libLLVM.23.1.dylib` | `@loader_path/../lib` | same bytes as the pinned tree |
 | `lib/libLLVM.23.1.dylib` | libSystem, libc++, libz | none | id `@rpath/libLLVM.23.1.dylib`, same bytes as the pinned tree |
 | `libexec/hirsel/*` and the programs the check builds | a subset of the link kit's libraries | none | no initializer entries |
 | `<program>.dSYM/.../DWARF/<program>` beside those | nothing | none | MH_DSYM with its program's UUID, unsigned |
 | `core-packages/<std>/native/o/**` | nothing | none | MH_OBJECT, unsigned; the final link sets its platform version |
 
-Every image (the first four rows) is a thin arm64 file with LC_UUID, minos at the
+Every signed image is a thin arm64 file with LC_UUID, minos at the
 floor, no segment whose maximum protection is both writable and executable, and a
 signature that passes `codesign -v --strict`; a Mach-O of no class fails.
 Without `MACOSX_DEPLOYMENT_TARGET`, rustc 1.99 stamps minos 11.0. The check then packs the bundle,

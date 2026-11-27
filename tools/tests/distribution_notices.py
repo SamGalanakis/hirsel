@@ -266,7 +266,48 @@ class Notices(unittest.TestCase):
         self.assertIn('no alternative license elected', record['selection'])
 
 
+def distribution_build():
+    sys.modules.setdefault('notices', notices)
+    loader = importlib.machinery.SourceFileLoader('dist_build', str(ROOT / 'tools/toolchain-dist/build'))
+    build = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(build)
+    return build
+
+
 class DistributionBuild(unittest.TestCase):
+    def test_fresh_inventory_requires_embed_runtime_alongside_plain_runtime(self):
+        build = distribution_build()
+        target = 'aarch64-apple-darwin'
+        flavours = [
+            ('runtime', 'none', False, False),
+            ('recording runtime', 'none', True, False),
+            ('profiling runtime', 'prof', False, False),
+            ('profiling recording runtime', 'prof', True, False),
+            ('charge observation runtime', 'observed', False, False),
+            ('charge observation recording runtime', 'observed', True, False),
+            ('embed runtime', 'none', False, True),
+        ]
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            prefix = Path(raw)
+            lines = ['hirsel 0.0.0-test', 'compiler ' + 'a' * 64,
+                     'std@1/sim/fs/serve\tfn', 'pass executed app@1/tests/test_twice']
+            rows = []
+            for i, (label, observation, record, embedded) in enumerate(flavours):
+                content = f'{i:064x}'
+                archive = Path('runtime') / target / content / 'libhirsel_core_rt.a'
+                (prefix / archive).parent.mkdir(parents=True)
+                (prefix / archive).touch()
+                rows.append(dict(target=target, observation=observation, record=record,
+                                 embedded=embedded, path=archive.as_posix()))
+                lines.append(f'{label} {target} {content}')
+            registration = prefix / 'hirsel-core-toolchain.json'
+            registration.write_text(json.dumps(dict(runtimes=rows)))
+            passed = subprocess.CompletedProcess([], 0, '\n'.join(lines), '')
+            build.accept_fresh(passed, prefix, {target})
+            registration.write_text(json.dumps(dict(runtimes=rows[:-1])))
+            with self.assertRaisesRegex(ValueError, 'runtime target/flavour mismatch'):
+                build.accept_fresh(passed, prefix, {target})
+
     def test_requires_a_release_tag_before_preparing_buck(self):
         env = os.environ.copy()
         env.pop('RELEASE_TAG', None)
@@ -299,10 +340,7 @@ class GlibcBaseline(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        sys.modules.setdefault('notices', notices)
-        loader = importlib.machinery.SourceFileLoader('dist_build', str(ROOT / 'tools/toolchain-dist/build'))
-        cls.build = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(cls.build)
+        cls.build = distribution_build()
 
     def check(self, fixture):
         with tempfile.TemporaryDirectory() as directory:
@@ -347,7 +385,9 @@ class Repository(unittest.TestCase):
         self.assertEqual(crates(derived) - crates(written), set(), 'locked crates NOTICES.md does not cover')
         self.assertEqual(derived, written, 'NOTICES.md is stale: run tools/toolchain-dist/notices.py --write')
         self.assertEqual(notices.render(written), text)
-        notices.check_bundle(Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']), sources, written)
+        tree = os.environ.get('HIRSEL_DISTRIBUTION_LLVM')
+        notices.check_bundle(Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']), sources, written,
+                             bootstrap_tree=Path(tree) if tree else None)
 
     def test_adapted_sources_cite_files_in_this_tree(self):
         for source, paths in notices.citations((ROOT / notices.ADAPTED).read_text()):

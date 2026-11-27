@@ -14,7 +14,7 @@ llvm_library = "lib/libLLVM.23.1.dylib"
 x86_64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-x86_64" }
 aarch64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-aarch64" }
 aarch64-apple-darwin = { platform = "root//tools/buck2:runtime-darwin" }
-# The iOS archive platforms and embed slot packaging arrive in Slice 6.
+# iOS archive production and packaging arrive in Slice 6.
 aarch64-apple-ios = { slots = ["embed-runtime"] }
 aarch64-apple-ios-sim = { slots = ["embed-runtime"] }
 
@@ -52,6 +52,7 @@ features = ["standalone", "charge-observation", "record"]
 observation = "observed"
 
 [runtime_slots.embed-runtime]
+buck_suffix = "-embed"
 crate = "hirsel-core-rt"
 features = []
 observation = "none"

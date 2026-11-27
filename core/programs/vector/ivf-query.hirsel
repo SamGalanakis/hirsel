@@ -260,8 +260,7 @@ fn shadowed[K, V](tx: store.Tx, v: Ivf[K, V], ids: List[u32], from: u64, key: By
 // nearest `q`; the tail's rows are scored exactly. A candidate's 1-bit
 // upper bound prunes it against the 10 * k best extended estimates, and
 // those 10 * k are reranked exactly from their rows through fetch_many.
-// With no image to read, every row is scored exactly. A Tiered source is
-// refused with Store(Tiered(Tail)). A row `filter` does not allow is
+// With no image to read, every row is scored exactly. A row `filter` does not allow is
 // skipped before it is admitted or scored exactly, so the 10 * k candidates
 // are all allowed rows (Store 3.3).
 pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: u32, filter: Filter) -> Result[List[Hit[K]], Error] {

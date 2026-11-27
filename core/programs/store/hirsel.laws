@@ -507,7 +507,9 @@ store@1/store/test_store_crash_sim src=0b1258f5726d5af3 sig=a592121c99d178cc run
 store@1/store/test_store_retention_trace src=3b1d8641729c2fc1 sig=802bd01bdfee1b5c run=b96fb3a4771b3c35 bug=- oracle=- rows=pending
 store@1/store/test_stored_size src=794f46038b30a3f8 sig=25314667eba79a2e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_streams src=5fa5d749ecdddca9 sig=cde41c29fe60381d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_tail src=1986ee1815303648 sig=e3af6cc13619d8f6 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_tail src=3e3b8d477c01cd74 sig=b4dc5f0e2eb71afe run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_tail_demoted_source src=9620f4e18935d82f sig=12445f74f2be5af7 run=0fbf0f9c200aa0aa bug=246051a96ea3019c oracle=ca0805f2cceb3106 rows=pending
+store@1/store/test_tail_tiered src=3c05fa19fa86ce40 sig=172866dad5cb495d run=0fbf0f9c200aa0aa bug=9691d3a2c60f0a11 oracle=df3d1609f57bf899 rows=pending
 store@1/store/test_teardown_catches_corrupt_live_db src=4d789e81a7549ec2 sig=e15abf1a6467f79d run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_teardown_session_opt_out_does_not_leak src=b49a00e8b519d96c sig=c43069aa1676f2ba run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_tiered_log_range_reads_cold_leaves_and_staged_tail src=9da831dcea19eca2 sig=51235e2e6a7a5777 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending

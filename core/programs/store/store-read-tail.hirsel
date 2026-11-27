@@ -1,0 +1,164 @@
+// A tail uses the deciding attempt for both roots. The published pin is a
+// holder in the same pack inventory as the head. Its tree has no Tx edits.
+fn read_tiered_tail(tx: Tx, base: pages.PageTree, head: pages.PageTree, id: u32, resume: Bytes, high: Bytes, mut out: ChangeOutput) -> Result[(), Error] {
+    let prefix = failure_result_from_rep(catalog.prefix(id))?
+    let low = if resume < prefix {
+        view prefix
+    } else {
+        view resume
+    }
+    let Some((_, old_descriptor)) = std.page.collection_slot(base.root, prefix) else {
+        return Error(Stale(id))
+    }
+    let Some((_, new_descriptor)) = std.page.collection_slot(head.root, prefix) else {
+        return Error(Stale(id))
+    }
+    let old = pages.collection_descriptor(old_descriptor)
+    let new = pages.collection_descriptor(new_descriptor)
+    let old_tiered = old.residency == ResidentTiered
+    let new_tiered = new.residency == ResidentTiered
+    let staged = if new_tiered {
+        tx_tiered_staged(head, tx.below, tx.ops, Some(id))?
+    } else {
+        std.omap.new()
+    }
+    let spans = if old_tiered && new_tiered {
+        let Some(attempt) = tx.attempt else {
+            return Error(Tiered(Tail))
+        }
+        tail_spans(attempt, tx.pins, base, head, id, prefix, staged, low, high)?
+    } else {
+        let mut span: List[(Bytes, Bytes)] = list.new()
+        list.push(mut span, (clone(low), clone(high)))
+        take span
+    }
+    let empty: std.omap.OMap[Bytes, Option[Arc[Bytes]]] = std.omap.new()
+    for span in spans {
+        let mut from = failure_result_from_rep(types.copied(span.0))?
+        let mut to = failure_result_from_rep(types.copied(span.0))?
+        let mut old_row: Option[(Bytes, Arc[Bytes])] = if old.rows == 0 {
+            None
+        } else {
+            next_tail_row(tx, base, id, old_tiered, empty, mut from, span.1)?
+        }
+        let mut new_row = next_tail_row(tx, head, id, new_tiered, staged, mut to, span.1)?
+        loop {
+            let comparison = match view old_row {
+                Some((key, _)) => match view new_row {
+                    Some((next_key, _)) => list.compare_bytes(key, next_key),
+                    None => Less,
+                },
+                None => if let Some(_) = view new_row {
+                    Greater
+                } else {
+                    break
+                },
+            }
+            if comparison == Less {
+                let Some((key, _)) = view old_row else {
+                    fail("store: a deleted tail row has no key")
+                }
+                if !admit_change(mut out, key, list.len(key))? {
+                    return Ok(())
+                }
+                list.push(mut out.rows, Change(tree_key: failure_result_from_rep(types.copied(key))?, value: None))
+            } else {
+                let Some((key, value)) = view new_row else {
+                    fail("store: a tail put has no row")
+                }
+                let changed = match view old_row {
+                    Some((_, previous)) => comparison == Greater || previous != value,
+                    None => true,
+                }
+                if changed {
+                    if !admit_change(mut out, key, int.saturating_add(list.len(key), list.len(value)))? {
+                        return Ok(())
+                    }
+                    list.push(mut out.rows, Change(tree_key: failure_result_from_rep(types.copied(key))?, value: Some(arc.share(value))))
+                }
+            }
+            if comparison != Greater {
+                old_row = next_tail_row(tx, base, id, old_tiered, empty, mut from, span.1)?
+            }
+            if comparison != Less {
+                new_row = next_tail_row(tx, head, id, new_tiered, staged, mut to, span.1)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn next_tail_row(tx: Tx, tree: pages.PageTree, id: u32, tiered: bool, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut start: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    if start >= high {
+        return Ok(None)
+    }
+    if tiered {
+        // A Memory head can still retain a Tiered image pin after demotion.
+        // Its driver cannot serve a Cold miss from that pin.
+        if let None = tx.attempt {
+            return Error(Tiered(Tail))
+        }
+        let mut stop = failure_result_from_rep(types.copied(high))?
+        return next_tiered_in(tree, tx.attempt, tx.pins, id, staged, mut start, mut stop, false)
+    }
+    let mut rows = byte_cursor(tree, Included(failure_result_from_rep(types.copied(start))?), high)?
+    let found = failure_result_from_rep(catalog.next_bytes(mut rows))?
+    if let Some(row) = view found {
+        start = failure_result_from_rep(pager.scan_page_after(row.0))?
+    }
+    Ok(take found)
+}
+
+// Identical subtrees need no reads. Replay and Tx edits can mask rows
+// under a shared stamp, so add their keys to the differing leaf spans.
+fn tail_spans(attempt: core.Cell[pager.TieredTouchSet], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], base: pages.PageTree, head: pages.PageTree, id: u32, prefix: Bytes, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], low: Bytes, high: Bytes) -> Result[List[(Bytes, Bytes)], Error] {
+    let mut left = pager.tiered_diff_root(base, prefix)
+    let mut right = pager.tiered_diff_root(head, prefix)
+    loop {
+        pager.tiered_diff_drop_shared(mut left, mut right)
+        let top = pager.tiered_diff_top(left, right)
+        if top == 0 {
+            break
+        }
+        let deeper_left = tail_deepen(attempt, pins, take left, top)?
+        left = take deeper_left
+        let deeper_right = tail_deepen(attempt, pins, take right, top)?
+        right = take deeper_right
+    }
+    let mut spans: List[(Bytes, Bytes)] = list.new()
+    for edge in left {
+        failure_result_from_rep(pager.tiered_diff_add_span(mut spans, id, edge, low, high))?
+    }
+    for edge in right {
+        failure_result_from_rep(pager.tiered_diff_add_span(mut spans, id, edge, low, high))?
+    }
+    tiered_diff_overlay_spans(mut spans, base, id, low, high)?
+    tiered_diff_overlay_spans(mut spans, head, id, low, high)?
+    let mut cursor = std.omap.range(staged, Included(clone(low)), Excluded(clone(high)))
+    while let Some((take key, _)) = std.omap.next(mut cursor) {
+        let after = failure_result_from_rep(pager.scan_page_after(key))?
+        failure_result_from_rep(pager.tiered_diff_push(mut spans, take key, take after, low, high))?
+    }
+    Ok(pager.tiered_diff_merge(take spans))
+}
+
+fn tail_deepen(attempt: core.Cell[pager.TieredTouchSet], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take edges: List[pager.TieredDiffEdge], top: u8) -> Result[List[pager.TieredDiffEdge], Error] {
+    let mut out: List[pager.TieredDiffEdge] = list.new()
+    for take edge in take edges {
+        if edge.level != top {
+            list.push(mut out, take edge)
+            continue
+        }
+        pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(edge.lo))?))
+        pager.tiered_reading(attempt, ValuesNone)
+        let expected: Option[u8] = if top == pager.TIERED_DIFF_UNREAD {
+            None
+        } else {
+            Some(top)
+        }
+        let page = failure_result_from_rep(pager.tiered_point_page(attempt, pins, edge.slot, expected))?
+        pager.tiered_seek(attempt, SeekOperation)
+        failure_result_from_rep(pager.tiered_diff_children(edge, page, mut out))?
+    }
+    Ok(take out)
+}

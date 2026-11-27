@@ -331,14 +331,19 @@ type Model = List[Option[List[i8]]]
 
 fn open_far(clock: Clock, random: Random, metric: vector.Metric, ordinal: StaticFn[fn(u64) -> u64], shape: vector.Shape) -> (store.Db, Points, Near, Far) waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let mut d = result.unwrap(store.declare(db, Migrate))
+    let (points, take near, take far) = bind_far(mut db, Migrate, metric, ordinal, shape)
+    (take db, points, take near, take far)
+}
+
+fn bind_far(mut db: store.Db, mode: store.Mode, metric: vector.Metric, ordinal: StaticFn[fn(u64) -> u64], shape: vector.Shape) -> (Points, Near, Far) waits {
+    let mut d = result.unwrap(store.declare(db, mode))
     let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
     let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
     let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code), ordinal))
     let points = result.unwrap(store.finish(mut d, take decl))
     let far = result.unwrap(vector.declare_ivf(mut d, points, "far", metric, code.describe(row_code), ordinal, shape))
     let _ = result.unwrap(store.seal(mut db, take d))
-    (take db, points, take near, take far)
+    (points, take near, take far)
 }
 
 fn recall_shape() -> vector.Shape {
@@ -374,7 +379,7 @@ fn ivf_layout_version(clock: Clock, random: Random) -> Result[(), ()] waits {
 }
 
 fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q: List[i8], k: u64) -> Found waits {
-    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(points), store.copy_env(far), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
+    let ran = result.unwrap(store.run(mut db, Some(recall_shape().steps), (store.copy_env(points), store.copy_env(far), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
         for step in input.2 {
             match step {
                 Put(key, c) => store.put(mut tx, input.0, key, clone(c))?,
@@ -393,13 +398,111 @@ fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q
 
 fn far_look(db: store.Db, far: Far, q: List[i8], k: u64, probes: u32) -> Found waits {
     let read_handle = result.unwrap(store.reader(db, 0u64))
-    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(far), store.copy_env(q), k, probes), fn(tx, input) -> Found {
+    far_read(read_handle, store.snapshot(db), None, far, q, k, probes)
+}
+
+fn far_read(reader: store.Reader, s: store.Snapshot, steps: Option[u64], far: Far, q: List[i8], k: u64, probes: u32) -> Found waits {
+    let looked = result.unwrap(store.look(reader, s, steps, (store.copy_env(far), store.copy_env(q), k, probes), fn(tx, input) -> Found {
         vector.query_ivf(tx, input.0, input.1, input.2, input.3, Every)
     }))
     match take looked {
         Seen(take seen) => clone(seen.value),
         _ => fail("ivf law: the look did not run"),
     }
+}
+
+fn ivf_disk_result(db: store.Db, far: Far, q: List[i8]) -> Found waits {
+    let reader = result.unwrap(store.reader(db, store.VALUE_LIMIT + 1048576))
+    far_read(reader, store.snapshot(db), Some(recall_shape().steps), far, q, IVF_K, 16)
+}
+
+fn equal_ivf(disk: Found, memory: Found) {
+    let Ok(actual) = view disk else {
+        fail("IVF residency: the disk query refused")
+    }
+    let Ok(expected) = view memory else {
+        fail("IVF residency: the Memory query refused")
+    }
+    if list.len(expected) != IVF_K || !same_hits(actual, expected) {
+        fail("IVF residency: the hit keys or exact scores differ")
+    }
+}
+
+fn ivf_residency(d: Dir, clock: Clock, random: Random, tasks: Tasks, source_tiered: bool) waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "ivf-residency-")
+    let directory = result.unwrap(host.mkdtemp(d, mut name))
+    let mut overrides = store.derived_sizes()
+    overrides.resident_limit = Some(300000000)
+    let options = result.unwrap(store.sized_with(Directory, 2147483648, overrides))
+    let mut disk = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let ordinal = code.describe(row_ordinal)
+    let (points, _, take far) = bind_far(mut disk, Migrate, L2, ordinal, recall_shape())
+    let (take opened, memory_points, _, take memory_far) = open_far(clock, random, L2, ordinal, recall_shape())
+    let mut memory = take opened
+    let q = far_query(0)
+    let mut seed: List[Step] = list.new()
+    for k in 0u64 .. 384 {
+        list.push(mut seed, Put(k, near_centre(k % IVF_CENTRES, k + 1)))
+    }
+    write_rows(mut disk, points, far, clone(seed))
+    write_rows(mut memory, memory_points, memory_far, take seed)
+    if source_tiered {
+        let (_, source_id) = store.table_identity(points)
+        result.unwrap(store.set_residency(mut disk, source_id, Tiered))
+        // Cold exact scan before the first image.
+        equal_ivf(ivf_disk_result(disk, far, q), far_look(memory, memory_far, q, IVF_K, 16))
+    }
+    let _ = settle(mut disk, far)
+    let _ = settle(mut memory, memory_far)
+    if !source_tiered {
+        let catalog = result.unwrap(store.catalog_entries(store.snapshot(disk)))
+        let mut moved = false
+        for entry in catalog {
+            if entry.name == "far.blocks" && entry.rows != 0 {
+                result.unwrap(store.set_residency(mut disk, entry.id, Tiered))
+                moved = true
+            }
+        }
+        if !moved {
+            fail("IVF residency: the published block table is empty or missing")
+        }
+    }
+    // Compare the published image, then a Cold committed tail with a
+    // deletion and a row moved to an exact match outside its old cluster.
+    equal_ivf(ivf_disk_result(disk, far, q), far_look(memory, memory_far, q, IVF_K, 16))
+    let mut edits: List[Step] = list.new()
+    list.push(mut edits, Delete(0))
+    list.push(mut edits, Put(137, clone(q)))
+    write_rows(mut disk, points, far, clone(edits))
+    write_rows(mut memory, memory_points, memory_far, take edits)
+    let _ = result.unwrap(store.checkpoint(mut disk))
+    result.unwrap(store.close(take disk))
+    let mut reopened = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let (reopened_points, _, take reopened_far) = bind_far(mut reopened, Open, L2, ordinal, recall_shape())
+    equal_ivf(ivf_disk_result(reopened, reopened_far, q), far_look(memory, memory_far, q, IVF_K, 16))
+    let mut staged: List[Step] = list.new()
+    list.push(mut staged, Delete(137))
+    list.push(mut staged, Put(389, clone(q)))
+    equal_ivf(far_run(mut reopened, reopened_points, reopened_far, clone(staged), q, IVF_K), far_run(mut memory, memory_points, memory_far, take staged, q, IVF_K))
+    result.unwrap(store.close(take reopened))
+    result.unwrap(store.close(take memory))
+}
+
+/// bug: read_tail refuses a Tiered source before the exact scan or the published-image query can run.
+/// oracle: the same IVF queries on a Memory twin, with identical committed and staged edits.
+@test
+fn ivf_tiered_source(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    ivf_residency(d, clock, random, tasks, true)
+    Ok(())
+}
+
+/// bug: an IVF query can use the source residency for its block reads and skip the block pager.
+/// oracle: published-image hits and exact scores from the same IVF query on a Memory twin.
+@test
+fn ivf_tiered_blocks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    ivf_residency(d, clock, random, tasks, false)
+    Ok(())
 }
 
 // Steps the projector until it is idle, and counts the merges it made.

@@ -933,7 +933,7 @@ Lanes land in order on top of each other. Each lane:
 - **Laws.** `store_lookup_laws`, `store_index_crash_laws`, `store_put_laws_2`; O1; O4.
 
 ### L11 — `read`
-- **Move.** `store-read.hirsel`, `store-read-pages.hirsel` and `store-changes.hirsel` privates, over a neutral `read.ReaderInput`.
+- **Move.** `store-read.hirsel`, `store-read-pages.hirsel` and `store-changes.hirsel` privates, over a neutral `read.ReaderInput`. The Tiered tail reader in `store-read-tail.hirsel` belongs to `read` (D7-S5).
 - **v3.1.** `next_index_page` calls L12's `tx_tiered_index_row`, so it lands with `txn` (§3.5).
 - **Stays.** `check_table_read`, `open_range`, `open_range_bounds`, `check_index_read` and `open_lookup` (Tx-bound) stay with `Tx`. `staged_reader` and the prepared-export adapter stay at the root. `Reader`, `ReadOnly`, `RowView`, `Visit`, `SharedCapture` and all 38 public `store-read.hirsel` declarations stay at the root with R4's contracts. The index entry cursor of v2.155 (3101) follows the same split: its private `EntryCursor`, `step_entry`, `entry_parts`, `lends_codes` and `lends_i8_rows` move with the `read` privates, while `IndexEntries`, `I8Code`, `entries`, `next_entry` and `next_i8_entry` stay at the root.
 - **Laws.** `store_read_laws`, `store_cursor_laws`, `store_changes_laws`, `store_changes_page_law`, `store_diff_laws`; O1; O4 (`ReaderState` control and `RowView` escape).

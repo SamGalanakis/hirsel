@@ -837,7 +837,7 @@ type TailRows = List[(u64, Option[u64])]
 
 fn tail_model_write(mut db: Db, mut model: Map[u64, u64], t: Table[u64, u64], k: u64, v: Option[u64]) -> Result[(), Error] waits {
     let input: (Table[u64, u64], u64, Option[u64]) = (clone(t), k, v)
-    let ran = run(mut db, None, input, fn(mut tx, env) -> Result[(), Error] {
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), input, fn(mut tx, env) -> Result[(), Error] {
         match env.2 {
             Some(value) => put(mut tx, env.0, env.1, value),
             None => {
@@ -897,15 +897,18 @@ fn tail_image(db: Db, fixture: ProjectorFixture) -> Result[Image, Error] waits {
     Ok(image)
 }
 
-fn law_tail(c: Clock) -> Result[(), Error] waits {
-    let mut db = test_db(c, 1073741824)
-    let fixture = projector_fixture(mut db, Migrate, Own, cadence())?
+fn law_tail(mut db: Db, fixture: ProjectorFixture, tiered: bool) -> Result[(), Error] waits {
     let t: Table[u64, u64] = clone(fixture.source_table)
     let steps = Limits(rows: 64, byte_limit: 65536)
     let mut model: Map[u64, u64] = map.new()
-    let r = reader(db, 0)?
+    let (pin_bytes, call_steps) = if tiered {
+        (VALUE_LIMIT + 1048576, Some(PROJECTOR_LAW_STEPS))
+    } else {
+        (0u64, None)
+    }
+    let r = reader(db, pin_bytes)?
     // No image yet: no base.
-    if look_tail(r, snapshot(db), fixture, t)? != None {
+    if look_tail(r, snapshot(db), fixture, t, call_steps)? != None {
         fail("tail: a projection with no image has a base")
     }
     for k in 0u64 .. 10 {
@@ -927,12 +930,15 @@ fn law_tail(c: Clock) -> Result[(), Error] waits {
     tail_model_write(mut db, mut model, t, 6, None)?
     tail_model_write(mut db, mut model, t, 20, Some(200))?
     tail_model_write(mut db, mut model, t, 7, Some(70))?
+    if tiered {
+        checkpoint_tail_pin(mut db, fixture, image)?
+    }
     let committed: Map[u64, u64] = clone(model)
     let held = snapshot(db)
     // A run's tail holds its own writes: a new key, a delete of a base key,
     // and neither a key put back to its base row nor one added and deleted.
     let input: (ProjectionDecl, Table[u64, u64]) = (clone(fixture.decl), clone(t))
-    let ran = run(mut db, None, input, fn(mut tx, env) -> Result[Option[TailRows], Error] {
+    let ran = run(mut db, call_steps, input, fn(mut tx, env) -> Result[Option[TailRows], Error] {
         put(mut tx, env.1, 21, 210)?
         put(mut tx, env.1, 5, 50)?
         let _ = delete(mut tx, env.1, 20)?
@@ -952,19 +958,19 @@ fn law_tail(c: Clock) -> Result[(), Error] waits {
     }
     // A Snapshot the projector has since stepped past keeps its own base.
     project_until_idle(mut db, steps)?
-    if look_tail(r, held, fixture, t)? != Some(tail_expected(base, committed)) {
+    if look_tail(r, held, fixture, t, call_steps)? != Some(tail_expected(base, committed)) {
         fail("tail: an older Snapshot's tail differs from the model difference")
     }
     // Another table is not the projection's source: no base.
-    if look_tail(r, snapshot(db), fixture, fixture.second_table)? != None {
+    if look_tail(r, snapshot(db), fixture, fixture.second_table, call_steps)? != None {
         fail("tail: another table has a base")
     }
     Ok(())
 }
 
-fn look_tail(r: Reader, s: Snapshot, fixture: ProjectorFixture, t: Table[u64, u64]) -> Result[Option[TailRows], Error] waits {
+fn look_tail(r: Reader, s: Snapshot, fixture: ProjectorFixture, t: Table[u64, u64], steps: Option[u64]) -> Result[Option[TailRows], Error] waits {
     let input: (ProjectionDecl, Table[u64, u64]) = (clone(fixture.decl), clone(t))
-    let Seen(Seen(value: take found, ..)) = look(r, s, None, input, tail_pages)? else {
+    let Seen(Seen(value: take found, ..)) = look(r, s, steps, input, tail_pages)? else {
         return Error(MigrationFault)
     }
     take found
@@ -972,5 +978,7 @@ fn look_tail(r: Reader, s: Snapshot, fixture: ProjectorFixture, t: Table[u64, u6
 
 @test
 fn test_tail(c: Clock) -> Result[(), Error] waits {
-    law_tail(c)
+    let mut db = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut db, Migrate, Own, cadence())?
+    law_tail(mut db, fixture, false)
 }

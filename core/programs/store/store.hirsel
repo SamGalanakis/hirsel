@@ -2372,13 +2372,6 @@ fn cut_io_error(mut db: Db, take problem: Error) -> Error {
     }
 }
 
-type PreparedDiskCut {
-    pages: manifest.PackDiskState,
-    compaction: pager.TieredCompaction,
-    removals: journal.DiskRemovals,
-    manifest: Bytes
-}
-
 type CutTiming {
     pause_ns: u64,
     removal_ns: u64,
@@ -2490,6 +2483,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     }
     let PreparedDiskCut(pages: take prepared_pages, compaction: take compaction, removals: take removals, manifest: take page_record) = take prepared
     let settled_tiered = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), generation, next_stamp))?
+    let tail_bases = prepare_sealed_tail_bases(db, delta, staged, heads)?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = manifest.resident_location_charge(manifest.pack_locations(prepared_pages))
@@ -2526,6 +2520,9 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     let leased_step = build_leased_step(db, delta)
     let held_delta = install_tiered_holders(mut db, take delta, take staged)
     install_holder_delta(mut db, take held_delta)
+    if let Some(take bases) = take tail_bases {
+        pages.set_holder_bases(mut db.holders, Some(take bases))
+    }
     record_leased_step(mut db, take leased_step)
     let installed = if observe {
         host.mono_ns(db.clock)

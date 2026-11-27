@@ -66,6 +66,10 @@ pub fn holder_bases(held: HolderTable) -> View[TailBases] in held {
     view held.bases
 }
 
+pub fn set_holder_bases(mut held: HolderTable, take bases: TailBases) {
+    held.bases = take bases
+}
+
 pub fn reserve_head(mut held: HolderTable) -> Result[(), Capacity] {
     reserve_branch_name(mut held)?
     list.try_reserve(mut held.heads, 1)

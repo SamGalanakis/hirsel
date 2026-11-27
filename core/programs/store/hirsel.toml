@@ -51,6 +51,7 @@ std = { major = 1 }
 "store-catalog-work.hirsel" = "catalog"
 "store-holders.hirsel" = "pages"
 "store-api-tail.hirsel" = "store"
+"store-read-tail.hirsel" = "store"
 "store-api-layout.hirsel" = "store"
 "store-page-inventory.hirsel" = "pages"
 "store-page-work.hirsel" = "store"
@@ -276,6 +277,7 @@ dirs = ["."]
 "store_put_laws_2.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"
+"store_tail_tiered_laws.hirsel" = "store"
 "store_diff_laws.hirsel" = "store"
 "store_lookup_laws.hirsel" = "store"
 "store_declare_laws.hirsel" = "store"
@@ -680,6 +682,12 @@ grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED,HIRSEL_TEST_SWARM_REPLAY"]
 
 [tests.runs."store@1/store/test_local_projector_laws"]
 limit = 536870912
+
+[tests.runs."store@1/store/test_tail_tiered"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_tail_demoted_source"]
+limit = 268435456
 
 [tests.runs."store@1/store/test_l63_parked_rerun_takes_moved_prior"]
 limit = 536870912

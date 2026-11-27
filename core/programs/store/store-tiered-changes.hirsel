@@ -44,6 +44,63 @@ pub fn tiered_diff_root(tree: pages.PageTree, key: Bytes) -> List[TieredDiffEdge
     take edges
 }
 
+pub fn tiered_diff_children(edge: TieredDiffEdge, page: Arc[std.page.Page], mut out: List[TieredDiffEdge]) -> Result[(), types.Failure] {
+    let image = std.page.image_of(page)
+    let height = std.page.level(image)
+    if height == 0 {
+        list.push(mut out, TieredDiffEdge(slot: clone(edge.slot), stamp: edge.stamp, level: 0, lo: types.copied(edge.lo)?, hi: clone(edge.hi)))
+        return Ok(())
+    }
+    let n = std.page.count(image)
+    for at in 0u64 .. n {
+        let child: std.page.Slot = clone(option.unwrap(std.page.child_slot(page, at)))
+        let lo = if at == 0 {
+            types.copied(edge.lo)?
+        } else {
+            option.unwrap(std.page.key_at(image, at))
+        }
+        let hi = if at + 1 < n {
+            std.page.key_at(image, at + 1)
+        } else {
+            clone(edge.hi)
+        }
+        let stamp = tiered_slot_stamp(child)
+        list.push(mut out, TieredDiffEdge(slot: take child, stamp: stamp, level: height - 1, lo: take lo, hi: take hi))
+    }
+    Ok(())
+}
+
+pub fn tiered_diff_top(left: List[TieredDiffEdge], right: List[TieredDiffEdge]) -> u8 {
+    let mut top = 0u8
+    for edge in left {
+        top = order.max(top, edge.level)
+    }
+    for edge in right {
+        top = order.max(top, edge.level)
+    }
+    top
+}
+
+pub fn tiered_diff_merge(take pending: List[(Bytes, Bytes)]) -> List[(Bytes, Bytes)] {
+    let mut spans = take pending
+    list.sort(mut spans, fn(x: (Bytes, Bytes), y: (Bytes, Bytes)) -> Order {
+        list.compare_bytes(x.0, y.0)
+    })
+    let mut merged: List[(Bytes, Bytes)] = list.new()
+    for take span in take spans {
+        let n = list.len(merged)
+        let (take lo, take hi) = take span
+        if n != 0 && lo <= merged[n - 1].1 {
+            if hi > merged[n - 1].1 {
+                merged[n - 1].1 = take hi
+            }
+        } else {
+            list.push(mut merged, (take lo, take hi))
+        }
+    }
+    take merged
+}
+
 // Drops every edge whose stamp is an edge of the other side. A zero stamp
 // names no subtree and is never dropped.
 pub fn tiered_diff_drop_shared(mut left: List[TieredDiffEdge], mut right: List[TieredDiffEdge]) {

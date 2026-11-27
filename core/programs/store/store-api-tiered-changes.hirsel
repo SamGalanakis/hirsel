@@ -159,17 +159,7 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: pager.TieredRowD
     let mut right = pager.tiered_diff_root(b.roots.collections, key)
     loop {
         pager.tiered_diff_drop_shared(mut left, mut right)
-        let mut top = 0u8
-        for edge in left {
-            if edge.level > top {
-                top = edge.level
-            }
-        }
-        for edge in right {
-            if edge.level > top {
-                top = edge.level
-            }
-        }
+        let top = pager.tiered_diff_top(left, right)
         if top == 0 {
             break
         }
@@ -184,8 +174,8 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: pager.TieredRowD
     for edge in right {
         failure_result_from_rep(pager.tiered_diff_add_span(mut spans, diff.id, edge, low, high))?
     }
-    tiered_diff_overlay_spans(mut spans, a, diff.id, low, high)?
-    tiered_diff_overlay_spans(mut spans, b, diff.id, low, high)?
+    tiered_diff_overlay_spans(mut spans, a.roots.collections, diff.id, low, high)?
+    tiered_diff_overlay_spans(mut spans, b.roots.collections, diff.id, low, high)?
     let (_, before_descriptor) = option.unwrap(std.page.collection_slot(a.roots.collections.root, key))
     let (_, after_descriptor) = option.unwrap(std.page.collection_slot(b.roots.collections.root, key))
     if pages.collection_descriptor(before_descriptor).kind == LogCollection && pages.collection_descriptor(after_descriptor).kind == LogCollection {
@@ -194,22 +184,7 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: pager.TieredRowD
         failure_result_from_rep(pager.tiered_diff_window_span(mut spans, diff.id, old.first, new.first, low, high))?
         failure_result_from_rep(pager.tiered_diff_window_span(mut spans, diff.id, old.next, new.next, low, high))?
     }
-    list.sort(mut spans, fn(x: (Bytes, Bytes), y: (Bytes, Bytes)) -> Order {
-        list.compare_bytes(x.0, y.0)
-    })
-    let mut merged: List[(Bytes, Bytes)] = list.new()
-    for take span in take spans {
-        let n = list.len(merged)
-        let (take lo, take hi) = take span
-        if n != 0 && lo <= merged[n - 1].1 {
-            if hi > merged[n - 1].1 {
-                merged[n - 1].1 = take hi
-            }
-        } else {
-            list.push(mut merged, (take lo, take hi))
-        }
-    }
-    Ok(take merged)
+    Ok(pager.tiered_diff_merge(take spans))
 }
 
 fn tiered_diff_paged(s: Snapshot, key: Bytes) -> bool {
@@ -267,36 +242,15 @@ fn tiered_diff_expand(r: Reader, s: Snapshot, take edges: List[pager.TieredDiffE
                 Some(edge.level)
             }
             let page = failure_result_from_rep(pager.tiered_point_page(attempt, visible, edge.slot, expected))?
-            let image = std.page.image_of(page)
-            let height = std.page.level(image)
-            if height == 0 {
-                list.push(mut out, pager.TieredDiffEdge(slot: clone(edge.slot), stamp: edge.stamp, level: 0, lo: failure_result_from_rep(types.copied(edge.lo))?, hi: clone(edge.hi)))
-                continue
-            }
-            let n = std.page.count(image)
-            for at in 0u64 .. n {
-                let child: std.page.Slot = clone(option.unwrap(std.page.child_slot(page, at)))
-                let lo = if at == 0 {
-                    failure_result_from_rep(types.copied(edge.lo))?
-                } else {
-                    option.unwrap(std.page.key_at(image, at))
-                }
-                let hi = if at + 1 < n {
-                    std.page.key_at(image, at + 1)
-                } else {
-                    clone(edge.hi)
-                }
-                let stamp = pager.tiered_slot_stamp(child)
-                list.push(mut out, pager.TieredDiffEdge(slot: take child, stamp, level: height - 1, lo: take lo, hi: take hi))
-            }
+            failure_result_from_rep(pager.tiered_diff_children(edge, page, mut out))?
         }
         Ok(take out)
     })
 }
 
 // Each replayed key of collection `id` at `s`, as the span of that one key.
-fn tiered_diff_overlay_spans(mut spans: List[(Bytes, Bytes)], s: Snapshot, id: u32, low: Bytes, high: Bytes) -> Result[(), Error] {
-    let Some(replay) = view s.roots.collections.replay else {
+fn tiered_diff_overlay_spans(mut spans: List[(Bytes, Bytes)], tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> Result[(), Error] {
+    let Some(replay) = view tree.replay else {
         return Ok(())
     }
     let Some(overlay) = std.omap.get(replay.collections, id) else {

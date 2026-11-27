@@ -153,6 +153,37 @@ fn drain_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]],
     }
 }
 
+// A cut can move a projector's pages without replacing the pin. Prepare
+// the same sealed roots for new Tx views before publishing the MANIFEST.
+// Pin add, drop and replacement already rebuild the tail bases at install.
+fn prepare_sealed_tail_bases(db: Db, delta: HolderDelta, staged: pager.TieredCutStage, heads: u64) -> Result[pages.TailBases, Error] {
+    if pager.tiered_cut_stage_empty(staged) {
+        return Ok(None)
+    }
+    let Some(_) = pages.holder_bases(db.holders) else {
+        return Ok(None)
+    }
+    match delta {
+        AddPin(_) => return Ok(None),
+        RemovePins(_) => return Ok(None),
+        ReplacePin(_, _) => return Ok(None),
+        _ => (),
+    }
+    disk_allocation(scoped fn() -> Result[pages.TailBases, Error] {
+        let mut visit: (u64, List[pages.TailBase]) = (heads, list.new())
+        manifest.visit_cut_pins(cut_input(db, delta), mut visit, scoped fn(mut at: (u64, List[pages.TailBase]), held: pages.Pin) -> Result[(), Error] {
+            if held.owner == ProjectorPin {
+                let roots = pages.share_roots(staged.roots[at.0])
+                list.push(mut at.1, pages.TailBase(name: clone(held.name), branch: held.branch, version: held.version, roots: take roots))
+            }
+            at.0 += 1
+            Ok(())
+        })?
+        let (_, take bases) = take visit
+        Ok(Some(arc.new(take bases)))
+    })
+}
+
 // Step 5: each participant's Tiered images replace its Hot ones, in the
 // order `visit_cut_heads` and `visit_cut_pins` gave them to the stage.
 fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_stage: pager.TieredCutStage) -> HolderDelta {
@@ -247,4 +278,11 @@ fn queue_index_chunk_frees(freed: pager.TieredFreed, branch_id: u32, mut seen: M
         }
     }
     Ok(())
+}
+
+type PreparedDiskCut {
+    pages: manifest.PackDiskState,
+    compaction: pager.TieredCompaction,
+    removals: journal.DiskRemovals,
+    manifest: Bytes
 }

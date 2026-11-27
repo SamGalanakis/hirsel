@@ -139,11 +139,13 @@ _posix_spawn
 _posix_spawn_file_actions_adddup2
 _posix_spawn_file_actions_addfchdir
 _posix_spawn_file_actions_addfchdir_np
+_posix_spawn_file_actions_addopen
 _posix_spawn_file_actions_destroy
 _posix_spawn_file_actions_init
 _posix_spawnattr_destroy
 _posix_spawnattr_init
 _posix_spawnattr_setflags
+_posix_spawnattr_setpgroup
 _posix_spawnattr_setsigdefault
 _posix_spawnattr_setsigmask
 _pow
@@ -222,6 +224,7 @@ _sigismember
 _signal
 _snprintf
 _socket
+_socketpair
 _stat
 _statfs
 _strcasecmp

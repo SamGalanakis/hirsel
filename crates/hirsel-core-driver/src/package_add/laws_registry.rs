@@ -227,9 +227,14 @@ fn g6_cli_named_add_update_audit() {
     let wrap = catalog.publish("fixture.test/wrap", "1.0.0", LIB, NOW - WAIT, edges);
     let manifest = dir.join("hirsel.toml");
     let original = fs::read_to_string(&manifest).unwrap();
-    fs::write(&manifest,format!("{original}\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{wrap}\", registry = \"https://alpha.test\" }}\n")).unwrap();
+    let constrained_manifest = original.replace("[dependencies]",&format!("[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{wrap}\", registry = \"https://alpha.test\" }}"));
+    fs::write(&manifest, constrained_manifest).unwrap();
     let constrained = snapshot(dir);
-    run(&["update", "j@0.3.1"], 2);
+    let rejected = run(&["update", "j@0.3.1"], 2);
+    assert!(
+        rejected.contains("no eligible registry release"),
+        "{rejected}"
+    );
     assert_eq!(snapshot(dir), constrained);
     fs::write(&manifest, &original).unwrap();
     run(&["update", "j@0.3.1"], 0);
@@ -300,7 +305,83 @@ fn g6_cli_named_add_update_audit() {
     assert!(denied.contains("authority"), "{denied}");
     assert_eq!(snapshot(dir), before);
 
+    let pre = catalog.publish(NAME, "1.1.0-rc.1", LIB, NOW - 100, BTreeMap::new());
+    let safe = catalog.publish(
+        "fixture.test/tools",
+        "2.0.0",
+        LIB,
+        NOW - WAIT,
+        BTreeMap::new(),
+    );
+    catalog.publish(
+        "fixture.test/tools",
+        "2.0.1",
+        "pub fn count(e: Env) -> u64 { env.len(e) }\n",
+        NOW - WAIT,
+        BTreeMap::new(),
+    );
+    let add = run(&["add", "fixture.test/tools@2", "--json"], 0);
+    assert!(add.contains(&safe.to_string()), "{add}");
+    let part = run(&["add", "fixture.test/json@1", "--as", "next"], 2);
+    assert!(part.contains("no eligible"), "{part}");
+    let exact = run(&["add", "fixture.test/json@1.1.0-rc.1", "--as", "next"], 0);
+    assert!(exact.contains(&pre.to_string()), "{exact}");
+
+    // Only a transitive floor names this identity. The requested release has
+    // never been a manifest row or the tested root of an edge.
+    let child_name = "fixture.test/child";
+    let tested = catalog.publish(child_name, "0.3.1", LIB, NOW - WAIT, BTreeMap::new());
+    let selected = catalog.publish(child_name, "0.3.2", LIB, NOW - 3600, BTreeMap::new());
+    catalog.publish(child_name, "0.4.0", LIB, NOW - WAIT, BTreeMap::new());
+    let floors = [(
+        "child".into(),
+        (
+            Id {
+                name: child_name.into(),
+                major: 0,
+            },
+            Binding::Floor {
+                tested,
+                minor: 3,
+                patch: 1,
+            },
+        ),
+    )]
+    .into();
+    catalog.publish("fixture.test/reader", "1.0.0", LIB, NOW - WAIT, floors);
+    run(&["add", "fixture.test/reader@1.0.0"], 0);
+    let with_floor = snapshot(dir);
+    let crossing = run(&["update", "fixture.test/child@0.4.0"], 2);
+    assert!(
+        crossing.contains("no eligible registry release"),
+        "{crossing}"
+    );
+    assert_eq!(snapshot(dir), with_floor);
+    run(&["update", "fixture.test/child@0.3.2"], 0);
+    let text = fs::read_to_string(&manifest).unwrap();
+    assert!(
+        text.contains("[selections]") && text.contains(&selected.to_string()),
+        "{text}"
+    );
+
     config(dir, true);
     let preview = run(&["audit"], 0);
     assert!(preview.contains("preview (quorum 0)"), "{preview}");
+    let head = serde_json::to_vec(&json!([
+        "takedown",
+        hex(&fix.0),
+        prior,
+        "legal",
+        "fixture removal",
+        "30",
+        auth()
+    ]))
+    .unwrap();
+    status.push(head);
+    serve_log(&server, Log::Status, &status, true);
+    let audit = run(&["audit"], 2);
+    assert!(
+        audit.contains("taken down (legal: fixture removal)"),
+        "{audit}"
+    );
 }

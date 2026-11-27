@@ -52,7 +52,7 @@ struct Report {
     fetched: BTreeSet<String>,
     closure: Vec<ClosureRow>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    registry: BTreeMap<String, crate::package_add::registry_select::Finding>,
+    registry: BTreeMap<String, registry_select::Finding>,
     /// The branch and commit taken for a git source given without a reference.
     #[serde(skip)]
     chose: Option<String>,
@@ -486,7 +486,7 @@ pub(crate) fn run_at(
     let options = Options::read(invocation)?;
     let scope = lock_scope(cwd)?;
     let workspace = current_scope(cwd, &scope, "add")?;
-    let mut registry = crate::package_add::registry_select::Registry::new(&options.store)?;
+    let mut registry = registry_select::Registry::new(&options.store)?;
     let mut authority_refusal = None;
     loop {
         match add(
@@ -504,9 +504,7 @@ pub(crate) fn run_at(
             Ok(Attempt::Denied(_, error)) => return Err(error),
             Err(e) => {
                 return Err(
-                    if e.downcast_ref::<crate::package_add::registry_select::NoEligible>()
-                        .is_some()
-                    {
+                    if e.downcast_ref::<registry_select::NoEligible>().is_some() {
                         authority_refusal.unwrap_or(e)
                     } else {
                         e
@@ -527,7 +525,7 @@ fn add(
     cwd: &Path,
     scope: &File,
     workspace: &Workspace,
-    registry: &mut crate::package_add::registry_select::Registry,
+    registry: &mut registry_select::Registry,
     checkpoint: &mut dyn FnMut(Checkpoint),
 ) -> Result<Attempt, Failure> {
     let root_manifest = workspace.directory.join(MANIFEST);
@@ -888,20 +886,11 @@ fn add(
     )
     .map_err(|error| report.with_fetches(error))?;
     if matches!(options.source, Source::Registry(_)) {
-        let mut findings = registry.graph(&trial, None)?;
-        if let (Some(SourceLocation::Registry(origin)), Some(root)) = (&locator, root) {
-            findings
-                .entry(id.clone())
-                .or_insert(registry.finding(origin, root)?);
-        }
-        crate::package_add::registry_select::require_active(&findings)?;
-        report.registry = findings
-            .into_iter()
-            .map(|(id, f)| (id.to_string(), f))
-            .collect();
-        let checked = crate::package_audit::check(&trial, None)?;
-        if !checked.authority.is_empty() {
-            let error = checked.authority.join("\n").into();
+        let (findings, authority) =
+            registry.check_add(&trial, &id, root, locator.as_ref(), shared.as_ref(), alias)?;
+        report.registry = findings;
+        if !authority.is_empty() {
+            let error = authority.join("\n").into();
             if matches!(&options.source, Source::Registry(query) if query.exact.is_none()) {
                 return Ok(Attempt::Denied(
                     root.expect("named registry binding"),

@@ -185,8 +185,8 @@ impl Refresh<'_> {
                 };
                 let choice = self.registry.select(
                     &query,
-                    Some((origin, *before, alias)),
-                    &self.constraints,
+                    Some((origin, *before, if alias_scope { alias } else { &id.name })),
+                    |r, v| self.constraints.accepts(id, r, v),
                 )?;
                 self.choices
                     .entry(id.clone())
@@ -418,7 +418,7 @@ fn run_at(
             })
         });
         refresh.libraries = libs;
-        if fits {
+        if fits && !(tried.is_empty() && refresh.registry.young_fix.is_some()) {
             break (edits, rebound);
         }
         if !tried.insert(refresh.choices.clone()) {
@@ -426,14 +426,21 @@ fn run_at(
         }
         refresh.constraints = constraints;
     };
+    let requested = target
+        .version()
+        .or_else(|| alias_version.as_ref().map(|(id, v)| (id, v)));
+    let unused = |id: &Id| {
+        refresh.choices.contains_key(id)
+            && !rebound.members.values().any(|m| m.edges.contains_key(id))
+    };
     let (selections, libraries) = select(
         &rebound,
         &store,
         refresh.libraries,
-        target
-            .version()
-            .or_else(|| alias_version.as_ref().map(|(id, v)| (id, v))),
+        requested.filter(|(id, _)| !unused(id)),
         &mut refresh.fetched,
+        &mut refresh.registry,
+        |id| target.includes(id, "", false),
     )?;
     let root = edits.last_mut().unwrap();
     let text = edit::selections(&root.after.bytes, &workspace.selections, &selections)?;
@@ -455,9 +462,34 @@ fn run_at(
     {
         return Err(format!("no dependency binds {name}").into());
     }
-    let findings = refresh.registry.graph(&trial, None)?;
+    let mut findings = refresh.registry.graph(&trial, None)?;
     crate::package_add::registry_select::require_active(&findings)?;
-    let checked = crate::package_audit::check(&trial, None)?;
+    let mut checked = crate::package_audit::check(&trial, None)?;
+    if let Some(shared) = Manifest::parse(
+        &edits.last().unwrap().after.bytes,
+        &workspace.directory.join(MANIFEST),
+    )?
+    .workspace
+    {
+        for (alias, dep) in &shared.dependencies {
+            let Dependency::Published(id, root, Some(SourceLocation::Registry(origin)), mask) = dep
+            else {
+                continue;
+            };
+            if target.includes(id, alias, inherited)
+                && !trial.workspace.members.values().any(|m| {
+                    matches!(
+                        m.package.dependencies.get(alias),
+                        Some(Dependency::Inherited)
+                    )
+                })
+            {
+                let (unused, authority) = refresh.registry.unbound(id, *root, origin, *mask)?;
+                findings.extend(unused);
+                checked.authority.extend(authority);
+            }
+        }
+    }
     let old = workspace
         .with_manifests(cwd, &[], false)?
         .and_then(|before| Resolution::resolve(before, store.clone(), true).ok());

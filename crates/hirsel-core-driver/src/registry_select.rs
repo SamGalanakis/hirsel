@@ -174,7 +174,7 @@ impl Registry {
         })
     }
 
-    fn open(&mut self, name: &str, pin: Option<&Origin>) -> Result<Origin, Failure> {
+    pub(crate) fn open(&mut self, name: &str, pin: Option<&Origin>) -> Result<Origin, Failure> {
         let client = self.store.registry(name, pin)?;
         let origin = client.route().origin().clone();
         if !self.logs.contains_key(&origin) {
@@ -223,7 +223,7 @@ impl Registry {
         &mut self,
         query: &Query,
         pin: Option<(&Origin, Root, &str)>,
-        constraints: &Constraints,
+        accepts: impl Fn(Root, &Version) -> bool,
     ) -> Result<Selected, Failure> {
         let name = &query.name;
         let origin = self.open(name, pin.map(|p| p.0))?;
@@ -235,7 +235,9 @@ impl Registry {
             .map(|(_, root, alias)| {
                 versions
                     .iter()
-                    .find(|(_, c)| c.leaf.root() == root)
+                    .find(|(v, c)| {
+                        c.leaf.root() == root && query.major.is_none_or(|major| v.major == major)
+                    })
                     .map(|(v, _)| (v, statuses.state(root), alias))
                     .ok_or_else(|| format!("{name} {root} lacks verified release inclusion"))
             })
@@ -251,7 +253,7 @@ impl Registry {
                 || before
                     .is_some_and(|(old, _, _)| v < old || (old.major == 0 && old.minor != v.minor))
                 || self.denied.contains(&candidate.leaf.root())
-                || !constraints.accepts(candidate.leaf.id(), candidate.leaf.root(), v)
+                || !accepts(candidate.leaf.root(), v)
                 || statuses
                     .state(candidate.leaf.root())
                     .is_some_and(|s| s.disposition != Disposition::Active)
@@ -280,17 +282,24 @@ impl Registry {
                 }),
                 alias,
             )) = before
-            && let [(candidate, age)] = young.as_slice()
+            && let Some((candidate, age)) = young.first()
         {
-            let fix = candidate.leaf.version();
-            let age = if *age >= 3600 {
-                format!("{} h", age / 3600)
+            let hint = if young.len() == 1 {
+                let fix = candidate.leaf.version();
+                let age = if *age >= 3600 {
+                    format!("{} h", age / 3600)
+                } else {
+                    format!("{} s", age)
+                };
+                format!(
+                    "{alias} {old} is retired ({reason}: {message}).\n{alias} {fix} was published {age} ago, inside the 72 h wait.\nTo take it now: hirsel update {alias}@{fix}"
+                )
             } else {
-                format!("{} s", age)
+                format!(
+                    "{alias} {old} is retired ({reason}: {message}). No eligible release is outside the 72 h wait."
+                )
             };
-            self.young_fix = Some(format!(
-                "{alias} {old} is retired ({reason}: {message}).\n{alias} {fix} was published {age} ago, inside the 72 h wait.\nTo take it now: hirsel update {alias}@{fix}"
-            ));
+            self.young_fix.get_or_insert(hint);
             selected = Some(candidate);
         }
         let candidate = selected.ok_or_else(|| NoEligible(name.clone()))?;
@@ -340,7 +349,82 @@ impl Registry {
                             Some(crate::package_manifest::Dependency::Inherited)
                         )))
         });
-        self.select(query, None, &constraints)
+        self.select(query, None, |r, v| {
+            constraints.accepts(
+                &Id {
+                    name: query.name.clone(),
+                    major: v.major,
+                },
+                r,
+                v,
+            )
+        })
+    }
+
+    pub(crate) fn check_add(
+        &mut self,
+        trial: &Resolution,
+        id: &Id,
+        root: Option<Root>,
+        locator: Option<&SourceLocation>,
+        shared: Option<&crate::package_manifest::Workspace>,
+        alias: &str,
+    ) -> Result<(BTreeMap<String, Finding>, Vec<String>), Failure> {
+        use crate::package_manifest::Dependency;
+        let mut findings = self.graph(trial, None)?;
+        require_active(&findings)?;
+        let mut checked = crate::package_audit::check(trial, None)?;
+        if let (Some(SourceLocation::Registry(origin)), Some(root)) = (locator, root)
+            && shared.is_some()
+            && !trial.workspace.members.values().any(|m| {
+                matches!(
+                    m.package.dependencies.get(alias),
+                    Some(Dependency::Inherited)
+                )
+            })
+        {
+            let ceiling = match shared.as_ref().and_then(|w| w.dependencies.get(alias)) {
+                Some(Dependency::Published(_, _, _, mask)) => *mask,
+                _ => 0,
+            };
+            let (unused, authority) = self.unbound(id, root, origin, ceiling)?;
+            findings.extend(unused);
+            checked.authority.extend(authority);
+        }
+        let report = findings
+            .into_iter()
+            .map(|(id, f)| (id.to_string(), f))
+            .collect();
+        Ok((report, checked.authority))
+    }
+
+    pub(crate) fn unbound(
+        &mut self,
+        id: &Id,
+        root: Root,
+        origin: &Origin,
+        ceiling: u16,
+    ) -> Result<(BTreeMap<Id, Finding>, Vec<String>), Failure> {
+        // The workspace lock omits unused shared rows. Resolve this declaration with
+        // the same carrier walk and compiler checks as a member inheriting the row.
+        let dir = tempfile::tempdir()?;
+        let kinds = crate::reachability::authority::names(ceiling);
+        let manifest = format!(
+            "[package]\nname = \"local/consumer\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[dependencies]\nsubject = {{ package = {:?}, major = {}, root = \"{root}\", registry = \"{origin}\", authority = {kinds:?} }}\n",
+            id.name, id.major
+        );
+        std::fs::write(dir.path().join("hirsel.toml"), manifest)?;
+        std::fs::write(
+            dir.path().join("main.hirsel"),
+            "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+        )?;
+        let workspace = Workspace::discover_for(dir.path(), true)?
+            .ok_or("missing declaration check workspace")?;
+        let res = Resolution::resolve(workspace, self.store.clone(), false)?;
+        let findings = self.graph(&res, None)?;
+        require_active(&findings)?;
+        let checked = crate::package_audit::check(&res, None)?;
+        Ok((findings, checked.authority))
     }
 
     pub(crate) fn finding(&self, origin: &Origin, root: Root) -> Result<Finding, Failure> {
@@ -416,11 +500,33 @@ impl Registry {
                 if binding.root().is_none() {
                     continue;
                 }
-                if let Some(explicit) = source(child, None) {
-                    work.push((child.clone(), Some(explicit), true));
-                } else if matches!(binding, Binding::Floor { .. }) && carrier.is_some() {
+                if let Binding::Floor {
+                    tested,
+                    minor,
+                    patch,
+                } = binding
+                    && carrier.is_some()
+                {
                     let origin = self.open(&child.name, None)?;
+                    self.candidates(&child.name, &origin)?;
+                    let floor = Version {
+                        major: child.major,
+                        minor: *minor,
+                        patch: *patch,
+                        pre: String::new(),
+                    };
+                    if self.names[&child.name]
+                        .get(&floor)
+                        .is_none_or(|c| c.leaf.root() != *tested)
+                    {
+                        return Err(format!(
+                            "{child}: floor {floor} {tested} lacks verified release inclusion"
+                        )
+                        .into());
+                    }
                     work.push((child.clone(), Some(origin), true));
+                } else if let Some(explicit) = source(child, None) {
+                    work.push((child.clone(), Some(explicit), true));
                 } else {
                     work.push((child.clone(), carrier.clone(), false));
                 }
@@ -439,19 +545,23 @@ fn boxed(e: Box<dyn std::error::Error + Send + Sync>) -> Failure {
 
 #[derive(Default, Serialize)]
 pub(crate) struct Finding {
-    pub(crate) status: String,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
     pub(crate) trust: Option<&'static str>,
     pub(crate) advisories: BTreeMap<String, Value>,
 }
 impl Finding {
     fn new(preview: bool, state: Option<&Status>) -> Result<Self, Failure> {
-        let status = match state.map(|s| &s.disposition) {
-            None | Some(Disposition::Active) => "active".into(),
+        let (status, reason, message) = match state.map(|s| &s.disposition) {
+            None | Some(Disposition::Active) => ("active", None, None),
             Some(Disposition::Retired { reason, message }) => {
-                format!("retired ({reason}: {message})")
+                ("retired", Some(reason.clone()), Some(message.clone()))
             }
             Some(Disposition::TakenDown { reason, message }) => {
-                format!("taken down ({reason}: {message})")
+                ("taken-down", Some(reason.clone()), Some(message.clone()))
             }
         };
         let mut advisories = BTreeMap::new();
@@ -460,6 +570,8 @@ impl Finding {
         }
         Ok(Self {
             status,
+            reason,
+            message,
             trust: preview.then_some("preview (quorum 0), unwitnessed"),
             advisories,
         })
@@ -467,13 +579,15 @@ impl Finding {
 
     fn merge(items: Vec<Self>) -> Self {
         let mut merged = Self {
-            status: "active".into(),
+            status: "active",
             ..Default::default()
         };
         for item in items {
             merged.trust = merged.trust.or(item.trust);
-            if item.status != "active" {
+            if item.status != "active" && merged.status != "taken-down" {
                 merged.status = item.status;
+                merged.reason = item.reason;
+                merged.message = item.message;
             }
             merged.advisories.extend(item.advisories);
         }
@@ -481,11 +595,14 @@ impl Finding {
     }
 
     pub(crate) fn report(&self, id: impl std::fmt::Display) {
-        println!(
-            "{id}: {}{}",
-            self.status,
-            self.trust.map(|t| format!("; {t}")).unwrap_or_default()
-        );
+        print!("{id}: {}", self.status.replace('-', " "));
+        if let (Some(reason), Some(message)) = (&self.reason, &self.message) {
+            print!(" ({reason}: {message})");
+        }
+        if let Some(trust) = self.trust {
+            print!("; {trust}");
+        }
+        println!();
         for (osv, doc) in &self.advisories {
             println!(
                 "{id}: {osv} (severity {}, aliases {}, modified {})",
@@ -498,7 +615,13 @@ impl Finding {
 pub(crate) fn require_active(findings: &BTreeMap<Id, Finding>) -> Result<(), Failure> {
     for (id, finding) in findings {
         if finding.status != "active" {
-            return Err(format!("{id} is {}", finding.status).into());
+            return Err(format!(
+                "{id} is {} ({}: {})",
+                finding.status,
+                finding.reason.as_deref().unwrap_or_default(),
+                finding.message.as_deref().unwrap_or_default()
+            )
+            .into());
         }
     }
     Ok(())

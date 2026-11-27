@@ -58,7 +58,10 @@ pub fn main(out: Stdout) -> Result[(), WriteError] waits {
 Host access requires explicit capabilities such as `Stdout`, `Dir`, `Clock`, `Net`, and
 `Tasks`. Logical byte budgets limit charged program allocations. The compiler checks
 function bodies against the signatures they use. No imports, no methods, no garbage
-collector, no lifetime annotations.
+collector, no lifetime annotations. Hirsel enforces capabilities through the compiler and
+runtime rather than an OS kernel sandbox: uncontained in-process `Foreign` C code runs
+outside the checker and must be trusted or sandboxed by the operator, while contained
+`Foreign` code runs isolated.
 
 ## Install
 

@@ -53,10 +53,10 @@ final class RuntimeTests: XCTestCase {
     func testCallAndTwoSubscriptionChanges() async throws {
         try await withRuntime { runtime in
             let session = try runtime.open(credential: fixtureCredential)
-            let answer = try await session.api.call.main.answer(35, deadline: 0)
+            let answer = try await session.api.call.main.answer(35, deadline: 5_000)
             XCTAssertEqual(answer, .returned(42))
 
-            let initial = try await session.api.call.main.write(512, deadline: 0)
+            let initial = try await session.api.call.main.write(512, deadline: 5_000)
             XCTAssertEqual(initial, .returned(512))
             let subscription = session.api.subscribe.main.rows(HirselUnit())
             var updates = subscription.makeAsyncIterator()
@@ -64,7 +64,7 @@ final class RuntimeTests: XCTestCase {
             XCTAssertNotNil(first)
             for (value, bytes) in [(UInt64(513), Data([1, 2, 0, 0, 0, 0, 0, 0])),
                                    (UInt64(514), Data([2, 2, 0, 0, 0, 0, 0, 0]))] {
-                let written = try await session.api.call.main.write(value, deadline: 0)
+                let written = try await session.api.call.main.write(value, deadline: 5_000)
                 XCTAssertEqual(written, .returned(value))
                 let event = try await updates.next()
                 let change = try XCTUnwrap(event)
@@ -128,14 +128,14 @@ final class RuntimeTests: XCTestCase {
     func testStopThenStart() async throws {
         let old = try await withRuntime { runtime in
             let session = try runtime.open(credential: fixtureCredential)
-            let result = try await session.api.call.main.answer(0, deadline: 0)
+            let result = try await session.api.call.main.answer(0, deadline: 5_000)
             XCTAssertEqual(result, .returned(7))
             return session
         }
         try await withRuntime { runtime in
-            XCTAssertEqual(hirsel_embed_v1_call(old.handle, 99, 0, hirsel_bytes(), 0), HIRSEL_STOPPED)
+            XCTAssertEqual(hirsel_embed_v1_call(old.handle, 99, 0, hirsel_bytes(), 5_000), HIRSEL_STOPPED)
             let fresh = try runtime.open(credential: fixtureCredential)
-            let result = try await fresh.api.call.main.answer(1, deadline: 0)
+            let result = try await fresh.api.call.main.answer(1, deadline: 5_000)
             XCTAssertEqual(result, .returned(8))
             try await fresh.close()
         }
@@ -146,14 +146,14 @@ final class RuntimeTests: XCTestCase {
         let start = clock.now
         try await withRuntime { runtime in
             let session = try runtime.open(credential: fixtureCredential)
-            let first = try await session.api.call.main.answer(0, deadline: 0)
+            let first = try await session.api.call.main.answer(0, deadline: 5_000)
             let firstTime = start.duration(to: clock.now)
             let memoryAtStart = memory()
             XCTAssertEqual(first, .returned(7))
             var calls: [Duration] = []
             for index in 0..<1000 {
                 let beforeCall = clock.now
-                let result = try await session.api.call.main.answer(UInt64(index), deadline: 0)
+                let result = try await session.api.call.main.answer(UInt64(index), deadline: 5_000)
                 calls.append(beforeCall.duration(to: clock.now))
                 XCTAssertEqual(result, .returned(UInt64(index + 7)))
             }

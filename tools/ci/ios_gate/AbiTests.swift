@@ -96,7 +96,7 @@ final class AbiTests: XCTestCase {
         let entries = try XCTUnwrap(root["entries"] as? [[String: Any]])
         let index = try XCTUnwrap(entries.firstIndex { $0["name"] as? String == "answer" })
         let status = [UInt8](repeating: 0, count: 8).withUnsafeBufferPointer {
-            hirsel_embed_v1_call(session, id, UInt32(index), hirsel_bytes(ptr: $0.baseAddress, len: $0.count), 0)
+            hirsel_embed_v1_call(session, id, UInt32(index), hirsel_bytes(ptr: $0.baseAddress, len: $0.count), 5_000)
         }
         XCTAssertEqual(status, HIRSEL_OK)
     }

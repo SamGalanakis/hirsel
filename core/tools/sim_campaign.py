@@ -4,9 +4,11 @@ import argparse
 from collections import defaultdict
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tomllib
 
@@ -19,6 +21,11 @@ SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
 # Seed zero has the same execution bound as the sweep in tools/sim-campaign.
 SEED_TIMEOUT_SECONDS = 300
+# A preparation that writes no executable for this long is stopped, so one
+# pathological compile marks its law prepare_red instead of holding the night.
+# It covers one seed-zero run after the executable is written.
+STALL_SECONDS = 900
+STALL_POLL_SECONDS = 10
 CANARY = 'std@1/tests/campaign_canary/seed_residue'
 GENERATED_KINDS = ('postgres', 'contracts', 'runner-adapters', 'canary')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
@@ -264,13 +271,38 @@ def output_name(definition):
     return hashlib.sha256(b''.join(len(part).to_bytes(8, 'little') + part for part in parts)).hexdigest()
 
 
-def run_preparation(command, scratch, report, expected):
-    for definition in expected:
-        command.extend(['--exact', definition])
+def outputs(directory):
+    # Names and change times; the compiler renames finished files into place.
+    seen = set()
+    for path in directory.iterdir() if directory.is_dir() else ():
+        try:
+            seen.add((path.name, path.stat().st_mtime_ns))
+        except FileNotFoundError:
+            pass
+    return frozenset(seen)
+
+
+def run_preparation(command, scratch, report, expected, output):
+    command = command + [argument for definition in expected for argument in ('--exact', definition)]
     with report.open('w') as log, report.with_suffix('.stderr').open('w') as stderr:
-        result = subprocess.run(command, stdout=log, stderr=stderr, cwd=scratch)
-    if result.returncode not in (0, 1):
-        raise ValueError(f'preparation exited {result.returncode}; see {report} and {report.with_suffix(".stderr")}')
+        child = subprocess.Popen(command, stdout=log, stderr=stderr, cwd=scratch, start_new_session=True)
+        seen, quiet = outputs(output), 0
+        while True:
+            try:
+                returncode = child.wait(STALL_POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            current = outputs(output)
+            quiet = 0 if current != seen else quiet + STALL_POLL_SECONDS
+            seen = current
+            if quiet >= STALL_SECONDS:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+                raise ValueError(f'wrote no executable for {STALL_SECONDS} s and was stopped; '
+                                 f'see {report} and {report.with_suffix(".stderr")}')
+    if returncode not in (0, 1):
+        raise ValueError(f'preparation exited {returncode}; see {report} and {report.with_suffix(".stderr")}')
     try:
         document = json.loads(report.read_text())
         if document.get('accepted') is False:
@@ -286,14 +318,23 @@ def run_preparation(command, scratch, report, expected):
 
 def prepare_leg(command, scratch, report, leg, expected, errors):
     covered = leg == 'bin'
-    if covered:
-        command.append('--coverage')
     try:
-        rows, refused = run_preparation(command, scratch, report, expected)
+        rows, refused = run_preparation(command + ['--coverage'] * covered, scratch, report, expected,
+                                        scratch / leg)
     except ValueError as error:
-        for definition in expected:
-            errors.setdefault(definition, []).append(f'{leg}: {error}')
-        return {}, set()
+        if len(expected) == 1:
+            errors.setdefault(expected[0], []).append(f'{leg}: {error}')
+            return {}, set()
+        # One program's failed or stalled build must not cost the other laws:
+        # prepare each law alone, so only the failing one turns prepare_red.
+        print(f'{leg}: {error}; preparing each law alone', flush=True)
+        rows, refused = {}, set()
+        for index, definition in enumerate(expected):
+            alone = report.with_name(f'{report.stem}-{index}.json')
+            prepared, rejected = prepare_leg(command, scratch, alone, leg, [definition], errors)
+            rows.update(prepared)
+            refused |= rejected
+        return rows, refused
     for definition in expected:
         binary = scratch / leg / output_name(definition)
         row = rows.get(definition, {})
@@ -368,8 +409,12 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
         for leg, launch in (('bin', normal), ('recording', recording)):
             report = reports / f'{prefix}prepare-{leg}.json'
+            # A law whose bin leg failed is already prepare_red; do not build it again.
+            expected = [definition for definition in entries.values() if definition not in errors]
+            if not expected:
+                break
             prepared, refused = prepare_leg(base + ['-o', str(scratch / leg)] + launch, scratch, report,
-                                            leg, list(entries.values()), errors)
+                                            leg, expected, errors)
             rejected = {law for module in refused for law in source_laws.get(module, ())}
             if results is not None and rejected and rejected != group.keys():
                 # Contract fixtures share a compiler invocation. Drop the refused

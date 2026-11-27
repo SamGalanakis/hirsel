@@ -36,9 +36,10 @@ fn link_recipe(
     let format = Target::from_triple(target)
         .ok_or_else(|| io::Error::other(format!("no link target {target}")))?
         .object_format();
-    let (editor, gcc) = match format {
-        ObjectFormat::Elf => ("ld.lld", true),
-        ObjectFormat::MachO => ("ld64.lld", false),
+    let editor = crate::link_closure::editor_name(format);
+    let gcc = match format {
+        ObjectFormat::Elf => true,
+        ObjectFormat::MachO => false,
     };
     let driver = cc.to_owned();
     let store = recipes()?;

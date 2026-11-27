@@ -25,6 +25,13 @@ mod macho_stub;
 
 pub(crate) use macho::arm64_slice;
 
+pub(crate) fn editor_name(format: ObjectFormat) -> &'static str {
+    match format {
+        ObjectFormat::Elf => "ld.lld",
+        ObjectFormat::MachO => "ld64.lld",
+    }
+}
+
 pub(crate) fn for_format(
     format: ObjectFormat,
     args: &[String],

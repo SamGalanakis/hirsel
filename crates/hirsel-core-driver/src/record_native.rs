@@ -21,18 +21,20 @@ fn record_inputs(backend: Backend) {
 
     fn quote(path:&Path)->String {format!("'{}'",path.display().to_string().replace('\'',"'\\''"))}
     let original=options.link.clone();
-    let selected=command(Command::new(original.driver()).arg("-print-prog-name=ld.lld")).unwrap();
+    let editor = crate::link_closure::editor_name(crate::host::HOST_TARGET.object_format());
+    let select = format!("-print-prog-name={editor}");
+    let selected=command(Command::new(original.driver()).arg(&select)).unwrap();
     let selected=String::from_utf8(selected).unwrap();
     let original_ld=if selected.trim().contains('/') {PathBuf::from(selected.trim())} else {
         let paths=std::env::var_os("PATH").unwrap();
         std::env::split_paths(&paths).map(|p|p.join(selected.trim())).find(|p|p.is_file()).unwrap()
     };
     let bin=dir.path().join("bin");std::fs::create_dir(&bin).unwrap();
-    let ld=bin.join("ld.lld");
+    let ld=bin.join(editor);
     let ld_script=format!("#!/bin/sh\nexec {} \"$@\"\n",quote(&original_ld));
     crate::executable::write(&ld, ld_script.as_bytes(), 0o755).unwrap();
     let cc=dir.path().join("cc");
-    let script=format!("#!/bin/sh\nif [ \"$1\" = -print-prog-name=ld.lld ]; then printf '%s\\n' {}; exit; fi\nexec {} -B{} \"$@\"\n",quote(&ld),quote(original.driver()),quote(&bin));
+    let script=format!("#!/bin/sh\nif [ \"$1\" = {select} ]; then printf '%s\\n' {}; exit; fi\nexec {} -B{} \"$@\"\n",quote(&ld),quote(original.driver()),quote(&bin));
     crate::executable::write(&cc, script.as_bytes(), 0o755).unwrap();
     let version=command(Command::new(&cc).arg("--version")).unwrap();
     assert_eq!(version,command(Command::new(original.driver()).arg("--version")).unwrap());

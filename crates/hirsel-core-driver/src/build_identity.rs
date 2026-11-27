@@ -344,13 +344,14 @@ fn development_link_recapture_preserves_the_observed_recipe() {
             let mut options = native_options(Backend::Cranelift, dir.path());
             let bin = dir.path().join("bin");
             std::fs::create_dir(&bin).unwrap();
-            let first = bin.join("first/ld.lld");
-            let second = bin.join("second/ld.lld");
+            let linker = crate::link_closure::editor_name(crate::host::HOST_TARGET.object_format());
+            let first = bin.join("first").join(linker);
+            let second = bin.join("second").join(linker);
             for path in [&first, &second] {
                 std::fs::create_dir(path.parent().unwrap()).unwrap();
             }
             let clang = options.link.driver();
-            let lld = clang.with_file_name("ld.lld");
+            let lld = clang.with_file_name(linker);
             let quote =
                 |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
             let editor = format!("#!/bin/sh\nexec {} \"$@\"\n", quote(&lld));
@@ -364,7 +365,7 @@ fn development_link_recapture_preserves_the_observed_recipe() {
             let cc = bin.join("clang");
             let script = format!(
                 "#!/bin/sh\neditor={}\nif [ ! -f \"$editor\" ]; then editor={}; fi\n\
-                 if [ \"$1\" = -print-prog-name=ld.lld ]; then printf '%s\\n' \"$editor\"; exit; fi\n\
+                 if [ \"$1\" = -print-prog-name={linker} ]; then printf '%s\\n' \"$editor\"; exit; fi\n\
                  exec {} --ld-path=\"$editor\" \"$@\"\n",
                 quote(&first),
                 quote(&second),
@@ -375,7 +376,7 @@ fn development_link_recapture_preserves_the_observed_recipe() {
             let observed =
                 crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)
                     .unwrap();
-            assert_eq!(observed.1.linker, first);
+            assert_eq!(observed.1.linker, first.canonicalize().unwrap());
             options.observed = Some(Arc::new(observed));
             let entry = DefPath::from_full("app@1/main/main").unwrap();
             let request = source_request(

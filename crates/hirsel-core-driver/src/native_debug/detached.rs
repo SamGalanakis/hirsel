@@ -169,7 +169,19 @@ pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: Co
                 flags: object::macho::S_REGULAR | object::macho::S_ATTR_NO_DEAD_STRIP,
                 reserved2: 0,
             };
-            object.append_section_data(section, &source.0, 1);
+            let offset = object.append_section_data(section, &source.0, 1);
+            // The resident linker locates changed input bytes by a symbol in
+            // the linked image. The source digest changes even on a text edit.
+            object.add_symbol(object::write::Symbol {
+                name: b"hirsel_source_identity".to_vec(),
+                value: offset,
+                size: source.0.len() as u64,
+                kind: object::SymbolKind::Data,
+                scope: object::SymbolScope::Compilation,
+                weak: false,
+                section: object::write::SymbolSection::Section(section),
+                flags: object::SymbolFlags::None,
+            });
         }
     }
 }

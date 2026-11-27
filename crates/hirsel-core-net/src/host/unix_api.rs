@@ -23,6 +23,24 @@ pub fn open_beneath(
     super::open_beneath(root, path, flags)
 }
 
+/// Run a socket operation relative to an open directory. Only the temporary
+/// thread changes working directory, and its directory goes away on return.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn in_directory<T: Send>(
+    dir: BorrowedFd<'_>,
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .spawn_scoped(scope, move || {
+                host::isolate_binding_thread(dir)?;
+                operation()
+            })?
+            .join()
+            .map_err(|_| io::Error::other("Unix socket helper stopped"))?
+    })
+}
+
 /// Bind `socket` at the empty slot `leaf` of the pinned directory `dir`. A
 /// slot that holds any node, a symbolic link included, gives `EADDRINUSE`, and
 /// no link is followed. The calling thread's working directory becomes `dir`,
@@ -82,18 +100,8 @@ pub fn probe() -> io::Result<()> {
     let root = File::open(&private.0).map_err(|e| requires("opening the probe directory", e))?;
     let parent =
         open_beneath(root.as_fd(), c".", host::DIRECTORY).map_err(|e| requires("openat2", e))?;
-    let binding = std::thread::Builder::new()
-        .name("hirsel-unix-probe".into())
-        .spawn(move || {
-            // A fresh private directory holds no link for the bind to follow.
-            host::isolate_binding_thread(parent.as_fd())
-                .map_err(|e| requires("a private working directory", e))?;
-            UnixListener::bind("socket").map_err(|e| requires("bind and listen", e))
-        })
-        .map_err(|e| requires("a bind helper thread", e))?;
-    let listener = binding
-        .join()
-        .map_err(|_| io::Error::other("Unix bind helper stopped"))??;
+    let listener = in_directory(parent.as_fd(), || UnixListener::bind("socket"))
+        .map_err(|e| requires("bind and listen in the private directory", e))?;
     let _client = host::connect_pinned(root.as_fd(), c"socket")
         .map_err(|e| requires("connecting to the pinned endpoint", e))?;
     drop(listener);

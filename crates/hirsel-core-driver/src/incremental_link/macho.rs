@@ -44,6 +44,7 @@ const LC_LINKER_OPTIMIZATION_HINT: u32 = 0x2e;
 const N_STAB: u8 = 0xe0;
 const N_PEXT: u8 = 0x10;
 const N_TYPE: u8 = 0x0e;
+const N_INDR: u8 = 0x0a;
 const N_EXT: u8 = 0x01;
 const N_SECT: u8 = 0x0e;
 const N_WEAK_DEF: u16 = 0x80;
@@ -588,15 +589,16 @@ fn edit(
     if old.len() != new.len() {
         return None;
     }
-    // Outside its sections' contents and its string table, `new` is `old`:
-    // the same load commands, relocations and symbol entries.
-    let (_, _, stroff, strsize) = o.symtab?;
+    // The object writer can reorder strings when a local symbol is renamed.
+    // Compare each nlist's name through its own string offset below. Every
+    // load command, relocation and other byte outside these tables must match.
+    let (symoff, count, stroff, strsize) = o.symtab?;
     let mut contents: Vec<(usize, usize)> = o
         .sections
         .iter()
         .filter(|s| !s.zerofill())
         .map(|s| (s.offset as usize, s.offset as usize + s.size as usize))
-        .chain([(stroff, stroff + strsize)])
+        .chain([(symoff, symoff + count * 16), (stroff, stroff + strsize)])
         .collect();
     contents.sort_unstable();
     let mut at = 0;
@@ -610,8 +612,16 @@ fn edit(
     let mut cut: FxHashMap<usize, Vec<Piece>> = FxHashMap::default();
     let mut placed: FxHashMap<(usize, u64), Option<usize>> = FxHashMap::default();
     let mut edits = Vec::new();
-    for symbol in &symbols {
-        let (an, bn) = (o.name(symbol)?, n.name(symbol)?);
+    for (symbol, next) in symbols.iter().zip(n.symbols()?) {
+        // Keep the relocation's symbol index, definition and placement. An
+        // indirect symbol also names its target by a string offset in n_value.
+        if (symbol.kind, symbol.sect, symbol.desc, symbol.value)
+            != (next.kind, next.sect, next.desc, next.value)
+            || symbol.kind & N_TYPE == N_INDR
+        {
+            return None;
+        }
+        let (an, bn) = (o.name(symbol)?, n.name(&next)?);
         if an == bn {
             continue;
         }

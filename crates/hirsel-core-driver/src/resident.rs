@@ -45,10 +45,10 @@ use hirsel_core_ids::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Seek, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -135,6 +135,13 @@ pub(crate) fn socket_under(runtime: &std::path::Path) -> PathBuf {
         .join(Toolchain::loaded().unwrap().file("sock"))
 }
 
+/// Read a client request and release the descriptors it lends the stand-in server.
+#[cfg(test)]
+pub(crate) fn read_test_request(stream: &mut UnixStream) -> serde_json::Value {
+    let (request, _fds) = read_message(stream).unwrap();
+    serde_json::from_slice(&request).unwrap()
+}
+
 /// The process's whole environment, as a request carries it.
 fn environment() -> Vec<(Vec<u8>, Vec<u8>)> {
     std::env::vars_os()
@@ -196,13 +203,19 @@ enum Step {
     Finish,
 }
 
-/// Linux reaches the directory through its descriptor to keep the address
-/// short. Check the address before using the path on either host.
-fn socket_path(toolchain: Toolchain) -> io::Result<(PathBuf, std::fs::File)> {
-    let held = std::fs::File::open(crate::host::runtime_directory("hirsel")?)?;
-    let path = crate::host::fd_path(&held)?.join(toolchain.file("sock"));
-    SocketAddr::from_pathname(&path)?;
-    Ok((path, held))
+/// Linux's fd path is short. A Darwin runtime directory can fill sun_path
+/// by itself, so name only the leaf on a thread rooted at the held directory.
+pub(crate) fn with_socket_path<T: Send>(
+    directory: &std::fs::File,
+    leaf: &Path,
+    operation: impl FnOnce(&Path) -> io::Result<T> + Send,
+) -> io::Result<T> {
+    let path = crate::host::fd_path(directory)?.join(leaf);
+    if SocketAddr::from_pathname(&path).is_ok() {
+        operation(&path)
+    } else {
+        hirsel_core_net::unix::in_directory(directory.as_fd(), || operation(leaf))
+    }
 }
 
 struct Route {
@@ -281,8 +294,10 @@ pub fn submit(args: &[String]) -> Option<i32> {
 }
 
 fn connect(toolchain: Toolchain) -> io::Result<UnixStream> {
-    let (path, _held) = socket_path(toolchain)?;
-    UnixStream::connect(path)
+    let directory = std::fs::File::open(crate::host::runtime_directory("hirsel")?)?;
+    with_socket_path(&directory, Path::new(&toolchain.file("sock")), |p| {
+        UnixStream::connect(p)
+    })
 }
 
 fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
@@ -586,7 +601,9 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
     }
     let limit = hirsel_guard::limit().unwrap_or(hirsel_guard::DEFAULT_LIMIT);
     let budget = memo::Budget::of(limit, serve.max_memory)?;
-    let (socket, _held) = socket_path(toolchain)?;
+    let directory = std::fs::File::open(crate::host::runtime_directory("hirsel")?)?;
+    let leaf = toolchain.file("sock");
+    let socket = crate::host::fd_path(&directory)?.join(&leaf);
     let (lock, listener, launched) = if let Some(inherited) = budget::inherited() {
         // This image succeeds one that stopped a request over its budget.
         if inherited.toolchain != toolchain {
@@ -603,7 +620,8 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         }
-        (lock, UnixListener::bind(&socket)?, Vec::new())
+        let listener = with_socket_path(&directory, Path::new(&leaf), |p| UnixListener::bind(p))?;
+        (lock, listener, Vec::new())
     };
     SERVING.store(true, Ordering::Relaxed);
     let served = serve_requests(&listener, &lock, launched, toolchain, budget);

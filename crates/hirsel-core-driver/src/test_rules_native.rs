@@ -251,15 +251,13 @@ fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
         .recursive(true)
         .create(socket.parent().unwrap())
         .unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    let directory = std::fs::File::open(socket.parent().unwrap()).unwrap();
+    let listener = crate::resident::with_socket_path(&directory, Path::new(socket.file_name().unwrap()), |p| {
+        std::os::unix::net::UnixListener::bind(p)
+    }).unwrap();
     let server = std::thread::spawn(move || {
-        use std::io::Read;
-
         let (mut client, _) = listener.accept().unwrap();
-        let mut length = [0; 4];
-        client.read_exact(&mut length).unwrap();
-        let request: serde_json::Value =
-            serde_json::from_reader(client.take(u64::from(u32::from_le_bytes(length)))).unwrap();
+        let request = crate::resident::read_test_request(&mut client);
         assert_eq!(request["args"][0], "test");
     });
     let (status, stdout, stderr) = process::tape_request_output(request());

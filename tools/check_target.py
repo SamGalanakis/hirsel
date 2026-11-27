@@ -30,6 +30,7 @@ HOST_SEAMS = (
     'crates/hirsel-core-rt/src/host/',
     'crates/hirsel-core-driver/src/host/',
     'crates/hirsel-guard/src/host/',
+    'crates/hirsel-compiler/src/host/',
     'crates/hirsel-core-net/src/host/',
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',

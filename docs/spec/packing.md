@@ -64,7 +64,7 @@ into a section, an index into a table, or an identifier from a closed list.
 | 12 | 1 | `backend` | `0` Cranelift, `1` LLVM |
 | 13 | 3 | zero | |
 | 16 | 8 | `policy` | policy bits, below |
-| 24 | 32 | `abi` | runtime ABI digest: the runtime layouts and the import row table |
+| 24 | 32 | `abi` | runtime ABI digest: `SHA-256("hirsel.mod-abi.v1", revision, row table)`, where the revision is a number that changes with any runtime layout or calling rule loaded code depends on |
 | 56 | 32 | `compiler` | compiler identity |
 | 88 | 32 | `coreir` | digest of the release's CoreIR closure |
 | 120 | 4 | `text_align` | power of two, at least 64 |
@@ -160,7 +160,10 @@ and `P` the address of the site.
 | 6 `Low12LoadData` | text | aarch64 | scaled load or store immediate: low 12 bits of `D + addend`, divided by the access size the instruction encodes |
 
 That is the whole set. Calls and branches inside the module are resolved by the `Compiler`
-and need no fixup. The loader refuses any other kind, a kind on the wrong target or in the
+and need no fixup. A reference the code makes through a global-offset entry reads a
+**pointer slot**: 8 bytes of `data` after the import slots that an `Abs64Text` or
+`Abs64Data` fixup fills. On x86-64 a `mov` from such an entry becomes a `lea` of the target
+instead and needs no slot. The loader refuses any other kind, a kind on the wrong target or in the
 wrong table, a site whose field or `bias` leaves its section, a `T + addend` or `D + addend` that
 leaves its section (one past the end is allowed), a value that does not fit its field, a
 `Low12LoadData` value that is not a multiple of its access size, and a site whose
@@ -173,7 +176,8 @@ An entry record is 80 bytes: `identity: [u8; 32]`, `signature: [u8; 32]`, `text:
 ([PROG-5](programs.md#prog-5-code-identity)), `signature` the digest of its lowered
 signature, `text` its code offset, `descriptor` the `data` offset of its PROG-9 descriptor
 (past the import slots) or `0xFFFFFFFF`, and `flags` bit 0 is set when the entry waits. Entries are sorted by
-`identity`, which is unique. `text` must be the start of a span.
+`identity`, which is unique. `text` must be the start of a span. A module's entries are
+the roots its request names. `hirsel build --emit module` names one, the package's entry.
 
 ## PACK-3: The `Compiler` service
 
@@ -182,20 +186,22 @@ for that compile. `hirsel host`<!-- doc-ref: planned --> supervises a local serv
 fleet worker may be configured with a shared builder on the same machine instead. A
 program sees one `Compiler` capability either way.
 
-A request names a checked release closure, a target, a backend and policy bits. A reply is
-a module (its bytes, digest and key) or one refusal:
+A request carries one package's source files (path and bytes), a target, a backend and
+policy bits. The worker is the `hirsel` tool: `hirsel build --emit module` checks the
+source, compiles the units its entry reaches, and links them into one module, keeping the
+sections the entry reaches. A reply is a module (its bytes, digest and key) or one refusal:
 
 | refusal | when | cached |
 |---|---|---|
-| `Rejected(diagnostics)` | the source does not check | by request digest |
-| `Unsupported(reason)` | the release cannot be a module: it reaches a `foreign` or `exec` row, needs writable data, or needs an import outside the row table | by request digest |
+| `Rejected(diagnostics)` | the source does not check: the worker's exit status is 1 | by request digest |
+| `Unsupported(reason)` | the worker's exit status is 2 and it names the reason the release cannot be a module: it reaches a `foreign` or `exec` row, needs writable or thread-local data, needs an import outside the row table, or asks for policy bits or a target the `Compiler` does not build | by request digest |
 | `Limit(Input)` | the request exceeds `input_bytes` | no |
 | `Limit(Cpu)` | the worker used more than `cpu_seconds` of processor time | by request digest and caps |
 | `Limit(Memory)` | the worker needed more than `memory_bytes` | by request digest and caps |
 | `Limit(Wall)` | the worker ran longer than `wall_ms` | no |
 | `Limit(Output)` | the module exceeds `output_bytes` | by request digest and caps |
 | `Busy` | the service's bounded queue is full | no |
-| `Unavailable` | the worker or the service ended for any other reason | no |
+| `Unavailable` | the worker or the service ended for any other reason, a tool failure with exit status 2 among them | no |
 
 **Caps.** A service has five caps, all required, with these defaults under `hirsel host`:
 `cpu_seconds = 10`, `memory_bytes = 512 MiB`, `wall_ms = 20 000`, `input_bytes = 16 MiB`,
@@ -204,17 +210,18 @@ a module (its bytes, digest and key) or one refusal:
 
 - **Processor.** The kernel's per-process CPU limit (`RLIMIT_CPU`). The worker ends at the
   cap.
-- **Memory.** Linux: the worker's private writable address space is limited to its size at
-  start plus `memory_bytes` (`RLIMIT_DATA`), and a refused allocation ends the worker with
-  the reserved exit status 77. macOS: the supervisor samples the worker's physical
-  footprint every 10 ms and kills it above the cap.
-- **Wall.** The supervisor kills the worker at the deadline.
+- **Memory.** The worker's startup memory guard holds `memory_bytes`
+  (`HIRSEL_MEMORY_LIMIT`): on Linux the soft `RLIMIT_DATA`, on macOS the allocator's capped
+  arena. A refused allocation ends the worker with exit status 71.
+- **Output.** The kernel's file size limit (`RLIMIT_FSIZE`) is `output_bytes + 1`, and the
+  supervisor refuses a module longer than `output_bytes`.
+- **Wall.** The supervisor kills the worker's process group at the deadline.
 - **Core dumps** are off in the worker (`RLIMIT_CORE = 0`).
 
-A refusal never ends, stalls or grows the pack host: the host waits on a socket with the
-wall deadline and holds no worker memory. Requests for one key are single-flight: later
+A refusal never ends, stalls or grows the pack host: the host waits on the worker's pipe until
+the wall deadline and holds no worker memory. Requests for one key are single-flight: later
 requests wait for the first reply. A worker's reply is accepted only if it is a well-formed
-module whose key equals the request's.
+module whose target, backend, policy bits and `abi` are the request's and this host's.
 
 The service writes an admission (PACK-1) for each module it returns, into the host's own
 admission table.

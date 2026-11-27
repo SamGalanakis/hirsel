@@ -35,6 +35,10 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-layout", Class::Data),
     ("hirsel-core-net", Class::Data),
     ("hirsel-tape-format", Class::Data),
+    // The `.hirsel-mod` format and the import row table.
+    ("hirsel-mod", Class::Data),
+    // The `Compiler` service's supervisor: a pack host links it and no compiler.
+    ("hirsel-compiler", Class::Implementation),
     ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-front", Class::Implementation),
     // One instance's module from its identity and its arguments' closures.
@@ -96,6 +100,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-layout"
                 | "hirsel-core-net"
                 | "hirsel-tape-format"
+                | "hirsel-mod"
                 | "hirsel-intern"
                 | "hirsel-guard"
                 | "hirsel-cranelift"

@@ -41,6 +41,7 @@ hirsel-core-materialize = { path = "../hirsel-core-materialize" }
 # Computed constants run on the reference evaluator (LANG-20, MEM-34).
 hirsel-core-eval = { path = "../hirsel-core-eval" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-mod = { path = "../hirsel-mod" }
 hirsel-core-contained = { path = "../hirsel-core-contained", features = ["compile"] }
 hirsel-cranelift = { path = "../hirsel-cranelift" }
 hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }

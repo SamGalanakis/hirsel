@@ -452,6 +452,41 @@ impl<'a> Plan<'a> {
     }
 }
 
+impl Plan<'_> {
+    /// The entry function's symbol.
+    pub(crate) fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    /// The digest of the entry's lowered signature: its result's layout, where an
+    /// `Exit` status sits in it, and its provider parameters.
+    pub(crate) fn signature(&self) -> std::io::Result<hirsel_core_ids::ContentHash> {
+        crate::native::key(
+            "hirsel.mod-entry-signature.v1",
+            &(self.layout, self.exit_offset, &self.parameters),
+        )
+    }
+
+    /// What a `.hirsel-mod` link takes in place of an entry object: the site words'
+    /// absolute symbols and each `revisions` row's carrier, as [`Plan::emit`] defines
+    /// them, and no launch code.
+    pub(crate) fn emit_module_support(
+        &self,
+        target: Target,
+        sources: &SourceMap,
+        revisions: &[(String, [u8; 32])],
+    ) -> Result<Vec<u8>> {
+        let mut object = object(target)?;
+        for (symbol, revision) in revisions {
+            data::carrier(&mut object, symbol, revision)?;
+        }
+        let mut product = object.finish();
+        sites::define(&mut product.object, sources)?;
+        sites::define_release(&mut product.object, sources, self.release_sites)?;
+        product.object.write().map_err(error)
+    }
+}
+
 fn object(target: Target) -> Result<ObjectModule> {
     let page = target.page_log2().to_string();
     let mut flags = settings::builder();

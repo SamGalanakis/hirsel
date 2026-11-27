@@ -82,6 +82,18 @@ pub fn rows_digest() -> ContentHash {
     ContentHash::of_parts("hirsel.mod-rows.v1", parts)
 }
 
+/// The runtime ABI revision: the layouts and calling rules loaded code shares with the
+/// runtime. A change to either adds one.
+pub const ABI: u32 = 1;
+
+/// The runtime ABI digest of this build: [`ABI`] and the row table.
+pub fn abi() -> ContentHash {
+    ContentHash::of_parts(
+        "hirsel.mod-abi.v1",
+        [&ABI.to_le_bytes()[..], &rows_digest().0],
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Backend {

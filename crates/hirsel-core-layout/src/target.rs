@@ -40,6 +40,8 @@ pub enum OutputKind {
     #[default]
     Executable,
     StaticLibrary,
+    /// A `.hirsel-mod` a pack host loads (docs/spec/packing.md PACK-2).
+    Module,
 }
 
 impl std::str::FromStr for OutputKind {
@@ -49,7 +51,8 @@ impl std::str::FromStr for OutputKind {
         match value {
             "exe" => Ok(Self::Executable),
             "staticlib" => Ok(Self::StaticLibrary),
-            _ => Err("--emit expects exe or staticlib"),
+            "module" => Ok(Self::Module),
+            _ => Err("--emit expects exe, staticlib or module"),
         }
     }
 }
@@ -116,6 +119,10 @@ impl Target {
                 Self::X86_64Linux | Self::Aarch64Linux | Self::Aarch64Darwin,
                 OutputKind::Executable,
             ) => Ok(()),
+            (Self::X86_64Linux | Self::Aarch64Linux, OutputKind::Module) => Ok(()),
+            (Self::Aarch64Darwin | Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::Module) => {
+                Err("a module for an Apple target is not implemented (docs/spec/packing.md PACK-5)")
+            }
             (Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::Executable) => {
                 Err("iOS executables require an Xcode-signed app bundle (docs/spec/embed.md)")
             }

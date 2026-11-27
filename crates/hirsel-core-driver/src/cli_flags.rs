@@ -113,7 +113,7 @@ flags! {
     Runtime ["--runtime"] "ARCHIVE" => "Select the core runtime archive for the requested recording mode.";
     LogicalChargeReport ["--logical-charge-report"] "FILE" => "Instrument root logical reservation; unsuitable for timings.";
     Cc ["--cc"] "PROGRAM" => "Select the C linker driver for this request.";
-    Emit ["--emit"] "exe|staticlib" => "Select the native output kind (default exe).";
+    Emit ["--emit"] "exe|staticlib|module" => "Select the native output kind (default exe).";
     Target ["--target"] "TRIPLE" => "Select the full native target triple.";
     CoreIr ["--coreir"] => "Export linked checked CoreIR, layouts and source annexes as JSON.";
     Emulator ["--emulator"] "FILE" => "Run through this explicit QEMU user executable.";

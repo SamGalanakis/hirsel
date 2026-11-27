@@ -6,7 +6,6 @@ use hirsel_core_ir::normal::EntryParameter;
 use hirsel_core_layout::{Layout, OutputKind, Recipe};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 #[cfg(test)]
 use std::process::Command;
 
@@ -18,6 +17,8 @@ mod cleanup;
 mod link;
 #[path = "link_input.rs"]
 pub(crate) mod link_input;
+#[path = "native_module.rs"]
+mod module;
 #[path = "object_product.rs"]
 mod object_product;
 #[path = "recipe_native.rs"]
@@ -30,6 +31,8 @@ pub(crate) mod recipe_groups;
 mod release;
 #[path = "std_release.rs"]
 pub(crate) mod std_release;
+#[path = "native_stop.rs"]
+mod stop;
 use cleanup::result_cleanup;
 pub(crate) use link::command;
 pub(crate) use link::direct_link;
@@ -156,6 +159,8 @@ pub enum NativeStop {
         message: String,
     },
     Link(String),
+    /// The release cannot be a `.hirsel-mod` (PACK-3 `Unsupported`).
+    Module(String),
     /// A coverage build's rebound body whose blocks are not its source's.
     Coverage(hirsel_core_ir::coverage::Mismatch),
     Input(io::Error),
@@ -165,36 +170,6 @@ pub enum NativeStop {
         product: Box<BuildProduct>,
         error: io::Error,
     },
-}
-impl fmt::Display for NativeStop {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Check(s) => write!(f, "check: {s}"),
-            Self::Instances(s) => write!(f, "instances: {s}"),
-            Self::Entry(s) => write!(f, "entry: {s}"),
-            Self::ForeignRecording { reason, .. } => write!(f, "refused: {reason}"),
-            Self::Archive(error) => error.fmt(f),
-            Self::Emit {
-                definition,
-                message,
-            } => write!(f, "emit {definition}: {message}"),
-            Self::Link(s) => write!(f, "link: {s}"),
-            Self::Coverage(mismatch) => mismatch.fmt(f),
-            Self::Input(e) => write!(f, "input: {e}"),
-            Self::Output { error, .. } => f.write_str(&crate::executable::output_stop(error)),
-        }
-    }
-}
-impl std::error::Error for NativeStop {}
-impl From<io::Error> for NativeStop {
-    fn from(e: io::Error) -> Self {
-        Self::Input(e)
-    }
-}
-impl From<crate::code_admission::AdmissionError> for NativeStop {
-    fn from(error: crate::code_admission::AdmissionError) -> Self {
-        Self::Archive(error)
-    }
 }
 /// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
 /// none for Cranelift, which is part of the compiler executable.
@@ -1434,6 +1409,19 @@ fn link_objects(
         None => key("hirsel.core-executable.v11", &(build, entry_plan))?,
     });
     let store = Store::cas(&options.cas)?;
+    if options.output_kind == OutputKind::Module {
+        return module::pack(
+            entry_plan,
+            objects,
+            options,
+            sources,
+            key("hirsel.core-module.v1", &(build, entry_plan))?,
+            &store,
+            counters,
+            address,
+            revisions,
+        );
+    }
     if options.output_kind == OutputKind::StaticLibrary {
         return archive::pack(
             entry_plan,

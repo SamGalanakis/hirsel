@@ -99,7 +99,7 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
         },
         MidProbe => {
             let _ = checkpoint(mut db)?
-            if !compact_listed(db, probed) || map.len(db.compaction.probes) == 0 {
+            if !compact_listed(db, probed) || map.len(pager.disk_compaction(disk_state(db).tiered).probes) == 0 {
                 fail("§13.6 crash: the probe is still running after its first cut")
             }
         },

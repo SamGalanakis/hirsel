@@ -1,4 +1,4 @@
-fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], data: pages.PageTree, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] {
+fn tiered_initial_changes(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], data: pages.PageTree, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] {
     let mut out = change_output(Some(limits))
     let beginning = list.slice(low, 0, order.min(4, list.len(low)))
     let mut collections = std.page.cursor_open(data.root, Some(failure_result_from_rep(types.copied(beginning))?), true, false)
@@ -27,11 +27,11 @@ fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
             view collection_end
         }
         let mut start = failure_result_from_rep(types.copied(from))?
-        while let Some((take key, take value)) = tiered_span_collection(attempt, visible, data, edge, descriptor, collection, start, until)? {
+        while let Some((take key, take value)) = failure_result_from_rep(pager.tiered_span_collection(attempt, visible, data, edge, descriptor, collection, start, until))? {
             if !admit_change(mut out, key, list.len(key) + list.len(value))? {
                 break
             }
-            start = scan_page_after(key)?
+            start = failure_result_from_rep(pager.scan_page_after(key))?
             list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
         }
         if let Some(_) = out.next {
@@ -45,7 +45,7 @@ fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
 fn snapshot_tiered_initial_changes(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[ChangePage, Error] {
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[ChangePage, Error] {
         tiered_initial_changes(attempt, visible, s.roots.collections, low, high, limits)
     })
 }

@@ -224,12 +224,12 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     }
     let mut working_staged = take staged
     if list.len(working_staged.queued_rewrites) != 0 {
-        let backend: TieredPageBackend = match db.pager {
+        let backend: pager.TieredPageBackend = match pager.pager_requests(db.pager) {
             Some(sender) => PagerTask(channel.sender(sender)),
-            None => PagerDirect(log_directory(db)?, db.store),
+            None => PagerDirect(log_directory(db)?, store_key_to_rep(db.store)),
         }
         let mut no_cut: Option[ChildCutContext] = None
-        let _ = resolve_queued_rewrites(take backend, db.writer_pin_bytes, open_number(db), db.store, mut working_staged, mut no_cut)?
+        let _ = resolve_queued_rewrites(take backend, pager.pin_partition(db.pager), open_number(db), db.store, mut working_staged, mut no_cut)?
     }
     let StagedMigration(plan: take staged_plan, declared: declared, projectors: take registered, ..) = take working_staged
     let mut plan = take staged_plan

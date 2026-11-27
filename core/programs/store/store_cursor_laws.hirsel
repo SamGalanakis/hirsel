@@ -156,7 +156,7 @@ fn scan_span_budget(s: Snapshot, t: Table[u64, u64]) -> Result[(), Error] waits 
     let read_handle = law_reader(s)
     let start = 20000u64
     let row_count = 1000u64
-    let opened = open_span_changes(read_handle, s, log_key(t.id, start)?, log_key(t.id, start + 2 * row_count)?)?
+    let opened = open_span_changes(read_handle, s, failure_result_from_rep(pager.log_key(t.id, start))?, failure_result_from_rep(pager.log_key(t.id, start + 2 * row_count))?)?
     let observed = bound steps(150 * row_count - 1) {
         let mut rows = take opened
         let mut matches = true

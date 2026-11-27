@@ -2,13 +2,13 @@
 // It runs once per cut, before AP16 plans the Memory classes, because the
 // collection-map leaves that AP16 encodes must already name the class-3
 // roots it emits here.
-type TieredCutPack: send {
+pub type TieredCutPack: send {
     seq: u64,
     wire: Bytes,
     pack: pages.PagePack
 }
 
-type TieredCutStage: send {
+pub type TieredCutStage: send {
     // Class 4 first, then class 3, in pack order (T4).
     packs: List[TieredCutPack],
     // The participants' roots in `cut_participants` order, each Tiered
@@ -31,26 +31,12 @@ type TieredCutStage: send {
     emitted: Map[u64, std.page.PagePtr]
 }
 
-fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
+pub fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
     list.len(cut_stage.packs) == 0 && !cut_stage.folded && list.len(cut_stage.queue.retiring) == 0
 }
 
-// A holder whose collection map holds a Tiered collection without a pack
-// inventory (for example an empty table moving Memory -> Tiered, whose
-// stamp-0 root emits no frames) still needs Step 5 to attach one.
-fn tiered_without_paging(roots: List[pages.Roots]) -> bool {
-    for held in roots {
-        if let None = view held.collections.paging {
-            if pages.tiered_collections(held.collections.root) {
-                return true
-            }
-        }
-    }
-    false
-}
-
-fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, std.page.PagePtr], mut packs: List[TieredCutPack]) -> Result[(), Error] {
-    failure_result_from_rep(types.capacity(list.try_reserve(mut packs, list.len(layout.packs))))?
+pub fn encode_tiered_run(id: types.StoreKey, layout: TieredPackRun, mut emitted: Map[u64, std.page.PagePtr], mut packs: List[TieredCutPack]) -> Result[(), types.Failure] {
+    types.capacity(list.try_reserve(mut packs, list.len(layout.packs)))?
     for laid in layout.packs {
         let (take wire, inventory) = encode_tiered_cut_pack(id, layout, laid, mut emitted)?
         list.push(mut packs, TieredCutPack(seq: laid.seq, wire: take wire, pack: inventory))
@@ -72,9 +58,9 @@ fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, s
 // overlay, so they stay counted live until it is built.
 // The participants whose fold replacements are filed: branch heads (the
 // first `heads` roots) whose fork row the cut does not first publish.
-fn fold_owners(branches: List[u32], heads: u64, forked: List[manifest.LineageFork]) -> Result[List[bool], Error] {
+pub fn fold_owners(branches: List[u32], heads: u64, forked: List[manifest.LineageFork]) -> Result[List[bool], types.Failure] {
     let mut owners: List[bool] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut owners, list.len(branches))))?
+    types.capacity(list.try_reserve(mut owners, list.len(branches)))?
     for slot in 0u64 .. list.len(branches) {
         let mut owns = slot < heads
         for fork_row in forked {
@@ -87,7 +73,7 @@ fn fold_owners(branches: List[u32], heads: u64, forked: List[manifest.LineageFor
     Ok(take owners)
 }
 
-fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], owners: List[bool], promote: Option[u64], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree], mut replaced: List[manifest.TieredDrainKill]) -> Result[bool, Error] waits {
+pub fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], owners: List[bool], promote: Option[u64], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree], mut replaced: List[manifest.TieredDrainKill]) -> Result[bool, types.Failure] waits {
     let mut folded = false
     let mut filed: Map[(u32, u64, u64), ()] = map.new()
     for slot in 0u64 .. list.len(roots) {
@@ -105,18 +91,18 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
                         let frame = format.tiered_frame_id(target)
                         let key = (branches[slot], frame.pack, frame.offset)
                         if !map.contains(seen, key) {
-                            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
+                            types.capacity(map.try_reserve(mut seen, 1))?
                             map.insert(mut seen, key, ())
-                            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
+                            types.capacity(list.try_reserve(mut queued, 1))?
                             list.push(mut queued, manifest.DeferredFree(branch_id: branches[slot], target: clone(target)))
                         }
                     },
                     FoldReplaced(frame) => {
                         let key = (branches[slot], frame.pack, frame.stamp)
                         if owners[slot] && !map.contains(filed, key) {
-                            failure_result_from_rep(types.capacity(map.try_reserve(mut filed, 1)))?
+                            types.capacity(map.try_reserve(mut filed, 1))?
                             map.insert(mut filed, key, ())
-                            failure_result_from_rep(types.capacity(list.try_reserve(mut replaced, 1)))?
+                            types.capacity(list.try_reserve(mut replaced, 1))?
                             list.push(mut replaced, manifest.TieredDrainKill(branch_id: branches[slot], frame: frame))
                         }
                     },
@@ -130,168 +116,27 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
 
 // T8 step 3's added rows from the live dropped list come first, then the
 // fold's. A row is added once per branch and frame.
-fn queue_live_dropped(dropped: List[manifest.DeferredFree], mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree]) -> Result[(), Error] {
+pub fn queue_live_dropped(dropped: List[manifest.DeferredFree], mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree]) -> Result[(), types.Failure] {
     for row in dropped {
         let frame = format.tiered_frame_id(row.target)
         let key = (row.branch_id, frame.pack, frame.offset)
         if !map.contains(seen, key) {
-            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
+            types.capacity(map.try_reserve(mut seen, 1))?
             map.insert(mut seen, key, ())
-            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
+            types.capacity(list.try_reserve(mut queued, 1))?
             list.push(mut queued, clone(row))
         }
     }
     Ok(())
 }
 
-// Each superseded main collection releases its Cold root, or the Cold
-// frontier of a dirty Hot root. The old root remains authoritative until
-// the cut publishes. Its pages are queued under main without reading them.
-fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree]) -> Result[(), Error] {
-    let ReplaceMain(replacement, _) = view delta else {
-        return Ok(())
-    }
-    let head = pages.holder_heads(db.holders)[0]
-    for id in replacement.superseded {
-        let Some((root, desc)) = std.page.collection_slot(head.roots.collections.root, failure_result_from_rep(catalog.prefix(id))?) else {
-            continue
-        }
-        if pages.collection_descriptor(desc).residency != ResidentTiered {
-            continue
-        }
-        let mut effects: List[TieredFoldEffect] = list.new()
-        fold_record_lost(root, map.new(), map.new(), true, mut effects)?
-        for take effect in take effects {
-            if let FoldDropped(take target) = take effect {
-                let frame = format.tiered_frame_id(target)
-                let key = (head.id, frame.pack, frame.offset)
-                if !map.contains(seen, key) {
-                    failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
-                    map.insert(mut seen, key, ())
-                    failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
-                    list.push(mut queued, manifest.DeferredFree(branch_id: head.id, target: take target))
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-// T2 then T4: every Hot Tiered page and blob that a participant reaches is
-// emitted once by stamp, class 4 then class 3, from the installed `next_pack`
-// upward.
-fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
-    let id = db.store
-    let first_pack = manifest.pack_next(disk_state(db).packs)
-    let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
-        Some(requests) => Some(view requests),
-        None => None,
-    }
-    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut roots = take participants
-    if let ReplaceMain(replacement, _) = delta {
-        if let Some(freed) = view replacement.chunk_freed {
-            tiered_index_dirty_room(db, roots, freed)?
-        }
-    }
-    let mut seen: Map[(u32, u64, u64), ()] = map.new()
-    let mut queued: List[manifest.DeferredFree] = list.new()
-    queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
-    let mut replaced: List[manifest.TieredDrainKill] = list.new()
-    let owners = fold_owners(branches, heads, manifest.pack_forked(disk_state(db).packs))?
-    let overlays = fold_cut_roots(pager, mut roots, branches, owners, promote, mut next_stamp, mut seen, mut queued, mut replaced)?
-    if let ReplaceMain(replacement, _) = delta {
-        if list.len(replacement.superseded) != 0 {
-            queue_superseded(db, delta, mut seen, mut queued)?
-        }
-        if let Some(freed) = view replacement.chunk_freed {
-            queue_index_chunk_frees(freed, pages.holder_heads(db.holders)[0].id, mut seen, mut queued, mut replaced)?
-        }
-    }
-    // A Tiered -> Memory change installs its loaded tree like a fold does.
-    let loaded = load_memory_residency(pager, mut roots, branches, disk_state(db).unload, mut next_stamp, mut queued)? || overlays
-    // A promotion that emits nothing still installs its re-pointed
-    // collection map. It runs after the queue's added rows have formed, so
-    // its materialization adds none (§13.6a mandatory candidate step 4).
-    let (promoted, materialized) = match promote {
-        Some(slot) => promote_cut_holder(db, pager, mut roots, slot, queued, mut next_stamp)?,
-        None => (false, false),
-    }
-    let compacted = compact_cut(db, pager, mut roots, queued, mut next_stamp)?
-    let leases = lease_cut_inventories(db.compaction, roots)?
-    let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved, queue: take moving) = take compacted
-    let folded = loaded || promoted || materialized || list.len(retiring) != 0 || tiered_without_paging(roots)
-    let compaction = TieredCompaction(probes: take probes, held: take leases)
-    let mut queue = drain_cut(db, pager, take queued, take replaced, moving, next_stamp)?
-    queue.moved = take moved
-    queue.retiring = take retiring
-    // The moved queue rows' copies follow the roots', so a stamp a root
-    // also moved keeps the one location the roots take.
-    let mut pending = tiered_cut_frames_restamped(roots, disk_state(db).restamp, mut next_stamp)?
-    tiered_emit_queue(mut pending, moving)?
-    let TieredCutFrames(pages: take staged_page_frames, blobs: take blobs, ..) = take pending
-    if list.len(staged_page_frames) == 0 && list.len(blobs) == 0 && !folded {
-        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction, emitted: map.new()))
-    }
-    let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
-    let page_run = layout_tiered_packs(take staged_page_frames, 3, blob_run.next_pack, cap)?
-    let mut emitted: Map[u64, std.page.PagePtr] = map.new()
-    let mut packs: List[TieredCutPack] = list.new()
-    encode_tiered_run(id, blob_run, mut emitted, mut packs)?
-    encode_tiered_run(id, page_run, mut emitted, mut packs)?
-    settle_queue_moves(mut queue, moving, emitted, manifest.pack_lists(disk_state(db).packs).deferred_next)?
-    let mut sealed: List[pages.Roots] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut sealed, list.len(roots))))?
-    for held in roots {
-        let collections = seal_holder_tiered(held.collections, emitted)?
-        list.push(mut sealed, pages.PageRoots(collections: take collections, streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
-    }
-    Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction, emitted: take emitted))
-}
-
-// T8 step 4 reads queued pages through the installed inventory. A cut with
-// an empty queue, or a zero `free_budget`, reads nothing.
-fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[manifest.DeferredFree], take folded: List[manifest.TieredDrainKill], moving: Map[u64, TieredQueueMove], next_stamp: u64) -> Result[manifest.CutQueue, Error] waits {
-    let mut queue = manifest.CutQueue(added: take added, rewritten: list.new(), drained: list.new(), kills: list.new(), folded: take folded, moved: list.new(), retiring: list.new())
-    let installed = disk_state(db).packs
-    let budget = disk_state(db).options.free_budget
-    if budget == 0 || (std.page.count(std.page.image_of(manifest.pack_lists(installed).deferred)) == 0 && list.len(queue.added) == 0) {
-        return Ok(take queue)
-    }
-    let Some(requests) = pager else {
-        return Error(Io(Closed))
-    }
-    let kept = list.len(queue.added)
-    let drained = match recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp) {
-        Ok(paging) => {
-            let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
-            drain_cut_queue(source, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut queue, moving, budget)
-        },
-        Error(take problem) => Error(take problem),
-    }
-    match take drained {
-        Ok(()) => Ok(take queue),
-        // Step 4 is optional (§13.6a T8): a refused drain leaves the queue as
-        // it stands, and the cut publishes the mandatory steps.
-        Error(Full(Allocation(_))) => {
-            while list.len(queue.added) > kept {
-                let _ = list.pop(mut queue.added)
-            }
-            queue.drained = list.new()
-            queue.kills = list.new()
-            Ok(take queue)
-        },
-        Error(take problem) => Error(take problem),
-    }
-}
-
 // `note_held_roots` lists each participant's collection map first.
-fn sealed_cut_holders(take holders: List[manifest.HeldPage], cut_stage: TieredCutStage) -> Result[List[manifest.HeldPage], Error] {
+pub fn sealed_cut_holders(take holders: List[manifest.HeldPage], cut_stage: TieredCutStage) -> Result[List[manifest.HeldPage], types.Failure] {
     if tiered_cut_stage_empty(cut_stage) {
         return Ok(take holders)
     }
     let mut ready: List[manifest.HeldPage] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut ready, list.len(holders))))?
+    types.capacity(list.try_reserve(mut ready, list.len(holders)))?
     let mut slot = 0u64
     for held in holders {
         let root = if let HolderSource(_, _, 0) = held.source {
@@ -308,15 +153,15 @@ fn sealed_cut_holders(take holders: List[manifest.HeldPage], cut_stage: TieredCu
 
 // T4's pack rows: each Tiered pack enters the candidate inventory with
 // `live` = its laid-out payload, so AP16 item 7 lists it.
-fn list_tiered_cut(mut known: manifest.PageLocations, cut_stage: TieredCutStage) -> Result[(), Error] {
+pub fn list_tiered_cut(mut known: manifest.PageLocations, cut_stage: TieredCutStage) -> Result[(), types.Failure] {
     for written in cut_stage.packs {
-        failure_result_from_rep(types.capacity(manifest.disk_index_put(mut known.packs, written.seq, written.pack, manifest.pack_edge_charge)))?
+        types.capacity(manifest.disk_index_put(mut known.packs, written.seq, written.pack, manifest.pack_edge_charge))?
     }
     Ok(())
 }
 
 // Step 3 for classes 4 and 3, ahead of AP16's classes 1, 0 and 2.
-fn write_tiered_cut(d: Dir, cut_stage: TieredCutStage, mut buffers: manifest.PackBuffers) -> Result[(), Error] waits {
+pub fn write_tiered_cut(d: Dir, cut_stage: TieredCutStage, mut buffers: manifest.PackBuffers) -> Result[(), types.Failure] waits {
     for written in cut_stage.packs {
         string.truncate(mut buffers.destination, 0)
         string.push(mut buffers.destination, "p-")
@@ -324,8 +169,8 @@ fn write_tiered_cut(d: Dir, cut_stage: TieredCutStage, mut buffers: manifest.Pac
         string.truncate(mut buffers.temporary, 0)
         string.push(mut buffers.temporary, buffers.destination)
         string.push(mut buffers.temporary, ".tmp")
-        failure_result_from_rep(manifest.disk_write_synced(d, buffers.temporary, written.wire))?
-        failure_result_from_rep(manifest.disk_io(host.rename(d, buffers.temporary, buffers.destination)))?
+        manifest.disk_write_synced(d, buffers.temporary, written.wire)?
+        manifest.disk_io(host.rename(d, buffers.temporary, buffers.destination))?
     }
     Ok(())
 }
@@ -334,7 +179,7 @@ fn write_tiered_cut(d: Dir, cut_stage: TieredCutStage, mut buffers: manifest.Pac
 // Holders that share a root by stamp count it once. The figure is exact for
 // one holder; across holders whose distinct roots share subtrees it is an
 // upper bound, which replay already treats as conservative (§13.1).
-fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut total: u64) -> Result[(), Error] {
+fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut total: u64) -> Result[(), types.Failure] {
     let image = std.page.image_of(root)
     for slot in 0u64 .. std.page.count(image) {
         if std.page.level(image) != 0 {
@@ -354,7 +199,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
             if map.contains(seen, stamp) {
                 continue
             }
-            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
+            types.capacity(map.try_reserve(mut seen, 1))?
             map.insert(mut seen, stamp, ())
         }
         let Some(sum) = int.checked_add(total, descriptor.row_bytes) else {
@@ -367,7 +212,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
 
 // Over the roots the cut publishes, so a fold's fresh roots are counted
 // and an overlaid head never hides a pin that shares its Cold root.
-fn cut_tiered_account(published: List[pages.Roots]) -> Result[u64, Error] {
+pub fn cut_tiered_account(published: List[pages.Roots]) -> Result[u64, types.Failure] {
     let mut seen: Map[u64, ()] = map.new()
     let mut total = 0u64
     for roots in published {
@@ -376,125 +221,8 @@ fn cut_tiered_account(published: List[pages.Roots]) -> Result[u64, Error] {
     Ok(total)
 }
 
-// Step 5's images, built before the rename so the swap allocates nothing.
-// Each sealed tree reads its Cold roots through the new generation's packs.
-// The cut settles (§13.7): the live Tiered account becomes the published X.
-fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: manifest.PageLocations, generation: u64, next_stamp: u64) -> Result[u64, Error] {
-    let settled = cut_tiered_account(cut_stage.roots)?
-    if tiered_cut_stage_empty(cut_stage) {
-        return Ok(settled)
-    }
-    let paging = recovered_tiered_inventory(installed, None, generation, next_stamp)?
-    for slot in 0u64 .. list.len(cut_stage.roots) {
-        let had_paging = match view cut_stage.roots[slot].collections.paging {
-            Some(_) => true,
-            None => false,
-        }
-        if had_paging || pages.tiered_collections(cut_stage.roots[slot].collections.root) {
-            cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
-        }
-    }
-    Ok(settled)
-}
-
-fn take_sealed(mut sealed: List[pages.Roots], mut at: u64) -> pages.PageTree {
+pub fn take_sealed(mut sealed: List[pages.Roots], mut at: u64) -> pages.PageTree {
     let tree = pages.share_page_tree(sealed[at].collections)
     at += 1
     take tree
-}
-
-// Step 5: each participant's Tiered images replace its Hot ones, in the
-// order `visit_cut_heads` and `visit_cut_pins` gave them to the stage.
-fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_stage: TieredCutStage) -> HolderDelta {
-    let mut delta = take holder_delta
-    if tiered_cut_stage_empty(cut_stage) {
-        return take delta
-    }
-    let TieredCutStage(roots: take sealed, ..) = take cut_stage
-    let mut sealed_roots = take sealed
-    let mut at = 0u64
-    let removed: Option[u64] = match delta {
-        RemoveHead(slot) => Some(slot),
-        ReplaceMain(_, slot) => slot,
-        _ => None,
-    }
-    let head_count = list.len(pages.holder_heads(db.holders))
-    for slot in 0u64 .. head_count {
-        if removed == Some(slot) {
-            continue
-        }
-        if slot == 0 {
-            if let ReplaceMain(mut replacement, _) = delta {
-                replacement.roots.collections = take_sealed(mut sealed_roots, mut at)
-                continue
-            }
-        }
-        pages.set_head_collection(mut db.holders, slot, take_sealed(mut sealed_roots, mut at))
-    }
-    if let AddHead(mut added, _) = delta {
-        added.roots.collections = take_sealed(mut sealed_roots, mut at)
-    }
-    let dropped = removed_pins(delta)
-    let mut inserted = false
-    let pin_count = list.len(pages.holder_pins(db.holders))
-    for slot in 0u64 .. pin_count {
-        if list.contains(dropped, slot) {
-            continue
-        }
-        if let ReplacePin(pin_slot, mut replacement) = delta {
-            if pin_slot == slot {
-                replacement.roots.collections = take_sealed(mut sealed_roots, mut at)
-                continue
-            }
-        }
-        if !inserted {
-            if let AddPin(mut added) = delta {
-                if manifest.pin_order(added.name, added.owner, pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].owner) == Less {
-                    added.roots.collections = take_sealed(mut sealed_roots, mut at)
-                    inserted = true
-                }
-            }
-        }
-        pages.install_sealed_pin(mut db.holders, slot, take_sealed(mut sealed_roots, mut at))
-    }
-    if !inserted {
-        if let AddPin(mut added) = delta {
-            added.roots.collections = take_sealed(mut sealed_roots, mut at)
-        }
-    }
-    take delta
-}
-
-fn tiered_index_dirty_room(db: Db, roots: List[pages.Roots], freed: TieredFreed) -> Result[(), Error] {
-    let frames = tiered_cut_frames(roots)?
-    let state = disk_state(db)
-    let dirty = view state.tiered_dirty
-    let replaced = int.saturating_add(dirty.replaced_rows, list.len(freed.replaced))
-    let dropped = int.saturating_add(list.len(dirty.dropped), list.len(freed.dropped))
-    let mut requested = int.saturating_add(int.saturating_mul(replaced, REPLACED_ROW), int.saturating_mul(dropped, DROPPED_ROW))
-    for item in frames.pages {
-        requested = int.saturating_add(requested, item.frame.size)
-    }
-    for item in frames.blobs {
-        requested = int.saturating_add(requested, item.frame.size)
-    }
-    failure_result_from_rep(catalog.over_ceiling(requested, state.options.dirty_bytes))
-}
-
-fn queue_index_chunk_frees(freed: TieredFreed, branch_id: u32, mut seen: Map[(u32, u64, u64), ()], mut queued: List[manifest.DeferredFree], mut replaced: List[manifest.TieredDrainKill]) -> Result[(), Error] {
-    for frame in freed.replaced {
-        failure_result_from_rep(types.capacity(list.try_reserve(mut replaced, 1)))?
-        list.push(mut replaced, manifest.TieredDrainKill(branch_id: branch_id, frame: frame))
-    }
-    for target in freed.dropped {
-        let frame = format.tiered_frame_id(target)
-        let key = (branch_id, frame.pack, frame.offset)
-        if !map.contains(seen, key) {
-            failure_result_from_rep(types.capacity(map.try_reserve(mut seen, 1)))?
-            map.insert(mut seen, key, ())
-            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
-            list.push(mut queued, manifest.DeferredFree(branch_id: branch_id, target: clone(target)))
-        }
-    }
-    Ok(())
 }

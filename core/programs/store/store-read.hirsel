@@ -9,8 +9,8 @@ type ReadAccess {
 }
 
 type ReaderPool: send {
-    requests: Sender[TieredPagerMessage],
-    grant: Arc[TieredReaderGrant]
+    requests: Sender[pager.TieredPagerMessage],
+    grant: Arc[pager.TieredReaderGrant]
 }
 
 pub opaque resource type Reader: send {
@@ -33,10 +33,10 @@ fn make_reader(id: StoreId, opened: u64, take pool: Option[ReaderPool]) -> Resul
     }
 }
 
-fn open_reader(id: StoreId, opened: u64, pager: Option[Sender[TieredPagerMessage]], pin_bytes: u64) -> Result[Reader, Error] waits {
-    let pool: Option[ReaderPool] = match pager {
+fn open_reader(id: StoreId, opened: u64, pager_sender: Option[Sender[pager.TieredPagerMessage]], pin_bytes: u64) -> Result[Reader, Error] waits {
+    let pool: Option[ReaderPool] = match pager_sender {
         Some(requests) => {
-            let grant = pager_reader_grant(requests, pin_bytes)?
+            let grant = failure_result_from_rep(pager.pager_reader_grant(requests, pin_bytes))?
             Some(ReaderPool(requests: channel.sender(requests), grant: take grant))
         },
         None => None,
@@ -45,7 +45,7 @@ fn open_reader(id: StoreId, opened: u64, pager: Option[Sender[TieredPagerMessage
 }
 
 pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(db.store, open_number(db), db.pager, pin_bytes)
+    open_reader(db.store, open_number(db), pager.pager_requests(db.pager), pin_bytes)
 }
 
 pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] waits {
@@ -170,12 +170,12 @@ fn table_decoder[K, V](t: Table[K, V]) -> RowDecoder[K, V] {
     RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), unique: false, skip: None)
 }
 
-fn snapshot_pager(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory) -> Result[(TieredPageSource, Arc[TieredReaderGrant], TieredPinRoot), Error] {
+fn snapshot_pager(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory) -> Result[(pager.TieredPageSource, Arc[pager.TieredReaderGrant], pager.TieredPinRoot), Error] {
     let Some(pool) = view r.pool else {
         return Error(Io(Closed))
     }
-    let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
-    let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections))
+    let source = pager.TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
+    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections))
     Ok((take source, arc.share(pool.grant), root))
 }
 
@@ -591,7 +591,7 @@ fn note_tx_row(reads: View[core.Log[Read]], mut low: Bytes, mut high: Bytes, rev
         let end = replace(mut high, take new_high)
         log.append(reads, Span(failure_result_from_rep(types.copied(key))?, take end))
     } else {
-        let mut end = scan_page_after(key)?
+        let mut end = failure_result_from_rep(pager.scan_page_after(key))?
         let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
         log.append(reads, Span(take start, take end))
     }
@@ -688,8 +688,8 @@ fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> 
 type EntryCursor: send = Unopened(pages.PageTree) | Open(pages.CollectionCursor) | OpenTiered(pages.PageTree, std.omap.OMap[Bytes, Option[Arc[Bytes]]]) | Exhausted
 
 scoped type EntryRead {
-    attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
     below: View[List[Arc[pages.Staged]]],
     ops: View[pages.DataOps]
 }

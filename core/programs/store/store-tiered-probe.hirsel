@@ -1,33 +1,33 @@
 // A path is local to the probe step. Its slots start at the participating
 // root, and its final slot names the matched edge.
-type TieredProbePath {
+pub type TieredProbePath {
     target: format.TieredTarget,
     slots: List[u64]
 }
 
-fn probe_frame_matches(pack: u64, row: manifest.PackIndexRow, target: format.TieredTarget) -> Result[bool, Error] {
+fn probe_frame_matches(pack: u64, row: manifest.PackIndexRow, target: format.TieredTarget) -> Result[bool, types.Failure] {
     let expected = format.tiered_frame_id(target)
     if expected.pack != pack || expected.offset != row.offset {
         return Ok(false)
     }
     if expected.len != int.widen(row.len) || expected.kind != int.widen(row.kind) || expected.stamp != row.stamp {
-        return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(pack))?, row.offset, Malformed)))
+        return Error(format.disk_fault(manifest.paged_pack_path(pack)?, row.offset, Malformed))
     }
     Ok(true)
 }
 
-fn probe_routing_key(pack: u64, row: manifest.PackIndexRow) -> Result[View[Bytes], Error] in row {
+fn probe_routing_key(pack: u64, row: manifest.PackIndexRow) -> Result[View[Bytes], types.Failure] in row {
     if list.len(row.key) < 4 {
-        return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(pack))?, row.offset, Malformed)))
+        return Error(format.disk_fault(manifest.paged_pack_path(pack)?, row.offset, Malformed))
     }
     let collection: u32 = list.word_be(row.key, 0)
     if collection != row.collection {
-        return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(pack))?, row.offset, Malformed)))
+        return Error(format.disk_fault(manifest.paged_pack_path(pack)?, row.offset, Malformed))
     }
     Ok(list.slice(row.key, 4, list.len(row.key)))
 }
 
-fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row: manifest.PackIndexRow) -> Result[Option[TieredProbePath], Error] waits {
+fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row: manifest.PackIndexRow) -> Result[Option[TieredProbePath], types.Failure] waits {
     let key = probe_routing_key(pack, row)?
     let mut edge: std.page.Slot = clone(root)
     let mut expected_level: Option[u8] = None
@@ -50,7 +50,7 @@ fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row:
         let height = std.page.level(image)
         if let Some(wanted) = expected_level {
             if height != wanted {
-                return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(pack))?, row.offset, Malformed)))
+                return Error(format.disk_fault(manifest.paged_pack_path(pack)?, row.offset, Malformed))
             }
         }
         if let Some(ptr) = matched {
@@ -58,7 +58,7 @@ fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row:
         }
         if let Some(slot) = std.page.descend(image, key) {
             let child = option.unwrap(std.page.child_slot(page, slot))
-            failure_result_from_rep(types.capacity(list.try_reserve(mut slots, 1)))?
+            types.capacity(list.try_reserve(mut slots, 1))?
             list.push(mut slots, slot)
             edge = clone(child)
             expected_level = Some(height - 1)
@@ -71,7 +71,7 @@ fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row:
                     if let Some(ColdBlob(ptr)) = std.page.blob_slot(page, reference.body) {
                         if probe_frame_matches(pack, row, TieredBlob(ptr))? {
                             let _ = fold_frame_at(cut, TieredBlob(ptr))?
-                            failure_result_from_rep(types.capacity(list.try_reserve(mut slots, 1)))?
+                            types.capacity(list.try_reserve(mut slots, 1))?
                             list.push(mut slots, slot)
                             return Ok(Some(TieredProbePath(target: TieredBlob(ptr), slots: take slots)))
                         }
@@ -83,7 +83,7 @@ fn probe_tiered_path(cut: TieredPageSource, root: std.page.Slot, pack: u64, row:
     }
 }
 
-fn probe_deferred_root(cut: TieredPageSource, queued: format.TieredTarget, pack: u64, row: manifest.PackIndexRow) -> Result[Option[TieredProbePath], Error] waits {
+pub fn probe_deferred_root(cut: TieredPageSource, queued: format.TieredTarget, pack: u64, row: manifest.PackIndexRow) -> Result[Option[TieredProbePath], types.Failure] waits {
     match queued {
         TieredPage(ptr) => probe_tiered_path(cut, ColdPage(ptr), pack, row),
         TieredBlob(ptr) => {

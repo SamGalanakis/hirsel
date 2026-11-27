@@ -1,0 +1,302 @@
+pub opaque type PagerState {
+    pager: Option[Sender[TieredPagerMessage]],
+    pager_writer: Option[Sender[TieredPagerMessage]],
+    park_notices: Option[Receiver[()]],
+    parked: ParkQueue,
+    writer_pin_bytes: u64
+}
+
+pub fn pager_state(writer_pin_bytes: u64) -> PagerState {
+    PagerState(pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: writer_pin_bytes)
+}
+
+pub fn pager_requests(state: PagerState) -> View[Option[Sender[TieredPagerMessage]]] in state {
+    view state.pager
+}
+
+pub fn replace_requests(mut state: PagerState, take next: Option[Sender[TieredPagerMessage]]) -> Option[Sender[TieredPagerMessage]] {
+    replace(mut state.pager, take next)
+}
+
+pub fn pin_partition(state: PagerState) -> u64 {
+    state.writer_pin_bytes
+}
+
+pub fn replace_writer_pin_bytes(mut state: PagerState, next: u64) -> u64 {
+    replace(mut state.writer_pin_bytes, next)
+}
+
+pub fn attach_pager(mut state: PagerState, take link: TieredPagerLink) -> Task[()] {
+    let TieredPagerLink(requests: take requests, writer: take writer, notices: take notices, worker: take worker) = take link
+    state.pager = Some(take requests)
+    state.pager_writer = Some(take writer)
+    state.park_notices = Some(take notices)
+    take worker
+}
+
+pub fn disconnect_pager(mut state: PagerState) {
+    state.pager_writer = None
+    state.park_notices = None
+    state.pager = None
+}
+
+pub fn park_notices(state: PagerState) -> View[Option[Receiver[()]]] in state {
+    view state.park_notices
+}
+
+pub fn take_park_notices(mut state: PagerState) -> Option[Receiver[()]] {
+    replace(mut state.park_notices, None)
+}
+
+pub fn park_queue(state: PagerState) -> View[ParkQueue] in state {
+    view state.parked
+}
+
+pub fn clear_parked(mut state: PagerState) {
+    state.parked = empty_park_queue()
+}
+
+pub fn revoke_parked(mut state: PagerState, root: TieredPinRoot) {
+    for k in 0u64 .. list.len(state.parked.entries) {
+        revoke_entry(mut state.parked, k, root)
+    }
+}
+
+pub fn remove_parked(mut state: PagerState, k: u64) -> ParkEntry {
+    list.remove(mut state.parked.entries, k)
+}
+
+pub fn cancel_parked(mut state: PagerState, id: u64) {
+    if let Some(k) = park_slot(state.parked, id) {
+        detach_answer(mut state.parked, k)
+        let _ = list.remove(mut state.parked.entries, k)
+    }
+}
+
+pub fn reserve_parked(mut state: PagerState) -> bool {
+    match list.try_reserve(mut state.parked.entries, 1) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+pub fn enqueue_parked(mut state: PagerState, kept: Option[u64], attempts: u64, take pins: TieredPins, take stamps: Map[u64, ()], take demand: TieredPointDemand, take pending: Option[(format.TieredTarget, types.Failure)], crowded: bool) -> u64 {
+    let id = match kept {
+        Some(id) => id,
+        None => {
+            let minted = state.parked.next_id
+            state.parked.next_id += 1
+            minted
+        },
+    }
+    let mut place = list.len(state.parked.entries)
+    while place != 0 && state.parked.entries[place - 1].id > id {
+        place -= 1
+    }
+    list.insert(mut state.parked.entries, place, ParkEntry(id: id, ready: false, attempts: attempts, pins: take pins, stamps: take stamps, demand: Some(take demand), answer: None, pending: take pending, failed: None, crowded: crowded))
+    id
+}
+
+pub fn send_parked_demand(mut state: PagerState) {
+    if parked_in_flight(state.parked) {
+        return
+    }
+    let Some(k) = first_unsent(state.parked) else {
+        return
+    }
+    let demand = option.unwrap(replace(mut state.parked.entries[k].demand, None))
+    let made = manifest.disk_allocation(fn() -> Result[(Sender[Result[TieredPointDelivery, types.Failure]], Receiver[Result[TieredPointDelivery, types.Failure]]), types.Failure] {
+        Ok(channel.new(1))
+    })
+    let (take answer, take delivered) = match take made {
+        Ok(take ends) => take ends,
+        Error(take problem) => {
+            state.parked.entries[k].failed = Some(take problem)
+            state.parked.entries[k].ready = true
+            return
+        },
+    }
+    let sent = match state.pager_writer {
+        Some(writer) => channel.try_send(writer, PagerPoint(take demand, take answer)),
+        None => Error(Closed(PagerPoint(take demand, take answer))),
+    }
+    match take sent {
+        Ok(()) => {
+            state.parked.entries[k].answer = Some(take delivered)
+            if let Some(requests) = state.pager {
+                let _ = channel.try_send(requests, PagerKick)
+            }
+        },
+        // The slot still holds a detached demand; the pager's answer to it
+        // posts a notice, and the next poll sends this one.
+        Error(Full(PagerPoint(take back, _))) => {
+            state.parked.entries[k].demand = Some(take back)
+        },
+        Error(Full(_)) => fail("store: a writer demand changed kind"),
+        Error(Closed(_)) => {
+            state.parked.entries[k].failed = Some(Io(Closed))
+            state.parked.entries[k].ready = true
+        },
+    }
+}
+
+fn install_parked(mut state: PagerState, k: u64, root: TieredPinRoot, take answer: Result[TieredPointDelivery, types.Failure]) {
+    let delivered = match take answer {
+        Ok(take delivered) => take delivered,
+        Error(take problem) => {
+            state.parked.entries[k].failed = Some(take problem)
+            return
+        },
+    }
+    let mut others = 0u64
+    for j in 0u64 .. list.len(state.parked.entries) {
+        if j != k {
+            others = int.saturating_add(others, state.parked.entries[j].pins.retained)
+        }
+    }
+    state.parked.entries[k].pins.partition = int.saturating_sub(state.writer_pin_bytes, others)
+    let touched = replace(mut state.parked.entries[k].stamps, map.new())
+    let mut pending = replace(mut state.parked.entries[k].pending, None)
+    let installed = tiered_install_delivery(take delivered, root, touched, mut state.parked.entries[k].pins, mut pending)
+    state.parked.entries[k].pending = take pending
+    match take installed {
+        Ok(true) => (),
+        Ok(false) => {
+            state.parked.entries[k].crowded = true
+        },
+        Error(take problem) => {
+            state.parked.entries[k].failed = Some(take problem)
+        },
+    }
+    state.parked.entries[k].stamps = take touched
+}
+
+pub fn poll_parked(mut state: PagerState, root: TieredPinRoot) -> Result[List[u64], types.Failure] {
+    let drained = match state.parked.drain {
+        Some(receiver) => match channel.try_receive(receiver) {
+            Error(Empty) => false,
+            _ => true,
+        },
+        None => false,
+    }
+    if drained {
+        state.parked.drain = None
+    }
+    let n = list.len(state.parked.entries)
+    for k in 0u64 .. n {
+        if state.parked.entries[k].ready {
+            continue
+        }
+        // A head move: a delivery at the old root would install nothing.
+        if state.parked.entries[k].pins.root != root {
+            revoke_entry(mut state.parked, k, root)
+            continue
+        }
+        let arrived: Option[Result[TieredPointDelivery, types.Failure]] = match state.parked.entries[k].answer {
+            Some(receiver) => match channel.try_receive(receiver) {
+                Ok(take answer) => Some(take answer),
+                Error(Empty) => None,
+                Error(Closed) => Some(Error(Io(Closed))),
+            },
+            None => None,
+        }
+        if let Some(take answer) = arrived {
+            state.parked.entries[k].answer = None
+            install_parked(mut state, k, root, take answer)
+            state.parked.entries[k].ready = true
+        }
+    }
+    send_parked_demand(mut state)
+    let mut ready: List[u64] = list.new()
+    types.capacity(list.try_reserve(mut ready, n))?
+    for queued in state.parked.entries {
+        if queued.ready {
+            list.push(mut ready, queued.id)
+        }
+    }
+    Ok(take ready)
+}
+
+pub opaque type DiskPagerState {
+    worker: Option[Task[()]],
+    dirty: TieredDirty,
+    compaction: TieredCompaction,
+    restamp: Option[u32],
+    unload: Option[u32]
+}
+
+pub fn disk_pager_state(take worker: Option[Task[()]]) -> DiskPagerState {
+    DiskPagerState(worker: take worker, dirty: clean_tiered_cut(), compaction: no_tiered_compaction(), restamp: None, unload: None)
+}
+
+pub fn set_worker(mut state: DiskPagerState, take worker: Task[()]) {
+    state.worker = Some(take worker)
+}
+
+pub fn take_worker(mut state: DiskPagerState) -> Option[Task[()]] {
+    replace(mut state.worker, None)
+}
+
+pub fn has_worker(state: DiskPagerState) -> bool {
+    match state.worker {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn dirty_cut(state: DiskPagerState) -> View[TieredDirty] in state {
+    view state.dirty
+}
+
+pub fn reserve_dirty(mut state: DiskPagerState, freed: TieredFreed, limit: u64) -> Result[(), types.Failure] {
+    reserve_tiered_commit(mut state.dirty, freed, limit)
+}
+
+pub fn admit_dirty(mut state: DiskPagerState, branch: u32, take written: TieredFreed) {
+    admit_tiered_commit(mut state.dirty, branch, take written)
+}
+
+pub fn install_disk_cut(mut state: DiskPagerState, take compaction: TieredCompaction) {
+    state.dirty = clean_tiered_cut()
+    state.compaction = take compaction
+}
+
+pub fn disk_compaction(state: DiskPagerState) -> View[TieredCompaction] in state {
+    view state.compaction
+}
+
+pub fn prune_leases(mut state: DiskPagerState) {
+    prune_tiered_leases(mut state.compaction.held)
+}
+
+pub fn reset_compaction(mut state: DiskPagerState) {
+    state.compaction = no_tiered_compaction()
+}
+
+pub fn restamp_collection(state: DiskPagerState) -> Option[u32] {
+    state.restamp
+}
+
+pub fn unload_collection(state: DiskPagerState) -> Option[u32] {
+    state.unload
+}
+
+pub fn set_restamp(mut state: DiskPagerState, id: Option[u32]) {
+    state.restamp = id
+}
+
+pub fn set_unload(mut state: DiskPagerState, id: Option[u32]) {
+    state.unload = id
+}
+
+pub fn has_requests(state: PagerState) -> bool {
+    match state.pager {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn close_requests(mut state: PagerState) {
+    state.pager_writer = None
+    state.pager = None
+}

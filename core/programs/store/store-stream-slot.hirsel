@@ -250,7 +250,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     Ok(JournalService(task: take running, control: take control_send, bell: take bell, reports: take report_client, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_batch_bytes: plan.batching.max_batch_bytes, max_rows: 2 * slots))
 }
 
-fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String], cache: Option[ObjectsCache]) -> Authority {
+fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String], cache: Option[pager.ObjectsCache]) -> Authority {
     wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), kind)
 }
 

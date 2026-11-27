@@ -22,9 +22,9 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     // Hot parent: 80 + 16. Cold leaf: 79 + 16. BLOB: 1025 + 8 + 16.
     let (take root, take leaf, take cached_blob) = l62_point_path_fixture()?
     let key = types.key_word(42)
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
-    let first = tiered_attempt(1240, 0)
-    let Error(Missed) = tiered_point_path(first, visible, root, None, key) else {
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let first = pager.tiered_attempt(1240, 0)
+    let Error(Missed) = failure_result_from_rep(pager.tiered_point_path(first, visible, root, None, key)) else {
         fail("L62: an unpinned leaf did not miss")
     }
     let Some(AttemptMiss(TieredPage(ptr))) = tiered_attempt_state(first).stopped else {
@@ -33,9 +33,9 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     if ptr.stamp != 40 || tiered_attempt_state(first).touched_bytes != 191 {
         fail("L62: point lookup did not count the Hot parent before the Cold leaf")
     }
-    map.insert(mut visible, tiered_cache_key(leaf.identity), take leaf)
-    let second = tiered_attempt(1240, 0)
-    let Error(Missed) = tiered_point_path(second, visible, root, None, key) else {
+    map.insert(mut visible, pager.tiered_cache_key(leaf.identity), take leaf)
+    let second = pager.tiered_attempt(1240, 0)
+    let Error(Missed) = failure_result_from_rep(pager.tiered_point_path(second, visible, root, None, key)) else {
         fail("L62: an unpinned body did not miss")
     }
     let Some(AttemptMiss(TieredBlob(reference))) = tiered_attempt_state(second).stopped else {
@@ -44,16 +44,16 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     if reference.stamp != 39 || tiered_attempt_state(second).touched_bytes != 1240 {
         fail("L62: point lookup did not count the full BLOB frame")
     }
-    map.insert(mut visible, tiered_cache_key(cached_blob.identity), take cached_blob)
-    let admitted = tiered_attempt(1240, 0)
-    let Some(value) = tiered_point_path(admitted, visible, root, None, key)? else {
+    map.insert(mut visible, pager.tiered_cache_key(cached_blob.identity), take cached_blob)
+    let admitted = pager.tiered_attempt(1240, 0)
+    let Some(value) = failure_result_from_rep(pager.tiered_point_path(admitted, visible, root, None, key))? else {
         fail("L62: an admitted pinned row was not read")
     }
     if list.len(value) != 1025 || value[1024u64] != 106 || tiered_attempt_state(admitted).touched_bytes != 1240 || map.len(tiered_attempt_state(admitted).stamps) != 3 {
         fail("L62: pin-only lookup did not return the selected BLOB")
     }
-    let refused = tiered_attempt(1239, 0)
-    let Error(Missed) = tiered_point_path(refused, visible, root, None, key) else {
+    let refused = pager.tiered_attempt(1239, 0)
+    let Error(Missed) = failure_result_from_rep(pager.tiered_point_path(refused, visible, root, None, key)) else {
         fail("L62: a warm pin bypassed the physical limit")
     }
     let Some(AttemptPinLimit(problem)) = tiered_attempt_state(refused).stopped else {
@@ -65,7 +65,7 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     Ok(())
 }
 
-fn l62_deliver_branch(requests: Sender[TieredPagerMessage], target: std.page.PagePtr, leaf: std.page.PagePtr) -> Result[(), Error] waits {
+fn l62_deliver_branch(requests: Sender[pager.TieredPagerMessage], target: std.page.PagePtr, leaf: std.page.PagePtr) -> Result[(), Error] waits {
     let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let mut ids = 0u64
     for ptr in[target, leaf] {
@@ -74,8 +74,8 @@ fn l62_deliver_branch(requests: Sender[TieredPagerMessage], target: std.page.Pag
         let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: inventory, object: None))
         packs = take next_packs
     }
-    let demand = TieredPointDemand(target: TieredPage(target), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: take packs, next_stamp: 51, deadline: 0, grant: None)
-    let TieredPointDelivery(frames: take path, ..) = tiered_point_delivery(requests, take demand)?
+    let demand = pager.TieredPointDemand(target: TieredPage(target), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), packs: take packs, next_stamp: 51, deadline: 0, grant: None)
+    let pager.TieredPointDelivery(frames: take path, ..) = failure_result_from_rep(pager.tiered_point_delivery(requests, take demand))?
     if list.len(path) != 2 || path[0u64].identity.stamp != 50 || path[1u64].identity.stamp != 49 {
         fail("L62: point batch must deliver the parent and selected leaf in order")
     }
@@ -109,7 +109,7 @@ fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     list.push(mut branches, std.page.Entry(key: types.key_word(42), cell: Child(std.page.Branch(child: leaf, rows: 1, charge: 86))))
     let branch_image = failure_result_from_rep(pages.page_result(std.page.encode(branches, 1, 50, Collection)))?
     let root = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(branch_image))?
-    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
     let delivered = l62_deliver_branch(requests, root, leaf)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
@@ -117,8 +117,8 @@ fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
 }
 
 fn l62_grant_cache_frames(owner: StoreId, retain_all: bool) -> Result[(), Error] {
-    let mut cache_state = new_tiered_cache(96 * 1048576)
-    let original = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 32 * 1048576))?
+    let mut cache_state = pager.new_tiered_cache(96 * 1048576)
+    let original = failure_result_from_rep(pager.tiered_cache_reserve_reader(mut cache_state, pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: 32 * 1048576)))?
     let mut held: List[Arc[format.TieredFrame]] = list.with_capacity(7)
     for slot in 0u64 .. 7 {
         let value_len = 8 * 1048576u64 - 24
@@ -129,12 +129,12 @@ fn l62_grant_cache_frames(owner: StoreId, retain_all: bool) -> Result[(), Error]
         if slot == 0 || retain_all {
             list.push(mut held, arc.share(frame))
         }
-        tiered_cache_admit(mut cache_state, frame)
+        pager.tiered_cache_admit(mut cache_state, frame)
     }
-    if !failure_result_from_rep(types.capacity(tiered_cache_evict(mut cache_state)))? || cache_state.cached_bytes != 48 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
+    if !failure_result_from_rep(types.capacity(pager.tiered_cache_evict(mut cache_state)))? || cache_state.cached_bytes != 48 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
         fail("L62: expected 48 MiB cached and 8 MiB of overlap")
     }
-    let admission = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 24 * 1048576))
+    let admission = failure_result_from_rep(pager.tiered_cache_reserve_reader(mut cache_state, pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: 24 * 1048576)))
     if retain_all {
         let Error(Full(Cache(problem))) = take admission else {
             fail("L62: overlap must leave the grant too little room")
@@ -177,9 +177,9 @@ fn l62_reader_grants(db: Db) -> Result[(), Error] waits {
         }
     }
     // The marker for an abandoned reply must also be reclaimable.
-    let (answer, abandoned): (Sender[Result[Arc[TieredReaderGrant], Error]], Receiver[Result[Arc[TieredReaderGrant], Error]]) = channel.new(1)
+    let (answer, abandoned): (Sender[Result[Arc[pager.TieredReaderGrant], types.Failure]], Receiver[Result[Arc[pager.TieredReaderGrant], types.Failure]]) = channel.new(1)
     let _ = take abandoned
-    let Some(requests) = view db.pager else {
+    let Some(requests) = pager.pager_requests(db.pager) else {
         fail("L62: fixture pager is missing")
     }
     channel.send(requests, PagerReserve(32 * 1048576, take answer)) ?=> |_| Io(Closed)
@@ -198,8 +198,8 @@ fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Err
     }
     l62_grant_cache_frames(db.store, false)?
     l62_grant_cache_frames(db.store, true)?
-    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
-    db.pager = Some(take requests)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let _ = pager.replace_requests(mut db.pager, Some(take requests))
     let admitted = l62_reader_grants(db)
     let _ = take db
     let _ = result.unwrap(task.join(take worker))
@@ -235,7 +235,7 @@ fn test_l68_fold_reuses_cold_edges() -> Result[(), Error] {
     let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(id: u64) -> std.page.PagePtr {
         fail("L68: Cold edges have no entry in the new pack's location table")
     }
-    let sealed = sealed_tiered_root(edited, locate)?
+    let sealed = failure_result_from_rep(pager.sealed_tiered_root(edited, locate))?
     let Some(ColdBlob(installed)) = std.page.blob_slot(sealed, 0) else {
         fail("L68: sealing lost the retained BLOB")
     }
@@ -247,7 +247,7 @@ fn test_l68_fold_reuses_cold_edges() -> Result[(), Error] {
     list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: child, rows: 1, charge: 1110))))
     let parent = failure_result_from_rep(pages.page_result(std.page.encode(branches, 1, 42, Collection)))?
     let root = failure_result_from_rep(pages.page_result(std.page.attach_cold(take parent)))?
-    let installed_root = sealed_tiered_root(root, locate)?
+    let installed_root = failure_result_from_rep(pager.sealed_tiered_root(root, locate))?
     let Some(ColdPage(inherited)) = std.page.child_slot(installed_root, 0) else {
         fail("L68: sealing lost a Cold child")
     }
@@ -270,7 +270,7 @@ fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[pages.PageTree, Error]
     Ok(take tree)
 }
 
-fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: pages.PageTree, key: Bytes) -> Result[Option[Bytes], Error] waits {
+fn l62_read_point_bytes(source: pager.TieredPageSource, grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, key: Bytes) -> Result[Option[Bytes], Error] waits {
     read_tiered_point(source, grant, root, tree, key, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
         match raw {
             Some(value) => Ok(Some(failure_result_from_rep(types.copied(value))?)),
@@ -279,11 +279,11 @@ fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant],
     })
 }
 
-fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
-    let grant = pager_reader_grant(source.pager, VALUE_LIMIT + 1048576)?
+fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let grant = failure_result_from_rep(pager.pager_reader_grant(source.pager, VALUE_LIMIT + 1048576))?
     let mut tree = l62_replay_read_tree(base)?
-    let key = log_key(9, 1)?
-    let mut root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let key = failure_result_from_rep(pager.log_key(9, 1))?
+    let mut root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
     for _ in 0u64 .. 2 {
         let Some(value) = l62_read_point_bytes(source, grant, root, tree, key)? else {
             fail("L62: cold and warm lookup must both find the row")
@@ -292,20 +292,20 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
             fail("L62: pager lookup changed the row")
         }
     }
-    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
-    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let before = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
     let put_op = format.JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, put_op)?
     root.root_stamp = pages.tree_stamp(tree)
-    let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
+    let overlay_only = pager.TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
     let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? else {
         fail("L62: a replay put did not answer without the Cold inventory")
     }
     if list.compare_bytes(replayed, string.as_bytes("second")) != Equal {
         fail("L62: a replay put did not take precedence over its base")
     }
-    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?)? else {
+    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 2))?)? else {
         fail("L62: an overlay skipped the Cold base for an untouched key")
     }
     if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
@@ -330,28 +330,28 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, pages.TieredPagerPack(inventory: inventory, object: None))
-    let (take pager, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
-    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 41, deadline: 0)
+    let (take pager_link, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let source = pager.TieredPageSource(pager: take pager_link, packs: take packs, next_stamp: 41, deadline: 0)
     let checked = l62_read_replayed_point(source, base)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
     checked
 }
 
-fn l62_check_batch_error_order(source: TieredPageSource, owner: StoreId, base: std.page.PagePtr) -> Result[(), Error] waits {
+fn l62_check_batch_error_order(source: pager.TieredPageSource, owner: StoreId, base: std.page.PagePtr) -> Result[(), Error] waits {
     let tree = l62_replay_read_tree(base)?
-    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
-    let key = log_key(9, 1)?
+    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let key = failure_result_from_rep(pager.log_key(9, 1))?
     // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
     // header and two 2-byte slots. The 16-byte frame head makes 160.
-    let short = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 160))
+    let short = arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: 160))
     let Error(Full(Cache(problem))) = l62_read_point_bytes(source, short, root, tree, key) else {
         fail("L62: a batch tail error escaped the first-touch limit")
     }
     if problem.requested != 216 || problem.available != 160 {
         fail("L62: the touch counts the missing child's 40 bytes and frame head")
     }
-    let enough = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 216))
+    let enough = arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: 216))
     let Error(Corrupt(Fault(why: Dangling(48), ..))) = l62_read_point_bytes(source, enough, root, tree, key) else {
         fail("L62: a failing edge that passes admission must report its fault")
     }
@@ -373,8 +373,8 @@ fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error]
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, pages.TieredPagerPack(inventory: inventory, object: None))
-    let (take pager, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
-    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 51, deadline: 0)
+    let (take pager_link, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
+    let source = pager.TieredPageSource(pager: take pager_link, packs: take packs, next_stamp: 51, deadline: 0)
     let checked = l62_check_batch_error_order(source, owner, base)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
@@ -407,7 +407,7 @@ fn test_l68_resident_images_ignore_cold_slots() -> Result[(), Error] {
 
 @test
 fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
-    let key = log_key(9, 1)?
+    let key = failure_result_from_rep(pager.log_key(9, 1))?
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     let value = string.into_bytes(string.from("stored"))
     list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(take value)))
@@ -415,10 +415,10 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let first_ptr = std.page.PagePtr(pack: 8, offset: 72, len: 45, checksum: 111, stamp: 40)
     let first_frame = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(first_ptr)), payload: TieredImage(failure_result_from_rep(pages.page_result(std.page.attach_cold(take first_image)))?)))
     let mut before = l62_replay_read_tree(first_ptr)?
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut visible, (8, 72), take first_frame)
-    let initial = tiered_attempt(61, 0)
-    if tiered_plan_prior(initial, visible, before, key)? != 7 {
+    let initial = pager.tiered_attempt(61, 0)
+    if failure_result_from_rep(pager.tiered_plan_prior(initial, visible, before, key))? != 7 {
         fail("L63: the first root's stored value is six bytes")
     }
     let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
@@ -430,18 +430,18 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let mut moved = l62_replay_read_tree(moved_ptr)?
     moved.root = std.page.copy_with_stamp(moved.root, 101)
     map.insert(mut visible, (9, 72), take moved_frame)
-    let deciding = tiered_attempt(95, 0)
-    if tiered_plan_prior(deciding, visible, moved, key)? != 1026 || tiered_attempt_state(deciding).touched_bytes != 95 {
+    let deciding = pager.tiered_attempt(95, 0)
+    if failure_result_from_rep(pager.tiered_plan_prior(deciding, visible, moved, key))? != 1026 || tiered_attempt_state(deciding).touched_bytes != 95 {
         fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
     }
-    let mut account = ReplayTieredAccount(total: 258, exact: false)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: false)
     let mut ids = 102u64
-    let before_edit = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let before_edit = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
     let new_bytes = string.into_bytes(string.from("second"))
     let op = format.JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
     replay_tiered_op("j-1", mut before, mut ids, mut account, before_edit, op)?
-    let folded = tiered_attempt(0, 0)
-    let Error(Missed) = tiered_plan_prior(folded, visible, before, key) else {
+    let folded = pager.tiered_attempt(0, 0)
+    let Error(Missed) = failure_result_from_rep(pager.tiered_plan_prior(folded, visible, before, key)) else {
         fail("L63: a write tried to plan through an overlay")
     }
     if let Some(AttemptFold(9)) = tiered_attempt_state(folded).stopped {
@@ -500,32 +500,32 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     // for its head and prefix and 41 per row, including both 12-byte keys.
     let first = manifest.PackFrame(stamp: 31, size: 12, body: BlobBody(arc.share(value)))
     let second = manifest.PackFrame(stamp: 32, size: 12, body: BlobBody(arc.share(value)))
-    let first_key = log_key(9, 1)?
-    let second_key = log_key(9, 2)?
-    let mut draft = begin_tiered_pack(owner, 7, 4, 237)?
-    let Some(_) = add_tiered_pack_frame(mut draft, first, 9, first_key, locate)? else {
+    let first_key = failure_result_from_rep(pager.log_key(9, 1))?
+    let second_key = failure_result_from_rep(pager.log_key(9, 2))?
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), 7, 4, 237))?
+    let Some(_) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, first, 9, first_key, locate))? else {
         fail("L68: the first BLOB did not fit")
     }
-    if let Some(_) = add_tiered_pack_frame(mut draft, second, 9, second_key, locate)? {
+    if let Some(_) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, second, 9, second_key, locate))? {
         fail("L68: pack admission used the front-coded size")
     }
-    let (_, split) = finish_tiered_pack(take draft)?
+    let (_, split) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
     if split.frames != 1 || split.index != 100 || split.live != 12 || split.payload_bytes != 169 {
         fail("L68: a refused frame changed the pack")
     }
-    let mut complete = begin_tiered_pack(owner, 8, 4, 238)?
-    let Some(left) = add_tiered_pack_frame(mut complete, first, 9, first_key, locate)? else {
+    let mut complete = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), 8, 4, 238))?
+    let Some(left) = failure_result_from_rep(pager.add_tiered_pack_frame(mut complete, first, 9, first_key, locate))? else {
         fail("L68: the first indexed BLOB did not fit")
     }
-    let Some(right) = add_tiered_pack_frame(mut complete, second, 9, second_key, locate)? else {
+    let Some(right) = failure_result_from_rep(pager.add_tiered_pack_frame(mut complete, second, 9, second_key, locate))? else {
         fail("L68: the second indexed BLOB should fit at its worst-case size")
     }
-    let (take raw, pack) = finish_tiered_pack(take complete)?
-    let mut packed_frames: List[TieredEmitFrame] = list.with_capacity(2)
-    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: first.stamp, key: clone(first_key), frame: clone(first)))
-    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: second.stamp, key: clone(second_key), frame: clone(second)))
-    let layout = layout_tiered_packs(take packed_frames, 4, 8, 238)?
-    let expected_pack = planned_tiered_pack(layout, layout.packs[0u64])
+    let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take complete))?
+    let mut packed_frames: List[pager.TieredEmitFrame] = list.with_capacity(2)
+    list.push(mut packed_frames, pager.TieredEmitFrame(collection: 9, stamp_in_image: first.stamp, key: clone(first_key), frame: clone(first)))
+    list.push(mut packed_frames, pager.TieredEmitFrame(collection: 9, stamp_in_image: second.stamp, key: clone(second_key), frame: clone(second)))
+    let layout = failure_result_from_rep(pager.layout_tiered_packs(take packed_frames, 4, 8, 238))?
+    let expected_pack = pager.planned_tiered_pack(layout, layout.packs[0u64])
     if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 || expected_pack.index != 128 || expected_pack.live != 24 || expected_pack.frames != 2 || expected_pack.class != 4 {
         fail("T4: the pack row must use the actual front-coded width before emission")
     }
@@ -670,14 +670,14 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take children, list.new())))?
     let capture = pages.share_roots(roots)
     let id = failure_result_from_rep(catalog.prefix(9))?
-    let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), 8, 3, 4096))?
     let frame = manifest.PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
-    let Some(place) = add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
+    let Some(place) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
         fail("L68: an inline leaf does not resolve a child")
-    })? else {
+    }))? else {
         fail("L68: the first PAGE must fit")
     }
-    let (take payload_bytes, inventory) = finish_tiered_pack(take draft)?
+    let (take payload_bytes, inventory) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
     let mut ids = 101u64
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut roots.collections.root, id, ColdPage(place), mut ids)))?
     let Some((HotPage(old_leaf), _)) = std.page.collection_slot(capture.collections.root, id) else {
@@ -747,25 +747,25 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     list.push(mut children, ColdPage(base))
     let mut tree = pages.new_page_tree(CollectionMap, 1024)
     tree.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take children, list.new())))?
-    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
-    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 1, next: 4)))
+    let before = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(pages.LogBoundsRep(first: 1, next: 4)))
     let trim = format.JournalOp(key: take id, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 2, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, trim)?;
     // There is no pager to answer. The former first row is in the base but
     // the new descriptor masks it. A retained row still needs the pager.
-    let (requests, receiver): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(1)
+    let (requests, receiver): (Sender[pager.TieredPagerMessage], Receiver[pager.TieredPagerMessage]) = channel.new(1)
     let _ = take receiver
-    let source = TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
-    let grant = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
-    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
-    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 1)?) else {
+    let source = pager.TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
+    let grant = arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
+    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 1))?) else {
         fail("L62: a trimmed row must not reach the Cold base")
     }
-    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 4)?) else {
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 4))?) else {
         fail("L62: a key at next_seq must not reach the Cold base")
     }
-    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?) else {
+    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 2))?) else {
         fail("L62: masking bypassed the Cold base inside the Log bounds")
     }
     Ok(())
@@ -774,7 +774,7 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
 @test
 fn test_l70_pager_admits_cache_backing(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let owner = StoreId(hi: 3, lo: 4)
-    let funding = TieredPagerFunding(cache_bytes: 12 * 1048576, writer_pin_bytes: 4 * 1048576, pager_task_bytes: 65536, cut_pins: false)
+    let funding = pager.TieredPagerFunding(cache_bytes: 12 * 1048576, writer_pin_bytes: 4 * 1048576, pager_task_bytes: 65536, cut_pins: false)
     let short = failure_result_from_rep(types.capacity(bound bytes 1048576 {
         start_tiered_pager(tasks, owner, 1, PagerDirectory(d), funding, 1)
     }))?
@@ -884,12 +884,12 @@ fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
     let base = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
     let target: std.page.Slot = HotPage(arc.share(base))
     let empty_root = std.page.empty(0, 0, Collection)
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let first = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
     map.insert(mut visible, (8u64, 72u64), take first)
-    let attempted = tiered_attempt(1379, 0)
+    let attempted = pager.tiered_attempt(1379, 0)
     let mut ids = 51u64
-    let Error(Missed) = stage_tiered_row(attempted, visible, target, empty_root, types.key_word(10), ReplayAbsent, 1024, false, 51, mut ids) else {
+    let Error(Missed) = failure_result_from_rep(pager.stage_tiered_row(attempted, visible, target, empty_root, types.key_word(10), ReplayAbsent, 1024, false, 51, mut ids)) else {
         fail("L63: editing without a required sibling must latch a miss")
     }
     let Some(AttemptMiss(TieredPage(requested))) = tiered_attempt_state(attempted).stopped else {
@@ -901,8 +901,8 @@ fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
     }
     let second = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(right)), payload: TieredImage(arc.share(right_leaf))))
     map.insert(mut visible, (8u64, 1204u64), take second)
-    let retry = tiered_attempt(1379, 0)
-    let ready = stage_tiered_row(retry, visible, target, empty_root, types.key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
+    let retry = pager.tiered_attempt(1379, 0)
+    let ready = failure_result_from_rep(pager.stage_tiered_row(retry, visible, target, empty_root, types.key_word(10), ReplayAbsent, 1024, false, 51, mut ids))?
     if tiered_attempt_state(retry).touched_bytes != 1379 || std.page.lookup(ready, types.key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) || std.page.totals(base) != (4u64, 1408u64) {
         fail("L63: the retry must apply once and keep its base intact")
     }
@@ -921,22 +921,22 @@ fn test_l79_pinned_trim_records_boundary_charge() -> Result[(), Error] {
     let root = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
     let target: std.page.Slot = HotPage(arc.share(root))
     let empty_root = std.page.empty(0, 0, Collection)
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let supplied = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
     map.insert(mut visible, (8u64, 72u64), take supplied)
     let mut ids = 51u64
-    let limits = LogBounds(first: 1, next: 5)
-    let attempt = tiered_attempt(235, 0)
-    let (take ready, dropped) = stage_tiered_trim(attempt, visible, target, empty_root, limits, 344, 2, mut ids)?
+    let limits = pages.LogBoundsRep(first: 1, next: 5)
+    let attempt = pager.tiered_attempt(235, 0)
+    let (take ready, dropped) = failure_result_from_rep(pager.stage_tiered_trim(attempt, visible, target, empty_root, limits, 344, 2, mut ids))?
     let Some(ColdPage(retained)) = std.page.child_slot(ready, 1) else {
         fail("L79: trim loaded a retained subtree beyond the boundary")
     }
     if dropped != 86 || retained != right || tiered_attempt_state(attempt).touched_bytes != 235 || std.page.totals(ready) != (3u64, 258u64) {
         fail("L79: trim must charge the removed row from its two pinned pages")
     }
-    let all_rows = tiered_attempt(0, 0)
+    let all_rows = pager.tiered_attempt(0, 0)
     let stamp_before = ids
-    let (take empty, all_dropped) = stage_tiered_trim(all_rows, visible, target, empty_root, limits, 344, 8, mut ids)?
+    let (take empty, all_dropped) = failure_result_from_rep(pager.stage_tiered_trim(all_rows, visible, target, empty_root, limits, 344, 8, mut ids))?
     if all_dropped != 344 || tiered_attempt_state(all_rows).touched_bytes != 0 || ids != stamp_before || std.page.totals(empty) != (0u64, 0u64) {
         fail("L79: trim past next_seq uses the descriptor's charge without paging")
     }

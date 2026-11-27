@@ -396,7 +396,7 @@ fn random_expected_diff(t: Table[u64, Bytes], a: Map[u64, u8], b: Map[u64, u8], 
     for key in 0u64 .. n {
         let after = random_expected(b, key)
         if random_expected(a, key) != after {
-            list.push(mut out, (log_key(t.id, key)?, take after))
+            list.push(mut out, (failure_result_from_rep(pager.log_key(t.id, key))?, take after))
         }
     }
     Ok(())
@@ -482,11 +482,11 @@ fn random_span(read_handle: Reader, s: Snapshot, t: Table[u64, Bytes], model: Ma
     let mut wanted: List[(Bytes, Option[Bytes])] = list.new()
     for key in lo .. hi {
         if map.contains(model, key) {
-            list.push(mut wanted, (log_key(t.id, key)?, random_expected(model, key)))
+            list.push(mut wanted, (failure_result_from_rep(pager.log_key(t.id, key))?, random_expected(model, key)))
         }
     }
-    let low = log_key(t.id, lo)?
-    let high = log_key(t.id, hi)?
+    let low = failure_result_from_rep(pager.log_key(t.id, lo))?
+    let high = failure_result_from_rep(pager.log_key(t.id, hi))?
     let whole = span_changes(read_handle, s, low, high)?
     let mut stepped: List[Change] = list.new()
     let mut cursor = open_span_changes(read_handle, s, low, high)?

@@ -1,0 +1,118 @@
+fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: pages.HistoryRef, window: pager.TieredRange, deadline: u64) -> Result[Bytes, Error] waits {
+    let path = history_key("p-", pack_ref)
+    let mut raw: Bytes = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut raw, window.hi - window.lo)))?
+    history_range(mut client, path, pack_ref, window.lo, window.hi, mut raw, deadline)?
+    Ok(take raw)
+}
+
+fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[pager.TieredBucketGet], streams: u64) -> Result[List[Result[Bytes, Error]], Error] waits {
+    let width = list.len(gets)
+    let prepared = disk_allocation(scoped fn() -> Result[List[std.object.GetRange], Error] {
+        let mut requests: List[std.object.GetRange] = list.with_capacity(width)
+        for read in gets {
+            let window = read.window
+            let target_name = history_key("p-", read.pack_ref)
+            let out: Bytes = list.with_capacity(window.hi - window.lo)
+            list.push(mut requests, std.object.GetRange(key: take target_name, lo: window.lo, hi: window.hi, buffer: take out, deadline: read.deadline))
+        }
+        Ok(take requests)
+    })?
+    let responses = std.object.fetch_ranges(mut client, take prepared, streams)
+    let mut outcomes: List[Result[Bytes, Error]] = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut outcomes, width)))?
+    let mut at = 0u64
+    for take response in take responses {
+        let (take status, take raw) = take response
+        let read = gets[at]
+        let path = history_key("p-", read.pack_ref)
+        let item: Result[Bytes, Error] = match take status {
+            Ok(meta) => {
+                if meta.size != read.pack_ref.len || list.len(raw) != read.window.hi - read.window.lo {
+                    Error(failure_from_rep(format.disk_fault(path, read.window.lo, Truncated)))
+                } else {
+                    Ok(take raw)
+                }
+            },
+            Error(NotFound) => Error(failure_from_rep(pager.history_missing_object(path, read.pack_ref))),
+            Error(take problem) => Error(Remote(take problem)),
+        }
+        list.push(mut outcomes, take item)
+        at += 1
+    }
+    Ok(take outcomes)
+}
+
+fn tiered_window_cache_key(request: pager.TieredBucketGet) -> Result[(String, Option[u64]), Error] {
+    if request.window.lo == 0 && request.window.hi == request.pack_ref.len {
+        return Ok((history_read_key("p-", request.pack_ref)?, Some(request.pack_ref.digest)))
+    }
+    failure_result_from_rep(types.capacity(bound bytes 104 {
+        let mut path = string.with_capacity(104)
+        pager.history_fill_key(mut path, "p-", request.pack_ref)
+        string.push(mut path, "-")
+        string.push_u64(mut path, request.window.lo)
+        string.push(mut path, "-")
+        string.push_u64(mut path, request.window.hi)
+        (take path, None)
+    }))
+}
+
+fn tiered_window_cached(cache: pager.ObjectsCache, request: pager.TieredBucketGet) -> Option[Bytes] waits {
+    let width = request.window.hi - request.window.lo
+    if width > cache.capacity_bytes {
+        return None
+    }
+    let Ok((take path, expected)) = tiered_window_cache_key(request) else {
+        return None
+    }
+    let trailer = if expected == None {
+        8u64
+    } else {
+        0u64
+    }
+    let Ok(take buffer) = failure_result_from_rep(manifest.disk_read_buffer(width + trailer)) else {
+        return None
+    }
+    let mut raw = take buffer
+    if pack_cache_read(cache, path, width, expected, mut raw) {
+        Some(take raw)
+    } else {
+        None
+    }
+}
+
+fn tiered_window_cache_store(cache: pager.ObjectsCache, request: pager.TieredBucketGet, raw: Bytes) waits {
+    let Ok((take path, expected)) = tiered_window_cache_key(request) else {
+        return
+    }
+    if let Some(digest) = expected {
+        if std.check.xxh3(raw, 0, list.len(raw)) != digest {
+            return
+        }
+    }
+    pack_cache_write(cache, path, raw, expected == None)
+}
+
+fn tiered_window_cache_discard(cache: pager.ObjectsCache, request: pager.TieredBucketGet) waits {
+    if let Ok((take path, _)) = tiered_window_cache_key(request) {
+        pack_cache_discard(cache, path)
+    }
+}
+
+fn read_checked_bucket_window[T](mut client: std.object.Client, cache: Option[pager.ObjectsCache], request: pager.TieredBucketGet, check: scoped[view] fn(Bytes) -> Result[T, Error]) -> Result[(Bytes, T), Error] waits {
+    if let Some(local) = cache {
+        if let Some(take raw) = tiered_window_cached(local, request) {
+            if let Ok(take checked_frame) = check(raw) {
+                return Ok((take raw, take checked_frame))
+            }
+            tiered_window_cache_discard(local, request)
+        }
+    }
+    let raw = read_tiered_bucket_window(mut client, request.pack_ref, request.window, request.deadline)?
+    let checked_frame = check(raw)?
+    if let Some(local) = cache {
+        tiered_window_cache_store(local, request, raw)
+    }
+    Ok((take raw, take checked_frame))
+}

@@ -5,13 +5,13 @@
 // fresh attempt record over the call's pin map. A latched miss is delivered
 // into the map and the body reruns; any other latch decides the call.
 fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Stage[R, A], Error] waits {
-    let mut pins = empty_tiered_pins(call_pin_root(db, i), db.writer_pin_bytes)
-    let mut pending: Option[(format.TieredTarget, Error)] = None
+    let mut pins = pager.empty_tiered_pins(call_pin_root(db, i), pager.pin_partition(db.pager))
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
-        let attempt = call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
+        let attempt = pager.call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, pager.pin_partition(db.pager), pager.tiered_window(pins))
         let staged = stage_with(mut db, i, wall, steps, keep_reply, force_frame, attempt, pins.frames, body)
-        let Some(state) = call_attempt_finish(take attempt) else {
+        let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take staged)
         }
         match state.stopped {
@@ -35,40 +35,40 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     }
 }
 
-fn call_pin_root(db: Db, i: u64) -> TieredPinRoot {
+fn call_pin_root(db: Db, i: u64) -> pager.TieredPinRoot {
     tiered_pin_root(open_number(db), pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].roots.collections)
 }
 
-fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> TieredPinRoot {
+fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> pager.TieredPinRoot {
     let generation = match tree.paging {
         Some(inventory) => inventory.generation,
         None => 0,
     }
-    TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: pages.tree_stamp(tree))
+    pager.TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: pages.tree_stamp(tree))
 }
 
-fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)], root: TieredPinRoot) {
+fn refresh_call_pins(mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)], root: pager.TieredPinRoot) {
     if pins.root != root {
-        tiered_reset_pins(mut pins, root)
+        pager.tiered_reset_pins(mut pins, root)
         pending = None
     }
 }
 
-fn deliver_call_miss(db: Db, tree: pages.PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
+fn deliver_call_miss(db: Db, tree: pages.PageTree, state: pager.TieredTouchSet, mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
     let SeekKey(sought) = view state.seek else {
         fail("store: a call's miss has no seek key")
     }
-    let requests: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+    let requests: Option[View[Sender[pager.TieredPagerMessage]]] = match pager.pager_requests(db.pager) {
         Some(pager) => Some(view pager),
         None => None,
     }
-    let source = tx_page_source(requests, tree)?
+    let source = failure_result_from_rep(pager.tx_page_source(requests, tree))?
     serve_tiered_miss(source, pins.root, state, sought, TieredPoint, None, mut pins, mut pending)
 }
 
 // One serve attempt over the pin map `drive_served` holds. A latched
 // attempt's stage is discarded by the driver, so it is not read here.
-fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
+fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
     let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
         let perform = scoped fn() -> Result[CallDraft, Capacity] {
             let keep: Option[fn(ServeReply) -> bool] = None
@@ -132,7 +132,7 @@ type DraftedCall {
 
 type DraftRefusal = AdmissionBytes(Capacity) | DraftStopped(Stop)
 
-fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
+fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
     // These synchronous scopes cannot lose task room between admission and use.
     // Refund the admission before encoding, so frame bytes come from the head.
     let admitted = bound bytes grant.retained {
@@ -173,12 +173,12 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
             return Ok(None)
         }
         let sequence: u64 = list.word_be(key, 4)
-        let window = descriptor_bounds(descriptor)
+        let window = pager.descriptor_bounds(descriptor)
         if sequence < window.first || sequence >= window.next {
             return Ok(None)
         }
     }
-    if let Some(row) = tiered_replayed_row(tree, key) {
+    if let Some(row) = pager.tiered_replayed_row(tree, key) {
         return Ok(match row.now {
             ReplayPut(value) => Some(view value),
             ReplayAbsent => None,
@@ -189,11 +189,11 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
         fail("store: a Tiered row read without an attempt record")
     }
     let inner = list.slice(key, 4, list.len(key))
-    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(inner))?))
-    tiered_reading(attempt, ValuesAt)
-    let backing = TieredBorrowedRoot(edge: edge, pins: tx.pins)
-    let found = tiered_point_bytes(attempt, backing, inner)?
-    tiered_seek(attempt, SeekOperation)
+    pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(inner))?))
+    pager.tiered_reading(attempt, ValuesAt)
+    let backing = pager.TieredBorrowedRoot(edge: edge, pins: tx.pins)
+    let found = pager.tiered_point_bytes(attempt, backing, inner) ?=> failure_from_rep
+    pager.tiered_seek(attempt, SeekOperation)
     Ok(found)
 }
 
@@ -208,16 +208,16 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
         Some(pool) => pool.grant.pin_bytes,
         None => 0,
     }
-    let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
+    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
         None => 0,
     }, root_stamp: pages.tree_stamp(s.roots.collections))
-    let mut pins = empty_tiered_pins(root, partition)
-    let mut pending: Option[(format.TieredTarget, Error)] = None
+    let mut pins = pager.empty_tiered_pins(root, partition)
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
-        let attempt = call_attempt(s.roots.collections.root, partition, tiered_window(pins))
+        let attempt = pager.call_attempt(s.roots.collections.root, partition, pager.tiered_window(pins))
         let looked = look_attempt(s, steps, env, body, attempt, pins.frames)
-        let Some(state) = call_attempt_finish(take attempt) else {
+        let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take looked)
         }
         match state.stopped {
@@ -232,15 +232,15 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
                 let Some(pool) = view r.pool else {
                     return Error(Io(Closed))
                 }
-                let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
-                let source = tx_page_source(pager, s.roots.collections)?
+                let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = Some(view pool.requests)
+                let source = failure_result_from_rep(pager.tx_page_source(pager_link, s.roots.collections))?
                 serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
             },
         }
     }
 }
 
-fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Looked[R] {
+fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Looked[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let observed_info: core.Cell[bool] = cell.new(false)

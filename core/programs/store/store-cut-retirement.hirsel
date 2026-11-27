@@ -1,6 +1,6 @@
 // The cut's retirements: which removed packs leave now, which a lease
 // carries to a later cut, and the generation's new pack state.
-fn cut_retirement(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: TieredCompaction, range_lease: Option[(u64, u64)], first: u64, end: u64) -> Result[(manifest.PackDiskState, TieredCompaction, DiskRemovals), Error] {
+fn cut_retirement(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), Error] {
     let mut locations = manifest.share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
     let mut carried: List[u64] = list.new()
@@ -29,6 +29,6 @@ fn cut_retirement(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPa
     }
     let plan = DiskRemovals(packs: take packs, before: before, after: after, name: string.with_capacity(26))
     let installed = manifest.retired_pack_disk(layout, holders, take locations, take carried, deferred)
-    let kept_compaction: TieredCompaction = clone(compaction)
+    let kept_compaction: pager.TieredCompaction = clone(compaction)
     Ok((take installed, take kept_compaction, take plan))
 }

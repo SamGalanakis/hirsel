@@ -128,7 +128,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
         let before = pages.share_roots(pages.holder_heads(child.db.holders)[0].roots)
         let state = deploy_result(failure_result_from_rep(types.capacity(current_state(child.db))))?
-        let mut initial = deploy_result(journal_replay(take state, pages.holder_next_node(child.db.holders), child.db.limits))?
+        let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(child.db.holders), limits_to_rep(child.db.limits))))?
         initial.tiered.total = child.db.tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
         if !list_contains_u32(replayed.superseded, by_v.id) {
@@ -141,7 +141,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
             fail("F4 case B1: expected forked branch beta in replayed tips")
         }
         let beta_entry = law_read_key(by_v.id, 20u64, Some(1u64))
-        let Some(pages.ReplayRow(now: ReplayPut(_), ..)) = tiered_replayed_row(replayed.state.tips[1].roots.collections, beta_entry) else {
+        let Some(pages.ReplayRow(now: ReplayPut(_), ..)) = pager.tiered_replayed_row(replayed.state.tips[1].roots.collections, beta_entry) else {
             fail("F4 case B1: forked branch beta must keep its pre-demotion overlay Arc")
         }
         let (_, take deferred) = deploy_result(catch_up_compare_collections(before.collections, replayed.state.tips[0].roots.collections, replayed.superseded))?
@@ -159,7 +159,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         }
         let before_snap = Snapshot(store: id, open: new_stamp.opened, branch: 0u32, head: child.stamp.head, roots: pages.share_roots(before), watermark: pages.holder_next_node(child.db.holders) + 1, bases: pages.no_tail_bases())
         let after_snap = Snapshot(store: id, open: new_stamp.opened, branch: 0u32, head: new_stamp.head, roots: pages.share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: pages.no_tail_bases())
-        let diffs = catch_up_tiered_diffs(exported.dir, id, child.db.writer_pin_bytes, before_snap, after_snap, deferred)?
+        let diffs = catch_up_tiered_diffs(exported.dir, id, pager.pin_partition(child.db.pager), before_snap, after_snap, deferred)?
         if list.len(diffs) != 1 || diffs[0].tree_key != law_read_key(rows.id, 1u64, None) {
             fail("F4 case B1: Tiered catch-up diff must report exact changed table row")
         }
@@ -200,7 +200,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let steps = read_steps(exported.dir, new_stamp)?
         let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
         let state = deploy_result(failure_result_from_rep(types.capacity(current_state(child.db))))?
-        let mut initial = deploy_result(journal_replay(take state, pages.holder_next_node(child.db.holders), child.db.limits))?
+        let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(child.db.holders), limits_to_rep(child.db.limits))))?
         initial.tiered.total = before_tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
         if !replayed.tiered.exact || replayed.tiered.total >= before_tiered {

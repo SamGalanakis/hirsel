@@ -92,15 +92,15 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Page[K, V], Error] {
+                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Page[K, V], Error] {
                     let mut walk = ()
                     read_snapshot_page(s, source, failure_result_from_rep(types.copied(high))?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
                         let found = if tiered_rows {
                             if let Some(last_key) = previous {
-                                let after = scan_page_after(last_key)?
-                                tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)?
+                                let after = failure_result_from_rep(pager.scan_page_after(last_key))?
+                                failure_result_from_rep(pager.tiered_scan_row(attempt, visible, edge, source, edits, after, high, false))?
                             } else {
-                                tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)?
+                                failure_result_from_rep(pager.tiered_scan_row(attempt, visible, edge, source, edits, start, high, false))?
                             }
                         } else {
                             let mut cursor = resume_data(data, start, high, previous, false)?
@@ -146,15 +146,9 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
 fn scan_page_start(low: Bound[Bytes], id: Bytes) -> Result[Bytes, Error] {
     match low {
         Included(key) => failure_result_from_rep(types.copied(key)),
-        Excluded(key) => scan_page_after(key),
+        Excluded(key) => failure_result_from_rep(pager.scan_page_after(key)),
         Unbounded => failure_result_from_rep(types.copied(id)),
     }
-}
-
-fn scan_page_after(key: Bytes) -> Result[Bytes, Error] {
-    let mut after = failure_result_from_rep(types.copied(key))?
-    list.push(mut after, 0u8)
-    Ok(take after)
 }
 
 type SnapshotPageStep[K, V] = PageEnd | PageLimit | PageValue(Bytes, (K, V), u64)

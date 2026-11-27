@@ -214,9 +214,9 @@ fn describe_collection(mut packs: CapturePacks, names: List[DescribeName], root:
         let rows: u64 = descriptor.rows
         let charge: u64 = descriptor.row_bytes
         let limits = if cat.kind == 4 {
-            descriptor_bounds(record)
+            pager.descriptor_bounds(record)
         } else {
-            LogBounds(first: 0, next: 0)
+            pages.LogBoundsRep(first: 0, next: 0)
         }
         (rows, charge, limits.first, limits.next)
     } else {

@@ -389,7 +389,7 @@ fn compact_check_published(d: Dir, db: Db, collection: u32) -> Result[(), Error]
             fail("L88 (h): a reachable frame lives in a listed pack on disk")
         }
     }
-    let idle = map.len(db.compaction.probes) == 0
+    let idle = map.len(pager.disk_compaction(disk_state(db).tiered).probes) == 0
     let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class < 3 {
@@ -439,7 +439,7 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     let before = snapshot(db)
     let mut cuts = 0u64
-    while compact_listed(db, probed) || map.len(db.compaction.probes) != 0 {
+    while compact_listed(db, probed) || map.len(pager.disk_compaction(disk_state(db).tiered).probes) != 0 {
         if cuts == 256 {
             fail("L88 (h): the class-4 probe ends")
         }
@@ -528,12 +528,12 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
         }
         let mut roots = compact_head_roots(db)
         let mut stamp = start
-        let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+        let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = match pager.pager_requests(db.pager) {
             Some(requests) => Some(view requests),
             None => None,
         }
         let ran = bound bytes limit {
-            compact_cut(db, pager, mut roots, list.new(), mut stamp)
+            compact_cut(db, pager_link, mut roots, list.new(), mut stamp)
         }
         let Ok(returned) = take ran else {
             fail("L88 (h): a refused probe returns its refusal rather than raising it")
@@ -570,7 +570,7 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
         fail("L88 (h): some bound refuses the probes after a move was installed")
     }
     let _ = checkpoint(mut db)?
-    if map.len(db.compaction.probes) == 0 && compact_listed(db, original.pack) {
+    if map.len(pager.disk_compaction(disk_state(db).tiered).probes) == 0 && compact_listed(db, original.pack) {
         fail("L88 (h): an unbounded cut publishes the probes' progress")
     }
     compact_branch_rows(db, main_branch(db), rows, row_count, row_count, 0)?
@@ -884,7 +884,7 @@ fn test_l100_tiered_idle_retires_without_pager(d: Dir, c: Clock, r: Random, task
     active.probe_budget = 65536
     active.compact_permille = 500
     let mut db = open(tasks, d, c, r, clone(active))?
-    if let Some(_) = db.pager {
+    if let Some(_) = pager.pager_requests(db.pager) {
         fail("L100 (b): a reopened Tiered-idle store starts no pager")
     }
     // Before-rename crash leaves P listed and on disk.
@@ -892,7 +892,7 @@ fn test_l100_tiered_idle_retires_without_pager(d: Dir, c: Clock, r: Random, task
     failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", sealed_before))?
     close(take db)?
     let mut after_before = open(tasks, d, c, r, clone(active))?
-    if let Some(_) = after_before.pager {
+    if let Some(_) = pager.pager_requests(after_before.pager) {
         fail("L100 (b): reopen after before-rename crash still starts no pager")
     }
     if !compact_listed(after_before, pack_p) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
@@ -922,7 +922,7 @@ fn test_l100_tiered_idle_retires_without_pager_crash_after_rename(d: Dir, c: Clo
     active.probe_budget = 65536
     active.compact_permille = 500
     let mut db = open(tasks, d, c, r, clone(active))?
-    if let Some(_) = db.pager {
+    if let Some(_) = pager.pager_requests(db.pager) {
         fail("L100 (b): a reopened Tiered-idle store starts no pager")
     }
     let sealed = compact_refused_retiring_cut(mut db)?

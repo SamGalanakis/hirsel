@@ -189,7 +189,7 @@ fn projector_run[K, V, E: inert + send](take source: Table[K, V], take fold: Fol
 
 fn source_reader(db: Db, from: Source) -> Result[Reader, Error] waits {
     match from {
-        Local => reader(db, match db.pager {
+        Local => reader(db, match pager.pager_requests(db.pager) {
             Some(_) => PROJECTOR_READ_PINS,
             None => 0u64
         }),

@@ -9,16 +9,16 @@ fn child_cut_tiered(mut tree: pages.PageTree, d: Dir, id: StoreId, mut next_pack
     let mut empty = pages.empty_roots()
     empty.collections = pages.share_page_tree(tree)
     list.push(mut roots, take empty)
-    let TieredCutFrames(pages: take staged_page_frames, blobs: take blobs, ..) = tiered_cut_frames(roots)?
+    let pager.TieredCutFrames(pages: take staged_page_frames, blobs: take blobs, ..) = failure_result_from_rep(pager.tiered_cut_frames(roots))?
     if list.len(staged_page_frames) == 0 && list.len(blobs) == 0 {
         return Ok(())
     }
-    let blob_run = layout_tiered_packs(take blobs, 4, next_pack, pack_bytes)?
-    let page_run = layout_tiered_packs(take staged_page_frames, 3, blob_run.next_pack, pack_bytes)?
+    let blob_run = failure_result_from_rep(pager.layout_tiered_packs(take blobs, 4, next_pack, pack_bytes))?
+    let page_run = failure_result_from_rep(pager.layout_tiered_packs(take staged_page_frames, 3, blob_run.next_pack, pack_bytes))?
     let mut emitted: Map[u64, std.page.PagePtr] = map.new()
-    let mut packs: List[TieredCutPack] = list.new()
-    encode_tiered_run(id, blob_run, mut emitted, mut packs)?
-    encode_tiered_run(id, page_run, mut emitted, mut packs)?
+    let mut packs: List[pager.TieredCutPack] = list.new()
+    failure_result_from_rep(pager.encode_tiered_run(store_key_to_rep(id), blob_run, mut emitted, mut packs))?
+    failure_result_from_rep(pager.encode_tiered_run(store_key_to_rep(id), page_run, mut emitted, mut packs))?
     let mut existing = match view tree.paging {
         Some(inv) => std.omap.snapshot(inv.packs),
         None => std.omap.new(),
@@ -34,7 +34,7 @@ fn child_cut_tiered(mut tree: pages.PageTree, d: Dir, id: StoreId, mut next_pack
         let (take updated, _) = std.omap.insert(mut map_ids, take existing, written.seq, pager_pack)
         existing = take updated
     }
-    let mut sealed = seal_holder_tiered(tree, emitted)?
+    let mut sealed = failure_result_from_rep(pager.seal_holder_tiered(tree, emitted))?
     let gen = match view tree.paging {
         Some(inv) => inv.generation + 1,
         None => 1u64,
@@ -55,7 +55,7 @@ fn tiered_tree_hot_bytes(tree: pages.PageTree) -> Result[u64, Error] {
     let mut empty = pages.empty_roots()
     empty.collections = pages.share_page_tree(tree)
     list.push(mut roots, take empty)
-    let TieredCutFrames(pages: pages, blobs: blobs, ..) = tiered_cut_frames(roots)?
+    let pager.TieredCutFrames(pages: pages, blobs: blobs, ..) = failure_result_from_rep(pager.tiered_cut_frames(roots))?
     let mut total = 0u64
     for item in pages {
         total = int.saturating_add(total, item.frame.size)
@@ -101,7 +101,7 @@ fn write_tiered_prepared_rows_direct(mut file: FrameFile, d: Dir, id: StoreId, w
 // Finishes every deferred Tiered range diff at the two captured roots
 // (`before` and `after`) through PagerDirect on `d`. Any deferred range that
 // cannot be finished (e.g. missing paging inventory) returns `Drift`.
-fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Snapshot, after: Snapshot, deferred: List[TieredRowDiff]) -> Result[List[CatchUpChange], DeployError] waits {
+fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Snapshot, after: Snapshot, deferred: List[pager.TieredRowDiff]) -> Result[List[CatchUpChange], DeployError] waits {
     let mut out: List[CatchUpChange] = list.new()
     for diff in deferred {
         if (diff.before && !snapshot_paged(before)) || (diff.after && !snapshot_paged(after)) {
@@ -211,18 +211,18 @@ fn catch_up_next_row(d: Dir, id: StoreId, writer_pin_bytes: u64, snap: Snapshot,
 // Tiered round application on OLD (`apply_round`) and on Child
 // ---------------------------------------------------------------------------
 // Applies one Tiered round op to `tree` via OLD's writer partition call
-// attempt (`db.writer_pin_bytes`).
+// attempt (`pager.pin_partition(db.pager)`).
 fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, take value: Option[Bytes], prior: bool, private_from: u64, mut next_stamp: u64) -> Result[(), DeployError] waits {
     let collection_bytes = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 0, 4))))?
     let suffix = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key)))))?
-    let mut pins = empty_tiered_pins(tiered_pin_root(open_number(db), 0u32, tree), db.writer_pin_bytes)
-    let mut pending: Option[(format.TieredTarget, Error)] = None
+    let mut pins = pager.empty_tiered_pins(tiered_pin_root(open_number(db), 0u32, tree), pager.pin_partition(db.pager))
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     let replay_val: pages.ReplayValue = match take value {
         Some(take raw) => ReplayPut(arc.new(take raw)),
         None => ReplayAbsent,
     }
     loop {
-        let attempt = tiered_attempt(db.writer_pin_bytes, 0)
+        let attempt = pager.tiered_attempt(pager.pin_partition(db.pager), 0)
         let apply_res = disk_allocation(scoped fn() -> Result[Result[(pages.PageTree, u64), DeployError], Error] {
             let mut staged = pages.share_page_tree(tree)
             let staged_inline = staged.inline
@@ -231,8 +231,8 @@ fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, t
                     return Ok(Error(ImportMalformed))
                 }
                 let fields = pages.collection_descriptor(desc)
-                tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
-                let prior_width = tiered_plan_prior(attempt, pins.frames, staged, key)?
+                pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
+                let prior_width = failure_result_from_rep(pager.tiered_plan_prior(attempt, pins.frames, staged, key))?
                 let present = prior_width != 0
                 match view replay_val {
                     ReplayPut(_) => if present != prior {
@@ -246,16 +246,16 @@ fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, t
                     fail("store: missing empty collection page")
                 }
                 let mut stamp_draw = next_stamp
-                let ready = stage_tiered_row(attempt, pins.frames, edge, empty_root, suffix, clone_replay_value(replay_val), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw)?
+                let ready = failure_result_from_rep(pager.stage_tiered_row(attempt, pins.frames, edge, empty_root, suffix, clone_replay_value(replay_val), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw))?
                 (take ready, pages.descriptor_kind_byte(fields.kind), stamp_draw)
             }
             let mut draw = draw0
             let revised = failure_result_from_rep(pages.rooted_collection_record(ready, kind_byte, ResidentTiered))?
             failure_result_from_rep(pages.page_result(std.page.insert(mut staged.root, collection_bytes, revised, Some(take ready), staged_inline, private_from, mut draw)))?
-            restore_planned_root(mut staged.root, collection_bytes, private_from, pins.frames, mut draw)?
+            failure_result_from_rep(pager.restore_planned_root(mut staged.root, collection_bytes, private_from, pins.frames, mut draw))?
             Ok(Ok((take staged, draw)))
         })
-        let state = tiered_finish(take attempt)
+        let state = pager.tiered_finish(take attempt)
         match state.stopped {
             None => {
                 let inner = deploy_result(take apply_res)?
@@ -290,11 +290,11 @@ fn child_apply_tiered_op(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64
     }
     let collection_bytes = failure_result_from_rep(types.copied(list.slice(key, 0, 4)))?
     let suffix = failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key))))?
-    let grant = disk_allocation(scoped fn() -> Result[Arc[TieredReaderGrant], Error] {
-        Ok(arc.new(TieredReaderGrant(store: id, opened: opened, pin_bytes: writer_pin_bytes)))
+    let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(id), opened: opened, pin_bytes: writer_pin_bytes)))
     })?
     let root = tiered_pin_root(opened, 0u32, tree)
-    let (take updated, draw) = retry_tiered_read_with(PagerDirect(d, id), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
+    let (take updated, draw) = retry_tiered_read_with(PagerDirect(d, store_key_to_rep(id)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
         let mut staged = pages.share_page_tree(tree)
         let staged_inline = staged.inline
         let (take ready, kind_byte, draw0) = {
@@ -302,19 +302,19 @@ fn child_apply_tiered_op(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64
                 return Error(Stale(list.word_be(collection_bytes, 0)))
             }
             let fields = pages.collection_descriptor(desc)
-            tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
-            let _ = tiered_plan_prior(attempt, visible, staged, key)?
+            pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
+            let _ = failure_result_from_rep(pager.tiered_plan_prior(attempt, visible, staged, key))?
             let Some(empty_root) = view staged.empty_collection else {
                 fail("store: missing empty collection page")
             }
             let mut stamp_draw = next_stamp
-            let ready = stage_tiered_row(attempt, visible, edge, empty_root, suffix, clone_replay_value(value), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw)?
+            let ready = failure_result_from_rep(pager.stage_tiered_row(attempt, visible, edge, empty_root, suffix, clone_replay_value(value), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw))?
             (take ready, pages.descriptor_kind_byte(fields.kind), stamp_draw)
         }
         let mut draw = draw0
         let revised = failure_result_from_rep(pages.rooted_collection_record(ready, kind_byte, ResidentTiered))?
         failure_result_from_rep(pages.page_result(std.page.insert(mut staged.root, collection_bytes, revised, Some(take ready), staged_inline, private_from, mut draw)))?
-        restore_planned_root(mut staged.root, collection_bytes, private_from, visible, mut draw)?
+        failure_result_from_rep(pager.restore_planned_root(mut staged.root, collection_bytes, private_from, visible, mut draw))?
         Ok((take staged, draw))
     })?
     tree = take updated
@@ -353,7 +353,7 @@ fn child_cut_context(source: Preparation) -> ChildCutContext {
     let next_seq = cell.with(source.next_pack, (), fn(mut v: u64, take _u: ()) -> u64 {
         v
     })
-    ChildCutContext(dir: source.dir, store: source.db.store, next_pack: next_seq, pack_bytes: source.pack_bytes, dirty_bytes: source.dirty_bytes, writer_pin_bytes: source.db.writer_pin_bytes)
+    ChildCutContext(dir: source.dir, store: source.db.store, next_pack: next_seq, pack_bytes: source.pack_bytes, dirty_bytes: source.dirty_bytes, writer_pin_bytes: pager.pin_partition(source.db.pager))
 }
 
 fn save_child_cut_pack(source: Preparation, next_pack: u64) {
@@ -363,12 +363,12 @@ fn save_child_cut_pack(source: Preparation, next_pack: u64) {
 // Runs one writer call attempt over every queued Cold rewrite in `staged`,
 // checking existence (`Missing("row")`) and index invariance (`Changed(<ix>)`)
 // pinned against `writer_pin_bytes` (`Full(Cache(Capacity))`).
-fn check_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, staged: StagedMigration, staged_collections: pages.PageTree) -> Result[(), Error] waits {
+fn check_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, staged: StagedMigration, staged_collections: pages.PageTree) -> Result[(), Error] waits {
     if list.len(staged.queued_rewrites) == 0 {
         return Ok(())
     }
-    let grant = disk_allocation(scoped fn() -> Result[Arc[TieredReaderGrant], Error] {
-        Ok(arc.new(TieredReaderGrant(store: store_id, opened: opened, pin_bytes: writer_pin_bytes)))
+    let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(store_id), opened: opened, pin_bytes: writer_pin_bytes)))
     })?
     let inventory = match view staged_collections.paging {
         Some(inv) => arc.share(inv),
@@ -377,16 +377,16 @@ fn check_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
             None => return Error(Io(Closed)),
         },
     }
-    let root = TieredPinRoot(domain: opened, branch: 0u32, generation: inventory.generation, root_stamp: pages.tree_stamp(staged_collections))
+    let root = pager.TieredPinRoot(domain: opened, branch: 0u32, generation: inventory.generation, root_stamp: pages.tree_stamp(staged_collections))
     let empty_hint: Bytes = list.new()
-    retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(), Error] {
+    retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(), Error] {
         for qr in staged.queued_rewrites {
             let tree = if qr.staged_range {
                 view staged_collections
             } else {
                 view staged.base_rows
             }
-            let old_bytes: Option[Bytes] = if let Some(row) = tiered_replayed_row(tree, qr.logical) {
+            let old_bytes: Option[Bytes] = if let Some(row) = pager.tiered_replayed_row(tree, qr.logical) {
                 match row.now {
                     ReplayPut(v) => Some(failure_result_from_rep(types.copied(v))?),
                     ReplayAbsent => None,
@@ -395,10 +395,10 @@ fn check_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
                 let Some((edge, _)) = std.page.collection_slot(tree.root, list.slice(qr.logical, 0, 4)) else {
                     return Error(Missing("row"))
                 }
-                tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(qr.key))?))
-                tiered_reading(attempt, ValuesAt)
-                let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
-                match tiered_point_bytes(attempt, backing, qr.key)? {
+                pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(qr.key))?))
+                pager.tiered_reading(attempt, ValuesAt)
+                let backing = pager.TieredBorrowedRoot(edge: view edge, pins: view visible)
+                match pager.tiered_point_bytes(attempt, backing, qr.key) ?=> failure_from_rep {
                     Some(raw) => Some(failure_result_from_rep(types.copied(raw))?),
                     None => None,
                 }
@@ -412,7 +412,7 @@ fn check_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
     })
 }
 
-fn apply_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, mut collections: pages.PageTree, mut next_node: u64, queued: List[QueuedRewrite], mut child_cut: Option[ChildCutContext]) -> Result[List[ActivationRewrite], Error] waits {
+fn apply_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, mut collections: pages.PageTree, mut next_node: u64, queued: List[QueuedRewrite], mut child_cut: Option[ChildCutContext]) -> Result[List[ActivationRewrite], Error] waits {
     let mut frame_rows: List[ActivationRewrite] = list.new()
     for qr in queued {
         if qr.staged_range {
@@ -446,7 +446,7 @@ fn apply_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
     Ok(take frame_rows)
 }
 
-fn resolve_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, mut staged: StagedMigration, mut child_cut: Option[ChildCutContext]) -> Result[List[ActivationRewrite], Error] waits {
+fn resolve_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_bytes: u64, opened: u64, store_id: StoreId, mut staged: StagedMigration, mut child_cut: Option[ChildCutContext]) -> Result[List[ActivationRewrite], Error] waits {
     if list.len(staged.queued_rewrites) == 0 {
         return Ok(list.new())
     }
@@ -457,25 +457,25 @@ fn resolve_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u6
     Ok(take rows)
 }
 
-fn clone_pager_backend(backend: TieredPageBackend) -> TieredPageBackend {
+fn clone_pager_backend(backend: pager.TieredPageBackend) -> pager.TieredPageBackend {
     match backend {
         PagerTask(sender) => PagerTask(channel.sender(sender)),
         PagerDirect(d, id) => PagerDirect(d, id),
     }
 }
 
-fn apply_tiered_rewrite_backend(take backend: TieredPageBackend, id: StoreId, writer_pin_bytes: u64, opened: u64, tree: pages.PageTree, logical: Bytes, take raw: Bytes, private_from: u64, mut next_stamp: u64) -> Result[pages.PageTree, Error] waits {
+fn apply_tiered_rewrite_backend(take backend: pager.TieredPageBackend, id: StoreId, writer_pin_bytes: u64, opened: u64, tree: pages.PageTree, logical: Bytes, take raw: Bytes, private_from: u64, mut next_stamp: u64) -> Result[pages.PageTree, Error] waits {
     let Some(inventory) = view tree.paging else {
         return Error(Io(Closed))
     }
     let collection_bytes = failure_result_from_rep(types.copied(list.slice(logical, 0, 4)))?
     let suffix = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
-    let grant = disk_allocation(scoped fn() -> Result[Arc[TieredReaderGrant], Error] {
-        Ok(arc.new(TieredReaderGrant(store: id, opened: opened, pin_bytes: writer_pin_bytes)))
+    let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(id), opened: opened, pin_bytes: writer_pin_bytes)))
     })?
     let root = tiered_pin_root(opened, 0u32, tree)
     let value: pages.ReplayValue = ReplayPut(arc.new(take raw))
-    let (take updated, draw) = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
+    let (take updated, draw) = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, suffix, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(pages.PageTree, u64), Error] {
         let mut staged = pages.share_page_tree(tree)
         let staged_inline = staged.inline
         let (take ready, kind_byte, draw0) = {
@@ -483,19 +483,19 @@ fn apply_tiered_rewrite_backend(take backend: TieredPageBackend, id: StoreId, wr
                 return Error(Missing("row"))
             }
             let fields = pages.collection_descriptor(desc)
-            tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
-            let _ = tiered_plan_prior(attempt, visible, staged, logical)?
+            pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
+            let _ = failure_result_from_rep(pager.tiered_plan_prior(attempt, visible, staged, logical))?
             let Some(empty_root) = view staged.empty_collection else {
                 fail("store: missing empty collection page")
             }
             let mut stamp_draw = next_stamp
-            let ready = stage_tiered_row(attempt, visible, edge, empty_root, suffix, clone_replay_value(value), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw)?
+            let ready = failure_result_from_rep(pager.stage_tiered_row(attempt, visible, edge, empty_root, suffix, clone_replay_value(value), staged_inline, fields.kind == LogCollection, private_from, mut stamp_draw))?
             (take ready, pages.descriptor_kind_byte(fields.kind), stamp_draw)
         }
         let mut draw = draw0
         let revised = failure_result_from_rep(pages.rooted_collection_record(ready, kind_byte, ResidentTiered))?
         failure_result_from_rep(pages.page_result(std.page.insert(mut staged.root, collection_bytes, revised, Some(take ready), staged_inline, private_from, mut draw)))?
-        restore_planned_root(mut staged.root, collection_bytes, private_from, visible, mut draw)?
+        failure_result_from_rep(pager.restore_planned_root(mut staged.root, collection_bytes, private_from, visible, mut draw))?
         Ok((take staged, draw))
     })?
     next_stamp = draw
@@ -545,18 +545,18 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
     let Some(inventory) = view tree.paging else {
         return Error(ImportMalformed)
     }
-    let backend: TieredPageBackend = match db.pager {
+    let backend: pager.TieredPageBackend = match pager.pager_requests(db.pager) {
         Some(sender) => PagerTask(channel.sender(sender)),
-        None => PagerDirect(deploy_result(log_directory(db))?, db.store),
+        None => PagerDirect(deploy_result(log_directory(db))?, store_key_to_rep(db.store)),
     }
-    let grant = deploy_result(disk_allocation(scoped fn() -> Result[Arc[TieredReaderGrant], Error] {
-        Ok(arc.new(TieredReaderGrant(store: db.store, opened: open_number(db), pin_bytes: db.writer_pin_bytes)))
+    let grant = deploy_result(disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(db.store), opened: open_number(db), pin_bytes: pager.pin_partition(db.pager))))
     }))?
     let root = tiered_pin_root(open_number(db), 0u32, tree)
     let empty_hint: Bytes = list.new()
-    let checked = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[bool, Error] {
+    let checked = retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[bool, Error] {
         for (cid, key, logical) in cold_rows {
-            if let Some(replayed) = tiered_replayed_row(tree, logical) {
+            if let Some(replayed) = pager.tiered_replayed_row(tree, logical) {
                 match replayed.now {
                     ReplayPut(_) => continue,
                     ReplayAbsent => return Ok(false),
@@ -565,10 +565,10 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
             let Some((edge, _)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(cid))?) else {
                 return Ok(false)
             }
-            tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(key))?))
-            tiered_reading(attempt, ValuesAt)
-            let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
-            let Some(_) = tiered_point_bytes(attempt, backing, key)? else {
+            pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(key))?))
+            pager.tiered_reading(attempt, ValuesAt)
+            let backing = pager.TieredBorrowedRoot(edge: view edge, pins: view visible)
+            let Some(_) = pager.tiered_point_bytes(attempt, backing, key) ?=> failure_from_rep else {
                 return Ok(false)
             }
         }
@@ -591,14 +591,14 @@ fn apply_import_rewrites_tiered(db: Db, mut plan: SchemaPlan, rewrites: List[Act
             let _ = deploy_result(failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take key, take raw)))?
             continue
         }
-        let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+        let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = match pager.pager_requests(db.pager) {
             Some(requests) => Some(view requests),
             None => None,
         }
         let id_key = deploy_result(failure_result_from_rep(catalog.prefix(row.id)))?
         let first = deploy_result(failure_result_from_rep(catalog.stamp_after(plan.schema.next_node)))?
         let (take updated, rows, charge, kind_byte, draw0) = {
-            let cut = deploy_result(tx_page_source(pager, plan.schema.roots.collections))?
+            let cut = deploy_result(failure_result_from_rep(pager.tx_page_source(pager_link, plan.schema.roots.collections)))?
             let Some((edge, desc)) = std.page.collection_slot(plan.schema.roots.collections.root, id_key) else {
                 return Error(ImportMalformed)
             }
@@ -608,8 +608,8 @@ fn apply_import_rewrites_tiered(db: Db, mut plan: SchemaPlan, rewrites: List[Act
                 fail("store: missing empty collection page")
             }
             let mut stamp_draw = first
-            let mut effects: Option[List[TieredFoldEffect]] = None
-            let updated = deploy_result(fold_materialize_row(cut, edge, empty_root, key, pages.ReplayRow(base: 0u32, now: ReplayPut(arc.new(take raw))), plan.schema.roots.collections.inline, false, first, mut stamp_draw, mut effects))?
+            let mut effects: Option[List[pager.TieredFoldEffect]] = None
+            let updated = deploy_result(failure_result_from_rep(pager.fold_materialize_row(cut, edge, empty_root, key, pages.ReplayRow(base: 0u32, now: ReplayPut(arc.new(take raw))), plan.schema.roots.collections.inline, false, first, mut stamp_draw, mut effects)))?
             let (rows, charge) = match view updated {
                 HotPage(p) => std.page.totals(p),
                 ColdPage(_) => (desc_fields.rows, desc_fields.row_bytes),

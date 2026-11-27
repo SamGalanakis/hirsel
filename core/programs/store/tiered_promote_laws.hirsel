@@ -7,16 +7,16 @@ fn l88_leaf_pack(d: Dir, owner: StoreId, seq: u64) -> Result[std.page.PagePtr, E
     l68_write_page_pack(d, owner, seq, 40, std.page.payload(image))
 }
 
-fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr, old: std.page.PagePtr, moved: std.page.PagePtr, sibling: std.page.PagePtr) -> Result[(), Error] waits {
+fn l88_converges_locations(captured: pager.TieredPageSource, parent: std.page.PagePtr, old: std.page.PagePtr, moved: std.page.PagePtr, sibling: std.page.PagePtr) -> Result[(), Error] waits {
     let mut map_stamp = 80u64
     let head = l79_cut_table(moved, 3, 258, mut map_stamp)?
-    let Some(take lookup_root) = promotion_collection_root(head.collections, 9)? else {
+    let Some(take lookup_root) = failure_result_from_rep(pager.promotion_collection_root(head.collections, 9))? else {
         fail("L88(a): the candidate must include the head's Tiered collection")
     }
-    let mut lookup_roots: List[TieredPromotionRoot] = list.with_capacity(1)
+    let mut lookup_roots: List[pager.TieredPromotionRoot] = list.with_capacity(1)
     list.push(mut lookup_roots, PromotionPage(take lookup_root))
-    let cut = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: take lookup_roots, probed_through: map.new())
-    let HotPage(take revised) = promotion_resolve_page(cut, 9, ColdPage(parent))? else {
+    let cut = pager.TieredPromotion(installed: pager.share_page_source(captured), captured: pager.share_page_source(captured), lookup: take lookup_roots, probed_through: map.new())
+    let HotPage(take revised) = failure_result_from_rep(pager.promotion_resolve_page(cut, 9, ColdPage(parent)))? else {
         fail("L88(a): moving one child must re-emit the captured parent")
     }
     let image = std.page.image_of(revised)
@@ -29,21 +29,21 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
     if found != moved || unchanged != sibling || std.page.stamp(image) != parent.stamp {
         fail("L88(a): the parent must keep its stamp and name the installed copy")
     }
-    let input = fold_frame_at(captured, TieredPage(old))?
-    let ColdPage(converged) = promotion_resolve_page(cut, 9, HotPage(arc.share(manifest.fold_page(input))))? else {
+    let input = failure_result_from_rep(pager.fold_frame_at(captured, TieredPage(old)))?
+    let ColdPage(converged) = failure_result_from_rep(pager.promotion_resolve_page(cut, 9, HotPage(arc.share(manifest.fold_page(input)))))? else {
         fail("L88(c): a Hot capture slot must match the already sealed stamp")
     }
     if converged != moved {
         fail("L88(c): the Hot page resolves to the installed Cold copy")
     }
     let mut ids = 0u64
-    let mut retired = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
+    let mut retired = pager.TieredPromotion(installed: pager.share_page_source(captured), captured: pager.share_page_source(captured), lookup: list.new(), probed_through: map.new())
     retired.installed.packs = std.omap.remove(mut ids, retired.installed.packs, 8u64)
-    let HotPage(take first) = promotion_resolve_page(retired, 9, ColdPage(old))? else {
+    let HotPage(take first) = failure_result_from_rep(pager.promotion_resolve_page(retired, 9, ColdPage(old)))? else {
         fail("L88(d): the first promotion must copy from the leased pack")
     }
     list.push(mut retired.lookup, PromotionPage(HotPage(arc.share(first))))
-    let HotPage(take second) = promotion_resolve_page(retired, 9, ColdPage(old))? else {
+    let HotPage(take second) = failure_result_from_rep(pager.promotion_resolve_page(retired, 9, ColdPage(old)))? else {
         fail("L88(d): the second promotion must use the first copy")
     }
     list.clear(mut retired.lookup)
@@ -53,16 +53,16 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
     if std.page.stamp(std.page.image_of(second)) != 40 {
         fail("L88(d): promotion must keep the copied page's stamp")
     }
-    let mut prefix_only = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
+    let mut prefix_only = pager.TieredPromotion(installed: pager.share_page_source(captured), captured: pager.share_page_source(captured), lookup: list.new(), probed_through: map.new())
     map.insert(mut prefix_only.probed_through, old.pack, old.offset)
-    let HotPage(take copied_leaf) = promotion_resolve_page(prefix_only, 9, ColdPage(old))? else {
+    let HotPage(take copied_leaf) = failure_result_from_rep(pager.promotion_resolve_page(prefix_only, 9, ColdPage(old)))? else {
         fail("L88(b): a listed page behind the installed cursor must still be copied")
     }
     if std.page.stamp(std.page.image_of(copied_leaf)) != old.stamp || map.get_or(prefix_only.probed_through, old.pack, 0u64) != old.offset {
         fail("L88(b): promotion must retain the stamp and leave the installed cursor in place")
     }
     list.push(mut prefix_only.lookup, PromotionPage(HotPage(arc.share(copied_leaf))))
-    let HotPage(take later_leaf) = promotion_resolve_page(prefix_only, 9, ColdPage(moved))? else {
+    let HotPage(take later_leaf) = failure_result_from_rep(pager.promotion_resolve_page(prefix_only, 9, ColdPage(moved)))? else {
         fail("L88(e): a second capture must take the earlier promotion's location")
     }
     list.clear(mut prefix_only.lookup)
@@ -92,9 +92,9 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
         packs = take revised
     }
     let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, pages.TieredPagerPack(inventory: probe_pack, object: None))
-    let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
+    let funding = pager.TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
-    let captured = TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
+    let captured = pager.TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
     let first_check = l88_converges_locations(captured, parent, old, moved, sibling)
     let checked = match take first_check {
         Ok(()) => l88_probe_keeps_progress(captured, probe_pack, probed_leaf),
@@ -106,7 +106,7 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
 }
 
 fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.PagePtr), Error] waits {
-    let mut draft = begin_tiered_pack(owner, 7, 3, 4096)?
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), 7, 3, 4096))?
     let mut first = std.page.unlocated(0)
     for slot in 0u64 .. 4 {
         let mut rows: List[std.page.Entry] = list.with_capacity(1)
@@ -116,39 +116,39 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.Pa
         let width = std.page.sealed_size(std.page.image_of(page))
         let frame = manifest.PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
         let key = failure_result_from_rep(catalog.logical_key(9, types.key_word(slot)))?
-        let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
+        let Some(ptr) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
             std.page.unlocated(stamp)
-        })? else {
+        }))? else {
             fail("L88(f): the four leaves must fit the fixture pack")
         }
         if slot == 0 {
             first = ptr
         }
     }
-    let (take raw, pack) = finish_tiered_pack(take draft)?
+    let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
     failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(7))?, raw))?
     Ok((pack, first))
 }
 
-fn l88_probe_keeps_progress(captured: TieredPageSource, pack: pages.PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
-    let mut cursor = start_tiered_probe(pack)
-    let mut promotion = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
+fn l88_probe_keeps_progress(captured: pager.TieredPageSource, pack: pages.PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut cursor = pager.start_tiered_probe(pack)
+    let mut promotion = pager.TieredPromotion(installed: pager.share_page_source(captured), captured: pager.share_page_source(captured), lookup: list.new(), probed_through: map.new())
     for cut in 0u64 .. 4 {
         if cut != 0 {
-            let HotPage(take copied_leaf) = promotion_resolve_page(promotion, 9, ColdPage(original))? else {
+            let HotPage(take copied_leaf) = failure_result_from_rep(pager.promotion_resolve_page(promotion, 9, ColdPage(original)))? else {
                 fail("L88(f): a historical pin may not reference the first frame behind the cursor")
             }
             list.clear(mut promotion.lookup)
             list.push(mut promotion.lookup, PromotionPage(HotPage(take copied_leaf)))
         }
         let mut visits = 0u64
-        let finished = probe_tiered_index(captured, 7, mut cursor, 1, mut visits, scoped fn(mut seen: u64, row: manifest.PackIndexRow) -> Result[bool, Error] {
+        let finished = failure_result_from_rep(pager.probe_tiered_index(captured, 7, mut cursor, 1, mut visits, scoped fn(mut seen: u64, row: manifest.PackIndexRow) -> Result[bool, types.Failure] {
             if row.stamp != 30 + cut {
                 fail("L88(f): the probe must visit the next index row after each promotion")
             }
             seen += 1
             Ok(true)
-        })?
+        }))?
         if finished != (cut == 3) || cursor.rows != cut + 1 {
             fail("L88(f): a four-row probe at budget one must finish at cut four")
         }

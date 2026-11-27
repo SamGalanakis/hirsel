@@ -490,7 +490,7 @@ fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
         }
         let ci = next_call_info(db)
         let no_record: Option[CallRecord] = None
-        let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+        let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
         let drafted = draft_call(db, complete, ci, Plan(n_e: 65536, s_e: 1048576, reply_max: 64), no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             let debit = match fetch_logical(tx, result.unwrap(failure_result_from_rep(catalog.logical_key(1, s4_account_key(from))))) {
                 Ok(Some(raw)) => decode_word(raw),

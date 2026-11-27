@@ -112,7 +112,7 @@ fn stream_follow_scan_slices(mut client: std.object.Client, mut lane: StreamLane
 
 // Applies any remaining slices of a sealed `(sid, inc)` tail in `[from_seq, cutoff]`
 // that landed after step 1 stopped and before the claim's cutoff (Case B).
-fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: format.SealedTail, from_seq: u64, store: StoreId, epoch: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: format.SealedTail, from_seq: u64, store: StoreId, epoch: u64, mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let dir = stream_key(root, stream_dir(host_stream_id_from_rep(st.tail.sid)))
     let mut seal_lane = stream_lane(host_stream_id_from_rep(st.tail.sid), authority_kind, 2, store)?
     seal_lane.dir = string.from(dir)
@@ -138,16 +138,16 @@ fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: 
     Ok(true)
 }
 
-fn stream_follow_make_capture(head: HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: JournalReplay) -> Result[Option[Arc[FollowCapture]], Error] {
+fn stream_follow_make_capture(head: HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: pager.JournalReplay) -> Result[Option[Arc[FollowCapture]], Error] {
     let resident = journal_account(replay)?
-    let JournalReplay(state: take built, next_node, ..) = take replay
+    let pager.JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: head, tag, next_node, attach: take attach, head_bytes: take head_bytes, live_next_seq)
     Ok(Some(follow_capture(head.store, take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
 }
 
 // Loads a head's settled history in §12.11.9 order, restarting if a sealed-tail
 // 404 observes that `head` moved.
-fn stream_follow_load_fresh(mut source: ObjectPackRead, root: String, place_prefix: String, expected: Option[StoreId], mut buffers: TailBuffers, mut scratch: Bytes, ceiling: u64, initial: bool) -> Result[(HistoryHead, std.object.ETag, Option[format.Attach], Bytes, JournalReplay), Error] waits {
+fn stream_follow_load_fresh(mut source: ObjectPackRead, root: String, place_prefix: String, expected: Option[StoreId], mut buffers: TailBuffers, mut scratch: Bytes, ceiling: u64, initial: bool) -> Result[(HistoryHead, std.object.ETag, Option[format.Attach], Bytes, pager.JournalReplay), Error] waits {
     loop {
         let (take capture, take attach, tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, initial)?
         let head = capture.head
@@ -189,7 +189,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let mut cur_bytes: Bytes = list.new()
     let mut scan_from = 0u64
     let mut advanced_anything = false
-    let mut replay: JournalReplay = match previous {
+    let mut replay: pager.JournalReplay = match previous {
         None => {
             let (head, tag, take attach, take saved_bytes, take loaded) = stream_follow_load_fresh(mut source, root, place_prefix, expected, mut buffers, mut scratch, avail, true)?
             match take attach {
@@ -222,7 +222,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
             match take reuse_live {
                 Some((take old_a, _)) => {
                     let state = copy_follow_state(old_capture.state)?
-                    let initial = journal_replay(take state, old.next_node, default_limits())?
+                    let initial = failure_result_from_rep(pager.journal_replay(take state, old.next_node, limits_to_rep(default_limits())))?
                     failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, avail))?
                     cur_head = old.current
                     cur_tag = old.tag

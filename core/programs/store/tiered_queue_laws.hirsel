@@ -31,7 +31,7 @@ fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, ap
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L87: the fixture has no Log")
         }
-        let limits = descriptor_bounds(before)
+        let limits = pager.descriptor_bounds(before)
         (arc.share(here), failure_result_from_rep(pages.log_record(here, limits.first, limits.next, ResidentTiered))?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
@@ -115,7 +115,7 @@ fn drain_directory(d: Dir, mut db: Db) -> Result[List[u64], Error] waits {
         let current = drain_pack_sizes(d)?
         let page_ptrs = disk_state(db).packs
         let (queued, _) = std.page.totals(manifest.pack_lists(page_ptrs).deferred)
-        if current == previous && queued == 0 && map.len(db.compaction.probes) == 0 {
+        if current == previous && queued == 0 && map.len(pager.disk_compaction(disk_state(db).tiered).probes) == 0 {
             return Ok(take current)
         }
         previous = take current
@@ -336,7 +336,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     }
     let mut dropped: List[std.page.PagePtr] = list.new()
     let mut lost = 0u64
-    for frames in disk_state(db).tiered_dirty.replaced {
+    for frames in pager.dirty_cut(disk_state(db).tiered).replaced {
         for frame in frames.frames {
             lost += 1
             let mut hits = 0u64
@@ -350,7 +350,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
             }
         }
     }
-    for row in disk_state(db).tiered_dirty.dropped {
+    for row in pager.dirty_cut(disk_state(db).tiered).dropped {
         let TieredPage(ptr) = row.target else {
             fail("L87: a Log trim drops pages only")
         }
@@ -365,7 +365,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     }
     for ptr in detached {
         let mut hits = 0u64
-        for frames in disk_state(db).tiered_dirty.replaced {
+        for frames in pager.dirty_cut(disk_state(db).tiered).replaced {
             for frame in frames.frames {
                 if ptr.pack == frame.pack && ptr.stamp == frame.stamp && ptr.len == frame.len {
                     hits += 1
@@ -465,9 +465,9 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     })? else {
         fail("L87: the whole-Log trim commits")
     }
-    let dropped_rows = list.len(disk_state(db).tiered_dirty.dropped)
+    let dropped_rows = list.len(pager.dirty_cut(disk_state(db).tiered).dropped)
     let mut dropped_pages = 0u64
-    for row in disk_state(db).tiered_dirty.dropped {
+    for row in pager.dirty_cut(disk_state(db).tiered).dropped {
         if let TieredPage(_) = row.target {
             dropped_pages += 1
         }
@@ -549,7 +549,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
 // dropped row, against `dirty_bytes`. A refused commit changes neither list.
 @test
 fn test_l70_dirty_admission() -> Result[(), ()] {
-    let mut dirty = clean_tiered_cut()
+    let mut dirty = pager.clean_tiered_cut()
     let one = std.page.PagePtr(pack: 12, offset: 72, len: 72, checksum: 102, stamp: 2)
     let two = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 11, offset: 72, body: 0)
     let three = std.page.PagePtr(pack: 12, offset: 160, len: 80, checksum: 103, stamp: 3)
@@ -559,25 +559,25 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
     let mut detached: List[format.TieredTarget] = list.new()
     list.push(mut detached, TieredPage(three))
     // 2 × 24 + 1 × 48 = 96.
-    let first = TieredFreed(replaced: take edited, dropped: take detached)
-    if let Error(_) = reserve_tiered_commit(mut dirty, first, 200) {
+    let first = pager.TieredFreed(replaced: take edited, dropped: take detached)
+    if let Error(_) = failure_result_from_rep(pager.reserve_tiered_commit(mut dirty, first, 200)) {
         return Error(())
     }
-    admit_tiered_commit(mut dirty, 7, take first)
+    pager.admit_tiered_commit(mut dirty, 7, take first)
     // 2 × 24 + 3 × 48 = 192.
     let mut blobs: List[format.TieredTarget] = list.new()
     list.push(mut blobs, TieredBlob(two))
     list.push(mut blobs, TieredBlob(std.page.BlobRef(stamp: 4, len: 900, checksum: 104, pack: 11, offset: 1120, body: 0)))
-    let second = TieredFreed(replaced: list.new(), dropped: take blobs)
-    if let Error(_) = reserve_tiered_commit(mut dirty, second, 200) {
+    let second = pager.TieredFreed(replaced: list.new(), dropped: take blobs)
+    if let Error(_) = failure_result_from_rep(pager.reserve_tiered_commit(mut dirty, second, 200)) {
         return Error(())
     }
-    admit_tiered_commit(mut dirty, 8, take second)
+    pager.admit_tiered_commit(mut dirty, 8, take second)
     // 3 × 24 + 3 × 48 = 216 > 200.
     let mut more: List[manifest.ReplacedFrame] = list.new()
     list.push(mut more, manifest.replaced_page(three))
-    let third = TieredFreed(replaced: take more, dropped: list.new())
-    let Error(Full(Resident(refused))) = reserve_tiered_commit(mut dirty, third, 200) else {
+    let third = pager.TieredFreed(replaced: take more, dropped: list.new())
+    let Error(Full(Resident(refused))) = failure_result_from_rep(pager.reserve_tiered_commit(mut dirty, third, 200)) else {
         return Error(())
     }
     if refused.requested != 216 || refused.available != 200 {

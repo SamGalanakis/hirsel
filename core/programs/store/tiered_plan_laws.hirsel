@@ -17,25 +17,25 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 59, checksum: 111, stamp: 40)
     let base = l63_tiered_table_base(ptr)?
     let source = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(ptr)), payload: TieredImage(arc.share(leaf))))
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut visible, (8u64, 72u64), take source)
     let mut operations = pages.new_data_rows()
-    pages.push_data_row(mut operations, format.DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None, prior: None))
-    pages.push_data_row(mut operations, format.DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None, prior: None))
-    let missed = tiered_attempt(75, 0)
+    pages.push_data_row(mut operations, format.DataOp(key: failure_result_from_rep(pager.log_key(9, 3))?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None, prior: None))
+    pages.push_data_row(mut operations, format.DataOp(key: failure_result_from_rep(pager.log_key(9, 2))?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None, prior: None))
+    let missed = pager.tiered_attempt(75, 0)
     let order = failure_result_from_rep(types.capacity(pages.data_order(operations)))?
-    let Error(Missed) = plan_tiered_edits(base, missed, map.new(), operations, order, 101) else {
+    let Error(Missed) = failure_result_from_rep(pager.plan_tiered_edits(base, missed, map.new(), operations, order, 101)) else {
         fail("L63: a Cold plan must latch before the encoder runs")
     }
-    let stopped = tiered_finish(take missed)
+    let stopped = pager.tiered_finish(take missed)
     let (Some(AttemptMiss(TieredPage(want))), SeekKey(sought)) = (view stopped.stopped, view stopped.seek) else {
         fail("L63: the driver needs the plan's demand and seek key")
     }
     if want != ptr || sought != types.key_word(2) {
         fail("L63: the first miss must seek the first op in wire order")
     }
-    let attempt = tiered_attempt(75, 0)
-    let Some(take plan) = plan_tiered_edits(base, attempt, visible, operations, order, 101)? else {
+    let attempt = pager.tiered_attempt(75, 0)
+    let Some(take plan) = failure_result_from_rep(pager.plan_tiered_edits(base, attempt, visible, operations, order, 101))? else {
         fail("L63: Tiered ops must have a plan before encoding")
     }
     // K=12 and V=6 charge 86 in either mode. The overwrite adds

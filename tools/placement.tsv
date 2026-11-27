@@ -319,9 +319,9 @@ fold_cell_edits	store-cell.hirsel	txn	txn	L12
 seal_cell_edits	store-cell.hirsel	txn	txn	L12
 published_cell	store-cell.hirsel	store	store	-
 diff_advance	store-changes.hirsel	read	read	L11
-ChangeOutput	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by snapshot_changes)
-change_output	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_changes)
-admit_change	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_initial_changes)
+ChangeOutput	store-changes.hirsel	read	store	-	L5 public root type ruling
+change_output	store-changes.hirsel	read	store	-	L5 public root type ruling
+admit_change	store-changes.hirsel	read	store	-	L5 public root type ruling
 page_change_rows	store-changes.hirsel	read	read	L11
 page_change_cell	store-changes.hirsel	read	read	L11
 start_diff	store-changes.hirsel	read	read	L11
@@ -336,7 +336,7 @@ Trimmed	store-changes.hirsel	store	store	-
 Changes	store-changes.hirsel	store	store	-
 ChangePage	store-changes.hirsel	store	store	-
 changes_page	store-changes.hirsel	store	store	-
-encode_staged	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
+encode_staged	store-commit-wire.hirsel	format	store	-	L5 public root type ruling
 encode_frame	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
 encode_call	store-commit-wire.hirsel	format	format	L1
 encode_call_fields	store-commit-wire.hirsel	format	format	L1
@@ -1175,7 +1175,7 @@ revoke_parked	store-mux.hirsel	store	store	-
 parked_in_flight	store-mux.hirsel	pager	pager	L5
 send_parked_demand	store-mux.hirsel	store	store	-
 first_unsent	store-mux.hirsel	pager	pager	L5
-install_parked	store-mux.hirsel	store	store	-
+install_parked	store-mux.hirsel	store	pager	L5	L5 binds the queue and partition in PagerState
 poll_parked	store-mux.hirsel	store	store	-
 cancel_parked	store-mux.hirsel	store	store	-
 resume_parked	store-mux.hirsel	store	store	-
@@ -1541,7 +1541,7 @@ get	store-read.hirsel	store	store	-
 count_at	store-read.hirsel	store	store	-
 decode_row_key	store-read.hirsel	read	read	L11
 advance_rows	store-read.hirsel	read	read	L11
-finish_row	store-read.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_snapshot_row)
+finish_row	store-read.hirsel	read	store	-	L5 public root type ruling
 open_scan	store-read.hirsel	read	read	L11
 open_snapshot_rows	store-read.hirsel	read	read	L11
 collection_is_tiered	store-read.hirsel	read	read	L11
@@ -1713,7 +1713,7 @@ ships	store-rounds.hirsel	transfer	transfer	L13
 shipped_count	store-rounds.hirsel	transfer	transfer	L13
 range_totals	store-rounds.hirsel	transfer	transfer	L13
 range_rows	store-rounds.hirsel	transfer	transfer	L13
-removed_pin	store-rounds.hirsel	transfer	store	-	pull-down transfer -> manifest (used by fill_cut_manifest); pull-down manifest -> pages (used by state_with_delta); push-up pages -> store (refs at layer 12)
+removed_pins	store-rounds.hirsel	transfer	store	-	pull-down transfer -> manifest (used by fill_cut_manifest); pull-down manifest -> pages (used by state_with_delta); push-up pages -> store (refs at layer 12)
 install_account	store-rounds.hirsel	store	store	-
 SCRUB_HISTORY_ROLE	store-scrub-pace.hirsel	manifest	manifest	L4
 SCRUB_HISTORY_KIND	store-scrub-pace.hirsel	manifest	manifest	L4
@@ -2201,7 +2201,7 @@ check_reader_pin_bytes	store-tiered-cache.hirsel	pager	pager	L5
 tiered_cache_reserve_reader	store-tiered-cache.hirsel	pager	pager	L5
 TieredRowDiff	store-tiered-changes.hirsel	pager	pager	L5
 TIERED_DIFF_BATCH	store-tiered-changes.hirsel	pager	pager	L5
-snapshot_paged	store-tiered-changes.hirsel	pager	pager	L5
+snapshot_paged	store-tiered-changes.hirsel	pager	store	-	L5 public root type ruling
 snapshot_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 tiered_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 tiered_row_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
@@ -2211,14 +2211,14 @@ TIERED_DIFF_UNREAD	store-tiered-changes.hirsel	pager	pager	L5
 TIERED_DIFF_EXPAND	store-tiered-changes.hirsel	pager	pager	L5
 tiered_slot_stamp	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_spans	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
-tiered_diff_paged	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_paged	store-tiered-changes.hirsel	pager	store	-	L5 public root type ruling
 tiered_diff_root	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_drop_shared	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_deepen	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 tiered_diff_expand	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 tiered_diff_push	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_add_span	store-tiered-changes.hirsel	pager	pager	L5
-tiered_diff_overlay_spans	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_overlay_spans	store-tiered-changes.hirsel	pager	store	-	L5 public root type ruling
 tiered_diff_window_span	store-tiered-changes.hirsel	pager	pager	L5
 TieredDiffSide	store-tiered-changes.hirsel	pager	pager	L5
 tiered_diff_fill	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
@@ -2312,7 +2312,7 @@ no_cut_queue	store-tiered-frees.hirsel	manifest	manifest	L4
 queued_free	store-tiered-frees.hirsel	manifest	manifest	L4
 drain_queue_row	store-tiered-frees.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
 drain_cut_queue	store-tiered-frees.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
-tiered_initial_changes	store-tiered-initial-changes.hirsel	pager	pager	L5
+tiered_initial_changes	store-tiered-initial-changes.hirsel	pager	store	-	L5 public root type ruling
 snapshot_tiered_initial_changes	store-tiered-initial-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
 LineageFork	store-tiered-lineage.hirsel	manifest	manifest	L4
 LineageCell	store-tiered-lineage.hirsel	manifest	manifest	L4
@@ -2527,8 +2527,8 @@ restamp_tiered_emission	store-tiered-residency.hirsel	pager	pager	L5
 Residency	store-tiered-residency.hirsel	store	store	-
 set_residency	store-tiered-residency.hirsel	store	store	-
 admit_tiered_plan	store-tiered-residency.hirsel	store	store	-
-tiered_plan_reserve	store-tiered-residency.hirsel	pager	pager	L5
-tiered_memory_room	store-tiered-residency.hirsel	pager	pager	L5
+tiered_plan_reserve	store-tiered-residency.hirsel	pager	store	-	L5 public root type ruling
+tiered_memory_room	store-tiered-residency.hirsel	pager	store	-	L5 public root type ruling
 start_residency_pager	store-tiered-residency.hirsel	store	store	-
 stop_residency_pager	store-tiered-residency.hirsel	store	store	-
 residency_to_tiered	store-tiered-residency.hirsel	store	store	-
@@ -3035,7 +3035,6 @@ append_pack_fork	store-manifest-support.hirsel	manifest	manifest	L4
 check_page_emission	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
 check_page_location_closure	store_locations_disk_laws.hirsel	manifest	manifest	L4
 check_paged_manifest	manifest_manifest_page_laws_2_white_box.hirsel	manifest	manifest	L4
-cut_removed_pin	store-cut-participants.hirsel	manifest	manifest	L4
 disk_index_len	store_locations_disk_laws.hirsel	manifest	manifest	L4
 disk_law_page_emission	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
 disk_law_page_location_closure	store_locations_disk_laws.hirsel	manifest	manifest	L4
@@ -3077,3 +3076,10 @@ test_l69_lineage_last_holder_ghost_and_adopt	tiered_lineage_laws_white_box.hirse
 genesis_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4
 recovered_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4
 retired_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4
+pack_selected_for_compaction	store-tiered-compact.hirsel	pager	pager	L5	-
+compact_idle_probes	store-tiered-compact.hirsel	pager	pager	L5	-
+cut_tiered_idle	store-tiered-compact.hirsel	pager	pager	L5	-
+PagerState	store-pager-state.hirsel	pager	pager	L5	-
+DiskPagerState	store-pager-state.hirsel	pager	pager	L5	-
+TieredManifestRestore	store-tiered-replay.hirsel	pager	pager	L5	-
+tiered_manifest_restore	store-tiered-replay.hirsel	pager	pager	L5	-

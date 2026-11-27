@@ -257,7 +257,7 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
     if seed != D7Unique {
         let tree = pages.holder_heads(reopened.holders)[0].roots.collections
         let inserted = law_read_key(rebound.by_v.id, 20u64, Some(primary))
-        let Some(pages.ReplayRow(base: 0, now: ReplayPut(raw))) = tiered_replayed_row(tree, inserted) else {
+        let Some(pages.ReplayRow(base: 0, now: ReplayPut(raw))) = pager.tiered_replayed_row(tree, inserted) else {
             fail("L68: the durable insert must replay with prior zero")
         }
         if list.len(raw) != 0 {
@@ -265,10 +265,10 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
         }
         let old = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
         if overwrite {
-            let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(tree, old) else {
+            let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = pager.tiered_replayed_row(tree, old) else {
                 fail("L68(f): deleting a present empty payload needs prior one")
             }
-        } else if let Some(_) = tiered_replayed_row(tree, old) {
+        } else if let Some(_) = pager.tiered_replayed_row(tree, old) {
             fail("L68(g): the insert-only suffix must keep the original entry")
         }
     }
@@ -287,7 +287,7 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
     if descriptor.residency != ResidentTiered || descriptor.rows != 0 || descriptor.row_bytes != 0 || std.page.totals(root) != (0u64, 0u64) {
         fail("L68: superseded entries must not reappear in the rebuilt root")
     }
-    if let Some(_) = tiered_replayed_row(tree, law_read_key(schema.by_v.id, 20u64, Some(primary))) {
+    if let Some(_) = pager.tiered_replayed_row(tree, law_read_key(schema.by_v.id, 20u64, Some(primary))) {
         fail("L68: the new root must not retain the old overlay")
     }
     let logical = law_read_key(schema.rows.id, primary, None)
@@ -342,7 +342,7 @@ fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, dri
             fail("L68(f): the previous catalog survives a refused schema cut")
         }
         let inserted = law_read_key(rebound.by_v.id, 20u64, Some(1u64))
-        if let None = tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, inserted) {
+        if let None = pager.tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, inserted) {
             fail("L68(f): the previous overlay survives a refused schema cut")
         }
         let mut evidence: List[(u32, u32)] = list.new()
@@ -448,7 +448,7 @@ fn test_lix_tiered_index_build_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let rebound = index_build_schema(mut recovered, Open)?
     {
         let former = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
-        let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, former) else {
+        let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = pager.tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, former) else {
             fail("L-IX: reopen replays the acknowledged write behind the cursor")
         }
     }

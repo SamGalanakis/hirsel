@@ -101,14 +101,14 @@ type ObjectPackRead {
     deadline: u64,
     admitted_base: Option[HistoryOpenBase],
     stream_root: Option[String],
-    cache: Option[ObjectsCache]
+    cache: Option[pager.ObjectsCache]
 }
 
 fn history_reader(take client: std.object.Client, deadline: u64) -> ObjectPackRead {
     ObjectPackRead(authority_kind: 1, client: take client, locator: empty_history_locator(), deadline, admitted_base: None, stream_root: None, cache: None)
 }
 
-fn history_list_page(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[ObjectsCache], id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
+fn history_list_page(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[pager.ObjectsCache], id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
     let Some(item) = map.get(locator.rows, ptr.pack) else {
         let file = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
         return Error(failure_from_rep(format.disk_fault(file, ptr.offset, Dangling(ptr.stamp))))
@@ -206,7 +206,7 @@ fn history_stream_hash(mut client: std.object.Client, deadline: u64, mut stream:
     Ok(())
 }
 
-fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[ObjectsCache], id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, Error] waits {
+fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[pager.ObjectsCache], id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, Error] waits {
     let item: pages.HistoryRef = clone(option.unwrap(map.get(locator.rows, seq)))
     let mut stream = HistoryPackStream(path: history_read_key("p-", item)?, reference: item, read_through: 0, offset: 0, available: failure_result_from_rep(manifest.disk_read_buffer(HISTORY_LIST_WINDOW))?, digest: std.check.start(), cached: None, staging: None)
     if let Some(local) = cache {
@@ -327,7 +327,7 @@ fn history_want_roots(mut pending: Map[u64, List[LocatedNeed]], roots: pages.Loc
     Ok(())
 }
 
-fn history_load_data_pack(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[ObjectsCache], id: StoreId, seq: u64, pack: pages.PagePack, next_stamp: u64) -> Result[(String, manifest.LoadedPack), Error] waits {
+fn history_load_data_pack(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, cache: Option[pager.ObjectsCache], id: StoreId, seq: u64, pack: pages.PagePack, next_stamp: u64) -> Result[(String, manifest.LoadedPack), Error] waits {
     let item: pages.HistoryRef = clone(option.unwrap(map.get(locator.rows, seq)))
     let name = history_read_key("p-", item)?
     let frame_room = if pack.class == 0 {
@@ -453,12 +453,12 @@ fn history_graph_order(mut graph: manifest.PageGraph) {
     })
 }
 
-fn history_validate_manifest(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take page_record: manifest.PageManifest, cache: Option[ObjectsCache]) -> Result[manifest.ValidatedPageManifest, Error] waits {
+fn history_validate_manifest(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take page_record: manifest.PageManifest, cache: Option[pager.ObjectsCache]) -> Result[manifest.ValidatedPageManifest, Error] waits {
     failure_result_from_rep(manifest.require_object_memory_manifest(page_record))?
     validate_bucket_graph(mut client, locator, deadline, id, file, take page_record, false, cache)
 }
 
-fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take page_record: manifest.PageManifest, allow_tiered: bool, cache: Option[ObjectsCache]) -> Result[manifest.ValidatedPageManifest, Error] waits {
+fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take page_record: manifest.PageManifest, allow_tiered: bool, cache: Option[pager.ObjectsCache]) -> Result[manifest.ValidatedPageManifest, Error] waits {
     let blank = manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = manifest.empty_listed_pages(allow_tiered, take blank)
     let mut final_item: Option[u64] = None
@@ -525,12 +525,12 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
     Ok(manifest.ValidatedPageManifest(manifest: take page_record, inventory: take inventory, lineage: take lineage, graph: take ordered, allow_tiered: allow_tiered))
 }
 
-fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
+fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
     let (take replay, _) = history_paged_load(mut source, head, ceiling)?
     Ok(take replay)
 }
 
-fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[(JournalReplay, manifest.LoadedPageStore), Error] waits {
+fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[(pager.JournalReplay, manifest.LoadedPageStore), Error] waits {
     let chain = history_suffix(mut source.client, head, head.checkpoint, source.deadline)?
     let (take mark, take checkpoint_data) = history_checkpoint(mut source.client, head, source.deadline)?
     let page_record = history_read_manifest(mut source.client, head.store, mark, head.checkpoint.seq, source.deadline)?
@@ -540,7 +540,7 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
     Ok((take recovered, take loaded))
 }
 
-fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes, take page_record: manifest.PageManifest, ceiling: u64) -> Result[(JournalReplay, manifest.LoadedPageStore), Error] waits {
+fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes, take page_record: manifest.PageManifest, ceiling: u64) -> Result[(pager.JournalReplay, manifest.LoadedPageStore), Error] waits {
     source.locator = history_locator(mut source.client, head, mark, checkpoint_data, source.deadline)?
     let name = history_read_key("m-", mark.manifest)?
     let cache = pack_cache_directory(source.cache)
@@ -552,7 +552,7 @@ fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: 
     let initial = disk_allocation(scoped fn() -> Result[pages.State, Error] {
         failure_result_from_rep(types.capacity(manifest.manifest_state(loaded.manifest, loaded.holders)))
     })?
-    let replay = journal_replay_manifest(take initial, loaded.manifest)?
+    let replay = failure_result_from_rep(pager.journal_replay_manifest(take initial, loaded.manifest))?
     failure_result_from_rep(catalog.over_ceiling(journal_account(replay)?, ceiling))?
     Ok((take replay, take loaded))
 }

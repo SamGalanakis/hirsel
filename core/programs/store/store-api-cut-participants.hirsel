@@ -9,7 +9,7 @@ type ProposedMain {
     // hot build's publish (§13.10a "Hot Tiered builds").
     drop_pin: Option[u64],
     superseded: List[u32],
-    chunk_freed: Option[TieredFreed],
+    chunk_freed: Option[pager.TieredFreed],
     // D-CU-1: rows this schema commit itself wrote, and whether the commit is
     // non-replayable under an export lease.
     step_rows: List[StepOp],
@@ -44,7 +44,7 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[manifest.CutParticipan
 }
 
 fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[pages.Roots], generation: u64, seq: u64, prev_first: u64, layout: manifest.PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
-    let account_tiered = cut_tiered_account(published)?
+    let account_tiered = failure_result_from_rep(pager.cut_tiered_account(published))?
     failure_result_from_rep(manifest.fill_cut_manifest(mut raw, cut_input(db, delta), published, generation, seq, prev_first, layout, next_stamp, account, account_tiered, scoped fn(mut output: Bytes, context: format.DiskContext, fence: u32) -> Result[(), types.Failure] waits {
         failure_result_to_rep(write_seal(mut output, context, fence))
     }))
@@ -57,7 +57,7 @@ fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
 
 // A pin's materialized pages are its own: its watermark rises above them,
 // so no holder reaches a frame at or above its watermark (§13.5 step 3).
-fn raise_materialized_pin(mut delta: HolderDelta, staged: TieredCutStage) {
+fn raise_materialized_pin(mut delta: HolderDelta, staged: pager.TieredCutStage) {
     if !staged.materialized {
         return ()
     }

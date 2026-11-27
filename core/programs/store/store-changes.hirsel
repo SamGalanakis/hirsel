@@ -17,7 +17,7 @@ type ChangeOutput {
     // Items an earlier part of the same page already admitted.
     carried: u64,
     // A collection whose rows `walk_page_changes` left for a Tiered read.
-    deferred: Option[TieredRowDiff]
+    deferred: Option[pager.TieredRowDiff]
 }
 
 fn change_output(limits: Option[Limits]) -> ChangeOutput {
@@ -156,11 +156,11 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
         std.page_walk.value(right)
     }
     let old_bounds = match before {
-        Some(raw) => Some(descriptor_bounds(raw)),
+        Some(raw) => Some(pager.descriptor_bounds(raw)),
         None => None
     }
     let new_bounds = match after {
-        Some(raw) => Some(descriptor_bounds(raw)),
+        Some(raw) => Some(pager.descriptor_bounds(raw)),
         None => None
     }
     let bounds_changed = match (old_bounds, new_bounds) {
@@ -188,7 +188,7 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, 
             None => old.next
         }
         if old.first < end {
-            if !page_change_trim(mut out, log_key(id, old.first)?, log_key(id, end)?, low, high)? {
+            if !page_change_trim(mut out, failure_result_from_rep(pager.log_key(id, old.first))?, failure_result_from_rep(pager.log_key(id, end))?, low, high)? {
                 return Ok(false)
             }
             let suffix = types.key_word(end)
@@ -215,7 +215,7 @@ fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Wa
     let before = comparison != Greater
     let after = comparison != Less
     if (before && pages.unwrap_collection_descriptor(std.page_walk.value(left)).residency != ResidentMemory) || (after && pages.unwrap_collection_descriptor(std.page_walk.value(right)).residency != ResidentMemory) {
-        out.deferred = Some(TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
+        out.deferred = Some(pager.TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
         return Ok(false)
     }
     let mut from = if comparison == Greater {
@@ -279,7 +279,7 @@ fn compare_page_collections(before: pages.PageTree, after: pages.PageTree) -> Re
     Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
 }
 
-fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], mut deferred: List[TieredRowDiff]) -> Result[(), Error] {
+fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], mut deferred: List[pager.TieredRowDiff]) -> Result[(), Error] {
     let Some(overlays) = view tree.replay else {
         return Ok(())
     }
@@ -307,7 +307,7 @@ fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pa
             None => false,
         }
         if has_before || has_after {
-            list.push(mut deferred, TieredRowDiff(id: id, start: None, stop: None, before: has_before, after: has_after))
+            list.push(mut deferred, pager.TieredRowDiff(id: id, start: None, stop: None, before: has_before, after: has_after))
         }
     }
     Ok(())
@@ -318,7 +318,7 @@ fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pa
 // inline, and collects every Tiered collection (including replay-overlaid
 // Tiered collections whose base descriptor did not move) into `deferred`
 // without stopping at the first Tiered collection.
-fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32]) -> Result[(Changes, List[TieredRowDiff]), Error] {
+fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32]) -> Result[(Changes, List[pager.TieredRowDiff]), Error] {
     let has_replay = (if let Some(_) = view before.replay {
         true
     } else {
@@ -332,7 +332,7 @@ fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, s
         return Ok((Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()), list.new()))
     }
     let mut out = change_output(None)
-    let mut deferred: List[TieredRowDiff] = list.new()
+    let mut deferred: List[pager.TieredRowDiff] = list.new()
     let mut left = start_diff(Some(view before.root), None)
     let mut right = start_diff(Some(view after.root), None)
     while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, None) {

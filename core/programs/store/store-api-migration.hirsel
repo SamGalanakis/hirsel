@@ -33,7 +33,7 @@ type SchemaPlan: send {
     schema: catalog.SchemaPlan,
     store: StoreId,
     bindings: List[IndexRegistration],
-    chunk_freed: Option[TieredFreed],
+    chunk_freed: Option[pager.TieredFreed],
     // D-CU-1: rows this schema commit itself wrote, and whether the commit is
     // non-replayable under an export lease (`Drift`).
     step_rows: List[StepOp],

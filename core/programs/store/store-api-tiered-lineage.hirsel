@@ -3,7 +3,7 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
 }
 
 fn settle_lineage_kills(take settled: manifest.Lineage, db: Db, delta: HolderDelta, queue: manifest.CutQueue, mut packs: manifest.DiskIndex[u64, pages.PagePack]) -> Result[manifest.Lineage, Error] {
-    failure_result_from_rep(manifest.settle_lineage_kills(take settled, cut_input(db, delta), disk_state(db).tiered_dirty.replaced, queue, mut packs))
+    failure_result_from_rep(manifest.settle_lineage_kills(take settled, cut_input(db, delta), pager.dirty_cut(disk_state(db).tiered).replaced, queue, mut packs))
 }
 
 // A fork the next cut is the first to publish: a journaled fork's FORK

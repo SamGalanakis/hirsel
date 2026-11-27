@@ -138,7 +138,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode_commit("fixture", payload))
     }
-    let mut replay = journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, pages.holder_next_node(db.holders), db.limits)?
+    let mut replay = failure_result_from_rep(pager.journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, pages.holder_next_node(db.holders), limits_to_rep(db.limits)))?
     result.unwrap(journal_apply("fixture", mut replay, Commit(take commit)))
     let roots = pages.share_roots(replay.state.tips[i].roots)
     let old_bytes = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
@@ -377,8 +377,8 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(durable(mut db, final_item))
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
-    let attempt = call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, db.writer_pin_bytes, 0)
-    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let attempt = pager.call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, pager.pin_partition(db.pager), 0)
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let figure = match stage(mut db, 0, wall, None, keep_reply, attempt, no_pins, fn(mut tx: Tx) -> Result[(), u64] {
         settle_body(mut tx, s)
     }) {

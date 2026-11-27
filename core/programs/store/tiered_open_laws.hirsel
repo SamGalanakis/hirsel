@@ -96,9 +96,9 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
     let replay_read = fn(_record: Recorded, mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
         (env.1)(mut tx, env.0)
     }
-    let requests = replace(mut db.pager, None)
+    let requests = pager.replace_requests(mut db.pager, None)
     let unserved = reexecute(db, main_branch(db), before, plan, failed, (copy_env(rows), read), replay_read)
-    db.pager = take requests
+    let _ = pager.replace_requests(mut db.pager, take requests)
     let Ok(Unknown(StateGone)) = unserved else {
         fail("L62: a replay miss with no pager must be Unknown(StateGone)")
     }

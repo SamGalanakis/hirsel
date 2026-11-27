@@ -1,0 +1,30 @@
+fn read_tiered_count(source: pager.TieredPageSource, grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, edge: std.page.Slot, descriptor: Bytes, id: Bytes, low: Bytes, high: Bytes) -> Result[u64, Error] waits {
+    let start = list.slice(low, 4, list.len(low))
+    let end = list.slice(high, 4, list.len(high))
+    let collection: u32 = list.word_be(id, 0)
+    let overlay = match tree.replay {
+        Some(replay) => std.omap.get(replay.collections, collection),
+        None => None,
+    }
+    retry_tiered_read(source, grant, root, start, Some(end), TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[u64, Error] {
+        let before = if low == id {
+            0u64
+        } else {
+            failure_result_from_rep(pager.tiered_page_rank(attempt, visible, edge, None, start))?
+        }
+        if list.slice(high, 0, 4) != id {
+            let omitted = failure_result_from_rep(pager.tiered_count_overlay(overlay, id, low, before))?
+            let rows: u64 = pages.collection_descriptor(descriptor).rows
+            let Some(total) = int.checked_sub(rows, omitted) else {
+                return Error(failure_from_rep(pages.malformed(0)))
+            }
+            return Ok(total)
+        }
+        pager.tiered_seek(attempt, SeekUpper)
+        let through = failure_result_from_rep(pager.tiered_page_rank(attempt, visible, edge, None, end))?
+        let Some(base_count) = int.checked_sub(through, before) else {
+            return Error(failure_from_rep(pages.malformed(0)))
+        }
+        failure_result_from_rep(pager.tiered_count_overlay(overlay, low, high, base_count))
+    })
+}

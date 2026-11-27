@@ -89,7 +89,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[format.Journ
 }
 
 type BaseReplay {
-    replay: JournalReplay,
+    replay: pager.JournalReplay,
     branch: u32,
     next: u64,
     stopped: bool
@@ -104,7 +104,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
     let (_, id, take page_record) = read_only_manifest(d)?
     let validated = validate_store_manifest(d, id, take page_record)?
     let (take selected, take state) = replay_base_state(take validated)?
-    let replay = journal_replay_manifest(take state, selected)?
+    let replay = failure_result_from_rep(pager.journal_replay_manifest(take state, selected))?
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
             return Ok(None)
@@ -201,7 +201,7 @@ type Rerun[R] = RanTo(R, pages.DataRows) | Halted(Stop) | RoomRefused
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
+fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
@@ -222,7 +222,7 @@ fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: Call
     })
     let _ = log.finish(take reads)
     let _ = cell.into_inner(take issued)
-    if call_attempt_latched(attempt) {
+    if pager.call_attempt_latched(attempt) {
         return RoomRefused
     }
     let finished = match take caught {
@@ -260,12 +260,12 @@ fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: Call
 
 fn rerun[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Result[Rerun[R], Error] waits {
     let root = tiered_pin_root(open_number(db), ci.id.branch, base.collections)
-    let mut pins = empty_tiered_pins(root, db.writer_pin_bytes)
-    let mut pending: Option[(format.TieredTarget, Error)] = None
+    let mut pins = pager.empty_tiered_pins(root, pager.pin_partition(db.pager))
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
-        let attempt = call_attempt(base.collections.root, db.writer_pin_bytes, tiered_window(pins))
+        let attempt = pager.call_attempt(base.collections.root, pager.pin_partition(db.pager), pager.tiered_window(pins))
         let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
-        let Some(state) = call_attempt_finish(take attempt) else {
+        let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take reran)
         }
         match state.stopped {
@@ -308,7 +308,7 @@ fn same_writes(rows: pages.DataRows, committed: List[format.JournalOp]) -> Resul
     }
     let order = failure_result_from_rep(types.capacity(pages.data_order(rows)))?
     for slot_order in 0u64 .. pages.data_row_count(rows) {
-        let op = ordered_row(rows, order, slot_order)
+        let op = pager.ordered_row(rows, order, slot_order)
         let other = view committed[slot_order]
         if op.key != other.key {
             return Ok(false)

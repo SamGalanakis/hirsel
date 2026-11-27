@@ -5,7 +5,7 @@
 type ReplicationWriter {
     source: ObjectPackRead,
     register: HistoryRegister,
-    replay: JournalReplay,
+    replay: pager.JournalReplay,
     authority: Bytes,
     buffers: HistoryBuffers
 }

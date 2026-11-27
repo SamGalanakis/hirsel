@@ -194,15 +194,15 @@ fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[(TieredS
     let minimum_cache = int.checked_add(writer, size_or(o.readers, VALUE_LIMIT + MIB))?
     let cache = size_or(o.cache_bytes, minimum_cache)
     let dirty = size_or(o.dirty_bytes, q)
-    let pager = size_or(o.pager_task_bytes, (q + 3) / 4)
-    let after_cut = int.checked_sub(resident_limit, CUT_PIN_BYTES)?
+    let pager_link = size_or(o.pager_task_bytes, (q + 3) / 4)
+    let after_cut = int.checked_sub(resident_limit, pager.CUT_PIN_BYTES)?
     let after_dirty = int.checked_sub(after_cut, dirty)?
-    let after_pager = int.checked_sub(after_dirty, pager)?
+    let after_pager = int.checked_sub(after_dirty, pager_link)?
     let remainder = int.checked_sub(after_pager, 64 * MIB)?
     if writer < MIN_WRITER_PINS || cache < minimum_cache || cache > remainder {
         return None
     }
-    Some((TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager), remainder))
+    Some((TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager_link), remainder))
 }
 
 // The open's Tiered floor (§13.8): the writer partition is at least Wmin and
@@ -212,7 +212,7 @@ fn tiered_open_funded(o: Options) -> bool {
     if o.writer_pin_bytes < MIN_WRITER_PINS || o.cache_bytes < o.writer_pin_bytes {
         return false
     }
-    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
+    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, pager.CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
     needed <= o.resident_limit
 }
 

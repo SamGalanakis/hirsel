@@ -16,7 +16,7 @@
 // deleted with it and its holder's later kill is not filed (an over-count).
 // AP16's redo keeps this cut's staged moves, queue rewrites included
 // (§13.6a T8, v2.114); only a refused compaction step drops them.
-type TieredCompaction: send {
+pub type TieredCompaction: send {
     probes: Map[u64, TieredProbeCursor],
     // One share of each generation's read inventory. A Snapshot reads its
     // Cold slots through the inventory of the generation it was taken at, so
@@ -26,11 +26,11 @@ type TieredCompaction: send {
     held: List[Arc[pages.TieredReadInventory]]
 }
 
-fn no_tiered_compaction() -> TieredCompaction {
+pub fn no_tiered_compaction() -> TieredCompaction {
     TieredCompaction(probes: map.new(), held: list.new())
 }
 
-fn prune_tiered_leases(mut held: List[Arc[pages.TieredReadInventory]]) {
+pub fn prune_tiered_leases(mut held: List[Arc[pages.TieredReadInventory]]) {
     let mut slot = 0u64
     while slot < list.len(held) {
         let ended = match arc.with_unique(mut held[slot], fn(mut _inventory: pages.TieredReadInventory) {}) {
@@ -46,7 +46,7 @@ fn prune_tiered_leases(mut held: List[Arc[pages.TieredReadInventory]]) {
 }
 
 // The participants' current inventories join the leases, once per generation.
-fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Roots]) -> Result[List[Arc[pages.TieredReadInventory]], Error] {
+pub fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Roots]) -> Result[List[Arc[pages.TieredReadInventory]], types.Failure] {
     let mut held: List[Arc[pages.TieredReadInventory]] = clone(installed.held)
     for participant in roots {
         if let Some(inventory) = view participant.collections.paging {
@@ -57,7 +57,7 @@ fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Roots]) 
                 }
             }
             if !known {
-                failure_result_from_rep(types.capacity(list.try_reserve(mut held, 1)))?
+                types.capacity(list.try_reserve(mut held, 1))?
                 list.push(mut held, arc.share(inventory))
             }
         }
@@ -71,14 +71,14 @@ type TieredQueueValue: send = MovedQueuePage(std.page.Slot) | MovedQueueBlob(std
 
 // A queue row this cut's compaction moved. T2 emits its copy under the
 // collection, and a BLOB under the logical key, of the index row it matched.
-type TieredQueueMove: send {
+pub type TieredQueueMove: send {
     branch_id: u32,
     collection: u32,
     key: Bytes,
     value: TieredQueueValue
 }
 
-type TieredCompactWork {
+pub type TieredCompactWork {
     roots: List[pages.Roots],
     next_stamp: u64,
     // (pack, len) of each Cold ancestor a move re-emitted, once per stamp.
@@ -90,18 +90,18 @@ type TieredCompactWork {
     queue: Map[u64, TieredQueueMove]
 }
 
-type TieredCompactStep {
+pub type TieredCompactStep {
     probes: Map[u64, TieredProbeCursor],
     retiring: List[u64],
     moved: List[(u64, u64)],
     queue: Map[u64, TieredQueueMove]
 }
 
-fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std.page.Page], Error] waits {
+fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std.page.Page], types.Failure] waits {
     match edge {
         ColdPage(ptr) => {
             let frame = fold_frame_at(source, TieredPage(ptr))?
-            disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
+            manifest.disk_allocation(scoped fn() -> Result[Arc[std.page.Page], types.Failure] {
                 Ok(std.page.copy_with_stamp(manifest.fold_page(frame), ptr.stamp))
             })
         },
@@ -111,9 +111,9 @@ fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std
 
 // The page with its stamp, one child or one BLOB replaced. Every other slot
 // keeps its location.
-fn compact_rebuild(page: Arc[std.page.Page], at: u64, child: Option[std.page.Slot], body: Option[std.page.BlobSlot]) -> Result[std.page.Slot, Error] {
+fn compact_rebuild(page: Arc[std.page.Page], at: u64, child: Option[std.page.Slot], body: Option[std.page.BlobSlot]) -> Result[std.page.Slot, types.Failure] {
     let image = std.page.image_of(page)
-    disk_allocation(scoped fn() -> Result[std.page.Slot, Error] {
+    manifest.disk_allocation(scoped fn() -> Result[std.page.Slot, types.Failure] {
         let mut rows: List[std.page.Entry] = list.new()
         let mut kids: List[std.page.Slot] = list.new()
         let mut bodies: List[std.page.BlobSlot] = list.new()
@@ -149,25 +149,25 @@ fn compact_rebuild(page: Arc[std.page.Page], at: u64, child: Option[std.page.Slo
             }
             list.push(mut rows, take row)
         }
-        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, std.page.level(image), std.page.stamp(image), std.page.key_domain(image))))?
-        Ok(HotPage(failure_result_from_rep(pages.page_result(std.page.attach(take ready, take kids, take bodies)))?))
+        let ready = pages.page_result(std.page.encode(rows, std.page.level(image), std.page.stamp(image), std.page.key_domain(image)))?
+        Ok(HotPage(pages.page_result(std.page.attach(take ready, take kids, take bodies))?))
     })
 }
 
-fn compact_note_moved(mut work: TieredCompactWork, ptr: std.page.PagePtr) -> Result[(), Error] {
+fn compact_note_moved(mut work: TieredCompactWork, ptr: std.page.PagePtr) -> Result[(), types.Failure] {
     if map.contains(work.moved_stamps, ptr.stamp) {
         return Ok(())
     }
-    failure_result_from_rep(types.capacity(map.try_reserve(mut work.moved_stamps, 1)))?
+    types.capacity(map.try_reserve(mut work.moved_stamps, 1))?
     map.insert(mut work.moved_stamps, ptr.stamp, ())
-    failure_result_from_rep(types.capacity(list.try_reserve(mut work.moved, 1)))?
+    types.capacity(list.try_reserve(mut work.moved, 1))?
     list.push(mut work.moved, (ptr.pack, int.widen(ptr.len)))
     Ok(())
 }
 
 // The path's copy from `depth` down. Each Cold ancestor's old copy is dead
 // once every root that reached it takes the new path.
-fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredProbePath, depth: u64, mut work: TieredCompactWork) -> Result[std.page.Slot, Error] waits {
+fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredProbePath, depth: u64, mut work: TieredCompactWork) -> Result[std.page.Slot, types.Failure] waits {
     let page = compact_load(source, edge)?
     let path_end = list.len(path.slots)
     if depth == path_end {
@@ -183,8 +183,8 @@ fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredP
             let TieredValue(body) = view frame.payload else {
                 fail("store: a BLOB reference resolved to a PAGE")
             }
-            let moved_body = disk_allocation(scoped fn() -> Result[std.page.BlobSlot, Error] {
-                Ok(HotBlob(arc.new(failure_result_from_rep(types.copied(body))?)))
+            let moved_body = manifest.disk_allocation(scoped fn() -> Result[std.page.BlobSlot, types.Failure] {
+                Ok(HotBlob(arc.new(types.copied(body)?)))
             })?
             return compact_rebuild(page, at, None, Some(moved_body))
         }
@@ -194,7 +194,7 @@ fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredP
     compact_rebuild(page, at, Some(moved_child), None)
 }
 
-fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, row: manifest.PackIndexRow, mut work: TieredCompactWork) -> Result[Option[TieredQueueValue], Error] waits {
+fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, row: manifest.PackIndexRow, mut work: TieredCompactWork) -> Result[Option[TieredQueueValue], types.Failure] waits {
     let Some(path) = probe_tiered_path(source, slot, pack, row)? else {
         return Ok(None)
     }
@@ -204,7 +204,7 @@ fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, 
 
 // §13.6 "Queue rows are their own roots": a Page row is compared and then
 // descended by the index row's key; a Blob row is compared. A match moves.
-fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: u64, queued: manifest.DeferredFree, pack: u64, row: manifest.PackIndexRow) -> Result[(), Error] waits {
+fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: u64, queued: manifest.DeferredFree, pack: u64, row: manifest.PackIndexRow) -> Result[(), types.Failure] waits {
     let current: Option[TieredQueueValue] = match map.get(work.queue, at) {
         Some(earlier) => Some(clone(earlier.value)),
         None => None,
@@ -221,8 +221,8 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
                     let TieredValue(body) = view frame.payload else {
                         fail("store: a BLOB reference resolved to a PAGE")
                     }
-                    let moved_body = disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-                        Ok(arc.new(failure_result_from_rep(types.copied(body))?))
+                    let moved_body = manifest.disk_allocation(scoped fn() -> Result[Arc[Bytes], types.Failure] {
+                        Ok(arc.new(types.copied(body)?))
                     })?
                     Some(MovedQueueBlob(reference, take moved_body))
                 } else {
@@ -234,10 +234,10 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
     let Some(take value) = take found else {
         return Ok(())
     }
-    let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        failure_result_from_rep(types.copied(row.key))
+    let key = manifest.disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        types.copied(row.key)
     })?
-    failure_result_from_rep(types.capacity(map.try_reserve(mut work.queue, 1)))?
+    types.capacity(map.try_reserve(mut work.queue, 1))?
     map.insert(mut work.queue, at, TieredQueueMove(branch_id: queued.branch_id, collection: row.collection, key: take key, value: take value))
     Ok(())
 }
@@ -245,7 +245,7 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
 // One PACK_INDEX row. Every queue row and every root that reaches the frame
 // takes a moved path. The added rows are numbered from `first_added`, the
 // installed `deferred_next`, as T8 step 3 will key them.
-fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, seq: u64, row: manifest.PackIndexRow) -> Result[bool, Error] waits {
+fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, seq: u64, row: manifest.PackIndexRow) -> Result[bool, types.Failure] waits {
     let mut rows = std.page.cursor_open(arc.share(installed_queue), None, true, false)
     while let Some(queue_row) = std.page.cursor_next(mut rows) {
         compact_queue_row(mut work, source, list.word_be(queue_row.key, 0), manifest.queued_free(queue_row.value), seq, row)?
@@ -253,7 +253,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
     for at in 0u64 .. list.len(queued) {
         compact_queue_row(mut work, source, first_added + at, queued[at], seq, row)?
     }
-    let key = failure_result_from_rep(catalog.prefix(row.collection))?
+    let key = catalog.prefix(row.collection)?
     for slot in 0u64 .. list.len(work.roots) {
         let Some(edge) = promotion_collection_root(work.roots[slot].collections, row.collection)? else {
             continue
@@ -262,10 +262,10 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
             continue
         }
         let moved_root = compact_relocate(source, edge, path, 0, mut work)?
-        let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+        let (take mapped, following) = manifest.disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), types.Failure] {
             let mut candidate = arc.share(work.roots[slot].collections.root)
             let mut draw = work.next_stamp
-            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, moved_root, mut draw)))?
+            pages.page_result(std.page.install_tiered_root(mut candidate, key, moved_root, mut draw))?
             Ok((take candidate, draw))
         })?
         work.roots[slot].collections.root = take mapped
@@ -274,10 +274,10 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
     Ok(true)
 }
 
-fn compact_probes(source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
+pub fn compact_probes(source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), types.Failure] waits {
     let mut packs_in_order: List[u64] = list.new()
     for (seq, _) in probes {
-        failure_result_from_rep(types.capacity(list.try_reserve(mut packs_in_order, 1)))?
+        types.capacity(list.try_reserve(mut packs_in_order, 1))?
         list.push(mut packs_in_order, seq)
     }
     list.sort(mut packs_in_order, fn(a: u64, b: u64) -> Order {
@@ -293,15 +293,15 @@ fn compact_probes(source: TieredPageSource, queued: List[manifest.DeferredFree],
         }
         let mut walk = take cursor
         let rows_before = walk.rows
-        let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: manifest.PackIndexRow) -> Result[bool, Error] waits {
+        let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: manifest.PackIndexRow) -> Result[bool, types.Failure] waits {
             compact_row(mut state, source, queued, installed_queue, first_added, seq, row)
         })?
         left = int.saturating_sub(left, walk.rows - rows_before)
         if finished {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut retiring, 1)))?
+            types.capacity(list.try_reserve(mut retiring, 1))?
             list.push(mut retiring, seq)
         } else {
-            failure_result_from_rep(types.capacity(map.try_reserve(mut probes, 1)))?
+            types.capacity(map.try_reserve(mut probes, 1))?
             map.insert(mut probes, seq, take walk)
         }
     }
@@ -332,7 +332,7 @@ fn pack_selected_for_compaction(seq: u64, pack: pages.PagePack, running: Map[u64
     scaled < threshold
 }
 
-fn select_compaction(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], Error] {
+pub fn select_compaction(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], types.Failure] {
     let mut probes: Map[u64, TieredProbeCursor] = map.new()
     let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -343,142 +343,15 @@ fn select_compaction(installed: manifest.PageLocations, running: Map[u64, Tiered
             Some(kept) => clone(kept),
             None => start_tiered_probe(pack),
         }
-        failure_result_from_rep(types.capacity(map.try_reserve(mut probes, 1)))?
+        types.capacity(map.try_reserve(mut probes, 1))?
         map.insert(mut probes, seq, take cursor)
     }
     Ok(take probes)
 }
 
-// §13.6 "Tiered-idle cuts" (v2.157, v2.161 D-TI-1): a candidate generation is
-// Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
-// collection descriptor, the candidate queue (installed and added rows) is
-// empty, and there is no anchor (anchors are empty until archival lands).
-fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[manifest.DeferredFree]) -> bool {
-    !pages.holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
-}
-
-// D-TI-1 + v2.162 F2: a Tiered-idle cut reads nothing and needs no pager. It
-// takes every listed class-3/4 pack in sequence order, retires each whole at
-// this cut (charging its rows left against `budget`, finishing the pack it
-// starts), removes the cursor of every pack it retires, and never installs or
-// moves a cursor.
-fn compact_idle_probes(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
-    let mut probes: Map[u64, TieredProbeCursor] = clone(running)
-    let mut retiring: List[u64] = list.new()
-    let mut left = budget
-    let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
-    while left > 0 {
-        let Some((seq, pack)) = std.omap.next(mut inventory) else {
-            break
-        }
-        if pack.class != 3 && pack.class != 4 {
-            continue
-        }
-        let done = match map.get(running, seq) {
-            Some(cursor) => cursor.rows,
-            None => 0u64,
-        }
-        let frame_count: u64 = int.widen(pack.frames)
-        let rows_left = int.saturating_sub(frame_count, done)
-        left = int.saturating_sub(left, rows_left)
-        failure_result_from_rep(types.capacity(list.try_reserve(mut retiring, 1)))?
-        list.push(mut retiring, seq)
-        let _ = map.remove(mut probes, seq)
-    }
-    Ok((take probes, take retiring))
-}
-
-// AP16 item 3 for Tiered packs, after the fold and the candidate queue's
-// added rows, before the drain. A refused allocation drops the cut's probe
-// progress: the installed cursors stand, nothing retires, and every root
-// is the one the cut staged before the probes ran, and no queue row is
-// rewritten.
-fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
-    let installed = disk_state(db).packs
-    let running: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
-        Ok(clone(db.compaction.probes))
-    })?
-    let budget = disk_state(db).options.probe_budget
-    let kept_probes: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
-        Ok(clone(running))
-    })?
-    let unchanged = TieredCompactStep(probes: take kept_probes, retiring: list.new(), moved: list.new(), queue: map.new())
-    if budget == 0 {
-        return Ok(take unchanged)
-    }
-    if cut_tiered_idle(roots, manifest.pack_lists(installed).deferred, queued) {
-        let idle = disk_allocation(scoped fn() -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
-            compact_idle_probes(manifest.pack_locations(installed), running, budget)
-        })
-        return match take idle {
-            Ok((take probes, take retiring)) => Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: list.new(), queue: map.new())),
-            Error(Full(Allocation(_))) => Ok(take unchanged),
-            Error(take problem) => Error(take problem),
-        }
-    }
-    let permille = disk_state(db).options.compact_permille
-    // Selection, the probe inventory and the saved roots change nothing, so
-    // a refusal among them skips the step like a refusal in the probes.
-    let selecting = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
-        select_compaction(manifest.pack_locations(installed), running, permille)
-    })
-    let selected = match take selecting {
-        Ok(take chosen) => take chosen,
-        Error(Full(Allocation(_))) => return Ok(take unchanged),
-        Error(take problem) => return Error(take problem),
-    }
-    if map.len(selected) == 0 {
-        return Ok(take unchanged)
-    }
-    let Some(requests) = pager else {
-        return Error(Io(Closed))
-    }
-    let checkpointed = db.checkpointed
-    let inventory_read = disk_allocation(scoped fn() -> Result[Arc[pages.TieredReadInventory], Error] {
-        recovered_tiered_inventory(manifest.pack_locations(installed), None, checkpointed, next_stamp)
-    })
-    let paging = match take inventory_read {
-        Ok(take ready) => take ready,
-        Error(Full(Allocation(_))) => return Ok(take unchanged),
-        Error(take problem) => return Error(take problem),
-    }
-    let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
-    // A refusal restores these, so no root keeps a move whose old ancestors
-    // were never charged dead.
-    let shared = disk_allocation(scoped fn() -> Result[List[pages.Roots], Error] {
-        let mut shares: List[pages.Roots] = list.new()
-        failure_result_from_rep(types.capacity(list.try_reserve(mut shares, list.len(roots))))?
-        for held in roots {
-            list.push(mut shares, pages.PageRoots(collections: pages.share_page_tree(held.collections), streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
-        }
-        Ok(take shares)
-    })
-    let saved = match take shared {
-        Ok(take ready) => take ready,
-        Error(Full(Allocation(_))) => return Ok(take unchanged),
-        Error(take problem) => return Error(take problem),
-    }
-    let mut work = TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new(), queue: map.new())
-    let mut probes = take selected
-    let mut retiring: List[u64] = list.new()
-    let ran = compact_probes(source, queued, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut work, mut probes, mut retiring, budget)
-    next_stamp = work.next_stamp
-    match ran {
-        Ok(()) => {
-            roots = replace(mut work.roots, list.new())
-            Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: replace(mut work.moved, list.new()), queue: replace(mut work.queue, map.new())))
-        },
-        Error(Full(Allocation(_))) => {
-            roots = take saved
-            Ok(take unchanged)
-        },
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn queue_moves_in_order(moving: Map[u64, TieredQueueMove]) -> Result[List[u64], Error] {
+fn queue_moves_in_order(moving: Map[u64, TieredQueueMove]) -> Result[List[u64], types.Failure] {
     let mut seqs: List[u64] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut seqs, map.len(moving))))?
+    types.capacity(list.try_reserve(mut seqs, map.len(moving)))?
     for (at, _) in moving {
         list.push(mut seqs, at)
     }
@@ -490,7 +363,7 @@ fn queue_moves_in_order(moving: Map[u64, TieredQueueMove]) -> Result[List[u64], 
 
 // T2 for the moved queue rows: each copy is emitted once by stamp, outside
 // every root (§13.6 "Queue rows are their own roots").
-fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueMove]) -> Result[(), Error] {
+pub fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueMove]) -> Result[(), types.Failure] {
     for at in queue_moves_in_order(moving)? {
         let Some(moved) = map.get(moving, at) else {
             continue
@@ -499,10 +372,10 @@ fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueM
             MovedQueuePage(slot) => tiered_emit_tree(mut pending, moved.collection, slot)?,
             MovedQueueBlob(reference, body) => {
                 if !map.contains(pending.seen, reference.stamp) {
-                    let key = failure_result_from_rep(types.copied(moved.key))?
+                    let key = types.copied(moved.key)?
                     let frame = manifest.PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
-                    failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
-                    failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, 1)))?
+                    types.capacity(map.try_reserve(mut pending.seen, 1))?
+                    types.capacity(list.try_reserve(mut pending.blobs, 1))?
                     map.insert(mut pending.seen, reference.stamp, ())
                     list.push(mut pending.blobs, TieredEmitFrame(collection: moved.collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
                 }
@@ -514,7 +387,7 @@ fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueM
 
 // Each moved row's value at its emitted location (T8 step 3): an added row's
 // in `added`, an installed row's in `rewritten`.
-fn settle_queue_moves(mut queue: manifest.CutQueue, moving: Map[u64, TieredQueueMove], emitted: Map[u64, std.page.PagePtr], first_added: u64) -> Result[(), Error] {
+pub fn settle_queue_moves(mut queue: manifest.CutQueue, moving: Map[u64, TieredQueueMove], emitted: Map[u64, std.page.PagePtr], first_added: u64) -> Result[(), types.Failure] {
     for at in queue_moves_in_order(moving)? {
         let Some(moved) = map.get(moving, at) else {
             continue
@@ -540,9 +413,48 @@ fn settle_queue_moves(mut queue: manifest.CutQueue, moving: Map[u64, TieredQueue
         if at >= first_added {
             queue.added[at - first_added] = take row
         } else {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut queue.rewritten, 1)))?
+            types.capacity(list.try_reserve(mut queue.rewritten, 1))?
             list.push(mut queue.rewritten, (at, take row))
         }
     }
     Ok(())
+}
+
+// §13.6 "Tiered-idle cuts" (v2.157, v2.161 D-TI-1): a candidate generation is
+// Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
+// collection descriptor, the candidate queue (installed and added rows) is
+// empty, and there is no anchor (anchors are empty until archival lands).
+pub fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[manifest.DeferredFree]) -> bool {
+    !pages.holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
+}
+
+// D-TI-1 + v2.162 F2: a Tiered-idle cut reads nothing and needs no pager. It
+// takes every listed class-3/4 pack in sequence order, retires each whole at
+// this cut (charging its rows left against `budget`, finishing the pack it
+// starts), removes the cursor of every pack it retires, and never installs or
+// moves a cursor.
+pub fn compact_idle_probes(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), types.Failure] {
+    let mut probes: Map[u64, TieredProbeCursor] = clone(running)
+    let mut retiring: List[u64] = list.new()
+    let mut left = budget
+    let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
+    while left > 0 {
+        let Some((seq, pack)) = std.omap.next(mut inventory) else {
+            break
+        }
+        if pack.class != 3 && pack.class != 4 {
+            continue
+        }
+        let done = match map.get(running, seq) {
+            Some(cursor) => cursor.rows,
+            None => 0u64,
+        }
+        let frame_count: u64 = int.widen(pack.frames)
+        let rows_left = int.saturating_sub(frame_count, done)
+        left = int.saturating_sub(left, rows_left)
+        types.capacity(list.try_reserve(mut retiring, 1))?
+        list.push(mut retiring, seq)
+        let _ = map.remove(mut probes, seq)
+    }
+    Ok((take probes, take retiring))
 }

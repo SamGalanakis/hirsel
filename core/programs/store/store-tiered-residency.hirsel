@@ -1,32 +1,32 @@
-fn issue_residency_stamp(mut next_stamp: u64) -> Result[u64, Error] {
+fn issue_residency_stamp(mut next_stamp: u64) -> Result[u64, types.Failure] {
     let stamp = next_stamp
-    next_stamp = failure_result_from_rep(catalog.stamp_after(stamp))?
+    next_stamp = catalog.stamp_after(stamp)?
     Ok(stamp)
 }
 
-fn resident_blob_from_tiered(source: TieredPageSource, body: std.page.BlobSlot) -> Result[Arc[Bytes], Error] waits {
+fn resident_blob_from_tiered(source: TieredPageSource, body: std.page.BlobSlot) -> Result[Arc[Bytes], types.Failure] waits {
     match body {
-        HotBlob(contents) => disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-            Ok(arc.new(failure_result_from_rep(types.copied(contents))?))
+        HotBlob(contents) => manifest.disk_allocation(scoped fn() -> Result[Arc[Bytes], types.Failure] {
+            Ok(arc.new(types.copied(contents)?))
         }),
         ColdBlob(ptr) => {
             let frame = fold_frame_at(source, TieredBlob(ptr))?
             let TieredValue(contents) = view frame.payload else {
                 fail("store: a BLOB reference resolved to a PAGE")
             }
-            disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
-                Ok(arc.new(failure_result_from_rep(types.copied(contents))?))
+            manifest.disk_allocation(scoped fn() -> Result[Arc[Bytes], types.Failure] {
+                Ok(arc.new(types.copied(contents)?))
             })
         },
     }
 }
 
-fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
+pub fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut next_stamp: u64) -> Result[Arc[std.page.Page], types.Failure] waits {
     let page = match root {
         HotPage(working) => arc.share(working),
         ColdPage(ptr) => {
             let frame = fold_frame_at(source, TieredPage(ptr))?
-            disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
+            manifest.disk_allocation(scoped fn() -> Result[Arc[std.page.Page], types.Failure] {
                 Ok(std.page.copy_with_stamp(manifest.fold_page(frame), ptr.stamp))
             })?
         },
@@ -40,7 +40,7 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
     let mut bodies: List[std.page.BlobSlot] = list.new()
     let mut rows: List[std.page.Entry] = list.new()
     for slot in 0u64 .. std.page.count(image) {
-        let mut row = disk_allocation(scoped fn() -> Result[std.page.Entry, Error] {
+        let mut row = manifest.disk_allocation(scoped fn() -> Result[std.page.Entry, types.Failure] {
             Ok(option.unwrap(std.page.entry(image, slot)))
         })?
         match row.cell {
@@ -48,7 +48,7 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
                 let edge = option.unwrap(std.page.child_slot(page, slot))
                 let child = resident_page_from_tiered(source, edge, mut next_stamp)?
                 previous.child = std.page.unlocated(std.page.stamp(std.page.image_of(child)))
-                failure_result_from_rep(types.capacity(list.try_reserve(mut children, 1)))?
+                types.capacity(list.try_reserve(mut children, 1))?
                 list.push(mut children, HotPage(take child))
             },
             BlobValue(mut previous) => {
@@ -58,27 +58,27 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
                 previous.pack = 0
                 previous.offset = 0
                 previous.body = int.truncate(list.len(bodies))
-                failure_result_from_rep(types.capacity(list.try_reserve(mut bodies, 1)))?
+                types.capacity(list.try_reserve(mut bodies, 1))?
                 list.push(mut bodies, HotBlob(take body))
             },
             InlineValue(_) => (),
         }
-        failure_result_from_rep(types.capacity(list.try_reserve(mut rows, 1)))?
+        types.capacity(list.try_reserve(mut rows, 1))?
         list.push(mut rows, take row)
     }
     let stamp = issue_residency_stamp(mut next_stamp)?
-    disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
-        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, height, stamp, Collection)))?
-        failure_result_from_rep(pages.page_result(std.page.attach(take ready, clone(children), clone(bodies))))
+    manifest.disk_allocation(scoped fn() -> Result[Arc[std.page.Page], types.Failure] {
+        let ready = pages.page_result(std.page.encode(rows, height, stamp, Collection))?
+        pages.page_result(std.page.attach(take ready, clone(children), clone(bodies)))
     })
 }
 
 // Releasing residency does not read the old tree. A Cold root is a single
 // queue row. A Hot root releases the Cold edges under its Hot pages.
-fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[manifest.DeferredFree]) -> Result[(), Error] {
+pub fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[manifest.DeferredFree]) -> Result[(), types.Failure] {
     match root {
         ColdPage(place) => {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
+            types.capacity(list.try_reserve(mut queued, 1))?
             list.push(mut queued, manifest.DeferredFree(branch_id: branch_id, target: TieredPage(place)))
         },
         HotPage(page) => {
@@ -88,7 +88,7 @@ fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[manif
                     residency_release(edge, branch_id, mut queued)?
                 } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
                     if let Some(ColdBlob(ptr)) = std.page.blob_slot(page, reference.body) {
-                        failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
+                        types.capacity(list.try_reserve(mut queued, 1))?
                         list.push(mut queued, manifest.DeferredFree(branch_id: branch_id, target: TieredBlob(ptr)))
                     }
                 }
@@ -98,7 +98,7 @@ fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[manif
     Ok(())
 }
 
-fn restamp_tiered_frames(mut frames: List[TieredEmitFrame], mut next_stamp: u64) -> Result[(), Error] {
+fn restamp_tiered_frames(mut frames: List[TieredEmitFrame], mut next_stamp: u64) -> Result[(), types.Failure] {
     for slot in 0u64 .. list.len(frames) {
         frames[slot].frame.stamp = issue_residency_stamp(mut next_stamp)?
     }
@@ -107,7 +107,7 @@ fn restamp_tiered_frames(mut frames: List[TieredEmitFrame], mut next_stamp: u64)
 
 // This plan belongs to one residency-changing holder. Its location map is
 // keyed by the stamps in that holder's untouched Memory images.
-fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp: u64) -> Result[TieredCutFrames, Error] {
+pub fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp: u64) -> Result[TieredCutFrames, types.Failure] {
     let mut frames = TieredCutFrames(pages: list.new(), blobs: list.new(), seen: map.new())
     tiered_emit_tree(mut frames, collection, root)?
     restamp_tiered_frames(mut frames.blobs, mut next_stamp)?
@@ -115,199 +115,23 @@ fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp:
     Ok(take frames)
 }
 
-pub type Residency: send = Memory | Tiered
-
-// §13.8 "Residency changes": a schema commit on main, published by its own
-// cut. Tables, Logs and indexes (D7, §13.10a; aggregates are indexes); a
-// Cell is `Missing("residency")`. Each join side reads by its own descriptor.
-pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
-    if !is_disk(db) {
-        return Error(Tiered(Memory))
-    }
-    if object_writer_open(db) {
-        return Error(Tiered(Install))
-    }
-    healthy(db)?
-    let key = failure_result_from_rep(catalog.prefix(id))?
-    let Some(std.page_descriptor.CollectionDescriptor(kind, residency, ..)) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, key) else {
-        return Error(Stale(id))
-    }
-    if kind == CellCollection {
-        return Error(Missing("residency"))
-    }
-    match r {
-        Tiered => {
-            if residency == ResidentTiered {
-                return Ok(())
-            }
-            residency_to_tiered(mut db, id, take key)
-        },
-        Memory => {
-            if residency == ResidentMemory {
-                return Ok(())
-            }
-            residency_to_memory(mut db, id, take key)
-        },
-    }
-}
-
-// §1.1 "Which plan": the first Tiered collection is admitted against the
-// Tiered plan before anything changes. The plan must be funded (r covers
-// C + K + D + P and the 64 MiB Memory floor, as at open), and the Memory rows
-// already resident must fit what the plan leaves them. The floor is their
-// room, so it is not added on top of them.
-fn admit_tiered_plan(db: Db) -> Result[(), Error] {
-    let o = disk_state(db).options
-    if !tiered_open_funded(o) {
-        let requested = int.saturating_add(tiered_plan_reserve(o), 64 * MIB)
-        return Error(Full(Resident(Capacity(requested: requested, available: o.resident_limit))))
-    }
-    failure_result_from_rep(catalog.over_ceiling(db.resident, tiered_memory_room(o)))
-}
-
-// C + K + D + P: what the Tiered plan reserves inside `resident_limit`.
-fn tiered_plan_reserve(o: Options) -> u64 {
-    int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES), int.saturating_add(o.dirty_bytes, o.pager_task_bytes))
-}
-
-// The Memory rows' room under the Tiered plan (§1.1, v2.76).
-fn tiered_memory_room(o: Options) -> u64 {
-    int.saturating_sub(o.resident_limit, tiered_plan_reserve(o))
-}
-
-fn start_residency_pager(mut db: Db) -> Result[(), Error] {
-    let d = log_directory(db)?
-    let link = {
-        let state = disk_state(db)
-        let o = state.options
-        let funding = TieredPagerFunding(cache_bytes: o.cache_bytes, writer_pin_bytes: o.writer_pin_bytes, pager_task_bytes: o.pager_task_bytes, cut_pins: true)
-        start_tiered_pager_link(state.tasks, db.store, state.open, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
-    }
-    let worker = attach_tiered_pager(mut db, take link)
-    write_disk(mut db.disk, take worker, scoped fn(mut state: DiskState, take running: Task[()]) {
-        state.pager_task = Some(take running)
-    })
-    Ok(())
-}
-
-// A refused first change leaves the store as it was: no pager.
-fn stop_residency_pager(mut db: Db) waits {
-    clear_parked(mut db)
-    db.pager_writer = None
-    db.park_notices = None
-    db.pager = None
-    let running = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Task[()]] {
-        replace(mut state.pager_task, None)
-    })
-    if let Some(take started) = take running {
-        let mut pager = take started
-        task.cancel(mut pager)
-        let _ = task.join(take pager)
-    }
-}
-
-fn residency_to_tiered(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
-    if !store_has_tiered(db) {
-        admit_tiered_plan(db)?
-    }
-    let started = match db.pager {
-        Some(_) => false,
-        None => {
-            start_residency_pager(mut db)?
-            true
-        },
-    }
-    let changed = publish_tiered_residency(mut db, id, take key)
-    if let Error(_) = changed {
-        if started {
-            stop_residency_pager(mut db)
-        }
-    }
-    changed
-}
-
-// The head's collection becomes a Hot Tiered root over its Memory images.
-// The cut's T2 emits it with fresh stamps (§13.6a T2 "Re-stamping"), so no
-// stamp is reached in classes 0 and 3. Followers see the head's pre-change
-// roots: the same rows, and no Hot Tiered page that carries a Memory stamp.
-fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
-    let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, ..), ..) = schema_plan(db)
-    let mut changed = take roots
-    let mut tree = pages.share_page_tree(changed.collections)
-    let (take root, take descriptor) = {
-        let Some((here, before)) = std.page.collection_entry(tree.root, key) else {
-            return Error(Stale(id))
-        }
-        let mut record = failure_result_from_rep(types.copied(before))?
-        std.page_descriptor.set_collection_residency(mut record, ResidentTiered)
-        (arc.share(here), take record)
-    }
-    let first = failure_result_from_rep(catalog.stamp_after(ids))?
-    let mut draw = first
-    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, clone(key), take descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
-    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, key, HotPage(take root), mut draw)))?
-    changed.collections = take tree
-    let head = pages.holder_heads(db.holders)[0u64].head + 1
-    let replacement = ProposedMain(roots: take changed, head: head, at: pages.holder_heads(db.holders)[0u64].at, tables: catalog.next_table_id(db.schema), activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, pages.holder_heads(db.holders)[0u64].roots, draw - 1)))?
-    pages.set_next_node(mut db.holders, draw - 1)
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.restamp = Some(id)
-    })
-    let installed = cut_install(mut db, ReplaceMain(take replacement, None))
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.restamp = None
-    })
-    let _ = installed?
-    publish(take publication)
-    Ok(())
-}
-
-// §13.8 Tiered -> Memory. Admitted before anything changes: the Memory rows
-// plus the collection's Tiered row charge must fit the Memory room the Tiered
-// plan leaves inside `resident_limit` (§1.1). The load is a step
-// of the schema commit's cut (`load_memory_residency`), so a refused or
-// failed load publishes nothing and the collection stays Tiered.
-fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
-    let charge = match std.page.lookup(pages.holder_heads(db.holders)[0u64].roots.collections.root, key) {
-        Some(descriptor) => pages.collection_descriptor(descriptor).row_bytes,
-        None => return Error(Stale(id)),
-    }
-    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options)))?
-    let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, ..), ..) = schema_plan(db)
-    let head = pages.holder_heads(db.holders)[0u64].head + 1
-    let replacement = ProposedMain(roots: take roots, head: head, at: pages.holder_heads(db.holders)[0u64].at, tables: catalog.next_table_id(db.schema), activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, pages.holder_heads(db.holders)[0u64].roots, ids)))?
-    pages.set_next_node(mut db.holders, ids)
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.unload = Some(id)
-    })
-    let installed = cut_install(mut db, ReplaceMain(take replacement, None))
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
-        state.unload = None
-    })
-    let _ = installed?
-    publish(take publication)
-    Ok(())
-}
-
 // §13.8 "Who pays for the load" (v2.74.2): after the fold, before the
 // candidate queue's added rows. Each Cold slot of main's tree is one load
 // step through the pager (`fold_frame_at` pins it on K), and every Hot page
 // and blob is copied, so the whole tree takes fresh stamps (v2.96). The old
 // tree is released as a dropped collection's is, so this cut's probe sees it.
-fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[manifest.DeferredFree]) -> Result[bool, Error] waits {
+pub fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[manifest.DeferredFree]) -> Result[bool, types.Failure] waits {
     let Some(id) = unload else {
         return Ok(false)
     }
-    let key = failure_result_from_rep(catalog.prefix(id))?
+    let key = catalog.prefix(id)?
     let source = tx_page_source(pager, roots[0u64].collections)?
     let (take old, take record) = {
         let Some((edge, before)) = std.page.collection_slot(roots[0u64].collections.root, key) else {
             return Error(Stale(id))
         }
         let slot: std.page.Slot = clone(edge)
-        (take slot, failure_result_from_rep(types.copied(before))?)
+        (take slot, types.copied(before)?)
     }
     let loaded = resident_page_from_tiered(source, old, mut next_stamp)?
     residency_release(old, branches[0u64], mut queued)?
@@ -319,6 +143,6 @@ fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut ro
     std.page_descriptor.set_collection_residency(mut descriptor, ResidentMemory)
     let private_from = next_stamp
     let inline = roots[0u64].collections.inline
-    failure_result_from_rep(pages.page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp)))?
+    pages.page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp))?
     Ok(true)
 }

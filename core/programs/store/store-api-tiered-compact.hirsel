@@ -1,0 +1,87 @@
+// AP16 item 3 for Tiered packs, after the fold and the candidate queue's
+// added rows, before the drain. A refused allocation drops the cut's probe
+// progress: the installed cursors stand, nothing retires, and every root
+// is the one the cut staged before the probes ran, and no queue row is
+// rewritten.
+fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[pager.TieredCompactStep, Error] waits {
+    let installed = disk_state(db).packs
+    let running: Map[u64, pager.TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, pager.TieredProbeCursor], Error] {
+        Ok(clone(pager.disk_compaction(disk_state(db).tiered).probes))
+    })?
+    let budget = disk_state(db).options.probe_budget
+    let kept_probes: Map[u64, pager.TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, pager.TieredProbeCursor], Error] {
+        Ok(clone(running))
+    })?
+    let unchanged = pager.TieredCompactStep(probes: take kept_probes, retiring: list.new(), moved: list.new(), queue: map.new())
+    if budget == 0 {
+        return Ok(take unchanged)
+    }
+    if pager.cut_tiered_idle(roots, manifest.pack_lists(installed).deferred, queued) {
+        let idle = disk_allocation(scoped fn() -> Result[(Map[u64, pager.TieredProbeCursor], List[u64]), Error] {
+            failure_result_from_rep(pager.compact_idle_probes(manifest.pack_locations(installed), running, budget))
+        })
+        return match take idle {
+            Ok((take probes, take retiring)) => Ok(pager.TieredCompactStep(probes: take probes, retiring: take retiring, moved: list.new(), queue: map.new())),
+            Error(Full(Allocation(_))) => Ok(take unchanged),
+            Error(take problem) => Error(take problem),
+        }
+    }
+    let permille = disk_state(db).options.compact_permille
+    // Selection, the probe inventory and the saved roots change nothing, so
+    // a refusal among them skips the step like a refusal in the probes.
+    let selecting = disk_allocation(scoped fn() -> Result[Map[u64, pager.TieredProbeCursor], Error] {
+        failure_result_from_rep(pager.select_compaction(manifest.pack_locations(installed), running, permille))
+    })
+    let selected = match take selecting {
+        Ok(take chosen) => take chosen,
+        Error(Full(Allocation(_))) => return Ok(take unchanged),
+        Error(take problem) => return Error(take problem),
+    }
+    if map.len(selected) == 0 {
+        return Ok(take unchanged)
+    }
+    let Some(requests) = pager_link else {
+        return Error(Io(Closed))
+    }
+    let checkpointed = db.checkpointed
+    let inventory_read = disk_allocation(scoped fn() -> Result[Arc[pages.TieredReadInventory], Error] {
+        recovered_tiered_inventory(manifest.pack_locations(installed), None, checkpointed, next_stamp)
+    })
+    let paging = match take inventory_read {
+        Ok(take ready) => take ready,
+        Error(Full(Allocation(_))) => return Ok(take unchanged),
+        Error(take problem) => return Error(take problem),
+    }
+    let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    // A refusal restores these, so no root keeps a move whose old ancestors
+    // were never charged dead.
+    let shared = disk_allocation(scoped fn() -> Result[List[pages.Roots], Error] {
+        let mut shares: List[pages.Roots] = list.new()
+        failure_result_from_rep(types.capacity(list.try_reserve(mut shares, list.len(roots))))?
+        for held in roots {
+            list.push(mut shares, pages.PageRoots(collections: pages.share_page_tree(held.collections), streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
+        }
+        Ok(take shares)
+    })
+    let saved = match take shared {
+        Ok(take ready) => take ready,
+        Error(Full(Allocation(_))) => return Ok(take unchanged),
+        Error(take problem) => return Error(take problem),
+    }
+    let mut work = pager.TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new(), queue: map.new())
+    let mut probes = take selected
+    let mut retiring: List[u64] = list.new()
+    let ran = failure_result_from_rep(pager.compact_probes(source, queued, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut work, mut probes, mut retiring, budget))
+    next_stamp = work.next_stamp
+    match ran {
+        Ok(()) => {
+            roots = replace(mut work.roots, list.new())
+            Ok(pager.TieredCompactStep(probes: take probes, retiring: take retiring, moved: replace(mut work.moved, list.new()), queue: replace(mut work.queue, map.new())))
+        },
+        Error(Full(Allocation(_))) => {
+            roots = take saved
+            Ok(take unchanged)
+        },
+        Error(take problem) => Error(take problem),
+    }
+}

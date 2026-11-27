@@ -29,19 +29,11 @@ type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u6
 
 pub opaque type Db {
     store: StoreId,
-    pager: Option[Sender[TieredPagerMessage]],
-    // The pager's one-slot writer channel, its park notices until the
-    // caller takes them, and the parked calls (§13.3a).
-    pager_writer: Option[Sender[TieredPagerMessage]],
-    park_notices: Option[Receiver[()]],
-    parked: ParkQueue,
-    // The writer partition every call's attempt is counted against (§13.2).
-    writer_pin_bytes: u64,
+    pager: pager.PagerState,
     indexes: IndexRegistry,
     schema: catalog.SchemaState,
     skip_test_teardown: bool,
     disk: Option[DiskState],
-    compaction: TieredCompaction,
     clock: Clock,
     holders: pages.HolderTable,
     followers: List[BranchFollower],
@@ -325,8 +317,8 @@ pub opaque scoped type Tx {
     observed_info: View[core.Cell[bool]],
     // The attempt record and the pin map it reads (§13.3, v2.81). The call's
     // driver owns both, outside the body's isolation and step bound.
-    attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
     refusal: Option[Capacity],
     // The index error that makes this transaction abort-only.
     index_conflict: Option[IndexStop],
@@ -396,7 +388,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, compaction: no_tiered_compaction(), clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
+    Db(store: id, pager: pager.pager_state(o.writer_pin_bytes), indexes: empty_index_registry(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -772,7 +764,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let first = CallRun(id: None, attempts: 0, pins: empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes), pending: None, crowded: false)
+    let first = CallRun(id: None, attempts: 0, pins: pager.empty_tiered_pins(call_pin_root(db, 0), pager.pin_partition(db.pager)), pending: None, crowded: false)
     drive_served(mut db, take complete, plan, grant, take rec, wall, take first, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
     })
@@ -836,8 +828,8 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
     }
     let keep: Option[fn(ServeReply) -> bool] = None
     // Saving a reply reads no Tiered row, so it carries no attempt record.
-    let attempt: Option[core.Cell[TieredTouchSet]] = None
-    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let attempt: Option[core.Cell[pager.TieredTouchSet]] = None
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let credit = keyed_completion_credit(db, pending_run.completion)
     let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, false, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
         let held: Bytes = clone(output)
@@ -942,7 +934,7 @@ type Ran[R, A] {
     first_stamp: u64,
     prepared_roots: bool,
     tiered: Option[u64],
-    freed: Option[TieredFreed],
+    freed: Option[pager.TieredFreed],
     live: u64,
     exact: bool,
     admits_rows: bool,
@@ -965,7 +957,7 @@ type Prepared[R, A] {
     outcome: Result[R, A],
     roots: pages.Roots,
     tiered: Option[u64],
-    plan: Option[TieredWritePlan],
+    plan: Option[pager.TieredWritePlan],
     live: u64,
     frame: Option[Bytes],
     ops: pages.DataRows,
@@ -983,17 +975,17 @@ type Prepared[R, A] {
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
-fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     stage_with(mut db, i, wall, steps, keep_reply, false, attempt, pins, body)
 }
 
-fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let no_record: Option[CallRecord] = None
     stage_call(mut db, i, wall, steps, keep_reply, no_record, None, force_frame, attempt, pins, body)
 }
 
 // The caller keeps owning the record so a refused publication can return it.
-fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let ci = call_info(db.store, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head + 1, wall, pages.holder_heads(db.holders)[i].at)
@@ -1023,7 +1015,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     })
     // The latch is read before anything else: a latched attempt's ids and
     // reads are discarded with it, so the watermark never depends on reruns.
-    if call_attempt_latched(attempt) {
+    if pager.call_attempt_latched(attempt) {
         let _ = cell.into_inner(take issued)
         let _ = log.finish(take reads)
         return Latched
@@ -1044,7 +1036,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     }
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), pages.OPEN_FRAME_TAIL),
         None => (None, pages.NO_FRAME_TAIL),
@@ -1132,7 +1124,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
     // overhead is fixed (§13.3 call reserves).
     let freed = match take plan {
         Some(take written) => {
-            let TieredWritePlan(freed: take plan_freed, ..) = take written
+            let pager.TieredWritePlan(freed: take plan_freed, ..) = take written
             Some(take plan_freed)
         },
         None => None,
@@ -1146,7 +1138,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         for slot in 0u64 .. pages.data_row_count(operations) {
             let edit = pages.data_row(operations, slot)
             if let Some(_) = edit.value {
-                if tiered != None && tiered_data_key(roots.collections, edit.key) {
+                if tiered != None && pager.tiered_data_key(roots.collections, edit.key) {
                     continue
                 }
                 admits_rows = true;
@@ -1332,19 +1324,6 @@ fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -> Op
         at += 1
     }
     newest
-}
-
-fn encode_stream_ops(mut payload: Bytes, ops: pages.DataRows, stream_count: u64, call: Option[format.CallView], settlement: Option[format.Settlement]) -> Result[(), Capacity] {
-    format.le(mut payload, 1, 1)?
-    format.le(mut payload, stream_count, 4)?
-    let order = pages.data_order(ops)?
-    for slot_order in 0u64 .. pages.data_row_count(ops) {
-        let operation = ordered_row(ops, order, slot_order)
-        if list.len(operation.key) != 0u64 {
-            format.encode_stream_op(mut payload, operation, call, settlement)?
-        }
-    }
-    Ok(())
 }
 
 pub type RowSchemas: codec + shareable + send {
@@ -2230,11 +2209,11 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
         Ok(manifest.located_owners(loaded.manifest))
     })?
     let recorded_after = manifested.tips[0u64].head
-    let initial = journal_replay_manifest(take manifested, loaded.manifest)?
+    let initial = failure_result_from_rep(pager.journal_replay_manifest(take manifested, loaded.manifest))?
     let recovered = journal_recover(d, store_key_from_rep(loaded.store), loaded.manifest.first_live, c, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live_bytes = journal_account(replay)?
-    let JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
+    let pager.JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
     check_stream_quota(state.tips[0u64].roots.streams, options.streams_max)?
     failure_result_from_rep(catalog.over_ceiling(live_bytes, options.resident_limit))?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
@@ -2321,7 +2300,6 @@ type DiskState {
     inflight: u64,
     uncovered: u64,
     since_cut: u64,
-    tiered_dirty: TieredDirty,
     acked_bytes: u64,
     written: Receiver[WriteNotice],
     written_send: Sender[WriteNotice],
@@ -2334,12 +2312,8 @@ type DiskState {
     journal_task: Task[Result[(), Error]],
     journal_wake: JournalWake,
     creation: Bytes,
-    // The pager of a store with a Tiered collection (§13.8), started from `tasks`; `restamp` and
-    // `unload` name the collection a `set_residency` cut moves to Tiered or to Memory on main.
-    pager_task: Option[Task[()]],
     tasks: Tasks,
-    restamp: Option[u32],
-    unload: Option[u32]
+    tiered: pager.DiskPagerState
 }
 
 fn open_number(db: Db) -> u64 {
@@ -2505,8 +2479,8 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     // The pager starts before the journal tasks, so a refusal leaves none. It
     // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
     let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(manifest.pack_lists(page_disk).deferred)) != 0 {
-        let funding = TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
-        let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
+        let funding = pager.TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
+        let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE)?
         Some(attach_tiered_pager(mut db, take link))
     } else {
         None
@@ -2535,7 +2509,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     } else {
         GatherFlush
     }
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, packs: take page_disk, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_wake: take journal_wake, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, packs: take page_disk, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_wake: take journal_wake, creation: take creation, tasks, tiered: pager.disk_pager_state(take pager_task)))
     Ok(take db)
 }
 
@@ -2585,7 +2559,7 @@ fn cut_io_error(mut db: Db, take problem: Error) -> Error {
 
 type PreparedDiskCut {
     pages: manifest.PackDiskState,
-    compaction: TieredCompaction,
+    compaction: pager.TieredCompaction,
     removals: DiskRemovals,
     manifest: Bytes
 }
@@ -2645,8 +2619,8 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     prepare_holder_slot(mut db, delta)?
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         manifest.prune_pack_scrubs(mut state.packs)
+        pager.prune_leases(mut state.tiered)
     })
-    prune_tiered_leases(mut db.compaction.held)
     let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(db, delta)
     })?
@@ -2654,9 +2628,9 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes)?
     pages.set_next_node(mut db.holders, staged.stamp_end - 1)
     raise_materialized_pin(mut delta, staged)
-    let holders = sealed_cut_holders(take participants_held, staged)?
+    let holders = failure_result_from_rep(pager.sealed_cut_holders(take participants_held, staged))?
     let mut base = failure_result_from_rep(manifest.page_retry_base(manifest.pack_locations(disk_state(db).packs), manifest.pack_owners(disk_state(db).packs), holders, staged.roots))?
-    list_tiered_cut(mut base.locations, staged)?
+    failure_result_from_rep(pager.list_tiered_cut(mut base.locations, staged))?
     let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
     failure_result_from_rep(catalog.over_ceiling(base.account, available_resident(db)))?
     let manifest_bytes = cut_manifest_size(db, delta)
@@ -2679,11 +2653,11 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
             db.file_seq = seq
             db.file_end = 72
         }
-        write_tiered_cut(d, staged, mut buffers)?
+        failure_result_from_rep(pager.write_tiered_cut(d, staged, mut buffers))?
         let layout = failure_result_from_rep(manifest.write_page_cut(d, store_key_to_rep(id), take cut_plan, mut buffers))?
         let manifest.PackBuffers(out: take out, ..) = take buffers
         let mut page_record = take out
-        let (take pages, take compaction, take removals) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, TieredCompaction, DiskRemovals), Error] {
+        let (take pages, take compaction, take removals) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), Error] {
             cut_retirement(layout, holders, disk_state(db).lease, manifest.pack_scrubs(disk_state(db).packs), staged.compaction, cut_input(db, delta).lease_span, prev_first, seq)
         })?
         fill_cut_manifest(mut page_record, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
@@ -2707,15 +2681,15 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         ReplaceMain(main, _) => main.head,
         _ => pages.holder_heads(db.holders)[0u64].head
     }
-    write_disk(mut db.disk, take prepared_pages, scoped fn(mut state: DiskState, take installed: manifest.PackDiskState) {
+    write_disk(mut db.disk, (take prepared_pages, take compaction), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, pager.TieredCompaction)) {
+        let (take installed, take candidate) = take installation
         manifest.install_pack_cut(mut state.packs, take installed)
         state.record_cut = seq
         state.recorded_after = recorded_after
         state.uncovered = 0
         // Step 5: the lists' rows are now queue rows of the published generation.
-        state.tiered_dirty = clean_tiered_cut()
+        pager.install_disk_cut(mut state.tiered, take candidate)
     })
-    db.compaction = take compaction
     db.checkpointed = generation
     db.resident = base.account
     db.tiered = settled_tiered
@@ -2943,41 +2917,7 @@ fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, se
     Ok((at, accepted))
 }
 
-type JournalReplay {
-    state: pages.State,
-    immutable: bool,
-    names: Map[String, u32],
-    record_bytes: u64,
-    next_node: u64,
-    tiered: ReplayTieredAccount,
-    forked: List[manifest.LineageFork],
-    // D-CU-1 / 3177 F4: collection ids superseded by replay steps in this
-    // round (skipped by catch-up diff) and Cold roots freed by superseding.
-    superseded: List[u32],
-    deferred_frees: List[manifest.DeferredFree],
-    // The recorded limits every replayed frame is checked against (§11.1 AP4a).
-    limits: StoreLimits
-}
-
-fn journal_replay(take state: pages.State, next_node: u64, limits: StoreLimits) -> Result[JournalReplay, Error] {
-    let (take names, total) = disk_allocation(scoped fn() -> Result[(Map[String, u32], u64), Error] {
-        let mut names: Map[String, u32] = map.new()
-        failure_result_from_rep(types.capacity(map.try_reserve(mut names, list.len(state.tips))))?
-        let mut total = 0u64
-        for held in state.pins {
-            total += manifest.pin_root_bytes(held.name, held.roots)
-        }
-        for head in state.tips {
-            total += manifest.branch_root_bytes(head.name, head.roots)
-            map.insert(mut names, string.from(head.name), head.id)
-        }
-        Ok((take names, total))
-    })?
-    let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
-    Ok(JournalReplay(state: take state, immutable: false, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), superseded: list.new(), deferred_frees: list.new(), limits: limits))
-}
-
-fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
+fn journal_account(replay: pager.JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
         failure_result_from_rep(types.capacity(pages.state_account(replay.state)))
     })
@@ -3037,7 +2977,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
     let request = request_digest(key, key)
     let stream_name = StreamKey(caller: Caller(issuer: 2u8, subject: take key), id: StreamId(t: keyed_time(db), n: 0u64))
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     for fault in[false, true] {
         let p = if fault {
             1u64
@@ -3175,7 +3115,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let short = bound steps grant.steps {
         metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             Ok(types.key_word(7))

@@ -237,7 +237,7 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: pages.PagePack, n
         let start_rows = rows_seen
         let start_matched = matched
         let step = disk_allocation(scoped fn() -> Result[(u64, u64, u64, u64), Error] {
-            let end = checked_tiered_index(path, id, seq, at, width, wire)?
+            let end = failure_result_from_rep(pager.checked_tiered_index(path, store_key_to_rep(id), seq, at, width, wire))?
             let payload = list.slice(wire, 16, end)
             let (prev, take initial) = failure_result_from_rep(manifest.start_pack_index(path, at, payload, 0))?
             if prev != prev_index {
@@ -355,7 +355,7 @@ fn check_cold_pack_index_row(d: Dir, id: StoreId, path: String, seq: u64, class:
         }
         let start_data = next_data
         let step = disk_allocation(scoped fn() -> Result[(u64, u64, bool), Error] {
-            let end = checked_tiered_index(path, id, seq, at, width, wire)?
+            let end = failure_result_from_rep(pager.checked_tiered_index(path, store_key_to_rep(id), seq, at, width, wire))?
             let payload = list.slice(wire, 16, end)
             let (prev, take initial) = failure_result_from_rep(manifest.start_pack_index(path, at, payload, 0))?
             if prev != prev_index {

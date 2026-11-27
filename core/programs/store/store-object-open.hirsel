@@ -7,7 +7,7 @@ type HistoryOpenBase: send {
     pages: manifest.PackDiskState
 }
 
-fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
+fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
     let (take replay, take checkpoint_state) = history_paged_load(mut read_source, head, ceiling)?
     let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
         Ok(manifest.located_owners(checkpoint_state.manifest))
@@ -156,7 +156,7 @@ fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(
     }
 }
 
-fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, authority_kind: u8, take authority: Bytes, mut workspace: HistoryBuffers, deadline: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
+fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, authority_kind: u8, take authority: Bytes, mut workspace: HistoryBuffers, deadline: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     if !options.create || (options.activation != None && options.activation != Some(0u64)) {
         return Error(NotFound)
     }
@@ -175,15 +175,15 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
     let first = disk_allocation(scoped fn() -> Result[pages.State, Error] {
         failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))
     })?
-    let initial = journal_replay(take first, 0, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))?
+    let initial = failure_result_from_rep(pager.journal_replay(take first, 0, limits_to_rep(limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))))?
     failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, options.resident_limit))?
     let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let admitted = prepare_writer(store_key_from_rep(id), initial)?
     if let Some(mut attaching) = link {
-        let register = history_stream_genesis(mut client, mut attaching, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, initial.limits)?
+        let register = history_stream_genesis(mut client, mut attaching, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, limits_from_rep(initial.limits))?
         return Ok((take register, take initial, take admitted, take authority))
     }
-    let created = history_publish_genesis(mut client, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, initial.limits, None)
+    let created = history_publish_genesis(mut client, store_key_from_rep(id), holder, authority_kind, authority, mut workspace, deadline, limits_from_rep(initial.limits), None)
     let mut register = match take created {
         Ok(take granted) => take granted,
         Error(Exists(existing)) if existing == "head" => return Error(Lost),
@@ -236,10 +236,10 @@ fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, dead
 // With `link`, the head has no ATTACH and the Place is opened streamed
 // (§12.11.5, "No ATTACH"): the replace writes ATTACH naming the slot's
 // stream, and the CLAIM rides the stream as X's first frame there.
-fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
+fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     let pair = first.head.pair
     let mut selected = take first
-    let mut admitted: Option[(HistoryHead, JournalReplay)] = None
+    let mut admitted: Option[(HistoryHead, pager.JournalReplay)] = None
     let mut entropy = disk_allocation(fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(8))
     })?
@@ -277,7 +277,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
             },
             Error(take problem) => return Error(take problem),
         }
-        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), limits_to_rep(replay.limits)))?
+        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), replay.limits))?
         let admitted_state = prepare_writer(selected.head.store, replay)?
         let head = selected.head
         let authority_end = history_authority_end(workspace.witness)?
@@ -296,7 +296,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
                     },
                     None => {
                         let place_prefix = std.object.bucket_config(read_source.client).prefix
-                        let (inc, next_seq) = slot_attach(mut attaching, head.store, head.pair.epoch + 1, place_prefix, replay.limits)?
+                        let (inc, next_seq) = slot_attach(mut attaching, head.store, head.pair.epoch + 1, place_prefix, limits_from_rep(replay.limits))?
                         granted = Some((head.pair.epoch + 1, inc, next_seq))
                         (inc, next_seq)
                     },
@@ -344,24 +344,24 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
     }
 }
 
-fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, from: pages.HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
+fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, from: pages.HistoryRef, take initial: pager.JournalReplay, ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
     let suffix = history_suffix(mut read_source.client, head, from, read_source.deadline)?
     let mut replay = take initial
     history_apply_suffix(mut read_source.client, head, from.seq, suffix, mut replay, ceiling, read_source.deadline)?
     Ok(take replay)
 }
 
-fn history_open_register(mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
+fn history_open_register(mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, pager.JournalReplay), Error] waits {
     let config = object_history_config(std.object.bucket_config(read_source.client), string.from(requested_level))
     let authority = history_config_bytes(config)?
     let mut unattached: Option[SlotLink] = None
-    let (take register, take replay, _, _) = history_open_with(mut read_source, c, r, options, config.levels, 1, take authority, mut workspace, op_ms, mut unattached, fn(id: StoreId, initial: JournalReplay) -> Result[(), Error] {
+    let (take register, take replay, _, _) = history_open_with(mut read_source, c, r, options, config.levels, 1, take authority, mut workspace, op_ms, mut unattached, fn(id: StoreId, initial: pager.JournalReplay) -> Result[(), Error] {
         Ok(())
     })?
     Ok((take register, take replay))
 }
 
-fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_levels: List[String], authority_kind: u8, take genesis_authority: Bytes, mut workspace: HistoryBuffers, op_ms: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
+fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_levels: List[String], authority_kind: u8, take genesis_authority: Bytes, mut workspace: HistoryBuffers, op_ms: u64, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, pager.JournalReplay, T, Bytes), Error] waits {
     let claim_ms = if options.claim_ms == 0 {
         op_ms
     } else {

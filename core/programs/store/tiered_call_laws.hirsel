@@ -13,14 +13,13 @@ fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db
         fail("L63: fixture inserts did not commit")
     }
     l62_prepare_snapshot_pages(mut db, fixtures, rows.id, 8)?
-    db.writer_pin_bytes = 1048576
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: db.writer_pin_bytes, pager_task_bytes: 1048576, cut_pins: false)
+    let _ = pager.replace_writer_pin_bytes(mut db.pager, 1048576)
+    let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: pager.pin_partition(db.pager), pager_task_bytes: 1048576, cut_pins: false)
     let link = start_tiered_pager_link(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
     let worker = attach_tiered_pager(mut db, take link)
     let answer = call(mut db, (rows, marks))
     clear_parked(mut db)
-    db.pager_writer = None
-    db.pager = None
+    pager.close_requests(mut db.pager)
     let _ = result.unwrap(task.join(take worker))
     answer
 }
@@ -54,12 +53,12 @@ fn l63_retry_until_hit(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) 
     }
     // With no pager the first attempt's miss cannot be served, which shows the
     // fixture's row 3 is Cold and the committed run below really reran.
-    let requests = replace(mut db.pager, None)
+    let requests = pager.replace_requests(mut db.pager, None)
     let unserved = run(mut db, Some(100000), copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
         let _ = fetch(tx, env.0, 3u64)?
         Ok(())
     })
-    db.pager = take requests
+    let _ = pager.replace_requests(mut db.pager, take requests)
     let Error(Io(Closed)) = unserved else {
         fail("L63: a miss with no pager is Io(Closed)")
     }
@@ -163,9 +162,9 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the serve call is admitted")
     }
-    let requests = replace(mut db.pager, None)
+    let requests = pager.replace_requests(mut db.pager, None)
     let unserved = serve(mut db, take first, plan, None, copy_env(handles), body)
-    db.pager = take requests
+    let _ = pager.replace_requests(mut db.pager, take requests)
     let Error(Before(Io(Closed), _)) = unserved else {
         fail("L63: a served miss with no pager is Before(Io(Closed))")
     }
@@ -173,9 +172,9 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Abandoned(take starved) = admit_law_stream(mut db, stream, 0, request)? else {
         fail("L63: the unserved call is handed back as Abandoned")
     }
-    let partition = replace(mut db.writer_pin_bytes, 1)
+    let partition = pager.replace_writer_pin_bytes(mut db.pager, 1)
     let refused = serve(mut db, take starved, plan, None, copy_env(handles), body)
-    db.writer_pin_bytes = partition
+    let _ = pager.replace_writer_pin_bytes(mut db.pager, partition)
     let Ok(NoRoom(_, Cache(_))) = refused else {
         fail("L63: a served call over its pin partition is NoRoom(Cache)")
     }
@@ -227,7 +226,7 @@ fn l63_settle[E: inert](mut db: Db, take first: Result[Served, ServeError], hand
         served = if found {
             resume_parked(mut db, take p, copy_env(handles), body)
         } else {
-            let woke = match db.park_notices {
+            let woke = match pager.park_notices(db.pager) {
                 Some(notices) => channel.receive(notices),
                 None => fail("L63: the fixture keeps the park notices"),
             }
@@ -320,7 +319,7 @@ fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Ok(Parked(take q)) = serve(mut db, take q_first, plan, None, copy_env(handles), l63_parking_body) else {
         fail("L63: Q's first miss parks it")
     }
-    let woke = match db.park_notices {
+    let woke = match pager.park_notices(db.pager) {
         Some(notices) => channel.receive(notices),
         None => fail("L63: the fixture keeps the park notices"),
     }
@@ -516,7 +515,7 @@ fn l63_check_diff(seen: List[Change], rows_handle: Table[u64, u32], neighbor: Ta
         (1u64, 0u64)
     }
     l62_check_span_row(seen[first], rows_handle, added.0, added.1)?
-    if seen[second].tree_key != log_key(rows_handle.id, deleted)? || seen[second].value != None {
+    if seen[second].tree_key != failure_result_from_rep(pager.log_key(rows_handle.id, deleted))? || seen[second].value != None {
         fail(clone(why))
     }
     l62_check_span_row(seen[2u64], neighbor, 7, 70)
@@ -553,7 +552,7 @@ fn l63_cold_snapshot_diffs(mut db: Db, base: Snapshot, rows_handle: Table[u64, u
     l63_check_diff(l63_paged_changes(read_handle, base, target, whole)?, rows_handle, neighbor, (2u64, 20u32), 3u64, "L63 (j): the forward diff of two Cold Snapshots")?
     l63_check_diff(l63_paged_changes(read_handle, base, target, single)?, rows_handle, neighbor, (2u64, 20u32), 3u64, "L63 (j): the forward diff resumed one row at a time")?
     let backward = l63_paged_changes(read_handle, target, base, single)?
-    if list.len(backward) != 3 || backward[0u64].tree_key != log_key(rows_handle.id, 2)? || backward[0u64].value != None || backward[2u64].tree_key != log_key(neighbor.id, 7)? || backward[2u64].value != None {
+    if list.len(backward) != 3 || backward[0u64].tree_key != failure_result_from_rep(pager.log_key(rows_handle.id, 2))? || backward[0u64].value != None || backward[2u64].tree_key != failure_result_from_rep(pager.log_key(neighbor.id, 7))? || backward[2u64].value != None {
         fail("L63 (j): the backward diff deletes the target's put and the neighbor's row")
     }
     l62_check_span_row(backward[1u64], rows_handle, 3, 30)
@@ -778,7 +777,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
         }
         schedule_commit(mut db, mut model, mut history, stream, env, receipt.reply)?
     }
-    if list.len(db.parked.entries) != 0 {
+    if list.len(pager.park_queue(db.pager).entries) != 0 {
         fail("L63 schedule: no call stays queued, so every call's pins are released")
     }
     for key in 0u64 .. 4 {
@@ -826,7 +825,7 @@ fn l63_check_rows(seen: List[Change], rows_handle: Table[u64, u32], expected: Li
         let (key, row) = expected[at]
         match row {
             Some(value) => l62_check_span_row(seen[at], rows_handle, key, value)?,
-            None => if seen[at].tree_key != log_key(rows_handle.id, key)? || seen[at].value != None {
+            None => if seen[at].tree_key != failure_result_from_rep(pager.log_key(rows_handle.id, key))? || seen[at].value != None {
                 fail(clone(why))
             },
         }

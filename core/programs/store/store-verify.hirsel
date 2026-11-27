@@ -296,7 +296,7 @@ fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkP
                 return Ok(WalkDirect(d))
             }
         }
-        if let None = view db.pager {
+        if let None = pager.pager_requests(db.pager) {
             return Error(Io(Closed))
         }
     }
@@ -312,7 +312,7 @@ fn walk_point[R](db: Db, s: Snapshot, source: WalkPoint, key: Bytes, visit: scop
             let Some(inventory) = view tree.paging else {
                 return Error(Io(Closed))
             }
-            read_tiered_point_direct(d, db.store, inventory, s.open, s.branch, db.writer_pin_bytes, tree, key, visit)
+            read_tiered_point_direct(d, db.store, inventory, s.open, s.branch, pager.pin_partition(db.pager), tree, key, visit)
         },
     }
 }

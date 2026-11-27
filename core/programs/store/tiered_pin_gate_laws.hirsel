@@ -142,7 +142,7 @@ fn gate_leaf_rows(leaf: GateLeaf) -> Map[u64, ()] {
 }
 
 fn gate_probe_rows(db: Db, pack: u64) -> u64 {
-    match map.get(db.compaction.probes, pack) {
+    match map.get(pager.disk_compaction(disk_state(db).tiered).probes, pack) {
         Some(cursor) => cursor.rows,
         None => 0,
     }

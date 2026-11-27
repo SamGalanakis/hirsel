@@ -866,7 +866,7 @@ fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env
     trust_seed_deploy_gate("bucket_test_m2_genesis_debris", bucket_m2_genesis_debris_run(d, c, tasks, seed_grant))
 }
 
-fn check_cached_reopen(tasks: Tasks, sim: BucketSim, head: HistoryHead, cache: Option[ObjectsCache]) -> Result[(), Error] waits {
+fn check_cached_reopen(tasks: Tasks, sim: BucketSim, head: HistoryHead, cache: Option[pager.ObjectsCache]) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut source = history_reader(take client, due)
@@ -954,8 +954,8 @@ fn bucket_test_pack_cache(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant:
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 72), None, list.new())
     let (take setup, head) = bucket_m2_upload_checkpoint(checkpoint_dir, tasks, sim)?
     drop(take setup)
-    let local = ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
-    let arms: Inline[Option[ObjectsCache], 4] =[None, None, Some(local), Some(local)]
+    let local = pager.ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
+    let arms: Inline[Option[pager.ObjectsCache], 4] =[None, None, Some(local), Some(local)]
     for i in 0u64 .. BUCKET_LAW_ROUNDS {
         if i != 0 {
             result.unwrap(std.dir.remove_all(local.dir, OBJECTS_CACHE_DIR))
@@ -969,7 +969,7 @@ fn bucket_test_pack_cache(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant:
     let report = bucket_law_finish(take sim)
     bucket_cache_samples(report, 4 * BUCKET_LAW_ROUNDS + 1, out)
     let cold_pager = bucket_law_sim(tasks, c, 8464, None, list.new())
-    let window_cache = ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
+    let window_cache = pager.ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
     let paging = l84_bucket_pager_batch(cold_pager, tasks, Some(window_cache))
     let requests = bucket_law_report(take cold_pager)
     paging?

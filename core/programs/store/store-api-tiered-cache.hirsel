@@ -1,0 +1,1 @@
+pub const READER_PIN_MIN: u64 = pager.READER_PIN_MIN

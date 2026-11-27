@@ -197,7 +197,7 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
     }
     let limit = disk_state(db).options.dirty_bytes
     let reserved = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
-        reserve_tiered_commit(mut state.tiered_dirty, freed, limit)
+        failure_result_from_rep(pager.reserve_dirty(mut state.tiered, freed, limit))
     })
     match reserved {
         Ok(()) => None,
@@ -227,7 +227,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     match db.disk {
         Some(mut state) => {
             if let Some(take written) = take freed {
-                admit_tiered_commit(mut state.tiered_dirty, branch_id, take written)
+                pager.admit_dirty(mut state.tiered, branch_id, take written)
             }
             db.file_end += match frame {
                 Some(raw) => list.len(raw),
@@ -446,7 +446,7 @@ fn frame_draft[R, A](db: Db, base: pages.PageTree, ci: CallInfo, rec: Option[Cal
 // Memory rows apply first; the Tiered plan then stages its collections over
 // that tree, and its tree is the commit's collection map. Every stamp drawn
 // here is raised into `issued`, so the watermark covers it.
-fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
@@ -467,7 +467,7 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
             materialize_ordered_rows(mut prepared.roots.collections, prepared.ops, prepared.order, memory_only, first, mut draw)?
             materialize_rows(mut prepared.roots.streams, prepared.stream_ops, false, first, mut draw)?
             if let Some(record) = attempt {
-                if let Some(take tiered_plan) = plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, prepared.order, draw)? {
+                if let Some(take tiered_plan) = failure_result_from_rep(pager.plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, prepared.order, draw))? {
                     prepared.roots.collections = pages.share_page_tree(tiered_plan.tree)
                     draw = tiered_plan.next_stamp
                     prepared.plan = Some(take tiered_plan)
@@ -502,14 +502,14 @@ fn materialize_ordered_rows(mut tree: pages.PageTree, operations: pages.DataRows
         if slot_order < processed {
             continue
         }
-        let op = ordered_row(operations, order, slot_order)
+        let op = pager.ordered_row(operations, order, slot_order)
         if collection_map {
             let collection = list.slice(op.key, 0, 4)
             if let Some(descriptor) = pages.collection_by_key(tree, collection) {
                 if descriptor.kind == TableCollection || descriptor.kind == IndexCollection {
                     processed = slot_order + 1
                     while processed < pages.data_row_count(operations) {
-                        let following = ordered_row(operations, order, processed)
+                        let following = pager.ordered_row(operations, order, processed)
                         if list.slice(following.key, 0, 4) != collection {
                             break
                         }
@@ -534,7 +534,7 @@ fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: boo
     if let Some(_) = op.trim {
         return Ok(())
     }
-    if memory_only && tiered_data_key(tree, op.key) {
+    if memory_only && pager.tiered_data_key(tree, op.key) {
         return Ok(())
     }
     if pages.tree_domain(tree) == CollectionMap {
@@ -565,7 +565,7 @@ fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: boo
 }
 
 fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
-    let collection = list.slice(ordered_row(operations, order, start).key, 0, 4)
+    let collection = list.slice(pager.ordered_row(operations, order, start).key, 0, 4)
     let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
         visit_materialized_edit(operations, order, slot, visit)
     }
@@ -573,7 +573,7 @@ fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.Data
 }
 
 fn visit_materialized_edit(operations: pages.DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
-    let op = ordered_row(operations, order, slot)
+    let op = pager.ordered_row(operations, order, slot)
     let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
         Some(PageValue(raw)) => Some((raw, None)),
         Some(BlobBody(raw)) => Some((view raw, Some(raw))),

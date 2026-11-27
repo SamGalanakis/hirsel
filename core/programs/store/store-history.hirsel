@@ -41,19 +41,9 @@ type HistoryCapture {
     config: HistoryConfig
 }
 
-fn history_fill_key(mut key: String, lead: String, reference: pages.HistoryRef) {
-    string.clear(mut key)
-    string.push(mut key, lead)
-    format.history_number(mut key, reference.seq)
-    string.push_char(mut key, '-')
-    format.history_number(mut key, reference.epoch)
-    string.push_char(mut key, '-')
-    std.hex.push_u64(mut key, reference.digest)
-}
-
 fn history_key(lead: String, reference: pages.HistoryRef) -> String {
     let mut key = string.with_capacity(60)
-    history_fill_key(mut key, lead, reference)
+    pager.history_fill_key(mut key, lead, reference)
     take key
 }
 

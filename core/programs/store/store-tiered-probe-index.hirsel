@@ -1,77 +1,26 @@
-type TieredIndexRequest: send {
+pub type TieredIndexRequest: send {
     pack: u64,
     offset: u64,
     listed: pages.TieredPagerPack,
     deadline: u64
 }
 
-fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request: TieredIndexRequest) -> Result[Arc[Bytes], Error] waits {
-    let path = failure_result_from_rep(manifest.paged_pack_path(request.pack))?
-    let pack = request.listed.inventory
-    let at = request.offset
-    if (pack.class != 3 && pack.class != 4) || at < pack.index || at >= pack.payload_bytes || pack.payload_bytes - at < 16 {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    let width = order.min(format.PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
-    let (take raw, end) = match input {
-        PagerLocal(d) => {
-            let mut opened = match host.open(d, path, Read) {
-                Ok(take fd) => take fd,
-                Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, at, Absent))),
-                Error(problem) => return Error(Io(problem)),
-            }
-            let obtained = failure_result_from_rep(manifest.read_disk_bytes(mut opened, path, at, width))
-            failure_result_from_rep(manifest.disk_io(host.close(take opened)))?
-            let wire = obtained?
-            let end = checked_tiered_index(path, owner, request.pack, at, width, wire)?
-            (take wire, end)
-        },
-        PagerObjects(mut client, op_ms, cache) => {
-            let Some(item) = request.listed.object else {
-                return Error(failure_from_rep(format.disk_fault(path, at, Absent)))
-            }
-            if item.seq != request.pack || item.len != pack.payload_bytes {
-                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-            }
-            let deadline = if request.deadline == 0 {
-                std.object.deadline_after_ms(client, op_ms)
-            } else {
-                request.deadline
-            }
-            let read = TieredBucketGet(pack_ref: item, window: TieredRange(lo: at, hi: at + width), deadline)
-            read_checked_bucket_window(mut client, cache, read, scoped fn(wire: Bytes) -> Result[u64, Error] {
-                checked_tiered_index(path, owner, request.pack, at, width, wire)
-            })?
-        },
-    }
-    let mut wire = take raw
-    list.truncate(mut wire, end)
-    let mut pin_bytes_owner = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
-        Ok(arc.new(list.new()))
-    })?
-    let installed = arc.with_unique(mut pin_bytes_owner, scoped fn(mut payload: Bytes) {
-        payload = replace(mut wire, list.new())
-    })
-    let _ = option.unwrap(installed)
-    Ok(take pin_bytes_owner)
-}
-
-fn checked_tiered_index(path: String, owner: StoreId, pack_seq: u64, at: u64, width: u64, wire: Bytes) -> Result[u64, Error] {
-    let head = failure_result_from_rep(manifest.disk_read_frame_head(path, list.slice(wire, 0, 16), at))?
+pub fn checked_tiered_index(path: String, owner: types.StoreKey, pack_seq: u64, at: u64, width: u64, wire: Bytes) -> Result[u64, types.Failure] {
+    let head = manifest.disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
     if head.kind != manifest.PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+        return Error(format.disk_fault(path, at, Malformed))
     }
     let end = 16 + head.size
-    let context = format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: pack_seq)
-    if failure_result_from_rep(types.capacity(format.disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end))))? != head.checksum {
-        return Error(failure_from_rep(format.disk_fault(path, at, Checksum)))
+    let context = format.DiskContext(store: owner, role: 3, seq: pack_seq)
+    if types.capacity(format.disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end)))? != head.checksum {
+        return Error(format.disk_fault(path, at, Checksum))
     }
     Ok(end)
 }
 
-fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages.TieredPagerPack) -> Result[Arc[Bytes], Error] waits {
+fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages.TieredPagerPack) -> Result[Arc[Bytes], types.Failure] waits {
     let request = TieredIndexRequest(pack: pack, offset: offset, listed: clone(listed), deadline: cut.deadline)
-    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[Arc[Bytes], Error]], Receiver[Result[Arc[Bytes], Error]]), Error] {
+    let (answer, delivered) = manifest.disk_allocation(fn() -> Result[(Sender[Result[Arc[Bytes], types.Failure]], Receiver[Result[Arc[Bytes], types.Failure]]), types.Failure] {
         Ok(channel.new(1))
     })?
     channel.send(cut.pager, PagerIndex(take request, take answer)) ?=> |_| Io(Closed)
@@ -82,7 +31,7 @@ fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages
 // brings its own visitor and installs the advanced cursor only on publication.
 // A visitor that returns false stops the probe before that row: the cursor
 // stays where it was, so a later cut decides the row again.
-type TieredProbeCursor: send {
+pub type TieredProbeCursor: send {
     index_at: u64,
     previous_index: u64,
     inside: Option[manifest.PackIndexCursor],
@@ -90,14 +39,14 @@ type TieredProbeCursor: send {
     rows: u64
 }
 
-fn start_tiered_probe(pack: pages.PagePack) -> TieredProbeCursor {
+pub fn start_tiered_probe(pack: pages.PagePack) -> TieredProbeCursor {
     TieredProbeCursor(index_at: pack.index, previous_index: 0, inside: None, next_data: 72, rows: 0)
 }
 
-fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, manifest.PackIndexRow) -> Result[bool, Error] waits) -> Result[bool, Error] waits {
-    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+pub fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, manifest.PackIndexRow) -> Result[bool, types.Failure] waits) -> Result[bool, types.Failure] waits {
+    let path = manifest.paged_pack_path(seq)?
     let Some(listed) = std.omap.get(cut.packs, seq) else {
-        return Error(failure_from_rep(format.disk_fault(path, cursor.index_at, Absent)))
+        return Error(format.disk_fault(path, cursor.index_at, Absent))
     }
     let pack = listed.inventory
     let mut work = 0u64
@@ -108,16 +57,16 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
         let mut inside = match replace(mut cursor.inside, None) {
             Some(take saved) => take saved,
             None => {
-                let (prev, take first) = failure_result_from_rep(manifest.start_pack_index(path, at, payload, 0))?
+                let (prev, take first) = manifest.start_pack_index(path, at, payload, 0)?
                 if prev != cursor.previous_index {
-                    return Error(failure_from_rep(format.disk_fault(path, at, Order)))
+                    return Error(format.disk_fault(path, at, Order))
                 }
                 take first
             },
         }
         while work < budget {
             let before: manifest.PackIndexCursor = clone(inside)
-            let Some(take row) = failure_result_from_rep(manifest.next_pack_index(path, at, payload, mut inside))? else {
+            let Some(take row) = manifest.next_pack_index(path, at, payload, mut inside)? else {
                 break
             }
             let width: u64 = int.widen(row.len)
@@ -127,7 +76,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
                 0x22u8
             }
             if row.kind != expected_kind || row.offset != cursor.next_data || row.stamp >= cut.next_stamp || row.offset >= pack.index || 16 + width > pack.index - row.offset || cursor.rows >= int.widen(pack.frames) {
-                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+                return Error(format.disk_fault(path, at, Malformed))
             }
             let _ = probe_routing_key(seq, row)?
             if !visit(mut state, row)? {
@@ -147,7 +96,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
     }
     if cursor.index_at == pack.payload_bytes {
         if cursor.next_data != pack.index || cursor.rows != int.widen(pack.frames) {
-            return Error(failure_from_rep(format.disk_fault(path, cursor.index_at, Malformed)))
+            return Error(format.disk_fault(path, cursor.index_at, Malformed))
         }
         return Ok(true)
     }

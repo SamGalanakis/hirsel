@@ -1,0 +1,108 @@
+fn replay_row_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], before: pager.ReplayDescriptor, op: format.JournalOp) -> Result[(pager.ReplayDescriptor, u64, u64), Error] {
+    let mut seq_bounds = before.seq_bounds
+    if let Some(window) = before.seq_bounds {
+        let Some(value) = view op.value else {
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        }
+        if op.prior != 0 || list.len(op.key) != 12 || list.len(value) < 2 || list.word_be(op.key, 4) != window.next {
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        }
+        let Some(following) = int.checked_add(window.next, 1) else {
+            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        }
+        seq_bounds = Some(pages.LogBoundsRep(first: window.first, next: following))
+    }
+    let (now, added, added_rows): (pages.ReplayValue, u64, u64) = match op.value {
+        Some(value) => (ReplayPut(arc.new(failure_result_from_rep(types.copied(value))?)), entry(op.key, value), 1),
+        None => (ReplayAbsent, 0, 0),
+    }
+    let removed = pager.prior_row_charge(op.key, op.prior)
+    let removed_rows = if op.prior == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let rows = failure_result_from_rep(pager.replay_charge(file, before.rows, removed_rows, added_rows))?
+    let row_bytes = failure_result_from_rep(pager.replay_charge(file, before.row_bytes, removed, added))?
+    failure_result_from_rep(pager.replay_overlay_edit(mut overlay, file, 0, op.key, op.prior, now))?
+    Ok((pager.ReplayDescriptor(rows: rows, row_bytes: row_bytes, seq_bounds: seq_bounds), removed, added))
+}
+
+fn replay_trim_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], collection: u32, before: pager.ReplayDescriptor, op: format.JournalOp, trim: format.JournalTrim) -> Result[(pager.ReplayDescriptor, u64, u64), Error] {
+    let Some(window) = before.seq_bounds else {
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+    }
+    if list.len(op.key) != 4 {
+        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+    }
+    let start = pager.ReplayLogHead(first: window.first, next: window.next, cold_next: option.unwrap(overlay.cold_next), row_bytes: before.row_bytes)
+    let revised = replay_overlay_trim(mut overlay, file, 0, collection, start, trim)?
+    let seq_bounds = pages.LogBoundsRep(first: revised.first, next: revised.next)
+    Ok((pager.ReplayDescriptor(rows: revised.next - revised.first, row_bytes: revised.row_bytes, seq_bounds: Some(seq_bounds)), trim.dropped, 0u64))
+}
+
+fn replay_tiered_op(file: String, mut tree: pages.PageTree, mut next_stamp: u64, mut account: pager.ReplayTieredAccount, before: pager.ReplayDescriptor, op: format.JournalOp) -> Result[(), Error] {
+    let id: u32 = list.word_be(op.key, 0)
+    let (take ready_root, take next_branch_overlay, following_stamp, total) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], Arc[pages.ReplayBranch], u64, u64), Error] {
+        let previous = match tree.replay {
+            Some(existing) => arc.share(existing),
+            None => arc.new(pages.ReplayBranch(collections: std.omap.new(), fork_time: None, ids: 0, charged: 0)),
+        }
+        let (take current, previous_charge) = match std.omap.get(previous.collections, id) {
+            Some(overlay) => (arc.share(overlay), overlay.charged),
+            None => (pager.empty_replay_overlay(match before.seq_bounds {
+                Some(window) => Some(window.next),
+                None => None
+            }), 0u64),
+        }
+        let mut overlay = take current
+        let (after, removed, added) = match op.trim {
+            Some(trim) => replay_trim_edit(file, mut overlay, id, before, op, trim)?,
+            None => replay_row_edit(file, mut overlay, before, op)?,
+        }
+        let new_total = failure_result_from_rep(pager.replay_charge(file, account.total, if account.exact {
+            removed
+        } else {
+            0u64
+        }, added))?
+        let seq_bounds: Option[(u64, u64)] = match after.seq_bounds {
+            Some(window) => Some((window.first, window.next)),
+            None => None,
+        }
+        let mut root = arc.share(tree.root)
+        let mut stamp = next_stamp
+        failure_result_from_rep(pages.page_result(std.page.replay_collection_totals(mut root, list.slice(op.key, 0, 4), after.rows, after.row_bytes, seq_bounds, mut stamp)))?
+        let charged = previous.charged - previous_charge + overlay.charged
+        let mut ids = previous.ids
+        let (take collections, _) = std.omap.insert(mut ids, previous.collections, id, take overlay)
+        Ok((take root, arc.new(pages.ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: charged)), stamp, new_total))
+    })?
+    tree.root = take ready_root
+    tree.replay = Some(take next_branch_overlay)
+    next_stamp = following_stamp
+    account.total = total
+    Ok(())
+}
+
+// H supersedes this collection on its proposed main root (§13.7). The
+// installed root and any fork or snapshot still hold their own overlay.
+fn discard_replayed_collection(mut tree: pages.PageTree, id: u32) -> Result[(), Error] {
+    let replacement = {
+        let Some(previous) = view tree.replay else {
+            return Ok(())
+        }
+        let Some(removed) = std.omap.get(previous.collections, id) else {
+            return Ok(())
+        }
+        disk_allocation(scoped fn() -> Result[Option[Arc[pages.ReplayBranch]], Error] {
+            let mut ids = previous.ids
+            let collections = std.omap.remove(mut ids, previous.collections, id)
+            if let None = std.omap.root(collections) {
+                return Ok(None)
+            }
+            Ok(Some(arc.new(pages.ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: previous.charged - removed.charged))))
+        })?
+    }
+    tree.replay = take replacement
+    Ok(())
+}

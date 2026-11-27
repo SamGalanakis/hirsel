@@ -11,7 +11,7 @@ fn stream_sealed_publish(mut client: std.object.Client, mut register: HistoryReg
     if has_entry {
         let next_pos = history_next_id(candidate.entry.seq)?
         candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, buffers.packet)
-        history_fill_key(mut buffers.key, "e-", candidate.entry)
+        pager.history_fill_key(mut buffers.key, "e-", candidate.entry)
         list.clear(mut buffers.compare)
         failure_result_from_rep(types.capacity(list.try_reserve(mut buffers.compare, list.len(buffers.packet))))?
         history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline)?

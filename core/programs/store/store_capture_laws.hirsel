@@ -156,7 +156,7 @@ fn capture_test_meta_ceiling(mut m: manifest.PageManifest) -> Result[(), Error] 
 }
 
 fn capture_test_commit(ctx: format.DiskContext, offset: u64, head_version: u64, width: u64, prior: u32) -> Result[Bytes, Error] {
-    let key = log_key(1, 1)?
+    let key = failure_result_from_rep(pager.log_key(1, 1))?
     let mut data: Bytes = list.with_capacity(width + 64)
     list.put_word_le(mut data, 0u32)
     list.put_word_le(mut data, head_version)

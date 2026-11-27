@@ -79,7 +79,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
     let mut out: List[(Bytes, Bytes)] = list.new()
     if let Some(d) = direct_dir {
         while list.len(out) <= limit {
-            let Some((take key, value, take resume)) = snapshot_tiered_span_step_direct(d, db.store, db.writer_pin_bytes, s, inventory, low, high, previous)? else {
+            let Some((take key, value, take resume)) = snapshot_tiered_span_step_direct(d, db.store, pager.pin_partition(db.pager), s, inventory, low, high, previous)? else {
                 return Ok((take out, true))
             }
             if list.len(out) == limit {
@@ -92,10 +92,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
     }
     if direct {
         let has_pager_task = match view db.disk {
-            Some(state) => match view state.pager_task {
-                Some(_) => true,
-                None => false,
-            },
+            Some(state) => pager.has_worker(state.tiered),
             None => false,
         }
         if !has_pager_task {
@@ -415,7 +412,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         let chunk = prepare_tiered_index_chunk(mut db, record, rows)?
         match take chunk {
             ChunkDuplicate(take previous, take next_key) => Some((take previous, take next_key)),
-            ChunkReady(TieredWritePlan(tree: take tree, next_stamp: following, freed: take freed, ..), take step_ops) => {
+            ChunkReady(pager.TieredWritePlan(tree: take tree, next_stamp: following, freed: take freed, ..), take step_ops) => {
                 plan.schema.roots.collections = take tree
                 plan.schema.next_node = following - 1
                 plan.chunk_freed = Some(take freed)

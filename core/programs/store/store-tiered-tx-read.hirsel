@@ -15,8 +15,8 @@ type TxTieredRows {
 
 // What an index cursor needs to read Tiered primaries without its Tx.
 pub opaque scoped type TxIndexTiered {
-    attempt: View[Option[core.Cell[TieredTouchSet]]],
-    pins: View[Map[TieredCacheKey, Arc[format.TieredFrame]]],
+    attempt: View[Option[core.Cell[pager.TieredTouchSet]]],
+    pins: View[Map[pager.TieredCacheKey, Arc[format.TieredFrame]]],
     staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]
 }
 
@@ -93,15 +93,15 @@ fn tx_index_tiered(tx: Tx) -> Result[Option[TxIndexTiered], Error] in tx {
     Ok(Some(TxIndexTiered(attempt: tx.attempt, pins: tx.pins, staged: tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, None)?)))
 }
 
-fn tx_tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> Result[(), Error] {
-    if tiered_stopped(attempt) {
+fn tx_tiered_stopped(attempt: core.Cell[pager.TieredTouchSet]) -> Result[(), Error] {
+    if pager.tiered_stopped(attempt) {
         return Error(Missed)
     }
     Ok(())
 }
 
 // The next row of a Tiered Tx cursor, or None once [from, to) is spent.
-fn next_tiered_in(tree: pages.PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_tiered_in(tree: pages.PageTree, attempt_record: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(collection))?) else {
         return Error(Stale(collection))
     }
@@ -134,21 +134,21 @@ fn next_tiered_in(tree: pages.PageTree, attempt_record: Option[core.Cell[TieredT
             },
             None => (failure_result_from_rep(types.copied(from))?, failure_result_from_rep(types.copied(to))?),
         }
-        let (take start, take stop) = tiered_scan_bounds(descriptor, collection, take low, take high)?
+        let (take start, take stop) = failure_result_from_rep(pager.tiered_scan_bounds(descriptor, collection, take low, take high))?
         let cold = if start < stop {
             let hint = if reverse {
                 view stop
             } else {
                 view start
             }
-            tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(hint, 4, list.len(hint))))?))
-            tiered_reading(attempt, if reverse {
+            pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(hint, 4, list.len(hint))))?))
+            pager.tiered_reading(attempt, if reverse {
                 ValuesNone
             } else {
                 ValuesFrom
             })
-            let found = tiered_scan_row(attempt, pins, edge, collection, overlay, start, stop, reverse)?
-            tiered_seek(attempt, SeekOperation)
+            let found = failure_result_from_rep(pager.tiered_scan_row(attempt, pins, edge, collection, overlay, start, stop, reverse))?
+            pager.tiered_seek(attempt, SeekOperation)
             take found
         } else {
             None
@@ -186,7 +186,7 @@ fn next_tiered_in(tree: pages.PageTree, attempt_record: Option[core.Cell[TieredT
     Ok(None)
 }
 
-fn next_tiered_index_row(tree: pages.PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_tiered_index_row(tree: pages.PageTree, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let mut start = failure_result_from_rep(types.copied(low))?
     let mut stop = failure_result_from_rep(types.copied(high))?
     next_tiered_in(tree, attempt, pins, id, staged, mut start, mut stop, false)
@@ -218,26 +218,26 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
     let before = if low == id {
         0u64
     } else {
-        tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(start))?))
-        let rank = tiered_page_rank(attempt, tx.pins, edge, None, start)?
-        tiered_seek(attempt, SeekOperation)
+        pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(start))?))
+        let rank = failure_result_from_rep(pager.tiered_page_rank(attempt, tx.pins, edge, None, start))?
+        pager.tiered_seek(attempt, SeekOperation)
         rank
     }
     let committed = if list.slice(high, 0, 4) != id {
-        let omitted = tiered_count_overlay(overlay, id, low, before)?
+        let omitted = failure_result_from_rep(pager.tiered_count_overlay(overlay, id, low, before))?
         let rows: u64 = pages.collection_descriptor(descriptor).rows
         let Some(total) = int.checked_sub(rows, omitted) else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
         total
     } else {
-        tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(end))?))
-        let through = tiered_page_rank(attempt, tx.pins, edge, None, end)?
-        tiered_seek(attempt, SeekOperation)
+        pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(end))?))
+        let through = failure_result_from_rep(pager.tiered_page_rank(attempt, tx.pins, edge, None, end))?
+        pager.tiered_seek(attempt, SeekOperation)
         let Some(base_count) = int.checked_sub(through, before) else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
-        tiered_count_overlay(overlay, low, high, base_count)?
+        failure_result_from_rep(pager.tiered_count_overlay(overlay, low, high, base_count))?
     }
     let staged = tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
     let mut total = committed
@@ -286,7 +286,7 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: p
         fail("store: a Tiered Tx read without an attempt record")
     }
     tx_tiered_stopped(attempt)?
-    let value = tiered_snapshot_primary(attempt, tiered.pins, data, edge, primary, r.table)?
+    let value = failure_result_from_rep(pager.tiered_snapshot_primary(attempt, tiered.pins, data, edge, primary, r.table))?
     finish_row(r, take k, primary, value, None, seen)
 }
 
@@ -304,30 +304,30 @@ pub fn fetch_many[K, V](tx: Tx, t: Table[K, V], keys: List[K]) -> Result[List[Op
         }
         return Ok(take rows)
     }
-    if tiered_stopped(attempt) {
+    if pager.tiered_stopped(attempt) {
         return Error(Missed)
     }
     // A missed key no longer stops the keys after it: each one resolves, and
     // each further miss joins the latched one's batch. The batch ends here,
     // on every return, and the latched attempt reruns however the body ends.
-    tiered_gather(attempt, true)
+    pager.tiered_gather(attempt, true)
     let mut missed = false
     for k in keys {
         match fetch(tx, t, k) {
             Ok(take row) => list.push(mut rows, take row),
             Error(Missed) => {
                 missed = true
-                if tiered_blocked(attempt) {
+                if pager.tiered_blocked(attempt) {
                     break
                 }
             },
             Error(take problem) => {
-                tiered_gather(attempt, false)
+                pager.tiered_gather(attempt, false)
                 return Error(take problem)
             },
         }
     }
-    tiered_gather(attempt, false)
+    pager.tiered_gather(attempt, false)
     if missed {
         return Error(Missed)
     }

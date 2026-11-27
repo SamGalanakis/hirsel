@@ -111,7 +111,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let invalid = journal_decode_commit(path, body)?
     let mut tree = take first
     let mut ids = pages.holder_next_node(db.holders)
-    let mut tiered = ReplayTieredAccount(total: 0, exact: true)
+    let mut tiered = pager.ReplayTieredAccount(total: 0, exact: true)
     match journal_apply_ops(path, mut ids, mut tree, invalid.data, mut tiered, false) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => return Error(Missing("contradictory prior refusal")),
@@ -328,7 +328,7 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         // pointer. Only its 126-byte Memory descriptor belongs to this walk.
         let mut state = failure_result_from_rep(types.capacity(pages.main_state(pages.share_roots(pages.holder_heads(replayed.holders)[0].roots), pages.holder_heads(replayed.holders)[0].head, 0)))?
         install_cold_companion(mut state.tips[0].roots, 101)?
-        let mut restored = journal_replay(take state, 102, default_limits())?
+        let mut restored = failure_result_from_rep(pager.journal_replay(take state, 102, limits_to_rep(default_limits())))?
         if journal_account(restored)? != baseline + 172 + 126 {
             return Error(Missing("single mixed root Memory account"))
         }
@@ -539,7 +539,7 @@ fn source_layout_witness(outlined: bool) -> Result[(), Error] {
     for immutable in[true, false] {
         let mut replay = pages.share_page_tree(base)
         let mut replay_ids = ids
-        let mut account = ReplayTieredAccount(total: 0, exact: true)
+        let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
         journal_apply_ops("source layout", mut replay_ids, mut replay, journal, mut account, immutable)?
         let actual = option.unwrap(std.page.collection_child(replay.root, id_key))
         if !failure_result_from_rep(pages.page_result(std.page.canonical(actual)))? || !source_layout_equal(expected, actual) || replay_ids + 1 != expected_next {
@@ -638,7 +638,7 @@ fn batch_law_collection_edits(ops: pages.DataRows, order: format.DataOrder, id: 
     let collection = failure_result_from_rep(catalog.prefix(id))?
     let mut edits: List[std.page.BatchEdit] = list.new()
     for slot in 0u64 .. pages.data_row_count(ops) {
-        let op = ordered_row(ops, order, slot)
+        let op = pager.ordered_row(ops, order, slot)
         if list.slice(op.key, 0, 4) != collection {
             continue
         }
@@ -711,7 +711,7 @@ fn batch_law_3152() -> Result[(), Error] {
     let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
     failure_result_from_rep(catalog.define_store_collection(mut base, 1, 1, mut ids))?
-    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
     let mut both: List[u64] = list.new()
     list.push(mut both, 1u64)
     list.push(mut both, 2u64)
@@ -773,7 +773,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     let mut replay = pages.share_page_tree(oracle)
     let mut live_ids = oracle_ids + 1
     let mut replay_ids = oracle_ids
-    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
     batch_law_3152()?
     batch_law_join()?
     let mut edited: List[Arc[std.page.Page]] = list.new()
@@ -852,7 +852,7 @@ fn replay_prior_grants() -> Result[(), Error] {
     let mut wrong: List[format.JournalOp] = list.new()
     list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: Some(prior_fixture_value(65536)), prior: 0, trim: None))
     list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, prior: 1, trim: None))
-    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
     // 4 KiB covers the fault but cannot admit the first 64 KiB value copy.
     let readonly_refusal = bound bytes 4096 {
         journal_apply_ops("bulk prior", mut ids, mut base, wrong, mut account, true)

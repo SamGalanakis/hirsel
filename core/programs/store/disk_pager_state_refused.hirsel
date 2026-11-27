@@ -1,0 +1,3 @@
+fn forge_disk_pager_state() -> store.pager.DiskPagerState {
+    store.pager.DiskPagerState(worker: None, dirty: store.pager.clean_tiered_cut(), compaction: store.pager.no_tiered_compaction(), restamp: None, unload: None)
+}

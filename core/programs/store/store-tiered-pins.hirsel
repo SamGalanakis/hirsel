@@ -1,11 +1,11 @@
-type TieredPinRoot: key {
+pub type TieredPinRoot: key {
     domain: u64,
     branch: u32,
     generation: u64,
     root_stamp: u64
 }
 
-type TieredPins: send {
+pub type TieredPins: send {
     root: TieredPinRoot,
     frames: Map[TieredCacheKey, Arc[format.TieredFrame]],
     ordered: List[TieredCacheKey],
@@ -20,7 +20,7 @@ type TieredPins: send {
 const TIERED_SCAN_WINDOW: u64 = 8
 
 // An attempt's sibling window: 8 pages, doubled per demand already served.
-fn tiered_window(pins: TieredPins) -> u64 {
+pub fn tiered_window(pins: TieredPins) -> u64 {
     let mut window = TIERED_SCAN_WINDOW
     for _ in 0u64 .. pins.demands {
         window = int.saturating_mul(window, 2)
@@ -28,11 +28,11 @@ fn tiered_window(pins: TieredPins) -> u64 {
     window
 }
 
-fn empty_tiered_pins(root: TieredPinRoot, partition: u64) -> TieredPins {
+pub fn empty_tiered_pins(root: TieredPinRoot, partition: u64) -> TieredPins {
     TieredPins(root: root, frames: map.new(), ordered: list.new(), retained: 0, partition: partition, demands: 0)
 }
 
-fn tiered_reset_pins(mut pins: TieredPins, root: TieredPinRoot) {
+pub fn tiered_reset_pins(mut pins: TieredPins, root: TieredPinRoot) {
     if pins.root != root {
         pins = empty_tiered_pins(root, pins.partition)
     }
@@ -58,14 +58,14 @@ fn tiered_pin_eviction(pins: TieredPins, touched: Map[u64, ()], needed: u64) -> 
     }
 }
 
-fn tiered_install_pin(mut pins: TieredPins, from_root: TieredPinRoot, touched: Map[u64, ()], frame: Arc[format.TieredFrame]) -> Result[bool, Error] {
+pub fn tiered_install_pin(mut pins: TieredPins, from_root: TieredPinRoot, touched: Map[u64, ()], frame: Arc[format.TieredFrame]) -> Result[bool, types.Failure] {
     if pins.root != from_root {
         return Ok(false)
     }
     let target_key = tiered_cache_key(frame.identity)
     if let Some(previous) = map.get(pins.frames, target_key) {
         if previous.identity != frame.identity {
-            return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(target_key.0))?, target_key.1, Checksum)))
+            return Error(format.disk_fault(manifest.paged_pack_path(target_key.0)?, target_key.1, Checksum))
         }
         return Ok(true)
     }
@@ -77,8 +77,8 @@ fn tiered_install_pin(mut pins: TieredPins, from_root: TieredPinRoot, touched: M
     let Some(oldest) = tiered_pin_eviction(pins, touched, needed) else {
         return Ok(false)
     }
-    failure_result_from_rep(types.capacity(map.try_reserve(mut pins.frames, 1)))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut pins.ordered, 1)))?
+    types.capacity(map.try_reserve(mut pins.frames, 1))?
+    types.capacity(list.try_reserve(mut pins.ordered, 1))?
     let mut slot = list.len(pins.ordered)
     while slot > oldest {
         slot -= 1

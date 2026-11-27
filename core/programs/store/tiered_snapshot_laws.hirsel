@@ -6,18 +6,18 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
             fail("L62: fixture has no collection")
         }
         let image = std.page.image_of(here)
-        let mut draft = begin_tiered_pack(db.store, pack_seq, 3, 4096)?
+        let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(db.store), pack_seq, 3, 4096))?
         let frame = manifest.PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
         let first_key = failure_result_from_rep(catalog.logical_key(collection, option.unwrap(std.page.key_at(image, 0))))?
-        let Some(place) = add_tiered_pack_frame(mut draft, frame, collection, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
+        let Some(place) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, collection, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
             fail("L62: the fixture leaf has no owning edge")
-        })? else {
+        }))? else {
             fail("L62: fixture PAGE did not fit")
         }
-        let (take raw, inventory) = finish_tiered_pack(take draft)?
+        let (take raw, inventory) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
         let kind = before[52u64]
         let descriptor = if kind == 4 {
-            let limits = descriptor_bounds(before)
+            let limits = pager.descriptor_bounds(before)
             failure_result_from_rep(pages.log_record(here, limits.first, limits.next, ResidentTiered))?
         } else {
             failure_result_from_rep(pages.rooted_collection_record(here, kind, ResidentTiered))?
@@ -57,14 +57,14 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Res
     let id = events.binding.id
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let trimmed = format.JournalOp(key: failure_result_from_rep(catalog.prefix(id))?, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
-    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(pages.LogBoundsRep(first: 0, next: 3))), trimmed)?
     let mut value: Bytes = list.with_capacity(6)
     list.put_word_le(mut value, events.binding.readers.current)
     list.put_word_le(mut value, event_number)
-    let appended = format.JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
-    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
+    let appended = format.JournalOp(key: failure_result_from_rep(pager.log_key(id, 3))?, value: Some(take value), prior: 0, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(pages.LogBoundsRep(first: 1, next: 3))), appended)?
     pages.set_head_collection(mut db.holders, 0u64, take tree)
     pages.set_next_node(mut db.holders, draw - 1)
     let at = pages.holder_heads(db.holders)[0u64].at
@@ -80,8 +80,8 @@ fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits
     let added = window_changes(read_handle, before, after, events, 2)?
     let removed = window_changes(read_handle, after, before, events, 2)?
     let id = events.binding.id
-    let old_key = log_key(id, 1)?
-    let new_key = log_key(id, 3)?
+    let old_key = failure_result_from_rep(pager.log_key(id, 1))?
+    let new_key = failure_result_from_rep(pager.log_key(id, 3))?
     let mut eleven: Bytes = list.new()
     let mut thirteen: Bytes = list.new()
     list.put_word_le(mut eleven, 11u32)
@@ -121,11 +121,11 @@ fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: T
         fail("L82: fixture Log appends must commit")
     }
     l62_prepare_snapshot_pages(mut db, fixtures, events.binding.id, 8)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
-    db.pager = Some(take requests)
+    let _ = pager.replace_requests(mut db.pager, Some(take requests))
     let answer = l62_log_window_reads(mut db, events)
-    db.pager = None
+    let _ = pager.replace_requests(mut db.pager, None)
     let _ = result.unwrap(task.join(take worker))
     answer
 }
@@ -153,16 +153,16 @@ fn l62_borrowed_rows_survive_later_touches() -> Result[(), Error] {
         std.page.PagePtr(pack: 8, offset: 72, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: 40)
     }
     let leaf = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
-    let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let mut visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut visible, (8, 72), arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))))
     map.insert(mut visible, (9, 72), arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take contents)))))
     let root_edge: std.page.Slot = ColdPage(ptr)
-    let backing = TieredBorrowedRoot(edge: view root_edge, pins: view visible)
-    let attempt = tiered_attempt(4096, 0)
-    let Some(first) = tiered_point_bytes(attempt, backing, types.key_word(1))? else {
+    let backing = pager.TieredBorrowedRoot(edge: view root_edge, pins: view visible)
+    let attempt = pager.tiered_attempt(4096, 0)
+    let Some(first) = pager.tiered_point_bytes(attempt, backing, types.key_word(1)) ?=> failure_from_rep else {
         fail("L62: the inline row must be in the pinned leaf")
     }
-    let Some(second) = tiered_point_bytes(attempt, backing, types.key_word(2))? else {
+    let Some(second) = pager.tiered_point_bytes(attempt, backing, types.key_word(2)) ?=> failure_from_rep else {
         fail("L62: the overflow row must be in the pinned BLOB")
     }
     if first != string.as_bytes("inline") || list.len(second) != 1025 || second[1024u64] != 0xa7 || map.len(tiered_attempt_state(attempt).stamps) != 2 {
@@ -185,11 +185,11 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
     }
     let table_id = rows_handle.id
     l62_prepare_snapshot_pages(mut db, fixtures, table_id, 8)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
-    db.pager = Some(take requests)
+    let _ = pager.replace_requests(mut db.pager, Some(take requests))
     let answered = l62_snapshot_point_reads(db, rows_handle)
-    db.pager = None
+    let _ = pager.replace_requests(mut db.pager, None)
     let _ = result.unwrap(task.join(take worker))
     answered
 }
@@ -197,15 +197,15 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
 fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
     let collection = rows_handle.id
     let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 20u32)
-    let inserted = format.JournalOp(key: log_key(collection, 2)?, value: Some(take stored), prior: 0, trim: None)
+    let inserted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 2))?, value: Some(take stored), prior: 0, trim: None)
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
-    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
-    let deleted = format.JournalOp(key: log_key(collection, 3)?, value: None, prior: 7, trim: None)
-    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
+    let deleted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 3))?, value: None, prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
     pages.set_head_collection(mut db.holders, 0u64, take tree)
     pages.set_next_node(mut db.holders, draw - 1)
     Ok(())
@@ -252,11 +252,11 @@ fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, memory_sibling: bool,
     let collection = rows_handle.id
     l62_prepare_snapshot_pages(mut db, fixtures, collection, 8)?
     l62_prepare_scan_overlay(mut db, rows_handle)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
-    db.pager = Some(take requests)
+    let _ = pager.replace_requests(mut db.pager, Some(take requests))
     let answer = read(db, rows_handle)
-    db.pager = None
+    let _ = pager.replace_requests(mut db.pager, None)
     let _ = result.unwrap(task.join(take worker))
     answer
 }
@@ -307,7 +307,7 @@ fn l62_check_span_row(change: Change, rows_handle: Table[u64, u32], key: u64, ex
     let Some(raw) = view change.value else {
         fail("L62: a Snapshot span only returns visible values")
     }
-    if change.tree_key != log_key(rows_handle.id, key)? || row_value(rows_handle.readers, rows_handle.id, raw)? != expected {
+    if change.tree_key != failure_result_from_rep(pager.log_key(rows_handle.id, key))? || row_value(rows_handle.readers, rows_handle.id, raw)? != expected {
         fail("L62: a span must read the same ordered rows as its Snapshot")
     }
     Ok(())
@@ -364,7 +364,7 @@ fn l62_initial_change_pages(db: Db, rows_handle: Table[u64, u32]) -> Result[(), 
     let Some(resume) = view first.next else {
         fail("L62: an initial page with more rows must keep its resume")
     }
-    if resume != log_key(rows_handle.id, 5)? {
+    if resume != failure_result_from_rep(pager.log_key(rows_handle.id, 5))? {
         fail("L62: a change-page resume begins at the first unseen key")
     }
     let last_page = changes_page(read_handle, None, s, resume, hi, limits)?
@@ -421,12 +421,12 @@ fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[
 fn l62_replay_index_owner(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
     let mut data = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let mut account = ReplayTieredAccount(total: 258, exact: true)
+    let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 43u32)
-    let edited = format.JournalOp(key: log_key(rows_handle.id, 1)?, value: Some(take stored), prior: 7, trim: None)
-    replay_tiered_op("j-1", mut data, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), edited)?
+    let edited = format.JournalOp(key: failure_result_from_rep(pager.log_key(rows_handle.id, 1))?, value: Some(take stored), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut data, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), edited)?
     pages.set_head_collection(mut db.holders, 0u64, take data)
     pages.set_next_node(mut db.holders, draw - 1)
     Ok(())
@@ -451,11 +451,11 @@ fn test_l62_snapshot_find_reads_cold_index_and_primary(d: Dir, c: Clock, tasks: 
     l62_prepare_snapshot_pages(mut db, fixtures, data_id, 8)?
     l62_prepare_snapshot_pages(mut db, fixtures, index_id, 9)?
     l62_replay_index_owner(mut db, rows_handle)?
-    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
+    let funding = pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false)
     let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
-    db.pager = Some(take requests)
+    let _ = pager.replace_requests(mut db.pager, Some(take requests))
     let answer = l62_snapshot_index_reads(db, parity)
-    db.pager = None
+    let _ = pager.replace_requests(mut db.pager, None)
     let _ = result.unwrap(task.join(take worker))
     answer
 }

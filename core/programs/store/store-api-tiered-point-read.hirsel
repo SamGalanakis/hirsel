@@ -1,0 +1,107 @@
+fn read_tiered_point[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    read_tiered_point_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, tree, logical, decode_row)
+}
+
+fn read_tiered_point_direct[R](d: Dir, owner: StoreId, inventory: pages.TieredReadInventory, opened: u64, branch_id: u32, pin_bytes: u64, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: opened, pin_bytes: pin_bytes)))
+    })?
+    let root = pager.TieredPinRoot(domain: opened, branch: branch_id, generation: inventory.generation, root_stamp: pages.tree_stamp(tree))
+    read_tiered_point_with(PagerDirect(d, store_key_to_rep(owner)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, tree, logical, decode_row)
+}
+
+fn read_tiered_point_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    if list.len(logical) < 4 {
+        return decode_row(None)
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
+        return decode_row(None)
+    }
+    if pages.collection_descriptor(descriptor).kind == LogCollection {
+        if list.len(logical) != 12 {
+            return decode_row(None)
+        }
+        let sequence: u64 = list.word_be(logical, 4)
+        let window = pager.descriptor_bounds(descriptor)
+        if sequence < window.first || sequence >= window.next {
+            return decode_row(None)
+        }
+    }
+    if let Some(row) = pager.tiered_replayed_row(tree, logical) {
+        let stored: Option[View[Bytes]] = match row.now {
+            ReplayPut(value) => Some(view value),
+            ReplayAbsent => None,
+        }
+        return decode_row(stored)
+    }
+    let key = list.slice(logical, 4, list.len(logical))
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error] {
+        pager.tiered_reading(attempt, ValuesAt)
+        let backing = pager.TieredBorrowedRoot(edge: view edge, pins: view visible)
+        let stored = pager.tiered_point_bytes(attempt, backing, key) ?=> failure_from_rep
+        decode_row(stored)
+    })
+}
+
+fn retry_tiered_read[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    retry_tiered_read_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
+}
+
+fn retry_tiered_read_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let mut pins = pager.empty_tiered_pins(root, root_grant.pin_bytes)
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
+    loop {
+        // The attempt lives outside the body's isolation, so a stop that
+        // escapes the body still leaves its touches and latch readable.
+        let window = if direction == TieredPoint {
+            0u64
+        } else {
+            pager.tiered_window(pins)
+        }
+        let attempt = pager.tiered_attempt(root_grant.pin_bytes, window)
+        let isolated = disk_allocation(scoped fn() -> Result[Result[R, Error], Error] {
+            Ok(read(attempt, pins.frames))
+        })
+        // The latch is read first: a latched attempt reruns however the
+        // body ended, an isolated failure included.
+        let state = pager.tiered_finish(take attempt)
+        match state.stopped {
+            Some(AttemptMiss(_)) => {
+                let sought = match state.seek {
+                    SeekKey(secondary) => view secondary,
+                    SeekUpper => option.unwrap(upper),
+                    SeekOperation => view key,
+                }
+                serve_tiered_miss_with(backend, packs, next_stamp, deadline, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
+            },
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
+            None => {
+                let observed = (take isolated)?
+                return take observed
+            },
+        }
+    }
+}
+
+// Delivers a latched miss's batch into the pin map, in the order the batch
+// names it. A target whose delivery failed once fails the read or call when
+// an attempt demands it again.
+fn serve_tiered_miss(source: pager.TieredPageSource, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
+    serve_tiered_miss_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root, state, sought, direction, take grant, mut pins, mut pending)
+}
+
+fn serve_tiered_miss_with(backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root: pager.TieredPinRoot, state: pager.TieredTouchSet, sought: Bytes, direction: pager.TieredDirection, take grant: Option[Arc[pager.TieredReaderGrant]], mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
+    let demand = failure_result_from_rep(pager.tiered_miss_demand_raw(packs, next_stamp, deadline, state, sought, direction, take grant, mut pending))?
+    let delivered = match backend {
+        PagerTask(requests) => failure_result_from_rep(pager.tiered_point_delivery(requests, take demand))?,
+        PagerDirect(d, owner) => {
+            let mut input: pager.TieredPagerInput = PagerLocal(d)
+            let mut local_cache = pager.new_tiered_cache(0)
+            tiered_pager_point(mut input, mut local_cache, store_key_from_rep(owner), demand)?
+        },
+    }
+    let _ = failure_result_from_rep(pager.tiered_install_delivery(take delivered, root, state.stamps, mut pins, mut pending))?
+    Ok(())
+}

@@ -85,7 +85,7 @@ fn journal_end_bytes(id: StoreId, seq: u64, end: u64) -> Bytes {
     take raw
 }
 
-fn journal_initial() -> JournalReplay {
+fn journal_initial() -> pager.JournalReplay {
     journal_main(pages.empty_roots(), 0, 0, 0)
 }
 

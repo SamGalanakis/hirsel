@@ -446,7 +446,7 @@ fn test_l98_memory_index_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 // One lookup of bucket 3 through the index, with the writer partition set to
 // `pin_bytes`, returns the call's refusal fields.
 fn l98_refusal(mut db: Db, handles: TxReadHandles, pin_bytes: u64) -> Result[(u64, u64), Error] waits {
-    let partition = replace(mut db.writer_pin_bytes, pin_bytes)
+    let partition = pager.replace_writer_pin_bytes(mut db.pager, pin_bytes)
     let outcome = run(mut db, Some(10000000), copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
         let mut seen = 0u64
         let mut rows = lookup(tx, env.ix, Included(3u64), Included(3u64))?
@@ -455,7 +455,7 @@ fn l98_refusal(mut db: Db, handles: TxReadHandles, pin_bytes: u64) -> Result[(u6
         }
         Ok(seen)
     })
-    db.writer_pin_bytes = partition
+    let _ = pager.replace_writer_pin_bytes(mut db.pager, partition)
     let Refused(Cache(problem)) = outcome? else {
         fail("L98 (a'): a Tiered index read past the writer partition is Refused(Cache)")
     }

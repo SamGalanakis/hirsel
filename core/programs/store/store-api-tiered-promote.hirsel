@@ -1,0 +1,103 @@
+fn promotion_has_overlay(tree: pages.PageTree, collection: u32) -> bool {
+    let Some(overlay) = view tree.replay else {
+        return false
+    }
+    match std.omap.get(overlay.collections, collection) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// §13.5 step 2 at the cut that publishes a historical pin or a cut-path
+// fork. Each Tiered collection of the added root resolves against the lookup
+// roots: every other participant after the fold, the installed queue and
+// this cut's added rows. A collection whose root takes another location is
+// re-pointed in a copy of the collection map with fresh stamps, so the
+// Memory classes emit the map again. Whether the published generation lists
+// a pack is the installed inventory's answer; the Snapshot's own inventory,
+// which its lease keeps readable, reads what it captured. A refusal here
+// refuses the cut: promotion is mandatory.
+fn promote_cut_holder(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]], mut roots: List[pages.Roots], at: u64, queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
+    let mut collections: List[(u32, std.page.Slot)] = list.new()
+    failure_result_from_rep(pager.promotion_tiered_collections(roots[at].collections.root, mut collections))?
+    if list.len(collections) == 0 {
+        return Ok((false, false))
+    }
+    let Some(requests) = pager_link else {
+        return Error(Io(Closed))
+    }
+    let installed = disk_state(db).packs
+    let paging = recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp)?
+    let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
+    let captured_packs = match view roots[at].collections.paging {
+        Some(inventory) => std.omap.snapshot(inventory.packs),
+        None => std.omap.snapshot(paging.packs),
+    }
+    let captured = pager.TieredPageSource(pager: channel.sender(requests), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
+    let mut probed_through: Map[u64, u64] = map.new()
+    for (seq, cursor) in pager.disk_compaction(disk_state(db).tiered).probes {
+        failure_result_from_rep(types.capacity(map.try_reserve(mut probed_through, 1)))?
+        map.insert(mut probed_through, seq, cursor.next_data - 1)
+    }
+    let mut queue_roots: List[pager.TieredPromotionRoot] = list.new()
+    let mut rows = std.page.cursor_open(arc.share(manifest.pack_lists(installed).deferred), None, true, false)
+    while let Some(queue_row) = std.page.cursor_next(mut rows) {
+        failure_result_from_rep(pager.promotion_queue_root(source, manifest.queued_free(queue_row.value), mut queue_roots))?
+    }
+    for added in queued {
+        failure_result_from_rep(pager.promotion_queue_root(source, added, mut queue_roots))?
+    }
+    let captured_root = arc.share(roots[at].collections.root)
+    let mut map_root = arc.share(roots[at].collections.root)
+    let mut resolved_bases: Map[u32, std.page.Slot] = map.new()
+    let mut changed = false
+    for (collection, edge) in collections {
+        let mut against: List[pager.TieredPromotionRoot] = list.new()
+        for slot in 0u64 .. list.len(roots) {
+            if slot == at {
+                continue
+            }
+            if let Some(take other) = failure_result_from_rep(pager.promotion_collection_root(roots[slot].collections, collection))? {
+                failure_result_from_rep(types.capacity(list.try_reserve(mut against, 1)))?
+                list.push(mut against, PromotionPage(take other))
+            }
+        }
+        failure_result_from_rep(types.capacity(list.try_reserve(mut against, list.len(queue_roots))))?
+        for queue_root in queue_roots {
+            list.push(mut against, clone(queue_root))
+        }
+        let cut = pager.TieredPromotion(installed: pager.share_page_source(source), captured: pager.share_page_source(captured), lookup: take against, probed_through: clone(probed_through))
+        let resolved = failure_result_from_rep(pager.promotion_resolve_page(cut, collection, edge))?
+        // §13.5 steps 2 then 3: a collection with a replay overlay already
+        // carries its post-overlay totals in its descriptor. Pass the
+        // resolved base straight to `promotion_materialize` so
+        // `install_tiered_root` checks totals against the materialized root.
+        if promotion_has_overlay(roots[at].collections, collection) {
+            failure_result_from_rep(types.capacity(map.try_reserve(mut resolved_bases, 1)))?
+            map.insert(mut resolved_bases, collection, take resolved)
+            continue
+        }
+        if let (ColdPage(before), ColdPage(after)) = (view edge, view resolved) {
+            if before == after {
+                continue
+            }
+        }
+        let key = failure_result_from_rep(catalog.prefix(collection))?
+        let draw_from = next_stamp
+        let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+            let mut candidate = arc.share(map_root)
+            let mut draw = draw_from
+            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, resolved, mut draw)))?
+            Ok((take candidate, draw))
+        })?
+        map_root = take mapped
+        next_stamp = following
+        changed = true
+    }
+    if changed {
+        roots[at].collections.root = take map_root
+    }
+    let materialized = failure_result_from_rep(pager.promotion_materialize(captured, source, captured_root, resolved_bases, mut roots[at].collections, mut next_stamp))?
+    Ok((changed, materialized))
+}

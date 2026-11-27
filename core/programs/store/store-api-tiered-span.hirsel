@@ -1,0 +1,43 @@
+fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
+    let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
+    snapshot_tiered_span_step_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, take grant, root, s, low, high, previous)
+}
+
+fn snapshot_tiered_span_step_direct(d: Dir, owner: StoreId, pin_bytes: u64, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
+    let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: s.open, pin_bytes: pin_bytes)))
+    })?
+    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections))
+    snapshot_tiered_span_step_with(PagerDirect(d, store_key_to_rep(owner)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, take grant, root, s, low, high, previous)
+}
+
+fn snapshot_tiered_span_step_with(take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, s: Snapshot, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
+    let beginning = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        match previous {
+            Some(last_key) => failure_result_from_rep(pager.scan_page_after(last_key)),
+            None => failure_result_from_rep(types.copied(low)),
+        }
+    })?
+    let empty_hint: Bytes = list.new()
+    retry_tiered_read_with(take backend, packs, next_stamp, deadline, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+        let Some((take key, take value)) = failure_result_from_rep(pager.tiered_span_row(attempt, visible, s.roots.collections, beginning, high))? else {
+            return Ok(None)
+        }
+        let resume = failure_result_from_rep(types.copied(key))?
+        Ok(Some((take key, take value, take resume)))
+    })
+}
+
+fn snapshot_tiered_span(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes) -> Result[List[Change], Error] waits {
+    let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
+    let empty_hint: Bytes = list.new()
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[List[Change], Error] {
+        let mut out: List[Change] = list.new()
+        let mut start = failure_result_from_rep(types.copied(low))?
+        while let Some((take key, take value)) = failure_result_from_rep(pager.tiered_span_row(attempt, visible, s.roots.collections, start, high))? {
+            start = failure_result_from_rep(pager.scan_page_after(key))?
+            list.push(mut out, Change(tree_key: take key, value: Some(take value)))
+        }
+        Ok(take out)
+    })
+}

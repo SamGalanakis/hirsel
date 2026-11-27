@@ -1,0 +1,3 @@
+fn forge_pager_state() -> store.pager.PagerState {
+    store.pager.PagerState(pager: None, pager_writer: None, park_notices: None, parked: store.pager.ParkQueue(entries: list.new(), next_id: 0, drain: None), writer_pin_bytes: 0)
+}

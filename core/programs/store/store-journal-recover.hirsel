@@ -7,7 +7,7 @@ fn journal_input(take file: HostFile, flush: bool) -> Result[format.JournalInput
 }
 
 type JournalRecovered {
-    replay: JournalReplay,
+    replay: pager.JournalReplay,
     seq: u64,
     end: u64,
     uncovered: u64
@@ -20,7 +20,7 @@ fn journal_refresh_size(mut input: format.JournalInput, boundary: Option[u64]) -
     failure_result_from_rep(format.refresh_journal_size(mut input, boundary))
 }
 
-fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
+fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: pager.JournalReplay) -> Result[JournalRecovered, Error] waits {
     let mut replay = take initial
     let mut seq = first
     let mut uncovered = 0u64
@@ -42,7 +42,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
             None => true,
             Some(_) => false
         }
-        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })
         let consumed_file = format.take_journal_file(take source)
@@ -75,7 +75,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
     }
 }
 
-fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: format.JournalFork) -> Result[(), Error] {
+fn journal_apply_fork(file: String, mut replay: pager.JournalReplay, take encoded: format.JournalFork) -> Result[(), Error] {
     let format.JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
     if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {
         return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
@@ -233,7 +233,7 @@ fn capture_fence(d: Dir, c: Clock, deadline: u64, mut walk: CaptureWalk) -> Resu
     }
 }
 
-fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
+fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
     let CaptureWalk(segments: take selected, torn_tail: torn_tail, ..) = take walk
     let mut segments = take selected
     let segment_count = list.len(segments)
@@ -257,7 +257,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut source = journal_input(take opened, torn)?
         journal_refresh_size(mut source, boundary)?
-        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })?
         let consumed = format.take_journal_file(take source)
@@ -270,7 +270,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
     Ok(take replay)
 }
 
-fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.JournalCommit) -> Result[(), Error] {
+fn journal_apply_commit(file: String, mut replay: pager.JournalReplay, commit: format.JournalCommit) -> Result[(), Error] {
     // Section 3.4 step 6: the branch must exist, and the version is its head + 1.
     let total_count = list.len(replay.state.tips)
     let mut i = total_count
@@ -282,7 +282,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.
     if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
         return Error(failure_from_rep(format.disk_fault(file, 0, Gap(commit.version))))
     }
-    failure_result_from_rep(format.replay_within_limits(file, limits_to_rep(replay.limits), commit))?
+    failure_result_from_rep(format.replay_within_limits(file, replay.limits, commit))?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, replay.immutable)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, replay.immutable)?
     if list.len(commit.keyed) != 0 {
@@ -303,7 +303,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.
     Ok(())
 }
 
-fn journal_apply(file: String, mut replay: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+fn journal_apply(file: String, mut replay: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
     match take event {
         Commit(take commit) => journal_apply_commit(file, mut replay, commit),
         Fork(take encoded) => journal_apply_fork(file, mut replay, take encoded),
@@ -312,7 +312,7 @@ fn journal_apply(file: String, mut replay: JournalReplay, take event: format.Jou
 
 // Replay settles the Memory union from the final roots. A put can make
 // the head and a pin share a row version again, lowering that union.
-fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: List[format.JournalOp], mut account: ReplayTieredAccount, immutable: bool) -> Result[(), Error] {
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: List[format.JournalOp], mut account: pager.ReplayTieredAccount, immutable: bool) -> Result[(), Error] {
     if list.len(ops) == 0 {
         return Ok(())
     }
@@ -332,7 +332,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
                 let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
                     return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
-                journal_collection_descriptor(descriptor)
+                pager.journal_collection_descriptor(descriptor)
             }
             if let Some(before) = tiered_descriptor {
                 replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op)?

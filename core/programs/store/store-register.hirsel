@@ -151,7 +151,7 @@ fn history_register_publish(mut client: std.object.Client, mut register: History
             HistoryUnknown => Ok(HistoryUndecided),
         }
     }
-    history_fill_key(mut buffers.key, "e-", candidate.entry)
+    pager.history_fill_key(mut buffers.key, "e-", candidate.entry)
     history_encode_register_head(mut buffers.body, candidate, authority, register.attach)?
     if let Error(take problem) = history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline) {
         register.terminal = Some(HistoryFault(clone(problem)))

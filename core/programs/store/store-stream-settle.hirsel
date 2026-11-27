@@ -41,7 +41,7 @@ fn stream_settle_publish(mut lane: ObjectJournalSession, sid: HostStreamId, inc:
     if has_entry {
         let next_pos = history_next_id(candidate.entry.seq)?
         candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, lane.buffers.packet)
-        history_fill_key(mut lane.buffers.key, "e-", candidate.entry)
+        pager.history_fill_key(mut lane.buffers.key, "e-", candidate.entry)
         list.clear(mut lane.buffers.compare)
         failure_result_from_rep(types.capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet))))?
         history_create(mut lane.client, lane.buffers.key, mut lane.buffers.packet, mut lane.buffers.compare, deadline)?

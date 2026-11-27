@@ -93,7 +93,8 @@ def crash_inputs(root):
 
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
-                    'view_tx_write_refused', 'journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused')
+                    'view_tx_write_refused', 'journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused',
+                    'pager_state_refused', 'disk_pager_state_refused')
 
 
 def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
@@ -103,7 +104,8 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
         source = dict(
             file=str(root / ('core/programs/store/' + control + '.hirsel')),
             modules=[control], signatures=False)
-        if control in ('journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused'):
+        if control in ('journal_input_refused', 'holder_table_refused', 'declare_state_refused', 'pack_disk_state_refused',
+                       'pager_state_refused', 'disk_pager_state_refused'):
             negative['packages'].append({
                 'package': {'name': control, 'version': '1'},
                 'dependencies': [{'name': 'core', 'version': '1'}, {'name': 'store', 'version': '1'}],
@@ -123,6 +125,8 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
             'journal_input_refused': [('PROG-2', '`store@1/format/JournalInput` is private or opaque')],
             'holder_table_refused': [('PROG-2', '`store@1/pages/HolderTable` is private or opaque')],
             'pack_disk_state_refused': [('PROG-2', '`store@1/manifest/PackDiskState` is private or opaque')],
+            'pager_state_refused': [('PROG-2', '`store@1/pager/PagerState` is private or opaque')],
+            'disk_pager_state_refused': [('PROG-2', '`store@1/pager/DiskPagerState` is private or opaque')],
             'declare_state_refused': [('PROG-2', '`store@1/catalog/DeclareState` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],

@@ -49,7 +49,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let before = pages.share_roots(pages.holder_heads(source.db.holders)[0].roots)
     let state = deploy_result(failure_result_from_rep(types.capacity(current_state(source.db))))?
-    let mut initial = deploy_result(journal_replay(take state, pages.holder_next_node(source.db.holders), source.db.limits))?
+    let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(source.db.holders), limits_to_rep(source.db.limits))))?
     initial.tiered.total = source.db.tiered
     let steps = read_steps(d, stamp)?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
@@ -71,7 +71,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     if list.len(deferred) != 0 {
         let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: pages.share_roots(before), watermark: pages.holder_next_node(source.db.holders) + 1, bases: pages.no_tail_bases())
         let after_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: stamp.head, roots: pages.share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: pages.no_tail_bases())
-        let tiered_rows = catch_up_tiered_diffs(source.dir, id, source.db.writer_pin_bytes, before_snap, after_snap, deferred)?
+        let tiered_rows = catch_up_tiered_diffs(source.dir, id, pager.pin_partition(source.db.pager), before_snap, after_snap, deferred)?
         for take item in take tiered_rows {
             list.push(mut row_changes, take item)
         }
@@ -82,12 +82,12 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let mut cut_ctx = child_cut_context(source)
     deploy_result(patch_index_ranges(mut cut_ctx, stamp.opened, mut staged.plan, before.collections, shipped, row_changes, mut touched))?
     save_child_cut_pack(source, cut_ctx.next_pack)
-    let ops = deploy_result(round_ops_direct(source.dir, id, source.db.writer_pin_bytes, stamp.opened, staged.plan.schema.roots.collections, mut touched))?
+    let ops = deploy_result(round_ops_direct(source.dir, id, pager.pin_partition(source.db.pager), stamp.opened, staged.plan.schema.roots.collections, mut touched))?
     let round_totals = deploy_result(range_totals(staged.plan.schema.roots.collections, round_ranges))?
     let round = last_round + 1
     write_round(d, id, RoundMeta(round: round, from: clone(source.stamp), to: clone(stamp), ops: list.len(ops), totals: take round_totals), ops)?
     let live_bytes = deploy_result(journal_account(replayed))?
-    let JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
+    let pager.JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
     source.db.resident = live_bytes
     source.db.tiered = tiered_account.total

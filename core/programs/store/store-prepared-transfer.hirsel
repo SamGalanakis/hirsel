@@ -10,10 +10,10 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
         save_child_cut_pack(source, ctx.next_pack)
     }
     if list.len(staged.queued_rewrites) != 0 {
-        let backend = PagerDirect(source.dir, source.db.store)
-        deploy_result(check_queued_rewrites(clone_pager_backend(backend), source.db.writer_pin_bytes, source.stamp.opened, source.db.store, staged, built_roots.collections))?
+        let backend: pager.TieredPageBackend = PagerDirect(source.dir, store_key_to_rep(source.db.store))
+        deploy_result(check_queued_rewrites(clone_pager_backend(backend), pager.pin_partition(source.db.pager), source.stamp.opened, source.db.store, staged, built_roots.collections))?
         let mut cut_opt: Option[ChildCutContext] = Some(child_cut_context(source))
-        extra_rewrites = deploy_result(apply_queued_rewrites(take backend, source.db.writer_pin_bytes, source.stamp.opened, source.db.store, mut built_roots.collections, mut built_next_node, staged.queued_rewrites, mut cut_opt))?
+        extra_rewrites = deploy_result(apply_queued_rewrites(take backend, pager.pin_partition(source.db.pager), source.stamp.opened, source.db.store, mut built_roots.collections, mut built_next_node, staged.queued_rewrites, mut cut_opt))?
         if let Some(ctx) = cut_opt {
             save_child_cut_pack(source, ctx.next_pack)
         }
@@ -25,7 +25,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
     let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
     for desc in ranges {
         if deploy_result(table_is_tiered(built_roots.collections, desc.id))? {
-            let (row_total, digest) = deploy_result(tiered_range_inventory_direct(source.dir, source.db.store, source.db.writer_pin_bytes, snap, desc.id))?
+            let (row_total, digest) = deploy_result(tiered_range_inventory_direct(source.dir, source.db.store, pager.pin_partition(source.db.pager), snap, desc.id))?
             list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: digest))
         } else {
             let mut cursor = deploy_result(entries_of(built_roots.collections, desc.id))?
@@ -70,7 +70,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
     }
     for desc in inventory {
         if deploy_result(table_is_tiered(built_roots.collections, desc.id))? {
-            write_tiered_prepared_rows_direct(mut file, source.dir, source.db.store, source.db.writer_pin_bytes, snap, desc.id, row_codec)?
+            write_tiered_prepared_rows_direct(mut file, source.dir, source.db.store, pager.pin_partition(source.db.pager), snap, desc.id, row_codec)?
         } else {
             let mut rows = deploy_result(entries_of(built_roots.collections, desc.id))?
             while let Some((take key, value)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut rows)))? {

@@ -1,0 +1,363 @@
+// A drained page hands its child pages, or a leaf its blobs, to the queue.
+pub fn queue_page_children(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u32, mut out: List[manifest.DeferredFree]) -> Result[(), types.Failure] waits {
+    let frame = fold_frame_at(cut, TieredPage(ptr))?
+    let image = std.page.image_of(manifest.fold_page(frame))
+    for slot in 0u64 .. std.page.count(image) {
+        let edge: Option[format.TieredTarget] = match std.page.owning_edge(image, slot) {
+            Some(PageEdge(child)) => Some(TieredPage(child)),
+            Some(BlobEdge(body)) => Some(TieredBlob(body)),
+            None => None,
+        }
+        if let Some(take child) = take edge {
+            types.capacity(list.try_reserve(mut out, 1))?
+            list.push(mut out, manifest.DeferredFree(branch_id: branch_id, target: take child))
+        }
+    }
+    Ok(())
+}
+
+fn drain_queue_row(cut: TieredPageSource, seq: u64, row: manifest.DeferredFree, mut queue: manifest.CutQueue, mut pages: u64) -> Result[(), types.Failure] waits {
+    let frame = match row.target {
+        TieredPage(ptr) => {
+            queue_page_children(cut, ptr, row.branch_id, mut queue.added)?
+            pages += 1
+            manifest.replaced_page(ptr)
+        },
+        TieredBlob(body) => manifest.replaced_blob(body),
+    }
+    types.capacity(list.try_reserve(mut queue.drained, 1))?
+    types.capacity(list.try_reserve(mut queue.kills, 1))?
+    list.push(mut queue.drained, seq)
+    list.push(mut queue.kills, manifest.TieredDrainKill(branch_id: row.branch_id, frame: frame))
+    Ok(())
+}
+
+// T8 step 4 (§13.6 "Deferred frees"): oldest first, up to `budget` pages of
+// the installed rows and then this cut's added rows, the first at `next_seq`.
+// A drained page's children join the end and may drain at this cut. A row
+// this cut's compaction moved (`moving`) stays queued under its new value,
+// so the drain never reads a frame the cut has just moved.
+pub fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], next_seq: u64, mut queue: manifest.CutQueue, moving: Map[u64, TieredQueueMove], budget: u64) -> Result[(), types.Failure] waits {
+    let mut pages = 0u64
+    let mut cursor = std.page.cursor_open(arc.share(installed), None, true, false)
+    while pages < budget {
+        let Some(row) = std.page.cursor_next(mut cursor) else {
+            break
+        }
+        let seq: u64 = list.word_be(row.key, 0)
+        if map.contains(moving, seq) {
+            continue
+        }
+        drain_queue_row(cut, seq, manifest.queued_free(row.value), mut queue, mut pages)?
+    }
+    let mut at = 0u64
+    while pages < budget && at < list.len(queue.added) {
+        if !map.contains(moving, next_seq + at) {
+            let row: manifest.DeferredFree = clone(queue.added[at])
+            drain_queue_row(cut, next_seq + at, row, mut queue, mut pages)?
+        }
+        at += 1
+    }
+    Ok(())
+}
+
+pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], mut ops: pages.DataRows, order: format.DataOrder, tail: u64, streams: pages.DataRows, call: Option[format.CallView], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+    let keyed_size = match keyed {
+        Some(draft) => format.keyed_frame_bytes(draft.edits),
+        None => 0u64
+    }
+    let data = pages.data_row_count(ops) != 0 || (pages.data_row_count(streams) == 0 && keyed_size == 0)
+    let control = pages.stream_control_slot(streams)
+    let control_count = if let Some(_) = control {
+        1u64
+    } else {
+        0u64
+    }
+    let stream_count = pages.data_row_count(streams) - control_count
+    let sections = (if data {
+        1u64
+    } else {
+        0u64
+    }) + (if stream_count != 0u64 {
+        1u64
+    } else {
+        0u64
+    }) + control_count
+    let keyed_sections = if keyed_size == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let mut size = 21 + 5 * sections + keyed_size
+    for slot in 0u64 .. pages.data_row_count(ops) {
+        let operation = pages.data_row(ops, slot)
+        size += format.data_op_size(operation, false)
+    }
+    for slot in 0u64 .. pages.data_row_count(streams) {
+        let operation = pages.data_row(streams, slot)
+        size += format.data_op_size(operation, true)
+        if let (Some(_), Some(record)) = (view operation.value, view call) {
+            if format.stream_record_matches(operation.key, record.issuer, record.subject, record.t, record.n) {
+                size += format.call_section_bytes(record.key, record.args, record.revision, record.code, settlement)
+            }
+        }
+    }
+    if size + 16 > frame_limit {
+        return Error(Capacity(requested: size + 16, available: frame_limit))
+    }
+    let room = 16 + size + format.BINDING_BYTES
+    let mut out: Bytes = if tail == 0 {
+        bytebuf.from_tail(mut ops.first[0].key, room)
+    } else if tail == 1 {
+        bytebuf.from_tail(mut ops.first[1].key, room)
+    } else if tail < pages.OPEN_FRAME_TAIL {
+        bytebuf.from_tail(mut ops.rest[tail - 2].key, room)
+    } else {
+        list.with_capacity(room)
+    }
+    format.le(mut out, 0x0011, 2)?
+    format.le(mut out, 1, 2)?
+    format.le(mut out, size, 4)?
+    format.le(mut out, 0, 8)?
+    format.le(mut out, int.widen(branch), 4)?
+    format.le(mut out, version, 8)?
+    format.le(mut out, at, 8)?
+    format.le(mut out, sections + keyed_sections, 1)?
+    if data {
+        encode_data_ops(mut out, base, prior_stamp, tiered, ops, order)?
+    }
+    if stream_count != 0u64 {
+        encode_stream_ops(mut out, streams, stream_count, call, settlement)?
+    }
+    if let Some(slot) = control {
+        format.le(mut out, 2u64, 1u64)?
+        format.le(mut out, 1u64, 4u64)?
+        let operation = pages.data_row(streams, slot)
+        format.encode_data_op(mut out, operation.key, operation.value, None)?
+    }
+    if let Some(draft) = keyed {
+        format.encode_keyed_edits(mut out, draft.edits)?
+    }
+    format.seal_frame(mut out, format.DiskContext(store: store, role: 2, seq: seq), offset)?
+    Ok(take out)
+}
+
+pub fn ordered_row(ops: pages.DataRows, order: format.DataOrder, slot_order: u64) -> View[format.DataOp] in ops {
+    let slot = match order {
+        InOrder => slot_order,
+        ReversePair => 1 - slot_order,
+        SortedSlots(slots) => slots[slot_order],
+    }
+    pages.data_row(ops, slot)
+}
+
+fn encode_data_ops(mut payload: Bytes, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], ops: pages.DataRows, order: format.DataOrder) -> Result[(), Capacity] {
+    let use_cached_prior = match base {
+        Some(head) => prior_stamp == Some(pages.tree_stamp(head)),
+        None => false,
+    }
+    format.le(mut payload, 0, 1)?
+    format.le(mut payload, pages.data_row_count(ops), 4)?
+    for slot_order in 0u64 .. pages.data_row_count(ops) {
+        let op = ordered_row(ops, order, slot_order)
+        let delta = match tiered {
+            Some(slots) => slots[slot_order],
+            None => None,
+        }
+        if let Some(trim) = op.trim {
+            let dropped = match delta {
+                Some(TieredDropped(bytes_dropped)) => bytes_dropped,
+                _ => trim.dropped,
+            }
+            format.encode_log_trim(mut payload, op.key, trim.floor, dropped)
+            continue
+        }
+        let prior = match (delta, use_cached_prior, op.prior, base) {
+            (Some(TieredPrior(prior)), _, _, _) => prior,
+            (_, true, Some(prior), _) => prior,
+            (_, _, _, Some(head)) => {
+                if pages.collection_kind(head, list.slice(op.key, 0, 4)) == Some(LogCollection) {
+                    0u32
+                } else {
+                    format.stored_prior(pages.get_page_row(head, op.key))
+                }
+            },
+            (_, _, _, None) => 0,
+        }
+        format.encode_data_op(mut payload, op.key, op.value, Some(prior))?
+    }
+    Ok(())
+}
+
+fn encode_stream_ops(mut payload: Bytes, ops: pages.DataRows, stream_count: u64, call: Option[format.CallView], settlement: Option[format.Settlement]) -> Result[(), Capacity] {
+    format.le(mut payload, 1, 1)?
+    format.le(mut payload, stream_count, 4)?
+    let order = pages.data_order(ops)?
+    for slot_order in 0u64 .. pages.data_row_count(ops) {
+        let operation = ordered_row(ops, order, slot_order)
+        if list.len(operation.key) != 0u64 {
+            format.encode_stream_op(mut payload, operation, call, settlement)?
+        }
+    }
+    Ok(())
+}
+
+pub type JournalReplay {
+    state: pages.State,
+    immutable: bool,
+    names: Map[String, u32],
+    record_bytes: u64,
+    next_node: u64,
+    tiered: ReplayTieredAccount,
+    forked: List[manifest.LineageFork],
+    // D-CU-1 / 3177 F4: collection ids superseded by replay steps in this
+    // round (skipped by catch-up diff) and Cold roots freed by superseding.
+    superseded: List[u32],
+    deferred_frees: List[manifest.DeferredFree],
+    // The recorded limits every replayed frame is checked against (§11.1 AP4a).
+    limits: types.LimitsRep
+}
+
+pub fn journal_replay(take state: pages.State, next_node: u64, limits: types.LimitsRep) -> Result[JournalReplay, types.Failure] {
+    let (take names, total) = manifest.disk_allocation(scoped fn() -> Result[(Map[String, u32], u64), types.Failure] {
+        let mut names: Map[String, u32] = map.new()
+        types.capacity(map.try_reserve(mut names, list.len(state.tips)))?
+        let mut total = 0u64
+        for held in state.pins {
+            total += manifest.pin_root_bytes(held.name, held.roots)
+        }
+        for head in state.tips {
+            total += manifest.branch_root_bytes(head.name, head.roots)
+            map.insert(mut names, string.from(head.name), head.id)
+        }
+        Ok((take names, total))
+    })?
+    let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
+    Ok(JournalReplay(state: take state, immutable: false, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), superseded: list.new(), deferred_frees: list.new(), limits: limits))
+}
+
+// The call multiplexer (§13.3a): the Db task's queue of served calls whose
+// attempt latched a miss, the one-slot writer channel their demands go out
+// on, and the attempt loop `serve` and `resume` share.
+pub type ParkEntry {
+    id: u64,
+    ready: bool,
+    attempts: u64,
+    pins: TieredPins,
+    // The touched stamps of the entry's last attempt, which protect the pins
+    // that attempt read.
+    stamps: Map[u64, ()],
+    // The demand not yet sent, and the answer to the one in flight.
+    demand: Option[TieredPointDemand],
+    answer: Option[Receiver[Result[TieredPointDelivery, types.Failure]]],
+    pending: Option[(format.TieredTarget, types.Failure)],
+    // A failure the next resume returns before it runs anything.
+    failed: Option[types.Failure],
+    crowded: bool
+}
+
+pub type ParkQueue {
+    // Ascending by id: an id is the entry's place in the queue.
+    entries: List[ParkEntry],
+    next_id: u64,
+    // A detached answer receiver, drained and dropped (§13.3a "Detaching").
+    drain: Option[Receiver[Result[TieredPointDelivery, types.Failure]]]
+}
+
+pub fn empty_park_queue() -> ParkQueue {
+    ParkQueue(entries: list.new(), next_id: 0, drain: None)
+}
+
+pub fn park_slot(q: ParkQueue, id: u64) -> Option[u64] {
+    for k in 0u64 .. list.len(q.entries) {
+        if q.entries[k].id == id {
+            return Some(k)
+        }
+    }
+    None
+}
+
+// Moves an entry's answer to the drain slot. An older detached receiver is
+// dropped, so the pager's answer into it fails and frees its frames.
+pub fn detach_answer(mut q: ParkQueue, k: u64) {
+    if let Some(take answer) = replace(mut q.entries[k].answer, None) {
+        q.drain = Some(take answer)
+    }
+}
+
+// A revocation (§13.3a "Wake sources"): the entry loses its pins, its
+// stamps and its demand, and is ready to rerun in its place.
+pub fn revoke_entry(mut q: ParkQueue, k: u64, root: TieredPinRoot) {
+    detach_answer(mut q, k)
+    q.entries[k].demand = None
+    q.entries[k].pins = empty_tiered_pins(root, q.entries[k].pins.partition)
+    q.entries[k].stamps = map.new()
+    q.entries[k].ready = true
+}
+
+pub fn parked_in_flight(q: ParkQueue) -> bool {
+    if let Some(_) = q.drain {
+        return true
+    }
+    for queued in q.entries {
+        if let Some(_) = queued.answer {
+            return true
+        }
+    }
+    false
+}
+
+pub fn first_unsent(q: ParkQueue) -> Option[u64] {
+    for k in 0u64 .. list.len(q.entries) {
+        if let Some(_) = q.entries[k].demand {
+            return Some(k)
+        }
+    }
+    None
+}
+
+pub fn history_fill_key(mut key: String, lead: String, reference: pages.HistoryRef) {
+    string.clear(mut key)
+    string.push(mut key, lead)
+    format.history_number(mut key, reference.seq)
+    string.push_char(mut key, '-')
+    format.history_number(mut key, reference.epoch)
+    string.push_char(mut key, '-')
+    std.hex.push_u64(mut key, reference.digest)
+}
+
+pub fn history_missing_object(path: String, reference: pages.HistoryRef) -> types.Failure {
+    let missing_seq = if string.starts_with(path, "e-") {
+        Some(reference.seq)
+    } else {
+        None
+    }
+    match (bound bytes format.round8(string.byte_len(path)) {
+        string.from(path)
+    }) {
+        Ok(take name) => HistoryMissing(take name, missing_seq),
+        Error(problem) => Full(Allocation(problem)),
+    }
+}
+
+// A disposable pack cache below a host-granted directory.
+pub type ObjectsCache: send {
+    dir: Dir,
+    capacity_bytes: u64
+}
+
+pub fn scan_page_after(key: Bytes) -> Result[Bytes, types.Failure] {
+    let mut after = types.copied(key)?
+    list.push(mut after, 0u8)
+    Ok(take after)
+}
+
+pub fn log_key(id: u32, seq: u64) -> Result[Bytes, types.Failure] {
+    let mut key = catalog.prefixed(id, 8, false)?
+    list.put_word_be(mut key, seq)
+    Ok(take key)
+}
+
+pub fn descriptor_bounds(descriptor: Bytes) -> pages.LogBoundsRep {
+    pages.LogBoundsRep(first: list.word_le(descriptor, 64), next: list.word_le(descriptor, 56))
+}

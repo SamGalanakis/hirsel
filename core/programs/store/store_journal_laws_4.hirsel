@@ -397,7 +397,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
-    let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let s_e = 200000u64
     // The least n_e that admits the body.
     let mut low = 1u64
@@ -688,8 +688,8 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn journal_main(take roots: pages.Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
-    result.unwrap(journal_replay(result.unwrap(pages.main_state(take roots, head, at)), next_node, default_limits()))
+fn journal_main(take roots: pages.Roots, head: u64, at: u64, next_node: u64) -> pager.JournalReplay {
+    result.unwrap(failure_result_from_rep(pager.journal_replay(result.unwrap(pages.main_state(take roots, head, at)), next_node, limits_to_rep(default_limits()))))
 }
 
 fn disk_window_width(commit_number: u64) -> u64 {

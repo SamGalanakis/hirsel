@@ -55,12 +55,11 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned_ranges(mut schema_change, ranges)?
     let has_tiered = pages.tiered_collections(schema_change.schema.roots.collections.root) || store_has_tiered(db)
     let started_pager = if has_tiered {
-        match db.pager {
-            Some(_) => false,
-            None => {
-                deploy_result(start_residency_pager(mut db))?
-                true
-            },
+        if pager.has_requests(db.pager) {
+            false
+        } else {
+            deploy_result(start_residency_pager(mut db))?
+            true
         }
     } else {
         false

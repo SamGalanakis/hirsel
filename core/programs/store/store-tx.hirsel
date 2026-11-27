@@ -655,7 +655,7 @@ fn transaction_write_height(tx: Tx, key: Bytes) -> Result[u64, Error] {
     let Some(attempt) = tx.attempt else {
         return Ok(collection_write_height(tree, key))
     }
-    if tiered_stopped(attempt) {
+    if pager.tiered_stopped(attempt) {
         return Error(Missed)
     }
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
@@ -664,15 +664,15 @@ fn transaction_write_height(tx: Tx, key: Bytes) -> Result[u64, Error] {
     if pages.collection_descriptor(descriptor).residency == ResidentMemory {
         return Ok(collection_write_height(tree, key))
     }
-    tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key))))?))
-    let root = tiered_point_page(attempt, tx.pins, edge, None)?
-    tiered_seek(attempt, SeekOperation)
+    pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key))))?))
+    let root = failure_result_from_rep(pager.tiered_point_page(attempt, tx.pins, edge, None))?
+    pager.tiered_seek(attempt, SeekOperation)
     Ok(tree_height(tree) + int.widen(std.page.level(std.page.image_of(root))) + 1)
 }
 
 fn transaction_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     if let Some(attempt) = tx.attempt {
-        if tiered_blocked(attempt) {
+        if pager.tiered_blocked(attempt) {
             return Error(Missed)
         }
     }
@@ -711,7 +711,7 @@ fn staged_op(tx: Tx, key: Bytes) -> Option[View[format.DataOp]] in tx {
 
 fn check_write_attempt(tx: Tx) -> Result[(), Error] {
     if let Some(attempt) = tx.attempt {
-        if tiered_stopped(attempt) {
+        if pager.tiered_stopped(attempt) {
             return Error(Missed)
         }
     }
@@ -720,7 +720,7 @@ fn check_write_attempt(tx: Tx) -> Result[(), Error] {
 
 fn memory_data_charge(tx: Tx, key: Bytes, raw: Bytes) -> u64 {
     if let Some(_) = tx.attempt {
-        if tiered_data_key(tx.roots.collections, key) {
+        if pager.tiered_data_key(tx.roots.collections, key) {
             return 0
         }
     }

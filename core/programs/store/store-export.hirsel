@@ -717,13 +717,13 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
         let state = failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))?
         Ok((take state, tiered))
     }))?
-    let replay = deploy_result(journal_replay_manifest(take initial, selected))?
+    let replay = deploy_result(failure_result_from_rep(pager.journal_replay_manifest(take initial, selected)))?
     let replayed = deploy_result(replay_export(d, id, selected.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }
     let live_bytes = deploy_result(journal_account(replayed))?
-    let JournalReplay(state: take state, next_node: ids, tiered: tiered_account, ..) = take replayed
+    let pager.JournalReplay(state: take state, next_node: ids, tiered: tiered_account, ..) = take replayed
     let admitted = if has_tiered {
         int.saturating_add(live_bytes, tiered_plan_reserve(options))
     } else {
@@ -808,7 +808,7 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
 // where the previous round ended (STORE-SPEC §3.5a "Catch-up"), and applies
 // the round's STEPS where main's versions fall: each before the first main
 // commit or fork of main that follows it, the rest at the end.
-fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limit: u64, steps: List[ReplayStep], take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
+fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limit: u64, steps: List[ReplayStep], take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
     let mut replay = take initial
     let mut seq = first
     let mut start = from
@@ -828,7 +828,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
         if seq == terminal && format.journal_input_size(source) > boundary {
             return Error(failure_from_rep(format.disk_fault(path, boundary, Malformed)))
         }
-        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             let through = match event {
                 Commit(commit) => if commit.branch == 0u32 {
                     int.saturating_sub(commit.version, 1u64)
@@ -861,7 +861,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
 // accounting, queues its old Cold root in `deferred_frees`, replaces it with an
 // empty collection of the same residency, and records the id in `superseded` so
 // catch-up diff skips it.
-fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep], mut stepped: u64, through: u64) -> Result[(), Error] {
+fn apply_steps(file: String, mut replay: pager.JournalReplay, steps: List[ReplayStep], mut stepped: u64, through: u64) -> Result[(), Error] {
     while stepped < list.len(steps) && steps[stepped].version <= through {
         let step = view steps[stepped]
         if replay.state.tips[0u64].id != 0u32 || int.checked_add(replay.state.tips[0u64].head, 1) != Some(step.version) {
@@ -879,8 +879,8 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
                     if replay.tiered.exact {
                         replay.tiered.total = int.saturating_sub(replay.tiered.total, fields.row_bytes)
                     }
-                    let mut effects: List[TieredFoldEffect] = list.new()
-                    fold_record_lost(old_root, map.new(), map.new(), true, mut effects)?
+                    let mut effects: List[pager.TieredFoldEffect] = list.new()
+                    failure_result_from_rep(pager.fold_record_lost(old_root, map.new(), map.new(), true, mut effects))?
                     for take effect in take effects {
                         if let FoldDropped(take target) = take effect {
                             failure_result_from_rep(types.capacity(list.try_reserve(mut replay.deferred_frees, 1)))?

@@ -109,22 +109,13 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
     }
 }
 
-fn log_key(id: u32, seq: u64) -> Result[Bytes, Error] {
-    let mut key = failure_result_from_rep(catalog.prefixed(id, 8, false))?
-    list.put_word_be(mut key, seq)
-    Ok(take key)
-}
-
-fn descriptor_bounds(descriptor: Bytes) -> LogBounds {
-    LogBounds(first: list.word_le(descriptor, 64), next: list.word_le(descriptor, 56))
-}
-
 fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Error] {
     let key = failure_result_from_rep(catalog.prefix(id))?
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
     }
-    Ok(descriptor_bounds(descriptor))
+    let window = pager.descriptor_bounds(descriptor)
+    Ok(LogBounds(first: window.first, next: window.next))
 }
 
 fn transaction_log_state(tx: Tx, id: u32) -> Result[pages.LogState, Error] {
@@ -136,9 +127,9 @@ fn transaction_log_state(tx: Tx, id: u32) -> Result[pages.LogState, Error] {
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
     }
-    let head = descriptor_bounds(descriptor)
+    let head = pager.descriptor_bounds(descriptor)
     let height = if pages.collection_descriptor(descriptor).residency == ResidentTiered {
-        transaction_write_height(tx, log_key(id, head.next)?)?
+        transaction_write_height(tx, failure_result_from_rep(pager.log_key(id, head.next))?)?
     } else {
         collection_write_height(tree, key)
     }
@@ -192,7 +183,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
             Some(after)
         },
     }
-    let key = log_key(id, seq)?
+    let key = failure_result_from_rep(pager.log_key(id, seq))?
     let _ = reserve_ids(mut tx, current.height)?
     let charge = memory_data_charge(tx, key, raw)
     let staged = pages.stage_value(take raw, tx.roots.collections.inline)
@@ -213,7 +204,7 @@ pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
 
 pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error] {
     readable_value(tx.store, tx.roots, l.binding)?
-    let key = log_key(l.binding.id, seq)?
+    let key = failure_result_from_rep(pager.log_key(l.binding.id, seq))?
     let current = transaction_log_bounds(tx, l.binding.id)?
     if seq < current.first || seq >= current.next {
         note_read(tx, Point(take key))?
@@ -247,7 +238,7 @@ pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
         return Ok(None)
     }
     let seq = current.next - 1
-    let key = log_key(id, seq)?
+    let key = failure_result_from_rep(pager.log_key(id, seq))?
     let row = transaction_row(tx, key)?
     note_read(tx, Span(take key, failure_result_from_rep(catalog.prefix(id + 1))?))?
     decode_log_last(l, seq, row)
@@ -264,7 +255,7 @@ pub fn log_bounds[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[LogBounds, Err
 pub fn log_get[V](r: Reader, s: Snapshot, l: Log[V], seq: u64) -> Result[Option[V], Error] waits {
     read_access(r, s)?
     readable_value(s.store, s.roots, l.binding)?
-    let key = log_key(l.binding.id, seq)?
+    let key = failure_result_from_rep(pager.log_key(l.binding.id, seq))?
     snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
         decode_log_row(l, raw)
     })
@@ -276,7 +267,7 @@ pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)]
         return Ok(None)
     }
     let seq = current.next - 1
-    let key = log_key(l.binding.id, seq)?
+    let key = failure_result_from_rep(pager.log_key(l.binding.id, seq))?
     snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
         decode_log_last(l, seq, raw)
     })
@@ -329,8 +320,8 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     let current = transaction_log_bounds(tx, id)?
     let lower = order.max(log_endpoint(lo, false), current.first)
     let upper = order.min(log_endpoint(hi, true), current.next)
-    let committed_low = log_key(id, lower)?
-    let committed_high = log_key(id, order.min(upper, head.next))?
+    let committed_low = failure_result_from_rep(pager.log_key(id, lower))?
+    let committed_high = failure_result_from_rep(pager.log_key(id, order.min(upper, head.next)))?
     // Staged appends are read through the tail, so a Tiered cursor stages none.
     let tiered = tx_tiered_rows(tx, id, committed_low, committed_high, false)?
     let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
@@ -349,7 +340,7 @@ fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, 
     if tail.seq >= tail.end {
         return Ok(None)
     }
-    let key = log_key(tail.id, tail.seq)?
+    let key = failure_result_from_rep(pager.log_key(tail.id, tail.seq))?
     let Some(raw) = transaction_row(tx, key)? else {
         return Error(failure_from_rep(pages.malformed(0)))
     }
@@ -382,7 +373,7 @@ fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
     let mut masked_charge = 0u64
     let mut masked_wire = 0u64
     for old_seq in order.max(current.head.next, current.limits.first) .. floor {
-        let key = log_key(id, old_seq)?
+        let key = failure_result_from_rep(pager.log_key(id, old_seq))?
         let Some(raw) = transaction_row(tx, key)? else {
             fail("store: missing staged Log append")
         }
@@ -427,7 +418,7 @@ fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected: Opt
         if fields.kind != LogCollection || fields.residency != ResidentMemory {
             return Error(failure_from_rep(pages.malformed(0)))
         }
-        let limits = descriptor_bounds(descriptor)
+        let limits = pager.descriptor_bounds(descriptor)
         let previous = fields.row_bytes
         if floor < limits.first {
             return Error(failure_from_rep(pages.malformed(0)))
@@ -486,7 +477,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
         let key = failure_result_from_rep(catalog.prefix(id))?
         // A Tiered Log's floor is staged by the Tiered write plan, whose
         // `TieredDropped` figure the frame carries (§13.3).
-        let dropped = if tiered_data_key(tx.roots.collections, key) {
+        let dropped = if pager.tiered_data_key(tx.roots.collections, key) {
             0u64
         } else {
             let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
@@ -527,7 +518,7 @@ pub fn tail_window[V](r: Reader, s: Snapshot, l: Log[V], t: u64) -> Result[LogBo
 
 fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
     for seq in lo .. hi {
-        list.push(mut out.rows, Change(tree_key: log_key(id, seq)?, value: None))
+        list.push(mut out.rows, Change(tree_key: failure_result_from_rep(pager.log_key(id, seq))?, value: None))
     }
     Ok(())
 }
@@ -536,8 +527,8 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
     if lo >= hi {
         return Ok(())
     }
-    let low = log_key(id, lo)?
-    let high = log_key(id, hi)?
+    let low = failure_result_from_rep(pager.log_key(id, lo))?
+    let high = failure_result_from_rep(pager.log_key(id, hi))?
     let tree = view after.roots.collections
     if let Some(inventory) = view tree.paging {
         let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
@@ -588,8 +579,8 @@ fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: page
         return Ok(true)
     }
     let rows = disk_allocation(scoped fn() -> Result[List[Change], Error] {
-        let mut old = std.omap.range(old_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
-        let mut new = std.omap.range(new_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
+        let mut old = std.omap.range(old_log.entries, Included(failure_result_from_rep(pager.log_key(id, start))?), Excluded(failure_result_from_rep(pager.log_key(id, hi))?))
+        let mut new = std.omap.range(new_log.entries, Included(failure_result_from_rep(pager.log_key(id, start))?), Excluded(failure_result_from_rep(pager.log_key(id, hi))?))
         let mut changed: List[Change] = list.new()
         for seq in start .. hi {
             let Some((take old_key, pages.ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {

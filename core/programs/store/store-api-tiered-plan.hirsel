@@ -1,0 +1,121 @@
+type TieredIndexChunk = ChunkReady(pager.TieredWritePlan, List[StepOp]) | ChunkDuplicate(Bytes, Bytes)
+
+fn index_build_has_overlay(tree: pages.PageTree, id: u32) -> bool {
+    if let Some(replay) = view tree.replay {
+        if let Some(_) = std.omap.get(replay.collections, id) {
+            return true
+        }
+    }
+    false
+}
+
+// A schema chunk uses the writer's attempt partition. Its prepared roots
+// and replacements belong to the cut candidate until MANIFEST publication.
+fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, Bytes)]) -> Result[TieredIndexChunk, Error] waits {
+    let mut pins = pager.empty_tiered_pins(call_pin_root(db, 0), pager.pin_partition(db.pager))
+    let mut pending: Option[(format.TieredTarget, types.Failure)] = None
+    loop {
+        let attempt = pager.tiered_attempt(pager.pin_partition(db.pager), pager.tiered_window(pins))
+        let prepared = disk_allocation(scoped fn() -> Result[Result[TieredIndexChunk, Error], Error] {
+            let Some(extractor) = bound_extractor(db.indexes, record) else {
+                return Error(Stale(record.id))
+            }
+            let first = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+            Ok(draft_tiered_index_chunk(attempt, pins.frames, pages.holder_heads(db.holders)[0].roots.collections, record, extractor, rows, first))
+        })
+        let state = pager.tiered_finish(take attempt)
+        match state.stopped {
+            None => return (take prepared)?,
+            Some(AttemptMiss(_)) => {
+                revoke_parked(mut db)
+                deliver_call_miss(db, pages.holder_heads(db.holders)[0].roots.collections, state, mut pins, mut pending)?
+            },
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: the index builder planned over a replay overlay"),
+        }
+    }
+}
+
+fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
+    let shape = catalog_index(record)?.shape
+    let Some((edge, _)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(record.id))?) else {
+        return Error(Stale(record.id))
+    }
+    let mut operations = pages.empty_ops()
+    let no_layers: List[Arc[pages.Staged]] = list.new()
+    let mut row_count = 0u64
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let IndexValue(keys: take keys, payload: take payload, sums: sums) = (extractor.extract)(raw, primary)?
+        let mut part = 0u64
+        for take key in take keys {
+            if list.len(key) > 4096 {
+                return Error(Limit(Key))
+            }
+            let prior: Option[Arc[Bytes]] = if let Entries(Many) = shape {
+                None
+            } else {
+                tiered_chunk_prior(attempt, visible, edge, operations, key)?
+            }
+            let value = match shape {
+                Entries(Unique) => {
+                    if let Some(value) = view prior {
+                        let owner = list.slice(value, 4, unique_owner_end(value)?)
+                        if owner != primary {
+                            return Ok(ChunkDuplicate(failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(primary))?))
+                        }
+                    }
+                    failure_result_from_rep(types.copied(payload))?
+                },
+                Entries(Many) => failure_result_from_rep(types.copied(payload))?,
+                Sums => {
+                    let (members, sum) = match prior {
+                        Some(body) => group_totals(body)?,
+                        None => (0u64, 0u64),
+                    }
+                    let Some(total) = int.checked_add(sum, sums[part]) else {
+                        return Error(Limit(Value))
+                    }
+                    totals_bytes(members + 1, total)?
+                },
+            }
+            part += 1
+            let _ = save_data_op(mut operations, no_layers, false, mut row_count, take key, Some(pages.stage_value(take value, tree.inline)), None)
+        }
+    }
+    let order = failure_result_from_rep(types.capacity(pages.data_order(operations.rows)))?
+    let write_plan = failure_result_from_rep(pager.prepare_tiered_writes(attempt, visible, tree, operations.rows, order, first))?
+    let mut step_rows: List[StepOp] = list.with_capacity(pages.data_row_count(operations.rows))
+    for slot in 0u64 .. pages.data_row_count(operations.rows) {
+        let op = pager.ordered_row(operations.rows, order, slot)
+        let prior = match write_plan.deltas[slot] {
+            Some(TieredPrior(w)) => w,
+            _ => 0u32,
+        }
+        let val: Option[Bytes] = match op.value {
+            Some(BlobBody(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
+            Some(PageValue(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
+            None => None,
+        }
+        list.push(mut step_rows, StepOp(key: failure_result_from_rep(types.copied(op.key))?, value: take val, prior: prior))
+    }
+    Ok(ChunkReady(take write_plan, take step_rows))
+}
+
+fn tiered_chunk_prior(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, staged: pages.DataOps, key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
+    if let Some(slot) = pages.op_slot(staged, key) {
+        let raw = pages.data_row(staged.rows, slot).value
+        return Ok(match raw {
+            Some(BlobBody(body)) => Some(arc.share(body)),
+            Some(PageValue(body)) => Some(arc.new(failure_result_from_rep(types.copied(body))?)),
+            None => None,
+        })
+    }
+    let suffix = list.slice(key, 4, list.len(key))
+    pager.tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(suffix))?))
+    pager.tiered_reading(attempt, ValuesAt)
+    let selected = failure_result_from_rep(pager.tiered_point_path(attempt, visible, edge, None, suffix))?
+    pager.tiered_seek(attempt, SeekOperation)
+    Ok(take selected)
+}

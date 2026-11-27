@@ -43,29 +43,42 @@ fn law_lookup_top_one(mut db: Db, t: Table[u64, u64], ix: Index[u64, u64, u64, (
     let before = snapshot(db)
     let read_handle = result.unwrap(reader(db, 0u64))
     let observed = result.unwrap(look(read_handle, before, None, copy_env(ix), look_first_bucket_two))
-    let Seen(top) = observed else { return false }
+    let Seen(top) = observed else {
+        return false
+    }
     let mut expected: List[Read] = list.new()
     let mut next_low = law_read_key(ix.id, 2, None)
     law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 1)
-    let Ok(Some((1, 14))) = view top.value else { return false }
+    let Ok(Some((1, 14))) = view top.value else {
+        return false
+    }
     if !equal_reads(top.reads, expected) {
         return false
     }
     // (2, 4) enters the same index interval after the only row the cursor saw.
-    if !typed_put(mut db, t, 4, 18) { return false }
+    if !typed_put(mut db, t, 4, 18) {
+        return false
+    }
     let after = snapshot(db)
     let delta = result.unwrap(changes(read_handle, before, after)).rows
     let inserted = law_read_key(ix.id, 2, Some(4u64))
     let mut saw_index_row = false
     for changed in delta {
-        if changed.tree_key == inserted { saw_index_row = true }
+        if changed.tree_key == inserted {
+            saw_index_row = true
+        }
         for dependency in top.reads {
-            if reads_key(dependency, changed.tree_key) { return false }
+            if reads_key(dependency, changed.tree_key) {
+                return false
+            }
         }
     }
     let checked = result.unwrap(look(read_handle, after, None, copy_env(ix), look_first_bucket_two))
-    let Seen(same_top) = checked else { return false }
-    let Ok(Some((1, 14))) = view same_top.value else { return false }
+    let Seen(same_top) = checked else {
+        return false
+    }
+    let Ok(Some((1, 14))) = view same_top.value else {
+        return false
+    }
     saw_index_row && equal_reads(same_top.reads, expected)
 }
-

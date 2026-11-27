@@ -1,21 +1,32 @@
-type ReplayTieredAccount: shareable + send {
+pub type ReplayTieredAccount: shareable + send {
     total: u64,
     exact: bool
 }
 
-fn journal_replay_manifest(take state: pages.State, page_record: manifest.PageManifest) -> Result[JournalReplay, Error] {
-    let mut replay = journal_replay(take state, page_record.next_stamp - 1, limits_from_rep(page_record.limits))?
-    replay.tiered.total = page_record.account_tiered
+type TieredManifestRestore {
+    next_node: u64,
+    limits: types.LimitsRep,
+    total: u64
+}
+
+fn tiered_manifest_restore(page_record: manifest.PageManifest) -> TieredManifestRestore {
+    TieredManifestRestore(next_node: page_record.next_stamp - 1, limits: page_record.limits, total: page_record.account_tiered)
+}
+
+pub fn journal_replay_manifest(take state: pages.State, page_record: manifest.PageManifest) -> Result[JournalReplay, types.Failure] {
+    let restore = tiered_manifest_restore(page_record)
+    let mut replay = journal_replay(take state, restore.next_node, restore.limits)?
+    replay.tiered.total = restore.total
     Ok(take replay)
 }
 
-type ReplayDescriptor {
+pub type ReplayDescriptor {
     rows: u64,
     row_bytes: u64,
-    seq_bounds: Option[LogBounds]
+    seq_bounds: Option[pages.LogBoundsRep]
 }
 
-fn journal_collection_descriptor(raw: Bytes) -> (std.page_descriptor.CollectionKind, Option[ReplayDescriptor], u64) {
+pub fn journal_collection_descriptor(raw: Bytes) -> (std.page_descriptor.CollectionKind, Option[ReplayDescriptor], u64) {
     let descriptor = pages.collection_descriptor(raw)
     let counts = if descriptor.residency == ResidentTiered {
         Some(tiered_replay_descriptor(raw, descriptor))
@@ -26,7 +37,7 @@ fn journal_collection_descriptor(raw: Bytes) -> (std.page_descriptor.CollectionK
 }
 
 fn tiered_replay_descriptor(raw: Bytes, fields: pages.CollectionDescriptor) -> ReplayDescriptor {
-    let seq_bounds: Option[LogBounds] = if fields.kind == LogCollection {
+    let seq_bounds: Option[pages.LogBoundsRep] = if fields.kind == LogCollection {
         Some(descriptor_bounds(raw))
     } else {
         None
@@ -34,7 +45,7 @@ fn tiered_replay_descriptor(raw: Bytes, fields: pages.CollectionDescriptor) -> R
     ReplayDescriptor(rows: fields.rows, row_bytes: fields.row_bytes, seq_bounds: seq_bounds)
 }
 
-fn prior_row_charge(key: Bytes, prior: u32) -> u64 {
+pub fn prior_row_charge(key: Bytes, prior: u32) -> u64 {
     if prior == 0 {
         return 0
     }
@@ -42,121 +53,12 @@ fn prior_row_charge(key: Bytes, prior: u32) -> u64 {
     62 + format.round8(list.len(key)) + format.round8(width)
 }
 
-fn replay_charge(file: String, before: u64, removed: u64, added: u64) -> Result[u64, Error] {
+pub fn replay_charge(file: String, before: u64, removed: u64, added: u64) -> Result[u64, types.Failure] {
     let Some(remaining) = int.checked_sub(before, removed) else {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        return Error(format.disk_fault(file, 0, Malformed))
     }
     let Some(total) = int.checked_add(remaining, added) else {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        return Error(format.disk_fault(file, 0, Malformed))
     }
     Ok(total)
-}
-
-fn replay_row_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], before: ReplayDescriptor, op: format.JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
-    let mut seq_bounds = before.seq_bounds
-    if let Some(window) = before.seq_bounds {
-        let Some(value) = view op.value else {
-            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-        }
-        if op.prior != 0 || list.len(op.key) != 12 || list.len(value) < 2 || list.word_be(op.key, 4) != window.next {
-            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-        }
-        let Some(following) = int.checked_add(window.next, 1) else {
-            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-        }
-        seq_bounds = Some(LogBounds(first: window.first, next: following))
-    }
-    let (now, added, added_rows): (pages.ReplayValue, u64, u64) = match op.value {
-        Some(value) => (ReplayPut(arc.new(failure_result_from_rep(types.copied(value))?)), entry(op.key, value), 1),
-        None => (ReplayAbsent, 0, 0),
-    }
-    let removed = prior_row_charge(op.key, op.prior)
-    let removed_rows = if op.prior == 0 {
-        0u64
-    } else {
-        1u64
-    }
-    let rows = replay_charge(file, before.rows, removed_rows, added_rows)?
-    let row_bytes = replay_charge(file, before.row_bytes, removed, added)?
-    replay_overlay_edit(mut overlay, file, 0, op.key, op.prior, now)?
-    Ok((ReplayDescriptor(rows: rows, row_bytes: row_bytes, seq_bounds: seq_bounds), removed, added))
-}
-
-fn replay_trim_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], collection: u32, before: ReplayDescriptor, op: format.JournalOp, trim: format.JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
-    let Some(window) = before.seq_bounds else {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-    }
-    if list.len(op.key) != 4 {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-    }
-    let start = ReplayLogHead(first: window.first, next: window.next, cold_next: option.unwrap(overlay.cold_next), row_bytes: before.row_bytes)
-    let revised = replay_overlay_trim(mut overlay, file, 0, collection, start, trim)?
-    let seq_bounds = LogBounds(first: revised.first, next: revised.next)
-    Ok((ReplayDescriptor(rows: revised.next - revised.first, row_bytes: revised.row_bytes, seq_bounds: Some(seq_bounds)), trim.dropped, 0u64))
-}
-
-fn replay_tiered_op(file: String, mut tree: pages.PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, before: ReplayDescriptor, op: format.JournalOp) -> Result[(), Error] {
-    let id: u32 = list.word_be(op.key, 0)
-    let (take ready_root, take next_branch_overlay, following_stamp, total) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], Arc[pages.ReplayBranch], u64, u64), Error] {
-        let previous = match tree.replay {
-            Some(existing) => arc.share(existing),
-            None => arc.new(pages.ReplayBranch(collections: std.omap.new(), fork_time: None, ids: 0, charged: 0)),
-        }
-        let (take current, previous_charge) = match std.omap.get(previous.collections, id) {
-            Some(overlay) => (arc.share(overlay), overlay.charged),
-            None => (empty_replay_overlay(match before.seq_bounds {
-                Some(window) => Some(window.next),
-                None => None
-            }), 0u64),
-        }
-        let mut overlay = take current
-        let (after, removed, added) = match op.trim {
-            Some(trim) => replay_trim_edit(file, mut overlay, id, before, op, trim)?,
-            None => replay_row_edit(file, mut overlay, before, op)?,
-        }
-        let new_total = replay_charge(file, account.total, if account.exact {
-            removed
-        } else {
-            0u64
-        }, added)?
-        let seq_bounds: Option[(u64, u64)] = match after.seq_bounds {
-            Some(window) => Some((window.first, window.next)),
-            None => None,
-        }
-        let mut root = arc.share(tree.root)
-        let mut stamp = next_stamp
-        failure_result_from_rep(pages.page_result(std.page.replay_collection_totals(mut root, list.slice(op.key, 0, 4), after.rows, after.row_bytes, seq_bounds, mut stamp)))?
-        let charged = previous.charged - previous_charge + overlay.charged
-        let mut ids = previous.ids
-        let (take collections, _) = std.omap.insert(mut ids, previous.collections, id, take overlay)
-        Ok((take root, arc.new(pages.ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: charged)), stamp, new_total))
-    })?
-    tree.root = take ready_root
-    tree.replay = Some(take next_branch_overlay)
-    next_stamp = following_stamp
-    account.total = total
-    Ok(())
-}
-
-// H supersedes this collection on its proposed main root (§13.7). The
-// installed root and any fork or snapshot still hold their own overlay.
-fn discard_replayed_collection(mut tree: pages.PageTree, id: u32) -> Result[(), Error] {
-    let replacement = {
-        let Some(previous) = view tree.replay else {
-            return Ok(())
-        }
-        let Some(removed) = std.omap.get(previous.collections, id) else {
-            return Ok(())
-        }
-        disk_allocation(scoped fn() -> Result[Option[Arc[pages.ReplayBranch]], Error] {
-            let mut ids = previous.ids
-            let collections = std.omap.remove(mut ids, previous.collections, id)
-            if let None = std.omap.root(collections) {
-                return Ok(None)
-            }
-            Ok(Some(arc.new(pages.ReplayBranch(collections: take collections, fork_time: clone(previous.fork_time), ids: ids, charged: previous.charged - removed.charged))))
-        })?
-    }
-    tree.replay = take replacement
-    Ok(())
 }

@@ -67,20 +67,6 @@ fn history_length(link: HistoryLink, seq: u64) -> pages.HistoryRef {
     pages.HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
 }
 
-fn history_missing_object(path: String, reference: pages.HistoryRef) -> Error {
-    let missing_seq = if string.starts_with(path, "e-") {
-        Some(reference.seq)
-    } else {
-        None
-    }
-    match (bound bytes format.round8(string.byte_len(path)) {
-        string.from(path)
-    }) {
-        Ok(take name) => HistoryMissing(take name, missing_seq),
-        Error(problem) => Full(Allocation(problem)),
-    }
-}
-
 fn history_range(mut client: std.object.Client, path: String, reference: pages.HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
     list.clear(mut buffer)
     let (take result, take raw) = std.object.fetch_range(mut client, path, lo, hi, replace(mut buffer, list.new()), deadline)
@@ -92,7 +78,7 @@ fn history_range(mut client: std.object.Client, path: String, reference: pages.H
             }
             Ok(())
         },
-        Error(NotFound) => Error(history_missing_object(path, reference)),
+        Error(NotFound) => Error(failure_from_rep(pager.history_missing_object(path, reference))),
         Error(take problem) => Error(Remote(take problem)),
     }
 }
@@ -140,7 +126,7 @@ fn history_read_object(mut client: std.object.Client, path: String, reference: p
     let mut raw = failure_result_from_rep(manifest.disk_read_buffer(reference.len))?
     match history_fetch(mut client, path, mut raw, deadline) {
         Ok(_) => (),
-        Error(Remote(NotFound)) => return Error(history_missing_object(path, reference)),
+        Error(Remote(NotFound)) => return Error(failure_from_rep(pager.history_missing_object(path, reference))),
         Error(take problem) => return Error(take problem),
     }
     Ok(take raw)
@@ -240,7 +226,7 @@ fn history_check_claim(path: String, reference: pages.HistoryRef, raw: Bytes, fr
     Ok(())
 }
 
-fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
+fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes, mut replay: pager.JournalReplay, ceiling: u64) -> Result[(), Error] {
     let (ctx, _) = history_entry_context(path, id, reference, raw)?
     history_object_digest(path, reference, raw)?
     let frame = failure_result_from_rep(manifest.disk_frame_bytes(path, ctx, raw, 112))?
@@ -273,7 +259,7 @@ fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, r
     Ok(())
 }
 
-fn history_apply_suffix(mut client: std.object.Client, head: HistoryHead, after: u64, chain: List[HistoryLink], mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+fn history_apply_suffix(mut client: std.object.Client, head: HistoryHead, after: u64, chain: List[HistoryLink], mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(chain) {
         let reference = history_length(chain[i], after + i + 1)
         let name = history_read_key("e-", reference)?

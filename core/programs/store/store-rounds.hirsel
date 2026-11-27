@@ -126,7 +126,7 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
     }
     let Imported(meta: take meta, delta: take delta, ranges: take built, rewrites: take rewrites, digest: digest, dir: import_dir, pass2_low: pass2_low, pass2_high: pass2_high, pass2_inline: pass2_inline, has_tiered: has_tiered, rewrites_checked: rewrites_checked) = take completed
     if has_tiered && !store_has_tiered(db) {
-        if let None = db.pager {
+        if !pager.has_requests(db.pager) {
             deploy_result(start_residency_pager(mut db))?
         }
     }

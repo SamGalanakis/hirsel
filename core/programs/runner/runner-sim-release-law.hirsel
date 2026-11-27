@@ -166,7 +166,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     }
     let committed = sim_release_bytes(codec, Ok(7u64))
     std.sim.history.check(std.sim.history.committed(mut history, b"L56/stream-1/0", published.version, take committed))
-    let replied: Option[Bytes] = match got.outcomes[0].outcome {
+    let replied: Option[Bytes] = match unpack_outcome(clone(got.outcomes[0].outcome)) {
         Returned(data) => Some(clone(data)),
         _ => None,
     }

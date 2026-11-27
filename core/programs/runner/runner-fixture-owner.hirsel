@@ -2,7 +2,11 @@ fn fixture_content(owner: FixtureOwner, take event: WireEvent) -> () waits {
     let Notice(e: take e) = publisher_notice(take event)
     let mut dropped: List[u32] = list.new()
     if let Updated(Update(version: _, content: Some(take o), outcomes: take outcomes)) = take e {
-        hand(owner.out, take o, mut dropped, take outcomes)
+        let mut rows: List[KeyedDone] = list.new()
+        for take row in outcomes {
+            list.push(mut rows, unpack_delivery(take row))
+        }
+        hand(owner.out, take o, mut dropped, take rows)
     }
     let _ = channel.try_send(owner.progress, ())
     let _ = channel.try_send(owner.post, PubIn(e: Drained))

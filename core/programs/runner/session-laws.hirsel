@@ -10,21 +10,21 @@ pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
     let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
     let (write, pending): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
-    let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new()), list.new()))
-    let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new()), list.new()))
+    let first = result.unwrap(wire_pack(pool, one_to, one_from, Reset(17u64, list.new()), list.new(), list.new()))
+    let second = result.unwrap(wire_pack(pool, two_to, two_from, Reset(19u64, list.new()), list.new(), list.new()))
     result.unwrap(channel.try_send(write, take first))
-    let before_write = match wire_pack(pool, one_to, one_from, Reset(23u64, list.new()), list.new()) {
+    let before_write = match wire_pack(pool, one_to, one_from, Reset(23u64, list.new()), list.new(), list.new()) {
         Error(Protocol(1013u16)) => true,
         _ => false
     }
     let writing = result.unwrap(channel.try_receive(pending))
-    let during_write = match wire_pack(pool, two_to, two_from, Reset(29u64, list.new()), list.new()) {
+    let during_write = match wire_pack(pool, two_to, two_from, Reset(29u64, list.new()), list.new(), list.new()) {
         Error(Protocol(1013u16)) => true,
         _ => false
     }
     let bytes_sent = list.len(writing)
     let _ = take writing
-    let third = result.unwrap(wire_pack(pool, one_to, one_from, Reset(31u64, list.new()), list.new()))
+    let third = result.unwrap(wire_pack(pool, one_to, one_from, Reset(31u64, list.new()), list.new(), list.new()))
     let other_bytes = list.len(second)
     let _ = take pooled_task
     before_write && during_write && bytes_sent == 18u64 && other_bytes == 18u64 && list.len(third) == 18u64
@@ -169,7 +169,7 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     }
     let codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
     let reply = match rows[0u64] {
-        CallAnswer(_, row) => match row.outcome {
+        CallAnswer(_, row) => match unpack_outcome(clone(row.outcome)) {
             Returned(body) => match std.codec.decode(codec, body) {
                 Ok(Ok(7u32)) => true,
                 _ => false
@@ -200,7 +200,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     })
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (reply, result_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
-    let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new()), list.new()))
+    let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new()), list.new(), list.new()))
     let mut arg: Bytes = list.new()
     std.codec.put_u32(7u32, mut arg)
     let call_frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, take arg)
@@ -225,12 +225,12 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     // 96, charged 96: before cancellation 128 - 32 - 8 = 88 refuses it, and
     // the argument's refund leaves exactly 96.
     let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, clone(payload), scoped fn() -> bool waits {
-        match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) {
+        match wire_pack(pool, reply, result_from, pool_full_frame(), list.new(), list.new()) {
             Error(Protocol(1013u16)) => true,
             _ => false
         }
     })
-    let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) {
+    let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame(), list.new(), list.new()) {
         Ok(body) => list.len(body) == 82u64,
         _ => false,
     }

@@ -197,7 +197,7 @@ fn test_unique_conflict_wire(clock: Clock, random: Random) -> Result[(), String]
     let mut wire_reply: Bytes = list.new()
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     if let CallAnswer(_, row) = answers[0u64] {
-        result.unwrap(std.codec.encode(codec, row.outcome, mut wire_reply))
+        result.unwrap(std.codec.encode(codec, unpack_outcome(clone(row.outcome)), mut wire_reply))
     } else {
         return Error("expected a wire answer")
     }

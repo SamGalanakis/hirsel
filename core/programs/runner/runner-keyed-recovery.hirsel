@@ -243,7 +243,7 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
     } else {
         initial
     }
-    let run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments, deadline: deadline, waiters: take waiters, background: background)
+    let mut run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments, deadline: deadline, waiters: take waiters, background: background)
     let live = match map.get(hd.r.t.keyed, op) {
         Some(KeyedRegistration(policy: Some(_), ..)) => true,
         _ => false,
@@ -261,7 +261,7 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
                 let record = claim_run_record(activation, run.arguments, revision, hd.replay_identity)?
                 let plan = store.Plan(n_e: activation.n_e, s_e: activation.s_e, reply_max: store.CLAIM_DONE_MAX)
                 let no_record: Option[store.CallRecord] = None
-                (go.serve)(mut hd.db, store.keyed_completion(take completion, take record), plan, take no_record, hd.h, run.caller, run.arguments)
+                (go.serve)(mut hd.db, store.keyed_completion(take completion, take record), plan, take no_record, hd.h, run.caller, mut run.arguments)
             }
             return recovery_settlement(mut hd, mut state, take run, take ran)
         }

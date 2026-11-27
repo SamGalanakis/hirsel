@@ -1,0 +1,152 @@
+// A receipt already owns the canonical Outcome bytes. Materialize the value only
+// for a consumer that reads its variants.
+type DeliveryOutcome: send = Immediate(Outcome) | EncodedOutcome(Bytes)
+
+type DeliveryRow: send {
+    stream: Bytes,
+    p: u64,
+    outcome: DeliveryOutcome
+}
+
+type EncodedDone: send {
+    stream: StreamId,
+    p: u64,
+    raw: Bytes
+}
+
+fn unpack_outcome(take outcome: DeliveryOutcome) -> Outcome {
+    match take outcome {
+        Immediate(take value) => take value,
+        EncodedOutcome(raw) => {
+            let codec: std.codec.Codec[Outcome] = std.codec.of()
+            result.unwrap(std.codec.decode(codec, raw))
+        },
+    }
+}
+
+fn unpack_delivery(take row: DeliveryRow) -> KeyedDone {
+    let DeliveryRow(stream: take stream, p: p, outcome: take outcome) = take row
+    KeyedDone(stream: take stream, p: p, outcome: unpack_outcome(take outcome))
+}
+
+fn fill_delivery(outcome: DeliveryOutcome, mut backing: Bytes) {
+    match outcome {
+        Immediate(value) => relay_fill(value, mut backing),
+        EncodedOutcome(raw) => list.append(mut backing, raw),
+    }
+}
+
+fn materialize_done(take rows: List[EncodedDone]) -> List[Done] {
+    let mut result: List[Done] = list.with_capacity(list.len(rows))
+    for take row in rows {
+        let EncodedDone(stream: stream, p: p, raw: take raw) = take row
+        list.push(mut result, Done(stream: stream, p: p, outcome: unpack_outcome(EncodedOutcome(take raw))))
+    }
+    take result
+}
+
+fn all_encoded(rows: List[DeliveryRow]) -> bool {
+    for row in rows {
+        if let Immediate(_) = row.outcome {
+            return false
+        }
+    }
+    true
+}
+
+fn staged_done(take done: List[Done], take packed: List[EncodedDone]) -> List[Done] {
+    if list.len(packed) == 0u64 {
+        return take done
+    }
+    materialize_done(take packed)
+}
+
+fn materialize_outcomes(take frame: Frame, take packed: List[EncodedDone]) -> Frame {
+    if list.len(packed) == 0u64 {
+        return take frame
+    }
+    let Batch(version, take complete, take groups, _) = take frame else {
+        fail("runner: packed outcomes outside Batch")
+    }
+    Batch(version, take complete, take groups, materialize_done(take packed))
+}
+
+fn wire_encoded_answer[G: send](mut s: WireSession[G], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], take told: DeliveryRow, mut done: List[EncodedDone], mut marks: List[WireMark]) -> Result[(), u16] {
+    if wire_cut_at(drain, s.clock) {
+        return Ok(())
+    }
+    let DeliveryRow(stream: take stream, p: p, outcome: EncodedOutcome(take raw)) = take told else {
+        fail("runner: expected receipt bytes")
+    }
+    let mut at = 0u64
+    let tag = result.unwrap(std.codec.take_u32(raw, mut at))
+    if tag == 0u32 {
+        let payload = result.unwrap(std.codec.take_bytes_view(raw, mut at))
+        if list.len(payload) > MAX_RETURNED_BYTES {
+            return Error(1009u16)
+        }
+    }
+    let key = slot_key(stream, p)
+    if let Some(take found) = map.remove(mut s.held, key) {
+        let mut h = take found
+        h.forwarded = false
+        let owed = replace(mut h.owed, list.new())
+        h.queued += list.len(owed)
+        for take owing in owed {
+            let WireOwed(generation: generation, reply: take backing) = take owing
+            list.push(mut completed, generation)
+            let mut reply = take backing
+            list.append(mut reply, raw)
+            let mark: WireMark = if tag <= 1u32 {
+                WriteUnit(clone(key))
+            } else {
+                Unit(clone(key))
+            }
+            list.push(mut done, EncodedDone(stream: h.stream, p: h.p, raw: take reply))
+            list.push(mut marks, take mark)
+        }
+        if h.queued != 0u64 {
+            map.insert(mut s.held, take key, take h)
+        }
+    }
+    Ok(())
+}
+
+fn encode_delivery_frame(out: std.wsock.Outbound, frame: Frame, groups: List[OwedGroup], rows: List[EncodedDone]) -> Result[Bytes, std.wsock.Error] {
+    if list.len(rows) == 0u64 {
+        return encode_published_frame(out, frame, groups)
+    }
+    let Batch(version, _, _, _) = view frame else {
+        fail("runner: packed outcomes outside Batch")
+    }
+    let mut size = 24u64
+    for row in rows {
+        size += DONE_POSITION_BYTES + list.len(row.raw)
+    }
+    std.wsock.try_encode_parts(out, size, scoped fn(mut dst: Bytes) -> Result[(), u16] {
+        std.codec.put_u32(6u32, mut dst)
+        std.codec.put_u64(version, mut dst)
+        std.codec.put_u32(0u32, mut dst)
+        std.codec.put_u32(0u32, mut dst)
+        std.codec.put_u32(int.truncate(list.len(rows)), mut dst)
+        for row in rows {
+            std.codec.put_u64(row.stream.t, mut dst)
+            std.codec.put_u64(row.stream.n, mut dst)
+            std.codec.put_u64(row.p, mut dst)
+            list.append(mut dst, row.raw)
+        }
+        Ok(())
+    })
+}
+
+fn call_answer(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: DeliveryOutcome, replayed: bool) -> CallAnswer {
+    call_answer_with_expiry(take waiter, stream, p, take outcome, replayed, None)
+}
+
+fn call_answer_with_expiry(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: DeliveryOutcome, replayed: bool, expires: Option[u64]) -> CallAnswer {
+    let CallWaiter(owner: owner, target: take target) = take waiter
+    match take target {
+        WireReply(take to) => CallAnswer(Recipient(owner: owner, to: take to), DeliveryRow(stream: clone(stream), p: p, outcome: take outcome)),
+        RelayReply(take recipient) => RelayAnswer(take recipient, take outcome, replayed, expires),
+    }
+}

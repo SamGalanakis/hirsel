@@ -79,7 +79,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
         }
     }
     // One durable group retains its units and V1 rows until Sent.
-    let mut answers: List[KeyedDone] = list.new()
+    let mut answers: List[DeliveryRow] = list.new()
     for stream in 0u32 .. 5u32 {
         let mut arg: Bytes = list.new()
         std.codec.put_u32(8152u32, mut arg)
@@ -95,7 +95,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
         let body = result.unwrap(w3c_bytes(8152u32))
         let value: Result[Bytes, u32] = Ok(take body)
         result.unwrap(std.codec.encode(carried, value, mut reply_bytes))
-        list.push(mut answers, KeyedDone(stream: take named, p: p, outcome: Returned(take reply_bytes)))
+        list.push(mut answers, DeliveryRow(stream: take named, p: p, outcome: Immediate(Returned(take reply_bytes))))
     }
     result.unwrap(wire_update(mut s, mut work, Update(version: 7u64, content: None, outcomes: take answers)))
     if wire_units(s) != 5u64 || list.len(work.output) != 1u64 {
@@ -164,8 +164,8 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
     }
     let freed = wire_units(s) == 0u64 && s.refusals == 0u64 && list.len(work.output) == 0u64
     let legacy = result.unwrap(w3c_bytes(8173u32))
-    let mut unfit: List[KeyedDone] = list.new()
-    list.push(mut unfit, KeyedDone(stream: list.new(), p: 0u64, outcome: Returned(take legacy)))
+    let mut unfit: List[DeliveryRow] = list.new()
+    list.push(mut unfit, DeliveryRow(stream: list.new(), p: 0u64, outcome: Immediate(Returned(take legacy))))
     let refused_legacy = match wire_update(mut s, mut work, Update(version: 9u64, content: None, outcomes: take unfit)) {
         Error(1009u16) => true,
         _ => false

@@ -109,7 +109,7 @@ type WireParsed: send {
     packet: Result[Option[WirePacket], std.wsock.Error]
 }
 
-type WireAllocation[C: send]: send = Decode(Box[std.wsock.Reader], u64, Sender[WireParsed]) | Encode(Frame, List[OwedGroup], Sender[Result[Bytes, std.wsock.Error]]) | AllocateService(Box[Service[C]], ServiceAllocation, Sender[Option[AllocatedState[C]]])
+type WireAllocation[C: send]: send = Decode(Box[std.wsock.Reader], u64, Sender[WireParsed]) | Encode(Frame, List[OwedGroup], List[EncodedDone], Sender[Result[Bytes, std.wsock.Error]]) | AllocateService(Box[Service[C]], ServiceAllocation, Sender[Option[AllocatedState[C]]])
 
 type WirePool[C: send]: send {
     inbox: Receiver[WireAllocation[C]],
@@ -185,8 +185,8 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
                 let packet = wire_parse(mut reader, at, clock)
                 let _ = channel.try_send(to, WireParsed(reader: take reader, packet: take packet))
             },
-            Encode(take frame, take groups, take to) => {
-                let encoded_frame = encode_published_frame(encoder, frame, groups)
+            Encode(take frame, take groups, take rows, take to) => {
+                let encoded_frame = encode_delivery_frame(encoder, frame, groups, rows)
                 let _ = channel.try_send(to, take encoded_frame)
             },
             AllocateService(take owned, take plan, take to) => {
@@ -227,8 +227,8 @@ fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, s
     Ok((take to, take handle))
 }
 
-fn wire_pack[C: send](pool: Sender[WireAllocation[C]], to: Sender[Result[Bytes, std.wsock.Error]], inbox: Receiver[Result[Bytes, std.wsock.Error]], take frame: Frame, take tapes: List[OwedGroup]) -> Result[Bytes, std.wsock.Error] waits {
-    if let Error(_) = channel.try_send(pool, Encode(take frame, take tapes, channel.sender(to))) {
+fn wire_pack[C: send](pool: Sender[WireAllocation[C]], to: Sender[Result[Bytes, std.wsock.Error]], inbox: Receiver[Result[Bytes, std.wsock.Error]], take frame: Frame, take tapes: List[OwedGroup], take rows: List[EncodedDone]) -> Result[Bytes, std.wsock.Error] waits {
+    if let Error(_) = channel.try_send(pool, Encode(take frame, take tapes, take rows, channel.sender(to))) {
         return Error(Protocol(1013u16))
     }
     match channel.receive(inbox) {

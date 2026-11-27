@@ -57,10 +57,10 @@ fn failed_read_reset(owner: FailedReadOwner, at: u64) -> bool {
     if list.len(received.outcomes) != 2u64 {
         return false
     }
-    let Abandoned = received.outcomes[0u64].outcome else {
+    let Abandoned = unpack_outcome(clone(received.outcomes[0u64].outcome)) else {
         return false
     }
-    let Refused(Overloaded) = received.outcomes[1u64].outcome else {
+    let Refused(Overloaded) = unpack_outcome(clone(received.outcomes[1u64].outcome)) else {
         return false
     }
     received.version == at && owe_is_reset(content) && list.len(owe_content_view(content).complete) == 0u64 && list.len(owe_content_view(content).rows) == 0u64 && list.len(owe_content_view(content).ended) == 0u64 && received.outcomes[0u64].p == 17u64 && received.outcomes[1u64].p == 18u64
@@ -104,8 +104,8 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
         return false
     }
     let mut answers: List[CallAnswer] = list.new()
-    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)), KeyedDone(stream: no_arg(), p: 17u64, outcome: Abandoned)))
-    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)), KeyedDone(stream: no_arg(), p: 18u64, outcome: Refused(Overloaded))))
+    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)), DeliveryRow(stream: no_arg(), p: 17u64, outcome: Immediate(Abandoned))))
+    list.push(mut answers, CallAnswer(Recipient(owner: 1u64, to: channel.sender(owner.to)), DeliveryRow(stream: no_arg(), p: 18u64, outcome: Immediate(Refused(Overloaded)))))
     let mut waiting: List[Replies] = list.new()
     keep_answers(mut waiting, take answers)
     b.reads = failing_reads(problem, phase)

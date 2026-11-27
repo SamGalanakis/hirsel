@@ -45,6 +45,7 @@ store = { package = "store", major = 1, path = "../store" }
 "runner-head-wakes.hirsel" = "runner"
 "runner-head-loop.hirsel" = "runner"
 "runner-head-calls.hirsel" = "runner"
+"runner-delivery.hirsel" = "runner"
 "runner-head-retirement.hirsel" = "runner"
 "runner-head-maintenance.hirsel" = "runner"
 "runner-identity.hirsel" = "runner"

@@ -474,7 +474,7 @@ fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H]
         let seen = bound bytes order.min(n, maximum) {
             let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
                 bound steps steps {
-                    match std.codec.decode(ca, arg) {
+                    match std.codec.validate(ca, arg) {
                         Ok(_) => {
                             let no_refusal: Option[Refusal] = None;
                             no_refusal

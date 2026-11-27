@@ -1096,7 +1096,7 @@ pub fn finish(take t: Task[Outcome]) -> Outcome waits {
 // The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
 fn encode_runner_reply(o: Outcome) -> Result[Bytes, store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
-    let mut b: Bytes = list.new()
+    let mut b: Bytes = list.with_capacity(wire_done_size(o) - DONE_POSITION_BYTES)
     std.codec.encode(co, o, mut b) ?=> |_| Limit(Value)
     Ok(take b)
 }
@@ -1139,23 +1139,11 @@ type CallWaiter: send {
     target: ReplyTarget
 }
 
-type CallAnswer: send = CallAnswer(Recipient, KeyedDone) | RelayAnswer(RelayRecipient, Outcome, bool, Option[u64])
-
-fn call_answer(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: Outcome, replayed: bool) -> CallAnswer {
-    call_answer_with_expiry(take waiter, stream, p, take outcome, replayed, None)
-}
-
-fn call_answer_with_expiry(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: Outcome, replayed: bool, expires: Option[u64]) -> CallAnswer {
-    let CallWaiter(owner: owner, target: take target) = take waiter
-    match take target {
-        WireReply(take to) => CallAnswer(Recipient(owner: owner, to: take to), KeyedDone(stream: clone(stream), p: p, outcome: take outcome)),
-        RelayReply(take recipient) => RelayAnswer(take recipient, take outcome, replayed, expires),
-    }
-}
+type CallAnswer: send = CallAnswer(Recipient, DeliveryRow) | RelayAnswer(RelayRecipient, DeliveryOutcome, bool, Option[u64])
 
 type Replies: send {
     recipient: Recipient,
-    rows: List[KeyedDone]
+    rows: List[DeliveryRow]
 }
 
 // A durable release advances the round (V4). A commitless release carries
@@ -1384,7 +1372,7 @@ type Worker: send {
     p: u64,
     digest: store.RequestDigest,
     version: u64,
-    outcome: Outcome,
+    outcome: DeliveryOutcome,
     waiters: List[CallWaiter]
 }
 
@@ -2271,19 +2259,6 @@ fn be_word(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn record_request(q: Request, revision: Option[Bytes], n: u64, s: u64, replay_identity: Bytes) -> Result[store.CallRecord, store.Error] {
-    let rev = match revision {
-        Some(bytes_in) => Some(copy_bytes(bytes_in)?),
-        None => None
-    }
-    let code = match code_bytes(n, s, replay_identity) {
-        Ok(take bytes_in) => take bytes_in,
-        Error(problem) => return Error(Full(Allocation(problem))),
-    }
-    let stream = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
-    Ok(store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: take stream, revision: take rev, code: take code))
-}
-
 fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes] {
     let (keep, take outcome): (bool, Outcome) = match take result {
         Commit(take raw) => (true, Returned(take raw)),
@@ -2310,13 +2285,18 @@ fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes
 
 type Effect = Served(Result[store.Served, store.ServeError]) | Unregistered(store.Pending)
 
-fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: Bytes, locations: Registry[G, H], handles: H, q: Request, take complete: store.Completion) -> Result[Effect, store.Error] waits {
+fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: Bytes, locations: Registry[G, H], handles: H, mut q: Request, take complete: store.Completion) -> Result[Effect, store.Error] waits {
     match map.get(locations.slots, q.key) {
         Some(Transact(n, s, revision, _, go)) => {
-            let rec = record_request(q, revision, n, s, identity)?
+            let key = replace(mut q.key, list.new())
+            let rec = record_request(take key, q, revision, n, s, identity)?
             // The stored Outcome adds a four-byte tag and a four-byte length.
             let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-            Ok(Served((go.serve)(mut db, take complete, plan, Some(take rec), handles, q.caller, q.arg)))
+            let served = (go.serve)(mut db, take complete, plan, Some(take rec), handles, q.caller, mut q.arg)
+            if let Ok(Parked(_)) = served {
+                q.key = clone(go.key)
+            }
+            Ok(Served(take served))
         },
         _ => {
             let attempted = store.next_call_info(db)
@@ -2331,7 +2311,7 @@ fn reply_only[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: 
     match take settled {
         Ok(Committed(receipt)) => {
             let version = store.main_commit_version(hd.db)
-            worker(mut hd, take q, take outcome, receipt.ticket, version)
+            worker(mut hd, take q, Immediate(take outcome), receipt.ticket, version)
         },
         Ok(NoRoom(_, _)) => refuse_admitted(mut hd, take q, Overloaded),
         Error(Before(Full(_), _)) => refuse_admitted(mut hd, take q, Overloaded),
@@ -2389,8 +2369,16 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
                         None => continue,
                     }
                     let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w
+                    let mut remaining = list.len(waiters)
+                    let mut outcome = take o
                     for take recipient in waiters {
-                        list.push(mut answers, call_answer(take recipient, stream, p, clone(o), false))
+                        remaining -= 1u64
+                        let reply = if remaining == 0u64 {
+                            replace(mut outcome, Immediate(Abandoned))
+                        } else {
+                            clone(outcome)
+                        }
+                        list.push(mut answers, call_answer(take recipient, stream, p, take reply, false))
                     }
                 }
                 publish_release(mut hd, durable_release(take at, take answers))
@@ -3121,11 +3109,11 @@ fn reply_bucket(waiting: List[Replies], owner: u64) -> Option[u64] {
     None
 }
 
-fn keep_wire_answer(mut waiting: List[Replies], take recipient: Recipient, take row: KeyedDone) {
+fn keep_wire_answer(mut waiting: List[Replies], take recipient: Recipient, take row: DeliveryRow) {
     match reply_bucket(waiting, recipient.owner) {
         Some(i) => list.push(mut waiting[i].rows, take row),
         None => {
-            let mut rows: List[KeyedDone] = list.new()
+            let mut rows: List[DeliveryRow] = list.new()
             list.push(mut rows, take row)
             list.push(mut waiting, Replies(recipient: take recipient, rows: take rows))
         },
@@ -3393,10 +3381,10 @@ fn forget(mut subs: Subscriptions, mut joined: List[Joiner], who: u64) {
 type Update: send {
     version: u64,
     content: Option[Owe],
-    outcomes: List[KeyedDone]
+    outcomes: List[DeliveryRow]
 }
 
-fn update(at: u64, take content: Option[Owe], take outcomes: List[KeyedDone]) -> Notice {
+fn update(at: u64, take content: Option[Owe], take outcomes: List[DeliveryRow]) -> Notice {
     Notice(e: Updated(Update(version: at, content: take content, outcomes: take outcomes)))
 }
 
@@ -3419,7 +3407,7 @@ pub fn head_outcome(take event: WireEvent) -> Option[KeyedDone] {
     match take notice {
         Updated(Update(outcomes: take outcomes, ..)) if list.len(outcomes) == 1u64 => {
             let mut rows = take outcomes
-            Some(list.remove(mut rows, 0u64))
+            Some(unpack_delivery(list.remove(mut rows, 0u64)))
         },
         _ => None,
     }

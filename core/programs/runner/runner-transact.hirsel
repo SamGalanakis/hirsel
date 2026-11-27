@@ -6,7 +6,7 @@ type Ran: send = Commit(Bytes) | Abort(Bytes) | Exhausted(Capacity) | Refuse(Ref
 // Running out of n is not a refusal; the head's run answers it with Failed(OutOfBytes).
 fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
     let seen = bound bytes n {
-        match std.codec.decode(ca, arg) {
+        match std.codec.validate(ca, arg) {
             Error(e) => {
                 let why: Refusal = Malformed(bad(e))
                 Some(take why)
@@ -50,7 +50,8 @@ fn adapt_transact[H: shareable + inert + send, A, R, E](f: StaticFn[fn(mut store
 }
 
 type TransactAdapters[H: shareable + inert + send]: send {
-    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take Option[store.CallRecord], H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
+    key: Bytes,
+    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take Option[store.CallRecord], H, Caller, mut Bytes) -> Result[store.Served, store.ServeError] waits,
     // A parked served call's next attempt, with the request's bytes decoded afresh (STORE-SPEC §13.3a).
     resume: own[send] fn(mut store.Db, take store.Parked, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
     trigger: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits,
@@ -153,9 +154,12 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
         check_arg(ca, arg, n)
     }
     let entry = TransactEntry(run: f, args: ca, reply: cr, error: ce)
-    let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: Option[store.CallRecord], h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
-        let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
-        store.serve(mut db, take complete, plan, take rec, env, transact_reply)
+    let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: Option[store.CallRecord], h: H, author: Caller, mut arg: Bytes) -> Result[store.Served, store.ServeError] waits {
+        let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: replace(mut arg, list.new()))
+        let served = store.serve(mut db, take complete, plan, take rec, env, transact_reply)
+        let TransactBody(raw: take held, ..) = take env
+        arg = take held
+        take served
     }
     let resume_entry = fn(mut db: store.Db, take parked: store.Parked, h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
@@ -173,7 +177,7 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
         store.reexecute_with(db, source, take declaration, plan, replay_fault, env, transact_replay)
     }
-    let adapters = TransactAdapters(serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
+    let adapters = TransactAdapters(key: clone(key), serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
     insert_exported(mut r, take key, code.identity(f), take d, Transact(n, s, take revision, check, take adapters))
 }
 

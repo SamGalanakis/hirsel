@@ -215,7 +215,7 @@ fn encode_published_frame(out: std.wsock.Outbound, frame: Frame, tapes: List[Owe
 }
 
 fn filter_output_groups(take output: WireOutput, stamps: List[(u32, u64)], present: bool) -> Option[WireOutput] {
-    let WireOutput(frame: take frame, tapes: take packed, marks: take marks, generations: take generations, external: external, check: check) = take output
+    let WireOutput(frame: take frame, encoded: take packed_rows, tapes: take packed, marks: take marks, generations: take generations, external: external, check: check) = take output
     let Batch(version, take ids, take groups, take done) = take frame else {
         return None
     }
@@ -232,10 +232,10 @@ fn filter_output_groups(take output: WireOutput, stamps: List[(u32, u64)], prese
         group.sub
     })
     let content = list.len(complete) != 0u64 || list.len(held) != 0u64 || list.len(tapes) != 0u64
-    if !content && list.len(done) == 0u64 {
+    if !content && list.len(done) == 0u64 && list.len(packed_rows) == 0u64 {
         return None
     }
-    Some(WireOutput(frame: Batch(version, take complete, take held, take done), tapes: take tapes, marks: take marks, generations: take generations, external: external, check: if content {
+    Some(WireOutput(frame: Batch(version, take complete, take held, take done), encoded: take packed_rows, tapes: take tapes, marks: take marks, generations: take generations, external: external, check: if content {
         check
     } else {
         None

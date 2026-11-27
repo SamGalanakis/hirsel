@@ -56,8 +56,9 @@ fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
     Ok(resumed)
 }
 
-fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
-    let tried = run_effect(mut hd.db, hd.replay_identity, hd.r, hd.h, q, take complete)
+fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take incoming: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
+    let mut q = take incoming
+    let tried = run_effect(mut hd.db, hd.replay_identity, hd.r, hd.h, mut q, take complete)
     let ran = match take tried {
         Ok(Served(take result)) => take result,
         Ok(Unregistered(take pending_run)) => return reply_only(mut hd, take q, take pending_run, Failed(Gone)),
@@ -84,12 +85,9 @@ fn settle_served[G: send, H: shareable + inert + send](mut hd: Head[G, H], take 
 }
 
 fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
-    let co: std.codec.Codec[Outcome] = std.codec.of()
     let version = store.main_commit_version(hd.db)
-    match std.codec.decode(co, receipt.reply) {
-        Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
-        _ => fail("runner: stored reply did not decode"),
-    }
+    let store.Receipt(ticket: ticket, reply: take raw) = take receipt
+    worker(mut hd, take q, EncodedOutcome(take raw), ticket, version)
 }
 
 fn held_stream(busy: Map[Bytes, Worker], waiting: List[Waiting], pending: store.StreamKey) -> bool {
@@ -153,7 +151,7 @@ fn refuse_admitted[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
     commitless(mut hd, take q, Refused(take reason))
 }
 
-fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
+fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: DeliveryOutcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
     let mut waiters: List[CallWaiter] = list.new()
@@ -179,7 +177,7 @@ fn publish_reply_with_expiry[G: send, H: shareable + inert + send](mut hd: Head[
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[CallAnswer] = list.new()
-    list.push(mut answers, call_answer_with_expiry(CallWaiter(owner: owner, target: take to), stream, p, take o, replayed, expires))
+    list.push(mut answers, call_answer_with_expiry(CallWaiter(owner: owner, target: take to), stream, p, Immediate(take o), replayed, expires))
     let release = Release(version: None, snapshot: None, answers: take answers)
     if list.len(hd.held) != 0u64 {
         list.push(mut hd.held, Loose(take release))

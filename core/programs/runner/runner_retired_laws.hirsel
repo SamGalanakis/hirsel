@@ -303,8 +303,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut joined: List[Joiner] = list.new()
     list.push(mut joined, Joiner(grants: None, who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: None, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     list.push(mut joined, Joiner(grants: None, who: 2u64, to: take m_to, closed: None, ended: take ended, reset: None, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
-    let mut outcomes: List[KeyedDone] = list.new()
-    list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded)))
+    let mut outcomes: List[DeliveryRow] = list.new()
+    list.push(mut outcomes, DeliveryRow(stream: no_arg(), p: 0u64, outcome: Immediate(Refused(Overloaded))))
     let mut waiting: List[Replies] = list.new()
     list.push(mut waiting, Replies(recipient: Recipient(owner: 2u64, to: take m_told), rows: take outcomes))
     sweep(mut b.subs, mut joined)
@@ -485,8 +485,8 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
         // A Told whose stream is over the session's bytes: slot_key's allocation faults.
         let mut big: Bytes = list.new()
         list.fill(mut big, 8388608u64, 0u8)
-        let mut answers: List[KeyedDone] = list.new()
-        list.push(mut answers, KeyedDone(stream: take big, p: 0u64, outcome: Refused(Overloaded)))
+        let mut answers: List[DeliveryRow] = list.new()
+        list.push(mut answers, DeliveryRow(stream: take big, p: 0u64, outcome: Immediate(Refused(Overloaded))))
         if let Error(_) = channel.send(inbox, wire_event(FromRunner(update(0u64, None, take answers)))) {
             return false
         }
@@ -675,7 +675,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let before = latest.read(register).at == v0
     let mut answers: List[CallAnswer] = list.new()
     for i in 0u64 .. 16384u64 {
-        let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
+        let row = DeliveryRow(stream: list.new(), p: i, outcome: Immediate(Abandoned))
         list.push(mut answers, CallAnswer(Recipient(owner: 999u64, to: channel.sender(s_to)), take row))
     }
     let _ = channel.send(to, PubIn(e: Released(Release(version: None, snapshot: None, answers: take answers))))

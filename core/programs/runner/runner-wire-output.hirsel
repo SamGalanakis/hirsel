@@ -48,7 +48,7 @@ fn wire_queue_external(mut work: WireWork, c: WireConfig, take frame: Frame, che
     if list.len(work.output) >= 1u64 + c.q || wire_queued_bytes(work.output) + wire_output_charge(frame, false) > c.budget {
         return Error(Busy)
     }
-    let item = WireOutput(frame: take frame, tapes: list.new(), marks: list.new(), generations: list.new(), external: true, check: check)
+    let item = WireOutput(frame: take frame, encoded: list.new(), tapes: list.new(), marks: list.new(), generations: list.new(), external: true, check: check)
     list.push(mut work.output, take item)
     Ok(())
 }
@@ -58,7 +58,7 @@ fn wire_queue(mut output: List[WireOutput], take frame: Frame, take marks: List[
 }
 
 fn wire_queue_checked(mut output: List[WireOutput], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)], check: Option[u64]) {
-    list.push(mut output, WireOutput(frame: take frame, tapes: list.new(), marks: take marks, generations: take generations, external: false, check: check))
+    list.push(mut output, WireOutput(frame: take frame, encoded: list.new(), tapes: list.new(), marks: take marks, generations: take generations, external: false, check: check))
 }
 
 fn wire_refused[G: send](mut s: WireSession[G], mut work: WireWork, stream: StreamId, p: u64, take why: Refusal) -> Result[(), u16] {
@@ -100,7 +100,8 @@ fn wire_reset_rows[G: send](mut s: WireSession[G], mut output: List[WireOutput],
             list.push(mut output, take o)
             continue
         }
-        let WireOutput(frame: take f, marks: take held, ..) = take o
+        let WireOutput(frame: take frame, encoded: take packed_done, marks: take held, ..) = take o
+        let f = materialize_outcomes(take frame, take packed_done)
         for take m in take held {
             list.push(mut marks, take m)
         }
@@ -172,7 +173,7 @@ fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Opt
 fn wire_supersede(mut output: List[WireOutput], replacing: List[(u32, u64)]) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(output) {
-        let empty = WireOutput(frame: Reset(0u64, list.new()), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
+        let empty = WireOutput(frame: Reset(0u64, list.new()), encoded: list.new(), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
         let queued = list.set(mut output, index, take empty)
         if let Some(take current) = wire_superseded(take queued, replacing) {
             let _ = list.set(mut output, kept, take current)
@@ -211,7 +212,7 @@ fn wire_superseded(take output: WireOutput, replacing: List[(u32, u64)]) -> Opti
 fn wire_prune_output[G: send](mut s: WireSession[G], mut output: List[WireOutput], retired: Option[u32]) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(output) {
-        let empty = WireOutput(frame: Reset(0u64, list.new()), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
+        let empty = WireOutput(frame: Reset(0u64, list.new()), encoded: list.new(), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
         let queued = list.set(mut output, index, take empty)
         if !queued.external {
             if let Ended(sub, _) = queued.frame {
@@ -243,12 +244,13 @@ fn wire_take_output[G: send](s: WireSession[G], mut work: WireWork) -> Result[Op
             break take current
         }
     }
-    let WireOutput(frame: take pending_frame, tapes: take tapes, marks: take marks, check: check, ..) = take selected
+    let WireOutput(frame: take pending_frame, encoded: take packed_done, tapes: take tapes, marks: take marks, check: check, ..) = take selected
     let f = if work.splice {
         work.packing = take tapes
+        work.encoded = take packed_done
         take pending_frame
     } else {
-        materialize_frame(take pending_frame, tapes)
+        materialize_frame(materialize_outcomes(take pending_frame, take packed_done), tapes)
     }
     work.sending = take marks
     work.check = check
@@ -316,8 +318,14 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
     let Update(version: at, content: take content, outcomes: take answers) = take upd
     let mut done: List[Done] = list.new()
     let mut marks: List[WireMark] = list.new()
-    for answer in answers {
-        wire_answer(mut s, mut completed, drain, answer, mut done, mut marks)?
+    let mut packed_rows: List[EncodedDone] = list.new()
+    let pack = none(content) && all_encoded(answers)
+    for take answer in answers {
+        if pack {
+            wire_encoded_answer(mut s, mut completed, drain, take answer, mut packed_rows, mut marks)?
+        } else {
+            wire_answer(mut s, mut completed, drain, unpack_delivery(take answer), mut done, mut marks)?
+        }
     }
     let current = match content {
         Some(o) => match s.joined {
@@ -326,7 +334,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
         },
         None => false,
     }
-    if !current && list.len(done) == 0u64 {
+    if !current && list.len(done) == 0u64 && list.len(packed_rows) == 0u64 {
         return Ok(())
     }
     s.last = if at > s.last {
@@ -351,7 +359,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
                 if !reset.read_failed {
                     s.reset_seen = true
                 }
-                return wire_reset_rows(mut s, mut output, version, take done, take marks)
+                return wire_reset_rows(mut s, mut output, version, staged_done(take done, take packed_rows), take marks)
             },
             Content(take owed) => {
                 let OweContent(generations: take stamps, complete: take complete, groups: take groups, ended: take stopped, ..) = take owed
@@ -382,7 +390,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
                 return Error(1008u16)
             }
             s.reset_seen = true
-            return wire_reset_rows(mut s, mut output, version, take done, take marks)
+            return wire_reset_rows(mut s, mut output, version, staged_done(take done, take packed_rows), take marks)
         }
         for sub in live_complete {
             wire_end(mut s, mut output, sub, Refused(Budget(Room(requested: requested, available: allowance))))
@@ -400,7 +408,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
         }
         wire_supersede(mut output, replacing)
     }
-    if list.len(live_groups) != 0u64 || list.len(live_complete) != 0u64 || list.len(done) != 0u64 {
+    if list.len(live_groups) != 0u64 || list.len(live_complete) != 0u64 || list.len(done) != 0u64 || list.len(packed_rows) != 0u64 {
         let charge = 24u64 + 4u64 * list.len(live_complete) + cached_charge(live_groups) + (if list.len(marks) != 0u64 {
             0u64
         } else {
@@ -413,7 +421,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
                     return Error(1008u16)
                 }
                 s.reset_seen = true
-                return wire_reset_rows(mut s, mut output, version, take done, take marks)
+                return wire_reset_rows(mut s, mut output, version, staged_done(take done, take packed_rows), take marks)
             }
         }
         let check = if list.len(live_groups) != 0u64 || list.len(live_complete) != 0u64 {
@@ -422,7 +430,7 @@ fn wire_stage_update[G: send](mut s: WireSession[G], mut output: List[WireOutput
             None
         }
         let frame: Frame = Batch(version, take live_complete, list.new(), take done)
-        list.push(mut output, WireOutput(frame: take frame, tapes: take live_groups, marks: take marks, generations: take generations, external: false, check: check))
+        list.push(mut output, WireOutput(frame: take frame, encoded: take packed_rows, tapes: take live_groups, marks: take marks, generations: take generations, external: false, check: check))
     }
     for take e in ended {
         let TerminalUpdate(sub, generation, version: checked_at, outcome: take why) = take e

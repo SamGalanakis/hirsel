@@ -36,11 +36,12 @@ pub opaque type WireWork {
     stream_time: Option[StreamTime],
     rooms: Option[RoomOwner],
     splice: bool,
+    encoded: List[EncodedDone],
     packing: List[OwedGroup]
 }
 
 fn wire_work() -> WireWork {
-    WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), stream_time: None, rooms: None, splice: false, packing: list.new())
+    WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), stream_time: None, rooms: None, splice: false, encoded: list.new(), packing: list.new())
 }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
@@ -80,6 +81,7 @@ type WireMark: send = Unit(Bytes) | V1 | WriteUnit(Bytes)
 // check"); None for a unit that carries no content and passes unchecked.
 type WireOutput: send {
     frame: Frame,
+    encoded: List[EncodedDone],
     tapes: List[OwedGroup],
     marks: List[WireMark],
     generations: List[(u32, u64)],

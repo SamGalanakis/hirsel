@@ -656,7 +656,7 @@ fn test_zero_mutation_behind_latch(d: Dir, real: Clock, random: Random, tasks: T
     let who = option.unwrap(peer.owner.joined)
     let mut waiters: List[CallWaiter] = list.with_capacity(1u64)
     list.push(mut waiters, CallWaiter(owner: who, target: WireReply(channel.sender(peer.to))))
-    let held_worker = Worker(p: 0u64, digest: req_digest, version: v, outcome: Returned(clone(reply_payload)), waiters: take waiters)
+    let held_worker = Worker(p: 0u64, digest: req_digest, version: v, outcome: Immediate(Returned(clone(reply_payload))), waiters: take waiters)
     map.insert(mut hd.busy, clone(raw_stream), take held_worker)
     list.push(mut hd.group, take raw_stream)
     hd.last = Some(done_b2.ticket)

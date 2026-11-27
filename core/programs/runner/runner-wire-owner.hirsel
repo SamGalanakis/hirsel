@@ -791,7 +791,8 @@ fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], p
             }
             let check = replace(mut st.work.check, None)
             let groups = replace(mut st.work.packing, list.new())
-            match wire_pack(pool, st.encoded_to, st.encoded_from, take f, take groups) {
+            let rows = replace(mut st.work.encoded, list.new())
+            match wire_pack(pool, st.encoded_to, st.encoded_from, take f, take groups, take rows) {
                 Ok(take b) => {
                     data_frame = Some((take b, welcome, check))
                 },

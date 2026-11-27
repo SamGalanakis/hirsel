@@ -71,7 +71,8 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
         fail("replay expected admission")
     }
     result.unwrap(store.durable(mut db, store.ticket(complete)))
-    let tried = result.unwrap(run_effect(mut db, identity, registered, h, q, take complete))
+    let mut request = take q
+    let tried = result.unwrap(run_effect(mut db, identity, registered, h, mut request, take complete))
     let receipt = match take tried {
         Served(Ok(Committed(take receipt))) if arg == 2u64 => take receipt,
         Served(Ok(Kept(take receipt))) if arg == 3u64 => take receipt,

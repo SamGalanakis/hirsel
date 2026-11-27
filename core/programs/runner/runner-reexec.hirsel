@@ -9,6 +9,19 @@ fn code_bytes(n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity]
     Ok(take raw)
 }
 
+fn record_request(take key: Bytes, q: Request, revision: Option[Bytes], n: u64, s: u64, replay_identity: Bytes) -> Result[store.CallRecord, store.Error] {
+    let rev = match revision {
+        Some(bytes_in) => Some(copy_bytes(bytes_in)?),
+        None => None
+    }
+    let code = match code_bytes(n, s, replay_identity) {
+        Ok(take bytes_in) => take bytes_in,
+        Error(problem) => return Error(Full(Allocation(problem))),
+    }
+    let stream = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    Ok(store.CallRecord(key: take key, args: copy_bytes(q.arg)?, stream: take stream, revision: take rev, code: take code))
+}
+
 // Re-execute a recorded transact against its original base without publishing writes.
 pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
     let identity: Option[Bytes] = match mode {

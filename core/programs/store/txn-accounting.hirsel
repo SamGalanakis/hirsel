@@ -1,0 +1,62 @@
+pub type AccountingState {
+    resident: u64,
+    tiered: u64,
+    page_resident: u64,
+    // Commits and cut-made operations on any branch.
+    changes: u64,
+    // The changes count at which resident was last exact (I4).
+    settled: u64,
+    ceiling: u64,
+    checkpointed: u64,
+}
+
+pub fn new_accounting(ceiling: u64) -> AccountingState {
+    AccountingState(resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: ceiling, checkpointed: 0)
+}
+
+pub type CallStreamState[T] {
+    keyed_credit: format.KeyedCredit,
+    // Stream name to the unreplied Admitted(p) this open committed (§1.8).
+    admits: Map[Bytes, OpenAdmit[T]],
+    stream_retention_ms: u64,
+    streams_per_caller_max: u64,
+    streams_max: u64,
+    stream_sweep_after: Option[StreamSweepCursor],
+}
+
+// An Admitted(p) this open committed on main: a later admit of p while it is
+// still unreplied answers Abandoned with this commit_ticket and commits nothing.
+// A None ticket marks a reserved admit and answers nothing.
+pub type OpenAdmit[T]: shareable + send {
+    p: u64,
+    ticket: Option[T],
+    held: bool
+}
+
+pub type StreamSweepCursor {
+    key: Bytes,
+    inclusive: bool
+}
+
+pub fn new_call_streams[T](retention_ms: u64, per_caller_max: u64, streams_max: u64) -> CallStreamState[T] {
+    CallStreamState(keyed_credit: format.no_keyed_credit(), admits: map.new(), stream_retention_ms: retention_ms, streams_per_caller_max: per_caller_max, streams_max: streams_max, stream_sweep_after: None)
+}
+
+pub fn available_resident(accounting: AccountingState, credit: format.KeyedCredit) -> u64 {
+    resident_with_credit(accounting.ceiling, credit)
+}
+
+fn resident_with_credit(ceiling: u64, credit: format.KeyedCredit) -> u64 {
+    int.saturating_sub(int.saturating_sub(ceiling, credit.resident), credit.padding)
+}
+
+pub fn available_journal(journal_limit: u64, credit: format.KeyedCredit) -> u64 {
+    int.saturating_sub(journal_limit, credit.journal)
+}
+
+pub fn draft_credit(current: format.KeyedCredit, keyed: Option[format.KeyedDraft]) -> format.KeyedCredit {
+    match keyed {
+        Some(draft) => draft.after,
+        None => current
+    }
+}

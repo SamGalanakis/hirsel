@@ -41,7 +41,7 @@ fn hot_admit(db: Db, plan: SchemaPlan, indexes: List[DeferredIndexBuild]) -> Res
     let descriptors = list.len(plan.pending_migrates) + list.len(indexes)
     let base = int.saturating_add(plan.schema.live, int.saturating_mul(126u64, descriptors))
     let workspace = order.min(disk_state(db).options.dirty_bytes, sources)
-    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(base, workspace), available_resident(db)))?
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(base, workspace), txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     Ok((base, workspace))
 }
 
@@ -50,7 +50,7 @@ fn hot_grow(db: Db, mut work: HotBuild, charge: u64) -> Result[(), Error] {
     if charge <= work.workspace {
         return Ok(())
     }
-    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(work.base, charge), available_resident(db)))?
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(work.base, charge), txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     work.workspace = charge
     Ok(())
 }

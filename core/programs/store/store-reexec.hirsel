@@ -435,7 +435,7 @@ pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
     if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) {
         return Error(Foreign)
     }
-    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(source.base), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), 0, db.ceiling, true, db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(source.base.collections))
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(source.base), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), 0, db.accounting.ceiling, true, db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(source.base.collections))
     Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
 }
 

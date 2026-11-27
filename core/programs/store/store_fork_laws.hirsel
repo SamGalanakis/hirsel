@@ -191,11 +191,11 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
     result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if db.resident != 260 {
+    if db.accounting.resident != 260 {
         return false
     }
     for operation in 0u64 .. 100000 {
-        if !typed_put(mut db, t, 1, operation + 1) || db.resident != 354 {
+        if !typed_put(mut db, t, 1, operation + 1) || db.accounting.resident != 354 {
             return false
         }
     }
@@ -378,19 +378,19 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
     result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if !typed_put(mut db, t, 1, 1) || db.resident != 354 {
+    if !typed_put(mut db, t, 1, 1) || db.accounting.resident != 354 {
         return false
     }
     let arg9 = snapshot(db)
     let _ = result.unwrap(pin(mut db, "p", arg9))
-    if db.resident != 354 {
+    if db.accounting.resident != 354 {
         return false
     }
     for operation in 0u64 .. 100 {
         if !typed_put(mut db, t, 1, operation + 2) {
             return false
         }
-        if db.resident != (if operation % 2 == 0 {
+        if db.accounting.resident != (if operation % 2 == 0 {
             448u64
         } else {
             542u64
@@ -399,11 +399,11 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
         }
     }
     let _ = result.unwrap(checkpoint(mut db))
-    if db.resident != 448 {
+    if db.accounting.resident != 448 {
         return false
     }
     let _ = result.unwrap(unpin(mut db, "p"))
-    if db.resident != 354 || !typed_put(mut db, t, 1, 7) || db.resident != 354 {
+    if db.accounting.resident != 354 || !typed_put(mut db, t, 1, 7) || db.accounting.resident != 354 {
         return false
     }
     result.unwrap(get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 1)) == Some(7u64)
@@ -438,14 +438,14 @@ fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
     if accounts(db).logical != 354 || accounts(db).exact {
         return Error(Foreign)
     }
-    let cut = db.checkpointed
+    let cut = db.accounting.checkpointed
     let restored = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, 1)
     })?
     let Committed(done) = restored else {
         return Error(Foreign)
     }
-    if db.checkpointed != cut + 1 {
+    if db.accounting.checkpointed != cut + 1 {
         return Error(Foreign)
     }
     durable(mut db, done.ticket)?
@@ -490,16 +490,16 @@ pub fn law_fork_shared_head(c: Clock) -> bool waits {
     let mut db = test_db(c, 500)
     result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if !typed_put(mut db, t, 1, 1) || db.resident != 354 {
+    if !typed_put(mut db, t, 1, 1) || db.accounting.resident != 354 {
         return false
     }
     let from = snapshot(db)
-    let cut = db.checkpointed
-    let before = db.changes
+    let cut = db.accounting.checkpointed
+    let before = db.accounting.changes
     match fork(mut db, "fork", from) {
         Ok((b, receipt)) => {
             result.unwrap(durable(mut db, receipt))
-            db.resident == 354 && db.checkpointed == cut && journal_mark(receipt) == before + 1 && accounts(db).exact && option.unwrap(branch(db, "fork")).id == b.id && result.unwrap(get(result.unwrap(reader(db, 0u64)), result.unwrap(snapshot_of(db, b)), t, 1)) == Some(1u64)
+            db.accounting.resident == 354 && db.accounting.checkpointed == cut && journal_mark(receipt) == before + 1 && accounts(db).exact && option.unwrap(branch(db, "fork")).id == b.id && result.unwrap(get(result.unwrap(reader(db, 0u64)), result.unwrap(snapshot_of(db, b)), t, 1)) == Some(1u64)
         },
         _ => false,
     }
@@ -592,10 +592,10 @@ pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
         return false
     }
     let held = snapshot(db)
-    if !typed_put(mut db, t, 1, 2) || db.resident != 354 {
+    if !typed_put(mut db, t, 1, 2) || db.accounting.resident != 354 {
         return false
     }
-    let cut = db.checkpointed
+    let cut = db.accounting.checkpointed
     let next_id = pages.holder_next_branch(db.holders)
     match fork(mut db, "fork", held) {
         Error(Full(Resident(cap))) => if cap.requested != 448 || cap.available != 447 {
@@ -607,7 +607,7 @@ pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
     if let Some(_) = branch(db, "fork") {
         return false
     }
-    db.checkpointed == cut && pages.holder_next_branch(db.holders) == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(result.unwrap(reader(db, 0u64)), head, t, 1)) == Some(2u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), held, t, 1)) == Some(1u64)
+    db.accounting.checkpointed == cut && pages.holder_next_branch(db.holders) == next_id + 1 && db.accounting.resident == 354 && version(head) == 3 && result.unwrap(get(result.unwrap(reader(db, 0u64)), head, t, 1)) == Some(2u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), held, t, 1)) == Some(1u64)
 }
 
 // L27(c). A pin of the empty table keeps the descriptor and catalog once.
@@ -624,14 +624,14 @@ pub fn law_fork_settle(c: Clock) -> bool waits {
             return false
         }
     }
-    if db.resident != 636 {
+    if db.accounting.resident != 636 {
         return false
     }
     let from = snapshot(db)
-    let settled = db.settled
-    let cut = db.checkpointed
+    let settled = db.accounting.settled
+    let cut = db.accounting.checkpointed
     match fork(mut db, "fork", from) {
-        Ok((b, _)) => db.resident == 636 && !accounts(db).exact && db.settled == settled && db.checkpointed == cut && result.unwrap(get(result.unwrap(reader(db, 0u64)), result.unwrap(snapshot_of(db, b)), t, 1)) == Some(4u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), option.unwrap(pinned(db, "empty")), t, 1)) == None,
+        Ok((b, _)) => db.accounting.resident == 636 && !accounts(db).exact && db.accounting.settled == settled && db.accounting.checkpointed == cut && result.unwrap(get(result.unwrap(reader(db, 0u64)), result.unwrap(snapshot_of(db, b)), t, 1)) == Some(4u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), option.unwrap(pinned(db, "empty")), t, 1)) == None,
         _ => false,
     }
 }

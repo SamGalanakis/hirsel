@@ -145,8 +145,8 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     let count_bytes = manifest.keyed_root_record_bytes(roots.keyed)
     pages.replace_head(mut db.holders, i, take roots, replay.state.tips[i].head, replay.state.tips[i].at, old_bytes, count_bytes)
     pages.set_next_node(mut db.holders, replay.next_node)
-    db.changes += 1
-    db.resident = result.unwrap(pages.state_account(replay.state))
+    db.accounting.changes += 1
+    db.accounting.resident = result.unwrap(pages.state_account(replay.state))
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
@@ -277,13 +277,13 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     // commits, so a Full re-commit leaves a reserved entry behind, and that
     // entry answers nothing: the next admit of 0 re-commits under this open.
     // Wrong implementation caught: a reserved entry that answers Abandoned.
-    let limit = db.ceiling
-    db.ceiling = 1
+    let limit = db.accounting.ceiling
+    db.accounting.ceiling = 1
     match admit_law_stream(mut db, s, 0, ours) {
         Error(Full(_)) => {},
         _ => return false
     }
-    db.ceiling = limit
+    db.accounting.ceiling = limit
     if pages.holder_heads(db.holders)[0].head != head {
         return false
     }
@@ -387,9 +387,9 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Latched => return false,
         DriftStop(_, _) => return false
     }
-    let ceiling = db.ceiling
-    let cut = db.checkpointed
-    db.ceiling = figure - 1
+    let ceiling = db.accounting.ceiling
+    let cut = db.accounting.checkpointed
+    db.accounting.ceiling = figure - 1
     let settled = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         settle_body(mut tx, call_env)
     }))
@@ -397,10 +397,10 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Committed(_) => {},
         _ => return false
     }
-    if !accounts(db).exact || db.checkpointed != cut + 1 {
+    if !accounts(db).exact || db.accounting.checkpointed != cut + 1 {
         return false
     }
-    db.ceiling = ceiling
+    db.accounting.ceiling = ceiling
     let committed_at = pages.holder_heads(db.holders)[0].head
     result.unwrap(close(take db))
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
@@ -490,7 +490,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     }
     let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let before = pages.holder_heads(db.holders)[0].head
-    let live_bytes = db.resident
+    let live_bytes = db.accounting.resident
     let frames = db.frame_seq
     let end = file_end(db)
     let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
@@ -503,7 +503,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if pages.holder_heads(db.holders)[0].head != before || db.resident != live_bytes || db.frame_seq != frames || file_end(db) != end {
+    if pages.holder_heads(db.holders)[0].head != before || db.accounting.resident != live_bytes || db.frame_seq != frames || file_end(db) != end {
         return false
     }
     let main = main_branch(db)

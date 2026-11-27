@@ -950,7 +950,7 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         Error(ok && lookup_foreign && range_foreign)
     })
     match take out {
-        Ok(Aborted(Undone(value: true, ticket: None))) => pages.holder_heads(b.holders)[0].head == 0 && b.resident == 0,
+        Ok(Aborted(Undone(value: true, ticket: None))) => pages.holder_heads(b.holders)[0].head == 0 && b.accounting.resident == 0,
         _ => false
     }
 }

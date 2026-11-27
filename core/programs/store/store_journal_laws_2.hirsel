@@ -200,7 +200,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
             return Error(Foreign)
         }
         let previous = file_seq(db)
-        let generation = db.checkpointed
+        let generation = db.accounting.checkpointed
         let saved = snapshot(db)
         let (beta, receipt) = if refuse {
             let attempt = bound bytes 4096 {
@@ -223,7 +223,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         } else {
             0u64
         }
-        if queue_accounting(disk_state(db)).uncovered != expected_journal || db.checkpointed != (if refuse {
+        if queue_accounting(disk_state(db)).uncovered != expected_journal || db.accounting.checkpointed != (if refuse {
             generation
         } else {
             generation + 1

@@ -546,7 +546,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     if list.len(leased) != list.len(live_only) + 1 || !list.contains(leased, pack_p) || list.contains(live_only, pack_p) {
         fail("L96 (e) D-ZL-2: last-conversion lease must be positive-live plus the one zero-live class-3 pack")
     }
-    let resident_exact = db.resident
+    let resident_exact = db.accounting.resident
     let job2 = result.unwrap(begin_backup(mut db, conv_backup, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db, attempt)

@@ -130,9 +130,9 @@ fn stream_q4_run(s: BucketSim, tasks: Tasks, r: Random, reg: String) -> Result[S
     // n = 3: rows 1 and 2 are n - 2 and n - 1, and one row's charge is
     // r1 - r0, so B's limit holds n - 1 with half a row to spare.
     bucket_law_commit(mut a, 1)?
-    let r0 = a.resident
+    let r0 = a.accounting.resident
     bucket_law_commit(mut a, 2)?
-    let r1 = a.resident
+    let r1 = a.accounting.resident
     let slot_b = journal_slot(mut service)?
     let claimant = Q4Claimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, limit: r1 + (r1 - r0) / 2)
     let running = task.spawn(tasks, bytes 33554432, take claimant, stream_q4_claim)

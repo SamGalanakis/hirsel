@@ -287,7 +287,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     pages.set_head_at(mut db.holders, 0, original_at)
     let plan = Plan(n_e: 8192, s_e: 8192, reply_max: 4096)
     if room_refusal {
-        db.ceiling = db.resident
+        db.accounting.ceiling = db.accounting.resident
     }
     let fault_at = if room_refusal {
         original_at + 1u64
@@ -314,7 +314,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     if let Some(_) = result.unwrap(recorded(db, main_branch(db), 2)) {
         return false
     }
-    db.ceiling = options.resident_limit
+    db.accounting.ceiling = options.resident_limit
     pages.set_head_at(mut db.holders, 0, original_at + 1u64)
     for _ in 0u64 .. 2 {
         let advanced = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), ()] {

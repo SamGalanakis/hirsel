@@ -17,11 +17,11 @@ pub fn accounts(db: Db) -> Accounts {
         None => (0u64, 0u64)
     }
     let resident = if is_disk(db) {
-        db.page_resident
+        db.accounting.page_resident
     } else {
         memory_page_images(db)
     }
-    Accounts(logical: int.saturating_add(int.saturating_add(db.resident, db.tiered), db.keyed_credit.padding), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: resident)
+    Accounts(logical: int.saturating_add(int.saturating_add(db.accounting.resident, db.accounting.tiered), db.call_streams.keyed_credit.padding), tiered: db.accounting.tiered, exact: !retaining(db) || db.accounting.changes == db.accounting.settled, frames: frames, journal: journal, resident: resident)
 }
 
 // A Memory store's page images, counted now over every head and pin. A walk

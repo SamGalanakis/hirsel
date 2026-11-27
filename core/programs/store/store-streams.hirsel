@@ -1,55 +1,16 @@
-type StreamControl {
-    max: u64,
-    count: u64,
-    expiry_floor: Option[u64]
-}
-
 type CallerStreams {
     count: u64,
     floor: Option[StreamId]
 }
 
-fn stream_control(db: Db) -> Result[StreamControl, Error] {
+fn stream_control(db: Db) -> Result[txn.StreamControl, Error] {
     let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, b"") else {
-        return Ok(StreamControl(max: db.streams_max, count: 0u64, expiry_floor: None))
+        return Ok(txn.StreamControl(max: db.call_streams.streams_max, count: 0u64, expiry_floor: None))
     }
-    decode_stream_control(raw)
+    failure_result_from_rep(txn.decode_stream_control(raw))
 }
 
-fn check_stream_quota(tree: pages.PageTree, declared: Option[u64]) -> Result[(), Error] {
-    let Some(expected) = declared else {
-        return Ok(())
-    }
-    if let Some(raw) = pages.get_page_row(tree, b"") {
-        if decode_stream_control(raw)?.max != expected {
-            return Error(Changed("streams_max"))
-        }
-    }
-    Ok(())
-}
-
-fn decode_stream_control(raw: Bytes) -> Result[StreamControl, Error] {
-    let mut at = 0u64
-    let saved_max = std.codec.take_u64(raw, mut at) ?=> Decode
-    let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
-    if at == list.len(raw) {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    let floor: Option[u64] = match (list.len(raw), raw[at]) {
-        (17u64, 0u8) => None,
-        (25u64, 1u8) => {
-            at += 1u64
-            Some(std.codec.take_u64(raw, mut at) ?=> Decode)
-        },
-        _ => return Error(failure_from_rep(pages.malformed(0))),
-    }
-    if saved_count > saved_max {
-        return Error(failure_from_rep(pages.malformed(0)))
-    }
-    Ok(StreamControl(max: saved_max, count: saved_count, expiry_floor: floor))
-}
-
-fn write_stream_control(mut tx: Tx, control: StreamControl) -> Result[(), Error] {
+fn write_stream_control(mut tx: Tx, control: txn.StreamControl) -> Result[(), Error] {
     let mut raw: Bytes = list.with_capacity(25u64)
     std.codec.put_u64(control.max, mut raw)
     std.codec.put_u64(control.count, mut raw)
@@ -114,7 +75,7 @@ fn stream_before(a: StreamId, b: StreamId) -> bool {
     a.t < b.t || (a.t == b.t && a.n < b.n)
 }
 
-fn raise_expiry(mut control: StreamControl, t: u64) {
+fn raise_expiry(mut control: txn.StreamControl, t: u64) {
     control.expiry_floor = Some(match control.expiry_floor {
         Some(old) => order.max(t, old),
         None => t
@@ -123,7 +84,7 @@ fn raise_expiry(mut control: StreamControl, t: u64) {
 
 type StreamChanges {
     caller_prefix: Bytes,
-    control: StreamControl,
+    control: txn.StreamControl,
     caller: CallerStreams,
     deletes: List[Bytes],
 }
@@ -144,7 +105,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
     if stream_at_or_below(name.id.t, control.expiry_floor) {
         return Ok(HistoryUnavailable)
     }
-    let aged = age_floor(at, db.stream_retention_ms)
+    let aged = age_floor(at, db.call_streams.stream_retention_ms)
     if stream_at_or_below(name.id.t, aged) {
         // Record the established age cutoff even if the row stays until the
         // sweep. A wider retention on reopen cannot recover a refused reply.
@@ -180,7 +141,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
         }
     }
     let oldest = reclaim_front(db, mut edits, aged, protected)?
-    if edits.caller.count >= db.streams_per_caller_max {
+    if edits.caller.count >= db.call_streams.streams_per_caller_max {
         let Some((take victim, id, busy)) = take oldest else {
             return Ok(StreamOverloaded)
         }
@@ -201,7 +162,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
     admit_commit(mut db, key, 0u64, digest, false, at, Some(take edits))
 }
 
-fn stream_changes(db: Db, caller: Caller, control: StreamControl) -> Result[StreamChanges, Error] {
+fn stream_changes(db: Db, caller: Caller, control: txn.StreamControl) -> Result[StreamChanges, Error] {
     let mut caller_prefix: Bytes = list.new()
     failure_result_from_rep(types.capacity(caller_key(caller, mut caller_prefix)))?
     let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
@@ -328,11 +289,6 @@ pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: sco
     Ok(Some(AnonymousCursor(key: take next_key)))
 }
 
-type StreamSweepCursor {
-    key: Bytes,
-    inclusive: bool
-}
-
 type StreamSweepEdit {
     caller_prefix: Bytes,
     metadata: Option[CallerStreams]
@@ -342,14 +298,14 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     journal_poll(mut db)?
     healthy(db)?
     let at = keyed_time(db)
-    let age = age_floor(at, db.stream_retention_ms)
+    let age = age_floor(at, db.call_streams.stream_retention_ms)
     let mut control = stream_control(db)?
-    let (take start, inclusive): (Option[Bytes], bool) = match db.stream_sweep_after {
+    let (take start, inclusive): (Option[Bytes], bool) = match db.call_streams.stream_sweep_after {
         Some(cursor) => (Some(clone(cursor.key)), cursor.inclusive),
         None => (None, false),
     }
     let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, start, inclusive, false, None))?
-    let mut after: Option[StreamSweepCursor] = None
+    let mut after: Option[txn.StreamSweepCursor] = None
     let mut edits: List[StreamSweepEdit] = list.new()
     let mut deletes: List[Bytes] = list.new()
     for _ in 0u64 .. 8u64 {
@@ -368,13 +324,13 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             return Error(failure_from_rep(pages.malformed(0)))
         }
         let caller_prefix = failure_result_from_rep(types.copied(list.slice(key, 0u64, caller_end)))?
-        after = Some(StreamSweepCursor(key: clone(key), inclusive: false))
+        after = Some(txn.StreamSweepCursor(key: clone(key), inclusive: false))
         if key[0u64] == 1u8 {
             let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
                 break
             }
             rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
-            after = Some(StreamSweepCursor(key: take next_caller, inclusive: true))
+            after = Some(txn.StreamSweepCursor(key: take next_caller, inclusive: true))
             continue
         }
         if list.len(key) == caller_end {
@@ -399,7 +355,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
                 break
             }
             rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
-            after = Some(StreamSweepCursor(key: take next_caller, inclusive: true))
+            after = Some(txn.StreamSweepCursor(key: take next_caller, inclusive: true))
             continue
         }
         control.count -= 1u64
@@ -417,7 +373,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     }
     let _ = take rows
     if list.len(edits) == 0u64 {
-        db.stream_sweep_after = take after
+        db.call_streams.stream_sweep_after = take after
         return Ok(())
     }
     let no_reply: Option[fn(Error) -> bool] = None
@@ -436,7 +392,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     })?
     match take settled {
         Committed(_) => {
-            db.stream_sweep_after = take after;
+            db.call_streams.stream_sweep_after = take after;
             Ok(())
         },
         Refused(c) => Error(Full(c)),
@@ -590,18 +546,8 @@ pub fn ticket(c: Completion) -> Ticket {
 
 pub type Admission = Admitted(Completion) | Duplicate(Stored) | Rejected(u64) | Abandoned(Completion) | RequestMismatch | HistoryUnavailable | StreamFuture(u64) | StreamOverloaded
 
-// An Admitted(p) this open committed on main: a later admit of p while it is
-// still unreplied answers Abandoned with this commit_ticket and commits nothing.
-// `ticket` is None while the entry is only reserved (admit_commit), and a None
-// entry answers nothing.
-type OpenAdmit: shareable + send {
-    p: u64,
-    ticket: Option[Ticket],
-    held: bool
-}
-
 fn stream_admit_held(db: Db, key: Bytes) -> bool {
-    match map.get(db.admits, key) {
+    match map.get(db.call_streams.admits, key) {
         Some(active) => active.held,
         None => false
     }
@@ -609,12 +555,12 @@ fn stream_admit_held(db: Db, key: Bytes) -> bool {
 
 pub fn release_stream_admit(mut db: Db, name: StreamKey, p: u64) -> Result[(), Error] {
     let key = failure_result_from_rep(types.capacity(stream_key_bytes(name)))?
-    if let Some(take prior) = map.remove(mut db.admits, key) {
+    if let Some(take prior) = map.remove(mut db.call_streams.admits, key) {
         let mut active = take prior
         if active.p == p {
             active.held = false
         }
-        map.insert(mut db.admits, take key, take active)
+        map.insert(mut db.call_streams.admits, take key, take active)
     }
     Ok(())
 }
@@ -633,7 +579,7 @@ pub fn admit_while(mut db: Db, stream: StreamKey, p: u64, d: RequestDigest, prot
     admit_stream(mut db, stream, key, p, d, at, protected)
 }
 
-fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: RequestDigest, state: StreamState, at: u64, age: Option[u64], control: StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
+fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: RequestDigest, state: StreamState, at: u64, age: Option[u64], control: txn.StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
     let latest = state.p
     if p < latest {
         // AH2: one state per stream keeps no digest below latest.
@@ -658,7 +604,7 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
         }
         return Ok(Duplicate(take r))
     }
-    let mine = match map.get(db.admits, stream) {
+    let mine = match map.get(db.call_streams.admits, stream) {
         Some(a) => if a.p == p {
             a.ticket
         } else {
@@ -667,15 +613,15 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
         None => None
     }
     if let Some(t) = mine {
-        let active = OpenAdmit(p: p, ticket: Some(t), held: true)
-        map.insert(mut db.admits, failure_result_from_rep(types.copied(stream))?, active)
+        let active = txn.OpenAdmit(p: p, ticket: Some(t), held: true)
+        map.insert(mut db.call_streams.admits, failure_result_from_rep(types.copied(stream))?, active)
         return Ok(Abandoned(Completion(admitted: t, stream: failure_result_from_rep(types.copied(stream))?, p: p, request: d, keyed: None)))
     }
     // An earlier open's admit: re-commit, keeping the digest bound at p.
     admit_next(mut db, name.caller, stream, p, d, true, at, age, control, protected)
 }
 
-fn admit_next(mut db: Db, caller: Caller, key: Bytes, p: u64, digest: RequestDigest, abandoned: bool, at: u64, age: Option[u64], control: StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
+fn admit_next(mut db: Db, caller: Caller, key: Bytes, p: u64, digest: RequestDigest, abandoned: bool, at: u64, age: Option[u64], control: txn.StreamControl, protected: scoped[view] fn(StreamKey) -> bool) -> Result[Admission, Error] waits {
     let mut edits = stream_changes(db, caller, control)?
     let _ = reclaim_front(db, mut edits, age, protected)?
     let stream_edits: Option[StreamChanges] = if list.len(edits.deletes) == 0u64 {
@@ -692,8 +638,8 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     // §1.8: a later admit of p in this open commits nothing, so the entry that
     // remembers this one is reserved before the commit. Without room the admit
     // is Full and commits nothing; the map is kept as it was.
-    if !map.contains(db.admits, key) {
-        failure_result_from_rep(types.capacity(map.try_reserve(mut db.admits, 1)))?
+    if !map.contains(db.call_streams.admits, key) {
+        failure_result_from_rep(types.capacity(map.try_reserve(mut db.call_streams.admits, 1)))?
     }
     journal_poll(mut db)?
     healthy(db)?
@@ -715,7 +661,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         Failed(_) => return Error(Missing("admit")),
         Stopped(_) => return Error(Missing("admit"))
     }
-    map.insert(mut db.admits, take key, OpenAdmit(p: p, ticket: Some(admitted), held: true))
+    map.insert(mut db.call_streams.admits, take key, txn.OpenAdmit(p: p, ticket: Some(admitted), held: true))
     let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d, keyed: None)
     Ok(if abandoned {
         Abandoned(take completion)
@@ -728,7 +674,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
 fn stream_live(db: Db, streams: pages.PageTree, ops: pages.DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
-    let mut live_bytes = db.resident
+    let mut live_bytes = db.accounting.resident
     for slot in 0u64 .. pages.data_row_count(ops.rows) {
         let operation = pages.data_row(ops.rows, slot)
         let k = operation.key

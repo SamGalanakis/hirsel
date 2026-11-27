@@ -464,10 +464,10 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
     if prior != Some(7) {
         fail("L63 (d): A's put of key 4 carries prior 1 + |40|, the moved head's value")
     }
-    let live_account = db.resident
+    let live_account = db.accounting.resident
     close(take db)?
     let replayed = open(tasks, directory, c, r, options)?
-    if replayed.resident != live_account {
+    if replayed.accounting.resident != live_account {
         fail("L63 (d): replay's account equals the live one")
     }
     close(take replayed)

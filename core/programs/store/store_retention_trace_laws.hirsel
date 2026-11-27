@@ -147,7 +147,7 @@ fn rt_arm(db: Db, mut st: CsimState) {
     if let Some(mut t) = st.trace {
         if !t.armed {
             t.armed = true
-            t.generation = db.checkpointed
+            t.generation = db.accounting.checkpointed
         }
     }
 }
@@ -158,10 +158,10 @@ fn rt_cut(db: Db, root: Dir, mut st: CsimState) -> Result[(), String] waits {
     let at = st.at
     let residency = rt_residency(st.tiered)
     if let Some(mut t) = st.trace {
-        if t.armed && db.checkpointed != t.generation {
+        if t.armed && db.accounting.checkpointed != t.generation {
             rt_cut_row(db, root, at, residency, mut t)?
         }
-        t.generation = db.checkpointed
+        t.generation = db.accounting.checkpointed
     }
     Ok(())
 }
@@ -180,7 +180,7 @@ fn rt_cut_row(db: Db, root: Dir, at: u64, residency: String, mut t: RtTrace) -> 
         }
     }
     rt_open_row(mut t.out, "cut", at)
-    rt_push_u64(mut t.out, "generation", db.checkpointed)
+    rt_push_u64(mut t.out, "generation", db.accounting.checkpointed)
     string.push(mut t.out, ",\"hres\":\"")
     string.push(mut t.out, residency)
     string.push(mut t.out, "\"")
@@ -191,7 +191,7 @@ fn rt_cut_row(db: Db, root: Dir, at: u64, residency: String, mut t: RtTrace) -> 
     string.push(mut t.out, "}\n")
     for p in removed {
         rt_open_row(mut t.out, "remove", at)
-        rt_push_u64(mut t.out, "generation", db.checkpointed)
+        rt_push_u64(mut t.out, "generation", db.accounting.checkpointed)
         rt_push_u64(mut t.out, "pack", p)
         string.push(mut t.out, "}\n")
     }
@@ -233,13 +233,13 @@ fn rt_reopen_row(db: Db, root: Dir, at: u64, mut t: RtTrace) -> Result[(), Strin
     let queue = rt_queue(db)?
     let files = rt_files(root, t.tiered)?
     rt_open_row(mut t.out, "reopen", at)
-    rt_push_u64(mut t.out, "generation", db.checkpointed)
+    rt_push_u64(mut t.out, "generation", db.accounting.checkpointed)
     rt_push_list(mut t.out, "listed", listed)
     rt_push_list(mut t.out, "queue", queue)
     rt_push_list(mut t.out, "files", files)
     string.push(mut t.out, "}\n")
     t.files = take files
-    t.generation = db.checkpointed
+    t.generation = db.accounting.checkpointed
     Ok(())
 }
 

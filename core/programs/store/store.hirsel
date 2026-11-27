@@ -37,22 +37,8 @@ pub opaque type Db {
     followers: List[BranchFollower],
     limits: StoreLimits,
     frame_seq: u64,
-    resident: u64,
-    tiered: u64,
-    page_resident: u64,
-    // Commits and cut-made operations on any branch.
-    changes: u64,
-    // The `changes` count at which `resident` was last exact (I4).
-    settled: u64,
-    ceiling: u64,
-    keyed_credit: format.KeyedCredit,
-    checkpointed: u64,
-    // Stream name to the unreplied Admitted(p) this open committed (§1.8).
-    admits: Map[Bytes, OpenAdmit],
-    stream_retention_ms: u64,
-    streams_per_caller_max: u64,
-    streams_max: u64,
-    stream_sweep_after: Option[StreamSweepCursor],
+    accounting: txn.AccountingState,
+    call_streams: txn.CallStreamState[Ticket],
     // Index drift seen since this open (§I.3 step one), one entry per index.
     // `attention_mark`'s own part (store-attention.hirsel).
     attention_seq: u64,
@@ -190,8 +176,8 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
             }
         },
     }
-    db.changes += 1
-    db.settled = db.changes
+    db.accounting.changes += 1
+    db.accounting.settled = db.accounting.changes
 }
 
 // A Memory cut counts row versions only. The page-image figure walks every
@@ -203,10 +189,10 @@ fn memory_cut_account(state: pages.State) -> Result[u64, Error] {
 }
 
 fn record_memory_cut(mut db: Db, live_bytes: u64) -> Ticket {
-    db.checkpointed += 1
-    db.resident = live_bytes
-    db.settled = db.changes
-    Ticket(store: db.store, open: 0, mark: Cut(db.checkpointed))
+    db.accounting.checkpointed += 1
+    db.accounting.resident = live_bytes
+    db.accounting.settled = db.accounting.changes
+    Ticket(store: db.store, open: 0, mark: Cut(db.accounting.checkpointed))
 }
 
 fn branch_slot(db: Db, id: u32) -> Result[u64, u64] {
@@ -383,7 +369,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: pager.pager_state(o.writer_pin_bytes), indexes: indexes.empty_index_owner(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: history.size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, attention_seq: 0, projectors: list.new())
+    Db(store: id, pager: pager.pager_state(o.writer_pin_bytes), indexes: indexes.empty_index_owner(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), frame_seq: 0, accounting: txn.new_accounting(o.resident_limit), call_streams: txn.new_call_streams(o.stream_retention_ms, o.streams_per_caller_max, history.size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES)), attention_seq: 0, projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -491,7 +477,7 @@ fn cut_install_emitted(mut db: Db, take delta: HolderDelta, mut emitted: Option[
     }
     let live_bytes = memory_cut_account(proposed)?
     if admission {
-        failure_result_from_rep(catalog.over_ceiling(live_bytes, available_resident(db)))?
+        failure_result_from_rep(catalog.over_ceiling(live_bytes, txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     }
     let commit_ticket = record_memory_cut(mut db, live_bytes)
     install_holder_delta(mut db, take delta)
@@ -644,7 +630,7 @@ pub fn next_call_info(db: Db) -> CallInfo {
 }
 
 pub fn stream_retention_ms(db: Db) -> u64 {
-    db.stream_retention_ms
+    db.call_streams.stream_retention_ms
 }
 
 pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempted: CallInfo) -> Pending {
@@ -1052,7 +1038,7 @@ fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
         None => (None, pages.NO_FRAME_TAIL),
     }
     let observed_info: core.Cell[bool] = cell.new(false)
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: pages.share_roots(base), base_collection: None, bases: pages.share_tail_bases(pages.holder_bases(db.holders)), ids: pages.holder_next_node(db.holders), private_from: int.saturating_add(pages.holder_next_node(db.holders), 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: pages.share_roots(base), base_collection: None, bases: pages.share_tail_bases(pages.holder_bases(db.holders)), ids: pages.holder_next_node(db.holders), private_from: int.saturating_add(pages.holder_next_node(db.holders), 1), resident: db.accounting.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1116,7 +1102,7 @@ fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
     }
     let pages.DataOps(rows: take stream_rows, ..) = take stream_ops
     let tiered = match attempt {
-        Some(_) => Some(db.tiered),
+        Some(_) => Some(db.accounting.tiered),
         None => None,
     }
     Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: pages.tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
@@ -1221,7 +1207,7 @@ fn covered(db: Db, mark: Mark) -> bool {
             Some(state) => queue_accounting(state).journaled >= n,
             None => n == 0
         },
-        Cut(n) => db.checkpointed >= n
+        Cut(n) => db.accounting.checkpointed >= n
     }
 }
 
@@ -2017,7 +2003,7 @@ fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[Li
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = failure_result_from_rep(types.capacity(current_state(source.db)))?
     state.tips[0].roots = pages.share_roots(staged.plan.schema.roots)
-    failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(types.capacity(pages.state_account(state)))?, available_resident(source.db)))
+    failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(types.capacity(pages.state_account(state)))?, txn.available_resident(source.db.accounting, source.db.call_streams.keyed_credit)))
 }
 
 fn db_target(db: Db) -> Option[manifest.TargetLimits] {
@@ -2074,7 +2060,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[journal.D
     let journal.JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live_bytes = failure_result_from_rep(journal.journal_account(replay))?
     let pager.JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
-    check_stream_quota(state.tips[0u64].roots.streams, options.streams_max)?
+    failure_result_from_rep(txn.check_stream_quota(state.tips[0u64].roots.streams, options.streams_max))?
     failure_result_from_rep(catalog.over_ceiling(live_bytes, options.resident_limit))?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
         let roots = failure_result_from_rep(types.capacity(pages.state_roots(state)))?
@@ -2224,7 +2210,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
         Ok(empty_db(c, id, options))
     })?
     open_heads(mut db, take state)?
-    db.resident = live_bytes
+    db.accounting.resident = live_bytes
     rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
     // The pager starts before the journal tasks, so a refusal leaves none. It
     // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
@@ -2239,9 +2225,9 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     db.limits = limits_from_rep(limits)
     pages.set_next_node(mut db.holders, next_node)
     catalog.set_next_table(mut db.schema, next_table)
-    db.tiered = tiered
-    db.page_resident = resident_pages
-    db.checkpointed = generation
+    db.accounting.tiered = tiered
+    db.accounting.page_resident = resident_pages
+    db.accounting.checkpointed = generation
     let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
     let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
     db.disk = Some(DiskState(open: seq, options: clone(options), lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
@@ -2250,7 +2236,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
 
 fn disk_wait_cut(db: Db, generation: u64) -> Result[(), Error] {
     healthy(db)?
-    if db.checkpointed < generation {
+    if db.accounting.checkpointed < generation {
         return Error(Foreign)
     }
     Ok(())
@@ -2338,7 +2324,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         0
     }
     let drain_groups = durable_groups(mut db, final_item)?
-    let Some(generation) = int.checked_add(db.checkpointed, 1) else {
+    let Some(generation) = int.checked_add(db.accounting.checkpointed, 1) else {
         return Error(Limit(Ids))
     }
     let Some(seq) = int.checked_add(file_seq(db), 1) else {
@@ -2361,7 +2347,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     let mut base = failure_result_from_rep(manifest.page_retry_base(manifest.pack_locations(disk_state(db).packs), manifest.pack_owners(disk_state(db).packs), holders, staged.roots))?
     failure_result_from_rep(pager.list_tiered_cut(mut base.locations, staged))?
     let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
-    failure_result_from_rep(catalog.over_ceiling(base.account, available_resident(db)))?
+    failure_result_from_rep(catalog.over_ceiling(base.account, txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
@@ -2424,11 +2410,11 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         // Step 5: the lists' rows are now queue rows of the published generation.
         pager.install_disk_cut(mut state.tiered, take candidate)
     })
-    db.checkpointed = generation
-    db.resident = base.account
-    db.tiered = settled_tiered
-    db.page_resident = resident_pages
-    db.settled = db.changes
+    db.accounting.checkpointed = generation
+    db.accounting.resident = base.account
+    db.accounting.tiered = settled_tiered
+    db.accounting.page_resident = resident_pages
+    db.accounting.settled = db.accounting.changes
     let wants_emitted = match view emitted_out {
         Some(_) => true,
         None => false,
@@ -2569,7 +2555,7 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[format.JournalCommi
                     let Some(control) = view row.value else {
                         return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
                     }
-                    let _ = decode_stream_control(control) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
+                    let _ = txn.decode_stream_control(control) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
                 }
                 list.insert(mut streams, 0u64, take row)
             },
@@ -2786,7 +2772,7 @@ fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
     result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
         failure_result_from_rep(catalog.bulk_store_collection(mut tree, t.id, 1, input, mut stamp))
     }))
-    db.resident = pages.one_page_account(pages.holder_heads(db.holders)[0].roots)
+    db.accounting.resident = pages.one_page_account(pages.holder_heads(db.holders)[0].roots)
 }
 
 fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
@@ -2812,12 +2798,12 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let Admitted(take complete) = take admission else {
         return false
     }
-    db.ceiling = db.resident
-    let unsettled = db.changes
-    if db.settled == unsettled {
+    db.accounting.ceiling = db.accounting.resident
+    let unsettled = db.accounting.changes
+    if db.accounting.settled == unsettled {
         return false
     }
-    let cut = db.checkpointed
+    let cut = db.accounting.checkpointed
     let Some(grant) = call_reserves(plan) else {
         return false
     }
@@ -2838,7 +2824,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     match serve(mut db, take complete, plan, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         Ok(types.key_word(7))
     }) {
-        Ok(Committed(receipt)) => receipt.reply == types.key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,
+        Ok(Committed(receipt)) => receipt.reply == types.key_word(7) && accounts(db).exact && db.accounting.checkpointed == cut + 1,
         _ => false,
     }
 }

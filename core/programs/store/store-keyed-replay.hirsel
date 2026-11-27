@@ -90,22 +90,3 @@ fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: 
     }
     total
 }
-
-fn resident_with_credit(ceiling: u64, credit: format.KeyedCredit) -> u64 {
-    int.saturating_sub(int.saturating_sub(ceiling, credit.resident), credit.padding)
-}
-
-fn available_resident(db: Db) -> u64 {
-    resident_with_credit(db.ceiling, db.keyed_credit)
-}
-
-fn available_journal(db: Db, credit: format.KeyedCredit) -> u64 {
-    int.saturating_sub(disk_state(db).options.journal_limit, credit.journal)
-}
-
-fn draft_credit[R, A](db: Db, ran: Ran[R, A]) -> format.KeyedCredit {
-    match ran.keyed {
-        Some(keyed) => keyed.after,
-        None => db.keyed_credit
-    }
-}

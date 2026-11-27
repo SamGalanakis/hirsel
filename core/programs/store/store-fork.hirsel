@@ -55,7 +55,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let size = 42 + string.byte_len(name)
     let disk = is_disk(db)
     if disk {
-        if let Some(over) = journal_refusal(queue_accounting(disk_state(db)).uncovered, size, available_journal(db, db.keyed_credit)) {
+        if let Some(over) = journal_refusal(queue_accounting(disk_state(db)).uncovered, size, txn.available_journal(disk_state(db).options.journal_limit, db.call_streams.keyed_credit)) {
             return Error(Full(Journal(over)))
         }
     }
@@ -80,7 +80,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         durable(mut db, preceding)?
     }
     pages.advance_branch(mut db.holders)
-    let exact = !retaining(db) || db.changes == db.settled
+    let exact = !retaining(db) || db.accounting.changes == db.accounting.settled
     let sequence = if let Some(take raw) = take frame {
         db.frame_seq += 1
         write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
@@ -89,7 +89,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         handoff(mut db)?
         db.frame_seq
     } else {
-        db.changes + 1
+        db.accounting.changes + 1
     }
     let fork_ticket = Ticket(store: store, open: opened, mark: Journal(sequence, id, head.head))
     if disk {
@@ -99,9 +99,9 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         note_fork_row(mut db, manifest.LineageFork(child: id, parent: head.parent, watermark: watermark, adopted: false))?
     }
     install_head(mut db, take head, take indexed_name)
-    db.changes += 1
+    db.accounting.changes += 1
     if exact {
-        db.settled = db.changes
+        db.accounting.settled = db.accounting.changes
     }
     match maybe_checkpoint(mut db) {
         Ok(()) => (),

@@ -112,7 +112,7 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
         Ok(clone(options))
     })?
     let (take register, take opened, take started, take metadata) = history_open_with(mut opening, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, replay: pager.JournalReplay) -> Result[Db, Error] {
-        check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max)?
+        failure_result_from_rep(txn.check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max))?
         let state = failure_result_from_rep(host_stream.copy_follow_state(replay.state))?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] {
             Ok(empty_db(c, id, options))
@@ -121,7 +121,7 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
         pages.set_next_node(mut prepared.holders, replay.next_node)
         prepared.limits = limits_from_rep(replay.limits)
         catalog.set_next_table(mut prepared.schema, replay.state.next_table)
-        prepared.resident = failure_result_from_rep(journal.journal_account(replay))?
+        prepared.accounting.resident = failure_result_from_rep(journal.journal_account(replay))?
         rebuild_keyed_credit(mut prepared, 0, options.journal_limit)?
         Ok(take prepared)
     })?
@@ -194,9 +194,9 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
             return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), authority_kind)))
         },
     }
-    db.checkpointed = generation
+    db.accounting.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
-    db.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
+    db.accounting.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
     db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(None)))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
@@ -397,7 +397,7 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
     // objects@1 has no Tiered publisher (§13.6a); its open refuses a Tiered account.
     failure_result_from_rep(types.require_memory_collections(pages.holders_tiered(participants.roots), tiered_refusal_to_rep(Install)))?
     let base = failure_result_from_rep(manifest.page_retry_base(manifest.pack_locations(disk_state(db).packs), manifest.pack_owners(disk_state(db).packs), participants.holders, participants.roots))?
-    failure_result_from_rep(catalog.over_ceiling(base.account, available_resident(db)))?
+    failure_result_from_rep(catalog.over_ceiling(base.account, txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     if let Some(wanted) = target {
         if let Some(problem) = types.journal_floor(wanted.checkpoint, wanted.journal, wanted.frame) {
             return Error(Full(Journal(problem)))
@@ -446,10 +446,10 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         pager.reset_compaction(mut state.tiered)
     })
-    db.checkpointed = generation
-    db.resident = base.account
-    db.page_resident = resident_pages
-    db.settled = db.changes
+    db.accounting.checkpointed = generation
+    db.accounting.resident = base.account
+    db.accounting.page_resident = resident_pages
+    db.accounting.settled = db.accounting.changes
     install_holder_delta(mut db, take delta)
     let authority = object_state(db)
     object_writer.schedule_reclaim(mut lane, object_writer.recovered_checkpoint(authority), generation, manifest.pack_next(disk_state(db).packs))

@@ -449,7 +449,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
         result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
         result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     }
-    let catalog_cost = db.resident
+    let catalog_cost = db.accounting.resident
     for k in 0u64 .. n {
         disk_bench_put(mut db, t, k, k)
     }
@@ -461,7 +461,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
     } else {
         110
     }
-    if db.resident != catalog_cost + n * per_row {
+    if db.accounting.resident != catalog_cost + n * per_row {
         fail("disk bench account")
     }
     let first_pack = disk_bench_next_pack(child)

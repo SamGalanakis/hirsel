@@ -136,7 +136,7 @@ fn direct_collection_edits(mut tree: pages.PageTree, edits: pages.DataRows, firs
 fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] {
     if over_bound(db, ran) {
         let needed = ran.live
-        let available = resident_with_credit(db.ceiling, draft_credit(db, ran))
+        let available = txn.available_resident(db.accounting, txn.draft_credit(db.call_streams.keyed_credit, ran.keyed))
         return Ok(OverLimit(take ran, Resident(Capacity(requested: needed, available: available))))
     }
     let mut draft = take ran
@@ -159,7 +159,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
             let Some(roots) = view draft.roots else {
                 fail("store: Tiered draft has no candidate")
             }
-            settled_tiered_bytes(db.tiered, retaining(db), pages.holder_heads(db.holders)[i].roots.collections, roots.collections, draft.edits)
+            settled_tiered_bytes(db.accounting.tiered, retaining(db), pages.holder_heads(db.holders)[i].roots.collections, roots.collections, draft.edits)
         }
         match total {
             Ok(n) => {
@@ -207,17 +207,17 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
 }
 
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
-    db.keyed_credit = draft_credit(db, ran)
+    db.call_streams.keyed_credit = txn.draft_credit(db.call_streams.keyed_credit, ran.keyed)
     if i == 0u64 {
         for reply_slot in 0u64 .. pages.data_row_count(ran.replies) {
             let drafted_reply = pages.data_row(ran.replies, reply_slot)
-            if map.contains(db.admits, drafted_reply.key) {
+            if map.contains(db.call_streams.admits, drafted_reply.key) {
                 let settled = match drafted_reply.value {
                     None => true,
                     Some(raw) => result.unwrap(stream_state(format.staged_bytes(raw))).state == 2u8,
                 }
                 if settled {
-                    let _ = map.remove(mut db.admits, drafted_reply.key)
+                    let _ = map.remove(mut db.call_streams.admits, drafted_reply.key)
                 }
             }
         }
@@ -245,18 +245,18 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         let count_bytes = manifest.keyed_root_record_bytes(candidate.keyed)
         pages.commit_roots(mut db.holders, i, take candidate, old_bytes, count_bytes)
     }
-    db.resident = live_bytes
+    db.accounting.resident = live_bytes
     if let Some(n) = tiered {
-        db.tiered = n
+        db.accounting.tiered = n
     }
     pages.advance_head(mut db.holders, i, ci.at)
-    db.changes += 1
+    db.accounting.changes += 1
     if exact {
-        db.settled = db.changes
+        db.accounting.settled = db.accounting.changes
     }
     publish(take publication)
     let sent_sequence = if !is_disk(db) {
-        db.changes
+        db.accounting.changes
     } else {
         db.frame_seq
     }
@@ -270,7 +270,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
 fn commit_skipped[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> Outcome[R, A] {
     let Ran(value: take value, reads: take seen, ..) = take ran
     let sent_sequence = if !is_disk(db) {
-        db.changes
+        db.accounting.changes
     } else {
         db.frame_seq
     }
@@ -288,7 +288,7 @@ fn keyed_credit_equal(a: format.KeyedCredit, b: format.KeyedCredit) -> bool {
 fn keyed_draft_empty(db: Db, keyed: Option[format.KeyedDraft]) -> bool {
     match keyed {
         None => true,
-        Some(draft) => list.len(draft.edits) == 0 && keyed_credit_equal(draft.after, db.keyed_credit),
+        Some(draft) => list.len(draft.edits) == 0 && keyed_credit_equal(draft.after, db.call_streams.keyed_credit),
     }
 }
 
@@ -343,7 +343,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
     }
     if is_disk(db) {
         let refusal = match ran.frame {
-            Some(raw) => journal_refusal(queue_accounting(disk_state(db)).uncovered, list.len(raw), available_journal(db, draft_credit(db, ran))),
+            Some(raw) => journal_refusal(queue_accounting(disk_state(db)).uncovered, list.len(raw), txn.available_journal(disk_state(db).options.journal_limit, txn.draft_credit(db.call_streams.keyed_credit, ran.keyed))),
             None => None,
         }
         if let Some(overflow) = refusal {
@@ -379,7 +379,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
         OverLimit(take rejected, problem) => return Ok(OverLimit(take rejected, problem)),
     }
     let mut draft = take admitted
-    if db.settled != db.changes && draft.tiered == None {
+    if db.accounting.settled != db.accounting.changes && draft.tiered == None {
         match cut_install(mut db, NoHolderChange) {
             Ok(_) => {},
             Error(Full(c)) => return Ok(OverLimit(take draft, c)),
@@ -591,7 +591,7 @@ fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
 }
 
 fn over_bound[R, A](db: Db, ran: Ran[R, A]) -> bool {
-    ran.admits_rows && ran.live > resident_with_credit(db.ceiling, draft_credit(db, ran))
+    ran.admits_rows && ran.live > txn.available_resident(db.accounting, txn.draft_credit(db.call_streams.keyed_credit, ran.keyed))
 }
 
 fn store_body_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {

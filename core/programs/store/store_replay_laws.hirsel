@@ -72,13 +72,13 @@ fn replay_law_compare(primary: pages.Tip, replayed: pages.Tip) {
 fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Result[(), Error] waits {
     let primary = failure_result_from_rep(types.capacity(current_state(db)))?
     let tip = view primary.tips[0]
-    if db.checkpointed != floor || tip.head != wanted {
+    if db.accounting.checkpointed != floor || tip.head != wanted {
         replay_law_mismatch(tip, "journal coverage")
     }
     journal_law_await_end(db)?;
     let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
     let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
-    let Some(take replayed) = log_follow_capture(d, c, due, mut progress, Some(db.store), db.ceiling, None)? else {
+    let Some(take replayed) = log_follow_capture(d, c, due, mut progress, Some(db.store), db.accounting.ceiling, None)? else {
         replay_law_mismatch(tip, "journal capture")
     }
     replay_law_compare(tip, replayed.state.tips[0])
@@ -105,7 +105,7 @@ fn journal_test_live_replay_versions(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let events = declare_log(mut declaring, "events", std.codec.of_u64(), Forever)?
     let _ = seal(mut db, take declaring)?
     let base = version(snapshot(db))
-    let floor = db.checkpointed
+    let floor = db.accounting.checkpointed
     replay_law_capture(db, dir, c, floor, base)?
     for step in 0u64 .. 4 {
         let outcome = run(mut db, None, (copy_env(rows), copy_env(cell), copy_env(events), step), fn(mut tx: Tx, env: (Table[u64, u64], Cell[Bytes], Log[u64], u64)) -> Result[(), Error] {

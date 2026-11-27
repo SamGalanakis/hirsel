@@ -50,7 +50,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let before = pages.share_roots(pages.holder_heads(source.db.holders)[0].roots)
     let state = deploy_result(failure_result_from_rep(types.capacity(current_state(source.db))))?
     let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(source.db.holders), limits_to_rep(source.db.limits))))?
-    initial.tiered.total = source.db.tiered
+    initial.tiered.total = source.db.accounting.tiered
     let steps = read_steps(d, stamp)?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
     if replayed.state.tips[0].head != stamp.head {
@@ -89,8 +89,8 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let live_bytes = deploy_result(failure_result_from_rep(journal.journal_account(replayed)))?
     let pager.JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
-    source.db.resident = live_bytes
-    source.db.tiered = tiered_account.total
+    source.db.accounting.resident = live_bytes
+    source.db.accounting.tiered = tiered_account.total
     for take freed in take freed_rows {
         list.push(mut source.deferred_frees, take freed)
     }

@@ -16,7 +16,7 @@ fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     }
     let _ = conclude_claim(mut db, take one, b"done")?
     let expiry = pages.holder_heads(db.holders)[0u64].at + 10000
-    let reserved = db.keyed_credit.resident
+    let reserved = db.call_streams.keyed_credit.resident
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
     close(take db)?
@@ -28,7 +28,7 @@ fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let admitted = b"\x03pay\x02\x05alice\x03two"
     {
         let trees = pages.holder_heads(reopened.holders)[0u64].roots.keyed
-        if list.len(trees) != 7 || reopened.keyed_credit.resident != reserved {
+        if list.len(trees) != 7 || reopened.call_streams.keyed_credit.resident != reserved {
             fail("checkpoint lost a keyed root or reserve")
         }
         let expected: Inline[u64, 7] =[1u64, 2u64, 1u64, 1u64, 1u64, 1u64, 1u64]
@@ -107,7 +107,7 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
     let hand_frame: u64 = 37 + 5 + (10 + 387 + 41 + 8192) + (10 + 460) + (10 + 526) + (6 + 387) + 198
     // A 128 MiB ceiling gives ceil(log2(floor(134217728 / 70) + 1)) = 21.
     let hand_resident: u64 = 526 + 590 + hand_frame + 4 * (6 * 22 + 2) * 32768
-    if db.keyed_credit.journal != 2 * hand_frame || db.keyed_credit.resident != 2 * hand_resident {
+    if db.call_streams.keyed_credit.journal != 2 * hand_frame || db.call_streams.keyed_credit.resident != 2 * hand_resident {
         fail("independently counted terminal credit")
     }
     // Each single-row frame has 73 bytes before its value. Use eight
@@ -132,7 +132,7 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
         durable(mut db, fill_commit.ticket)?
         remaining -= 73 + width
     }
-    if accounts(db).journal + db.keyed_credit.journal != options.journal_limit {
+    if accounts(db).journal + db.call_streams.keyed_credit.journal != options.journal_limit {
         fail("journal and credit sum")
     }
     match admit_claim(mut db, extra, digest, b"args", Some(clone(policy))) {
@@ -142,14 +142,14 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
     let _ = failure_result_from_rep(types.capacity(bound bytes 1048576 {
         conclude_claim(mut db, take one, b"done")
     }))??
-    if db.keyed_credit.journal != hand_frame || accounts(db).journal <= options.checkpoint_bytes || accounts(db).journal > options.journal_limit - hand_frame {
+    if db.call_streams.keyed_credit.journal != hand_frame || accounts(db).journal <= options.checkpoint_bytes || accounts(db).journal > options.journal_limit - hand_frame {
         fail("first terminal credit")
     }
     let covered_before_reopen = accounts(db).journal
     close(take db)?
     options.create = false
     let mut reopened = open(tasks, directory, c, r, options)?
-    if reopened.keyed_credit.journal != hand_frame || reopened.keyed_credit.resident != hand_resident || accounts(reopened).journal != covered_before_reopen {
+    if reopened.call_streams.keyed_credit.journal != hand_frame || reopened.call_streams.keyed_credit.resident != hand_resident || accounts(reopened).journal != covered_before_reopen {
         fail("reopened credit")
     }
     match admit_claim(mut reopened, extra, digest, b"args", Some(clone(policy))) {
@@ -164,7 +164,7 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
         fail("second ownerless")
     }
     let _ = conclude_claim(mut reopened, take again, b"finished")?
-    if reopened.keyed_credit.journal != 0 || accounts(reopened).journal > options.journal_limit {
+    if reopened.call_streams.keyed_credit.journal != 0 || accounts(reopened).journal > options.journal_limit {
         fail("last credit")
     }
     close(take reopened)
@@ -825,7 +825,7 @@ fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
     // A 40 MiB ceiling: floor(41943040 / 70) + 1 = 599187 rows, 20 halvings
     // to one, so a keyed page height of 21.
     let hand_resident: u64 = 526 + 590 + hand_frame + 4 * (6 * 21 + 2) * 32768
-    if db.keyed_credit.resident != 2 * hand_resident || db.keyed_credit.journal != 2 * hand_frame {
+    if db.call_streams.keyed_credit.resident != 2 * hand_resident || db.call_streams.keyed_credit.journal != 2 * hand_frame {
         fail("two admissions did not hold two hand-counted reserves")
     }
     let held = snapshot(db)
@@ -838,7 +838,7 @@ fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
         Ok(Committed(_)) => fail("a success spent the second claim's reserve"),
         _ => fail("the oversized success was not refused for resident room"),
     }
-    if get(reader(db, 0u64)?, snapshot(db), rows, 1000u64)? != None || db.keyed_credit.resident != 2 * hand_resident {
+    if get(reader(db, 0u64)?, snapshot(db), rows, 1000u64)? != None || db.call_streams.keyed_credit.resident != 2 * hand_resident {
         fail("a refused success committed or released a reserve")
     }
     let Pending(completion: take again, ..) = take pending
@@ -846,13 +846,13 @@ fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
         Ok(Committed(_)) => (),
         _ => fail("a success within its own reserve did not commit"),
     }
-    if db.keyed_credit.resident != hand_resident || db.keyed_credit.journal != hand_frame {
+    if db.call_streams.keyed_credit.resident != hand_resident || db.call_streams.keyed_credit.journal != hand_frame {
         fail("the first success released more or less than its own reserve")
     }
     // Fill again to the limit, so only the second claim's own reserve is left.
     claim_reserve_fill(mut db, rows, c, 5000)?
     let _ = conclude_claim(mut db, take second, b"done")?
-    if db.keyed_credit.resident != 0 || db.keyed_credit.journal != 0 {
+    if db.call_streams.keyed_credit.resident != 0 || db.call_streams.keyed_credit.journal != 0 {
         fail("the control-only reply left a reserve")
     }
     Ok(())

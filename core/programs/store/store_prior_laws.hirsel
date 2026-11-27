@@ -67,7 +67,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = open(tasks, dir, c, r, options)?
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let baseline = db.resident
+    let baseline = db.accounting.resident
     let start = file_end(db)
     let seq = file_seq(db)
     let Committed(initial) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
@@ -76,7 +76,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(Missing("insert"))
     }
     // entry(12, 34) = 62 + 16 + 40 = 118.
-    if db.resident != baseline + 118 || file_end(db) != start + 101 {
+    if db.accounting.resident != baseline + 118 || file_end(db) != start + 101 {
         return Error(Missing("insert charge or length"))
     }
     let first = pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections)
@@ -87,7 +87,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(Missing("overwrite"))
     }
     // entry(12, 10) = 62 + 16 + 16 = 94. Only one put survives in the frame.
-    if db.resident != baseline + 94 || file_end(db) != start + 101 + 77 {
+    if db.accounting.resident != baseline + 94 || file_end(db) != start + 101 + 77 {
         return Error(Missing("overwrite charge or length"))
     }
     let Committed(removed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
@@ -96,7 +96,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     })? else {
         return Error(Missing("delete"))
     }
-    if db.resident != baseline || file_end(db) != start + 101 + 77 + 63 {
+    if db.accounting.resident != baseline || file_end(db) != start + 101 + 77 + 63 {
         return Error(Missing("delete charge or length"))
     }
     durable(mut db, removed.ticket)?
@@ -129,7 +129,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     close(take db)?
     let reopened = open(tasks, dir, c, r, options)?
-    if reopened.resident != baseline || page_row_count(pages.holder_heads(reopened.holders)[0].roots.collections) != 0 || pages.holder_heads(reopened.holders)[0].head != removed_info.id.version {
+    if reopened.accounting.resident != baseline || page_row_count(pages.holder_heads(reopened.holders)[0].roots.collections) != 0 || pages.holder_heads(reopened.holders)[0].head != removed_info.id.version {
         return Error(Missing("replayed table account"))
     }
     close(take reopened)
@@ -176,10 +176,10 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
             }
         }
     }
-    let expected = db.resident
+    let expected = db.accounting.resident
     close(take db)?
     let recovered = open(tasks, directory, c, r, options)?
-    if recovered.resident != expected {
+    if recovered.accounting.resident != expected {
         return Error(Missing("covering prior replay charge"))
     }
     close(take recovered)
@@ -190,7 +190,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = open(tasks, directory, c, r, options)?
     let _ = law_table(mut db, "big", std.codec.key_u64(), std.codec.of_bytes())?
-    let baseline = db.resident
+    let baseline = db.accounting.resident
     let logical = failure_result_from_rep(catalog.logical_key(1, types.key_word(7)))?
     let width = 12582912u64
     {
@@ -203,13 +203,13 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
             failure_result_from_rep(pages.put_page_row(mut tree, logical, raw, first, mut next_stamp))
         })?
         pages.set_next_node(mut db.holders, next_stamp - 1)
-        db.resident += 12582990
+        db.accounting.resident += 12582990
     }
     let receipt = checkpoint(mut db)?
     durable(mut db, receipt)?
     close(take db)?
     let mut reopened = open(tasks, directory, c, r, options)?
-    if reopened.resident != baseline + 12582990 {
+    if reopened.accounting.resident != baseline + 12582990 {
         return Error(Missing("12 MiB prior seed charge"))
     }
     if let Some(raw) = pages.get_page_row(pages.holder_heads(reopened.holders)[0].roots.collections, logical) {
@@ -233,7 +233,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     durable(mut reopened, done.ticket)?
     let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
     let wire = read_journal_prefix(directory, path, start + 63)?
-    if !prior_fixture_frame(wire, start, 2, 63, 12582913) || reopened.resident != baseline {
+    if !prior_fixture_frame(wire, start, 2, 63, 12582913) || reopened.accounting.resident != baseline {
         return Error(Missing("12 MiB delete prior or charge"))
     }
     let mut body = failure_result_from_rep(types.copied(list.slice(wire, start + 16, start + 63)))?
@@ -249,7 +249,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     }
     close(take reopened)?
     let replayed = open(tasks, directory, c, r, options)?
-    if replayed.resident != baseline || page_row_count(pages.holder_heads(replayed.holders)[0].roots.collections) != 0 {
+    if replayed.accounting.resident != baseline || page_row_count(pages.holder_heads(replayed.holders)[0].roots.collections) != 0 {
         return Error(Missing("12 MiB delete replay"))
     }
     close(take replayed)
@@ -298,7 +298,7 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let mut options = journal_crash_options()
     let mut db = open(tasks, directory, c, r, options)?
     let _ = law_table(mut db, "warm", std.codec.key_u64(), std.codec.of_u32())?
-    let baseline = db.resident
+    let baseline = db.accounting.resident
     retained_fixture_write(mut db, 1, 1)?
     retained_fixture_write(mut db, 2, 2)?
     let original = snapshot(db)
@@ -311,16 +311,16 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     // Key 1, pinned 2:A and head 2:B are three distinct 86-byte versions.
     options.resident_limit = baseline + 258
     let mut writer = open(tasks, directory, c, r, options)?
-    if writer.resident != baseline + 258 {
+    if writer.accounting.resident != baseline + 258 {
         return Error(Missing("retained fixture baseline"))
     }
     retained_fixture_write(mut writer, 2, 2)?
-    if writer.resident != baseline + 172 {
+    if writer.accounting.resident != baseline + 172 {
         return Error(Missing("retained live settle"))
     }
     close(take writer)?
     let mut replayed = open(tasks, directory, c, r, options)?
-    if replayed.resident != baseline + 172 {
+    if replayed.accounting.resident != baseline + 172 {
         return Error(Missing("retained replay settle"))
     }
     {
@@ -340,7 +340,7 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         }
     }
     retained_fixture_write(mut replayed, 3, 3)?
-    if replayed.resident != baseline + 258 {
+    if replayed.accounting.resident != baseline + 258 {
         return Error(Missing("retained reopen admission"))
     }
     close(take replayed)

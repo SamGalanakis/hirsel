@@ -401,11 +401,11 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
         return Error(Limit(Value))
     }
     let width = 41 + list.len(args)
-    let exclusive_credit = claim_terminal_credit(db.ceiling, policy, width)
+    let exclusive_credit = claim_terminal_credit(db.accounting.ceiling, policy, width)
     if exclusive_credit.journal > FRAME_LIMIT {
         return Error(Limit(Transaction))
     }
-    let after = add_keyed_credit(db.keyed_credit, exclusive_credit)
+    let after = add_keyed_credit(db.call_streams.keyed_credit, exclusive_credit)
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         stage_claim_admit(mut tx, address, d, args, policy, after)
@@ -456,8 +456,8 @@ pub fn conclude_claim(mut db: Db, take completion: ClaimCompletion, reply_bytes:
     journal_poll(mut db)?
     healthy(db)?
     validate_claim_completion(db, completion)?
-    let own_credit = claim_terminal_credit(db.ceiling, completion.policy, completion.admitted_width)
-    let after = remove_keyed_credit(db.keyed_credit, own_credit)
+    let own_credit = claim_terminal_credit(db.accounting.ceiling, completion.policy, completion.admitted_width)
+    let after = remove_keyed_credit(db.call_streams.keyed_credit, own_credit)
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_on(mut db, 0, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         stage_claim_reply(mut tx, completion.key, completion.request, completion.policy.retention_ms, reply_bytes, after, None)
@@ -491,13 +491,13 @@ fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Resul
             return Error(failure_from_rep(pages.malformed(0)))
         }
         let policy = read_keyed_policy(raw_policy)?
-        credit = add_keyed_credit(credit, claim_terminal_credit(db.ceiling, policy, list.len(raw_claim)))
+        credit = add_keyed_credit(credit, claim_terminal_credit(db.accounting.ceiling, policy, list.len(raw_claim)))
     }
-    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.resident, int.saturating_add(credit.resident, credit.padding)), db.ceiling))?
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.accounting.resident, int.saturating_add(credit.resident, credit.padding)), db.accounting.ceiling))?
     if let Some(room) = journal_refusal(uncovered, credit.journal, journal_limit) {
         return Error(Full(Journal(room)))
     }
-    db.keyed_credit = credit
+    db.call_streams.keyed_credit = credit
     Ok(())
 }
 
@@ -523,8 +523,8 @@ fn keyed_completion_credit(db: Db, completion: Completion) -> Option[format.Keye
     let Some(keyed) = view completion.keyed else {
         return None
     }
-    let held = claim_terminal_credit(db.ceiling, keyed.policy, keyed.admitted_width)
-    Some(remove_keyed_credit(db.keyed_credit, held))
+    let held = claim_terminal_credit(db.accounting.ceiling, keyed.policy, keyed.admitted_width)
+    Some(remove_keyed_credit(db.call_streams.keyed_credit, held))
 }
 
 fn check_keyed_completion(db: Db, completion: Completion, call_run: KeyedRun) -> Result[(), Error] {

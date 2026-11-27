@@ -120,8 +120,8 @@ fn claim_quotas_reclaim_their_own_scope() -> Result[(), Error] waits {
     let Accepted(_) = admit_claim(mut small, claim_law_key(b"one"), request_digest(b"charge", b"args"), b"args", Some(claim_law_policy()))? else {
         fail("one reserve did not fit")
     }
-    let credit = small.keyed_credit.resident
-    if !claim_quota_full(mut small, claim_law_key(b"two"), claim_law_policy()) || small.keyed_credit.resident != credit {
+    let credit = small.call_streams.keyed_credit.resident
+    if !claim_quota_full(mut small, claim_law_key(b"two"), claim_law_policy()) || small.call_streams.keyed_credit.resident != credit {
         fail("a resident refusal at admission was not Full or committed")
     }
     Ok(())

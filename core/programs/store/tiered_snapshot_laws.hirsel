@@ -42,8 +42,8 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
     // Tiered one, as a residency cut's install does (§1.1), so a committed
     // Tiered write settles its charge against it.
     let charge: u64 = list.word_le(descriptor, 44)
-    db.resident = int.saturating_sub(db.resident, charge)
-    db.tiered = int.saturating_add(db.tiered, charge)
+    db.accounting.resident = int.saturating_sub(db.accounting.resident, charge)
+    db.accounting.tiered = int.saturating_add(db.accounting.tiered, charge)
     // A disk store lists the pack as a promotion does, so a cut publishes it.
     if let Some(mut state) = db.disk {
         failure_result_from_rep(manifest.edit_pack_locations(mut state.packs, scoped fn(mut locations: manifest.PageLocations) -> Result[(), types.Failure] {

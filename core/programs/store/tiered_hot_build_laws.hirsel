@@ -132,9 +132,9 @@ fn test_l102_hot_memory_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let both = disk_test_directory(d)
     let mut paired = open(tasks, both, c, r, l102_g_options()?)?
     let _ = l102_g_seed(mut paired)?
-    let before = paired.checkpointed
+    let before = paired.accounting.checkpointed
     let (sparse, dense) = l102_g_declare(mut paired, Migrate, true)?
-    if paired.checkpointed - before < 2 {
+    if paired.accounting.checkpointed - before < 2 {
         fail("L102 (g): the paired build must run a build cut before its publish")
     }
     let Some(wide_ix) = dense else {

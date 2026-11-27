@@ -121,9 +121,9 @@ fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks
     residency_check_rows(db, snapshot(db), rows, row_count)?
     residency_check_rows(db, before, rows, row_count)?
     // A second change to the same residency is no commit.
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     set_residency(mut db, rows.id, Tiered)?
-    if db.checkpointed != generation {
+    if db.accounting.checkpointed != generation {
         fail("residency: an unchanged residency makes no cut")
     }
     close(take db)?
@@ -143,7 +143,7 @@ fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks
 fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(182375271u64)?)?
     let rows = residency_rows(mut db, 20)?
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Tiered) else {
         fail("residency: a store below the Tiered floor refuses the first change")
@@ -151,7 +151,7 @@ fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Ran
     if let Some(_) = pager.pager_requests(db.pager) {
         fail("residency: a refused change leaves no pager")
     }
-    if db.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
+    if db.accounting.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
         fail("residency: a refused change publishes nothing")
     }
     if residency_mode(db, rows.id)? != (TableCollection, ResidentMemory) {
@@ -194,9 +194,9 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     }
     residency_check_rows(db, snapshot(db), rows, row_count)?
     residency_check_rows(db, before, rows, row_count)?
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     set_residency(mut db, rows.id, Memory)?
-    if db.checkpointed != generation {
+    if db.accounting.checkpointed != generation {
         fail("residency: an unchanged residency makes no cut")
     }
     close(take db)?
@@ -329,12 +329,12 @@ fn test_set_residency_refused_load_changes_nothing(d: Dir, c: Clock, r: Random, 
         }
         let _ = checkpoint(mut db)?
     }
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Memory) else {
         fail("residency: a collection larger than the Memory room refuses the load")
     }
-    if db.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
+    if db.accounting.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
         fail("residency: a refused load publishes nothing")
     }
     if residency_mode(db, rows.id)? != (TableCollection, ResidentTiered) {

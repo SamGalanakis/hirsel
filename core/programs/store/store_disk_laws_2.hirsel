@@ -60,7 +60,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     }
     close(take db)?
     let reopened = open(tasks, d, c, r, options)?
-    if reopened.resident != logical {
+    if reopened.accounting.resident != logical {
         return Error(Foreign)
     }
     if let Error(Stale(_)) = get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 1) {} else {
@@ -373,7 +373,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Ok(Error(Full(Allocation(_)))) => {},
         _ => return false
     }
-    if version(snapshot(db)) != before || db.checkpointed != 2 {
+    if version(snapshot(db)) != before || db.accounting.checkpointed != 2 {
         return false
     }
     if let Some(_) = journal_poison(db) {
@@ -497,7 +497,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
         match take made {
             Ok(Error(Full(Allocation(_)))) => {
                 refusals += 1
-                if pages.holder_heads(db.holders)[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || catalog.next_table_id(db.schema) != 2 || page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 512 {
+                if pages.holder_heads(db.holders)[0].head != 513 || db.accounting.resident != 260 + 512 * 94 || db.accounting.checkpointed != 2 || catalog.next_table_id(db.schema) != 2 || page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 512 {
                     return false
                 }
                 let persisted = result.unwrap(disk_load(child, 1048576))
@@ -507,7 +507,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             },
             Ok(Ok(commit_ticket)) => {
                 successes += 1
-                if pages.holder_heads(db.holders)[0].head != 514 || db.checkpointed != 3 || catalog.next_table_id(db.schema) != 3 {
+                if pages.holder_heads(db.holders)[0].head != 514 || db.accounting.checkpointed != 3 || catalog.next_table_id(db.schema) != 3 {
                     return false
                 }
                 result.unwrap(durable(mut db, commit_ticket))
@@ -600,7 +600,7 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(law_table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
     let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
-    let base = db.resident
+    let base = db.accounting.resident
     let mut raw: Bytes = list.with_capacity(1048566)
     list.fill(mut raw, 1048566, 97u8)
     let text = result.unwrap(string.from_utf8(take raw))
@@ -634,7 +634,7 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     options.pack_bytes = 512
     options.create = false
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.resident != base + 36 * (62 + 16 + 1048576) {
+    if reopened.accounting.resident != base + 36 * (62 + 16 + 1048576) {
         return false
     }
     for k in 0u64 .. 36 {

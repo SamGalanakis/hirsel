@@ -7,6 +7,8 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"txn-accounting.hirsel" = "txn"
+"txn-streams.hirsel" = "txn"
 "object-writer-tiered-point-read.hirsel" = "object_writer"
 "object-writer-follower-capture.hirsel" = "object_writer"
 "object-writer-follower-service.hirsel" = "object_writer"

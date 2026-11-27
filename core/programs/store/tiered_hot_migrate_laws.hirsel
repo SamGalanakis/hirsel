@@ -339,9 +339,9 @@ fn l102_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Erro
 
 fn l102_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     run_migration(mut db, tasks, code.describe(hot_reverse))?
-    if db.checkpointed - before < 2 {
+    if db.accounting.checkpointed - before < 2 {
         return Error(Missing("build cut"))
     }
     close(take db)
@@ -524,9 +524,9 @@ fn test_l102_hot_index_build(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let big = disk_test_directory(d)
     let mut db = open(tasks, big, c, r, hot_options(65536)?)?
     let _ = hot_seed(mut db, 6000)?
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     let (ix, ix_bands) = l102_declare(mut db, Migrate)?
-    let cuts = db.checkpointed - before
+    let cuts = db.accounting.checkpointed - before
     if cuts < 2 {
         fail("L102 (b): the fixture must run a build cut before its publish")
     }
@@ -550,9 +550,9 @@ fn test_l102_hot_index_build(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let Backfilling(None) = lix_state(again, "by_v")? else {
         fail("L102 (b): the fixture must leave by_v Backfilling")
     }
-    let rebuilt_from = again.checkpointed
+    let rebuilt_from = again.accounting.checkpointed
     let (rebuilt, rebuilt_bands) = l102_declare(mut again, Migrate)?
-    if again.checkpointed - rebuilt_from < 2 {
+    if again.accounting.checkpointed - rebuilt_from < 2 {
         fail("L102 (b): the rebuild must run a build cut before its publish")
     }
     if rebuilt.id != reopened.id {
@@ -717,10 +717,10 @@ fn test_l102_hot_unique_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let mut db = open(tasks, d, c, r, hot_options(65536)?)?
     let rows = hot_seed(mut db, 6000)?
     let head = pages.holder_heads(db.holders)[0u64].head
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     l102_unique_refused(mut db)?
     // Fixture guard: the build cut before it met the duplicate.
-    if db.checkpointed == before || !l102_owner3_pin(db) {
+    if db.accounting.checkpointed == before || !l102_owner3_pin(db) {
         fail("L102 (e): the fixture refused before any build cut")
     }
     if pages.holder_heads(db.holders)[0u64].head != head {
@@ -778,12 +778,12 @@ fn l102_chain_declare(mut decl: Declare) -> Result[Index[u64, u64, u64, ()], Err
 fn test_l102_hot_chain(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, hot_options(65536)?)?
     let _ = hot_seed(mut db, 6000)?
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     let mut decl = declare_migration(db, tasks, code.describe(l102_chain))?
     let ix = l102_chain_declare(mut decl)?
     let staged = finish_migration(db, take decl)?
     install_activation(mut db, take staged)?
-    if db.checkpointed - before < 2 {
+    if db.accounting.checkpointed - before < 2 {
         fail("L102 (f): the fixture must run a build cut before its publish")
     }
     hot_rows(mut db, string.from("last"), 6000)?
@@ -816,9 +816,9 @@ fn test_l102_hot_chain(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 // sizing; a completed write that ran fewer than two cuts refuses.
 fn l102_index_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l102_crash_options()?)?
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     let _ = l102_declare(mut db, Migrate)?
-    if db.checkpointed - before < 2 {
+    if db.accounting.checkpointed - before < 2 {
         return Error(Missing("build cut"))
     }
     close(take db)

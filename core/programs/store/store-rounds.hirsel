@@ -154,7 +154,7 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
     deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
     pages.set_next_node(mut db.holders, next_stamp - 1)
     // The reservation's charge is now the pin's, which the cut accounts.
-    db.ceiling = disk_state(db).options.resident_limit
+    db.accounting.ceiling = disk_state(db).options.resident_limit
     if has_tiered {
         let Some(d) = import_dir else {
             forget_import(mut db)

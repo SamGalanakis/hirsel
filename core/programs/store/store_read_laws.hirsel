@@ -184,8 +184,8 @@ pub fn law_streams(c: Clock) -> bool waits {
     // An 8-byte reply grows the stored row's value from 41 to 49 bytes, past
     // the admitted row's 48. A ceiling below the current resident therefore
     // refuses it on both exits.
-    let ceiling = db.ceiling
-    db.ceiling = db.resident - 1
+    let ceiling = db.accounting.ceiling
+    db.accounting.ceiling = db.accounting.resident - 1
     let over = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if let Error(_) = reply(mut tx, call_env, 2, types.key_word(9)) {
             return Error(1)
@@ -211,7 +211,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         Error(Full(_)) => {},
         _ => return false
     }
-    db.ceiling = ceiling
+    db.accounting.ceiling = ceiling
     match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
         Abandoned(t) => if !mark_is(ticket(t), 5) {
             return false
@@ -362,8 +362,8 @@ fn test_streams(c: Clock) -> Result[(), ()] waits {
 @test
 fn stream_quota_preserves_eviction_floor(c: Clock) -> Result[(), u64] waits {
     let mut db = raw_test_db(c, 1073741824u64)
-    db.streams_per_caller_max = 1u64
-    db.streams_max = 1u64
+    db.call_streams.streams_per_caller_max = 1u64
+    db.call_streams.streams_max = 1u64
     let time = keyed_time(db)
     let caller = Caller(issuer: 2u8, subject: clone(b"same caller"))
     let older = StreamKey(caller: clone(caller), id: StreamId(t: time, n: 1u64))

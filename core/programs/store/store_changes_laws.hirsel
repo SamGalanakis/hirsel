@@ -13,7 +13,7 @@ pub fn law_drop_recreate(c: Clock, tasks: Tasks) -> bool waits {
         Error(Stale(1)) => {},
         _ => return false
     }
-    if db.resident != 0 || typed_value(held, sh, 1) != 10 {
+    if db.accounting.resident != 0 || typed_value(held, sh, 1) != 10 {
         return false
     }
     result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
@@ -79,11 +79,11 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
     // Scalar schemas are 1 + 4 + 1 = 6 bytes each. Catalog size is
     // 17 + (4 + 6) + 2 + (2 + 8 + 4 + 6) + 2 + 4 + 4 = 59 bytes.
     // Key 1||"rows" is 5 bytes. The charge is r8(59) + r8(5) + 62 = 260.
-    if db.resident != 260 {
+    if db.accounting.resident != 260 {
         return false
     }
-    db.ceiling = 354
-    if !typed_put(mut db, t, 1, 10) || db.resident != 354 {
+    db.accounting.ceiling = 354
+    if !typed_put(mut db, t, 1, 10) || db.accounting.resident != 354 {
         return false
     }
     let out = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
@@ -104,7 +104,7 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    db.resident == 260
+    db.accounting.resident == 260
 }
 
 @test
@@ -399,7 +399,7 @@ pub fn law_abort_budget(c: Clock) -> bool {
             _ => return false
         }
     }
-    pages.holder_heads(db.holders)[0].head == 0 && db.resident == 0
+    pages.holder_heads(db.holders)[0].head == 0 && db.accounting.resident == 0
 }
 
 @test
@@ -444,7 +444,7 @@ pub fn law_look(c: Clock) -> bool waits {
     let sh = view t
     let s = snapshot(db)
     let head = pages.holder_heads(db.holders)[0].head
-    let live_bytes = db.resident
+    let live_bytes = db.accounting.resident
     let high_water = pages.holder_next_node(db.holders)
     let end = file_end(db)
     let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
@@ -458,7 +458,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || pages.holder_heads(db.holders)[0].head != head || db.resident != live_bytes || pages.holder_next_node(db.holders) != high_water || file_end(db) != end {
+    if got.version != head || pages.holder_heads(db.holders)[0].head != head || db.accounting.resident != live_bytes || pages.holder_next_node(db.holders) != high_water || file_end(db) != end {
         return false
     }
     let mut expected: List[Read] = list.new()
@@ -562,7 +562,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         })
     })
     match take refused_query {
-        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && pages.holder_heads(db.holders)[0].head == 0 && db.resident == 0,
+        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && pages.holder_heads(db.holders)[0].head == 0 && db.accounting.resident == 0,
         _ => false
     }
 }

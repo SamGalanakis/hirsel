@@ -36,7 +36,7 @@ fn check_stream_ops(path: String, raw: Bytes, mut at: u64, control: bool) -> Res
                 return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
             let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 1048576))?
-            let _ = decode_stream_control(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
+            let _ = txn.decode_stream_control(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
             continue
         }
         if end_key == key || kind == 0 || kind > 3 {

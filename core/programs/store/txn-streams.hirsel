@@ -1,0 +1,38 @@
+pub type StreamControl {
+    max: u64,
+    count: u64,
+    expiry_floor: Option[u64]
+}
+
+pub fn check_stream_quota(tree: pages.PageTree, declared: Option[u64]) -> Result[(), types.Failure] {
+    let Some(expected) = declared else {
+        return Ok(())
+    }
+    if let Some(raw) = pages.get_page_row(tree, b"") {
+        if decode_stream_control(raw)?.max != expected {
+            return Error(Changed("streams_max"))
+        }
+    }
+    Ok(())
+}
+
+pub fn decode_stream_control(raw: Bytes) -> Result[StreamControl, types.Failure] {
+    let mut at = 0u64
+    let saved_max = std.codec.take_u64(raw, mut at) ?=> Decode
+    let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
+    if at == list.len(raw) {
+        return Error(pages.malformed(0))
+    }
+    let floor: Option[u64] = match (list.len(raw), raw[at]) {
+        (17u64, 0u8) => None,
+        (25u64, 1u8) => {
+            at += 1u64
+            Some(std.codec.take_u64(raw, mut at) ?=> Decode)
+        },
+        _ => return Error(pages.malformed(0)),
+    }
+    if saved_count > saved_max {
+        return Error(pages.malformed(0))
+    }
+    Ok(StreamControl(max: saved_max, count: saved_count, expiry_floor: floor))
+}

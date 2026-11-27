@@ -394,7 +394,7 @@ fn d7_finish_index(mut db: Db) -> Result[(), Error] waits {
 }
 
 fn d7_check_chunk_capacity(mut db: Db) -> Result[(), Error] waits {
-    let before = db.checkpointed
+    let before = db.accounting.checkpointed
     let room = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> u64 {
         replace(mut state.options.dirty_bytes, 1)
     })
@@ -408,7 +408,7 @@ fn d7_check_chunk_capacity(mut db: Db) -> Result[(), Error] waits {
     let Backfilling(None) = lix_state(db, "by_v")? else {
         fail("L-IX: a refused chunk cannot advance its cursor")
     }
-    if requested <= 1 || db.checkpointed != before {
+    if requested <= 1 || db.accounting.checkpointed != before {
         fail("L-IX: a refused chunk cannot publish its pages")
     }
     Ok(())
@@ -452,11 +452,11 @@ fn test_lix_tiered_index_build_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks)
             fail("L-IX: reopen replays the acknowledged write behind the cursor")
         }
     }
-    let generation = recovered.checkpointed
+    let generation = recovered.accounting.checkpointed
     if !same_index_step(index_build_step(mut recovered, 1)?) {
         fail("L-IX: the next chunk resumes the Tiered build")
     }
-    if recovered.checkpointed != generation + 2 {
+    if recovered.accounting.checkpointed != generation + 2 {
         fail("L-IX: the chunk first folds the replay overlay and then publishes the build")
     }
     d7_expect_entries(recovered, snapshot(recovered), rebound.by_v, (20u64, 2u64), Some((30u64, 1u64)))?

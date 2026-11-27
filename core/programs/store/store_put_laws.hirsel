@@ -104,7 +104,7 @@ fn raw_test_db(c: Clock, cap: u64) -> Db {
     result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
         failure_result_from_rep(catalog.define_store_collection(mut tree, 1, 1, mut stamp))
     }))
-    db.resident = 126
+    db.accounting.resident = 126
     take db
 }
 
@@ -348,7 +348,7 @@ pub fn law_resident(c: Clock) -> bool {
         return false
     }
     let mut db = raw_test_db(c, 212)
-    if !put_one(mut db, 1, 10) || db.resident != 212 {
+    if !put_one(mut db, 1, 10) || db.accounting.resident != 212 {
         return false
     }
     let refused_write = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
@@ -372,7 +372,7 @@ pub fn law_resident(c: Clock) -> bool {
         },
         _ => return false
     }
-    db.resident == 126 && value_at(snapshot(db), 1) == 0
+    db.accounting.resident == 126 && value_at(snapshot(db), 1) == 0
 }
 
 // L20's byte-core handle boundary; typed handles await S0's reader ruling.

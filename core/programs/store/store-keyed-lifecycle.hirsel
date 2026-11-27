@@ -152,7 +152,7 @@ fn commit_clock_floor(mut db: Db, at: u64) -> Result[(), Error] waits {
         }
     } else {
         let sent_sequence = if !is_disk(db) {
-            db.changes
+            db.accounting.changes
         } else {
             db.frame_seq
         }
@@ -253,7 +253,7 @@ pub fn sweep_claims(mut db: Db, mut cursor: ClaimSweep, bound_op: scoped[view] f
     let (take next_pass, work, take edits) = plan_claim_sweep(pages.holder_heads(db.holders)[0u64].roots, cursor, at, bound_op)?
     if list.len(edits) != 0 {
         let keep: Option[fn(Error) -> bool] = None
-        let held = db.keyed_credit
+        let held = db.call_streams.keyed_credit
         let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
             tx.keyed = Some(format.KeyedDraft(edits: clone(edits), after: held))
             Ok(())

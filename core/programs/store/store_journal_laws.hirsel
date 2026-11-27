@@ -176,7 +176,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let sh = view table_handle
     let id = db.store
     let seq = file_seq(db)
-    let baseline = db.resident
+    let baseline = db.accounting.resident
     let wall = pages.holder_heads(db.holders)[0].at + 17
     let next_node = pages.holder_next_node(db.holders)
     result.unwrap(close(take db))
@@ -199,7 +199,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let end_path = result.unwrap(manifest.disk_path("j-", seq, ".end"))
     result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, end_path, journal_end_bytes(id, seq, 149))))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if pages.holder_heads(reopened.holders)[0].head != 2 || pages.holder_heads(reopened.holders)[0].at != wall || reopened.resident != baseline + 94 || pages.holder_next_node(reopened.holders) <= next_node {
+    if pages.holder_heads(reopened.holders)[0].head != 2 || pages.holder_heads(reopened.holders)[0].at != wall || reopened.accounting.resident != baseline + 94 || pages.holder_next_node(reopened.holders) <= next_node {
         return false
     }
     if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 7)) != Some(70u64) {
@@ -799,7 +799,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let preceding = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, preceding)?
     let before = accounts(db)
-    let old_generation = db.checkpointed
+    let old_generation = db.accounting.checkpointed
     let old_segment = file_seq(db)
     let old_stamp = pages.holder_next_node(db.holders)
     let old_end = file_end(db)
@@ -808,7 +808,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
     let raw = read_journal_prefix(child, file, old_end + 46)?
-    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || pages.holder_next_node(db.holders) != old_stamp || db.checkpointed != old_generation || file_seq(db) != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || pages.holder_next_node(db.holders) != old_stamp || db.accounting.checkpointed != old_generation || file_seq(db) != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?

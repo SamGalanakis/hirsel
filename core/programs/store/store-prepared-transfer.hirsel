@@ -414,7 +414,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
         state.imported = None
         state.reserving = Some(payload.digest)
     })
-    db.ceiling = int.saturating_sub(current, payload.charge)
+    db.accounting.ceiling = int.saturating_sub(current, payload.charge)
     Ok(ImportWork(payload: take payload, low: low, high: high, inline: inline))
 }
 

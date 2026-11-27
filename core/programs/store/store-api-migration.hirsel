@@ -50,7 +50,7 @@ type SchemaPlan: send {
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.resident, db.ceiling, retaining(db), db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
+    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.accounting.resident, db.accounting.ceiling, retaining(db), db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {

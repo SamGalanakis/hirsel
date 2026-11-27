@@ -129,7 +129,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let before = pages.share_roots(pages.holder_heads(child.db.holders)[0].roots)
         let state = deploy_result(failure_result_from_rep(types.capacity(current_state(child.db))))?
         let mut initial = deploy_result(failure_result_from_rep(pager.journal_replay(take state, pages.holder_next_node(child.db.holders), limits_to_rep(child.db.limits))))?
-        initial.tiered.total = child.db.tiered
+        initial.tiered.total = child.db.accounting.tiered
         let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
         if !read.list_contains_u32(replayed.superseded, by_v.id) {
             fail("F4 case B1: replay must record superseded by_v.id")
@@ -190,7 +190,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let exported = export_copy(take export_job)?
         let child_opts = deploy_result(f4_tiered_options())?
         let child = open_export(exported.dir, c, clone(attempt), child_opts)?
-        let before_tiered = child.db.tiered
+        let before_tiered = child.db.accounting.tiered
         deploy_result(rebuild_index(mut db, by_v))?
         let Tail(take tail) = advance_export(mut db, scratch_c, clone(attempt))? else {
             fail("F4 case B2: expected Tail round")

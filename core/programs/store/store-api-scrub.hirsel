@@ -45,7 +45,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
         failure_result_from_rep(manifest.add_pack_scrub(mut state.packs, arc.share(lease)))
     })?
-    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
+    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.

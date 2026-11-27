@@ -114,7 +114,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         }
         return Error(Expired)
     }
-    db.ceiling = disk_limit
+    db.accounting.ceiling = disk_limit
     let limits = manifest.TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame, tiered_reserve: tiered_reserve, has_tiered: has_tiered)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = Some(limits)
@@ -162,7 +162,7 @@ fn perform_cutover_with[V](mut db: Db, request: Cutover, current_activation: u64
 }
 
 fn forget_import(mut db: Db) {
-    db.ceiling = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> u64 {
+    db.accounting.ceiling = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> u64 {
         state.imported = None
         state.reserving = None
         state.lease = None

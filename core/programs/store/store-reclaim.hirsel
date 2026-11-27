@@ -203,7 +203,7 @@ pub fn reclaim_preview(mut db: Db, max_items: u64) -> Result[ReclaimList, Error]
     let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, latest_receipt)?
     let recovered = object_writer.recovered_checkpoint(object_state(db))
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let store_id = db.store
     let (take paused, take resume) = take_object_journal(mut db)?
@@ -312,7 +312,7 @@ pub fn reclaim_purge(mut db: Db, plan: ReclaimList) -> Result[PurgeReport, Recla
     let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, latest_receipt) ?=> Store
     let recovered = object_writer.recovered_checkpoint(object_state(db))
-    let generation = db.checkpointed
+    let generation = db.accounting.checkpointed
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let (take paused, take resume) = take_object_journal(mut db) ?=> Store
     let mut lane = take paused

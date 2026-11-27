@@ -456,7 +456,7 @@ fn test_changes_rewritten_equal(c: Clock) -> Result[(), ()] {
 }
 
 // L91 (E7, F2, F4): memory store zero-mutation commit returns Done.info = None,
-// leaves version and changes unchanged, and carries Journal(db.changes, b, v)
+// leaves version and changes unchanged, and carries Journal(db.accounting.changes, b, v)
 // matching the newest written commit's ticket.
 @test
 fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
@@ -472,7 +472,7 @@ fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
         fail("L91 E7: written commit returned None info")
     }
     let v1 = version(snapshot(db))
-    let c1 = db.changes
+    let c1 = db.accounting.changes
     if w1_info.id.version != v1 {
         fail("L91 E7: written commit info version mismatch")
     }
@@ -481,7 +481,7 @@ fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
     })? else {
         fail("L91 E7: zero-mutation memory run did not commit")
     }
-    if skipped.value != Some(10u64) || version(snapshot(db)) != v1 || db.changes != c1 {
+    if skipped.value != Some(10u64) || version(snapshot(db)) != v1 || db.accounting.changes != c1 {
         fail("L91 E7: skipped memory run advanced version or changes")
     }
     if let Some(_) = skipped.info {

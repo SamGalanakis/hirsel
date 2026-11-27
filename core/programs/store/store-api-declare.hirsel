@@ -30,7 +30,7 @@ pub fn declared_table[K, V](t: TableDecl[K, V]) -> Table[K, V] {
 }
 
 fn declaration_base(db: Db) -> catalog.DeclarationBase {
-    catalog.DeclarationBase(store: types.StoreKey(hi: db.store.hi, lo: db.store.lo), opened: open_number(db), version: pages.holder_heads(db.holders)[0].head, stamp: pages.holder_next_node(db.holders), changes: db.changes, live: db.resident)
+    catalog.DeclarationBase(store: types.StoreKey(hi: db.store.hi, lo: db.store.lo), opened: open_number(db), version: pages.holder_heads(db.holders)[0].head, stamp: pages.holder_next_node(db.holders), changes: db.accounting.changes, live: db.accounting.resident)
 }
 
 fn new_declaration(mode: Mode, base: catalog.DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {

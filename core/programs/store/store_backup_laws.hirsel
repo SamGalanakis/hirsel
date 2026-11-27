@@ -555,7 +555,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
         }
         let _ = deploy_result(checkpoint(mut db))?
     }
-    let resident_exact = db.resident
+    let resident_exact = db.accounting.resident
     let want_packs = manifest.live_pack_sequences(manifest.pack_locations(disk_state(db).packs))
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)

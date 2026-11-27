@@ -45,7 +45,7 @@ fn admit_tiered_plan(db: Db) -> Result[(), Error] {
         let requested = int.saturating_add(tiered_plan_reserve(o), 64 * history.MIB)
         return Error(Full(Resident(Capacity(requested: requested, available: o.resident_limit))))
     }
-    failure_result_from_rep(catalog.over_ceiling(db.resident, tiered_memory_room(o)))
+    failure_result_from_rep(catalog.over_ceiling(db.accounting.resident, tiered_memory_room(o)))
 }
 
 // C + K + D + P: what the Tiered plan reserves inside `resident_limit`.
@@ -153,7 +153,7 @@ fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
         Some(descriptor) => pages.collection_descriptor(descriptor).row_bytes,
         None => return Error(Stale(id)),
     }
-    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options)))?
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.accounting.resident, charge), tiered_memory_room(disk_state(db).options)))?
     let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, ..), ..) = schema_plan(db)
     let head = pages.holder_heads(db.holders)[0u64].head + 1
     let replacement = ProposedMain(roots: take roots, head: head, at: pages.holder_heads(db.holders)[0u64].at, tables: catalog.next_table_id(db.schema), activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)

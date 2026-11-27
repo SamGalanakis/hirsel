@@ -499,7 +499,7 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     }
     let journaled = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, file_seq(db), file_end(db)))?
     let tail = int.saturating_add(journaled, step_bytes(steps))
-    if tail > db.resident / 100 {
+    if tail > db.accounting.resident / 100 {
         release_export(mut db, attempt)
         let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(failure_result_from_rep(types.copied(attempt)))?, Some(lease.activation))?
         return Ok(Full(take renewed))
@@ -680,8 +680,8 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     deploy_result(failure_result_from_rep(catalog.over_ceiling(admitted, options.resident_limit)))?
     let mut db = empty_db(c, id, options)
     deploy_result(open_heads(mut db, take state))?
-    db.resident = live_bytes
-    db.tiered = tiered_account.total
+    db.accounting.resident = live_bytes
+    db.accounting.tiered = tiered_account.total
     db.limits = limits_from_rep(selected.limits)
     pages.set_next_node(mut db.holders, ids)
     catalog.set_next_table(mut db.schema, stamp.next_table)

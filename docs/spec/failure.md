@@ -383,3 +383,161 @@ fn guard(f: scoped fn() -> u64) -> u64 {
   }
 }
 ```
+
+## Proposal: stack exhaustion is a failure (FAIL-17, awaiting ratification)
+
+**Status: proposal, not ratified, not built.** Nothing here applies until it is ratified.
+Until then FAIL-2, FAIL-15 and FAIL-16 above are the rule, and exhausting the stack is the
+run stop `Stack`.
+
+**Why.** A run stop ends every task in the run. Recursion depth, the size of a nested value
+and the frames a call chain needs are chosen by input as often as loop counts and sizes
+are. A step bound already turns runaway steps into a failure (MEM-30), and a limit turns
+runaway allocation into one (MEM-21). Stack exhaustion is the one input-chosen resource
+whose exhaustion still ends the whole run. That includes a host that runs untrusted code
+under `bound bytes`, `bound steps` and `isolate` and expects a failure to stay inside them.
+On the main branch at this proposal, each of these ends the run with status 102 and
+`run stop: Stack` on Cranelift and LLVM:
+- recursion with a 4 KiB frame inside `isolate`, `bound bytes` or `bound steps`;
+- a chain of 50 non-recursive calls, each with a 256 KiB `Inline` local, inside
+  `isolate`, in `main` and in a spawned task;
+- `clone` of a 1,000,000-node `Box` chain inside `isolate`.
+
+On the evaluator, the first case stops the run too, or, when the host thread's stack is
+smaller than the evaluator assumes, aborts the host process.
+
+### Proposed FAIL-17: Stack exhaustion
+
+Each task runs on its own stack. The part of that stack that user code may use is the task's
+**stack allowance**. It is the same for every task of one build, and is fixed by the build.
+It is not a limit (MEM-19): nothing admits, refunds or hands it over, and nothing names it.
+Below the allowance, each stack keeps an **engine reserve** for the engine code that runs
+between activations: cleanup, refunds, cause recording, and core functions whose stack use
+the input does not choose.
+
+- **The refusal.** Every entry of user code needs room for its activation: its whole frame,
+  however large, and the frames of any callees the build checks with it (Determinism,
+  below). The entries are a call of a function or callable value, a finalizer when cleanup
+  runs it, and a callable that a core function calls back (MEM-30's list). If the room is
+  not left in the allowance, the entry is refused. Nothing of the activation is made and its
+  body does not run. A failure with primary cause `Stack` is raised at the call, after its
+  arguments are evaluated, where MEM-30 takes the call's step. For an entry made without a
+  call, it is raised at the operation that made it.
+  - A refused call is refused before its commit point (FAIL-3). The callee takes nothing, so
+    its `take` arguments are dropped with the caller's statement temporaries (FAIL-8).
+  - A refused finalizer is a finalizer failure (FAIL-12). Its resource's fields are still
+    cleaned mechanically, the cause goes into the resource's cell (FAIL-10), and cleanup
+    continues.
+- **The cause.** `Stack` joins FAIL-2's closed list as a payload-free case of core's
+  `CauseKind`, raised by "an entry of user code that the stack allowance refuses
+  (FAIL-17)". Raising it admits nothing and uses a cell that is already reserved
+  (FAIL-10). Its PROG-3 line is `Stack at SITE`.
+- **Who catches it.** It is an ordinary failure. FAIL-8's cleanup runs on every exit edge
+  it takes. `isolate` catches it like any other cause, so FAIL-16's list gains `Stack`. A
+  bound scope does not catch it, as a `bound bytes` scope does not catch `Capacity`
+  (MEM-25). If nothing catches it, it ends its task (FAIL-14) and the joiner receives
+  `Failed(causes)`. In `main` it ends the run with status 101. No other task is touched.
+- **Cleanup near the edge.** Cleanup after a `Stack` failure starts at the deepest frame.
+  Mechanical release (FAIL-13) runs in the engine reserve and always fits. A finalizer
+  whose activation does not fit is refused as above, as a finalizer under an exhausted step
+  bound is (MEM-30). So cleanup always ends, and each finalizer that could not run adds one
+  `Stack` cause to the chain.
+- **Generated glue uses constant stack.** Code an engine generates for a type uses an
+  amount of stack set by the type alone, never by the value it visits. That covers drop,
+  `clone`, `clone_in`, equality, ordering and hashing. So glue never raises `Stack`, and
+  it works on a recursive type of any depth: a `Box` chain, a tree, a nested `List`. Work
+  that grows with the value's depth goes in the value itself, or in an engine worklist.
+  - Drop and `clone` need no worklist: a drop walks and frees the value, and a `clone`
+    links each copied node through the copy it is building. Drop glue already works this
+    way: it drops a 1,000,000-node chain at constant stack.
+  - Equality, ordering and hashing walk with a worklist of at most one word for each level
+    of nesting below the current node. The nodes on that path are already charged, so the
+    worklist is engine bookkeeping like drop flags (MEM-19). The host refusing it is the
+    run stop `HostMemory`.
+  - Mechanical release still never fails (FAIL-13), and glue that admits still fails only
+    with `Capacity` (MEM-21).
+- **Core functions.** A core function whose stack depth its input chooses checks the
+  allowance the same way, and raises `Stack` at the call that reached it. Examples are a
+  recursive parser, a pattern compiler, and a decoder of nested values. Every other core
+  function uses a bounded amount of stack, which the engine reserve covers.
+- **Determinism.** Where an entry is refused depends on the build's frame sizes. Every run
+  of one build with the same inputs is refused at the same entry, so a `Stack` failure
+  passes the replay point like any other failure ([SEM-8](semantics.md#sem-8-determinism)).
+  Across builds the point differs, as for limits (MEM-28) and step bounds (MEM-30). An
+  engine or optimisation level may use larger or smaller frames, or inline calls, so no
+  program or test may rely on a depth across engines. A build may check at one entry for a
+  whole subtree of calls whose stack need is bounded and known, and leave the entries
+  inside that subtree unchecked. The subtree's root is then refused earlier than strictly
+  needed, but at the same point on every run of that build.
+- **What stays a run stop.** FAIL-15's `Stack` row becomes "the engine reserve is
+  exhausted (`Stack`)". FAIL-17 keeps every activation of user code, all generated glue and
+  every input-chosen core recursion inside the allowance, so this row covers only engine
+  code past the reserve. The other rows of FAIL-15 are unchanged:
+  - `HostMemory`, when the host refuses stack growth;
+  - native foreign frames, which run on a separate host stack, where overflow is
+    termination by the host (FFI-1);
+  - the embedded rules of [EMB-3](embed.md#emb-3-embedded-launch).
+
+  Contained foreign code already fails, with `contained trap: stack overflow`, when its
+  guest stack runs out ([FFI-14](foreign.md#ffi-14-determinism-traps-and-replay)). FAIL-17
+  makes Hirsel's own code behave the same way.
+- **No per-scope stack bound.** `bound bytes` does not charge the stack (MEM-19), and no
+  scope narrows the allowance. A stack figure is one engine's frame size, so a bound
+  written in one would mean something different on each build. A portable depth bound,
+  counted in activations as MEM-34 counts them for constants, is reserved.
+
+```hirsel unbuilt
+fn depth(n: u64) -> u64 { if n == 0 { 0 } else { depth(n - 1) + 1 } }
+
+// Run depth(n) in an isolate. If this build refuses it for stack, retry once at half
+// the depth, and give up with 0 if that is refused too.
+fn depth_or_half(n: u64) -> u64 {
+  match isolate(fn() -> u64 { depth(n) }) {
+    Ok(Ok(d)) => d,
+    Ok(Error(first)) => {
+      for a in first {
+        match a.kind {
+          Stack => match isolate(fn() -> u64 { depth(n / 2) }) {
+            Ok(Ok(d)) => return d,
+            Ok(Error(second)) => {
+              for b in second { match b.kind { Stack => return 0, _ => {} } }
+            },
+            Error(_) => {},
+          },
+          _ => {},
+        }
+      }
+      0
+    },
+    Error(_) => 0,
+  }
+}
+```
+
+### Laws a build must add
+
+Each law is red on the main branch at this proposal, because the run stops with status 102.
+No law compares a depth across engines.
+
+| law | real bug it catches | check (oracle) | harness |
+|---|---|---|---|
+| **S1** `isolate` catches deep recursion | exhaustion still ends the run, or `isolate` leaves `Stack` out of its catch list | Recursion with a 4 KiB frame and no base case, inside `isolate`, inside `bound bytes` and inside `bound steps`, returns `Ok(Error(causes))`, primary cause `Stack`, site the recursive call. The bound scopes pass it on to the `isolate`. The oracle is FAIL-17 and FAIL-16. | corpus case, `--backend all` |
+| **S2** large frames without recursion, in `main` and in a fiber | a check that covers only recursion, or only the main stack, so large frames still reach the guard page | 50 non-recursive functions, each with a dynamically indexed 256 KiB `Inline` local, each calling the next, under `bound bytes { bound steps { isolate(..) } }`. In `main`, and in a task spawned with `task.spawn` and joined, the `isolate` returns `Ok(Error(causes))`, primary cause `Stack`. The run goes on and exits 0. A sibling task that computes a known value returns it. | `test_run_native.rs`, beside `prog4_runs`, Cranelift and LLVM |
+| **S3** cleanup at the edge ends and loses nothing | a finalizer at the deepest frame faults into the guard page, cleanup is skipped, or a `take` argument of the refused call is leaked or dropped twice | Each level creates a resource whose finalizer appends one entry to a log, and passes a second resource `take` to the call that is refused. After `isolate` returns, created = logged + refused, where refused is the number of causes after the primary. Every cause is `Stack`. Creation is counted in a cell the body cannot roll back. | corpus case, `--backend all` |
+| **S4** glue on deep values | recursive `clone`, `==` or hash glue that runs out of stack on a deep value | A 1,000,000-node `Box` chain: `clone` inside `isolate` returns `Ok(Ok(_))`, `==` of the chain and its clone is `true`, and dropping both succeeds, under a limit that holds both chains. The oracle is FAIL-17's glue rule: no glue depends on depth. | corpus case, `--backend all` |
+| **S5** replay | a refusal point that depends on the run, not the build | `hirsel test --replay` of a test that catches S1's `Stack` beside a task that prints a line, on a 2-thread scheduler, ends `Sealed` (FW27's shape). | `hirsel test --replay` |
+| **S6** `main`'s outcome | the stop name is still written, or the status is 102 | The existing `stopped` row of `prog4_runs` (`deep()`) expects status 101 and a first stderr line beginning `Stack at`. | change the existing row; no new test |
+
+### Build slices
+
+| slice | contents | laws |
+|---|---|---|
+| **K1** cause and evaluator | `Stack` in `CauseKind`, in the PROG-3 cause line and in `isolate`'s catch list. The evaluator's activation check raises the failure `Stack` where it now stops the run, before the activation is made, and keeps its host-stack reserve for cleanup. | S1, S3, S6 on the evaluator |
+| **K2** native check | Add a stack-limit word per task to the native Context, set when the fiber is made to the guard end plus the engine reserve. Add an IR `stack_check` instruction, fallible like `step`, at the call. It compares the stack pointer, less the callee's need, with the word, and branches cold to the failure successor. A callee's need is its frame plus the need of the unchecked calls it makes. The emitter publishes it as a link-time constant per function, and a function value carries its own. Calls are checked where they enter a recursive component, where they are indirect, and where a subtree's need exceeds a fixed threshold. A call inside a checked subtree is not checked. The runtime checks `fiber::room` before it enters a finalizer, task entry or core callback. Then frames never reach the guard page, and the guard stays as the backstop for engine code. Cranelift first, then LLVM. | S1 to S3 and S6 on both engines |
+| **K3** iterative glue | Rewrite `clone`, `clone_in`, equality, ordering and hashing glue for recursive types to use constant stack, as drop glue already does. | S4 |
+| **K4** core recursion | Audit the core functions whose stack depth the input chooses. Each gets `fiber::room` and raises `Stack`. | a case per function in its existing harness |
+| **K5** replay and fold-in | S5. Then move this text into FAIL-2, FAIL-15 and FAIL-16 and [reserved](reserved.md) R5 and R8, update the LANG-19 recursion case and the `Stack` exceptions in `crates/hirsel-core-program-tests/src/cases/engines.rs`, and remove the proposal mark. | S5 |
+
+Reversible: until K1 lands, this section is spec text only. After it, the cause and the
+catch list are core and spec text. Where the check sits and what the glue does are private
+to the engines.

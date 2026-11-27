@@ -1,26 +1,45 @@
 """Pack toolchain packages and build the installed host helpers."""
 
+from datetime import date, time
+import json
 from pathlib import Path
 import platform
-import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
+
+
+def toml_value(value):
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False).replace('\x7f', r'\u007f')
+    if isinstance(value, dict):
+        fields = (f'{toml_value(key)} = {toml_value(item)}' for key, item in value.items())
+        return '{ ' + ', '.join(fields) + ' }'
+    if isinstance(value, list):
+        return '[' + ', '.join(map(toml_value, value)) + ']'
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    return str(value).lower()
 
 
 def place(source, destination):
     manifest = source / 'hirsel.toml'
-    text = manifest.read_text()
-    package = tomllib.loads(text)['package']
+    document = tomllib.loads(manifest.read_text(encoding='utf-8'))
+    package = document['package']
+    # Installed bindings name the package by its alias and take only a major.
+    dependencies = document.get('dependencies', {})
+    for alias, binding in dependencies.items():
+        if 'path' in binding and binding.get('package') == alias:
+            dependencies[alias] = {'major': binding['major']}
     shutil.copytree(source, destination, dirs_exist_ok=True)
     # The copies keep the inputs' read-only mode under remote execution.
-    # Rebind workspace paths to the packages supplied by the toolchain.
     installed = destination / manifest.name
     installed.unlink()
-    installed.write_text(re.sub(
-        r'^([a-z_]+) = \{ package = "\1", major = ([0-9]+), path = "[^"]*" \}$',
-        r'\1 = { major = \2 }', text, flags=re.M))
+    installed.write_text(''.join(
+        f'{toml_value(key)} = {toml_value(value)}\n' for key, value in document.items()
+    ), encoding='utf-8')
     # The identity's major is the version's MAJOR (packages.md section 1).
     return dict(package, major=package['version'].split('.')[0])
 
@@ -28,11 +47,16 @@ def place(source, destination):
 def pack(compiler, sources, output, work, names):
     output.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    for name in names:
-        package = place(sources / name, work / name)
-        subprocess.run([compiler, 'pack', work / name, '--package-store', work / 'packages',
-                        '--output', output / f"{package['name']}-{package['major']}.hpkg"],
+    with tempfile.TemporaryDirectory(dir=work, prefix='prefix-') as directory:
+        prefix = Path(directory)
+        subprocess.run([compiler, 'std-product', '--install', prefix],
                        stdout=subprocess.DEVNULL, check=True)
+        for name in names:
+            package = place(sources / name, work / name)
+            archive = output / f"{package['name']}-{package['major']}.hpkg"
+            subprocess.run([prefix / 'hirsel', 'pack', work / name, '--package-store', work / 'packages',
+                            '--output', archive], stdout=subprocess.DEVNULL, check=True)
+            shutil.copyfile(archive, prefix / 'core-packages' / archive.name)
 
 
 def helpers(product, root, source, work, host_image):

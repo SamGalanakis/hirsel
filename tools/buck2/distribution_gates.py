@@ -56,6 +56,11 @@ def distribution_gates(out, call, Raw, reads, slots):
                             embed=True))
     out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel",
                             packages=toolchain_packages(reads, reads.root)))
+    out.append("\n" + call("hirsel_script_test", name="test-toolchain-packages", script="tools/tests/toolchain_packages.py",
+                            data=[],
+                            files_env={"HIRSEL_PACK_COMPILER": "//:hirsel-core-driver-bin-hirsel",
+                                       "HIRSEL_PACK_PROGRAMS": "//tools/toolchain-dist:toolchain_programs.py"},
+                            extra_env={"HIRSEL_JOBS": "1"}))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes={flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
                                       for flag, slot in slots.items()},

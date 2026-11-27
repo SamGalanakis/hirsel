@@ -173,3 +173,65 @@ fn every_front_run_case_survives_the_release_passes() {
     assert!(count > 0);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A repeat of an aggregate is a counted loop of element copies, and nested
+/// repeats nest those loops. Release LLVM fully unrolled them, and SROA then
+/// split each element copy into one store per word, so the 8 MiB value below
+/// became tens of thousands of stores per function and its release build did
+/// not finish within minutes (3202 H3b, suite_stack). Release LLVM keeps
+/// such a loop a loop (`BulkCopyUnrollLimitPass`). Building it is bounded at
+/// 10 s, two orders of magnitude above the loop shape's cost and far below
+/// the minutes the unrolled one took, so a loaded host does not trip it; the
+/// object is bounded at 1 MiB, a quarter of the 32k-store unrolled `mk256k`
+/// alone. Every word of `mk256k(v)` is `v` (hand-derived), so `corner` reads
+/// back `v` and `sum` adds the four corners of one 256 KiB value.
+#[test]
+fn nested_aggregate_repeats_build_fast_on_release() {
+    let source = r#"
+type S256 { a: Inline[u64, 32] }
+type S8K { a: Inline[S256, 32] }
+type S256K { a: Inline[S8K, 32] }
+type S8M { a: Inline[S256K, 32] }
+
+fn mk256(v: u64) -> S256 { S256(a: [v; 32]) }
+fn mk8k(v: u64) -> S8K { S8K(a: [mk256(v); 32]) }
+fn mk256k(v: u64) -> S256K { S256K(a: [mk8k(v); 32]) }
+fn mk8m(v: u64) -> S8M { S8M(a: [mk256k(v); 32]) }
+
+fn corner(v: u64) -> u64 { let x = mk256k(v); x.a[31].a[31].a[31] }
+fn sum(v: u64) -> u64 {
+    let x = mk256k(v)
+    x.a[0].a[0].a[0] + x.a[31].a[0].a[17] + x.a[5].a[31].a[0] + x.a[31].a[31].a[31]
+}
+fn huge(v: u64) -> u64 { let x = mk8m(v); x.a[31].a[31].a[31].a[31] }
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let exports = ["corner", "sum", "huge"].map(|name| names[name]);
+    let started = std::time::Instant::now();
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(10), "release build took {took:?}");
+    assert!(llvm.len() < 1 << 20, "release object is {} bytes", llvm.len());
+    let laws = [("corner", 7, 7), ("corner", 0, 0), ("sum", 9, 36)];
+    let cases: Vec<_> = laws
+        .iter()
+        .map(|&(name, v, _)| Case {
+            function: names[name],
+            args: vec![v],
+            limit: 1_000_000,
+            injection: None,
+        })
+        .collect();
+    for ((case, &(name, v, want)), native) in cases.iter().zip(&laws).zip(execute_object(
+        &program,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(llvm),
+    )) {
+        let evaluated = eval::run(&program, case.function, &case.args, case.limit).outcome;
+        assert_eq!(evaluated, eval::Outcome::Returned(vec![want]), "evaluated {name}({v})");
+        assert_eq!(native.outcome, evaluated, "release {name}({v})");
+    }
+}

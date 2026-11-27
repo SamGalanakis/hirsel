@@ -560,6 +560,57 @@ public:
     }
 };
 
+// The unroller prices a memcpy or memset as one call whatever its length,
+// but SROA then splits each copy of an alloca it has split into slices
+// into one store per slice. A repeat of an aggregate (`[e; 32]`) is a
+// counted loop of element copies, so full unrolling it and its nested
+// repeats made one store per 8 bytes of the whole value: suite_stack's
+// `Inline[Inline[Inline[Inline[u64, 32], 32], 32], 32]` became 98k stores
+// in one function, and SROA, LoopAccessAnalysis and counter-range took
+// minutes over them. A loop whose iterations together move more bytes than
+// the O3 full-unroll threshold (300 instructions) would allow at 8 bytes
+// a store is kept a loop.
+class BulkCopyUnrollLimitPass : public OptionalPassInfoMixin<BulkCopyUnrollLimitPass> {
+    static constexpr uint64_t Limit = 300 * 8;
+
+    // The bytes `loop` moves in all its iterations, saturating at Limit + 1,
+    // or 0 when it has no constant trip bound and so is never fully unrolled.
+    static uint64_t moved(Loop &loop, LoopInfo &loops, ScalarEvolution &evolution) {
+        uint64_t each = 0;
+        for (BasicBlock *block : loop.blocks()) {
+            if (loops.getLoopFor(block) != &loop) continue;
+            for (Instruction &i : *block)
+                if (auto *bulk = dyn_cast<MemIntrinsic>(&i))
+                    if (auto *length = dyn_cast<ConstantInt>(bulk->getLength()))
+                        each = std::min(Limit + 1, each + length->getValue().getLimitedValue(Limit + 1));
+        }
+        for (Loop *inner : loop) {
+            uint64_t bytes = moved(*inner, loops, evolution);
+            if (!bytes && any_of(inner->blocks(), [](BasicBlock *b) {
+                    return any_of(*b, [](Instruction &i) { return isa<MemIntrinsic>(i); });
+                }))
+                bytes = Limit + 1;
+            each = std::min(Limit + 1, each + bytes);
+        }
+        uint64_t trips = evolution.getSmallConstantMaxTripCount(&loop);
+        if (!trips || !each) return 0;
+        return each > (Limit + 1) / trips ? Limit + 1 : each * trips;
+    }
+
+public:
+    PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
+        LoopInfo &loops = analyses.getResult<LoopAnalysis>(f);
+        if (loops.empty()) return PreservedAnalyses::all();
+        ScalarEvolution &evolution = analyses.getResult<ScalarEvolutionAnalysis>(f);
+        for (Loop *loop : loops.getLoopsInPreorder())
+            if (loop->getLoopLatch() && !getBooleanLoopAttribute(loop, "llvm.loop.unroll.disable") &&
+                moved(*loop, loops, evolution) > Limit)
+                addStringMetadataToLoop(loop, "llvm.loop.unroll.disable", 1);
+        // Loop metadata is not an analysis input.
+        return PreservedAnalyses::all();
+    }
+};
+
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
 using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
 
@@ -580,6 +631,10 @@ void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirs
             }
             if (name == "counted-exit-split") {
                 passes.addPass(hirsel_llvm::CountedExitSplitPass());
+                return true;
+            }
+            if (name == "bulk-copy-unroll-limit") {
+                passes.addPass(BulkCopyUnrollLimitPass());
                 return true;
             }
             if (name == "masked-cell-unroll") {
@@ -729,7 +784,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,invariant-arm-sink,"
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
                       "loop-rotate,licm<allowspeculation>,priced-unswitch),"
-            "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,counted-exit-split,"
+            "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,counted-exit-split,bulk-copy-unroll-limit,"
             "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),counter-range,"
             "sroa<modify-cfg>,early-vector-combine,mldst-motion,gvn,sccp,bdce,instcombine<no-verify-fixpoint>,"
             "dfa-jump-threading,jump-threading,correlated-propagation,adce,memcpyopt,dse,"

@@ -36,7 +36,7 @@ struct CounterHost: App {
                     if case .renderTree(let tree)? = reader.readCommand(),
                        tree.id == "counter", case .text(let text, _, _, _, _) = tree.kind,
                        let value = UInt64(text) {
-                        record(value)
+                        CounterHost.record(value)
                     }
                 }
             }

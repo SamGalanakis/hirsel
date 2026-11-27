@@ -1127,6 +1127,7 @@
 hirsel_guard::install!();
 
 pub mod address;
+pub mod contain;
 pub mod coverage;
 pub mod decode;
 pub mod extent;

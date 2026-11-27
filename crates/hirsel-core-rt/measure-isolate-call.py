@@ -287,6 +287,8 @@ def copy_workspace_for_layout(tmp):
     shutil.copytree(ROOT / 'crates', copy / 'crates')
     lib = copy / 'crates/hirsel-core-rt/src/lib.rs'
     context = lib.read_text().split('pub struct Context {', 1)[1].split('\n}', 1)[0]
+    # A field under #[cfg] is absent from this build and has no offset to report.
+    context = re.sub(r'^    #\[cfg\([^\n]*\n[^\n]*\n', '', context, flags=re.MULTILINE)
     fields = re.findall(r'^    (?:pub(?:\(crate\))? )?(\w+):', context, re.MULTILINE)
     tasks = lib.with_name('tasks.rs')
     with tasks.open('a') as target:

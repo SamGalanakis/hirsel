@@ -11,6 +11,7 @@ mod bytes;
 mod case;
 mod cleanup;
 mod collections;
+mod contain;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod copy_tests;
 mod coverage;
@@ -779,6 +780,8 @@ fn emit_prepared(
                 step_neutral: Some(neutral_functions),
                 step_counter: None,
                 neutral_step_call: false,
+                contain: Default::default(),
+                row: 0,
                 view_invariants: Vec::new(),
                 view_ends_before_exit: false,
                 aliases,
@@ -844,6 +847,7 @@ fn emit_prepared(
             } else {
                 Vec::new()
             };
+            e.open_contain(&step_loops, &step_regions);
             let step_groups = body
                 .blocks
                 .iter()
@@ -1526,6 +1530,9 @@ struct FunctionEmitter<'a> {
     step_neutral: Option<&'a [bool]>,
     step_counter: Option<Value>,
     neutral_step_call: bool,
+    /// PACK-12: this body's fused scope rows, and the row being lowered.
+    contain: hirsel_core_ir::contain::Plan,
+    row: usize,
     view_invariants: Vec<(Value, Value, u64)>,
     view_ends_before_exit: bool,
     sink: &'a mut dyn Sink,
@@ -2006,6 +2013,7 @@ impl FunctionEmitter<'_> {
 
     fn inst_body(&mut self, inst: &Inst, index: usize) -> Result<()> {
         self.anchor = self.body.inst_anchors[index];
+        self.row = index;
         if let Inst::StorageDead { slot } = *inst {
             if self.scoped.slots[slot.index()] {
                 self.end_slot(slot.index());

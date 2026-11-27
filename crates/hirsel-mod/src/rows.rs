@@ -41,6 +41,8 @@ pub const ROWS: &[(&str, Class)] = &[
     ("hirsel_core_conn_receive_rec", Class::Task),
     ("hirsel_core_conn_send", Class::Task),
     ("hirsel_core_conn_send_rec", Class::Task),
+    ("hirsel_core_contain_enter", Class::Metered),
+    ("hirsel_core_contain_leave", Class::Metered),
     ("hirsel_core_count_overflow", Class::Metered),
     ("hirsel_core_counted_init", Class::Metered),
     ("hirsel_core_crc32c", Class::Pure),

@@ -8,6 +8,13 @@ pub(crate) struct Region {
     cost: u64,
 }
 
+impl Region {
+    /// Whether this plan pays ahead for steps of `block`.
+    pub(crate) fn covers(&self, block: usize) -> bool {
+        self.nodes.contains(&block)
+    }
+}
+
 fn visit(
     body: &Body,
     block: usize,

@@ -1,0 +1,186 @@
+// PACK-12: a byte bound, a step bound and an isolate around one call, in both
+// orders of the bounds. Every way out leaves each scope it entered exactly once:
+// a refusal at each layer, a returned value, a caught failure, and a body that
+// runs out of steps. The values come from MEM-30 and FAIL-16 (the isolate's cause
+// cell is 32 bytes): a refused byte bound reports what was asked and what its
+// enclosing bound had; `rounds` repeats every way out under bounds that one
+// scope left entered would exhaust.
+// expect: accept
+// expect: run bytes_first(64,5000,7,0) = 7
+// expect: run bytes_first(64,5000,7,1) = 4000 used 32
+// expect: run bytes_first(64,5000,7,2) = 2000
+// expect: run bytes_first(32,5000,7,0) = 7
+// expect: run bytes_first(31,5000,7,0) = 3000
+// expect: run bytes_first(64,0,7,0) = 2000
+// expect: run bytes_first_under_bytes() = 106463
+// expect: run bytes_first_under_steps() = 2000
+// expect: run bytes_first_rounds() = 78273 used 32
+// expect: run steps_first(7,0) = 7
+// expect: run steps_first(7,1) = 4000 used 32
+// expect: run steps_first(7,2) = 2000
+// expect: run steps_first_under_bytes() = 106463
+// expect: run steps_first_under_steps() = 2000
+// expect: run steps_first_rounds() = 78273 used 32
+// expect: run in_loop(19,10) = 90
+// expect: run in_loop(18,10) = 1072
+// expect: run in_loop(10,10) = 9000
+// expect: run in_loop(9,10) = 9999
+fn work(n: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        let zero: u64 = 0
+        return n / zero
+    }
+    if mode == 2 {
+        let mut i: u64 = 0
+        while i < 100000 {
+            i += 1
+        }
+    }
+    n
+}
+
+fn bytes_first(room: u64, fuel: u64, n: u64, mode: u64) -> u64 {
+    let r = bound bytes room {
+        bound steps fuel {
+            isolate(fn() -> u64 {
+                work(n, mode)
+            })
+        }
+    }
+    match r {
+        Error(c) => 100000 + c.requested * 100 + c.available,
+        Ok(Error(_)) => 2000,
+        Ok(Ok(Error(_))) => 3000,
+        Ok(Ok(Ok(Error(_)))) => 4000,
+        Ok(Ok(Ok(Ok(x)))) => x
+    }
+}
+
+fn steps_first(n: u64, mode: u64) -> u64 {
+    let r = bound steps 5000 {
+        bound bytes 64 {
+            isolate(fn() -> u64 {
+                work(n, mode)
+            })
+        }
+    }
+    match r {
+        Error(_) => 2000,
+        Ok(Error(c)) => 100000 + c.requested * 100 + c.available,
+        Ok(Ok(Error(_))) => 3000,
+        Ok(Ok(Ok(Error(_)))) => 4000,
+        Ok(Ok(Ok(Ok(x)))) => x
+    }
+}
+
+fn bytes_first_under_bytes() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 63 {
+        bytes_first(64, 5000, 7, 0)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => 9999
+    }
+}
+
+fn steps_first_under_bytes() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 63 {
+        steps_first(7, 0)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => 9999
+    }
+}
+
+fn bytes_first_under_steps() -> u64 {
+    let r: Result[u64, OutOfTime] = bound steps 50 {
+        bytes_first(64, 5000, 7, 0)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => 9999
+    }
+}
+
+fn steps_first_under_steps() -> u64 {
+    let r: Result[u64, OutOfTime] = bound steps 50 {
+        steps_first(7, 0)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => 9999
+    }
+}
+
+// Forty calls: fourteen return their number (0, 3, ..., 39: 273), thirteen fail
+// and are caught (4000 each) and thirteen run out of steps (2000 each). The byte
+// bound has room for one call's 64 bytes, and the step bound for the thirteen
+// spent bounds of 5000 but not for one more held by each of the other calls.
+// The last caught failure's cause cell stays admitted (FAIL-16, MEM-24).
+fn bytes_first_rounds() -> u64 {
+    let r = bound bytes 100 {
+        bound steps 100000 {
+            let mut sum: u64 = 0
+            let mut i: u64 = 0
+            while i < 40 {
+                sum += bytes_first(64, 5000, i, i % 3)
+                i += 1
+            }
+            sum
+        }
+    }
+    match r {
+        Ok(Ok(sum)) => sum,
+        _ => 9999
+    }
+}
+
+fn steps_first_rounds() -> u64 {
+    let r = bound bytes 100 {
+        bound steps 100000 {
+            let mut sum: u64 = 0
+            let mut i: u64 = 0
+            while i < 40 {
+                sum += steps_first(i, i % 3)
+                i += 1
+            }
+            sum
+        }
+    }
+    match r {
+        Ok(Ok(sum)) => sum,
+        _ => 9999
+    }
+}
+
+// Both bounds entered inside a loop that an enclosing step bound counts. Each
+// time round takes one step of the enclosing bound, and the inner step bound
+// reserves 10 from what that bound has left and returns them unused (MEM-30).
+// With 19, round i has 19 - i left, so every round is admitted; with 18 the
+// last round (nine left) is refused; with 10 only the first round is admitted
+// and the ten loop steps fit exactly; with 9 no round is admitted and the tenth
+// loop step does not fit.
+fn in_loop(limit: u64, n: u64) -> u64 {
+    let r = bound steps limit {
+        let mut sum: u64 = 0
+        let mut i: u64 = 0
+        while i < n {
+            let inner = bound bytes 8 {
+                bound steps 10 {
+                    i * 2
+                }
+            }
+            sum += match inner {
+                Ok(Ok(v)) => v,
+                _ => 1000
+            }
+            i += 1
+        }
+        sum
+    }
+    match r {
+        Ok(sum) => sum,
+        Error(_) => 9999
+    }
+}

@@ -456,6 +456,25 @@ impl FunctionEmitter<'_> {
         };
         let p = |v: &Value| ptr(v.clone());
         let u = |v: &Value| word(v.clone());
+        if op == RtOp::StepEnter {
+            let &[admitted] = site.results.get(&self.body.pools.values).unwrap() else {
+                unreachable!("a step enter has one result")
+            };
+            let entered = if self.contain.entered.contains_key(&self.row) {
+                let (made, _) = self.entered_by_first();
+                Some(self.made(Predicate::Eq, &made, 2))
+            } else if let Some(enter) = self.contain.enters.get(&self.row).copied() {
+                let bytes = self.contain_operand(enter.operand);
+                let (made, _) = self.contain_enter(1, &bytes, &args[0], self.row);
+                Some(self.made(Predicate::Ne, &made, 0))
+            } else {
+                None
+            };
+            if let Some(entered) = entered {
+                self.put(admitted, &entered);
+                return Ok(());
+            }
+        }
         let values = match op {
             RtOp::Flow(op) => self.native_call(
                 "hirsel_core_flow",
@@ -479,14 +498,18 @@ impl FunctionEmitter<'_> {
                 &[K],
                 &[ptr(CONTEXT), u(&args[0]), u(&args[1]), u(&args[2]), u(&at)],
             ),
-            RtOp::StepLeave => self.native_call("hirsel_core_step_leave", &[], &[ptr(CONTEXT)]),
+            RtOp::StepLeave => {
+                self.leave("hirsel_core_step_leave");
+                Vec::new()
+            }
             RtOp::Closed(_) => Vec::new(),
             RtOp::StepCatch => self.native_call("hirsel_core_step_catch", &[B], &[ptr(CONTEXT)]),
             RtOp::IsolateEnter => {
                 self.native_call("hirsel_core_isolate_enter", &[B, U], &[ptr(CONTEXT)])
             }
             RtOp::IsolateLeave => {
-                self.native_call("hirsel_core_isolate_leave", &[], &[ptr(CONTEXT)])
+                self.leave("hirsel_core_isolate_leave");
+                Vec::new()
             }
             RtOp::IsolateCatch => {
                 self.native_call("hirsel_core_isolate_catch", &[P, K], &[ptr(CONTEXT)])

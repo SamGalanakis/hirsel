@@ -22,6 +22,7 @@ mod backing_observation;
 pub mod block;
 pub mod causes;
 pub mod channel;
+pub mod contain;
 pub mod counted;
 mod coverage;
 mod crc;

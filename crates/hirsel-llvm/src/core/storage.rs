@@ -991,7 +991,14 @@ impl FunctionEmitter<'_> {
                 bytes,
             } => {
                 let n = self.numeric(bytes);
-                let (yes, room) = if self.empty_bounds.enters.contains(&admitted) {
+                let (yes, room) = if self.contain.entered.contains_key(&index) {
+                    let (made, room) = self.entered_by_first();
+                    (self.made(Predicate::Eq, &made, 2), room)
+                } else if let Some(enter) = self.contain.enters.get(&index).copied() {
+                    let steps = self.contain_operand(enter.operand);
+                    let (made, room) = self.contain_enter(0, &n, &steps, enter.second);
+                    (self.made(Predicate::Ne, &made, 0), room)
+                } else if self.empty_bounds.enters.contains(&admitted) {
                     self.empty_bound(&n)
                 } else {
                     let (p, room) =
@@ -1006,7 +1013,7 @@ impl FunctionEmitter<'_> {
             Inst::StackCheck { fail } => self.stack_check(fail),
             Inst::LimitExit => {
                 if !self.empty_bounds.exits.contains(&index) {
-                    self.runtime_void("hirsel_core_limit_exit", &[ptr(CONTEXT)]);
+                    self.leave("hirsel_core_limit_exit");
                 }
             }
             Inst::RegionOpen { result } => {

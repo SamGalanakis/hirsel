@@ -430,6 +430,59 @@ process. A task takes identities from the process in ranges of 64 and takes its 
 range when it first opens an account, so opening a `bound steps` writes no memory another
 worker reads.
 
+## PACK-12: Fused scope rows
+
+A contained call wraps one call in a byte bound, a step bound and an isolate. Each of the
+three has an enter row and a leave row in the runtime, so the plain lowering makes six
+runtime calls around the call. An engine may make fewer by running several of these rows
+in one runtime call. This changes what the engine emits, never what the program means:
+every bound and isolate is entered and left exactly as [MEM-19](budgets.md#mem-19-limits),
+[MEM-30](budgets.md#mem-30-step-bounds) and [FAIL-16](failure.md) say, in the same order,
+with the same refusals and the same results.
+
+**Fused enter.** When a function enters a byte bound and then a step bound, or a step bound
+and then a byte bound, the first enter's row may make both enters. This is allowed only
+when:
+
+1. the second enter runs exactly when the first is admitted, and on no other path;
+2. every instruction between the two only reads or writes values and frame memory: none
+   can fail, charge or refund bytes, take a step, or call; and
+3. the second bound's size is a constant or a value computed before the first enter.
+
+The runtime makes the first enter, and the second only when the first is admitted. A
+refused second enter leaves the first entered, and the function then leaves the first by
+its own path, as in the plain lowering.
+
+**Fused leave.** When a function leaves two or more of these scopes one after another, the
+first leave's row may make all of them, innermost first. This is allowed only when every
+instruction between the leaves meets condition 2 above and control reaches each later leave
+from the one before it without a branch. A later leave row that is also reached another
+way (from a refusal or a caught failure, where the earlier leaves did not run) still makes
+its own leave on that path.
+
+**What is fused today.** A function that writes `bound bytes { bound steps { isolate(f) } }`
+or `bound steps { bound bytes { isolate(f) } }` enters both bounds in one call and, when the
+body returns, leaves the isolate and both bounds in one call: three runtime calls around
+the body instead of six. The isolate's enter stays a call of its own, because the step that
+meters the call to the isolate lies between the bounds' enters and the isolate's. A bound
+that encloses an isolate with no second bound keeps its two enters and makes its two leaves
+in one call. A step bound written inside the isolate's body lies in another function and
+is not fused with the scopes outside it. The paths that leave after a refusal or a failure
+make one call per scope.
+
+**Engine limits.** An engine never fuses a row it lowers without a runtime call (a byte
+bound with an empty body). The LLVM engine pays the steps of some loops and regions ahead
+and refunds the unused ones on the way out; inside such a loop or region it starts no fused
+group at a byte bound's row, so a refund always reaches the step bound that was current
+when the steps were paid.
+
+**Runtime rows.** `hirsel_core_contain_enter(context, order, bytes, steps, site)` returns
+the number of enters made (0, 1 or 2) and the byte bound's `available` result; `order` 0 is
+bytes then steps and 1 is steps then bytes. `hirsel_core_contain_leave(context, layers)`
+leaves the scopes that `layers` names, innermost first, four bits each from the low end: 1
+a byte bound, 2 a step bound, 3 an isolate. Both rows are in class `Metered` of the import
+table (PACK-2).
+
 ## Gates
 
 | gate | target |

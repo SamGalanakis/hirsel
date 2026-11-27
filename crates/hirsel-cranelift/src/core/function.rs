@@ -70,6 +70,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub calls: calls::Calls<'c>,
     pub testing: bool,
     pub empty_bound: bool,
+    pub contain: super::contain::State,
     pub observe_charge: bool,
     pub(super) law: Option<c::law::Hooks>,
     pub(super) coverage: Option<super::coverage::Flags>,
@@ -299,6 +300,7 @@ pub(super) fn emit(
         cause_slot: None,
         testing: tables.trace_drops,
         empty_bound: !tables.observe_charge && fast::empty_bound(body),
+        contain: super::contain::State::new(body, tables.observe_charge),
         observe_charge: tables.observe_charge,
         law: c::law::Hooks::pick(input, function, body, layouts),
         calls: calls::Calls::new(
@@ -313,6 +315,7 @@ pub(super) fn emit(
     };
     // The entry flag, before anything in the body can stop it.
     f.set_flag(0, None);
+    f.open_leave_credit();
     for i in order(body) {
         let block = &body.blocks[i];
         if i != 0 {
@@ -363,6 +366,7 @@ pub(super) fn emit(
                 body.inst_anchors.get(index).copied().flatten(),
                 index as u32 + 1,
             );
+            f.contain.row = index;
             if !matches!((fill, inst), (Some(fill), Inst::Store { address, .. }) if fill.store == *address)
             {
                 f.instruction(inst)?;

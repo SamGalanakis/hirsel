@@ -21,6 +21,7 @@ mod abi;
 pub use abi::{Signature as NativeSignature, c_param};
 mod calls;
 mod case;
+mod contain;
 mod coverage;
 mod debug;
 mod drop;

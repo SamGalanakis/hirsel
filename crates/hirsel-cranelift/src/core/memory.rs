@@ -640,6 +640,9 @@ impl Function<'_, '_, '_> {
             } => {
                 let ctx = self.context;
                 let bytes = self.get(bytes);
+                if self.fused_limit_enter(admitted, available, bytes)? {
+                    return Ok(());
+                }
                 if self.empty_bound {
                     let payer = self.current_limit();
                     let (ok, available_value) = self.admission(payer, bytes)?;
@@ -665,7 +668,7 @@ impl Function<'_, '_, '_> {
                 if self.empty_bound {
                     return Ok(());
                 }
-                self.c_call("hirsel_core_limit_exit", &[p], &[], &[self.context])?;
+                self.leave("hirsel_core_limit_exit")?;
             }
             Inst::RegionOpen { result } => {
                 use cranelift_codegen::ir::{StackSlotData, StackSlotKind};

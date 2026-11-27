@@ -56,6 +56,7 @@ typedef struct HirselCoreContext HirselCoreContext;
 /* MEM-30. StepEnter false leaves the current bound unchanged. StepCatch closes
    its bound and refunds/catches only a chain of that bound's OutOfTime causes. */
 bool hirsel_core_step_enter(HirselCoreContext *, uint64_t steps);
+bool hirsel_core_step_enter_at(HirselCoreContext *, uint64_t steps, uint64_t site);
 void hirsel_core_step_leave(HirselCoreContext *);
 bool hirsel_core_step_catch(HirselCoreContext *);
 uint8_t hirsel_core_step_out(HirselCoreContext *, uint64_t site);
@@ -167,6 +168,14 @@ HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *reserved
 void hirsel_core_free(void *, uint64_t remaining_charge);
 HirselCoreAllocation hirsel_core_limit_enter(HirselCoreContext *, uint64_t bytes);
 void hirsel_core_limit_exit(HirselCoreContext *);
+/* PACK-12. One call for two enters and one for a run of leaves. order 0 enters
+   the byte bound then the step bound, 1 the reverse; layers counts the enters
+   made and room is the byte bound's available result. Leave takes its scopes
+   innermost first, four bits each from the low end: 1 bytes, 2 steps, 3 isolate. */
+typedef struct { uint64_t layers; uint64_t room; } HirselCoreEntered;
+HirselCoreEntered hirsel_core_contain_enter(HirselCoreContext *, uint64_t order,
+    uint64_t bytes, uint64_t steps, uint64_t site);
+void hirsel_core_contain_leave(HirselCoreContext *, uint64_t layers);
 typedef struct HirselCoreRegion HirselCoreRegion;
 HirselCoreRegion *hirsel_core_region_open(const HirselCoreContext *);
 HirselCoreAllocation hirsel_core_region_alloc(const HirselCoreContext *,

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod neutral_runtime;
 mod regions;
 use neutral_runtime::neutral_runtime;
+pub(super) use regions::Region;
 pub(super) use regions::plans as regions;
 
 #[cfg(all(test, not(hirsel_lazy_core)))]
@@ -101,6 +102,12 @@ pub(super) struct Loop {
     stride: Stride,
     inclusive: bool,
     offset: u64,
+}
+impl Loop {
+    /// Whether this plan pays ahead for steps of `block`.
+    pub(super) fn covers(&self, block: usize) -> bool {
+        self.nodes.contains(&block)
+    }
 }
 fn next(body: &Body, block: usize) -> Option<Vec<usize>> {
     let edge = |e: EdgeId| body.edges[e.index()].target.index();

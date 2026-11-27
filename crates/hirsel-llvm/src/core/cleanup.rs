@@ -214,6 +214,8 @@ pub(super) fn glue_emitter<'a>(
         step_neutral: Some(&[]),
         step_counter: None,
         neutral_step_call: false,
+        contain: Default::default(),
+        row: 0,
         view_invariants: Vec::new(),
         view_ends_before_exit: false,
         empty_bounds: empty::EmptyBounds::default(),

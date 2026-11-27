@@ -107,6 +107,9 @@ impl Function<'_, '_, '_> {
             };
         }
         let mut outputs = [Value::from_u32(0); 8];
+        if op == RtOp::StepEnter && self.fused_step_enter(call, args[0])? {
+            return Ok(());
+        }
         let site = match op {
             RtOp::Host(_)
             | RtOp::Returnable(_)
@@ -161,7 +164,7 @@ impl Function<'_, '_, '_> {
                 0
             }
             RtOp::StepLeave => {
-                self.c_call("hirsel_core_step_leave", &[P], &[], &[self.context])?;
+                self.leave("hirsel_core_step_leave")?;
                 0
             }
             RtOp::Closed(_) => 0,
@@ -177,7 +180,7 @@ impl Function<'_, '_, '_> {
                 2
             }
             RtOp::IsolateLeave => {
-                self.c_call("hirsel_core_isolate_leave", &[P], &[], &[self.context])?;
+                self.leave("hirsel_core_isolate_leave")?;
                 0
             }
             RtOp::IsolateCatch => {

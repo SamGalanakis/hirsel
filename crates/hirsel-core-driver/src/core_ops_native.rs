@@ -1565,6 +1565,24 @@ fn dest_put_cranelift() {
 fn dest_put_llvm() {
     dest_put(Backend::Llvm);
 }
+/// PACK-12: every way out of a byte bound, a step bound and an isolate around one
+/// call leaves each entered scope once, with the rows fused, on each engine.
+fn contained_call(backend: Backend) {
+    run_lines_native(
+        backend,
+        include_str!("../../../core/front/cases/body/contained-call.hirsel"),
+    );
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn contained_call_cranelift() {
+    contained_call(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn contained_call_llvm() {
+    contained_call(Backend::Llvm);
+}
 /// MEM-17, T1.5: own clone and its refusal's drop and refund, on each engine.
 fn clone_own(backend: Backend) {
     run_lines_native(

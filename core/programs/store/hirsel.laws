@@ -301,6 +301,7 @@ store@1/store/test_l100_zero_live_pin_survives_probe src=1bb7572874ba8c84 sig=d7
 store@1/store/test_l100_zero_live_pin_survives_probe_memory_main src=052a4420ab242265 sig=d72cf7e04585aaf0 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_identity src=9b6a817513a5b585 sig=cdbfc6c6f596318c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_merge src=5b8f3e3c1f11a124 sig=cdbfc6c6f596318c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_l102_hot_migrate_untouched src=5403a4fe09226db0 sig=a7efb7b2f71c17a8 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l62_attempt_touch_order src=946681123adf6327 sig=c8738979bd930d6e run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_batch_error_follows_touch src=b133212ee023536f sig=9f763c2bc0cc2d31 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_initial_change_pages_resolve_tiered_rows src=7d815f779bfe6d31 sig=8c7d81399e8de1b9 run=a6b003f729117be3 bug=- oracle=- rows=pending

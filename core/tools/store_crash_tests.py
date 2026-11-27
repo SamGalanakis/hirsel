@@ -12,6 +12,12 @@ import tempfile
 from case_progress import run_case
 
 SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install', 'read-only', 'window', 'index-build', 'catch-up')
+# A Tiered store's floor (cache, cut pins, dirty and pager task inside
+# `resident_limit`) does not fit the 64 MiB process limit, so these scenarios
+# run in their own binary.
+TIERED_SCENARIOS = ('hot-migrate',)
+CRASH_LIMIT = 64 * 1024 * 1024
+TIERED_CRASH_LIMIT = 512 * 1024 * 1024
 WINDOW_FAILURES = ('window-chunk-failure', 'window-sync-failure')
 JOURNAL_SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split',
                      'journal-place-idle', 'journal-fork', 'journal-tail')
@@ -163,8 +169,9 @@ def entry_grants(manifest, entry, directory):
     return grants
 
 
-def build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter):
-    build = work / (engine + '-crash')
+def build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter,
+                limit=CRASH_LIMIT):
+    build = work / (engine + '-crash' + ('' if limit == CRASH_LIMIT else f'-{limit}'))
     build.mkdir()
     if cc is None:
         prefix = Path(os.environ.get('LLVM_SYS_231_PREFIX', root / 'tools/buck2/toolchains/llvm-files'))
@@ -187,7 +194,7 @@ def build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, ent
     command = [str(compiler.resolve()), 'build', '--inputs', str(manifest), '--source-core', '--source-std',
                '--entry', entry, '--backend',
                'llvm' if engine == 'llvm-release' else engine, '--runtime', str(runtime.resolve()),
-               '--cc', str(wrapper), '--store', str(build / 'objects'), '--limit', str(64 * 1024 * 1024),
+               '--cc', str(wrapper), '--store', str(build / 'objects'), '--limit', str(limit),
                *entry_grants(manifest, entry, build), '-o', str(executable), '--json']
     if engine == 'llvm-release' or (engine == 'llvm' and adapter == 'runner_crash.c'):
         command.append('--release')
@@ -206,8 +213,9 @@ def bridge_env(bridge, environment=None):
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=(), sectors=(), receipts=False, eio_only=False):
-    executable = build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter)
+                count_only=(), sectors=(), receipts=False, eio_only=False, limit=CRASH_LIMIT):
+    executable = build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter,
+                             limit)
     env = bridge_env(bridge, environment)
     if eio_only:
         rows = []

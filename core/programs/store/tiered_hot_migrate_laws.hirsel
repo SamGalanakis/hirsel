@@ -252,6 +252,150 @@ fn test_l102_hot_migrate_merge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     l102_merge_refused(disk_test_directory(d), c, r, tasks)
 }
 
+// L102 (d): a build cut whose probe relocates frames of an untouched second
+// Tiered table. `other` (3000 Tiered rows) is half rewritten, so its packs
+// hold dead frames. The store then reopens with `compact_permille` 1001, so
+// every pack is under probe at every cut, and with a large `probe_budget`, so
+// the hot build's cuts move `other`'s frames on main. The graft keeps main's
+// current slot for an id the plan did not change (F3), so after the publish
+// and after a reopen `other` reads all its model rows. The guard requires that
+// some frame of `other` moved during the migrate.
+@test
+fn test_l102_hot_migrate_untouched(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut seeded = open(tasks, d, c, r, hot_options(65536)?)?
+    let _ = hot_seed(mut seeded, 6000)?
+    hot_seed_other(mut seeded, 3000)?
+    let other = table(mut seeded, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let other_id = other.id
+    let Committed(_) = run(mut seeded, Some(100000000u64), copy_env(other), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        for k in 0u64 .. 1500u64 {
+            put(mut tx, t, 2u64 * k, (2u64 * k) % 97)?
+        }
+        Ok(())
+    })? else {
+        fail("L102 (d): the rewrite did not commit")
+    }
+    let _ = checkpoint(mut seeded)?
+    close(take seeded)?
+    let mut options = hot_options(65536)?
+    options.compact_permille = 1001
+    options.probe_budget = 1073741824u64
+    let mut db = open(tasks, d, c, r, options)?
+    let before = compact_walk(d, db, other_id)?
+    run_migration(mut db, tasks, code.describe(hot_migrate))?
+    let after = compact_walk(d, db, other_id)?
+    let mut relocated = false
+    for (stamp, place) in before.places {
+        match map.get(after.places, stamp) {
+            Some(now) => {
+                if now != place {
+                    relocated = true
+                }
+            },
+            None => {
+                relocated = true
+            },
+        }
+    }
+    if !relocated {
+        fail("L102 (d): no frame of the untouched table moved during the build")
+    }
+    l102_moved(d, mut db, 6000)?
+    hot_rows(mut db, string.from("other"), 3000)?
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, options)?
+    hot_rows(mut again, string.from("other"), 3000)?
+    l102_moved(d, mut again, 6000)?
+    close(take again)
+}
+
+// L102 (c): the "hot-migrate" W2 crash scenario (store_crash_tests.py). The
+// write phase runs `hot_reverse` over 3000 Tiered rows at dirty 65536, so
+// cuts land while runs stream, at the turn to the merge, in the merge, and at
+// the publish.
+// The crash binary runs under a 64 MiB process limit, so its cache is the
+// smallest the Tiered floor admits: the writer's pins plus one reader
+// (`VALUE_LIMIT` + 1 MiB).
+fn l102_crash_options() -> Result[Options, Error] {
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(268435456u64)
+    overrides.writer_pin_bytes = Some(34471936u64)
+    overrides.cache_bytes = Some(34471936u64 + 17825792u64)
+    overrides.dirty_bytes = Some(65536u64)
+    Ok(sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("hot crash sizing"))
+}
+
+fn l102_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    let _ = hot_seed(mut db, 3000)?
+    close(take db)
+}
+
+fn l102_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    run_migration(mut db, tasks, code.describe(hot_reverse))?
+    close(take db)
+}
+
+// The recovered state is exactly OLD (`rows` with its model rows, no
+// `moved`) or exactly NEW (`moved` reversed, no `rows`); `required_new`
+// demands NEW. One holder-free cut leaves no owner-3 pin, the surviving
+// table's stamps are published (F2), and a further write and cut reopen to
+// the same state with no pin.
+fn l102_crash_state(d: Dir, mut db: Db, old: bool) -> Result[bool, Error] waits {
+    if l102_owner3_pin(db) {
+        return Ok(false)
+    }
+    if old {
+        hot_rows(mut db, string.from("rows"), 3000)?
+        if let Ok(_) = table(mut db, "moved", std.codec.key_u64(), std.codec.of_u64()) {
+            return Ok(false)
+        }
+        let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        l102_stamps(d, db, rows.id)?
+        return Ok(true)
+    }
+    if let Ok(_) = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()) {
+        return Ok(false)
+    }
+    l102_reversed(d, mut db, 3000)?
+    Ok(true)
+}
+
+fn l102_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let mut db = open(tasks, d, c, r, l102_crash_options()?)?
+    trust_store(mut db)?
+    let old = match table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    if old && required_new {
+        return Ok(false)
+    }
+    let _ = checkpoint(mut db)?
+    if !l102_crash_state(d, mut db, old)? {
+        return Ok(false)
+    }
+    let (name, key) = if old {
+        ("rows", 7u64)
+    } else {
+        ("moved", 1000000u64 - 7u64)
+    }
+    let t = table(mut db, name, std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(_) = run(mut db, Some(100000000u64), copy_env((t, key)), fn(mut tx: Tx, env: (Table[u64, u64], u64)) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, 7u64)
+    })? else {
+        return Ok(false)
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let mut again = open(tasks, d, c, r, l102_crash_options()?)?
+    let good = l102_crash_state(d, mut again, old)?
+    close(take again)?
+    Ok(good)
+}
+
 // A new index on a Tiered table would build through seal's child cut on the
 // live directory. Red on a663f742: past `dirty_bytes` the build's packs
 // collided with the publishing cut's, and reopen was `Corrupt` p-6.

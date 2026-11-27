@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import inputs
-from store_crash_tests import SCENARIOS, WINDOW_FAILURES, run_crashes
+from store_crash_tests import SCENARIOS, TIERED_CRASH_LIMIT, TIERED_SCENARIOS, WINDOW_FAILURES, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
@@ -48,7 +48,7 @@ def main():
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
     selector = p.add_mutually_exclusive_group()
-    selector.add_argument('--crash-scenario', choices=SCENARIOS + LIVE_READ_SCENARIOS + WINDOW_FAILURES)
+    selector.add_argument('--crash-scenario', choices=SCENARIOS + TIERED_SCENARIOS + LIVE_READ_SCENARIOS + WINDOW_FAILURES)
     selector.add_argument('--directory-eio', action='store_true', help='run only the Directory EIO sweep')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -83,18 +83,26 @@ def main():
                 if args.compiler is None or args.runtime is None or args.bridge is None:
                     p.error('native backends require --compiler, --runtime and --bridge')
                 try:
-                    count = args.crash_scenario in LIVE_READ_SCENARIOS + WINDOW_FAILURES
-                    cases = () if count else (args.crash_scenario,) if args.crash_scenario else SCENARIOS
-                    count_only = (args.crash_scenario,) if count else () if args.crash_scenario else (
-                        'checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
-                        'watermark-absent', 'watermark-torn', *LIVE_READ_SCENARIOS, *WINDOW_FAILURES)
-                    if args.crash_scenario == 'window':
-                        count_only = WINDOW_FAILURES
-                    cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
-                                       args.cc, crash_manifest, work, engine, scenarios=cases,
-                                       count_only=count_only, receipts=True,
-                                       sectors=('window',) if args.crash_scenario in (None, 'window') else (),
-                                       eio_only=args.directory_eio)
+                    tiered = () if args.directory_eio else (args.crash_scenario,) if args.crash_scenario in TIERED_SCENARIOS else () if args.crash_scenario else TIERED_SCENARIOS
+                    if args.crash_scenario in TIERED_SCENARIOS:
+                        cuts = []
+                    else:
+                        count = args.crash_scenario in LIVE_READ_SCENARIOS + WINDOW_FAILURES
+                        cases = () if count else (args.crash_scenario,) if args.crash_scenario else SCENARIOS
+                        count_only = (args.crash_scenario,) if count else () if args.crash_scenario else (
+                            'checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
+                            'watermark-absent', 'watermark-torn', *LIVE_READ_SCENARIOS, *WINDOW_FAILURES)
+                        if args.crash_scenario == 'window':
+                            count_only = WINDOW_FAILURES
+                        cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
+                                           args.cc, crash_manifest, work, engine, scenarios=cases,
+                                           count_only=count_only, receipts=True,
+                                           sectors=('window',) if args.crash_scenario in (None, 'window') else (),
+                                           eio_only=args.directory_eio)
+                    if tiered:
+                        cuts += run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
+                                            args.cc, crash_manifest, work, engine, scenarios=tiered,
+                                            receipts=True, limit=TIERED_CRASH_LIMIT)
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

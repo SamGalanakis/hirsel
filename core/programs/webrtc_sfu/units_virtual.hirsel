@@ -1,13 +1,13 @@
-/// The optional virtual door follows every session-eligible unit.
+/// An optional virtual door (bridge or cascade) follows the session-eligible units.
 pub opaque type VirtualUnit: key {
     index: u16
 }
 
-pub fn virtual_unit(session_units: u16) -> Option[VirtualUnit] {
-    if session_units == 0 || session_units >= router.UNITS_MAX {
+pub fn virtual_unit(index: u16) -> Option[VirtualUnit] {
+    if index == 0 || index >= router.UNITS_MAX {
         return None
     }
-    Some(VirtualUnit(index: session_units))
+    Some(VirtualUnit(index: index))
 }
 
 pub fn virtual_index(v: VirtualUnit) -> u16 {
@@ -20,11 +20,32 @@ type BridgeReply {
     answer: Result[(), router.RouterError]
 }
 
+type CascadeReply {
+    room: peer.RoomId,
+    serial: u64,
+    answer: Result[(), router.RouterError]
+}
+
 pub fn set_virtual(mut u: Unit, v: VirtualUnit) -> Result[(), router.RouterError] {
-    if list.len(u.doors) != (int.widen(v.index) : u64) + 1 || u.index >= v.index {
+    let idx: u64 = int.widen(v.index)
+    if idx >= list.len(u.doors) || u.index >= v.index {
         return Error(Limit(int.widen(router.UNITS_MAX)))
     }
     u.virtual = Some(v)
+    u.virtual_mask = u.virtual_mask | (1u64 << idx)
+    Ok(())
+}
+
+pub fn set_cascade(mut u: Unit, v: VirtualUnit) -> Result[(), router.RouterError] {
+    let idx: u64 = int.widen(v.index)
+    if idx >= list.len(u.doors) || u.index >= v.index {
+        return Error(Limit(int.widen(router.UNITS_MAX)))
+    }
+    if u.virtual == Some(v) {
+        return Error(Exists)
+    }
+    u.cascade = Some(v)
+    u.virtual_mask = u.virtual_mask | (1u64 << idx)
     Ok(())
 }
 
@@ -52,6 +73,35 @@ pub fn bridge_answer(mut u: Unit, room: peer.RoomId, serial: u64) -> Option[Resu
     for i in 0u64 .. list.len(u.bridge_replies) {
         if u.bridge_replies[i].room == room && u.bridge_replies[i].serial == serial {
             let BridgeReply(room: _, serial: _, answer: take a) = list.remove(mut u.bridge_replies, i)
+            return Some(take a)
+        }
+    }
+    None
+}
+
+/// Send a cascade room lifecycle request to the cascade virtual door.
+pub fn post_cascade(mut u: Unit, room: peer.RoomId, serial: u64, attach: bool, name: Inline[u8, 32], home: bool, term: u64) -> Result[bool, router.RouterError] {
+    let Some(v) = u.cascade else {
+        return Error(NoParticipant)
+    }
+    if u.index != 0 || !router.room_open(u.r, room) {
+        return Error(NoRoom)
+    }
+    let i: u64 = int.widen(v.index)
+    match conn.try_send(u.doors[i].control, ControlMessage(step: CascadeOrder(room: room, serial: serial, attach: attach, name: name, home: home, term: term), opus_fmtp: None)) {
+        Ok(()) => {
+            u.rung |= 1u64 << i
+            Ok(true)
+        },
+        Error(Full(_)) => Ok(false),
+        Error(Closed(_)) => Error(NoParticipant),
+    }
+}
+
+pub fn cascade_answer(mut u: Unit, room: peer.RoomId, serial: u64) -> Option[Result[(), router.RouterError]] {
+    for i in 0u64 .. list.len(u.cascade_replies) {
+        if u.cascade_replies[i].room == room && u.cascade_replies[i].serial == serial {
+            let CascadeReply(room: _, serial: _, answer: take a) = list.remove(mut u.cascade_replies, i)
             return Some(take a)
         }
     }

@@ -1,18 +1,19 @@
 // KS5 real-host node binary for law K10 `three_node_room_on_boat` (docs/spec/sfu_cascade.md).
 //
 // Runs a real Hirsel SFU cascade node (`single`, `home`, or `edge`) over real OS UDP
-// sockets using `webrtc_sfu.cascade` (QUIC mutual-pin star links, canonical RTP headers,
+// sockets using `webrtc_sfu.router` (Unit 0) + `webrtc_sfu.cascade.CascadeAdapter` (Unit 1)
+// + `webrtc_sfu.cascade.LinkHub` (QUIC mutual-pin star links, zero-copy `PayloadSlice`,
 // RTC-4 Sender Reports, CAS-5 leases, CAS-7 ordered reattach).
 //
 // Usage:
 //   k10-node single <p_count> <duration_ms>
 //   k10-node home <bind_ip:port> <p_start> <p_count> <total> <duration_ms> (<edge_name> <edge_pin_hex>)...
 //   k10-node edge <bind_ip:port> <home_ip:port> <node_name> <p_start> <p_count> <total> <duration_ms> <home_pin_hex>
-//
-// Directory grant (required for `home` and `edge`): directory holding `cert.der` and `key.der`.
 const MS: u64 = 1000000
 
 const SECOND: u64 = 1000000000
+
+const K10_ROOM: webrtc_sfu.peer.RoomId = RoomId(1)
 
 fn room_name() -> Bytes {
     b"room-k10"
@@ -20,7 +21,6 @@ fn room_name() -> Bytes {
 
 const SOCKET_OPTS: UdpOptions = UdpOptions(slots: 128, slot_bytes: 2048)
 
-// 100 us latency histogram buckets covering 0..500 ms (plus overflow at index 5000).
 const HIST_BUCKETS: u64 = 5001
 
 const BUCKET_US: u64 = 100
@@ -119,12 +119,6 @@ fn k10_room_limits() -> webrtc_sfu.router.RoomLimits {
     webrtc_sfu.router.RoomLimits(participants: 64, ids: 64, publications: 64, down_tracks: 1024, audio_forward: 0, pause_delay_ms: 5000, pause: false)
 }
 
-fn one_rid(tag: Bytes) -> List[Bytes] {
-    let mut rids: List[Bytes] = list.with_capacity(1)
-    list.push(mut rids, clone(tag))
-    take rids
-}
-
 fn make_canon_rtp(codec: webrtc_sfu.sdp.Codec, seq: u16, ts: u32, ssrc: u32, payload_len: u64) -> Bytes {
     let mut out: Bytes = list.with_capacity(12 + payload_len)
     let w = rtp.ext.writer()
@@ -133,7 +127,6 @@ fn make_canon_rtp(codec: webrtc_sfu.sdp.Codec, seq: u16, ts: u32, ssrc: u32, pay
     take out
 }
 
-// Compute 48 kHz Opus RTP timestamp and NTP (hi, lo) from monotonic clock ns.
 fn audio_clock_pair(mono_ns: u64) -> (u32, u32, u32) {
     let secs = mono_ns / SECOND
     let rem_ns = mono_ns % SECOND
@@ -143,7 +136,6 @@ fn audio_clock_pair(mono_ns: u64) -> (u32, u32, u32) {
     (ntp_hi, ntp_lo, rtp_ts)
 }
 
-// Reconstruct sender's monotonic timestamp (ns) from an RTC-4 SenderReport and RTP timestamp.
 fn audio_latency_us(sr: webrtc_sfu.cascade.SrTiming, rtp_ts: u32, recv_ns: u64) -> u64 {
     let sr_secs: u64 = int.widen(sr.ntp_hi)
     let sr_frac: u64 = int.widen(sr.ntp_lo)
@@ -184,34 +176,161 @@ fn new_metrics(p_start: u64, p_count: u64, total: u64) -> NodeMetrics {
     NodeMetrics(p_start: p_start, p_count: p_count, total: total, audio_seen: take a, video_seen: take v, audio_pkts: 0, video_pkts: 0, all_hist: new_hist(), remote_hist: new_hist())
 }
 
-fn record_delivered(mut m: NodeMetrics, cr: webrtc_sfu.cascade.CascadeRouter, local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], take deliv: List[webrtc_sfu.cascade.LocalDelivered], recv_ns: u64, measure: bool) {
-    for d in deliv {
-        if d.subscriber < m.p_start || d.subscriber >= m.p_start + m.p_count {
+type K10Node {
+    r: webrtc_sfu.router.Router,
+    a: webrtc_sfu.cascade.CascadeAdapter,
+    obs2: webrtc_sfu.router.Observer,
+    out: webrtc_sfu.peer.Outbox,
+    empty: Shared[Bytes],
+    seq: u64,
+    p_start: u64,
+    p_count: u64,
+    total: u64,
+    // Per local participant offset `0..p_count`: (audio_pub_id, video_pub_id).
+    local_pubs: List[(webrtc_sfu.router.PublicationId, webrtc_sfu.router.PublicationId)],
+    // Tracks which publications Unit 2 has already subscribed every local participant to.
+    subbed_pubs: List[webrtc_sfu.router.PublicationId]
+}
+
+fn new_k10_node(random: Random, nid: webrtc_sfu.cascade.NodeId, lim: webrtc_sfu.cascade.LinkLimits, p_start: u64, p_count: u64, total: u64) -> K10Node {
+    let empty: Bytes = list.new()
+    K10Node(r: webrtc_sfu.router.on_unit(random, 0), a: webrtc_sfu.cascade.cascade_adapter(1, nid, lim), obs2: webrtc_sfu.router.new_observer(2), out: result.unwrap(webrtc_sfu.peer.outbox(262144, 256)), empty: shared.new(take empty), seq: 0, p_start: p_start, p_count: p_count, total: total, local_pubs: list.new(), subbed_pubs: list.new())
+}
+
+fn k10_apply(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, now_ns: u64, c: webrtc_sfu.router.Change) -> Result[webrtc_sfu.router.Answer, webrtc_sfu.router.RouterError] {
+    let ans = webrtc_sfu.router.apply(mut n.r, now_ns, c, mut n.out)?
+    let resolved: webrtc_sfu.router.Change = match c {
+        PublishRemote(room: room, who: who, section: sec, id: _, shape: sh, via: via) => match ans {
+            Shaped(id: assigned, shape: _) => PublishRemote(room: room, who: who, section: sec, id: assigned, shape: sh, via: via),
+            _ => c,
+        },
+        other => other,
+    }
+    n.seq += 1
+    let seq = n.seq
+    let _ = webrtc_sfu.cascade.control(mut n.a, mut hub, now_ns, Order(room: K10_ROOM, seq: seq, change: resolved))
+    let _ = webrtc_sfu.router.observer_apply(mut n.obs2, K10_ROOM, seq, resolved)
+    Ok(ans)
+}
+
+fn pub_is_subbed(n: K10Node, id: webrtc_sfu.router.PublicationId) -> bool {
+    for p in n.subbed_pubs {
+        if p == id {
+            return true
+        }
+    }
+    false
+}
+
+// Subscribe every local participant (except the publication's own owner) to any new publication
+// appearing in `obs2`, and push Unit 2's `Carry.Wanted` mask into `n.r`.
+fn k10_sync_subscriptions(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, now_ns: u64) {
+    let pubs = webrtc_sfu.router.observer_publications(n.obs2, K10_ROOM)
+    for (pub_id, info) in pubs {
+        if pub_is_subbed(n, pub_id) {
             continue
         }
-        if d.pub_key.participant == 0 || d.pub_key.participant > m.total || d.pub_key.participant == d.subscriber {
+        list.push(mut n.subbed_pubs, pub_id)
+        let Gen(id: owner_id, epoch: _) = info.owner
+        let mut any = false
+        for off in 0u64 .. n.p_count {
+            let sub_id = n.p_start + off
+            if sub_id == owner_id {
+                continue
+            }
+            let sub: webrtc_sfu.peer.Gen = Gen(id: sub_id, epoch: 1)
+            let target: webrtc_sfu.router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+            let _ = k10_apply(mut n, mut hub, now_ns, Subscribe(room: K10_ROOM, who: sub, p: pub_id, section: 0, target: target))
+            any = true
+        }
+        if any {
+            let carried = webrtc_sfu.router.Carried(carry: Wanted(room: K10_ROOM, publication: pub_id, src: info.owner, unit: 2, mask: 1), packet: shared.share(n.empty))
+            let _ = webrtc_sfu.router.accept(mut n.r, now_ns, take carried, mut n.out)
+        }
+    }
+}
+
+fn k10_pump(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, mut m: NodeMetrics, local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], now_ns: u64, measure: bool) {
+    for _ in 0u64 .. 16 {
+        let mut progressed = false
+        let changes = webrtc_sfu.cascade.take_changes(mut n.a)
+        if list.len(changes) != 0 {
+            progressed = true
+            for c in changes {
+                let _ = k10_apply(mut n, mut hub, now_ns, c)
+            }
+            k10_sync_subscriptions(mut n, mut hub, now_ns)
+        }
+        let posts_a = webrtc_sfu.cascade.take_posts(mut n.a)
+        if list.len(posts_a) != 0 {
+            progressed = true
+            for take p in take posts_a {
+                let webrtc_sfu.router.Post(to: to, carried: take carried) = take p
+                if to == 0 {
+                    let _ = webrtc_sfu.router.accept(mut n.r, now_ns, take carried, mut n.out)
+                }
+            }
+        }
+        let posts_r = webrtc_sfu.router.take_posts(mut n.r)
+        if list.len(posts_r) != 0 {
+            progressed = true
+            for take p in take posts_r {
+                let webrtc_sfu.router.Post(to: to, carried: take carried) = take p
+                if to == 1 {
+                    webrtc_sfu.cascade.carried(mut n.a, mut hub, now_ns, take carried)
+                } else if to == 2 {
+                    let webrtc_sfu.router.Carried(carry: take carry, packet: _) = take carried
+                    if let Media(room: _, publication: pub_id, src: src, m: media, ..) = take carry {
+                        record_media_delivery(mut m, n, local_srs, pub_id, src, media.ts, now_ns, measure)
+                    }
+                }
+            }
+        }
+        if !progressed {
+            break
+        }
+    }
+}
+
+fn record_media_delivery(mut m: NodeMetrics, n: K10Node, local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], pub_id: webrtc_sfu.router.PublicationId, src: webrtc_sfu.peer.Gen, ts: u32, recv_ns: u64, measure: bool) {
+    let Some(info) = webrtc_sfu.router.observer_publication(n.obs2, K10_ROOM, pub_id) else {
+        return
+    }
+    let is_audio = info.shape.codec == Opus
+    let Gen(id: sender, epoch: src_ep) = src
+    if sender == 0 || sender > m.total {
+        return
+    }
+    let is_local = sender >= m.p_start && sender < m.p_start + m.p_count
+    let sr_opt = if is_audio && measure {
+        if is_local {
+            local_srs[sender - m.p_start]
+        } else {
+            let key = webrtc_sfu.cascade.PubKey(participant: sender, epoch: src_ep, pub_slot: int.narrow(sender * 2 - 1))
+            webrtc_sfu.cascade.remote_sr(n.a, room_name(), key, 0)
+        }
+    } else {
+        None
+    }
+    for off in 0u64 .. m.p_count {
+        let sub = m.p_start + off
+        if sub == sender {
             continue
         }
-        let slot = (d.subscriber - m.p_start) * m.total + (d.pub_key.participant - 1)
-        if d.pub_key.pub_slot == 1 {
+        let slot = off * m.total + (sender - 1)
+        if is_audio {
             m.audio_pkts += 1
             if measure {
                 m.audio_seen[slot] = true
-                let is_local = d.pub_key.participant >= m.p_start && d.pub_key.participant < m.p_start + m.p_count
-                let sr_opt = if is_local {
-                    local_srs[d.pub_key.participant - m.p_start]
-                } else {
-                    webrtc_sfu.cascade.remote_sr(cr, room_name(), d.pub_key, 0)
-                }
                 if let Some(sr) = sr_opt {
-                    let lat = audio_latency_us(sr, d.ts, recv_ns)
+                    let lat = audio_latency_us(sr, ts, recv_ns)
                     hist_add(mut m.all_hist, lat)
                     if !is_local {
                         hist_add(mut m.remote_hist, lat)
                     }
                 }
             }
-        } else if d.pub_key.pub_slot == 2 {
+        } else {
             m.video_pkts += 1
             if measure {
                 m.video_seen[slot] = true
@@ -279,62 +398,63 @@ fn emit_json(out: Stdout, name: String, m: NodeMetrics, sr_rx: u64, lc: webrtc_s
     say(out, s)
 }
 
-fn register_pubs_and_subs(mut cr: webrtc_sfu.cascade.CascadeRouter, mut hub: webrtc_sfu.cascade.LinkHub, p_start: u64, p_count: u64, total: u64) {
-    for off in 0u64 .. p_count {
-        let p = p_start + off
-        let pk_a = webrtc_sfu.cascade.PubKey(participant: p, epoch: 1, pub_slot: 1)
-        let pk_v = webrtc_sfu.cascade.PubKey(participant: p, epoch: 1, pub_slot: 2)
-        result.unwrap(webrtc_sfu.cascade.publish_local(mut cr, mut hub, room_name(), pk_a, Opus, one_rid(b"a0")))
-        result.unwrap(webrtc_sfu.cascade.publish_local(mut cr, mut hub, room_name(), pk_v, Vp8, one_rid(b"v0")))
+fn register_local_participants(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, now_ns: u64) {
+    for off in 0u64 .. n.p_count {
+        let p = n.p_start + off
+        let who: webrtc_sfu.peer.Gen = Gen(id: p, epoch: 1)
+        let _ = k10_apply(mut n, mut hub, now_ns, Admit(who: webrtc_sfu.peer.Participant(gen: who, room: K10_ROOM), home: 2))
+        // Deterministic unique PublicationIds across all 3 nodes: audio = 2*p - 1, video = 2*p.
+        let pid_a: webrtc_sfu.router.PublicationId = PublicationId(p * 2 - 1)
+        let pid_v: webrtc_sfu.router.PublicationId = PublicationId(p * 2)
+        let _ = k10_apply(mut n, mut hub, now_ns, PublishRemote(room: K10_ROOM, who: who, section: 0, id: pid_a, shape: webrtc_sfu.router.Shape(codec: Opus, pli: true, fir: true, encodings: 1), via: 3))
+        let _ = k10_apply(mut n, mut hub, now_ns, PublishRemote(room: K10_ROOM, who: who, section: 1, id: pid_v, shape: webrtc_sfu.router.Shape(codec: Vp8, pli: true, fir: true, encodings: 1), via: 3))
+        list.push(mut n.local_pubs, (pid_a, pid_v))
     }
-    for off in 0u64 .. p_count {
-        let sub = p_start + off
-        for pub_p in 1u64 .. (total + 1) {
-            if pub_p == sub {
-                continue
-            }
-            let pk_a = webrtc_sfu.cascade.PubKey(participant: pub_p, epoch: 1, pub_slot: 1)
-            let pk_v = webrtc_sfu.cascade.PubKey(participant: pub_p, epoch: 1, pub_slot: 2)
-            result.unwrap(webrtc_sfu.cascade.subscribe_local(mut cr, mut hub, room_name(), sub, pk_a, 0))
-            result.unwrap(webrtc_sfu.cascade.subscribe_local(mut cr, mut hub, room_name(), sub, pk_v, 0))
-        }
-    }
+    k10_sync_subscriptions(mut n, mut hub, now_ns)
 }
 
-fn send_local_audio(mut cr: webrtc_sfu.cascade.CascadeRouter, mut hub: webrtc_sfu.cascade.LinkHub, p_start: u64, p_count: u64, seq: u16, now_ns: u64) {
+fn send_local_audio(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, mut m: NodeMetrics, local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], seq: u16, now_ns: u64, measure: bool) {
     let (_, _, rtp_ts) = audio_clock_pair(now_ns)
-    let now_ms = now_ns / MS
-    for off in 0u64 .. p_count {
-        let p = p_start + off
-        let pk_a = webrtc_sfu.cascade.PubKey(participant: p, epoch: 1, pub_slot: 1)
+    for off in 0u64 .. n.p_count {
+        let p = n.p_start + off
+        let who: webrtc_sfu.peer.Gen = Gen(id: p, epoch: 1)
+        let (pid_a, _) = n.local_pubs[off]
         let ssrc: u32 = int.narrow(0x1000u64 + p)
         let pkt = make_canon_rtp(Opus, seq, rtp_ts, ssrc, 48)
-        webrtc_sfu.cascade.forward_local_rtp(mut cr, mut hub, room_name(), pk_a, 0, take pkt, now_ms)
+        let _ = webrtc_sfu.router.inject_remote_media(mut n.r, now_ns, K10_ROOM, pid_a, who, 0, webrtc_sfu.cascade.canon_slice(take pkt), mut n.out)
     }
+    k10_pump(mut n, mut hub, mut m, local_srs, now_ns, measure)
 }
 
-fn send_local_video(mut cr: webrtc_sfu.cascade.CascadeRouter, mut hub: webrtc_sfu.cascade.LinkHub, p_start: u64, p_count: u64, seq: u16, now_ns: u64) {
+fn send_local_video(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, mut m: NodeMetrics, local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], seq: u16, now_ns: u64, measure: bool) {
     let rtp_ts: u32 = int.narrow(((now_ns / 1000u64) * 90u64 / 1000u64) & 0xffffffffu64)
-    let now_ms = now_ns / MS
-    for off in 0u64 .. p_count {
-        let p = p_start + off
-        let pk_v = webrtc_sfu.cascade.PubKey(participant: p, epoch: 1, pub_slot: 2)
+    for off in 0u64 .. n.p_count {
+        let p = n.p_start + off
+        let who: webrtc_sfu.peer.Gen = Gen(id: p, epoch: 1)
+        let (_, pid_v) = n.local_pubs[off]
         let ssrc: u32 = int.narrow(0x2000u64 + p)
         let pkt = make_canon_rtp(Vp8, seq, rtp_ts, ssrc, 200)
-        webrtc_sfu.cascade.forward_local_rtp(mut cr, mut hub, room_name(), pk_v, 0, take pkt, now_ms)
+        let _ = webrtc_sfu.router.inject_remote_media(mut n.r, now_ns, K10_ROOM, pid_v, who, 0, webrtc_sfu.cascade.canon_slice(take pkt), mut n.out)
     }
+    k10_pump(mut n, mut hub, mut m, local_srs, now_ns, measure)
 }
 
-fn send_local_srs(mut cr: webrtc_sfu.cascade.CascadeRouter, mut hub: webrtc_sfu.cascade.LinkHub, mut local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], p_start: u64, p_count: u64, audio_seq: u16, now_ns: u64) {
+fn send_local_srs(mut n: K10Node, mut hub: webrtc_sfu.cascade.LinkHub, mut m: NodeMetrics, mut local_srs: List[Option[webrtc_sfu.cascade.SrTiming]], audio_seq: u16, now_ns: u64, measure: bool) {
     let (ntp_hi, ntp_lo, rtp_ts) = audio_clock_pair(now_ns)
     let pkts: u32 = int.widen(audio_seq)
     let sr = webrtc_sfu.cascade.SrTiming(ntp_hi: ntp_hi, ntp_lo: ntp_lo, rtp_ts: rtp_ts, packets: pkts, octets: pkts * 48u32)
-    for off in 0u64 .. p_count {
-        let p = p_start + off
-        let pk_a = webrtc_sfu.cascade.PubKey(participant: p, epoch: 1, pub_slot: 1)
+    let hi_w: u64 = int.widen(ntp_hi)
+    let lo_w: u64 = int.widen(ntp_lo)
+    let ntp: u64 = (hi_w << 32u64) | lo_w
+    let info = rtp.rtcp.SenderInfo(ssrc: 0, ntp: ntp, rtp: rtp_ts, packets: pkts, octets: pkts * 48u32)
+    for off in 0u64 .. n.p_count {
+        let p = n.p_start + off
+        let who: webrtc_sfu.peer.Gen = Gen(id: p, epoch: 1)
+        let (pid_a, _) = n.local_pubs[off]
         local_srs[off] = Some(sr)
-        webrtc_sfu.cascade.forward_local_sr(mut cr, mut hub, room_name(), pk_a, 0, sr)
+        let _ = webrtc_sfu.router.inject_remote_sr(mut n.r, now_ns, K10_ROOM, pid_a, who, 0, info)
     }
+    k10_pump(mut n, mut hub, mut m, local_srs, now_ns, measure)
 }
 
 fn run_single(a: Args, dir: Dir, clock: Clock, random: Random, out: Stdout) -> Result[(), Exit] waits {
@@ -344,14 +464,16 @@ fn run_single(a: Args, dir: Dir, clock: Clock, random: Random, out: Stdout) -> R
     let nid = webrtc_sfu.cascade.node_id(b"single")
     let id = load_identity(dir)
     let mut hub = result.unwrap(webrtc_sfu.cascade.link_hub(nid, random, lim, take id, list.new(), 2))
-    let mut cr = webrtc_sfu.cascade.cascade_router(nid, lim)
-    result.unwrap(webrtc_sfu.cascade.open_home_room(mut cr, room_name(), 1, k10_room_limits()))
+    let mut n = new_k10_node(random, nid, lim, 1, p_count, p_count)
     let start_ns = host.mono_ns(clock)
-    webrtc_sfu.cascade.enable_leases(mut cr, room_name(), start_ns / MS + duration_ms + 30000, list.new())
-    register_pubs_and_subs(mut cr, mut hub, 1, p_count, p_count)
+    let _ = result.unwrap(k10_apply(mut n, mut hub, start_ns, Open(room: K10_ROOM, limits: k10_room_limits())))
+    result.unwrap(webrtc_sfu.cascade.open_home_room(mut n.a, K10_ROOM, room_name(), 1, k10_room_limits()))
+    webrtc_sfu.cascade.enable_leases(mut n.a, room_name(), start_ns / MS + duration_ms + 30000, list.new())
+    register_local_participants(mut n, mut hub, start_ns)
     let mut local_srs: List[Option[webrtc_sfu.cascade.SrTiming]] = list.with_capacity(p_count)
     list.fill(mut local_srs, p_count, None)
     let mut metrics = new_metrics(1, p_count, p_count)
+    k10_pump(mut n, mut hub, mut metrics, local_srs, start_ns, false)
     let end_ns = start_ns + duration_ms * MS
     let warm_ns = start_ns + 400 * MS
     let mut next_audio = start_ns
@@ -363,29 +485,26 @@ fn run_single(a: Args, dir: Dir, clock: Clock, random: Random, out: Stdout) -> R
         let now = host.mono_ns(clock)
         let measure = now >= warm_ns
         if now >= next_sr {
-            send_local_srs(mut cr, mut hub, mut local_srs, 1, p_count, a_seq, now)
+            send_local_srs(mut n, mut hub, mut metrics, mut local_srs, a_seq, now, measure)
             next_sr = now + 250 * MS
         }
         if now >= next_audio {
-            send_local_audio(mut cr, mut hub, 1, p_count, a_seq, now)
+            send_local_audio(mut n, mut hub, mut metrics, local_srs, a_seq, now, measure)
             a_seq += 1
             next_audio = now + 20 * MS
         }
         if now >= next_video {
-            send_local_video(mut cr, mut hub, 1, p_count, v_seq, now)
+            send_local_video(mut n, mut hub, mut metrics, local_srs, v_seq, now, measure)
             v_seq += 1
             next_video = now + 33 * MS
         }
-        let recv_ns = host.mono_ns(clock)
-        let deliv = webrtc_sfu.cascade.take_delivered(mut cr)
-        record_delivered(mut metrics, cr, local_srs, take deliv, recv_ns, measure)
-        let _ = webrtc_sfu.cascade.take_forward_logs(mut cr)
+        let _ = webrtc_sfu.cascade.take_forward_logs(mut n.a)
         let wake = order.min(order.min(next_audio, next_video), end_ns)
         if wake > host.mono_ns(clock) {
             host.sleep_until(clock, wake)
         }
     }
-    emit_json(out, string.from("single"), metrics, webrtc_sfu.cascade.sr_received_count(cr), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(cr))
+    emit_json(out, string.from("single"), metrics, webrtc_sfu.cascade.sr_received_count(n.a), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(n.a))
     Ok(())
 }
 
@@ -411,17 +530,19 @@ fn run_home(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
     let nid = webrtc_sfu.cascade.node_id(b"home")
     let id = load_identity(dir)
     let mut hub = result.unwrap(webrtc_sfu.cascade.link_hub(nid, random, lim, take id, take pins, 8))
-    let mut cr = webrtc_sfu.cascade.cascade_router(nid, lim)
-    result.unwrap(webrtc_sfu.cascade.open_home_room(mut cr, room_name(), 1, k10_room_limits()))
+    let mut n = new_k10_node(random, nid, lim, p_start, p_count, total)
     let (take sock_in, _) = result.unwrap(host.udp_bind(net, bind_addr, SOCKET_OPTS))
     let mut sock = take sock_in
     let start_ns = host.mono_ns(clock)
-    webrtc_sfu.cascade.enable_leases(mut cr, room_name(), start_ns / MS + duration_ms + 30000, list.new())
-    register_pubs_and_subs(mut cr, mut hub, p_start, p_count, total)
-    say(out, "K10_READY home")
+    let _ = result.unwrap(k10_apply(mut n, mut hub, start_ns, Open(room: K10_ROOM, limits: k10_room_limits())))
+    result.unwrap(webrtc_sfu.cascade.open_home_room(mut n.a, K10_ROOM, room_name(), 1, k10_room_limits()))
+    webrtc_sfu.cascade.enable_leases(mut n.a, room_name(), start_ns / MS + duration_ms + 30000, list.new())
+    register_local_participants(mut n, mut hub, start_ns)
     let mut local_srs: List[Option[webrtc_sfu.cascade.SrTiming]] = list.with_capacity(p_count)
     list.fill(mut local_srs, p_count, None)
     let mut metrics = new_metrics(p_start, p_count, total)
+    k10_pump(mut n, mut hub, mut metrics, local_srs, start_ns, false)
+    say(out, "K10_READY home")
     let end_ns = start_ns + duration_ms * MS
     let warm_ns = start_ns + 1500 * MS
     let mut next_audio = start_ns + 200 * MS
@@ -436,30 +557,27 @@ fn run_home(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
         let _ = webrtc_sfu.cascade.drive_links(mut hub, clock, mut sock, until, mut events)
         let cur = host.mono_ns(clock)
         let measure = cur >= warm_ns
-        webrtc_sfu.cascade.handle_events(mut cr, mut hub, take events, cur / MS)
+        webrtc_sfu.cascade.handle_events(mut n.a, mut hub, take events, cur / MS)
         events = list.new()
-        let deliv_in = webrtc_sfu.cascade.take_delivered(mut cr)
-        record_delivered(mut metrics, cr, local_srs, take deliv_in, host.mono_ns(clock), measure)
+        k10_pump(mut n, mut hub, mut metrics, local_srs, host.mono_ns(clock), measure)
         let cur2 = host.mono_ns(clock)
         if cur2 >= next_sr {
-            send_local_srs(mut cr, mut hub, mut local_srs, p_start, p_count, a_seq, cur2)
+            send_local_srs(mut n, mut hub, mut metrics, mut local_srs, a_seq, cur2, measure)
             next_sr = cur2 + 250 * MS
         }
         if cur2 >= next_audio {
-            send_local_audio(mut cr, mut hub, p_start, p_count, a_seq, cur2)
+            send_local_audio(mut n, mut hub, mut metrics, local_srs, a_seq, cur2, measure)
             a_seq += 1
             next_audio = cur2 + 20 * MS
         }
         if cur2 >= next_video {
-            send_local_video(mut cr, mut hub, p_start, p_count, v_seq, cur2)
+            send_local_video(mut n, mut hub, mut metrics, local_srs, v_seq, cur2, measure)
             v_seq += 1
             next_video = cur2 + 33 * MS
         }
-        let deliv_loc = webrtc_sfu.cascade.take_delivered(mut cr)
-        record_delivered(mut metrics, cr, local_srs, take deliv_loc, host.mono_ns(clock), measure)
-        let _ = webrtc_sfu.cascade.take_forward_logs(mut cr)
+        let _ = webrtc_sfu.cascade.take_forward_logs(mut n.a)
     }
-    emit_json(out, string.from("home"), metrics, webrtc_sfu.cascade.sr_received_count(cr), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(cr))
+    emit_json(out, string.from("home"), metrics, webrtc_sfu.cascade.sr_received_count(n.a), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(n.a))
     Ok(())
 }
 
@@ -490,10 +608,11 @@ fn run_edge(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
     let mut hp2: List[quic.handshake.Pin] = list.with_capacity(1)
     list.push(mut hp2, take home_pin)
     let mut hub = result.unwrap(webrtc_sfu.cascade.link_hub(nid, random, lim, take id1, take hp1, 4))
-    let mut cr = webrtc_sfu.cascade.cascade_router(nid, lim)
+    let mut n = new_k10_node(random, nid, lim, p_start, p_count, total)
     let (take sock_in, _) = result.unwrap(host.udp_bind(net, bind_addr, SOCKET_OPTS))
     let mut sock = take sock_in
     let start_ns = host.mono_ns(clock)
+    let _ = result.unwrap(k10_apply(mut n, mut hub, start_ns, Open(room: K10_ROOM, limits: k10_room_limits())))
     let h = result.unwrap(webrtc_sfu.cascade.dial_addr(mut hub, hid, home_addr, take hp2, start_ns, take id2))
     let mut attached = false
     let mut local_srs: List[Option[webrtc_sfu.cascade.SrTiming]] = list.with_capacity(p_count)
@@ -521,38 +640,35 @@ fn run_edge(a: Args, net: Net, dir: Dir, clock: Clock, random: Random, out: Stdo
         }
         let cur = host.mono_ns(clock)
         let measure = cur >= warm_ns
-        webrtc_sfu.cascade.handle_events(mut cr, mut hub, take events, cur / MS)
+        webrtc_sfu.cascade.handle_events(mut n.a, mut hub, take events, cur / MS)
         events = list.new()
         if got_up && !attached {
-            let _ = result.unwrap(webrtc_sfu.cascade.attach_edge_room(mut cr, mut hub, room_name(), h, 1, k10_room_limits()))
-            webrtc_sfu.cascade.enable_leases(mut cr, room_name(), 0, list.new())
-            register_pubs_and_subs(mut cr, mut hub, p_start, p_count, total)
+            let _ = result.unwrap(webrtc_sfu.cascade.attach_edge_room(mut n.a, mut hub, K10_ROOM, room_name(), h, 1, k10_room_limits()))
+            webrtc_sfu.cascade.enable_leases(mut n.a, room_name(), 0, list.new())
+            register_local_participants(mut n, mut hub, cur)
             attached = true
         }
-        let deliv_in = webrtc_sfu.cascade.take_delivered(mut cr)
-        record_delivered(mut metrics, cr, local_srs, take deliv_in, host.mono_ns(clock), measure)
+        k10_pump(mut n, mut hub, mut metrics, local_srs, host.mono_ns(clock), measure)
         if attached {
             let cur2 = host.mono_ns(clock)
             if cur2 >= next_sr {
-                send_local_srs(mut cr, mut hub, mut local_srs, p_start, p_count, a_seq, cur2)
+                send_local_srs(mut n, mut hub, mut metrics, mut local_srs, a_seq, cur2, measure)
                 next_sr = cur2 + 250 * MS
             }
             if cur2 >= next_audio {
-                send_local_audio(mut cr, mut hub, p_start, p_count, a_seq, cur2)
+                send_local_audio(mut n, mut hub, mut metrics, local_srs, a_seq, cur2, measure)
                 a_seq += 1
                 next_audio = cur2 + 20 * MS
             }
             if cur2 >= next_video {
-                send_local_video(mut cr, mut hub, p_start, p_count, v_seq, cur2)
+                send_local_video(mut n, mut hub, mut metrics, local_srs, v_seq, cur2, measure)
                 v_seq += 1
                 next_video = cur2 + 33 * MS
             }
-            let deliv_loc = webrtc_sfu.cascade.take_delivered(mut cr)
-            record_delivered(mut metrics, cr, local_srs, take deliv_loc, host.mono_ns(clock), measure)
         }
-        let _ = webrtc_sfu.cascade.take_forward_logs(mut cr)
+        let _ = webrtc_sfu.cascade.take_forward_logs(mut n.a)
     }
-    emit_json(out, node_name, metrics, webrtc_sfu.cascade.sr_received_count(cr), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(cr))
+    emit_json(out, node_name, metrics, webrtc_sfu.cascade.sr_received_count(n.a), webrtc_sfu.cascade.link_counts(hub), webrtc_sfu.cascade.fence_stats(n.a))
     Ok(())
 }
 

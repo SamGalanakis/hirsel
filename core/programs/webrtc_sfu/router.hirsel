@@ -76,8 +76,13 @@ type Encoding {
     // On the home unit, the dynacast mask (RTC-6): the units whose local mask holds
     // this encoding, whether its bit is published, and since when the union is empty.
     wanting: u64,
+    // Virtual transport destinations (e.g. cascade) with active demand for this encoding.
+    demand: u64,
     on: bool,
     since: Option[u64],
+    // Extended RTP sequence and timestamp state for remote-origin ingress (CAS-2).
+    remote_seq: Option[u64],
+    remote_ts: i64,
     // AV1's template structure of this source (AV1 RTP section A.8), from its last
     // descriptor that carried one. The target map is derived from it.
     structure: media_bits.dependency.Structure,
@@ -91,9 +96,12 @@ type Encoding {
     last_marker: bool
 }
 
+pub type Origin: key + cross = Local | Remote(via: u16)
+
 type Publication {
     id: PublicationId,
     owner: peer.Gen,
+    origin: Origin,
     // The publisher's home unit: only it holds the session and the ring.
     home: u16,
     room: peer.RoomId,
@@ -216,7 +224,7 @@ pub type Shape: key {
 /// there (`park`); `Admit` admits it.
 pub type Cause = Signaling | Lease | Term
 
-pub type Change: cross = Open(room: peer.RoomId, limits: RoomLimits) | Close(room: peer.RoomId) | Admit(who: peer.Participant, home: u16) | Publish(room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Option[Shape]) | Subscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target) | Retarget(room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target) | Rebind(room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target) | Unsubscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId) | Leave(room: peer.RoomId, who: peer.Gen) | Revoke(room: peer.RoomId, id: u64, epoch: u64) | Suspend(room: peer.RoomId, cause: Cause, on: bool) | Playout(room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay])
+pub type Change: cross = Open(room: peer.RoomId, limits: RoomLimits) | Close(room: peer.RoomId) | Admit(who: peer.Participant, home: u16) | Publish(room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Option[Shape]) | PublishRemote(room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Shape, via: u16) | Subscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target) | Retarget(room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target) | Rebind(room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target) | Unsubscribe(room: peer.RoomId, who: peer.Gen, p: PublicationId) | Leave(room: peer.RoomId, who: peer.Gen) | Revoke(room: peer.RoomId, id: u64, epoch: u64) | Suspend(room: peer.RoomId, cause: Cause, on: bool) | SetLease(room: peer.RoomId, deadline_ms: Option[u64], guard_ms: u32) | Playout(room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay])
 
 /// What a unit answers when it has applied a change.
 pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
@@ -224,7 +232,7 @@ pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
 /// The control inboxes' messages: the control unit's changes, each room's in that
 /// room's order, and each unit's acknowledgement once it has applied one. `seq`
 /// counts per room (RTC-10, The control plane).
-pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError]) | Fault(room: peer.RoomId, unit: u16, error: RouterError) | BridgeOrder(room: peer.RoomId, serial: u64, frame_bytes: Option[u64]) | BridgeAck(room: peer.RoomId, serial: u64, unit: u16, answer: Result[(), RouterError])
+pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError]) | Fault(room: peer.RoomId, unit: u16, error: RouterError) | BridgeOrder(room: peer.RoomId, serial: u64, frame_bytes: Option[u64]) | BridgeAck(room: peer.RoomId, serial: u64, unit: u16, answer: Result[(), RouterError]) | CascadeOrder(room: peer.RoomId, serial: u64, attach: bool, name: Inline[u8, 32], home: bool, term: u64) | CascadeAck(room: peer.RoomId, serial: u64, unit: u16, answer: Result[(), RouterError]) | CascadePropose(change: Change)
 
 /// The media inboxes' messages (RTC-5):
 ///
@@ -251,7 +259,7 @@ pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | A
 /// - `Shut`: a refused re-offer closed the session.
 /// - `Answer`: the participant's answer to it, from the control unit to the home unit,
 ///   its SDP in `packet`.
-pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64, dropped: u8) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64, murmur: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) | Offer(room: peer.RoomId, src: peer.Gen, version: u64) | Shut(room: peer.RoomId, src: peer.Gen) | Answer(room: peer.RoomId, dst: peer.Gen, version: u64)
+pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64, dropped: u8) | RemoteMedia(room: peer.RoomId, publication: PublicationId, src: peer.Gen, encoding: u8, slice: quic.PayloadSlice) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Demand(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64, murmur: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) | Offer(room: peer.RoomId, src: peer.Gen, version: u64) | Shut(room: peer.RoomId, src: peer.Gen) | Answer(room: peer.RoomId, dst: peer.Gen, version: u64)
 
 /// One media-inbox message: what it is, and the plaintext it carries (empty for
 /// `Ask`, `Key` and `Sender`).
@@ -332,13 +340,13 @@ pub fn take_posts(mut r: Router) -> List[Post] {
     replace(mut r.posts, list.new())
 }
 
-fn post(mut r: Router, to: u16, carry: Carry, take packet: Shared[Bytes]) {
-    list.push(mut r.posts, Post(to: to, carried: Carried(carry: carry, packet: take packet)))
+fn post(mut r: Router, to: u16, take carry: Carry, take packet: Shared[Bytes]) {
+    list.push(mut r.posts, Post(to: to, carried: Carried(carry: take carry, packet: take packet)))
 }
 
-fn post_bare(mut r: Router, to: u16, carry: Carry) {
+fn post_bare(mut r: Router, to: u16, take carry: Carry) {
     let none = shared.share(r.empty)
-    post(mut r, to, carry, take none)
+    post(mut r, to, take carry, take none)
 }
 
 fn room_at(r: Router, room: peer.RoomId) -> Option[u64] {
@@ -668,7 +676,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     for _ in 0u8 .. shape.encodings {
         // Every encoding starts published: the publisher sends all of them until a
         // mask says otherwise (RTC-6).
-        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, planned: 0, idle: false, empty: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, planned: 0, idle: false, empty: 0, wanting: 0, demand: 0, on: true, since: None, remote_seq: None, remote_ts: 0, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
     }
     let depth = if shape.codec == Opus {
         rtp.red.MAX_DISTANCE
@@ -677,26 +685,9 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     }
     let red = rtp.red.ring(depth) ?=> |c| Capacity(c)
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
-    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, opus_fmtp: take opus_fmtp, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, red: take red, local: 0, clock: clock, window: None, voice: quiet(), dropped: 0, orientation: None))
+    list.push(mut r.publications, Publication(id: id, owner: who, origin: Local, home: home, room: room, section: section, codec: shape.codec, opus_fmtp: take opus_fmtp, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, red: take red, local: 0, clock: clock, window: None, voice: quiet(), dropped: 0, orientation: None))
     r.roster[si].publications += 1
     Ok(shape)
-}
-
-/// RTP-11's source ID for encoding `e` of publication `p`.
-pub fn source_id(p: PublicationId, e: u8) -> u32 {
-    let PublicationId(n) = p
-    let wide: u64 = int.widen(e)
-    int.truncate(n * ENCODINGS_MAX + wide)
-}
-
-/// The encoding that `source` names within `p`, when it names this publication.
-pub fn source_encoding(p: PublicationId, source: u32) -> Option[u64] {
-    let PublicationId(n) = p
-    let wide: u64 = int.widen(source)
-    if wide / ENCODINGS_MAX != n {
-        return None
-    }
-    Some(wide % ENCODINGS_MAX)
 }
 
 /// RTC-6's stable target map: `i = t` clamped to 3 for VP8, `i = 4s + t` with each

@@ -26,7 +26,8 @@ pub type Pool[M] {
     reports: Sender[PoolReport],
     until: u64,
     relay: Option[RelayLink],
-    bridge: Option[bridge.BridgeLink]
+    bridge: Option[bridge.BridgeLink],
+    cascade: Option[cascade.CascadeLink]
 }
 
 /// What signaling shares with the relay place (TURN-11): the master it mints with (it
@@ -37,7 +38,7 @@ pub type RelayLink {
     revokes: Sender[RelayRevoke]
 }
 
-pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues | Bridge(bridge.StartError)
+pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues | Bridge(bridge.StartError) | Cascade(cascade.StartError)
 
 /// The pool's unit deadlines, active polling interval, signaling retry policy, and
 /// how long a room stays continuously empty before `PoolReport.Empty` is raised.
@@ -379,7 +380,7 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
 /// order and hands each room client its messages without waiting. A one-room service is
 /// a pool with one `Open` queued.
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
-    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, queues: queues, orders: take orders, reports: take reports, until: until, relay: take linked, bridge: take bridge_link) = take p
+    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, queues: queues, orders: take orders, reports: take reports, until: until, relay: take linked, bridge: take bridge_link, cascade: take cascade_link) = take p
     let n = limits.units
     if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
@@ -403,24 +404,46 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
     let mut roster_limits = limits
     let mut virtual_door: Option[units.VirtualUnit] = None
-    let mut bridge_fixed = 0u64
+    let mut cascade_door: Option[units.VirtualUnit] = None
     let mut bridge_window = 0u64
+    let mut cascade_limits = cascade.default_link_limits()
     if let Some(l) = bridge_link {
-        let Some(v) = units.virtual_unit(n) else {
+        let Some(v) = units.virtual_unit(roster_limits.units) else {
             return Error(Units)
         }
-        roster_limits.units += 1
-        if !bridge.listener_valid(l, n, queues) {
+        if !bridge.listener_valid(l, units.virtual_index(v), queues) {
             return Error(Bridge(Config))
         }
-        bridge_fixed = bridge.listener_bytes(l, plane, queues, roster_limits.units)
-        if bridge_fixed == 0xffffffffffffffff || bridge_fixed > limits.unit_bytes {
-            return Error(Router(Capacity(Capacity(requested: bridge_fixed, available: limits.unit_bytes))))
-        }
+        roster_limits.units += 1
         bridge_window = l.config.window
         virtual_door = Some(v)
     }
+    if let Some(cl) = cascade_link {
+        let Some(cv) = units.virtual_unit(roster_limits.units) else {
+            return Error(Units)
+        }
+        if !cascade.listener_valid(cl, units.virtual_index(cv), queues) {
+            return Error(Cascade(Config))
+        }
+        roster_limits.units += 1
+        cascade_limits = cl.limits
+        cascade_door = Some(cv)
+    }
     let total = roster_limits.units
+    let mut bridge_fixed = 0u64
+    if let Some(l) = bridge_link {
+        bridge_fixed = bridge.listener_bytes(l, plane, queues, total)
+        if bridge_fixed == 0xffffffffffffffff || bridge_fixed > limits.unit_bytes {
+            return Error(Router(Capacity(Capacity(requested: bridge_fixed, available: limits.unit_bytes))))
+        }
+    }
+    let mut cascade_fixed = 0u64
+    if let Some(cl) = cascade_link {
+        cascade_fixed = cascade.listener_bytes(cl, plane, queues, total)
+        if cascade_fixed == 0xffffffffffffffff || cascade_fixed > limits.unit_bytes {
+            return Error(Router(Capacity(Capacity(requested: cascade_fixed, available: limits.unit_bytes))))
+        }
+    }
     let bounds = router.pool_bounds(int.widen(total), int.widen(limits.rooms), int.widen(limits.sessions), session)
     for k in 0u16 .. n {
         let fixed = pool_unit_bytes(k, roster_limits, session, queues)
@@ -432,6 +455,10 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let (doors0, take control, take media) = units.inboxes_with(at, 0, total, plane, queues) ?=> |take e| Router(e)
     let bridge_run = match take bridge_link {
         Some(take l) => Some(bridge.start(tasks, net, clock, random, take l, plane, queues, timing.udp, total, limits.unit_bytes, until) ?=> |take e| Bridge(e)),
+        None => None,
+    }
+    let cascade_run = match take cascade_link {
+        Some(take cl) => Some(cascade.start_cascade(tasks, net, clock, random, take cl, plane, queues, timing.udp, total, limits.unit_bytes, until) ?=> |take e| Cascade(e)),
         None => None,
     }
     let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes HELLO_BYTES)
@@ -476,15 +503,34 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         list.push(mut builders, take b)
     }
     let mut bridge_task: Option[Task[()]] = None
+    let mut bridge_roster: Option[Client[units.Doors]] = None
     if let Some(take run) = take bridge_run {
         let bridge.Running(doors: take d, roster: take roster, task: take worker) = take run
         list.push(mut all, take d)
+        bridge_roster = Some(take roster)
+        bridge_task = Some(take worker)
+    }
+    let mut cascade_task: Option[Task[()]] = None
+    let mut cascade_roster: Option[Client[units.Doors]] = None
+    if let Some(take run) = take cascade_run {
+        let cascade.Running(doors: take d, roster: take roster, task: take worker) = take run
+        list.push(mut all, take d)
+        cascade_roster = Some(take roster)
+        cascade_task = Some(take worker)
+    }
+    if let Some(roster) = bridge_roster {
         for door in all {
             if let Error(_) = conn.send(roster, dup(door)) {
                 return Error(Units)
             }
         }
-        bridge_task = Some(take worker)
+    }
+    if let Some(roster) = cascade_roster {
+        for door in all {
+            if let Error(_) = conn.send(roster, dup(door)) {
+                return Error(Units)
+            }
+        }
     }
     for r in rosters {
         for k in 0u64 .. list.len(all) {
@@ -497,6 +543,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     if let Some(v) = virtual_door {
         units.set_virtual(mut u, v) ?=> |take e| Router(e)
     }
+    if let Some(cv) = cascade_door {
+        units.set_cascade(mut u, cv) ?=> |take e| Router(e)
+    }
     units.reserve_pool(mut u, bounds)
     units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
@@ -508,6 +557,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let mut room_ledger = ledger(take free, limits.sessions, session)
     if let Some(v) = virtual_door {
         ledger_bridge(mut room_ledger, v, limits.unit_bytes - bridge_fixed) ?=> |_| Units
+    }
+    if let Some(cv) = cascade_door {
+        ledger_cascade(mut room_ledger, cv, limits.unit_bytes - cascade_fixed) ?=> |_| Units
     }
     let mut pool: Rooms[M] = rooms(limits.rooms, take room_ledger)
     empty_idle(mut pool, timing.empty_idle_ns)
@@ -547,6 +599,8 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
                 Close(name: name) => close_room(mut pool, name),
                 AttachBridge(name: name, max_frame_bytes: cap) => attach_bridge(mut pool, name, bridge_window, cap),
                 DetachBridge(name: name) => detach_bridge(mut pool, name),
+                AttachCascade(name: name, home: is_home, term: term) => attach_cascade(mut pool, name, cascade_limits, is_home, term),
+                DetachCascade(name: name) => detach_cascade(mut pool, name),
             }
         }
         // The rooms marked ready, and only those.
@@ -646,6 +700,9 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         let _ = task.join(take t)
     }
     if let Some(take worker) = take bridge_task {
+        let _ = task.join(take worker)
+    }
+    if let Some(take worker) = take cascade_task {
         let _ = task.join(take worker)
     }
     Ok(())

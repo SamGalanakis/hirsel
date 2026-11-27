@@ -1,8 +1,6 @@
-// CAS-3: Edge-local repair (RTP-12 histories per received layer, once-per-seq
-// upstream NACK over the room stream, never crossing two links, and RTC-6 PLI/FIR
-// rate-limiting at home).
-const KEYFRAME_MIN_INTERVAL_NS: u64 = 100000000
-
+// CAS-3: Edge-local 1-hop repair (RTP-12 `quic.PayloadSlice` histories per received
+// layer, once-per-seq upstream NACK over the room stream, never crossing two links)
+// and keyframe forwarding into `router.Router`'s single RTC-6 `Keyframes` coalescer.
 const ASKED_RING_CAP: u64 = 512
 
 pub type RepairCounts: key {
@@ -12,8 +10,7 @@ pub type RepairCounts: key {
     nacks_received: u64,
     nacks_answered: u64,
     nacks_unanswered: u64,
-    pli_forwarded: u64,
-    pli_throttled: u64
+    pli_forwarded: u64
 }
 
 pub type LocalRepairResult: key {
@@ -26,23 +23,22 @@ type LayerHistory {
     room_name: Bytes,
     key: PubKey,
     encoding: u8,
-    history: rtp.history.History[Bytes],
-    asked: List[u16],
-    last_pli_ns: Option[u64]
+    history: rtp.history.History[quic.PayloadSlice],
+    asked: List[u16]
 }
 
-/// Per-node RTP-12 repair histories and NACK/PLI state (CAS-3).
+/// Per-node RTP-12 repair histories and NACK/PLI counters (CAS-3).
 pub type RepairState {
     layers: List[LayerHistory],
     counts: RepairCounts
 }
 
 pub fn new_repair_state() -> RepairState {
-    RepairState(layers: list.new(), counts: RepairCounts(local_hits: 0, local_misses: 0, upstream_nacks_sent: 0, nacks_received: 0, nacks_answered: 0, nacks_unanswered: 0, pli_forwarded: 0, pli_throttled: 0))
+    RepairState(layers: list.new(), counts: RepairCounts(local_hits: 0, local_misses: 0, upstream_nacks_sent: 0, nacks_received: 0, nacks_answered: 0, nacks_unanswered: 0, pli_forwarded: 0))
 }
 
-pub fn repair_counts(cr: CascadeRouter) -> RepairCounts {
-    cr.repair.counts
+pub fn repair_counts(a: CascadeAdapter) -> RepairCounts {
+    a.repair.counts
 }
 
 fn find_layer_history(rs: RepairState, room_name: Bytes, key: PubKey, encoding: u8) -> Option[u64] {
@@ -58,31 +54,59 @@ fn ensure_layer_history(mut rs: RepairState, room_name: Bytes, key: PubKey, enco
     if let Some(i) = find_layer_history(rs, room_name, key, encoding) {
         return Some(i)
     }
-    let res: Result[rtp.history.History[Bytes], Capacity] = rtp.history.history(LAYER_HISTORY_SLOTS, LAYER_HISTORY_AGE_NS)
+    let res: Result[rtp.history.History[quic.PayloadSlice], Capacity] = rtp.history.history(LAYER_HISTORY_SLOTS, LAYER_HISTORY_AGE_NS)
     let Ok(take h) = res else {
         return None
     }
-    list.push(mut rs.layers, LayerHistory(room_name: clone(room_name), key: key, encoding: encoding, history: take h, asked: list.new(), last_pli_ns: None))
+    list.push(mut rs.layers, LayerHistory(room_name: clone(room_name), key: key, encoding: encoding, history: take h, asked: list.new()))
     Some(list.len(rs.layers) - 1)
 }
 
-/// Store one canonical RTP packet in this node's RTP-12 history for `(room, key, encoding)`.
-pub fn repair_record(mut cr: CascadeRouter, ri: u64, key: PubKey, encoding: u8, seq: u16, pkt: Bytes, now_ns: u64) {
-    let rname: Bytes = clone(cr.rooms[ri].room_name)
-    let Some(hi) = ensure_layer_history(mut cr.repair, rname, key, encoding) else {
+/// Store one canonical RTP packet (`quic.PayloadSlice`) in this node's 1-hop history.
+pub fn repair_record(mut a: CascadeAdapter, ri: u64, key: PubKey, encoding: u8, seq: u16, take pkt: quic.PayloadSlice, now_ns: u64) {
+    let rname: Bytes = clone(a.rooms[ri].room_name)
+    let Some(hi) = ensure_layer_history(mut a.repair, rname, key, encoding) else {
         return
     }
     let idx: u64 = int.widen(seq)
-    let _ = rtp.history.put(mut cr.repair.layers[hi].history, idx, now_ns, clone(pkt))
+    let _ = rtp.history.put(mut a.repair.layers[hi].history, idx, now_ns, take pkt)
+}
+
+/// Purge repair histories for any fenced generation `(participant, <= epoch)` in `room_name`.
+pub fn purge_repair_fenced(mut a: CascadeAdapter, room_name: Bytes, participant: u64, epoch: u64) {
+    let mut i = 0u64
+    while i < list.len(a.repair.layers) {
+        let m = a.repair.layers[i].key.participant == participant && a.repair.layers[i].key.epoch <= epoch && list.compare_bytes(a.repair.layers[i].room_name, room_name) == Equal
+        if m {
+            let _ = list.remove(mut a.repair.layers, i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Purge all repair histories belonging to `room_name`.
+pub fn purge_repair_room(mut a: CascadeAdapter, room_name: Bytes) {
+    let mut i = 0u64
+    while i < list.len(a.repair.layers) {
+        if list.compare_bytes(a.repair.layers[i].room_name, room_name) == Equal {
+            let _ = list.remove(mut a.repair.layers, i)
+        } else {
+            i += 1
+        }
+    }
 }
 
 /// Check whether this node's RTP-12 history currently holds `seq` for `(room, key, encoding)`.
-pub fn history_holds(cr: CascadeRouter, room_name: Bytes, key: PubKey, encoding: u8, seq: u16) -> bool {
-    let Some(hi) = find_layer_history(cr.repair, room_name, key, encoding) else {
+pub fn history_holds(a: CascadeAdapter, room_name: Bytes, key: PubKey, encoding: u8, seq: u16) -> bool {
+    let Some(hi) = find_layer_history(a.repair, room_name, key, encoding) else {
         return false
     }
     let idx: u64 = int.widen(seq)
-    rtp.history.entry(cr.repair.layers[hi].history, idx) != None
+    match rtp.history.entry(a.repair.layers[hi].history, idx) {
+        Some(_) => true,
+        None => false,
+    }
 }
 
 fn already_asked(asked: List[u16], seq: u16) -> bool {
@@ -106,11 +130,16 @@ fn mark_asked(mut asked: List[u16], seq: u16) {
 /// - Every missing `seq` is asked of the upstream node **once per sequence number** over the
 ///   room stream (`asked_upstream`). A second local NACK for the same missing `seq` is NOT
 ///   asked upstream again (`already_asked`).
-pub fn handle_local_nack(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, key: PubKey, encoding: u8, seqs: List[u16], now_ns: u64) -> LocalRepairResult {
-    let Some(ri) = find_room(cr, room_name) else {
+pub fn handle_local_nack(mut a: CascadeAdapter, mut hub: LinkHub, room_name: Bytes, key: PubKey, encoding: u8, seqs: List[u16], now_ns: u64) -> LocalRepairResult {
+    let Some(ri) = find_room(a, room_name) else {
         return LocalRepairResult(answered_local: 0, asked_upstream: 0, already_asked: 0)
     }
-    let Some(hi) = ensure_layer_history(mut cr.repair, room_name, key, encoding) else {
+    let room = a.rooms[ri].room
+    let owner: peer.Gen = Gen(id: key.participant, epoch: key.epoch)
+    if router.observer_fenced(a.obs, room, owner) || !router.observer_routing_allowed(a.obs, room, now_ns / 1000000) {
+        return LocalRepairResult(answered_local: 0, asked_upstream: 0, already_asked: 0)
+    }
+    let Some(hi) = ensure_layer_history(mut a.repair, room_name, key, encoding) else {
         return LocalRepairResult(answered_local: 0, asked_upstream: 0, already_asked: 0)
     }
     let mut answered = 0u64
@@ -118,34 +147,34 @@ pub fn handle_local_nack(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Byt
     let mut to_ask: List[u16] = list.new()
     for seq in seqs {
         let idx: u64 = int.widen(seq)
-        let hit = match rtp.history.get(mut cr.repair.layers[hi].history, idx, now_ns, 0) {
+        let hit = match rtp.history.get(mut a.repair.layers[hi].history, idx, now_ns, 0) {
             Found(_) => true,
             _ => false,
         }
         if hit {
             answered += 1
-            cr.repair.counts.local_hits += 1
+            a.repair.counts.local_hits += 1
         } else {
-            cr.repair.counts.local_misses += 1
-            if already_asked(cr.repair.layers[hi].asked, seq) {
+            a.repair.counts.local_misses += 1
+            if already_asked(a.repair.layers[hi].asked, seq) {
                 dup += 1
             } else {
-                mark_asked(mut cr.repair.layers[hi].asked, seq)
+                mark_asked(mut a.repair.layers[hi].asked, seq)
                 list.push(mut to_ask, seq)
             }
         }
     }
     let mut asked_count = 0u64
-    if list.len(to_ask) > 0 && cr.rooms[ri].role == Edge {
-        if let Some(h) = cr.rooms[ri].home_handle {
-            if cr.rooms[ri].edge_attached {
-                let rn = cr.rooms[ri].edge_room_num
-                let term = cr.rooms[ri].term
-                if let Some(ln) = find_remote_layer_num(cr.rooms[ri], key, encoding) {
-                    let rseq = cr.rooms[ri].next_room_seq
-                    cr.rooms[ri].next_room_seq += 1
+    if list.len(to_ask) > 0 && a.rooms[ri].role == Edge {
+        if let Some(h) = a.rooms[ri].home_handle {
+            if a.rooms[ri].edge_attached {
+                let rn = a.rooms[ri].edge_room_num
+                let term = a.rooms[ri].term
+                if let Some(ln) = find_remote_layer_num(a.rooms[ri], key, encoding) {
+                    let rseq = a.rooms[ri].next_room_seq
+                    a.rooms[ri].next_room_seq += 1
                     asked_count = list.len(to_ask)
-                    cr.repair.counts.upstream_nacks_sent += asked_count
+                    a.repair.counts.upstream_nacks_sent += asked_count
                     let _ = send_room_msg(mut hub, h, rn, Nack(room_num: rn, term: term, seq: rseq, layer_num: ln, rtp_seqs: take to_ask))
                 }
             }
@@ -154,8 +183,8 @@ pub fn handle_local_nack(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Byt
     LocalRepairResult(answered_local: answered, asked_upstream: asked_count, already_asked: dup)
 }
 
-fn find_remote_layer_num(room: CascadeRoom, key: PubKey, encoding: u8) -> Option[u32] {
-    for p in room.remote_pubs {
+fn find_remote_layer_num(room: RoomBinding, key: PubKey, encoding: u8) -> Option[u32] {
+    for p in room.remote_links {
         if p.key == key {
             for l in p.layers {
                 if l.encoding == encoding {
@@ -167,20 +196,25 @@ fn find_remote_layer_num(room: CascadeRoom, key: PubKey, encoding: u8) -> Option
     None
 }
 
-/// Handle a `Nack` arriving over a room stream (CAS-3):
-/// The upstream answers ONLY from its own RTP-12 history with a datagram, or not at all.
+/// Handle a `Nack` arriving over a room stream (CAS-3, CAS-4, CAS-5):
+/// Guards on live lease and unfenced owner, then answers ONLY from this node's own
+/// RTP-12 `quic.PayloadSlice` history with zero payload copies, or not at all.
 /// A NACK NEVER crosses two links (home never forwards an edge's NACK to another edge).
-pub fn on_remote_nack(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.ConnectionHandle, rn: u32, ln: u32, rtp_seqs: List[u16], now_ns: u64) {
-    cr.repair.counts.nacks_received += list.len(rtp_seqs)
-    // Only Home answers downstream NACKs for outbound layers it announced to `h`.
-    if cr.rooms[ri].role != Home {
+pub fn on_remote_nack(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, h: quic.ConnectionHandle, rn: u32, ln: u32, rtp_seqs: List[u16], now_ns: u64) {
+    a.repair.counts.nacks_received += list.len(rtp_seqs)
+    if a.rooms[ri].role != Home {
         return
     }
-    let Some(ei) = find_edge(cr.rooms[ri], h) else {
+    let room = a.rooms[ri].room
+    if !router.observer_routing_allowed(a.obs, room, now_ns / 1000000) {
+        a.fence.dropped_expired_media += list.len(rtp_seqs)
+        return
+    }
+    let Some(ei) = find_edge(a.rooms[ri], h) else {
         return
     }
     let mut found_pub: Option[(PubKey, u8)] = None
-    for o in cr.rooms[ri].edges[ei].outbound_layers {
+    for o in a.rooms[ri].edges[ei].outbound_layers {
         if o.layer_num == ln {
             found_pub = Some((o.key, o.encoding))
             break
@@ -189,67 +223,72 @@ pub fn on_remote_nack(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.
     let Some((key, enc)) = found_pub else {
         return
     }
-    let rname: Bytes = clone(cr.rooms[ri].room_name)
-    let Some(hi) = find_layer_history(cr.repair, rname, key, enc) else {
-        cr.repair.counts.nacks_unanswered += list.len(rtp_seqs)
+    let owner: peer.Gen = Gen(id: key.participant, epoch: key.epoch)
+    if router.observer_fenced(a.obs, room, owner) {
+        a.fence.dropped_fenced_media += list.len(rtp_seqs)
+        return
+    }
+    let rname: Bytes = clone(a.rooms[ri].room_name)
+    let Some(hi) = find_layer_history(a.repair, rname, key, enc) else {
+        a.repair.counts.nacks_unanswered += list.len(rtp_seqs)
         return
     }
     for seq in rtp_seqs {
         let idx: u64 = int.widen(seq)
-        let pkt_opt: Option[Bytes] = match rtp.history.get(mut cr.repair.layers[hi].history, idx, now_ns, 0) {
-            Found(_) => match rtp.history.entry(cr.repair.layers[hi].history, idx) {
-                Some(p) => Some(clone(p)),
+        let pkt_opt: Option[quic.PayloadSlice] = match rtp.history.get(mut a.repair.layers[hi].history, idx, now_ns, 0) {
+            Found(_) => match rtp.history.entry(a.repair.layers[hi].history, idx) {
+                Some(p) => Some(quic.payload_share(p)),
                 None => None,
             },
             _ => None,
         }
         match take pkt_opt {
             Some(take pkt) => {
-                if let Ok(()) = send_media(mut hub, h, rn, ln, pkt) {
-                    cr.repair.counts.nacks_answered += 1
+                if let Ok(()) = send_media(mut hub, h, rn, ln, take pkt) {
+                    a.repair.counts.nacks_answered += 1
                 }
             },
             None => {
                 // Missing from Home's own history: do NOT forward NACK to publisher's edge!
-                cr.repair.counts.nacks_unanswered += 1
+                a.repair.counts.nacks_unanswered += 1
             },
         }
     }
 }
 
-/// Edge sends a PLI or FIR request upstream to Home on the room stream (CAS-3).
-pub fn request_keyframe_upstream(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, key: PubKey, encoding: u8, fir: bool) {
-    let Some(ri) = find_room(cr, room_name) else {
+/// Forward an arriving `SwitchReq` into `router.Router` via `Carry.Key` so local and
+/// remote keyframe requests coalesce in the single RTC-6 `rtp.loss.Keyframes` throttle
+/// on the publication's home unit (no duplicate PLI timer in cascade).
+pub fn on_switch_req(mut a: CascadeAdapter, ri: u64, h: quic.ConnectionHandle, ln: u32, fir: bool) {
+    let room = a.rooms[ri].room
+    let why: rtp.loss.Why = if fir {
+        Switch
+    } else {
+        Loss
+    }
+    if a.rooms[ri].role == Edge {
+        // Edge receiving SwitchReq from Home for one of Edge's local publications.
+        let mut target: Option[(router.PublicationId, u8)] = None
+        for m in a.rooms[ri].local_layers {
+            if m.upstream_layer == Some(ln) {
+                target = Some((m.pub_id, m.encoding))
+                break
+            }
+        }
+        if let Some((pub_id, enc)) = target {
+            if let Some(info) = router.observer_publication(a.obs, room, pub_id) {
+                a.repair.counts.pli_forwarded += 1
+                post_carried(mut a, info.home, Key(room: room, publication: pub_id, encoding: enc, why: why))
+            }
+        }
         return
     }
-    if cr.rooms[ri].role != Edge || !cr.rooms[ri].edge_attached {
-        return
-    }
-    let Some(h) = cr.rooms[ri].home_handle else {
-        return
-    }
-    let Some(ln) = find_remote_layer_num(cr.rooms[ri], key, encoding) else {
-        return
-    }
-    let rn = cr.rooms[ri].edge_room_num
-    let term = cr.rooms[ri].term
-    let rseq = cr.rooms[ri].next_room_seq
-    cr.rooms[ri].next_room_seq += 1
-    let _ = send_room_msg(mut hub, h, rn, SwitchReq(room_num: rn, term: term, seq: rseq, layer_num: ln, fir: fir))
-}
-
-/// Home rate-limits PLI/FIR per publication (RTC-6 100 ms floor) before forwarding to the
-/// publisher's node (CAS-3).
-pub fn on_switch_req(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.ConnectionHandle, ln: u32, fir: bool, now_ns: u64) {
-    if cr.rooms[ri].role != Home {
-        cr.repair.counts.pli_forwarded += 1
-        return
-    }
-    let Some(ei) = find_edge(cr.rooms[ri], h) else {
+    // Home receiving SwitchReq from an edge for an outbound layer announced to `h`.
+    let Some(ei) = find_edge(a.rooms[ri], h) else {
         return
     }
     let mut found_pub: Option[(PubKey, u8)] = None
-    for o in cr.rooms[ri].edges[ei].outbound_layers {
+    for o in a.rooms[ri].edges[ei].outbound_layers {
         if o.layer_num == ln {
             found_pub = Some((o.key, o.encoding))
             break
@@ -258,41 +297,30 @@ pub fn on_switch_req(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.C
     let Some((key, enc)) = found_pub else {
         return
     }
-    let rname: Bytes = clone(cr.rooms[ri].room_name)
-    let Some(hi) = ensure_layer_history(mut cr.repair, rname, key, enc) else {
-        return
-    }
-    if let Some(last) = cr.repair.layers[hi].last_pli_ns {
-        if now_ns >= last && now_ns - last < KEYFRAME_MIN_INTERVAL_NS {
-            cr.repair.counts.pli_throttled += 1
+    // Check local/non-cascade publications in `router.Observer`.
+    for (pub_id, info) in router.observer_publications(a.obs, room) {
+        if info.origin != Remote(via: a.unit) && pub_key_of(info.owner, pub_id) == key {
+            post_carried(mut a, info.home, Key(room: room, publication: pub_id, encoding: enc, why: why))
             return
         }
     }
-    cr.repair.layers[hi].last_pli_ns = Some(now_ns)
-    cr.repair.counts.pli_forwarded += 1
-    // If publisher is on a remote edge, forward the rate-limited PLI/FIR to that edge.
-    for pi in 0u64 .. list.len(cr.rooms[ri].remote_pubs) {
-        if cr.rooms[ri].remote_pubs[pi].key == key {
-            let src_h = cr.rooms[ri].remote_pubs[pi].source_handle
-            let src_rn = cr.rooms[ri].remote_pubs[pi].source_room_num
-            for li in 0u64 .. list.len(cr.rooms[ri].remote_pubs[pi].layers) {
-                if cr.rooms[ri].remote_pubs[pi].layers[li].encoding == enc {
-                    let src_ln = cr.rooms[ri].remote_pubs[pi].layers[li].layer_num
-                    let term = cr.rooms[ri].term
-                    let rseq = cr.rooms[ri].next_room_seq
-                    cr.rooms[ri].next_room_seq += 1
-                    let _ = send_room_msg(mut hub, src_h, src_rn, SwitchReq(room_num: src_rn, term: term, seq: rseq, layer_num: src_ln, fir: fir))
-                    return
-                }
-            }
+    // Check remote publications (`Origin.Remote` homed on Unit 0).
+    let mut remote_pub: Option[router.PublicationId] = None
+    for rl in a.rooms[ri].remote_links {
+        if rl.key == key {
+            remote_pub = rl.pub_id
+            break
         }
+    }
+    if let Some(pub_id) = remote_pub {
+        post_carried(mut a, 0, Key(room: room, publication: pub_id, encoding: enc, why: why))
     }
 }
 
 /// Read the latest forwarded SR timing for `(key, encoding)` in `room_name`.
-pub fn remote_sr(cr: CascadeRouter, room_name: Bytes, key: PubKey, encoding: u8) -> Option[SrTiming] {
-    let ri = find_room(cr, room_name)?
-    for p in cr.rooms[ri].remote_pubs {
+pub fn remote_sr(a: CascadeAdapter, room_name: Bytes, key: PubKey, encoding: u8) -> Option[SrTiming] {
+    let ri = find_room(a, room_name)?
+    for p in a.rooms[ri].remote_links {
         if p.key == key {
             for l in p.layers {
                 if l.encoding == encoding {

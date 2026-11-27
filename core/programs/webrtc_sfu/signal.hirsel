@@ -160,6 +160,9 @@ pub opaque type Adapter[M] {
     bridge: Option[RoomBridge],
     bridge_serial: u64,
     bridge_events: List[BridgeEvent],
+    cascade: Option[RoomCascade],
+    cascade_serial: u64,
+    cascade_events: List[CascadeEvent],
     signaling: Signaling,
     // The control order: the call in flight and what waits, in order.
     calling: Option[After],
@@ -191,7 +194,7 @@ type Life: key = Serving | Closing | Gone
 pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M]) -> Adapter[M] {
     let mut jobs: List[Job] = list.new()
     list.push(mut jobs, Job(change: Open(room: room, limits: limits), after: Opening))
-    Adapter(room: room, limits: limits, embed: take embed, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), bridge: None, bridge_serial: 0, bridge_events: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
+    Adapter(room: room, limits: limits, embed: take embed, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), bridge: None, bridge_serial: 0, bridge_events: list.new(), cascade: None, cascade_serial: 0, cascade_events: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
 }
 
 /// Give the adapter a relay: from now on each admission is minted TURN credentials and
@@ -732,6 +735,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit, now: 
         }
     }
     drive_bridge(mut a, mut l, mut u)?
+    drive_cascade(mut a, mut l, mut u)?
     let mut faulted: Option[router.RouterError] = None
     for take e in units.take_room_events(mut u, a.room) {
         match take e {

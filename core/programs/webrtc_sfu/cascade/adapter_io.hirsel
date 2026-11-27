@@ -1,0 +1,247 @@
+// Virtual unit task for `Pool.cascade`: owns the node's cascade UDP socket, `LinkHub`,
+// and `CascadeAdapter` over `router.Observer`, mirroring `moq_bridge_io.hirsel`.
+/// Configuration for the pool's optional cascade virtual unit door.
+pub type CascadeLink: cross {
+    bind: Addr,
+    unit: u16,
+    node: NodeId,
+    limits: LinkLimits,
+    certificate: Bytes,
+    key: Secret,
+    algorithm: SignAlg,
+    cert_pins: List[(NodeId, Inline[u8, 32])],
+    max_connections: u32,
+    transport_bytes: u64
+}
+
+pub type StartError: cross = Config | Bind(NetError) | Capacity(Capacity) | Link(LinkError) | Router(router.RouterError) | Spawn
+
+pub type Running {
+    doors: units.Doors,
+    roster: Client[units.Doors],
+    task: Task[()]
+}
+
+type Hello: cross {
+    doors: units.Doors,
+    roster: Client[units.Doors]
+}
+
+type Start: cross {
+    listener: CascadeLink,
+    hello: Client[Result[Hello, StartError]],
+    net: Net,
+    clock: Clock,
+    random: Random,
+    plane: units.Plane,
+    queue: units.MediaQueues,
+    timing: units.Timing,
+    total: u16,
+    until: u64
+}
+
+fn io_seq_price(element: u64, cap: u64) -> u64 {
+    match charge.seq(element, cap) {
+        Some(v) => v,
+        None => 0xffffffffffffffff,
+    }
+}
+
+/// Price the cascade virtual unit's fixed buffers and caller-funded transport state.
+pub fn listener_bytes(l: CascadeLink, plane: units.Plane, queues: units.MediaQueues, total: u16) -> u64 {
+    let depth = units.control_slots(l.unit, total, plane)
+    let controls = io_seq_price(bytes[units.ControlMessage], order.max(4, depth))
+    let width: u64 = int.widen(queues.datagram_bytes)
+    let Some(socket) = units.udp_options(queues.socket_slots, queues.datagram_bytes) else {
+        return 0xffffffffffffffff
+    }
+    let UdpOptions(slots: slots, slot_bytes: stride) = socket
+    let net_bytes: u64 = (int.widen(slots) : u64) * int.widen(stride)
+    let rings = units.virtual_inbox_bytes(l.unit, total, plane, queues)
+    let buffers = io_seq_price(1, 64 * width) + io_seq_price(bytes[UdpPacket], 64) + io_seq_price(1, LINK_SEND_BATCH * 1472) + io_seq_price(bytes[UdpTx], LINK_SEND_BATCH) + io_seq_price(bytes[quic.Output], LINK_SEND_BATCH)
+    int.saturating_add(l.transport_bytes, rings + net_bytes + buffers + controls + 65536)
+}
+
+pub fn listener_valid(l: CascadeLink, index: u16, queues: units.MediaQueues) -> bool {
+    l.unit == index && l.limits.rooms != 0 && l.limits.layers != 0 && l.limits.lease_ms != 0 && l.max_connections != 0 && l.transport_bytes != 0 && queues.datagram_bytes >= 1472
+}
+
+pub fn start_cascade(tasks: Tasks, net: Net, clock: Clock, random: Random, take listener: CascadeLink, plane: units.Plane, queues: units.MediaQueues, timing: units.Timing, total: u16, grant: u64, until: u64) -> Result[Running, StartError] waits {
+    let c: Result[(Client[Result[Hello, StartError]], Inbox[Result[Hello, StartError]]), Capacity] = conn.new(1, bytes 0)
+    let (hello, take inbox) = c ?=> |cap| Capacity(cap)
+    let args = Start(listener: take listener, hello: take hello, net: net, clock: clock, random: random, plane: plane, queue: queues, timing: timing, total: total, until: until)
+    let work = task.spawn_unit(tasks, bytes grant, take args, run) ?=> |_| Spawn
+    match conn.receive(inbox) {
+        Ok(Ok(take h)) => {
+            let Hello(doors: take d, roster: take r) = take h
+            Ok(Running(doors: take d, roster: take r, task: take work))
+        },
+        Ok(Error(take e)) => {
+            let _ = task.join(take work)
+            Error(take e)
+        },
+        Error(_) => {
+            let _ = task.join(take work)
+            Error(Spawn)
+        },
+    }
+}
+
+type Bound {
+    adapter: CascadeAdapter,
+    hub: LinkHub,
+    socket: UdpSocket,
+    control: Inbox[units.ControlMessage],
+    media: Inbox[router.Carried],
+    siblings: Inbox[units.Doors],
+    hello: Hello
+}
+
+fn bind(take l: CascadeLink, n: Net, r: Random, q: units.MediaQueues, plane: units.Plane, total: u16) -> Result[Bound, StartError] waits {
+    let CascadeLink(bind: at, unit: unit, node: local_node, limits: limits, certificate: take leaf, key: take signing_key, algorithm: alg, cert_pins: take raw_pins, max_connections: max_conn, transport_bytes: _) = take l
+    let Some(options) = units.udp_options(q.socket_slots, q.datagram_bytes) else {
+        return Error(Config)
+    }
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take leaf)
+    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take signing_key, alg: alg)
+    let mut pins: List[PeerPins] = list.with_capacity(list.len(raw_pins))
+    for (pnode, digest) in raw_pins {
+        let mut ps: List[quic.handshake.Pin] = list.with_capacity(1)
+        list.push(mut ps, Cert(digest))
+        list.push(mut pins, PeerPins(node: pnode, pins: take ps))
+    }
+    let hub = link_hub(local_node, r, limits, take identity, take pins, max_conn) ?=> |e| Link(e)
+    let (take socket, local) = host.udp_bind(n, at, options) ?=> |e| Bind(e)
+    let (take doors, take control_in, take media) = units.inboxes_with(local, unit, total, plane, q) ?=> |e| Router(e)
+    let c: Result[(Client[units.Doors], Inbox[units.Doors]), Capacity] = conn.new(64, bytes 0)
+    let (roster, take siblings) = c ?=> |cap| Capacity(cap)
+    let adapter = cascade_adapter(unit, local_node, limits)
+    Ok(Bound(adapter: take adapter, hub: take hub, socket: take socket, control: take control_in, media: take media, siblings: take siblings, hello: Hello(doors: take doors, roster: roster)))
+}
+
+fn earlier_opt(a: Option[u64], b: Option[u64]) -> Option[u64] {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(order.min(x, y)),
+        (None, _) => b,
+        _ => a,
+    }
+}
+
+fn run(take s: Start) waits {
+    let Start(listener: take l, hello: take report, net: net, clock: clock, random: r, plane: plane, queue: queues, timing: timing, total: total, until: until) = take s
+    let result = bind(take l, net, r, queues, plane, total)
+    let opened = match take result {
+        Ok(take b) => take b,
+        Error(take e) => {
+            let _ = conn.send(report, Error(take e))
+            return
+        },
+    }
+    let Bound(adapter: take initial, hub: take init_hub, socket: take bound_socket, control: take orders, media: take media, siblings: take siblings, hello: take out) = take opened
+    if let Error(_) = conn.send(report, Ok(take out)) {
+        return
+    }
+    let mut doors: List[units.Doors] = list.new()
+    for _ in 0u16 .. total {
+        let Ok(take d) = conn.receive(siblings) else {
+            return
+        }
+        list.push(mut doors, take d)
+    }
+    let mut socket = take bound_socket
+    let mut adapter = take initial
+    let mut hub = take init_hub
+    let width: u64 = int.widen(queues.datagram_bytes)
+    let mut rx: Bytes = list.with_capacity(64 * width)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    let mut acks: List[units.ControlMessage] = list.new()
+    let mut events: List[LinkEvent] = list.new()
+    let mut wake: Option[u64] = None
+    let mut rung = 0u64
+    while host.mono_ns(clock) < until {
+        let now_before = host.mono_ns(clock)
+        let cap = order.min(until, int.saturating_add(now_before, timing.idle_poll_ns))
+        let next = option.unwrap(earlier_opt(Some(cap), wake))
+        list.clear(mut rx)
+        list.clear(mut packets)
+        let got = match host.udp_recv(mut socket, mut rx, mut packets, At(clock, next)) {
+            Ok(n) => n,
+            Error(_) => 0,
+        }
+        let now = host.mono_ns(clock)
+        while let Ok(take msg) = conn.try_receive(orders) {
+            let units.ControlMessage(step: take step, opus_fmtp: _) = take msg
+            if let Some(take answer) = control(mut adapter, mut hub, now, take step) {
+                list.push(mut acks, units.ControlMessage(step: take answer, opus_fmtp: None))
+            }
+        }
+        for _ in 0u32 .. plane.media_take {
+            let Ok(take msg) = conn.try_receive(media) else {
+                break
+            }
+            carried(mut adapter, mut hub, now, take msg)
+        }
+        list.clear(mut events)
+        for i in 0u64 .. got {
+            let UdpPacket(peer: from, at: at, len: len, truncated: truncated, ecn: ecn) = packets[i]
+            if !truncated && len != 0 {
+                receive_datagram(mut hub, now, from, ecn, mut rx, at, len, mut events)
+            }
+        }
+        let link_events = replace(mut events, list.new())
+        handle_events(mut adapter, mut hub, take link_events, now / 1000000)
+        for take ch in take_changes(mut adapter) {
+            list.push(mut acks, units.ControlMessage(step: CascadePropose(change: take ch), opus_fmtp: None))
+        }
+        while list.len(acks) != 0 {
+            let a_msg = list.remove(mut acks, 0)
+            match conn.try_send(doors[0].control, take a_msg) {
+                Ok(()) => {
+                    rung |= 1
+                },
+                Error(Full(take back)) => {
+                    list.insert(mut acks, 0, take back)
+                    break
+                },
+                Error(Closed(_)) => return,
+            }
+        }
+        for take post in take_posts(mut adapter) {
+            let router.Post(to: to, carried: take packet) = take post
+            let k: u64 = int.widen(to)
+            if let Ok(()) = conn.try_send(doors[k].media, take packet) {
+                rung |= 1u64 << k
+            }
+        }
+        ring_doors(mut socket, clock, timing.control_send_ns, doors, mut rung)
+        list.clear(mut events)
+        wake = stage_links(mut hub, now, mut events)
+        let timeout_events = replace(mut events, list.new())
+        if list.len(timeout_events) != 0 {
+            handle_events(mut adapter, mut hub, take timeout_events, now / 1000000)
+        }
+        // Recheck lease expiry right before committing the staged batch to the socket.
+        enforce_leases(mut adapter, mut hub, host.mono_ns(clock) / 1000000)
+        let deadline = int.saturating_add(host.mono_ns(clock), timing.media_send_ns)
+        let _ = send_staged(mut hub, clock, mut socket, deadline, 0xffffffffffffffff)
+    }
+}
+
+fn ring_doors(mut socket: UdpSocket, clock: Clock, timeout: u64, doors: List[units.Doors], mut rung: u64) waits {
+    if rung == 0 {
+        return
+    }
+    let mut tx: List[UdpTx] = list.new()
+    for i in 0u64 .. list.len(doors) {
+        if (rung >> i) & 1 != 0 {
+            list.push(mut tx, UdpTx(to: doors[i].addr, at: 0, len: 0, ecn: 0))
+        }
+    }
+    let deadline = int.saturating_add(host.mono_ns(clock), timeout)
+    if let Ok(n) = host.udp_send(mut socket, b"", tx, At(clock, deadline)) {
+        for _ in 0u64 .. n {
+            rung = rung & (rung - 1)
+        }
+    }
+}

@@ -78,6 +78,7 @@ pub fn change_room(c: Change) -> peer.RoomId {
         Close(room: room) => room,
         Admit(who: who, ..) => who.room,
         Publish(room: room, ..) => room,
+        PublishRemote(room: room, ..) => room,
         Subscribe(room: room, ..) => room,
         Retarget(room: room, ..) => room,
         Rebind(room: room, ..) => room,
@@ -85,6 +86,7 @@ pub fn change_room(c: Change) -> peer.RoomId {
         Leave(room: room, ..) => room,
         Revoke(room: room, ..) => room,
         Suspend(room: room, ..) => room,
+        SetLease(room: room, ..) => room,
         Playout(room: room, ..) => room,
     }
 }
@@ -95,6 +97,7 @@ pub fn fencing(c: Change) -> bool {
     match c {
         Revoke(room: _, ..) => true,
         Suspend(room: _, ..) => true,
+        SetLease(room: _, ..) => true,
         Close(room: _) => true,
         _ => false,
     }
@@ -155,7 +158,13 @@ pub fn lease_expired(r: Router, t: peer.Tag, now_ms: u64) -> bool {
     if t.src == None {
         return false
     }
-    let Some(ri) = room_at(r, t.room) else {
+    lease_expired_room(r, t.room, now_ms)
+}
+
+/// Whether `room`'s lease deadline has passed `deadline_ms - guard_ms` at `now_ms`.
+/// Equality (`now_ms + guard_ms == deadline_ms`) is permitted; strictly greater is expired.
+pub fn lease_expired_room(r: Router, room: peer.RoomId, now_ms: u64) -> bool {
+    let Some(ri) = room_at(r, room) else {
         return true
     }
     match r.rooms[ri].lease_deadline_ms {
@@ -259,8 +268,25 @@ fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], 
             Ok(Done)
         },
         Publish(room: room, who: who, section: section, id: id, shape: shape) => {
+            let PublicationId(raw) = id
+            if raw >= r.next_publication {
+                r.next_publication = raw + 1
+            }
             let made = add_publication(mut r, room, who, section, id, shape, fmtp)?
             Ok(Shaped(id: id, shape: made))
+        },
+        PublishRemote(room: room, who: who, section: section, id: id, shape: shape, via: via) => {
+            let assigned = if id == PublicationId(0) {
+                next_publication(mut r)
+            } else {
+                let PublicationId(raw) = id
+                if raw >= r.next_publication {
+                    r.next_publication = raw + 1
+                }
+                id
+            }
+            let made = add_remote_publication(mut r, room, who, section, assigned, shape, via)?
+            Ok(Shaped(id: assigned, shape: made))
         },
         Subscribe(room: room, who: who, p: p, section: section, target: target) => {
             add_down(mut r, room, who, p, section, target, now, mut out)?
@@ -291,6 +317,15 @@ fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], 
         },
         Suspend(room: room, cause: cause, on: on) => {
             hold(mut r, room, cause_bit(cause), on, mut out)?
+            Ok(Done)
+        },
+        SetLease(room: room, deadline_ms: deadline_ms, guard_ms: guard_ms) => {
+            let Some(ri) = room_at(r, room) else {
+                return Error(NoRoom)
+            }
+            r.rooms[ri].lease_deadline_ms = deadline_ms
+            r.rooms[ri].lease_guard_ms = guard_ms
+            let _ = purge_at(r, now / 1000000, mut out)
             Ok(Done)
         },
         Playout(room: room, who: who, p: p, delay: delay) => {
@@ -356,8 +391,16 @@ fn fence(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Ou
     let Some(ri) = room_at(r, room) else {
         return Error(NoRoom)
     }
-    let Some(e) = entry_of(r, ri, id) else {
-        return Error(NoParticipant)
+    let e = match entry_of(r, ri, id) {
+        Some(idx) => idx,
+        None => {
+            if list.len(r.rooms[ri].ids) >= int.widen(r.rooms[ri].limits.ids) {
+                return Error(Limit(int.widen(r.rooms[ri].limits.ids)))
+            }
+            list.push(mut r.rooms[ri].ids, id)
+            list.push(mut r.rooms[ri].fenced, None)
+            list.len(r.rooms[ri].ids) - 1
+        },
     }
     let raised = match r.rooms[ri].fenced[e] {
         Some(f) if f >= epoch => f,

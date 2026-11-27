@@ -181,6 +181,45 @@ fn virtual_ledger() {
     if signal.ledger_free(ledger, 63) != 0 {
         fail("an old room's refund hit the reopened room")
     }
+    // Two virtual doors simultaneously inside the 64-door cap: 62 session homes (0..61),
+    // bridge on 62, cascade on 63.
+    let vb = option.unwrap(units.virtual_unit(62))
+    let vc = option.unwrap(units.virtual_unit(63))
+    let mut budgets2: List[u64] = list.new()
+    list.push(mut budgets2, control)
+    for _ in 1u16 .. 62 {
+        list.push(mut budgets2, cost.replicated + cost.per_session)
+    }
+    let mut ledger2 = signal.ledger(take budgets2, 1, session)
+    let link_lim = cascade.default_link_limits()
+    let casc = signal.room_cost_cascade(limits, session, link_lim).cascade
+    result.unwrap(signal.ledger_bridge(mut ledger2, vb, projection + bridge))
+    result.unwrap(signal.ledger_cascade(mut ledger2, vc, projection + casc))
+    let rboth: peer.RoomId = RoomId(203)
+    result.unwrap(signal.reserve_room(mut ledger2, rboth, limits))
+    if signal.primary_of(ledger2, rboth) != Some(0) || signal.ledger_free(ledger2, 62) != bridge || signal.ledger_free(ledger2, 63) != casc {
+        fail("two-virtual-door room share did not charge projection on both 62 and 63")
+    }
+    result.unwrap(signal.reserve_bridge(mut ledger2, rboth, bridge))
+    result.unwrap(signal.reserve_cascade(mut ledger2, rboth, 1, casc))
+    if signal.ledger_free(ledger2, 62) != 0 || signal.ledger_free(ledger2, 63) != 0 {
+        fail("bridge and cascade did not charge their respective virtual doors")
+    }
+    let Error(Exists) = signal.reserve_cascade(mut ledger2, rboth, 1, casc) else {
+        fail("duplicate cascade link reservation was not refused Exists")
+    }
+    signal.release_cascade(mut ledger2, rboth, 1)
+    if signal.ledger_free(ledger2, 63) != casc {
+        fail("release_cascade did not refund cascade virtual door")
+    }
+    // Over-budget cascade refusal names the cascade virtual door (63).
+    let Error(Bytes(unit: 63, need: _, free: _)) = signal.reserve_cascade(mut ledger2, rboth, 2, casc + 1) else {
+        fail("over-budget cascade reserve did not refuse Bytes on unit 63")
+    }
+    // Without a cascade virtual door, reserve_cascade refuses Limits(NoParticipant).
+    let Error(Limits(NoParticipant)) = signal.reserve_cascade(mut ledger, fresh, 1, 1) else {
+        fail("reserve_cascade without cascade virtual door did not refuse NoParticipant")
+    }
 }
 
 /// bug: the control unit admits a room or a join whose memory no unit has reserved, so

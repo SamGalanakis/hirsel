@@ -1,7 +1,7 @@
 // CAS-1: RoomDirectory contract and `sim_directory` fake.
 // Linearizable per room over (home, term, lease_end_ms, fences), with injectable
 // unavailability and delay for the K laws.
-pub type NodeId: key = NodeId(Inline[u8, 16])
+pub type NodeId: key + cross = NodeId(Inline[u8, 16])
 
 pub type DirEntry {
     home: NodeId,

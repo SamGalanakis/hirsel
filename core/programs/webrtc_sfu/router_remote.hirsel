@@ -1,0 +1,391 @@
+// Remote-origin publications (`Origin.Remote`), remote media/SR ingress, and keyframe/poll.
+fn remote_clock(c: sdp.Codec) -> u32 {
+    match c {
+        Opus => 48000,
+        Red => 48000,
+        _ => 90000,
+    }
+}
+
+/// Register a remote-origin publication homed on unit 0 with `Origin.Remote(via)`.
+/// Remote encodings start off (`on: false`) and turn on only when local or remote demand arrives.
+fn add_remote_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, shape: Shape, via: u16) -> Result[Shape, RouterError] {
+    if via >= UNITS_MAX {
+        return Error(Limit(int.widen(UNITS_MAX)))
+    }
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let Some(si) = seat_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let mut limit = r.rooms[ri].limits.publications
+    if let Some(b) = r.pool {
+        if b.publications < int.widen(limit) {
+            limit = int.narrow(b.publications)
+        }
+    }
+    if r.roster[si].publications >= limit {
+        return Error(Limit(int.widen(limit)))
+    }
+    for p in r.publications {
+        if p.room == room && p.owner == who && p.section == section {
+            return Error(Exists)
+        }
+    }
+    let enc_w: u64 = int.widen(shape.encodings)
+    if shape.encodings == 0 || enc_w > ENCODINGS_MAX {
+        return Error(Limit(int.narrow(ENCODINGS_MAX)))
+    }
+    let mut encodings: List[Encoding] = list.new()
+    list.try_reserve(mut encodings, ENCODINGS_MAX) ?=> |c| Capacity(c)
+    for _ in 0u8 .. shape.encodings {
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, planned: 0, idle: false, empty: 0, wanting: 0, demand: 0, on: false, since: None, remote_seq: None, remote_ts: 0, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
+    }
+    let depth = if shape.codec == Opus {
+        rtp.red.MAX_DISTANCE
+    } else {
+        0u8
+    }
+    let red = rtp.red.ring(depth) ?=> |c| Capacity(c)
+    list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
+    let empty_fmtp = shared.share(r.empty)
+    list.push(mut r.publications, Publication(id: id, owner: who, origin: Remote(via: via), home: 0, room: room, section: section, codec: shape.codec, opus_fmtp: take empty_fmtp, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: Ring(slots: list.new(), handles: list.new()), red: take red, local: 0, clock: remote_clock(shape.codec), window: None, voice: quiet(), dropped: 0, orientation: None))
+    r.roster[si].publications += 1
+    Ok(shape)
+}
+
+/// RTP-11's source ID for encoding `e` of publication `p`.
+pub fn source_id(p: PublicationId, e: u8) -> u32 {
+    let PublicationId(n) = p
+    let wide: u64 = int.widen(e)
+    int.truncate(n * ENCODINGS_MAX + wide)
+}
+
+/// The encoding that `source` names within `p`, when it names this publication.
+pub fn source_encoding(p: PublicationId, source: u32) -> Option[u64] {
+    let PublicationId(n) = p
+    let wide: u64 = int.widen(source)
+    if wide / ENCODINGS_MAX != n {
+        return None
+    }
+    Some(wide % ENCODINGS_MAX)
+}
+
+fn router_canon_ext_map() -> rtp.ext.ExtMap {
+    let mut m = rtp.ext.map(OneOnly)
+    let _ = rtp.ext.bind(mut m, 1, Mid)
+    let _ = rtp.ext.bind(mut m, 2, Rid)
+    let _ = rtp.ext.bind(mut m, 3, RepairedRid)
+    let _ = rtp.ext.bind(mut m, 4, AudioLevel)
+    let _ = rtp.ext.bind(mut m, 5, AbsSendTime)
+    let _ = rtp.ext.bind(mut m, 6, TransportSeq)
+    let _ = rtp.ext.bind(mut m, 7, DependencyDescriptor)
+    let _ = rtp.ext.bind(mut m, 8, VideoLayersAllocation)
+    let _ = rtp.ext.bind(mut m, 9, PlayoutDelay)
+    let _ = rtp.ext.bind(mut m, 10, VideoOrientation)
+    let _ = rtp.ext.bind(mut m, 11, AbsCaptureTime)
+    rtp.ext.vad(mut m, true)
+    take m
+}
+
+fn remote_plan(a: rtp.ext.Allocation) -> peer.Plan {
+    let mut p = peer.Plan(stream: a.stream, active: 0, kbps:[0u32; 4])
+    for s in 0u64 .. 4 {
+        if a.masks[s] == 0 {
+            continue
+        }
+        p.active = p.active | (1u8 << int.narrow(s))
+        p.kbps[s] = match rtp.ext.stream_kbps(a, s) {
+            Some(k) => k,
+            None => 0,
+        }
+    }
+    p
+}
+
+/// CAS-2/CAS-3: Inject one canonical RTP packet from a remote-origin publication
+/// (`Origin.Remote`) directly from an owned `quic.PayloadSlice` into `router_route.spread`.
+/// All RTP payload and extension offsets are 0-relative within `quic.payload_bytes(pkt)`.
+pub fn inject_remote_media(mut r: Router, now: u64, room: peer.RoomId, publication: PublicationId, src: peer.Gen, encoding: u8, take pkt: quic.PayloadSlice, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        count_stale(mut r, None)
+        return Ok(())
+    }
+    if fenced_at(r, ri, src) || r.rooms[ri].causes != 0 {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    if lease_expired_room(r, room, now / 1000000) {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    let Some(pi) = publication_at(r, room, publication) else {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    if r.publications[pi].owner != src {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    let e: u64 = int.widen(encoding)
+    if e >= list.len(r.publications[pi].encodings) {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    let raw = quic.payload_bytes(pkt)
+    let Ok(h) = rtp.header.parse(raw) else {
+        r.counts.unparsed += 1
+        return Ok(())
+    }
+    let Ok((pay_at, pay_len)) = rtp.header.payload(h, raw) else {
+        r.counts.unparsed += 1
+        return Ok(())
+    }
+    let map = router_canon_ext_map()
+    let found = match rtp.ext.scan(map, raw, h) {
+        Ok(f) => Some(f),
+        Error(_) => None,
+    }
+    let (voice, audio_level) = match found {
+        Some(f) => match rtp.ext.found(f, AudioLevel) {
+            Some(el) => match rtp.ext.audio_level(map, raw, h, el) {
+                Ok((v, l)) => (v, Some(l)),
+                Error(_) => (None, None),
+            },
+            None => (None, None),
+        },
+        None => (None, None),
+    }
+    let (dd_at, dd_len) = match found {
+        Some(f) => match rtp.ext.found(f, DependencyDescriptor) {
+            Some(el) => (el.at, el.len),
+            None => (0u64, 0u64),
+        },
+        None => (0u64, 0u64),
+    }
+    let orientation = match found {
+        Some(f) => match rtp.ext.found(f, VideoOrientation) {
+            Some(el) => match rtp.ext.orientation(raw, h, el) {
+                Ok(b) => Some(b),
+                Error(_) => None,
+            },
+            None => None,
+        },
+        None => None,
+    }
+    let capture = match found {
+        Some(f) => match rtp.ext.found(f, AbsCaptureTime) {
+            Some(el) => match rtp.ext.abs_capture_time(raw, h, el) {
+                Ok((ts, offset)) => Some(peer.Capture(ts: ts, offset: offset)),
+                Error(_) => None,
+            },
+            None => None,
+        },
+        None => None,
+    }
+    let plan = match found {
+        Some(f) => match rtp.ext.found(f, VideoLayersAllocation) {
+            Some(el) => match rtp.ext.allocation(raw, h, el) {
+                Ok(a) => Some(remote_plan(a)),
+                Error(_) => None,
+            },
+            None => None,
+        },
+        None => None,
+    }
+    let (idx, wide) = match r.publications[pi].encodings[e].remote_seq {
+        None => {
+            let init_seq: u64 = int.widen(h.seq)
+            let w: i64 = int.widen(h.ts)
+            r.publications[pi].encodings[e].remote_seq = Some(init_seq)
+            r.publications[pi].encodings[e].remote_ts = w
+            (init_seq, w)
+        },
+        Some(highest) => {
+            let ext_seq = match rtp.seq.estimate(highest, h.seq) {
+                Index(n) => n,
+                _ => int.widen(h.seq),
+            }
+            let ext_ts = rtp.seq.estimate32(r.publications[pi].encodings[e].remote_ts, h.ts)
+            if ext_seq > highest {
+                r.publications[pi].encodings[e].remote_seq = Some(ext_seq)
+            }
+            if ext_ts > r.publications[pi].encodings[e].remote_ts {
+                r.publications[pi].encodings[e].remote_ts = ext_ts
+            }
+            (ext_seq, ext_ts)
+        },
+    }
+    let codec = r.publications[pi].codec
+    let layer = if codec == Vp8 {
+        match media_bits.unit.vp8(list.slice(raw, pay_at, pay_at + pay_len), h.marker) {
+            Ok(u) => Some(u),
+            Error(_) => None,
+        }
+    } else {
+        None
+    }
+    let m = peer.MediaIn(section: r.publications[pi].section, encoding: encoding, ssrc: h.ssrc, index: idx, pt: h.pt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: pay_at, payload_len: pay_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len, orientation: orientation, capture: capture, plan: plan)
+    r.publications[pi].encodings[e].ssrc = h.ssrc
+    let end = pay_at + pay_len
+    measure(mut r, pi, e, end, now, mut out)?
+    observe(mut r, pi, m, now, mut out)?
+    if let Some(pl) = plan {
+        planned(mut r, pi, encoding, pl, now, mut out)?
+    }
+    let handle = store(mut r.publications[pi].ring, r.next_handle, list.slice(raw, 0, end))
+    r.next_handle += 1u64 << SLOT_SHIFT
+    let talking = speaking(r.publications[pi].voice)
+    spread(mut r, now, pi, m, handle, talking, raw, mut out)
+}
+
+/// CAS-3: Deliver a remote publication's RTCP Sender Report to local down-tracks on this
+/// unit and fan it out to other local units holding down-tracks (never back to `via`).
+pub fn inject_remote_sr(mut r: Router, now: u64, room: peer.RoomId, publication: PublicationId, owner: peer.Gen, encoding: u8, info: rtp.rtcp.SenderInfo) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        count_stale(mut r, None)
+        return Ok(())
+    }
+    if fenced_at(r, ri, owner) {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    let Some(pi) = publication_at(r, room, publication) else {
+        count_stale(mut r, Some(ri))
+        return Ok(())
+    }
+    let src = source_id(publication, encoding)
+    let mut remote = 0u64
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || !clocked(r, d, publication, owner) {
+            continue
+        }
+        if r.downs[d].home != r.unit {
+            remote = remote | (1u64 << int.widen(r.downs[d].home))
+            continue
+        }
+        if let Some(si) = member_at(r, room, r.downs[d].sub) {
+            peer.source_report(mut r.members[si].session, r.downs[d].track, src, info, now)
+        }
+    }
+    let enc_w: u64 = int.widen(encoding)
+    if enc_w < list.len(r.publications[pi].encodings) {
+        remote = remote | r.publications[pi].encodings[enc_w].demand
+    }
+    if let Remote(via: v) = r.publications[pi].origin {
+        remote = remote & ~(1u64 << int.widen(v))
+    }
+    remote = remote & ~(1u64 << int.widen(r.unit))
+    for u in 0u64 .. 64 {
+        if (remote >> u) & 1 == 1 {
+            post_bare(mut r, int.narrow(u), Sender(room: room, publication: publication, owner: owner, source: src, info: info))
+        }
+    }
+    Ok(())
+}
+
+/// Request a keyframe for `publication` encoding `encoding`, coalesced through the
+/// publication's single `rtp.loss.Keyframes` throttle on its home unit.
+pub fn request_keyframe(mut r: Router, now: u64, room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(pi) = publication_at(r, room, publication) else {
+        return Error(NoPublication)
+    }
+    keyframe(mut r, now, pi, encoding, why, mut out)
+}
+
+/// RTC-6 keyframe requests: one `Keyframes` per publication encoding coalesces every
+/// down-track's ask. `Switch` asks for a FIR when the publisher negotiated `ccm fir`;
+/// otherwise, and for `Loss`, a PLI, sent only when it negotiated `nack pli`.
+fn keyframe(mut r: Router, now: u64, pi: u64, encoding: u8, why: rtp.loss.Why, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let e: u64 = int.widen(encoding)
+    if e >= list.len(r.publications[pi].encodings) {
+        return Ok(())
+    }
+    // The publisher's session is on its home unit, which coalesces every unit's asks.
+    if r.publications[pi].home != r.unit {
+        let home = r.publications[pi].home
+        let room = r.publications[pi].room
+        let id = r.publications[pi].id
+        post_bare(mut r, home, Key(room: room, publication: id, encoding: encoding, why: why))
+        return Ok(())
+    }
+    let fir = why == Switch && r.publications[pi].fir
+    if !fir && !r.publications[pi].pli {
+        r.counts.unrequested += 1
+        return Ok(())
+    }
+    if let Remote(via: v) = r.publications[pi].origin {
+        if let Some(req) = rtp.loss.want(mut r.publications[pi].encodings[e].keyframes, why, now) {
+            let out_why: rtp.loss.Why = match req {
+                Fir(_) => Switch,
+                Pli => Loss,
+            }
+            if v != r.unit {
+                let room = r.publications[pi].room
+                let id = r.publications[pi].id
+                post_bare(mut r, v, Key(room: room, publication: id, encoding: encoding, why: out_why))
+            }
+        }
+        return Ok(())
+    }
+    // No stream yet: nothing to ask about until its first packet names the SSRC.
+    let ssrc = r.publications[pi].encodings[e].ssrc
+    if ssrc == 0 {
+        return Ok(())
+    }
+    let room = r.publications[pi].room
+    let Some(oi) = member_at(r, room, r.publications[pi].owner) else {
+        return Ok(())
+    }
+    if let Some(req) = rtp.loss.want(mut r.publications[pi].encodings[e].keyframes, why, now) {
+        peer.request_keyframe(mut r.members[oi].session, ssrc, req, mut out) ?=> |take x| Peer(x)
+    }
+    Ok(())
+}
+
+/// Drive every session's timers, and keep each encoding's keyframe interval at
+/// `max(100 ms, rtt)` of its publisher, updated in place when the estimate moves
+/// by more than a quarter. It answers the earliest deadline.
+pub fn poll(mut r: Router, now: u64, mut out: peer.Outbox) -> Option[u64] {
+    let mut wake: Option[u64] = None
+    for i in 0u64 .. list.len(r.members) {
+        let next = match peer.poll(mut r.members[i].session, now, mut out) {
+            Transmit => Some(now),
+            WakeAt(t) => Some(t),
+            Idle => None,
+        }
+        if let Some(t) = next {
+            wake = match wake {
+                Some(w) if w <= t => Some(w),
+                _ => Some(t),
+            }
+        }
+    }
+    for pi in 0u64 .. list.len(r.publications) {
+        let Some(oi) = member_at(r, r.publications[pi].room, r.publications[pi].owner) else {
+            continue
+        }
+        let rtt = match peer.round_trip(r.members[oi].session) {
+            Some(x) if x > MIN_INTERVAL_NS => x,
+            _ => MIN_INTERVAL_NS,
+        }
+        for e in 0u64 .. list.len(r.publications[pi].encodings) {
+            let old = r.publications[pi].encodings[e].interval
+            let moved = if rtt > old {
+                rtt - old
+            } else {
+                old - rtt
+            }
+            if 4 * moved > old {
+                rtp.loss.set_interval(mut r.publications[pi].encodings[e].keyframes, rtt)
+                r.publications[pi].encodings[e].interval = rtt
+            }
+        }
+    }
+    match dynamics(mut r, now, mut out) {
+        Ok(next) => earliest(wake, next),
+        // A refused keyframe request or rewrite target: the next poll retries.
+        Error(_) => wake,
+    }
+}

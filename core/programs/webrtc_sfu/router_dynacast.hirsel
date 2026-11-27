@@ -176,6 +176,54 @@ fn wanted(mut r: Router, pi: u64, unit: u16, mask: u8, now: u64) {
     let _ = published(mut r, pi, now)
 }
 
+// Virtual transport destination demand (e.g. cascade): joins the publication's single
+// dynacast union AND marks `unit` as a fan-out destination for the requested encodings.
+fn set_demand(mut r: Router, pi: u64, unit: u16, mask: u8, now: u64) {
+    let shift: u64 = int.widen(unit)
+    let bit = 1u64 << shift
+    let wide: u64 = int.widen(mask)
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if (wide >> e) & 1 == 1 {
+            r.publications[pi].encodings[e].wanting = r.publications[pi].encodings[e].wanting | bit
+            r.publications[pi].encodings[e].demand = r.publications[pi].encodings[e].demand | bit
+        } else {
+            r.publications[pi].encodings[e].wanting = r.publications[pi].encodings[e].wanting & ~bit
+            r.publications[pi].encodings[e].demand = r.publications[pi].encodings[e].demand & ~bit
+        }
+    }
+    let _ = published(mut r, pi, now)
+}
+
+/// Update virtual transport demand for `p` on its home unit (CAS-3).
+pub fn set_publication_demand(mut r: Router, room: peer.RoomId, p: PublicationId, unit: u16, mask: u8, now: u64) -> Result[(), RouterError] {
+    if unit >= UNITS_MAX {
+        return Error(Limit(int.widen(UNITS_MAX)))
+    }
+    let Some(pi) = publication_at(r, room, p) else {
+        return Error(NoPublication)
+    }
+    if r.publications[pi].home != r.unit {
+        let home = r.publications[pi].home
+        let owner = r.publications[pi].owner
+        post_bare(mut r, home, Demand(room: room, publication: p, src: owner, unit: unit, mask: mask))
+        return Ok(())
+    }
+    set_demand(mut r, pi, unit, mask, now)
+    Ok(())
+}
+
+/// Current published wanted mask of `p` on its home unit (one bit per encoding).
+pub fn published_mask(r: Router, room: peer.RoomId, p: PublicationId) -> Option[u8] {
+    let pi = publication_at(r, room, p)?
+    let mut mask = 0u64
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if r.publications[pi].encodings[e].on {
+            mask = mask | (1u64 << e)
+        }
+    }
+    Some(int.narrow(mask))
+}
+
 fn pause_ns(r: Router, room: peer.RoomId) -> u64 {
     let ms: u64 = match room_at(r, room) {
         Some(ri) => int.widen(r.rooms[ri].limits.pause_delay_ms),
@@ -232,7 +280,8 @@ fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
     next
 }
 
-// A published change goes to the control unit as `Event.Layers`.
+// A published change goes to the control unit as `Event.Layers`, and for a
+// remote-origin publication to its virtual transport unit as `Carry.Layers`.
 fn layers(mut r: Router, pi: u64) {
     let mut mask = 0u64
     for e in 0u64 .. list.len(r.publications[pi].encodings) {
@@ -241,12 +290,18 @@ fn layers(mut r: Router, pi: u64) {
         }
     }
     let id = r.publications[pi].id
+    let room = r.publications[pi].room
+    let owner = r.publications[pi].owner
+    let m: u8 = int.narrow(mask)
     if r.unit == 0 {
-        list.push(mut r.notices, Layers(room: r.publications[pi].room, publication: id, mask: int.narrow(mask)))
+        list.push(mut r.notices, Layers(room: room, publication: id, mask: m))
     } else {
-        let room = r.publications[pi].room
-        let owner = r.publications[pi].owner
-        post_bare(mut r, 0, Layers(room: room, publication: id, src: owner, mask: int.narrow(mask)))
+        post_bare(mut r, 0, Layers(room: room, publication: id, src: owner, mask: m))
+    }
+    if let Remote(via: v) = r.publications[pi].origin {
+        if v != r.unit {
+            post_bare(mut r, v, Layers(room: room, publication: id, src: owner, mask: m))
+        }
     }
 }
 

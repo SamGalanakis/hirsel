@@ -32,6 +32,7 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "peer_repair.hirsel" = "peer"
 "router.hirsel" = "router"
 "router_route.hirsel" = "router"
+"router_remote.hirsel" = "router"
 "router_fence.hirsel" = "router"
 "router_dynacast.hirsel" = "router"
 "router_observe.hirsel" = "router"
@@ -49,12 +50,16 @@ rtp_jitter = { major = 1, path = "../rtp_jitter" }
 "signal_room.hirsel" = "signal"
 "signal_ledger.hirsel" = "signal"
 "signal_bridge.hirsel" = "signal"
+"signal_cascade.hirsel" = "signal"
 "cascade/directory.hirsel" = "cascade"
 "cascade/canon.hirsel" = "cascade"
 "cascade/wire.hirsel" = "cascade"
 "cascade/link.hirsel" = "cascade"
+"cascade/link_drain.hirsel" = "cascade"
 "cascade/cost.hirsel" = "cascade"
-"cascade/forward.hirsel" = "cascade"
+"cascade/adapter.hirsel" = "cascade"
+"cascade/adapter_events.hirsel" = "cascade"
+"cascade/adapter_io.hirsel" = "cascade"
 "moq_bridge.hirsel" = "bridge"
 "moq_bridge_io.hirsel" = "bridge"
 "cascade/repair.hirsel" = "cascade"
@@ -105,7 +110,7 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "vectors/chromium_rtp.hirsel" = "vectors"
 
 [tests.runs."webrtc_sfu@1/laws/service_answers_over_the_room"]
-limit = 1342177280
+limit = 1476395008
 
 [tests.runs."webrtc_sfu@1/laws/pool_room_cost_is_exact"]
 limit = 268435456

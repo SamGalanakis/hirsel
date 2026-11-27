@@ -155,3 +155,40 @@ pub fn rewrite_to_canon(pkt: Bytes, codec: sdp.Codec, src_map: rtp.ext.ExtMap, m
     list.append(mut out, list.slice(pkt, pay_at, pay_at + pay_len))
     Ok(())
 }
+
+/// Rewrite one plaintext RTP packet from a local unit's `Carried.Media` (`peer.MediaIn`)
+/// directly into an owned canonical `quic.PayloadSlice` once per packet (CAS-2, CAS-3).
+pub fn rewrite_from_media(pkt: Bytes, m: peer.MediaIn, codec: sdp.Codec) -> Result[quic.PayloadSlice, rtp.header.WriteError] {
+    let end = m.payload_at + m.payload_len
+    if end > list.len(pkt) {
+        return Error(Form)
+    }
+    let dst_map = canon_ext_map()
+    let mut w = rtp.ext.writer()
+    if let Some(level) = m.audio_level {
+        let vad = match m.voice {
+            Some(v) => v,
+            None => false,
+        }
+        let _ = rtp.ext.put_level(mut w, dst_map, vad, level)
+    }
+    if m.dd_len > 0 && m.dd_at + m.dd_len <= list.len(pkt) {
+        let _ = rtp.ext.put(mut w, dst_map, DependencyDescriptor, pkt, m.dd_at, m.dd_len)
+    }
+    if let Some(o) = m.orientation {
+        let mut ob: Bytes = list.with_capacity(1)
+        list.push(mut ob, o)
+        let _ = rtp.ext.put(mut w, dst_map, VideoOrientation, ob, 0, 1)
+    }
+    let seq: u16 = int.truncate(m.index)
+    let fields = rtp.header.Fields(marker: m.marker, pt: canon_pt(codec), seq: seq, ts: m.ts, ssrc: m.ssrc)
+    let mut out: Bytes = list.with_capacity(12 + 32 + m.payload_len)
+    let _ = rtp.header.write(fields, view w, mut out)?
+    list.append(mut out, list.slice(pkt, m.payload_at, end))
+    Ok(quic.payload_whole(shared.new(take out)))
+}
+
+/// Wrap an already-canonical RTP packet buffer as a tight owned `quic.PayloadSlice`.
+pub fn canon_slice(take buf: Bytes) -> quic.PayloadSlice {
+    quic.payload_whole(shared.new(take buf))
+}

@@ -312,9 +312,9 @@ fn want(mut rec: Recorder, i: u64) {
     post_bare(mut rec, t.home, Wanted(room: t.room, publication: t.publication, src: t.owner, unit: unit, mask: mask))
 }
 
-fn post_bare(mut rec: Recorder, to: u16, carry: webrtc_sfu.router.Carry) {
+fn post_bare(mut rec: Recorder, to: u16, take carry: webrtc_sfu.router.Carry) {
     let packet = shared.share(rec.empty)
-    list.push(mut rec.posts, webrtc_sfu.router.Post(to: to, carried: webrtc_sfu.router.Carried(carry: carry, packet: packet)))
+    list.push(mut rec.posts, webrtc_sfu.router.Post(to: to, carried: webrtc_sfu.router.Carried(carry: take carry, packet: packet)))
 }
 
 fn ask_key(mut rec: Recorder, i: u64) {

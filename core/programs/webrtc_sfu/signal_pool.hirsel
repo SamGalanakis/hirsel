@@ -37,9 +37,9 @@ pub fn room_name(b: Bytes) -> RoomName {
     RoomName(n)
 }
 
-pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName)
+pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName) | AttachCascade(name: RoomName, home: bool, term: u64) | DetachCascade(name: RoomName)
 
-pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: peer.RoomId) | Empty(name: RoomName, room: peer.RoomId, idle_ns: u64) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: peer.RoomId) | BridgeDetached(name: RoomName, room: peer.RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal)
+pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: peer.RoomId) | Empty(name: RoomName, room: peer.RoomId, idle_ns: u64) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: peer.RoomId) | BridgeDetached(name: RoomName, room: peer.RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal) | CascadeAttached(name: RoomName, room: peer.RoomId) | CascadeDetached(name: RoomName, room: peer.RoomId) | CascadeRefused(name: RoomName, why: PoolRefusal)
 
 pub type PoolRefusal: send = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(router.RouterError)
 
@@ -217,6 +217,13 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
                 Attached => list.push(mut p.reports, BridgeAttached(name: name, room: room)),
                 Detached => list.push(mut p.reports, BridgeDetached(name: name, room: room)),
                 Refused(take why) => list.push(mut p.reports, BridgeRefused(name: name, why: take why)),
+            }
+        }
+        for take ev in replace(mut p.served[i].a.cascade_events, list.new()) {
+            match take ev {
+                Attached => list.push(mut p.reports, CascadeAttached(name: name, room: room)),
+                Detached => list.push(mut p.reports, CascadeDetached(name: name, room: room)),
+                Refused(take why) => list.push(mut p.reports, CascadeRefused(name: name, why: take why)),
             }
         }
     }

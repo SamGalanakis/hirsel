@@ -85,8 +85,11 @@ pub type Event = Fenced(peer.Participant) | Fault(room: peer.RoomId, error: rout
 pub opaque type Unit {
     r: router.Router,
     index: u16,
+    virtual_mask: u64,
     virtual: Option[VirtualUnit],
+    cascade: Option[VirtualUnit],
     bridge_replies: List[BridgeReply],
+    cascade_replies: List[CascadeReply],
     doors: List[Doors],
     control: Inbox[ControlMessage],
     media: Inbox[router.Carried],
@@ -279,7 +282,7 @@ pub fn unit_with(r: Random, index: u16, doors: List[Doors], take control: Inbox[
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, virtual: None, bridge_replies: list.new(), doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, datagram_bytes: width, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, virtual_mask: 0, virtual: None, cascade: None, bridge_replies: list.new(), cascade_replies: list.new(), doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, datagram_bytes: width, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {
@@ -482,12 +485,21 @@ fn admit(mut u: Unit, now: u64) {
 fn start_call(mut u: Unit, now: u64, i: u64, c: router.Change, fence: bool) {
     let change: router.Change = match c {
         Publish(room: room, who: who, section: section, id: _, shape: _) => Publish(room: room, who: who, section: section, id: router.next_publication(mut u.r), shape: None),
+        PublishRemote(room: room, who: who, section: section, id: id, shape: shape, via: via) => {
+            let assigned = if id == PublicationId(0) {
+                router.next_publication(mut u.r)
+            } else {
+                id
+            }
+            PublishRemote(room: room, who: who, section: section, id: assigned, shape: shape, via: via)
+        },
         other => other,
     }
     let first = router.first(u.r, change)
-    let home = match u.virtual {
-        Some(v) if first == v.index => 0u16,
-        _ => first,
+    let home = if (u.virtual_mask >> int.widen(first)) & 1 != 0 {
+        0u16
+    } else {
+        first
     }
     u.calls[i].seq += 1
     let seq = u.calls[i].seq
@@ -677,7 +689,22 @@ pub fn take_control(mut u: Unit, now: u64) {
                     list.push(mut u.bridge_replies, BridgeReply(room: room, serial: serial, answer: take a))
                 }
             },
+            Ok(ControlMessage(step: CascadeAck(room: room, serial: serial, unit: from, answer: take a), opus_fmtp: _)) => {
+                if u.index == 0 && u.cascade == virtual_unit(from) && u.cascade != None && router.room_open(u.r, room) {
+                    list.push(mut u.cascade_replies, CascadeReply(room: room, serial: serial, answer: take a))
+                }
+            },
+            Ok(ControlMessage(step: CascadePropose(change: change), opus_fmtp: _)) => {
+                if u.index == 0 && u.cascade != None {
+                    let room = router.change_room(change)
+                    if router.room_open(u.r, room) {
+                        let ci = calls_of(mut u, room)
+                        list.push(mut u.calls[ci].pending, change)
+                    }
+                }
+            },
             Ok(ControlMessage(step: BridgeOrder(..), opus_fmtp: _)) => (),
+            Ok(ControlMessage(step: CascadeOrder(..), opus_fmtp: _)) => (),
             Error(_) => break,
         }
     }
@@ -685,6 +712,9 @@ pub fn take_control(mut u: Unit, now: u64) {
         {
             let r = view (u.r)
             list.retain(mut u.bridge_replies, scoped fn(a: BridgeReply) -> bool {
+                router.room_open(r, a.room)
+            })
+            list.retain(mut u.cascade_replies, scoped fn(a: CascadeReply) -> bool {
                 router.room_open(r, a.room)
             })
         }

@@ -1,5 +1,6 @@
 // SFU cascade KS2 laws: K3 (`one_copy_per_layer_per_node`),
-// K7 (`congested_link_costs_its_rooms`), and K8 (`attach_cost_is_exact`).
+// K7 (`congested_link_costs_its_rooms`), and K8 (`attach_cost_is_exact`),
+// wired through real `router.Router` + `cascade.CascadeAdapter` + `router.Observer`.
 const K3_HOME_ADDR: Addr = Addr(ip: V4(0x0a020001), port: 4510)
 
 const K3_EDGE_A_ADDR: Addr = Addr(ip: V4(0x0a020002), port: 4511)
@@ -18,6 +19,8 @@ const K7_EDGE_B_ADDR: Addr = Addr(ip: V4(0x0a030003), port: 4522)
 
 const K2_END: u64 = 8000 * MS
 
+const K_ROOM: peer.RoomId = RoomId(1)
+
 fn make_canon_rtp(codec: sdp.Codec, seq: u16, ts: u32, ssrc: u32, payload_len: u64) -> Bytes {
     let mut out: Bytes = list.with_capacity(12 + payload_len)
     let w = rtp.ext.writer()
@@ -26,22 +29,200 @@ fn make_canon_rtp(codec: sdp.Codec, seq: u16, ts: u32, ssrc: u32, payload_len: u
     take out
 }
 
-fn three_rids() -> List[Bytes] {
-    let mut r: List[Bytes] = list.with_capacity(3)
-    list.push(mut r, b"q")
-    list.push(mut r, b"h")
-    list.push(mut r, b"f")
-    take r
-}
-
-fn one_rid() -> List[Bytes] {
-    let mut r: List[Bytes] = list.with_capacity(1)
-    list.push(mut r, b"q")
-    take r
-}
-
 fn k_room_limits() -> router.RoomLimits {
     router.RoomLimits(participants: 64, ids: 64, publications: 4, down_tracks: 64, audio_forward: 0, pause_delay_ms: 5000, pause: false)
+}
+
+// ---- Shared KNode harness: real `router.Router` (Unit 0) + `cascade.CascadeAdapter` (Unit 1) ----
+// Subscribers placed on Unit 2 are tracked solely through `obs2: router.Observer` (unit 2) so
+// every control change (`Subscribe`, `Unsubscribe`, `Revoke`, `Close`) and every media/SR
+// fan-out flows through `router.Router` with zero parallel routing tables.
+type KDelivered {
+    room: peer.RoomId,
+    subscriber: u64,
+    pub_id: router.PublicationId,
+    owner: peer.Gen,
+    encoding: u8,
+    seq: u16,
+    ts: u32
+}
+
+type KNode {
+    r: router.Router,
+    a: cascade.CascadeAdapter,
+    obs2: router.Observer,
+    out: peer.Outbox,
+    empty: Shared[Bytes],
+    seqs: List[(peer.RoomId, u64)],
+    delivered: List[KDelivered],
+    sr_seen: List[(peer.RoomId, router.PublicationId, u32, rtp.rtcp.SenderInfo)],
+    keys_seen: List[(peer.RoomId, router.PublicationId, u8, rtp.loss.Why)]
+}
+
+fn new_knode(seed: u64, nid: cascade.NodeId, lim: cascade.LinkLimits) -> KNode {
+    let empty: Bytes = list.new()
+    KNode(r: router.on_unit(provide.random(seed), 0), a: cascade.cascade_adapter(1, nid, lim), obs2: router.new_observer(2), out: result.unwrap(peer.outbox(262144, 256)), empty: shared.new(take empty), seqs: list.new(), delivered: list.new(), sr_seen: list.new(), keys_seen: list.new())
+}
+
+fn knode_next_seq(mut n: KNode, room: peer.RoomId) -> u64 {
+    for i in 0u64 .. list.len(n.seqs) {
+        if n.seqs[i].0 == room {
+            let s = n.seqs[i].1 + 1
+            n.seqs[i] = (room, s)
+            return s
+        }
+    }
+    list.push(mut n.seqs, (room, 1))
+    1
+}
+
+fn knode_apply(mut n: KNode, mut hub: cascade.LinkHub, now_ns: u64, c: router.Change) -> Result[router.Answer, router.RouterError] {
+    let ans = router.apply(mut n.r, now_ns, c, mut n.out)?
+    let resolved: router.Change = match c {
+        PublishRemote(room: room, who: who, section: sec, id: _, shape: sh, via: via) => match ans {
+            Shaped(id: assigned, shape: _) => PublishRemote(room: room, who: who, section: sec, id: assigned, shape: sh, via: via),
+            _ => c,
+        },
+        Publish(room: room, who: who, section: sec, id: id, shape: _) => match ans {
+            Shaped(id: assigned, shape: sh) => Publish(room: room, who: who, section: sec, id: assigned, shape: Some(sh)),
+            _ => c,
+        },
+        other => other,
+    }
+    let room = router.change_room(resolved)
+    let seq = knode_next_seq(mut n, room)
+    let _ = cascade.control(mut n.a, mut hub, now_ns, Order(room: room, seq: seq, change: resolved))
+    let _ = router.observer_apply(mut n.obs2, room, seq, resolved)
+    Ok(ans)
+}
+
+fn knode_sync_unit2_wants(mut n: KNode, room: peer.RoomId, pub_id: router.PublicationId, now_ns: u64) {
+    let Some(info) = router.observer_publication(n.obs2, room, pub_id) else {
+        return
+    }
+    let mut mask = 0u8
+    for d in router.observer_downs(n.obs2, room) {
+        if d.publication == pub_id {
+            if let Layer(encoding: e, ..) = d.target {
+                let bit: u8 = int.narrow(1u64 << int.widen(e))
+                mask = mask | bit
+            }
+        }
+    }
+    let carried = router.Carried(carry: Wanted(room: room, publication: pub_id, src: info.owner, unit: 2, mask: mask), packet: shared.share(n.empty))
+    let _ = router.accept(mut n.r, now_ns, take carried, mut n.out)
+}
+
+fn knode_open_room(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, lim: router.RoomLimits, now_ns: u64) {
+    let _ = result.unwrap(knode_apply(mut n, mut hub, now_ns, Open(room: room, limits: lim)))
+}
+
+fn knode_publish_synthetic(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, who: peer.Gen, section: u8, id: router.PublicationId, codec: sdp.Codec, encodings: u8, now_ns: u64) -> router.PublicationId {
+    let _ = knode_apply(mut n, mut hub, now_ns, Admit(who: peer.Participant(gen: who, room: room), home: 2))
+    let shape = router.Shape(codec: codec, pli: true, fir: true, encodings: encodings)
+    let ans = result.unwrap(knode_apply(mut n, mut hub, now_ns, PublishRemote(room: room, who: who, section: section, id: id, shape: shape, via: 3)))
+    match ans {
+        Shaped(id: assigned, shape: _) => assigned,
+        _ => id,
+    }
+}
+
+fn knode_subscribe(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, sub_id: u64, pub_id: router.PublicationId, encoding: u8, now_ns: u64) {
+    let sub: peer.Gen = Gen(id: sub_id, epoch: 1)
+    let _ = knode_apply(mut n, mut hub, now_ns, Admit(who: peer.Participant(gen: sub, room: room), home: 2))
+    let target: router.Target = Layer(encoding: encoding, spatial: 0, temporal: 0)
+    let _ = knode_apply(mut n, mut hub, now_ns, Subscribe(room: room, who: sub, p: pub_id, section: 0, target: target))
+    knode_sync_unit2_wants(mut n, room, pub_id, now_ns)
+}
+
+fn knode_unsubscribe(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, sub_id: u64, pub_id: router.PublicationId, now_ns: u64) {
+    let sub: peer.Gen = Gen(id: sub_id, epoch: 1)
+    let _ = knode_apply(mut n, mut hub, now_ns, Unsubscribe(room: room, who: sub, p: pub_id))
+    knode_sync_unit2_wants(mut n, room, pub_id, now_ns)
+}
+
+fn knode_inject_media(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, pub_id: router.PublicationId, owner: peer.Gen, encoding: u8, take pkt: Bytes, now_ns: u64) {
+    let _ = router.inject_remote_media(mut n.r, now_ns, room, pub_id, owner, encoding, cascade.canon_slice(take pkt), mut n.out)
+    knode_pump(mut n, mut hub, now_ns)
+}
+
+fn knode_inject_sr(mut n: KNode, mut hub: cascade.LinkHub, room: peer.RoomId, pub_id: router.PublicationId, owner: peer.Gen, encoding: u8, sr: cascade.SrTiming, now_ns: u64) {
+    let hi_w: u64 = int.widen(sr.ntp_hi)
+    let lo_w: u64 = int.widen(sr.ntp_lo)
+    let ntp: u64 = (hi_w << 32u64) | lo_w
+    let info = rtp.rtcp.SenderInfo(ssrc: 0, ntp: ntp, rtp: sr.rtp_ts, packets: sr.packets, octets: sr.octets)
+    let _ = router.inject_remote_sr(mut n.r, now_ns, room, pub_id, owner, encoding, info)
+    knode_pump(mut n, mut hub, now_ns)
+}
+
+fn knode_pump(mut n: KNode, mut hub: cascade.LinkHub, now_ns: u64) {
+    for _ in 0u64 .. 16 {
+        let mut progressed = false
+        let changes = cascade.take_changes(mut n.a)
+        if list.len(changes) != 0 {
+            progressed = true
+            for c in changes {
+                let _ = knode_apply(mut n, mut hub, now_ns, c)
+            }
+        }
+        let posts_a = cascade.take_posts(mut n.a)
+        if list.len(posts_a) != 0 {
+            progressed = true
+            for take p in take posts_a {
+                let router.Post(to: to, carried: take carried) = take p
+                if to == 0 {
+                    let _ = router.accept(mut n.r, now_ns, take carried, mut n.out)
+                }
+            }
+        }
+        let posts_r = router.take_posts(mut n.r)
+        if list.len(posts_r) != 0 {
+            progressed = true
+            for take p in take posts_r {
+                let router.Post(to: to, carried: take carried) = take p
+                if to == 1 {
+                    cascade.carried(mut n.a, mut hub, now_ns, take carried)
+                } else if to == 2 {
+                    let router.Carried(carry: take carry, packet: _) = take carried
+                    match take carry {
+                        Media(room: room, publication: pub_id, src: src, m: m, ..) => {
+                            let seq: u16 = int.truncate(m.index)
+                            for d in router.observer_downs(n.obs2, room) {
+                                if d.publication == pub_id {
+                                    if let Layer(encoding: e, ..) = d.target {
+                                        if e == m.encoding {
+                                            let Gen(id: sid, epoch: _) = d.sub
+                                            list.push(mut n.delivered, KDelivered(room: room, subscriber: sid, pub_id: pub_id, owner: src, encoding: m.encoding, seq: seq, ts: m.ts))
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Sender(room: room, publication: pub_id, owner: _, source: src, info: info) => {
+                            list.push(mut n.sr_seen, (room, pub_id, src, info))
+                        },
+                        Key(room: room, publication: pub_id, encoding: enc, why: why) => {
+                            list.push(mut n.keys_seen, (room, pub_id, enc, why))
+                        },
+                        _ => (),
+                    }
+                }
+            }
+        }
+        if !progressed {
+            break
+        }
+    }
+}
+
+fn knode_step(mut n: KNode, mut hub: cascade.LinkHub, take events: List[cascade.LinkEvent], now_ns: u64) {
+    cascade.handle_events(mut n.a, mut hub, take events, now_ns / MS)
+    let _ = router.poll(mut n.r, now_ns, mut n.out)
+    knode_pump(mut n, mut hub, now_ns)
+}
+
+fn knode_take_delivered(mut n: KNode) -> List[KDelivered] {
+    replace(mut n.delivered, list.new())
 }
 
 // ---- K3: one_copy_per_layer_per_node ----
@@ -80,7 +261,9 @@ type K3HomeStats: send {
     fwd_enc0: u64,
     fwd_enc1: u64,
     fwd_enc2: u64,
-    fwd_total: u64
+    fwd_total: u64,
+    reflected_to_b: u64,
+    home_local_delivered: u64
 }
 
 type K3EdgeAStats: send {
@@ -96,7 +279,8 @@ type K3EdgeBStats: send {
     sent_enc0: u64,
     sent_enc1: u64,
     sent_enc2: u64,
-    sent_total: u64
+    sent_total: u64,
+    paused_after_delay: bool
 }
 
 fn k3_home_task(take cfg: K3HomeCfg) -> K3HomeStats waits {
@@ -104,17 +288,50 @@ fn k3_home_task(take cfg: K3HomeCfg) -> K3HomeStats waits {
     let mut sock = take given
     let lim = cascade.default_link_limits()
     let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(3001), lim, rebuild_id(take k, take c), take pins, 8))
-    let mut cr = cascade.cascade_router(nid, lim)
-    result.unwrap(cascade.open_home_room(mut cr, b"room-k3", 1, k_room_limits()))
-    let mut stats = K3HomeStats(fwd_enc0: 0, fwd_enc1: 0, fwd_enc2: 0, fwd_total: 0)
+    let mut n = new_knode(3011, nid, lim)
+    let mut rlim = k_room_limits()
+    rlim.pause_delay_ms = 200
+    knode_open_room(mut n, mut hub, K_ROOM, rlim, 0)
+    result.unwrap(cascade.open_home_room(mut n.a, K_ROOM, b"room-k3", 1, rlim))
+    let b_id = cascade.node_id(b"edge-b-k3")
+    let pub1_key = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
+    let mut home_subbed = false
+    let mut home_unsubbed = false
+    let mut stats = K3HomeStats(fwd_enc0: 0, fwd_enc1: 0, fwd_enc2: 0, fwd_total: 0, reflected_to_b: 0, home_local_delivered: 0)
     let mut events: List[cascade.LinkEvent] = list.new()
     let end = 2500 * MS
     while host.mono_ns(clock) < end {
         let now = host.mono_ns(clock)
         result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 10 * MS, end), mut events))
-        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        let cur = host.mono_ns(clock)
+        knode_step(mut n, mut hub, take events, cur)
         events = list.new()
-        for f in cascade.take_forward_logs(mut cr) {
+        // Review S5 K3 lifecycle: add a local Home subscriber after Edge A already pulled enc 0,
+        // then remove it after Edge A drops enc 0 to observe pause_delay_ms turn-off.
+        if !home_subbed && cur >= 800 * MS {
+            if let Some(pid) = cascade.remote_pub_id(n.a, b"room-k3", pub1_key) {
+                knode_subscribe(mut n, mut hub, K_ROOM, 60, pid, 0, cur)
+                knode_pump(mut n, mut hub, cur)
+                home_subbed = true
+            }
+        }
+        if home_subbed && !home_unsubbed && cur >= 1500 * MS {
+            if let Some(pid) = cascade.remote_pub_id(n.a, b"room-k3", pub1_key) {
+                knode_unsubscribe(mut n, mut hub, K_ROOM, 60, pid, cur)
+                knode_pump(mut n, mut hub, cur)
+                home_unsubbed = true
+            }
+        }
+        for d in knode_take_delivered(mut n) {
+            if d.subscriber == 60 && d.encoding == 0 {
+                stats.home_local_delivered += 1
+            }
+        }
+        let hb_opt = cascade.find_link(hub, b_id)
+        for f in cascade.take_forward_logs(mut n.a) {
+            if hb_opt == Some(f.handle) {
+                stats.reflected_to_b += 1
+            }
             stats.fwd_total += 1
             if f.encoding == 0 {
                 stats.fwd_enc0 += 1
@@ -135,10 +352,14 @@ fn k3_edge_a_task(take cfg: K3EdgeACfg) -> K3EdgeAStats waits {
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
     let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(3002), lim, take id1, node_pins(hid, clone(hpin)), 4))
-    let mut cr = cascade.cascade_router(nid, lim)
+    let mut n = new_knode(3012, nid, lim)
+    let mut rlim = k_room_limits()
+    rlim.pause_delay_ms = 100
+    knode_open_room(mut n, mut hub, K_ROOM, rlim, 0)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
     let mut attached = false
     let mut subscribed = false
+    let mut unsubbed_low = false
     let pub1 = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
     let pub2 = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 2)
     let mut stats = K3EdgeAStats(sub_low_total: 0, sub_mid_total: 0, sub_high_total: 0, pub2_total: 0, sr_matched: false)
@@ -155,22 +376,40 @@ fn k3_edge_a_task(take cfg: K3EdgeACfg) -> K3EdgeAStats waits {
                 }
             }
         }
-        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        let cur = host.mono_ns(clock)
+        knode_step(mut n, mut hub, take events, cur)
         events = list.new()
         if got_up && !attached {
-            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, b"room-k3", h_home, 1, k_room_limits()))
+            let _ = result.unwrap(cascade.attach_edge_room(mut n.a, mut hub, K_ROOM, b"room-k3", h_home, 1, rlim))
+            knode_pump(mut n, mut hub, cur)
             attached = true
         }
-        if attached && !subscribed && host.mono_ns(clock) >= 200 * MS {
-            // 50 local subscribers wanting low (encoding 0) and 1 wanting high (encoding 2).
-            for s in 1u64 .. 51u64 {
-                result.unwrap(cascade.subscribe_local(mut cr, mut hub, b"room-k3", s, pub1, 0))
+        if attached && !subscribed {
+            if let Some(pid1) = cascade.remote_pub_id(n.a, b"room-k3", pub1) {
+                // 50 local subscribers wanting low (encoding 0) and 1 wanting high (encoding 2).
+                for s in 10u64 .. 60u64 {
+                    knode_subscribe(mut n, mut hub, K_ROOM, s, pid1, 0, cur)
+                }
+                knode_subscribe(mut n, mut hub, K_ROOM, 61, pid1, 2, cur)
+                knode_pump(mut n, mut hub, cur)
+                subscribed = true
             }
-            result.unwrap(cascade.subscribe_local(mut cr, mut hub, b"room-k3", 51, pub1, 2))
-            subscribed = true
         }
-        for d in cascade.take_delivered(mut cr) {
-            if d.pub_key == pub2 {
+        // After the 10-packet burst finishes (1200 ms), Edge A drops all its enc 0 and enc 2 subs;
+        // Home's local sub (1500 ms) keeps enc 0 alive until 1500 ms + pause_delay_ms!
+        if subscribed && !unsubbed_low && cur >= 1200 * MS {
+            if let Some(pid1) = cascade.remote_pub_id(n.a, b"room-k3", pub1) {
+                for s in 10u64 .. 60u64 {
+                    knode_unsubscribe(mut n, mut hub, K_ROOM, s, pid1, cur)
+                }
+                knode_unsubscribe(mut n, mut hub, K_ROOM, 61, pid1, cur)
+                knode_pump(mut n, mut hub, cur)
+                unsubbed_low = true
+            }
+        }
+        let pid2_opt = cascade.remote_pub_id(n.a, b"room-k3", pub2)
+        for d in knode_take_delivered(mut n) {
+            if pid2_opt == Some(d.pub_id) {
                 stats.pub2_total += 1
             } else if d.encoding == 0 {
                 stats.sub_low_total += 1
@@ -180,7 +419,7 @@ fn k3_edge_a_task(take cfg: K3EdgeACfg) -> K3EdgeAStats waits {
                 stats.sub_high_total += 1
             }
         }
-        if let Some(sr) = cascade.remote_sr(cr, b"room-k3", pub1, 0) {
+        if let Some(sr) = cascade.remote_sr(n.a, b"room-k3", pub1, 0) {
             if sr.ntp_hi == 0x11223344 && sr.rtp_ts == 90000 {
                 stats.sr_matched = true
             }
@@ -196,14 +435,19 @@ fn k3_edge_b_task(take cfg: K3EdgeBCfg) -> K3EdgeBStats waits {
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
     let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(3003), lim, take id1, node_pins(hid, clone(hpin)), 4))
-    let mut cr = cascade.cascade_router(nid, lim)
+    let mut n = new_knode(3013, nid, lim)
+    let mut rlim = k_room_limits()
+    rlim.pause_delay_ms = 100
+    knode_open_room(mut n, mut hub, K_ROOM, rlim, 0)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
     let mut attached = false
     let mut admit_asked = false
     let mut published_ok = false
+    let mut pub1_id: router.PublicationId = PublicationId(0)
+    let mut pub2_id: router.PublicationId = PublicationId(0)
     let mut sent_count = 0u16
     let mut next_send_ns = 700 * MS
-    let mut stats = K3EdgeBStats(admitted_id: 0, sent_enc0: 0, sent_enc1: 0, sent_enc2: 0, sent_total: 0)
+    let mut stats = K3EdgeBStats(admitted_id: 0, sent_enc0: 0, sent_enc1: 0, sent_enc2: 0, sent_total: 0, paused_after_delay: false)
     let mut events: List[cascade.LinkEvent] = list.new()
     let end = 2500 * MS
     while host.mono_ns(clock) < end {
@@ -217,50 +461,56 @@ fn k3_edge_b_task(take cfg: K3EdgeBCfg) -> K3EdgeBStats waits {
                 }
             }
         }
-        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        let cur = host.mono_ns(clock)
+        knode_step(mut n, mut hub, take events, cur)
         events = list.new()
         if got_up && !attached {
-            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, b"room-k3", h_home, 1, k_room_limits()))
+            let _ = result.unwrap(cascade.attach_edge_room(mut n.a, mut hub, K_ROOM, b"room-k3", h_home, 1, rlim))
+            knode_pump(mut n, mut hub, cur)
             attached = true
         }
-        if attached && !admit_asked && host.mono_ns(clock) >= 150 * MS {
-            result.unwrap(cascade.request_edge_admit(mut cr, mut hub, b"room-k3", 77, 0))
+        if attached && !admit_asked && cur >= 150 * MS {
+            result.unwrap(cascade.request_edge_admit(mut n.a, mut hub, b"room-k3", 77, 0))
             admit_asked = true
         }
-        for adm in cascade.take_admitted(mut cr) {
+        for adm in cascade.take_admitted(mut n.a) {
             if adm.req_id == 77 && adm.ok {
                 stats.admitted_id = adm.participant
                 if !published_ok {
-                    let pub1 = cascade.PubKey(participant: adm.participant, epoch: adm.epoch, pub_slot: 1)
-                    let pub2 = cascade.PubKey(participant: adm.participant, epoch: adm.epoch, pub_slot: 2)
-                    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k3", pub1, Vp8, three_rids()))
-                    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k3", pub2, Vp8, one_rid()))
+                    let who: peer.Gen = Gen(id: adm.participant, epoch: adm.epoch)
+                    pub1_id = knode_publish_synthetic(mut n, mut hub, K_ROOM, who, 0, PublicationId(1), Vp8, 3, cur)
+                    pub2_id = knode_publish_synthetic(mut n, mut hub, K_ROOM, who, 1, PublicationId(2), Vp8, 1, cur)
+                    knode_pump(mut n, mut hub, cur)
                     published_ok = true
                 }
             }
         }
-        let cur = host.mono_ns(clock)
         if published_ok && sent_count < 10 && cur >= next_send_ns {
-            let pub1 = cascade.PubKey(participant: stats.admitted_id, epoch: 1, pub_slot: 1)
-            let pub2 = cascade.PubKey(participant: stats.admitted_id, epoch: 1, pub_slot: 2)
-            let now_ms = cur / MS
+            let who: peer.Gen = Gen(id: stats.admitted_id, epoch: 1)
             let sc_u32: u32 = int.widen(sent_count)
             let ts: u32 = 90000u32 + sc_u32 * 3000u32
             if sent_count == 0 {
-                cascade.forward_local_sr(mut cr, mut hub, b"room-k3", pub1, 0, cascade.SrTiming(ntp_hi: 0x11223344, ntp_lo: 0x55667788, rtp_ts: 90000, packets: 1, octets: 200))
+                knode_inject_sr(mut n, mut hub, K_ROOM, pub1_id, who, 0, cascade.SrTiming(ntp_hi: 0x11223344, ntp_lo: 0x55667788, rtp_ts: 90000, packets: 1, octets: 200), cur)
             }
             for enc in 0u8 .. 3u8 {
                 let enc_u32: u32 = int.widen(enc)
                 let pkt = make_canon_rtp(Vp8, sent_count + 1, ts, 0x100u32 + enc_u32, 120)
-                cascade.forward_local_rtp(mut cr, mut hub, b"room-k3", pub1, enc, pkt, now_ms)
+                knode_inject_media(mut n, mut hub, K_ROOM, pub1_id, who, enc, take pkt, cur)
             }
-            // Second publisher: nobody subscribed to it on Edge A.
+            // Second publisher: nobody subscribed to it anywhere.
             let pkt2 = make_canon_rtp(Vp8, sent_count + 1, ts, 0x200, 120)
-            cascade.forward_local_rtp(mut cr, mut hub, b"room-k3", pub2, 0, pkt2, now_ms)
+            knode_inject_media(mut n, mut hub, K_ROOM, pub2_id, who, 0, take pkt2, cur)
             sent_count += 1
             next_send_ns = cur + 20 * MS
         }
-        for f in cascade.take_forward_logs(mut cr) {
+        // After Home's local sub leaves at 1500 ms + pause_delay_ms (200 ms) + Edge B pause_delay_ms (100 ms),
+        // confirm Edge B's router published_mask for pub1 dropped back to 0!
+        if published_ok && cur >= 2200 * MS {
+            if router.published_mask(n.r, K_ROOM, pub1_id) == Some(0) {
+                stats.paused_after_delay = true
+            }
+        }
+        for f in cascade.take_forward_logs(mut n.a) {
             stats.sent_total += 1
             if f.encoding == 0 {
                 stats.sent_enc0 += 1
@@ -276,11 +526,11 @@ fn k3_edge_b_task(take cfg: K3EdgeBCfg) -> K3EdgeBStats waits {
 
 /// bug: an edge sends duplicate copies per subscriber across a link, forwards layers
 /// outside the union wanted mask (such as the middle simulcast layer or an unsubscribed
-/// publisher), fails to assign canonical participant IDs at home, or drops RTCP SRs.
-/// oracle: docs/spec/sfu_cascade.md K3 and CAS-3: with 50 low-layer and 1 high-layer
-/// subscribers on edge A to publisher 1 on edge B and 0 subscribers to publisher 2,
-/// 10 packets cross B->home and home->A once each for low and high (20 total per hop,
-/// 0 mid, 0 pub2), yielding 500 low + 10 high local deliveries on A plus exact SR timing.
+/// publisher), reflects packets back to the source edge, fails to keep remote demand
+/// alive while local demand holds or pause after `pause_delay_ms`, fails to assign
+/// canonical participant IDs at home, or drops RTCP SRs.
+/// oracle: docs/spec/sfu_cascade.md K3 and CAS-3, driven through real `router.Router`
+/// + `cascade.CascadeAdapter`.
 @test
 fn one_copy_per_layer_per_node(tasks: Tasks) -> Result[(), ()] waits {
     let script = std.sim.world.Script(tail_seed: 303, streams: list.new())
@@ -322,8 +572,17 @@ fn one_copy_per_layer_per_node(tasks: Tasks) -> Result[(), ()] waits {
     if h_s.fwd_enc0 != 10 || h_s.fwd_enc1 != 0 || h_s.fwd_enc2 != 10 || h_s.fwd_total != 20 {
         fail("home->edge A did not forward exactly 1 copy of low and high (and 0 mid / pub2)")
     }
+    if h_s.reflected_to_b != 0 {
+        fail("home reflected remote packets back to source edge B")
+    }
+    if h_s.home_local_delivered == 0 {
+        fail("home local subscriber did not receive edge B's remote publication via router.inject_remote_media")
+    }
+    if !b_s.paused_after_delay {
+        fail("edge B did not pause publication after last subscriber departed and pause_delay_ms elapsed")
+    }
     if a_s.sub_low_total != 500 || a_s.sub_mid_total != 0 || a_s.sub_high_total != 10 || a_s.pub2_total != 0 {
-        fail("edge A local fanout did not deliver 50x10 low, 1x10 high, 0 mid, 0 pub2")
+        fail("edge A local router fanout did not deliver 50x10 low, 1x10 high, 0 mid, 0 pub2")
     }
     if !a_s.sr_matched {
         fail("forwarded RTCP SR timing did not reach edge A")
@@ -400,6 +659,9 @@ fn shaper_task(take cfg: ShaperCfg) -> u64 waits {
 type K7HomeStats: send {
     shaped_max_enc: u8,
     shaped_shed: u64,
+    ceil1_allowed_e0: u64,
+    ceil1_allowed_e1: u64,
+    ceil1_sent_e2: u64,
     clean_max_enc: u8,
     clean_shed: u64,
     clean_enc0: u64,
@@ -419,13 +681,17 @@ fn k7_home_task(take cfg: K3HomeCfg) -> K7HomeStats waits {
     let mut lim = cascade.default_link_limits()
     lim.link_bytes = 262144
     let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(7001), lim, rebuild_id(take k, take c), take pins, 8))
-    let mut cr = cascade.cascade_router(nid, lim)
-    result.unwrap(cascade.open_home_room(mut cr, b"room-shaped", 1, k_room_limits()))
-    result.unwrap(cascade.open_home_room(mut cr, b"room-clean", 1, k_room_limits()))
-    let p_shaped = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
-    let p_clean = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
-    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-shaped", p_shaped, Vp8, three_rids()))
-    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-clean", p_clean, Vp8, three_rids()))
+    let mut n = new_knode(7011, nid, lim)
+    let r_shaped: peer.RoomId = RoomId(1)
+    let r_clean: peer.RoomId = RoomId(2)
+    knode_open_room(mut n, mut hub, r_shaped, k_room_limits(), 0)
+    knode_open_room(mut n, mut hub, r_clean, k_room_limits(), 0)
+    result.unwrap(cascade.open_home_room(mut n.a, r_shaped, b"room-shaped", 1, k_room_limits()))
+    result.unwrap(cascade.open_home_room(mut n.a, r_clean, b"room-clean", 1, k_room_limits()))
+    let owner: peer.Gen = Gen(id: 1, epoch: 1)
+    let p_shaped = knode_publish_synthetic(mut n, mut hub, r_shaped, owner, 0, PublicationId(1), Vp8, 3, 0)
+    let p_clean = knode_publish_synthetic(mut n, mut hub, r_clean, owner, 0, PublicationId(1), Vp8, 3, 0)
+    knode_pump(mut n, mut hub, 0)
     let a_id = cascade.node_id(b"edge-a-k7")
     let b_id = cascade.node_id(b"edge-b-k7")
     let mut seq = 1u16
@@ -433,14 +699,22 @@ fn k7_home_task(take cfg: K3HomeCfg) -> K7HomeStats waits {
     let mut clean_e0 = 0u64
     let mut clean_e1 = 0u64
     let mut clean_e2 = 0u64
+    let mut ceil1_e0 = 0u64
+    let mut ceil1_e1 = 0u64
+    let mut ceil1_e2 = 0u64
     let mut events: List[cascade.LinkEvent] = list.new()
     let end = 3600 * MS
     while host.mono_ns(clock) < end {
         let now = host.mono_ns(clock)
         result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 5 * MS, end), mut events))
         let cur = host.mono_ns(clock)
-        cascade.handle_events(mut cr, mut hub, take events, cur / MS)
+        knode_step(mut n, mut hub, take events, cur)
         events = list.new()
+        let ha_opt = cascade.find_link(hub, a_id)
+        let a_ceil_before = match ha_opt {
+            Some(ha) => cascade.link_max_encoding(n.a, ha),
+            None => cascade.MAX_ENC_INDEX,
+        }
         if cur >= next_send && cur < 3200 * MS {
             // 3 layers x 1,150 bytes every 15 ms = ~1.84 Mbit/s (> 1 Mbit/s shaped link!).
             let seq_u32: u32 = int.widen(seq)
@@ -448,14 +722,23 @@ fn k7_home_task(take cfg: K3HomeCfg) -> K7HomeStats waits {
             for enc in 0u8 .. 3u8 {
                 let enc_u32: u32 = int.widen(enc)
                 let pkt = make_canon_rtp(Vp8, seq, ts, 0x700u32 + enc_u32, 1138)
-                cascade.forward_local_rtp(mut cr, mut hub, b"room-shaped", p_shaped, enc, clone(pkt), cur / MS)
-                cascade.forward_local_rtp(mut cr, mut hub, b"room-clean", p_clean, enc, pkt, cur / MS)
+                knode_inject_media(mut n, mut hub, r_shaped, p_shaped, owner, enc, clone(pkt), cur)
+                knode_inject_media(mut n, mut hub, r_clean, p_clean, owner, enc, take pkt, cur)
             }
             seq += 1
             next_send = cur + 15 * MS
         }
         let hb_opt = cascade.find_link(hub, b_id)
-        for f in cascade.take_forward_logs(mut cr) {
+        for f in cascade.take_forward_logs(mut n.a) {
+            if ha_opt == Some(f.handle) && a_ceil_before == 1 {
+                if f.encoding == 0 {
+                    ceil1_e0 += 1
+                } else if f.encoding == 1 {
+                    ceil1_e1 += 1
+                } else if f.encoding == 2 {
+                    ceil1_e2 += 1
+                }
+            }
             if hb_opt == Some(f.handle) {
                 if f.encoding == 0 {
                     clean_e0 += 1
@@ -469,7 +752,7 @@ fn k7_home_task(take cfg: K3HomeCfg) -> K7HomeStats waits {
     }
     let ha = option.unwrap(cascade.find_link(hub, a_id))
     let hb = option.unwrap(cascade.find_link(hub, b_id))
-    K7HomeStats(shaped_max_enc: cascade.link_max_encoding(cr, ha), shaped_shed: cascade.link_shed_packets(cr, ha), clean_max_enc: cascade.link_max_encoding(cr, hb), clean_shed: cascade.link_shed_packets(cr, hb), clean_enc0: clean_e0, clean_enc1: clean_e1, clean_enc2: clean_e2)
+    K7HomeStats(shaped_max_enc: cascade.link_max_encoding(n.a, ha), shaped_shed: cascade.link_shed_packets(n.a, ha), ceil1_allowed_e0: ceil1_e0, ceil1_allowed_e1: ceil1_e1, ceil1_sent_e2: ceil1_e2, clean_max_enc: cascade.link_max_encoding(n.a, hb), clean_shed: cascade.link_shed_packets(n.a, hb), clean_enc0: clean_e0, clean_enc1: clean_e1, clean_enc2: clean_e2)
 }
 
 type K7EdgeCfg: send {
@@ -492,7 +775,8 @@ fn k7_edge_task(take cfg: K7EdgeCfg) -> K7EdgeStats waits {
     let id1 = rebuild_id(secret.share(k), clone(c))
     let id2 = rebuild_id(take k, take c)
     let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(seed), lim, take id1, node_pins(hid, clone(hpin)), 4))
-    let mut cr = cascade.cascade_router(nid, lim)
+    let mut n = new_knode(seed + 10, nid, lim)
+    knode_open_room(mut n, mut hub, K_ROOM, k_room_limits(), 0)
     let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, daddr, single_pin(hpin), 0, take id2))
     let mut attached = false
     let mut subbed = false
@@ -511,19 +795,24 @@ fn k7_edge_task(take cfg: K7EdgeCfg) -> K7EdgeStats waits {
                 }
             }
         }
-        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        let cur = host.mono_ns(clock)
+        knode_step(mut n, mut hub, take events, cur)
         events = list.new()
         if got_up && !attached {
-            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, clone(rname), h_home, 1, k_room_limits()))
+            let _ = result.unwrap(cascade.attach_edge_room(mut n.a, mut hub, K_ROOM, clone(rname), h_home, 1, k_room_limits()))
+            knode_pump(mut n, mut hub, cur)
             attached = true
         }
-        if attached && !subbed && host.mono_ns(clock) >= 250 * MS {
-            result.unwrap(cascade.subscribe_local(mut cr, mut hub, clone(rname), 1, pub1, 0))
-            result.unwrap(cascade.subscribe_local(mut cr, mut hub, clone(rname), 2, pub1, 1))
-            result.unwrap(cascade.subscribe_local(mut cr, mut hub, clone(rname), 3, pub1, 2))
-            subbed = true
+        if attached && !subbed {
+            if let Some(pid1) = cascade.remote_pub_id(n.a, rname, pub1) {
+                knode_subscribe(mut n, mut hub, K_ROOM, 10, pid1, 0, cur)
+                knode_subscribe(mut n, mut hub, K_ROOM, 11, pid1, 1, cur)
+                knode_subscribe(mut n, mut hub, K_ROOM, 12, pid1, 2, cur)
+                knode_pump(mut n, mut hub, cur)
+                subbed = true
+            }
         }
-        for d in cascade.take_delivered(mut cr) {
+        for d in knode_take_delivered(mut n) {
             if d.encoding == 0 {
                 stats.enc0 += 1
             } else if d.encoding == 1 {
@@ -536,11 +825,13 @@ fn k7_edge_task(take cfg: K7EdgeCfg) -> K7EdgeStats waits {
     stats
 }
 
-/// bug: congestion on one cascade link either fails to shed higher layers on that link
-/// or penalizes rooms carried on another uncongested link.
+/// bug: congestion on one cascade link either fails to shed higher layers on that link,
+/// miscomputes numeric ceiling 1 (blocking encoding 1 instead of allowing 0 and 1 while
+/// shedding 2), or penalizes rooms carried on another uncongested link.
 /// oracle: docs/spec/sfu_cascade.md K7 and CAS-3: with link A shaped to 1 Mbit/s and
 /// link B unshaped, home lowers layers (`max_encoding < 2`, `shed > 0`) on link A while
-/// link B keeps `max_encoding == 3`, `shed == 0`, and delivers every layer (0, 1, 2).
+/// ceiling 1 allows both encoding 0 and encoding 1 and sheds 2, and link B keeps
+/// `max_encoding == 3`, `shed == 0`, and delivers every layer (0, 1, 2).
 @test
 fn congested_link_costs_its_rooms(tasks: Tasks) -> Result[(), ()] waits {
     let script = std.sim.world.Script(tail_seed: 707, streams: list.new())
@@ -582,6 +873,9 @@ fn congested_link_costs_its_rooms(tasks: Tasks) -> Result[(), ()] waits {
     if hs.shaped_max_enc >= 2 || hs.shaped_shed == 0 {
         fail("home did not lower layers on the 1 Mbit/s shaped link")
     }
+    if hs.ceil1_sent_e2 != 0 || (hs.ceil1_allowed_e0 > 0 && hs.ceil1_allowed_e1 == 0) {
+        fail("numeric ceiling 1 did not allow both encoding 0 and encoding 1 while shedding encoding 2")
+    }
     if hs.clean_max_enc != cascade.MAX_ENC_INDEX || hs.clean_shed != 0 {
         fail("congestion on the shaped link spilled over to the unshaped link")
     }
@@ -595,25 +889,30 @@ fn congested_link_costs_its_rooms(tasks: Tasks) -> Result[(), ()] waits {
 }
 
 // ---- K8: attach_cost_is_exact ----
-/// bug: attaching a room allocates past `room_cost_cascade().cascade`, fails to return
-/// the exact reservation on detach, or admits a room past `limits.rooms` instead of
-/// refusing by name (`RoomsLimit`).
+/// bug: attaching a room (either `alloc_room_budget` or a real `CascadeAdapter` + `LinkHub`
+/// attach) allocates past `room_cost_cascade().cascade`, fails to charge/refund the exact
+/// reservation on the cascade virtual door, or admits a room past `limits.rooms`.
 /// oracle: docs/spec/sfu_cascade.md K8 and CAS-6, checked against the runtime MEM
-/// ledger (`bound bytes cost.cascade`), `signal.Ledger`, and `limits.rooms`.
+/// ledger (`bound bytes cost.cascade`), `signal.Ledger` with `ledger_cascade`, and `limits.rooms`.
 @test
 fn attach_cost_is_exact() -> Result[(), ()] {
     let session = peer.PeerLimits(sections: 4, down_tracks: 4, rtx_bytes: 65536, pacer_packets: 16, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
     let mut link_lim = cascade.default_link_limits()
     link_lim.rooms = 2
     link_lim.layers = 8
-    // Test two distinct room shapes against the runtime MEM bound (as W34).
     let small = router.RoomLimits(participants: 2, ids: 2, publications: 1, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false)
     let wide = router.RoomLimits(participants: 16, ids: 16, publications: 2, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000, pause: false)
+    let (_, clock) = std.sim.world.new(808, 0, 0)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(811), clock))
+    let nid = cascade.node_id(b"home-k8")
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(812), link_lim, rebuild_id(take hk, take hc), list.new(), 4))
+    let v_casc = option.unwrap(units.virtual_unit(1))
     for lim in[small, wide] {
         let cost = signal.room_cost_cascade(lim, session, link_lim)
         if cost.cascade == 0 {
             fail("room_cost_cascade returned zero cascade cost")
         }
+        // 1. Preallocated room budget fits inside `bound bytes cost.cascade`.
         let checked = bound bytes cost.cascade {
             cascade.alloc_room_budget(lim, link_lim)
         }
@@ -623,42 +922,56 @@ fn attach_cost_is_exact() -> Result[(), ()] {
         if cascade.budget_histories(budget) != cascade.room_layer_cap(lim, link_lim) {
             fail("attached room budget did not preallocate exact RTP-12 histories")
         }
-        // Verify exact ledger reserve + detach refund on unit 0.
-        // Room open requires replicated + control + per_session free, reserving replicated + control;
-        // add one session so remaining headroom is exactly `cost.cascade` (enough for 1 link, not 2).
-        let on0 = cost.replicated + cost.control + cost.per_session + cost.cascade
+        // 2. Real `CascadeAdapter` room open + lease enable + 1-hop history allocations fit inside `bound bytes cost.cascade`.
+        let mut real_a = cascade.cascade_adapter(1, nid, link_lim)
+        let _ = cascade.control(mut real_a, mut hub, 0, Order(room: RoomId(1), seq: 1, change: Open(room: RoomId(1), limits: lim)))
+        let real_ok = bound bytes cost.cascade {
+            let r = cascade.open_home_room(mut real_a, RoomId(1), b"room-real", 1, lim)
+            if let Ok(()) = r {
+                cascade.enable_leases(mut real_a, b"room-real", 10000, list.new())
+                let key = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
+                let pkt = cascade.canon_slice(make_canon_rtp(Vp8, 1, 90000, 0x1, 32))
+                cascade.repair_record(mut real_a, 0, key, 0, 1, take pkt, 1000)
+            }
+            r
+        }
+        let Ok(Ok(())) = real_ok else {
+            fail("real CascadeAdapter room attach + history exceeded room_cost.cascade")
+        }
+        // 3. Exact ledger reserve + detach refund on the cascade virtual unit (unit 1).
+        let on0 = cost.replicated + cost.control + cost.per_session
+        let projection = router.observer_room_bytes(lim)
         let mut free: List[u64] = list.with_capacity(1)
         list.push(mut free, on0)
         let mut l = signal.ledger(take free, 4, session)
+        result.unwrap(signal.ledger_cascade(mut l, v_casc, projection + cost.cascade))
         let room: peer.RoomId = RoomId(1)
         result.unwrap(signal.reserve_room(mut l, room, lim))
         let _ = option.unwrap(signal.reserve_session(mut l, peer.Participant(gen: Gen(id: 1, epoch: 1), room: room)))
-        let before_attach = signal.ledger_free(l, 0)
+        let before_attach = signal.ledger_free(l, 1)
         if before_attach != cost.cascade {
-            fail("ledger headroom before cascade attach did not equal cost.cascade")
+            fail("cascade virtual unit headroom before attach did not equal cost.cascade")
         }
         result.unwrap(signal.reserve_cascade(mut l, room, 1, cost.cascade))
-        if signal.ledger_free(l, 0) != 0 {
-            fail("reserve_cascade did not charge exactly cost.cascade")
+        if signal.ledger_free(l, 1) != 0 {
+            fail("reserve_cascade did not charge exactly cost.cascade on the cascade virtual unit")
         }
-        // A second link attach cannot fit and is refused by name (`Bytes`).
-        let Error(Bytes(unit: 0, need: need, free: had)) = signal.reserve_cascade(mut l, room, 2, cost.cascade) else {
-            fail("over-budget cascade attach was not refused Bytes")
+        let Error(Bytes(unit: 1, need: need, free: had)) = signal.reserve_cascade(mut l, room, 2, cost.cascade) else {
+            fail("over-budget cascade attach was not refused Bytes on unit 1")
         }
         if need != cost.cascade || had != 0 {
             fail("over-budget cascade refusal named wrong need or free")
         }
-        // Detaching returns the exact cascade charge.
         signal.release_cascade(mut l, room, 1)
-        if signal.ledger_free(l, 0) != before_attach {
+        if signal.ledger_free(l, 1) != before_attach {
             fail("detaching cascade link did not refund exact cost.cascade")
         }
     }
     // Verify `limits.rooms` refusal by name (`RoomsLimit`).
-    let mut cr = cascade.cascade_router(cascade.node_id(b"home-k8"), link_lim)
-    result.unwrap(cascade.open_home_room(mut cr, b"r1", 1, small))
-    result.unwrap(cascade.open_home_room(mut cr, b"r2", 1, small))
-    let Error(RoomsLimit) = cascade.open_home_room(mut cr, b"r3", 1, small) else {
+    let mut a = cascade.cascade_adapter(1, nid, link_lim)
+    result.unwrap(cascade.open_home_room(mut a, RoomId(1), b"r1", 1, small))
+    result.unwrap(cascade.open_home_room(mut a, RoomId(2), b"r2", 1, small))
+    let Error(RoomsLimit) = cascade.open_home_room(mut a, RoomId(3), b"r3", 1, small) else {
         fail("attach past limits.rooms was not refused with RoomsLimit")
     }
     Ok(())

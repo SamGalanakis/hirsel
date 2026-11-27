@@ -1663,13 +1663,13 @@ pub type PoolLimits {
     room_pps: u32,             // authenticated datagrams per second per publisher session
     open_pps: Option[u32]      // SRTP open attempts per second per unit, before authentication
 }
-pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName)
-pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: RoomId) | Empty(name: RoomName, room: RoomId, idle_ns: u64) | Closed(name: RoomName, room: RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: RoomId) | BridgeDetached(name: RoomName, room: RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal)
+pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName) | AttachBridge(name: RoomName, max_frame_bytes: u64) | DetachBridge(name: RoomName) | AttachCascade(name: RoomName, home: bool, term: u64) | DetachCascade(name: RoomName)
+pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: RoomId) | Empty(name: RoomName, room: RoomId, idle_ns: u64) | Closed(name: RoomName, room: RoomId, why: CloseWhy) | BridgeAttached(name: RoomName, room: RoomId) | BridgeDetached(name: RoomName, room: RoomId) | BridgeRefused(name: RoomName, why: PoolRefusal) | CascadeAttached(name: RoomName, room: RoomId) | CascadeDetached(name: RoomName, room: RoomId) | CascadeRefused(name: RoomName, why: PoolRefusal)
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
 pub type ServiceTiming: key { udp: units.Timing, active_tick_ns: u64, rejoin_initial_ns: u64, rejoin_max_ns: u64, empty_idle_ns: u64 }
-pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink], bridge: Option[bridge.BridgeLink] }
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink], bridge: Option[bridge.BridgeLink], cascade: Option[cascade.CascadeLink] }
 
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
 pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost
@@ -1678,10 +1678,10 @@ pub type RoomCost { replicated: u64, per_session: u64, per_remote: u64, control:
 
 `serve` becomes `serve_pool` with one `Open` already queued: the single-room service is a
 pool of one room, and there is no second entry point to keep (`/wholehog`). The application
-sends `Open` and `Close` orders on `orders` and reads `PoolReport`s. `RoomName` is the
+sends `Open`, `Close`, bridge, and cascade orders on `orders` and reads `PoolReport`s. `RoomName` is the
 application's name for the room, 32 bytes, opaque to the pool. The pool keeps one
 `Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0). `relay` is the TURN relay link every room mints its credentials from (TURN-11).
-`Pool.cascade` is planned in [SFU cascade](sfu_cascade.md) CAS-6.
+`Pool.cascade` attaches the cascade distribution adapter ([SFU cascade](sfu_cascade.md) CAS-2, CAS-6).
 
 **Accepted-state projection.** `router.Router` owns routing and admission policy.
 Unit 0 orders each room's changes by sequence. A virtual unit applies a change after its
@@ -1704,15 +1704,18 @@ pub fn observer_routing_allowed(obs: Observer, room: peer.RoomId, now_ms: u64) -
 ```
 
 **Virtual door.** A `VirtualUnit` has a control inbox, a media inbox and a doorbell.
-It follows the session-eligible units in `units.Doors`. The 64-door limit includes
-Unit 0 and the virtual door. A pool with a bridge supports 1 to 63 session-eligible
-units. The primary and fallback session-home searches use only session-eligible
-indices. Virtual subscriptions are validated on Unit 0 before they enter the
-accepted order. The virtual unit answers at its own fence point with an `Ack`.
-It receives `router.Carried` media and sends `Post.Wanted` and `Post.Key`.
+Virtual doors follow the session-eligible units in `units.Doors`. The 64-door limit
+includes Unit 0 and every configured virtual door (`Pool.bridge` and/or `Pool.cascade`):
+a pool with one virtual door supports 1 to 63 session-eligible units, and a pool with both
+supports 1 to 62. The primary and fallback session-home searches use only session-eligible
+indices. Virtual subscriptions and remote publications (`Change.PublishRemote`,
+`Origin.Remote(via)`) are validated on Unit 0 before they enter the accepted order. Each
+virtual unit answers at its own fence point with an `Ack`. It receives `router.Carried`
+media/layers/keyframe/SR messages and sends `Carry.Wanted`, `Carry.Demand`, `Carry.Key`,
+`Carry.RemoteMedia`, and `Carry.Sender`.
 
 **Bridge lifecycle.** With `Pool.bridge`, the bridge task and its doors start
-with the pool. `AttachBridge` reserves the room's attachment bytes on the virtual
+with the pool. `AttachBridge` reserves the room's attachment bytes on the bridge virtual
 unit and admits one virtual subscriber seat in that room. The seat counts against
 the room's participant and id limits. The pool installs the attachment at the
 live room's latest sequence and subscribes the seat to the base encodings of
@@ -1724,6 +1727,19 @@ installation failure the pool removes the seat and refunds the reservation.
 the same reservation. `Close` waits for the normal room fence and refunds both
 the attachment and projection. Replies carry the room incarnation and request
 serial.
+
+**Cascade lifecycle.** With `Pool.cascade`, the cascade virtual unit task and its doors
+start with the pool (`cascade.start_cascade`), and `Open` reserves `observer_room_bytes`
+on the cascade virtual unit's ledger. `AttachCascade` reserves `RoomCost.cascade`
+(`cascade.cascade_room_cost`) on the cascade virtual unit's ledger (refusing `NoParticipant`
+when `Pool.cascade` is absent, `NoRoom` when the room is not open, `Exists` on duplicate
+attach, or `Bytes` when the cascade unit lacks space) and sends `Control.CascadeOrder` to
+the cascade door. `DetachCascade` discards staged packets and queued link datagrams,
+clears cascade demand, purges repair histories, and refunds the reservation on
+`CascadeAck`. `Close` waits for the normal room fence and refunds both attachment and
+projection. `Change.Revoke` reserves a fence slot for an absent participant id up to
+`RoomLimits.ids` so cross-node fence tables and revokes hold before rejoin, and
+`Change.SetLease` updates each unit's room lease deadline and purges expired outbox entries.
 
 **Room occupancy and empty-room reclamation.** Unit 0 tracks each serving room's non-service
 seat count (`signal.room_peers`, excluding the service's own `you`/`former` peer numbers).
@@ -1798,10 +1814,11 @@ The service derives its ingress RTX ring from the same packet count. Each sessio
 unit's ledger starts at `unit_bytes` minus the fixed unit cost (`units.fixed_bytes`
 plus `signal.serve_bytes`). Open reserves `replicated` on each of those units and
 `control` on Unit 0. Sessions and remote down-tracks reserve their own terms.
-The bridge's ledger starts at its grant less the socket, inbox, work buffers and
-configured transport budget. Open then reserves the room's Observer projection on
-that ledger. Attach reserves `RoomCost.bridge` there. `signal.room_cost` has zero
-optional attachment terms.
+The bridge and cascade virtual doors' ledgers start at their grants less their sockets,
+inboxes, work buffers and configured transport budgets. Open then reserves each room's
+Observer projection on every configured virtual door. `AttachBridge` reserves
+`RoomCost.bridge` on the bridge door and `AttachCascade` reserves `RoomCost.cascade`
+on the cascade door. `signal.room_cost` has zero optional attachment terms.
 
 **The fixed cost (as built in P3).** `units.fixed_bytes` is the unit's control and media
 inboxes at their byte budgets, its outbox, its receive, batch and slot buffers, the socket's

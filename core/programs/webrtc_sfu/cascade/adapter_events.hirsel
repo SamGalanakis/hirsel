@@ -1,0 +1,549 @@
+// CAS-2 & CAS-3: Media-inbox forwarding, LinkEvent dispatch, and room stream handlers.
+/// Consume one media-inbox message from `router.Router`:
+/// - `Media`: canonicalize a local publication's packet to `quic.PayloadSlice` and forward on links.
+/// - `Layers`: forward the router's coalesced published wanted mask upstream as `WantedMask`.
+/// - `Key`: forward the router's coalesced keyframe request upstream as `SwitchReq`.
+/// - `Sender`: forward a local publication's RTCP Sender Report over the room stream.
+pub fn carried(mut a: CascadeAdapter, mut hub: LinkHub, now_ns: u64, take msg: router.Carried) {
+    let now_ms = now_ns / 1000000
+    let router.Carried(carry: take carry, packet: take packet) = take msg
+    match take carry {
+        Media(room: room, publication: pub_id, src: src, m: m, ..) => {
+            let Some(ri) = find_room_by_id(a, room) else {
+                return
+            }
+            if router.observer_fenced(a.obs, room, src) {
+                a.fence.dropped_fenced_media += 1
+                return
+            }
+            if !router.observer_routing_allowed(a.obs, room, now_ms) {
+                a.fence.dropped_expired_media += 1
+                return
+            }
+            let Some(info) = router.observer_publication(a.obs, room, pub_id) else {
+                return
+            }
+            // Never reflect a cascade-origin publication back onto cascade links from `Carry.Media`.
+            if info.origin == Remote(via: a.unit) {
+                return
+            }
+            let Ok(take slice) = rewrite_from_media(packet, m, info.shape.codec) else {
+                return
+            }
+            let key = pub_key_of(info.owner, pub_id)
+            let seq: u16 = int.truncate(m.index)
+            let ts = m.ts
+            let encoding = m.encoding
+            repair_record(mut a, ri, key, encoding, seq, quic.payload_share(slice), now_ns)
+            if a.rooms[ri].role == Edge {
+                let Some(h) = a.rooms[ri].home_handle else {
+                    return
+                }
+                if !a.rooms[ri].edge_attached {
+                    return
+                }
+                let bit: u8 = int.narrow(1u64 << int.widen(encoding))
+                if (local_wanted_mask_for(a.rooms[ri], key) & bit) == 0 {
+                    return
+                }
+                let ci = find_congestion(mut a, h)
+                if encoding > a.congestion[ci].max_encoding {
+                    a.congestion[ci].shed_packets += 1
+                    return
+                }
+                let rn = a.rooms[ri].edge_room_num
+                if let Some(ln) = find_local_upstream_layer(a.rooms[ri], pub_id, encoding) {
+                    send_and_log(mut a, mut hub, h, rn, ln, encoding, seq, ts, take slice, now_ms)
+                }
+                return
+            }
+            forward_to_edges(mut a, mut hub, ri, None, key, encoding, seq, ts, take slice, now_ms)
+        },
+        Layers(room: room, publication: pub_id, src: _, mask: mask) => {
+            let Some(ri) = find_room_by_id(a, room) else {
+                return
+            }
+            for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                if a.rooms[ri].remote_links[pi].pub_id == Some(pub_id) {
+                    a.rooms[ri].remote_links[pi].published_mask = mask
+                    send_upstream_wanted_if_changed(mut a, mut hub, ri, pi)
+                    return
+                }
+            }
+        },
+        Key(room: room, publication: pub_id, encoding: enc, why: why) => {
+            let Some(ri) = find_room_by_id(a, room) else {
+                return
+            }
+            let fir = why == Switch
+            for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                if a.rooms[ri].remote_links[pi].pub_id == Some(pub_id) {
+                    if a.rooms[ri].role == Edge && !a.rooms[ri].edge_attached {
+                        return
+                    }
+                    let src_h = a.rooms[ri].remote_links[pi].source_handle
+                    let src_rn = a.rooms[ri].remote_links[pi].source_room_num
+                    for li in 0u64 .. list.len(a.rooms[ri].remote_links[pi].layers) {
+                        if a.rooms[ri].remote_links[pi].layers[li].encoding == enc {
+                            let src_ln = a.rooms[ri].remote_links[pi].layers[li].layer_num
+                            let term = a.rooms[ri].term
+                            let rseq = a.rooms[ri].next_room_seq
+                            a.rooms[ri].next_room_seq += 1
+                            a.repair.counts.pli_forwarded += 1
+                            let _ = send_room_msg(mut hub, src_h, src_rn, SwitchReq(room_num: src_rn, term: term, seq: rseq, layer_num: src_ln, fir: fir))
+                            return
+                        }
+                    }
+                    return
+                }
+            }
+        },
+        Sender(room: room, publication: pub_id, owner: owner, source: source, info: sr_info) => {
+            let Some(ri) = find_room_by_id(a, room) else {
+                return
+            }
+            let Some(pub_info) = router.observer_publication(a.obs, room, pub_id) else {
+                return
+            }
+            if pub_info.origin == Remote(via: a.unit) {
+                return
+            }
+            let Some(enc_u64) = router.source_encoding(pub_id, source) else {
+                return
+            }
+            let enc: u8 = int.narrow(enc_u64)
+            let key = pub_key_of(owner, pub_id)
+            let ntp_hi: u32 = int.truncate(sr_info.ntp >> 32u64)
+            let ntp_lo: u32 = int.truncate(sr_info.ntp)
+            let sr = SrTiming(ntp_hi: ntp_hi, ntp_lo: ntp_lo, rtp_ts: sr_info.rtp, packets: sr_info.packets, octets: sr_info.octets)
+            if a.rooms[ri].role == Edge {
+                let Some(h) = a.rooms[ri].home_handle else {
+                    return
+                }
+                if !a.rooms[ri].edge_attached {
+                    return
+                }
+                let rn = a.rooms[ri].edge_room_num
+                let term = a.rooms[ri].term
+                if let Some(ln) = find_local_upstream_layer(a.rooms[ri], pub_id, enc) {
+                    let seq = a.rooms[ri].next_room_seq
+                    a.rooms[ri].next_room_seq += 1
+                    let _ = send_room_msg(mut hub, h, rn, SenderReport(room_num: rn, term: term, seq: seq, layer_num: ln, ntp_hi: sr.ntp_hi, ntp_lo: sr.ntp_lo, rtp_ts: sr.rtp_ts, packets: sr.packets, octets: sr.octets))
+                }
+                return
+            }
+            forward_sr_to_edges(mut a, mut hub, ri, None, key, enc, sr)
+        },
+        _ => (),
+    }
+}
+
+fn send_upstream_wanted_if_changed(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, pi: u64) {
+    if a.rooms[ri].role == Edge && !a.rooms[ri].edge_attached {
+        return
+    }
+    if list.len(a.rooms[ri].remote_links[pi].layers) == 0 {
+        return
+    }
+    let mask = a.rooms[ri].remote_links[pi].published_mask
+    if a.rooms[ri].remote_links[pi].last_sent_mask == mask {
+        return
+    }
+    a.rooms[ri].remote_links[pi].last_sent_mask = mask
+    let src_h = a.rooms[ri].remote_links[pi].source_handle
+    let src_rn = a.rooms[ri].remote_links[pi].source_room_num
+    let key = a.rooms[ri].remote_links[pi].key
+    let term = a.rooms[ri].term
+    let seq = a.rooms[ri].next_room_seq
+    a.rooms[ri].next_room_seq += 1
+    let _ = send_room_msg(mut hub, src_h, src_rn, WantedMask(room_num: src_rn, term: term, seq: seq, participant: key.participant, epoch: key.epoch, pub_slot: key.pub_slot, mask: mask))
+}
+
+fn forward_sr_to_edges(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, skip: Option[quic.ConnectionHandle], key: PubKey, encoding: u8, sr: SrTiming) {
+    let term = a.rooms[ri].term
+    let bit: u8 = int.narrow(1u64 << int.widen(encoding))
+    for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+        let h = a.rooms[ri].edges[ei].handle
+        if skip == Some(h) || !a.rooms[ri].edges[ei].attached {
+            continue
+        }
+        if (edge_wanted_mask(a.rooms[ri].edges[ei], key) & bit) == 0 {
+            continue
+        }
+        let rn = a.rooms[ri].edges[ei].room_num
+        let mut target_ln: Option[u32] = None
+        for oi in 0u64 .. list.len(a.rooms[ri].edges[ei].outbound_layers) {
+            if a.rooms[ri].edges[ei].outbound_layers[oi].key == key && a.rooms[ri].edges[ei].outbound_layers[oi].encoding == encoding {
+                target_ln = Some(a.rooms[ri].edges[ei].outbound_layers[oi].layer_num)
+                break
+            }
+        }
+        if let Some(ln) = target_ln {
+            let seq = a.rooms[ri].next_room_seq
+            a.rooms[ri].next_room_seq += 1
+            let _ = send_room_msg(mut hub, h, rn, SenderReport(room_num: rn, term: term, seq: seq, layer_num: ln, ntp_hi: sr.ntp_hi, ntp_lo: sr.ntp_lo, rtp_ts: sr.rtp_ts, packets: sr.packets, octets: sr.octets))
+        }
+    }
+}
+
+fn forward_to_edges(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, skip: Option[quic.ConnectionHandle], key: PubKey, encoding: u8, seq: u16, ts: u32, take rtp_pkt: quic.PayloadSlice, now_ms: u64) {
+    let bit: u8 = int.narrow(1u64 << int.widen(encoding))
+    for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+        let h = a.rooms[ri].edges[ei].handle
+        if skip == Some(h) || !a.rooms[ri].edges[ei].attached {
+            continue
+        }
+        if (edge_wanted_mask(a.rooms[ri].edges[ei], key) & bit) == 0 {
+            continue
+        }
+        let ci = find_congestion(mut a, h)
+        // Numeric ceiling: max_encoding == 1 permits BOTH encoding 0 and encoding 1, shedding 2+.
+        if encoding > a.congestion[ci].max_encoding {
+            a.congestion[ci].shed_packets += 1
+            continue
+        }
+        let rn = a.rooms[ri].edges[ei].room_num
+        let mut target_ln: Option[u32] = None
+        for o in a.rooms[ri].edges[ei].outbound_layers {
+            if o.key == key && o.encoding == encoding {
+                target_ln = Some(o.layer_num)
+                break
+            }
+        }
+        if let Some(ln) = target_ln {
+            send_and_log(mut a, mut hub, h, rn, ln, encoding, seq, ts, quic.payload_share(rtp_pkt), now_ms)
+        }
+    }
+}
+
+fn send_and_log(mut a: CascadeAdapter, mut hub: LinkHub, h: quic.ConnectionHandle, rn: u32, ln: u32, encoding: u8, seq: u16, ts: u32, take rtp_pkt: quic.PayloadSlice, now_ms: u64) {
+    match send_media(mut hub, h, rn, ln, take rtp_pkt) {
+        Ok(()) => {
+            list.push(mut a.forward_logs, ForwardLog(handle: h, room_num: rn, layer_num: ln, encoding: encoding, seq: seq, ts: ts))
+        },
+        Error(Quic(Limit)) => {
+            note_link_limit_drop(mut a, h, now_ms)
+        },
+        Error(_) => (),
+    }
+}
+
+/// Process a batch of `LinkEvent`s from `LinkHub` into `CascadeAdapter`.
+pub fn handle_events(mut a: CascadeAdapter, mut hub: LinkHub, take events: List[LinkEvent], now_ms: u64) {
+    poll_congestion(mut a, hub, now_ms)
+    enforce_leases(mut a, mut hub, now_ms)
+    for take ev in take events {
+        match take ev {
+            LinkUp(handle: h, ..) => {
+                let _ = find_congestion(mut a, h)
+            },
+            LinkDown(handle: h, ..) => on_link_lost(mut a, h),
+            RoomDetached(room_num: rn, malformed: m, ..) => {
+                if m {
+                    list.push(mut a.fence.detached_malformed, rn)
+                }
+            },
+            ControlIn(handle: h, msg: take msg) => on_ctrl_msg(mut a, mut hub, h, take msg, now_ms),
+            RoomIn(handle: h, room_num: rn, msg: take msg) => on_room_msg(mut a, mut hub, h, rn, take msg, now_ms * 1000000),
+            MediaIn(handle: h, room_num: rn, layer_num: ln, layer: take info, rtp: take pkt) => on_media_in(mut a, mut hub, h, rn, ln, take info, take pkt, now_ms),
+            _ => (),
+        }
+    }
+    flush_pending_fence_acks(mut a, mut hub, now_ms)
+    step_edge_leases(mut a, mut hub, now_ms)
+}
+
+fn on_ctrl_msg(mut a: CascadeAdapter, mut hub: LinkHub, h: quic.ConnectionHandle, take msg: LinkMsg, now_ms: u64) {
+    match take msg {
+        Attach(room_num: rn, term: term, seq: seq, room_name: name) => {
+            let Some(ri) = find_room(a, name) else {
+                a.attach_refusals += 1
+                let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: term, seq: seq, ok: false, reason: REFUSE_UNKNOWN_ROOM))
+                return
+            }
+            if term < a.rooms[ri].term {
+                a.attach_refusals += 1
+                let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: a.rooms[ri].term, seq: seq, ok: false, reason: REFUSE_STALE_TERM))
+                return
+            }
+            if link_room_count(hub, h) >= int.widen(a.limits.rooms) {
+                a.attach_refusals += 1
+                let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: a.rooms[ri].term, seq: seq, ok: false, reason: REFUSE_ROOMS_LIMIT))
+                return
+            }
+            let Some(peer) = link_peer(hub, h) else {
+                close_link(mut hub, h, ERR_MALFORMED_CTRL)
+                return
+            }
+            // Replace any stale EdgeAttachment for the same peer and recompute demand.
+            let mut removed_old = false
+            let mut old_i = 0u64
+            while old_i < list.len(a.rooms[ri].edges) {
+                if a.rooms[ri].edges[old_i].peer == peer {
+                    let _ = list.remove(mut a.rooms[ri].edges, old_i)
+                    removed_old = true
+                } else {
+                    old_i += 1
+                }
+            }
+            if removed_old {
+                recompute_room_demand(mut a, ri)
+            }
+            let _ = attach_room_stream(mut hub, h, rn, a.rooms[ri].term, false)
+            list.push(mut a.rooms[ri].edges, EdgeAttachment(peer: peer, handle: h, room_num: rn, attached: true, outbound_layers: list.new(), wanted: list.new()))
+            let ei = list.len(a.rooms[ri].edges) - 1
+            let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: a.rooms[ri].term, seq: seq, ok: true, reason: REFUSE_OK))
+            on_home_edge_attached(mut a, mut hub, ri, h, rn, peer, now_ms)
+            // Announce all existing local publications from `router.Observer` and remote publications to this edge.
+            let room = a.rooms[ri].room
+            for (pub_id, info) in router.observer_publications(a.obs, room) {
+                if info.origin != Remote(via: a.unit) {
+                    let key = pub_key_of(info.owner, pub_id)
+                    announce_pub_to_edge(mut a, mut hub, ri, ei, key, info.shape.codec, info.shape.encodings)
+                }
+            }
+            let n_remote = list.len(a.rooms[ri].remote_links)
+            for pi in 0u64 .. n_remote {
+                if a.rooms[ri].remote_links[pi].source_handle == h {
+                    continue
+                }
+                let key = a.rooms[ri].remote_links[pi].key
+                let kind = a.rooms[ri].remote_links[pi].kind
+                let total = a.rooms[ri].remote_links[pi].total_encodings
+                announce_pub_to_edge(mut a, mut hub, ri, ei, key, kind, total)
+            }
+        },
+        AttachAck(room_num: rn, term: term, seq: _, ok: ok, reason: _) => {
+            let Some(ri) = find_room_by_link(a, h, rn) else {
+                return
+            }
+            if term < a.rooms[ri].term {
+                return
+            }
+            if !ok {
+                a.attach_refusals += 1
+                detach_room(mut hub, h, rn)
+                return
+            }
+            a.rooms[ri].edge_attached = true
+            sync_room_publications(mut a, mut hub, ri)
+            for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                send_upstream_wanted_if_changed(mut a, mut hub, ri, pi)
+            }
+        },
+        Layer(room_num: rn, term: term, seq: _, layer_num: ln, participant: p, epoch: ep, kind: kind, rid: wire_rid) => {
+            let Some(ri) = find_room_by_link(a, h, rn) else {
+                return
+            }
+            if term < a.rooms[ri].term {
+                return
+            }
+            let (pub_slot, encoding, total_encodings, user_rid) = decode_pub_rid(wire_rid)
+            let key = PubKey(participant: p, epoch: ep, pub_slot: pub_slot)
+            let mut found_pi: Option[u64] = None
+            for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                if a.rooms[ri].remote_links[pi].key == key {
+                    found_pi = Some(pi)
+                    break
+                }
+            }
+            let pi = match found_pi {
+                Some(idx) => {
+                    a.rooms[ri].remote_links[idx].source_handle = h
+                    a.rooms[ri].remote_links[idx].source_room_num = rn
+                    idx
+                },
+                None => {
+                    let sec = a.rooms[ri].next_remote_section
+                    a.rooms[ri].next_remote_section += 1
+                    list.push(mut a.rooms[ri].remote_links, RemoteLink(key: key, kind: kind, total_encodings: total_encodings, local_section: sec, pub_id: None, proposed: false, source_handle: h, source_room_num: rn, layers: list.new(), published_mask: 0, last_sent_mask: 0))
+                    list.len(a.rooms[ri].remote_links) - 1
+                },
+            }
+            let mut updated_layer = false
+            for li in 0u64 .. list.len(a.rooms[ri].remote_links[pi].layers) {
+                if a.rooms[ri].remote_links[pi].layers[li].encoding == encoding {
+                    a.rooms[ri].remote_links[pi].layers[li].layer_num = ln
+                    a.rooms[ri].remote_links[pi].layers[li].rid = clone(user_rid)
+                    updated_layer = true
+                    break
+                }
+            }
+            if !updated_layer {
+                list.push(mut a.rooms[ri].remote_links[pi].layers, RemoteLayer(encoding: encoding, rid: clone(user_rid), layer_num: ln, last_sr: None))
+            }
+            // Propose `Admit` (if remote participant is not yet seated) + `PublishRemote` once per RemoteLink
+            // when the room is not suspended (re-checked automatically when suspension lifts).
+            ensure_remote_publications(mut a, ri)
+            if a.rooms[ri].role == Home {
+                // Re-announce this edge's layer to every OTHER attached edge (star topology).
+                for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+                    if a.rooms[ri].edges[ei].handle == h || !a.rooms[ri].edges[ei].attached {
+                        continue
+                    }
+                    if has_outbound_layer(a.rooms[ri].edges[ei], key, encoding) {
+                        continue
+                    }
+                    let eh = a.rooms[ri].edges[ei].handle
+                    let ern = a.rooms[ri].edges[ei].room_num
+                    let seq = a.rooms[ri].next_ctrl_seq
+                    a.rooms[ri].next_ctrl_seq += 1
+                    let out_rid = encode_pub_rid(pub_slot, encoding, total_encodings, user_rid)
+                    if let Ok(out_ln) = announce_layer(mut hub, eh, ern, a.rooms[ri].term, seq, p, ep, kind, out_rid) {
+                        list.push(mut a.rooms[ri].edges[ei].outbound_layers, OutboundLayer(key: key, encoding: encoding, layer_num: out_ln))
+                    }
+                }
+                recompute_key_demand(mut a, ri, key)
+            } else {
+                send_upstream_wanted_if_changed(mut a, mut hub, ri, pi)
+            }
+        },
+        other => on_fence_ctrl_msg(mut a, mut hub, h, take other, now_ms),
+    }
+}
+
+fn on_room_msg(mut a: CascadeAdapter, mut hub: LinkHub, h: quic.ConnectionHandle, rn: u32, take msg: RoomMsg, now_ns: u64) {
+    let Some(ri) = find_room_by_link(a, h, rn) else {
+        return
+    }
+    let room = a.rooms[ri].room
+    match take msg {
+        AdmitReq(room_num: _, term: term, seq: seq, req_id: req_id, participant_hint: hint) => {
+            if a.rooms[ri].role != Home || term < a.rooms[ri].term {
+                a.fence.stale_msgs_ignored += 1
+                return
+            }
+            if hint != 0 && router.observer_fenced(a.obs, room, Gen(id: hint, epoch: 1)) {
+                let _ = send_room_msg(mut hub, h, rn, AdmitResp(room_num: rn, term: a.rooms[ri].term, seq: seq, req_id: req_id, ok: false, participant: hint, epoch: 1, reason: REFUSE_FENCED))
+                return
+            }
+            let pid = if hint != 0 {
+                if hint >= a.rooms[ri].next_admit_id {
+                    a.rooms[ri].next_admit_id = hint + 1
+                }
+                hint
+            } else {
+                let obs_next = match router.observer_next_id(a.obs, room) {
+                    Some(n) => n,
+                    None => 1u64,
+                }
+                let id = order.max(obs_next, a.rooms[ri].next_admit_id)
+                a.rooms[ri].next_admit_id = id + 1
+                id
+            }
+            let _ = send_room_msg(mut hub, h, rn, AdmitResp(room_num: rn, term: a.rooms[ri].term, seq: seq, req_id: req_id, ok: true, participant: pid, epoch: 1, reason: REFUSE_OK))
+        },
+        AdmitResp(room_num: _, term: term, seq: _, req_id: req_id, ok: ok, participant: p, epoch: ep, reason: why) => {
+            if term < a.rooms[ri].term {
+                a.fence.stale_msgs_ignored += 1
+                return
+            }
+            list.push(mut a.admitted, AdmittedPeer(req_id: req_id, ok: ok, participant: p, epoch: ep, reason: why))
+        },
+        WantedMask(room_num: _, term: term, seq: _, participant: p, epoch: ep, pub_slot: ps, mask: mask) => {
+            if term < a.rooms[ri].term {
+                a.fence.stale_msgs_ignored += 1
+                return
+            }
+            let key = PubKey(participant: p, epoch: ep, pub_slot: ps)
+            if a.rooms[ri].role == Edge {
+                set_local_wanted_mask(mut a.rooms[ri], key, mask)
+                recompute_key_demand(mut a, ri, key)
+                return
+            }
+            if let Some(ei) = find_edge(a.rooms[ri], h) {
+                set_edge_wanted_mask(mut a.rooms[ri].edges[ei], key, mask)
+                recompute_key_demand(mut a, ri, key)
+            }
+        },
+        SenderReport(room_num: _, term: term, seq: _, layer_num: ln, ntp_hi: hi, ntp_lo: lo, rtp_ts: ts, packets: pkts, octets: octs) => {
+            if term < a.rooms[ri].term {
+                return
+            }
+            let sr = SrTiming(ntp_hi: hi, ntp_lo: lo, rtp_ts: ts, packets: pkts, octets: octs)
+            a.sr_received += 1
+            for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                if a.rooms[ri].remote_links[pi].source_handle != h {
+                    continue
+                }
+                let key = a.rooms[ri].remote_links[pi].key
+                let pub_opt = a.rooms[ri].remote_links[pi].pub_id
+                for li in 0u64 .. list.len(a.rooms[ri].remote_links[pi].layers) {
+                    if a.rooms[ri].remote_links[pi].layers[li].layer_num == ln {
+                        let enc = a.rooms[ri].remote_links[pi].layers[li].encoding
+                        a.rooms[ri].remote_links[pi].layers[li].last_sr = Some(sr)
+                        if a.rooms[ri].role == Home {
+                            forward_sr_to_edges(mut a, mut hub, ri, Some(h), key, enc, sr)
+                        }
+                        if let Some(pub_id) = pub_opt {
+                            let owner: peer.Gen = Gen(id: key.participant, epoch: key.epoch)
+                            let src = router.source_id(pub_id, enc)
+                            let hi_w: u64 = int.widen(hi)
+                            let lo_w: u64 = int.widen(lo)
+                            let ntp: u64 = (hi_w << 32u64) | lo_w
+                            let info = rtp.rtcp.SenderInfo(ssrc: 0, ntp: ntp, rtp: ts, packets: pkts, octets: octs)
+                            post_carried(mut a, 0, Sender(room: room, publication: pub_id, owner: owner, source: src, info: info))
+                        }
+                        return
+                    }
+                }
+            }
+        },
+        Nack(room_num: _, term: term, seq: _, layer_num: ln, rtp_seqs: take seqs) => {
+            if term < a.rooms[ri].term {
+                return
+            }
+            on_remote_nack(mut a, mut hub, ri, h, rn, ln, take seqs, now_ns)
+        },
+        SwitchReq(room_num: _, term: term, seq: _, layer_num: ln, fir: fir) => {
+            if term < a.rooms[ri].term {
+                return
+            }
+            on_switch_req(mut a, ri, h, ln, fir)
+        },
+        _ => (),
+    }
+}
+
+fn on_media_in(mut a: CascadeAdapter, mut hub: LinkHub, h: quic.ConnectionHandle, rn: u32, ln: u32, take info: LayerInfo, take pkt: quic.PayloadSlice, now_ms: u64) {
+    let Some(ri) = find_room_by_link(a, h, rn) else {
+        return
+    }
+    if info.term < a.rooms[ri].term {
+        a.fence.stale_msgs_ignored += 1
+        return
+    }
+    let room = a.rooms[ri].room
+    let owner: peer.Gen = Gen(id: info.participant, epoch: info.epoch)
+    // CAS-4: both ends drop a fenced participant's media at ingress.
+    if router.observer_fenced(a.obs, room, owner) {
+        a.fence.dropped_fenced_media += 1
+        return
+    }
+    if !router.observer_routing_allowed(a.obs, room, now_ms) {
+        a.fence.dropped_expired_media += 1
+        return
+    }
+    let (pub_slot, encoding, _, _) = decode_pub_rid(info.rid)
+    let key = PubKey(participant: info.participant, epoch: info.epoch, pub_slot: pub_slot)
+    let (seq, ts) = match rtp.header.parse(quic.payload_bytes(pkt)) {
+        Ok(hdr) => (hdr.seq, hdr.ts),
+        Error(_) => (0u16, 0u32),
+    }
+    repair_record(mut a, ri, key, encoding, seq, quic.payload_share(pkt), now_ms * 1000000)
+    if a.rooms[ri].role == Home {
+        forward_to_edges(mut a, mut hub, ri, Some(h), key, encoding, seq, ts, quic.payload_share(pkt), now_ms)
+    }
+    // Deliver into `router.Router` (Unit 0) as `Carry.RemoteMedia` with zero payload copy.
+    let mut target_pub: Option[router.PublicationId] = None
+    for rl in a.rooms[ri].remote_links {
+        if rl.key == key {
+            target_pub = rl.pub_id
+            break
+        }
+    }
+    if let Some(pub_id) = target_pub {
+        post_carried(mut a, 0, RemoteMedia(room: room, publication: pub_id, src: owner, encoding: encoding, slice: take pkt))
+    }
+    let _ = ln
+}

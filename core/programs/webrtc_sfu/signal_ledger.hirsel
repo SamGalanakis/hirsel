@@ -7,7 +7,9 @@
 /// what it paid for. So two pending `Build`s never both pass a check only one fits.
 pub opaque type Ledger {
     free: List[u64],
+    homes: u64,
     bridge: Option[units.VirtualUnit],
+    cascade: Option[units.VirtualUnit],
     live: List[u32],
     sessions: u32,
     session: peer.PeerLimits,
@@ -35,16 +37,17 @@ type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, p
 /// The ledgers of a pool whose unit `k` has `free[k]` bytes once its fixed cost is
 /// paid, each unit homing at most `sessions` sessions of `session`'s size.
 pub fn ledger(take free: List[u64], sessions: u32, session: peer.PeerLimits) -> Ledger {
+    let n_homes = list.len(free)
     let mut live: List[u32] = list.new()
     for _ in free {
         list.push(mut live, 0)
     }
-    Ledger(free: take free, bridge: None, live: take live, sessions: sessions, session: session, rooms: list.new(), held: list.new())
+    Ledger(free: take free, homes: n_homes, bridge: None, cascade: None, live: take live, sessions: sessions, session: session, rooms: list.new(), held: list.new())
 }
 
-/// Append the funded virtual door after every eligible session home.
+/// Append the funded bridge virtual door after every eligible session home.
 pub fn ledger_bridge(mut l: Ledger, unit: units.VirtualUnit, free: u64) -> Result[(), PoolRefusal] {
-    if l.bridge != None || list.len(l.free) != int.widen(units.virtual_index(unit)) {
+    if l.bridge != None || list.len(l.free) != int.widen(units.virtual_index(unit)) || list.len(l.free) >= int.widen(router.UNITS_MAX) {
         return Error(Exists)
     }
     list.push(mut l.free, free)
@@ -53,12 +56,19 @@ pub fn ledger_bridge(mut l: Ledger, unit: units.VirtualUnit, free: u64) -> Resul
     Ok(())
 }
 
-fn homes(l: Ledger) -> u64 {
-    list.len(l.free) - if l.bridge == None {
-        0u64
-    } else {
-        1u64
+/// Append the funded cascade virtual door after every eligible session home (and optional bridge).
+pub fn ledger_cascade(mut l: Ledger, unit: units.VirtualUnit, free: u64) -> Result[(), PoolRefusal] {
+    if l.cascade != None || list.len(l.free) != int.widen(units.virtual_index(unit)) || list.len(l.free) >= int.widen(router.UNITS_MAX) {
+        return Error(Exists)
     }
+    list.push(mut l.free, free)
+    list.push(mut l.live, 0)
+    l.cascade = Some(unit)
+    Ok(())
+}
+
+fn homes(l: Ledger) -> u64 {
+    l.homes
 }
 
 /// The bytes unit `unit` has left to reserve.
@@ -107,7 +117,7 @@ fn refund(mut l: Ledger, i: u64) {
 // What a room holds on unit `k` from its `Open` until its `Close` completes: its
 // replicated state everywhere, and on the control unit its adapter, bridge and cascade.
 fn room_share(l: Ledger, cost: RoomCost, limits: router.RoomLimits, k: u64) -> u64 {
-    if k == homes(l) {
+    if k >= homes(l) {
         return router.observer_room_bytes(limits)
     }
     if k == 0 {
@@ -257,17 +267,33 @@ pub fn release_room(mut l: Ledger, room: peer.RoomId) {
     })
 }
 
-/// Reserve a cascade link attachment's exact `cost.cascade` term on unit 0 (CAS-6, K8).
+/// Reserve a cascade link attachment's exact `cost.cascade` term on its virtual unit (CAS-6, K8).
 pub fn reserve_cascade(mut l: Ledger, room: peer.RoomId, link: u64, amount: u64) -> Result[(), PoolRefusal] {
-    let free = l.free[0]
-    if free < amount {
-        return Error(Bytes(unit: 0, need: amount, free: free))
+    let Some(v) = l.cascade else {
+        return Error(Limits(NoParticipant))
     }
-    hold(mut l, room, 0, amount, Cascade(link: link))
+    if priced_at(l, room) == None {
+        return Error(Limits(NoRoom))
+    }
+    for h in l.held {
+        if h.room == room {
+            if let Cascade(link: k) = h.what {
+                if k == link {
+                    return Error(Exists)
+                }
+            }
+        }
+    }
+    let unit = units.virtual_index(v)
+    let free = l.free[int.widen(unit)]
+    if amount > free || amount == 0xffffffffffffffff {
+        return Error(Bytes(unit: unit, need: amount, free: free))
+    }
+    hold(mut l, room, unit, amount, Cascade(link: link))
     Ok(())
 }
 
-/// Refund a detached cascade link's reservation on unit 0 (CAS-6, K8).
+/// Refund a detached cascade link's reservation on its virtual unit (CAS-6, K8).
 pub fn release_cascade(mut l: Ledger, room: peer.RoomId, link: u64) {
     let mut i = 0u64
     while i < list.len(l.held) {

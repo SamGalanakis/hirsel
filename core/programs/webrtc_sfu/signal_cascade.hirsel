@@ -1,0 +1,119 @@
+type CascadeStage = Installing(sent: bool) | Live | Detaching(sent: bool)
+
+type RoomCascade {
+    name: Inline[u8, 32],
+    home: bool,
+    term: u64,
+    stage: CascadeStage
+}
+
+type CascadeEvent = Attached | Detached | Refused(PoolRefusal)
+
+fn attach_cascade[M](mut p: Rooms[M], name: RoomName, link_limits: cascade.LinkLimits, home: bool, term: u64) {
+    let Some(i) = named_at(p, name) else {
+        list.push(mut p.reports, CascadeRefused(name: name, why: Limits(NoRoom)))
+        return
+    }
+    let result = request_cascade(mut p.served[i].a, mut p.l, name, link_limits, home, term)
+    if let Error(take why) = take result {
+        list.push(mut p.reports, CascadeRefused(name: name, why: take why))
+    }
+}
+
+fn request_cascade[M](mut a: Adapter[M], mut l: Ledger, name: RoomName, link_limits: cascade.LinkLimits, home: bool, term: u64) -> Result[(), PoolRefusal] {
+    if !serving(a) {
+        return Error(Limits(NoRoom))
+    }
+    let Some(_) = l.cascade else {
+        return Error(Limits(NoParticipant))
+    }
+    if let Some(_) = a.cascade {
+        return Error(Exists)
+    }
+    let cap = cascade.cascade_room_cost(a.limits, link_limits)
+    reserve_cascade(mut l, a.room, 0, cap)?
+    a.cascade_serial += 1
+    let RoomName(raw) = name
+    a.cascade = Some(RoomCascade(name: raw, home: home, term: term, stage: Installing(sent: false)))
+    Ok(())
+}
+
+fn detach_cascade[M](mut p: Rooms[M], name: RoomName) {
+    let Some(i) = named_at(p, name) else {
+        list.push(mut p.reports, CascadeRefused(name: name, why: Limits(NoRoom)))
+        return
+    }
+    let stage = match p.served[i].a.cascade {
+        Some(c) => c.stage,
+        None => {
+            list.push(mut p.reports, CascadeRefused(name: name, why: Limits(NoParticipant)))
+            return
+        },
+    }
+    if let Live = stage {
+        p.served[i].a.cascade_serial += 1
+        if let Some(mut entry) = p.served[i].a.cascade {
+            entry.stage = Detaching(sent: false)
+        }
+    } else {
+        list.push(mut p.reports, CascadeRefused(name: name, why: Exists))
+    }
+}
+
+fn drive_cascade[M](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit) -> Result[(), router.RouterError] {
+    if !serving(a) {
+        return Ok(())
+    }
+    let Some(c) = a.cascade else {
+        return Ok(())
+    }
+    let (sent, attach) = match c.stage {
+        Installing(sent: sent) => (sent, true),
+        Detaching(sent: sent) => (sent, false),
+        Live => return Ok(()),
+    }
+    let room = a.room
+    let ticket = a.cascade_serial
+    if !sent {
+        match units.post_cascade(mut u, room, ticket, attach, c.name, c.home, c.term) {
+            Ok(true) => {
+                if let Some(mut entry) = a.cascade {
+                    entry.stage = if attach {
+                        Installing(sent: true)
+                    } else {
+                        Detaching(sent: true)
+                    }
+                }
+            },
+            Ok(false) => (),
+            Error(take e) => cascade_ack(mut a, mut l, attach, Error(take e))?,
+        }
+    } else if let Some(take answer) = units.cascade_answer(mut u, room, ticket) {
+        cascade_ack(mut a, mut l, attach, take answer)?
+    }
+    Ok(())
+}
+
+fn cascade_ack[M](mut a: Adapter[M], mut l: Ledger, install: bool, take answer: Result[(), router.RouterError]) -> Result[(), router.RouterError] {
+    if install {
+        match take answer {
+            Ok(()) => {
+                if let Some(mut c) = a.cascade {
+                    c.stage = Live
+                }
+                list.push(mut a.cascade_events, Attached)
+            },
+            Error(take e) => {
+                release_cascade(mut l, a.room, 0)
+                a.cascade = None
+                list.push(mut a.cascade_events, Refused(Limits(take e)))
+            },
+        }
+    } else {
+        answer?
+        release_cascade(mut l, a.room, 0)
+        a.cascade = None
+        list.push(mut a.cascade_events, Detached)
+    }
+    Ok(())
+}

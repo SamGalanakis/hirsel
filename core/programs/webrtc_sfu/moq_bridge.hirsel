@@ -392,9 +392,9 @@ fn send_want(mut b: Bridge, i: u64) {
     post_bare(mut b, t.home, Wanted(room: t.room, publication: t.publication, src: t.owner, unit: unit, mask: mask))
 }
 
-fn post_bare(mut b: Bridge, to: u16, carry: router.Carry) {
+fn post_bare(mut b: Bridge, to: u16, take carry: router.Carry) {
     let packet = shared.share(b.empty)
-    list.push(mut b.posts, router.Post(to: to, carried: router.Carried(carry: carry, packet: packet)))
+    list.push(mut b.posts, router.Post(to: to, carried: router.Carried(carry: take carry, packet: packet)))
 }
 
 fn ask_key(mut b: Bridge, i: u64) {

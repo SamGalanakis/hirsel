@@ -1,0 +1,826 @@
+// CAS-2 & CAS-3: Thin cascade distribution adapter over `router.Observer` and a
+// virtual unit door. Room membership, publications, local down-tracks, dynacast
+// wanted masks + pause delay, keyframe coalescing, fences, suspension causes, and
+// lease deadlines live in `router.Router` and are projected here through `a.obs`.
+pub const REFUSE_OK: u32 = 0
+
+pub const REFUSE_ROOMS_LIMIT: u32 = 1
+
+pub const REFUSE_UNKNOWN_ROOM: u32 = 2
+
+pub const REFUSE_STALE_TERM: u32 = 3
+
+pub const REFUSE_FENCED: u32 = 4
+
+pub const MAX_ENC_INDEX: u8 = 3
+
+const CONGESTION_STEP_MS: u64 = 150
+
+const CONGESTION_RECOVER_MS: u64 = 3000
+
+pub type Role: key + cross = Home | Edge
+
+pub type PubKey: key {
+    participant: u64,
+    epoch: u64,
+    pub_slot: u32
+}
+
+pub type SrTiming: key {
+    ntp_hi: u32,
+    ntp_lo: u32,
+    rtp_ts: u32,
+    packets: u32,
+    octets: u32
+}
+
+pub type ForwardLog {
+    handle: quic.ConnectionHandle,
+    room_num: u32,
+    layer_num: u32,
+    encoding: u8,
+    seq: u16,
+    ts: u32
+}
+
+pub type AdmittedPeer: key {
+    req_id: u64,
+    ok: bool,
+    participant: u64,
+    epoch: u64,
+    reason: u32
+}
+
+type LocalLayerMap {
+    pub_id: router.PublicationId,
+    encoding: u8,
+    upstream_layer: Option[u32]
+}
+
+type LocalWanted {
+    key: PubKey,
+    mask: u8
+}
+
+type RemoteLayer {
+    encoding: u8,
+    rid: Bytes,
+    layer_num: u32,
+    last_sr: Option[SrTiming]
+}
+
+type RemoteLink {
+    key: PubKey,
+    kind: sdp.Codec,
+    total_encodings: u8,
+    local_section: u8,
+    pub_id: Option[router.PublicationId],
+    proposed: bool,
+    source_handle: quic.ConnectionHandle,
+    source_room_num: u32,
+    layers: List[RemoteLayer],
+    // Latest published mask told by `router.Router` via `Carry.Layers`.
+    published_mask: u8,
+    // Last `WantedMask` sent over the current link (reset on link loss/reattach).
+    last_sent_mask: u8
+}
+
+type OutboundLayer {
+    key: PubKey,
+    encoding: u8,
+    layer_num: u32
+}
+
+type WantedEntry {
+    key: PubKey,
+    mask: u8
+}
+
+type EdgeAttachment {
+    peer: NodeId,
+    handle: quic.ConnectionHandle,
+    room_num: u32,
+    attached: bool,
+    outbound_layers: List[OutboundLayer],
+    wanted: List[WantedEntry]
+}
+
+type RoomBinding {
+    room: peer.RoomId,
+    room_name: Bytes,
+    role: Role,
+    term: u64,
+    limits: router.RoomLimits,
+    // On Edge: connection to Home and link-local room_num.
+    home_handle: Option[quic.ConnectionHandle],
+    edge_room_num: u32,
+    edge_attached: bool,
+    // Monotonic floor for canonical participant ids handed out to edges on Home.
+    next_admit_id: u64,
+    next_remote_section: u8,
+    local_layers: List[LocalLayerMap],
+    local_wanted: List[LocalWanted],
+    remote_links: List[RemoteLink],
+    edges: List[EdgeAttachment],
+    next_ctrl_seq: u64,
+    next_room_seq: u64
+}
+
+type LinkCongestion {
+    handle: quic.ConnectionHandle,
+    last_late: u64,
+    max_encoding: u8,
+    last_drop_ms: u64,
+    drop_events: u64,
+    shed_packets: u64
+}
+
+/// Thin cascade distribution adapter paired with a `LinkHub` and driven by `router.Observer`.
+pub opaque type CascadeAdapter {
+    unit: u16,
+    node: NodeId,
+    limits: LinkLimits,
+    obs: router.Observer,
+    rooms: List[RoomBinding],
+    congestion: List[LinkCongestion],
+    posts: List[router.Post],
+    changes: List[router.Change],
+    empty: Shared[Bytes],
+    forward_logs: List[ForwardLog],
+    admitted: List[AdmittedPeer],
+    repair: RepairState,
+    fence: FenceState,
+    attach_refusals: u64,
+    sr_received: u64
+}
+
+pub fn cascade_adapter(unit: u16, local_node: NodeId, limits: LinkLimits) -> CascadeAdapter {
+    let empty: Bytes = list.new()
+    CascadeAdapter(unit: unit, node: local_node, limits: limits, obs: router.new_observer(unit), rooms: list.new(), congestion: list.new(), posts: list.new(), changes: list.new(), empty: shared.new(take empty), forward_logs: list.new(), admitted: list.new(), repair: new_repair_state(), fence: new_fence_state(), attach_refusals: 0, sr_received: 0)
+}
+
+pub fn unit_index(a: CascadeAdapter) -> u16 {
+    a.unit
+}
+
+pub fn observer(a: CascadeAdapter) -> View[router.Observer] in a {
+    view (a.obs)
+}
+
+pub fn take_posts(mut a: CascadeAdapter) -> List[router.Post] {
+    replace(mut a.posts, list.new())
+}
+
+pub fn take_changes(mut a: CascadeAdapter) -> List[router.Change] {
+    replace(mut a.changes, list.new())
+}
+
+pub fn take_forward_logs(mut a: CascadeAdapter) -> List[ForwardLog] {
+    replace(mut a.forward_logs, list.new())
+}
+
+pub fn take_admitted(mut a: CascadeAdapter) -> List[AdmittedPeer] {
+    replace(mut a.admitted, list.new())
+}
+
+pub fn attach_refusal_count(a: CascadeAdapter) -> u64 {
+    a.attach_refusals
+}
+
+pub fn sr_received_count(a: CascadeAdapter) -> u64 {
+    a.sr_received
+}
+
+pub fn pub_key_of(owner: peer.Gen, id: router.PublicationId) -> PubKey {
+    let peer.Gen(id: pid, epoch: ep) = owner
+    let router.PublicationId(raw) = id
+    PubKey(participant: pid, epoch: ep, pub_slot: int.truncate(raw))
+}
+
+fn post_carried(mut a: CascadeAdapter, to: u16, take c: router.Carry) {
+    list.push(mut a.posts, router.Post(to: to, carried: router.Carried(carry: take c, packet: shared.share(a.empty))))
+}
+
+fn find_room(a: CascadeAdapter, room_name: Bytes) -> Option[u64] {
+    for i in 0u64 .. list.len(a.rooms) {
+        if list.compare_bytes(a.rooms[i].room_name, room_name) == Equal {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_room_by_id(a: CascadeAdapter, room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(a.rooms) {
+        if a.rooms[i].room == room {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_room_by_link(a: CascadeAdapter, h: quic.ConnectionHandle, room_num: u32) -> Option[u64] {
+    for i in 0u64 .. list.len(a.rooms) {
+        if a.rooms[i].role == Edge {
+            if a.rooms[i].home_handle == Some(h) && a.rooms[i].edge_room_num == room_num {
+                return Some(i)
+            }
+        } else {
+            for e in a.rooms[i].edges {
+                if e.handle == h && e.room_num == room_num {
+                    return Some(i)
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_edge(room: RoomBinding, h: quic.ConnectionHandle) -> Option[u64] {
+    for i in 0u64 .. list.len(room.edges) {
+        if room.edges[i].handle == h {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_congestion(mut a: CascadeAdapter, h: quic.ConnectionHandle) -> u64 {
+    for i in 0u64 .. list.len(a.congestion) {
+        if a.congestion[i].handle == h {
+            return i
+        }
+    }
+    list.push(mut a.congestion, LinkCongestion(handle: h, last_late: 0, max_encoding: MAX_ENC_INDEX, last_drop_ms: 0, drop_events: 0, shed_packets: 0))
+    list.len(a.congestion) - 1
+}
+
+/// Current maximum encoding index allowed on link `h` by congestion control (CAS-3).
+pub fn link_max_encoding(a: CascadeAdapter, h: quic.ConnectionHandle) -> u8 {
+    for c in a.congestion {
+        if c.handle == h {
+            return c.max_encoding
+        }
+    }
+    MAX_ENC_INDEX
+}
+
+/// Packets shed due to congestion on link `h`.
+pub fn link_shed_packets(a: CascadeAdapter, h: quic.ConnectionHandle) -> u64 {
+    for c in a.congestion {
+        if c.handle == h {
+            return c.shed_packets
+        }
+    }
+    0
+}
+
+/// Resolve the local `router.PublicationId` assigned to a remote publication `key`.
+pub fn remote_pub_id(a: CascadeAdapter, room_name: Bytes, key: PubKey) -> Option[router.PublicationId] {
+    let ri = find_room(a, room_name)?
+    for rl in a.rooms[ri].remote_links {
+        if rl.key == key {
+            return rl.pub_id
+        }
+    }
+    None
+}
+
+/// Open a room in the `Home` role for `term` (CAS-1), bound to `room`.
+pub fn open_home_room(mut a: CascadeAdapter, room: peer.RoomId, room_name: Bytes, term: u64, limits: router.RoomLimits) -> Result[(), LinkError] {
+    if find_room(a, room_name) != None || find_room_by_id(a, room) != None {
+        return Error(RoomExists)
+    }
+    if list.len(a.rooms) >= int.widen(a.limits.rooms) {
+        return Error(RoomsLimit)
+    }
+    list.push(mut a.rooms, RoomBinding(room: room, room_name: clone(room_name), role: Home, term: term, limits: limits, home_handle: None, edge_room_num: 0, edge_attached: false, next_admit_id: 1, next_remote_section: 0, local_layers: list.new(), local_wanted: list.new(), remote_links: list.new(), edges: list.new(), next_ctrl_seq: 1, next_room_seq: 1))
+    Ok(())
+}
+
+/// Attach a room in the `Edge` role to `home_handle` (CAS-2, CAS-6), bound to `room`.
+pub fn attach_edge_room(mut a: CascadeAdapter, mut hub: LinkHub, room: peer.RoomId, room_name: Bytes, home_handle: quic.ConnectionHandle, term: u64, limits: router.RoomLimits) -> Result[u32, LinkError] {
+    if find_room(a, room_name) != None || find_room_by_id(a, room) != None {
+        return Error(RoomExists)
+    }
+    if list.len(a.rooms) >= int.widen(a.limits.rooms) {
+        return Error(RoomsLimit)
+    }
+    let rn = alloc_room_num(mut hub, home_handle)?
+    attach_room_stream(mut hub, home_handle, rn, term, true)?
+    send_control(mut hub, home_handle, Attach(room_num: rn, term: term, seq: 1, room_name: clone(room_name)))?
+    list.push(mut a.rooms, RoomBinding(room: room, room_name: clone(room_name), role: Edge, term: term, limits: limits, home_handle: Some(home_handle), edge_room_num: rn, edge_attached: false, next_admit_id: 1, next_remote_section: 0, local_layers: list.new(), local_wanted: list.new(), remote_links: list.new(), edges: list.new(), next_ctrl_seq: 2, next_room_seq: 1))
+    let _ = find_congestion(mut a, home_handle)
+    Ok(rn)
+}
+
+/// Detach a room from cascade, discarding staged packets, dropping queued room datagrams,
+/// clearing demand on local/remote publications, and purging repair histories.
+pub fn detach_cascade_room(mut a: CascadeAdapter, mut hub: LinkHub, room: peer.RoomId, now_ns: u64) -> Result[(), LinkError] {
+    let Some(ri) = find_room_by_id(a, room) else {
+        return Error(UnknownRoom)
+    }
+    let _ = discard_staged(mut hub, now_ns)
+    drop_all_room_datagrams(a, mut hub, ri)
+    clear_local_demand(mut a, ri)
+    if a.rooms[ri].role == Edge {
+        if let Some(h) = a.rooms[ri].home_handle {
+            detach_room(mut hub, h, a.rooms[ri].edge_room_num)
+        }
+    } else {
+        for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+            let eh = a.rooms[ri].edges[ei].handle
+            let ern = a.rooms[ri].edges[ei].room_num
+            detach_room(mut hub, eh, ern)
+        }
+    }
+    let rname: Bytes = clone(a.rooms[ri].room_name)
+    purge_repair_room(mut a, rname)
+    let _ = list.remove(mut a.rooms, ri)
+    Ok(())
+}
+
+fn drop_all_room_datagrams(a: CascadeAdapter, mut hub: LinkHub, ri: u64) {
+    if a.rooms[ri].role == Edge {
+        if let Some(h) = a.rooms[ri].home_handle {
+            let _ = drop_room_datagrams(mut hub, h, a.rooms[ri].edge_room_num)
+        }
+    } else {
+        for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+            let eh = a.rooms[ri].edges[ei].handle
+            let ern = a.rooms[ri].edges[ei].room_num
+            let _ = drop_room_datagrams(mut hub, eh, ern)
+        }
+    }
+}
+
+/// Home allocates a canonical `(participant, epoch)` locally from `router.Observer` (CAS-2 O6).
+pub fn admit_home_participant(mut a: CascadeAdapter, room_name: Bytes) -> Result[(u64, u64), LinkError] {
+    let Some(ri) = find_room(a, room_name) else {
+        return Error(UnknownRoom)
+    }
+    let obs_next = match router.observer_next_id(a.obs, a.rooms[ri].room) {
+        Some(n) => n,
+        None => 1u64,
+    }
+    let pid = order.max(obs_next, a.rooms[ri].next_admit_id)
+    a.rooms[ri].next_admit_id = pid + 1
+    Ok((pid, 1))
+}
+
+/// Edge asks Home to assign a canonical `(participant, epoch)` over the room stream (CAS-2 O6).
+pub fn request_edge_admit(mut a: CascadeAdapter, mut hub: LinkHub, room_name: Bytes, req_id: u64, hint: u64) -> Result[(), LinkError] {
+    let Some(ri) = find_room(a, room_name) else {
+        return Error(UnknownRoom)
+    }
+    let Some(h) = a.rooms[ri].home_handle else {
+        return Error(NotReady)
+    }
+    let rn = a.rooms[ri].edge_room_num
+    let term = a.rooms[ri].term
+    let seq = a.rooms[ri].next_room_seq
+    a.rooms[ri].next_room_seq += 1
+    send_room_msg(mut hub, h, rn, AdmitReq(room_num: rn, term: term, seq: seq, req_id: req_id, participant_hint: hint))
+}
+
+fn trim_room_name(raw: Inline[u8, 32]) -> Bytes {
+    let mut end = 32u64
+    while end > 0 && raw[end - 1] == 0 {
+        end -= 1
+    }
+    let mut out: Bytes = list.with_capacity(end)
+    for i in 0u64 .. end {
+        list.push(mut out, raw[i])
+    }
+    take out
+}
+
+/// Apply an accepted RTC-5 control step or a `CascadeOrder` lifecycle request.
+pub fn control(mut a: CascadeAdapter, mut hub: LinkHub, now_ns: u64, take step: router.Control) -> Option[router.Control] {
+    match take step {
+        Order(room: room, seq: seq, change: c) => {
+            let answer = router.observer_apply(mut a.obs, room, seq, c)
+            if let Ok(_) = answer {
+                on_observed_change(mut a, mut hub, now_ns, room, c)
+            }
+            Some(Ack(room: room, seq: seq, unit: a.unit, answer: take answer))
+        },
+        CascadeOrder(room: room, serial: serial, attach: attach, name: name_raw, home: home, term: term) => {
+            let res: Result[(), router.RouterError] = if attach {
+                if router.observer_sequence(a.obs, room) == None {
+                    Error(NoRoom)
+                } else {
+                    let rname = trim_room_name(name_raw)
+                    let limits = router.RoomLimits(participants: 64, ids: 256, publications: 4, down_tracks: 64, audio_forward: 4, pause_delay_ms: 5000, pause: false)
+                    if home {
+                        match open_home_room(mut a, room, rname, term, limits) {
+                            Ok(()) => {
+                                if let Some(ri) = find_room_by_id(a, room) {
+                                    sync_room_publications(mut a, mut hub, ri)
+                                }
+                                Ok(())
+                            },
+                            Error(RoomExists) => Error(Exists),
+                            Error(_) => Error(Limit(a.limits.rooms)),
+                        }
+                    } else {
+                        match open_home_room(mut a, room, rname, term, limits) {
+                            Ok(()) => {
+                                if let Some(ri) = find_room_by_id(a, room) {
+                                    a.rooms[ri].role = Edge
+                                }
+                                Ok(())
+                            },
+                            Error(RoomExists) => Error(Exists),
+                            Error(_) => Error(Limit(a.limits.rooms)),
+                        }
+                    }
+                }
+            } else {
+                match detach_cascade_room(mut a, mut hub, room, now_ns) {
+                    Ok(()) => Ok(()),
+                    Error(_) => Error(NoRoom),
+                }
+            }
+            Some(CascadeAck(room: room, serial: serial, unit: a.unit, answer: take res))
+        },
+        _ => None,
+    }
+}
+
+fn on_observed_change(mut a: CascadeAdapter, mut hub: LinkHub, now_ns: u64, room: peer.RoomId, c: router.Change) {
+    let now_ms = now_ns / 1000000
+    match c {
+        Publish(room: _, ..) => {
+            if let Some(ri) = find_room_by_id(a, room) {
+                sync_room_publications(mut a, mut hub, ri)
+            }
+        },
+        PublishRemote(room: _, who: who, section: sec, id: id, shape: _, via: via) => {
+            if via != a.unit {
+                if let Some(ri) = find_room_by_id(a, room) {
+                    sync_room_publications(mut a, mut hub, ri)
+                }
+                return
+            }
+            if let Some(ri) = find_room_by_id(a, room) {
+                let Gen(id: wid, epoch: wep) = who
+                let mut matched_key: Option[PubKey] = None
+                for i in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                    let is_none = a.rooms[ri].remote_links[i].pub_id == None
+                    let k = a.rooms[ri].remote_links[i].key
+                    let rsec = a.rooms[ri].remote_links[i].local_section
+                    if is_none && k.participant == wid && k.epoch == wep && rsec == sec {
+                        a.rooms[ri].remote_links[i].pub_id = Some(id)
+                        matched_key = Some(k)
+                        break
+                    }
+                }
+                if let Some(key) = matched_key {
+                    recompute_key_demand(mut a, ri, key)
+                }
+            }
+        },
+        Revoke(room: _, id: pid, epoch: ep) => {
+            if let Some(ri) = find_room_by_id(a, room) {
+                let _ = discard_staged(mut hub, now_ns)
+                drop_all_room_datagrams(a, mut hub, ri)
+                let rname: Bytes = clone(a.rooms[ri].room_name)
+                purge_repair_fenced(mut a, rname, pid, ep)
+                flush_pending_fence_acks(mut a, mut hub, now_ms)
+            }
+        },
+        Suspend(room: _, cause: _, on: on) => {
+            if let Some(ri) = find_room_by_id(a, room) {
+                if on {
+                    let _ = discard_staged(mut hub, now_ns)
+                    drop_all_room_datagrams(a, mut hub, ri)
+                } else if !router.observer_suspended(a.obs, room) {
+                    for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+                        if a.rooms[ri].remote_links[pi].pub_id == None {
+                            a.rooms[ri].remote_links[pi].proposed = false
+                        }
+                    }
+                    ensure_remote_publications(mut a, ri)
+                }
+            }
+        },
+        SetLease(room: _, ..) => {
+            if !router.observer_routing_allowed(a.obs, room, now_ms) {
+                if let Some(ri) = find_room_by_id(a, room) {
+                    let _ = discard_staged(mut hub, now_ns)
+                    drop_all_room_datagrams(a, mut hub, ri)
+                }
+            }
+        },
+        Close(room: _) => {
+            let _ = detach_cascade_room(mut a, mut hub, room, now_ns)
+        },
+        _ => (),
+    }
+}
+
+fn ensure_remote_publications(mut a: CascadeAdapter, ri: u64) {
+    let room = a.rooms[ri].room
+    if router.observer_suspended(a.obs, room) {
+        return
+    }
+    let mut pending_admits: List[peer.Gen] = list.new()
+    for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+        if a.rooms[ri].remote_links[pi].pub_id != None || a.rooms[ri].remote_links[pi].proposed {
+            continue
+        }
+        let key = a.rooms[ri].remote_links[pi].key
+        let who: peer.Gen = Gen(id: key.participant, epoch: key.epoch)
+        if router.observer_fenced(a.obs, room, who) {
+            continue
+        }
+        a.rooms[ri].remote_links[pi].proposed = true
+        if !router.observer_seated(a.obs, room, who) {
+            let mut queued = false
+            for g in pending_admits {
+                if g == who {
+                    queued = true
+                    break
+                }
+            }
+            if !queued {
+                list.push(mut pending_admits, who)
+                list.push(mut a.changes, Admit(who: peer.Participant(gen: who, room: room), home: a.unit))
+            }
+        }
+        let shape = router.Shape(codec: a.rooms[ri].remote_links[pi].kind, pli: true, fir: true, encodings: a.rooms[ri].remote_links[pi].total_encodings)
+        let sec = a.rooms[ri].remote_links[pi].local_section
+        list.push(mut a.changes, PublishRemote(room: room, who: who, section: sec, id: PublicationId(0), shape: shape, via: a.unit))
+    }
+}
+
+/// Announce every non-cascade-origin publication in `a.obs` for room `ri` on attached links.
+pub fn sync_room_publications(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64) {
+    let room = a.rooms[ri].room
+    let pubs = router.observer_publications(a.obs, room)
+    for (pub_id, info) in pubs {
+        if info.origin == Remote(via: a.unit) {
+            continue
+        }
+        let key = pub_key_of(info.owner, pub_id)
+        if a.rooms[ri].role == Edge {
+            if a.rooms[ri].edge_attached {
+                announce_local_pub_to_home(mut a, mut hub, ri, pub_id, key, info.shape)
+            }
+        } else {
+            for ei in 0u64 .. list.len(a.rooms[ri].edges) {
+                if a.rooms[ri].edges[ei].attached {
+                    announce_pub_to_edge(mut a, mut hub, ri, ei, key, info.shape.codec, info.shape.encodings)
+                }
+            }
+        }
+    }
+}
+
+fn find_local_upstream_layer(room: RoomBinding, pub_id: router.PublicationId, enc: u8) -> Option[u32] {
+    for m in room.local_layers {
+        if m.pub_id == pub_id && m.encoding == enc {
+            return m.upstream_layer
+        }
+    }
+    None
+}
+
+fn set_local_upstream_layer(mut room: RoomBinding, pub_id: router.PublicationId, enc: u8, ln: u32) {
+    for i in 0u64 .. list.len(room.local_layers) {
+        if room.local_layers[i].pub_id == pub_id && room.local_layers[i].encoding == enc {
+            room.local_layers[i].upstream_layer = Some(ln)
+            return
+        }
+    }
+    list.push(mut room.local_layers, LocalLayerMap(pub_id: pub_id, encoding: enc, upstream_layer: Some(ln)))
+}
+
+fn local_wanted_mask_for(room: RoomBinding, key: PubKey) -> u8 {
+    for w in room.local_wanted {
+        if w.key == key {
+            return w.mask
+        }
+    }
+    0
+}
+
+fn set_local_wanted_mask(mut room: RoomBinding, key: PubKey, mask: u8) {
+    for i in 0u64 .. list.len(room.local_wanted) {
+        if room.local_wanted[i].key == key {
+            room.local_wanted[i].mask = mask
+            return
+        }
+    }
+    list.push(mut room.local_wanted, LocalWanted(key: key, mask: mask))
+}
+
+fn default_rid(enc: u8) -> Bytes {
+    match enc {
+        0 => b"q",
+        1 => b"h",
+        2 => b"f",
+        _ => b"x",
+    }
+}
+
+fn announce_local_pub_to_home(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, pub_id: router.PublicationId, key: PubKey, shape: router.Shape) {
+    let Some(h) = a.rooms[ri].home_handle else {
+        return
+    }
+    let rn = a.rooms[ri].edge_room_num
+    let term = a.rooms[ri].term
+    for e in 0u8 .. shape.encodings {
+        if find_local_upstream_layer(a.rooms[ri], pub_id, e) != None {
+            continue
+        }
+        let seq = a.rooms[ri].next_ctrl_seq
+        a.rooms[ri].next_ctrl_seq += 1
+        let rid = encode_pub_rid(key.pub_slot, e, shape.encodings, default_rid(e))
+        if let Ok(ln) = announce_layer(mut hub, h, rn, term, seq, key.participant, key.epoch, shape.codec, rid) {
+            set_local_upstream_layer(mut a.rooms[ri], pub_id, e, ln)
+        }
+    }
+}
+
+fn announce_pub_to_edge(mut a: CascadeAdapter, mut hub: LinkHub, ri: u64, ei: u64, key: PubKey, kind: sdp.Codec, total_encodings: u8) {
+    let h = a.rooms[ri].edges[ei].handle
+    let rn = a.rooms[ri].edges[ei].room_num
+    let term = a.rooms[ri].term
+    for enc in 0u8 .. total_encodings {
+        if has_outbound_layer(a.rooms[ri].edges[ei], key, enc) {
+            continue
+        }
+        let seq = a.rooms[ri].next_ctrl_seq
+        a.rooms[ri].next_ctrl_seq += 1
+        let rid = encode_pub_rid(key.pub_slot, enc, total_encodings, default_rid(enc))
+        if let Ok(ln) = announce_layer(mut hub, h, rn, term, seq, key.participant, key.epoch, kind, rid) {
+            list.push(mut a.rooms[ri].edges[ei].outbound_layers, OutboundLayer(key: key, encoding: enc, layer_num: ln))
+        }
+    }
+}
+
+fn has_outbound_layer(edge: EdgeAttachment, key: PubKey, enc: u8) -> bool {
+    for o in edge.outbound_layers {
+        if o.key == key && o.encoding == enc {
+            return true
+        }
+    }
+    false
+}
+
+/// Pack `(pub_slot, encoding, total_encodings, user_rid)` into the wire `rid` bytes of a `Layer` announcement.
+fn encode_pub_rid(pub_slot: u32, encoding: u8, total_encodings: u8, user_rid: Bytes) -> Bytes {
+    let mut b: Bytes = list.with_capacity(6 + list.len(user_rid))
+    list.put_word_be(mut b, pub_slot)
+    list.push(mut b, encoding)
+    list.push(mut b, total_encodings)
+    list.append(mut b, user_rid)
+    take b
+}
+
+fn decode_pub_rid(wire_rid: Bytes) -> (u32, u8, u8, Bytes) {
+    if list.len(wire_rid) < 5 {
+        return (0, 0, 1, clone(wire_rid))
+    }
+    let ps: u32 = list.word_be(wire_rid, 0)
+    let enc = wire_rid[4]
+    if list.len(wire_rid) >= 6 {
+        let total = wire_rid[5]
+        let clamped = if total == 0 || total > 4 {
+            order.max(enc + 1, 1)
+        } else {
+            total
+        }
+        let rest: Bytes = clone(list.slice(wire_rid, 6, list.len(wire_rid)))
+        return (ps, enc, clamped, take rest)
+    }
+    let rest: Bytes = clone(list.slice(wire_rid, 5, list.len(wire_rid)))
+    (ps, enc, enc + 1, take rest)
+}
+
+fn edge_wanted_mask(edge: EdgeAttachment, key: PubKey) -> u8 {
+    for w in edge.wanted {
+        if w.key == key {
+            return w.mask
+        }
+    }
+    0
+}
+
+fn set_edge_wanted_mask(mut edge: EdgeAttachment, key: PubKey, mask: u8) {
+    for i in 0u64 .. list.len(edge.wanted) {
+        if edge.wanted[i].key == key {
+            edge.wanted[i].mask = mask
+            return
+        }
+    }
+    list.push(mut edge.wanted, WantedEntry(key: key, mask: mask))
+}
+
+/// Recompute `Carry.Demand` for one `PubKey` on Home and post it to the publication's home unit.
+fn recompute_key_demand(mut a: CascadeAdapter, ri: u64, key: PubKey) {
+    let room = a.rooms[ri].room
+    let my_unit = a.unit
+    if a.rooms[ri].role == Edge {
+        let mask = local_wanted_mask_for(a.rooms[ri], key)
+        for (pub_id, info) in router.observer_publications(a.obs, room) {
+            if info.origin != Remote(via: my_unit) && pub_key_of(info.owner, pub_id) == key {
+                post_carried(mut a, info.home, Demand(room: room, publication: pub_id, src: info.owner, unit: my_unit, mask: mask))
+                return
+            }
+        }
+        return
+    }
+    // Home: check local/non-cascade publications first.
+    for (pub_id, info) in router.observer_publications(a.obs, room) {
+        if info.origin != Remote(via: my_unit) && pub_key_of(info.owner, pub_id) == key {
+            let mut union_mask = 0u8
+            for e in a.rooms[ri].edges {
+                if e.attached {
+                    union_mask = union_mask | edge_wanted_mask(e, key)
+                }
+            }
+            post_carried(mut a, info.home, Demand(room: room, publication: pub_id, src: info.owner, unit: my_unit, mask: union_mask))
+            return
+        }
+    }
+    // Home: check remote publications (union all edges EXCEPT the publisher's source edge).
+    for pi in 0u64 .. list.len(a.rooms[ri].remote_links) {
+        if a.rooms[ri].remote_links[pi].key == key {
+            let Some(pub_id) = a.rooms[ri].remote_links[pi].pub_id else {
+                return
+            }
+            let src_h = a.rooms[ri].remote_links[pi].source_handle
+            let mut union_mask = 0u8
+            for e in a.rooms[ri].edges {
+                if e.attached && e.handle != src_h {
+                    union_mask = union_mask | edge_wanted_mask(e, key)
+                }
+            }
+            let owner: peer.Gen = Gen(id: key.participant, epoch: key.epoch)
+            post_carried(mut a, 0, Demand(room: room, publication: pub_id, src: owner, unit: my_unit, mask: union_mask))
+            return
+        }
+    }
+}
+
+/// Recompute `Carry.Demand` for every local and remote publication in room `ri` (after link loss,
+/// edge detach, or reconnect).
+pub fn recompute_room_demand(mut a: CascadeAdapter, ri: u64) {
+    let room = a.rooms[ri].room
+    let pubs = router.observer_publications(a.obs, room)
+    for (pub_id, info) in pubs {
+        if info.origin != Remote(via: a.unit) {
+            let key = pub_key_of(info.owner, pub_id)
+            recompute_key_demand(mut a, ri, key)
+        }
+    }
+    let mut keys: List[PubKey] = list.new()
+    for rl in a.rooms[ri].remote_links {
+        list.push(mut keys, rl.key)
+    }
+    for k in keys {
+        recompute_key_demand(mut a, ri, k)
+    }
+}
+
+/// Clear all cascade `Carry.Demand` for every publication in room `ri` (used on detach / link loss / term advance).
+fn clear_local_demand(mut a: CascadeAdapter, ri: u64) {
+    list.clear(mut a.rooms[ri].local_wanted)
+    let room = a.rooms[ri].room
+    let my_unit = a.unit
+    for (pub_id, info) in router.observer_publications(a.obs, room) {
+        post_carried(mut a, info.home, Demand(room: room, publication: pub_id, src: info.owner, unit: my_unit, mask: 0))
+    }
+}
+
+/// Poll QUIC congestion counters for every active link and shed the highest encoding
+/// first on any congested link (CAS-3, K7). Never affects other links.
+pub fn poll_congestion(mut a: CascadeAdapter, hub: LinkHub, now_ms: u64) {
+    for i in 0u64 .. list.len(a.congestion) {
+        let h = a.congestion[i].handle
+        let late = link_datagrams_late(hub, h)
+        if late > a.congestion[i].last_late {
+            a.congestion[i].last_late = late
+            a.congestion[i].drop_events += 1
+            if a.congestion[i].max_encoding > 0 && now_ms >= a.congestion[i].last_drop_ms + CONGESTION_STEP_MS {
+                a.congestion[i].max_encoding -= 1
+                a.congestion[i].last_drop_ms = now_ms
+            }
+        } else if a.congestion[i].max_encoding < MAX_ENC_INDEX && a.congestion[i].last_drop_ms > 0 && now_ms >= a.congestion[i].last_drop_ms + CONGESTION_RECOVER_MS {
+            a.congestion[i].max_encoding += 1
+            a.congestion[i].last_drop_ms = now_ms
+        }
+    }
+}
+
+fn note_link_limit_drop(mut a: CascadeAdapter, h: quic.ConnectionHandle, now_ms: u64) {
+    let ci = find_congestion(mut a, h)
+    a.congestion[ci].drop_events += 1
+    if a.congestion[ci].max_encoding > 0 && now_ms >= a.congestion[ci].last_drop_ms + CONGESTION_STEP_MS {
+        a.congestion[ci].max_encoding -= 1
+        a.congestion[ci].last_drop_ms = now_ms
+    }
+}

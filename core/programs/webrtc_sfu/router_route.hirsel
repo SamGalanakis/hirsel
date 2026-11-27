@@ -565,7 +565,15 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     // for the packets after it.
     rtp.red.keep(mut r.publications[pi].red, m.index, m.ts, packet, m.payload_at, m.payload_len)
     // Step 3, on the home unit only: one plaintext copy, shared by every other unit
-    // that has a down-track of the publication.
+    // that has a down-track of the publication or virtual transport demand.
+    // Never reflect a remote-origin publication back to its own `via` virtual unit.
+    if r.publications[pi].home == r.unit {
+        remote = remote | r.publications[pi].encodings[e].demand
+        remote = remote & ~(1u64 << int.widen(r.unit))
+        if let Remote(via: v) = r.publications[pi].origin {
+            remote = remote & ~(1u64 << int.widen(v))
+        }
+    }
     if remote != 0 && r.publications[pi].home == r.unit {
         let mut plain: Bytes = list.new()
         list.try_reserve(mut plain, end) ?=> |c| Capacity(c)
@@ -596,7 +604,9 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
 pub fn carry_room(c: Carry) -> peer.RoomId {
     match c {
         Media(room: room, ..) => room,
+        RemoteMedia(room: room, ..) => room,
         Wanted(room: room, ..) => room,
+        Demand(room: room, ..) => room,
         Layers(room: room, ..) => room,
         Score(room: room, ..) => room,
         Ask(room: room, ..) => room,
@@ -648,6 +658,9 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             }
             spread(mut r, now, pi, m, handle, talking, packet, mut out)
         },
+        RemoteMedia(room: room, publication: publication, src: src, encoding: encoding, slice: take slice) => {
+            inject_remote_media(mut r, now, room, publication, src, encoding, take slice, mut out)
+        },
         Wanted(room: room, publication: publication, src: src, unit: unit, mask: mask) => {
             let Some(pi) = live(mut r, ri, room, publication, src) else {
                 return Ok(())
@@ -657,6 +670,17 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 return Ok(())
             }
             wanted(mut r, pi, unit, mask, now)
+            Ok(())
+        },
+        Demand(room: room, publication: publication, src: src, unit: unit, mask: mask) => {
+            let Some(pi) = live(mut r, ri, room, publication, src) else {
+                return Ok(())
+            }
+            if r.publications[pi].home != r.unit {
+                count_stale(mut r, Some(ri))
+                return Ok(())
+            }
+            set_demand(mut r, pi, unit, mask, now)
             Ok(())
         },
         Layers(room: room, publication: publication, src: src, mask: mask) => {
@@ -753,6 +777,15 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             if fenced_at(r, ri, owner) {
                 count_stale(mut r, Some(ri))
                 return Ok(())
+            }
+            if let Some(pi) = publication_at(r, room, publication) {
+                if r.publications[pi].home == r.unit {
+                    if let Remote(via: _) = r.publications[pi].origin {
+                        if let Some(enc) = source_encoding(publication, origin) {
+                            return inject_remote_sr(mut r, now, room, publication, owner, int.narrow(enc), info)
+                        }
+                    }
+                }
             }
             for d in 0u64 .. list.len(r.downs) {
                 if r.downs[d].room != room || r.downs[d].home != r.unit || !clocked(r, d, publication, owner) {
@@ -862,6 +895,11 @@ fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: pe
                         peer.source_report(mut r.members[si].session, r.downs[d].track, src, info, now)
                     }
                 }
+                remote = remote | r.publications[pi].encodings[e].demand
+                remote = remote & ~(1u64 << int.widen(r.unit))
+                if let Remote(via: v) = r.publications[pi].origin {
+                    remote = remote & ~(1u64 << int.widen(v))
+                }
                 for u in 0u64 .. 64 {
                     if (remote >> u) & 1 == 1 {
                         post_bare(mut r, int.narrow(u), Sender(room: who.room, publication: id, owner: who.gen, source: src, info: info))
@@ -906,86 +944,4 @@ fn track_down(r: Router, who: peer.Participant, track: u16) -> Option[u64] {
         }
     }
     None
-}
-
-/// RTC-6 keyframe requests: one `Keyframes` per publication encoding coalesces every
-/// down-track's ask. `Switch` asks for a FIR when the publisher negotiated `ccm fir`;
-/// otherwise, and for `Loss`, a PLI, sent only when it negotiated `nack pli`.
-fn keyframe(mut r: Router, now: u64, pi: u64, encoding: u8, why: rtp.loss.Why, mut out: peer.Outbox) -> Result[(), RouterError] {
-    let e: u64 = int.widen(encoding)
-    if e >= list.len(r.publications[pi].encodings) {
-        return Ok(())
-    }
-    // The publisher's session is on its home unit, which coalesces every unit's asks.
-    if r.publications[pi].home != r.unit {
-        let home = r.publications[pi].home
-        let room = r.publications[pi].room
-        let id = r.publications[pi].id
-        post_bare(mut r, home, Key(room: room, publication: id, encoding: encoding, why: why))
-        return Ok(())
-    }
-    // No stream yet: nothing to ask about until its first packet names the SSRC.
-    let ssrc = r.publications[pi].encodings[e].ssrc
-    if ssrc == 0 {
-        return Ok(())
-    }
-    let fir = why == Switch && r.publications[pi].fir
-    if !fir && !r.publications[pi].pli {
-        r.counts.unrequested += 1
-        return Ok(())
-    }
-    let room = r.publications[pi].room
-    let Some(oi) = member_at(r, room, r.publications[pi].owner) else {
-        return Ok(())
-    }
-    if let Some(req) = rtp.loss.want(mut r.publications[pi].encodings[e].keyframes, why, now) {
-        peer.request_keyframe(mut r.members[oi].session, ssrc, req, mut out) ?=> |take x| Peer(x)
-    }
-    Ok(())
-}
-
-/// Drive every session's timers, and keep each encoding's keyframe interval at
-/// `max(100 ms, rtt)` of its publisher, updated in place when the estimate moves
-/// by more than a quarter. It answers the earliest deadline.
-pub fn poll(mut r: Router, now: u64, mut out: peer.Outbox) -> Option[u64] {
-    let mut wake: Option[u64] = None
-    for i in 0u64 .. list.len(r.members) {
-        let next = match peer.poll(mut r.members[i].session, now, mut out) {
-            Transmit => Some(now),
-            WakeAt(t) => Some(t),
-            Idle => None,
-        }
-        if let Some(t) = next {
-            wake = match wake {
-                Some(w) if w <= t => Some(w),
-                _ => Some(t),
-            }
-        }
-    }
-    for pi in 0u64 .. list.len(r.publications) {
-        let Some(oi) = member_at(r, r.publications[pi].room, r.publications[pi].owner) else {
-            continue
-        }
-        let rtt = match peer.round_trip(r.members[oi].session) {
-            Some(x) if x > MIN_INTERVAL_NS => x,
-            _ => MIN_INTERVAL_NS,
-        }
-        for e in 0u64 .. list.len(r.publications[pi].encodings) {
-            let old = r.publications[pi].encodings[e].interval
-            let moved = if rtt > old {
-                rtt - old
-            } else {
-                old - rtt
-            }
-            if 4 * moved > old {
-                rtp.loss.set_interval(mut r.publications[pi].encodings[e].keyframes, rtt)
-                r.publications[pi].encodings[e].interval = rtt
-            }
-        }
-    }
-    match dynamics(mut r, now, mut out) {
-        Ok(next) => earliest(wake, next),
-        // A refused keyframe request or rewrite target: the next poll retries.
-        Error(_) => wake,
-    }
 }

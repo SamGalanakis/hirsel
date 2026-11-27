@@ -116,7 +116,7 @@ fn k9_home_task(take cfg: K9HomePlan) -> K9HomeOut waits {
                 },
                 MediaIn(room_num: rn, layer_num: ln, rtp: rtp_pkt, ..) => {
                     if rn == 1 && ln == 1 {
-                        if let Ok(h) = rtp.header.parse(rtp_pkt) {
+                        if let Ok(h) = rtp.header.parse(quic.payload_bytes(rtp_pkt)) {
                             if h.pt == cascade.canon_pt(Vp8) {
                                 out.media_received += 1
                             }
@@ -208,10 +208,12 @@ fn k9_edge_task(take cfg: K9EdgePlan) -> Result[K9EdgeOut, String] waits {
                 return Error("rewrite_to_canon failed")
             }
             // Send on announced layer 1 and on unannounced layer 99.
-            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 1, canon_rtp) {
+            let slice1 = cascade.canon_slice(take canon_rtp)
+            let slice2 = quic.payload_share(slice1)
+            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 1, take slice1) {
                 return Error("send_media layer 1 failed")
             }
-            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 99, canon_rtp) {
+            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 99, take slice2) {
                 return Error("send_media layer 99 failed")
             }
             sent = true

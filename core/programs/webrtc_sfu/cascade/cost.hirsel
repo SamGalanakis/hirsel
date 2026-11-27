@@ -1,6 +1,7 @@
 // CAS-6: Exact memory cost of attaching a room to a cascade link.
 // Covers the room's layer table, sequence windows, room stream buffers, RTP-12
-// histories for the layers it may receive, and the home's grant ledger entry.
+// histories (`quic.PayloadSlice`) and asked-seq rings for the layers it may
+// receive, adapter room/edge metadata, and the home's grant ledger entry.
 pub const ROOM_STREAM_BUF_BYTES: u64 = 16384
 
 pub const LAYER_HISTORY_SLOTS: u32 = 256
@@ -26,12 +27,12 @@ pub opaque type AttachedRoomBudget {
     seq_windows: List[u64],
     stream_rx: Bytes,
     stream_tx: Bytes,
-    histories: List[rtp.history.History[Bytes]],
+    histories: List[rtp.history.History[quic.PayloadSlice]],
     grant_ledger: List[GrantEntry]
 }
 
 /// Bound on the layers one attached room may carry on a link: at most
-/// `min(link_limits.layers, participants * publications * ENCODINGS_PER_PUB)`, floored at 1.
+/// `min(link_limits.layers, participants * publications * ENCODINGS_PER_PUB)`, floored at 4.
 pub fn room_layer_cap(limits: router.RoomLimits, link_limits: LinkLimits) -> u64 {
     let p: u64 = int.widen(limits.participants)
     let pubs: u64 = int.widen(limits.publications)
@@ -54,21 +55,26 @@ fn seq_cost(element: u64, cap: u64) -> u64 {
 
 /// CAS-6: Exact heap bytes of attaching one room of `limits` on a cascade link of
 /// `link_limits`: its layer tables, sequence windows, room stream rx/tx buffers,
-/// RTP-12 histories for the layers it may receive, and one grant ledger entry.
+/// RTP-12 `quic.PayloadSlice` histories and asked rings for the layers it may
+/// receive, adapter room/edge state, and grant ledger entry.
 pub fn cascade_room_cost(limits: router.RoomLimits, link_limits: LinkLimits) -> u64 {
     let layers = room_layer_cap(limits, link_limits)
     let layer_tables = int.saturating_mul(2, seq_cost(bytes[LayerInfo], layers))
     let seq_windows = seq_cost(bytes[u64], layers)
     let stream_bufs = int.saturating_mul(2, seq_cost(1, ROOM_STREAM_BUF_BYTES))
-    let none_bytes: Option[Bytes] = None
-    let one_history = rtp.history.history_heap(LAYER_HISTORY_SLOTS, none_bytes)
-    let histories_list = seq_cost(bytes[rtp.history.History[Bytes]], layers)
+    let none_slice: Option[quic.PayloadSlice] = None
+    let one_history = rtp.history.history_heap(LAYER_HISTORY_SLOTS, none_slice)
+    let histories_list = seq_cost(bytes[rtp.history.History[quic.PayloadSlice]], layers)
     let histories_data = int.saturating_mul(layers, one_history)
+    let asked_rings = int.saturating_mul(layers, seq_cost(bytes[u16], ASKED_RING_CAP))
+    let adapter_meta = int.saturating_add(int.saturating_add(seq_cost(bytes[RoomBinding], 4), seq_cost(bytes[EdgeAttachment], 4)), int.saturating_add(seq_cost(bytes[LeaseLedgerEntry], 4), seq_cost(bytes[RoomLease], 4)))
+    let adapter_tables = int.saturating_add(int.saturating_add(seq_cost(bytes[LayerHistory], layers), seq_cost(bytes[RemoteLink], layers)), int.saturating_add(int.saturating_add(seq_cost(bytes[OutboundLayer], layers), seq_cost(bytes[WantedEntry], layers)), int.saturating_add(seq_cost(bytes[LocalLayerMap], layers), seq_cost(bytes[RoomStream], 4))))
     // `try_reserve(_, 1)` on an empty list allocates the minimum growth capacity (4).
     let ledger_entry = seq_cost(bytes[GrantEntry], 4)
     let a = int.saturating_add(layer_tables, seq_windows)
     let b = int.saturating_add(stream_bufs, int.saturating_add(histories_list, histories_data))
-    int.saturating_add(int.saturating_add(a, b), ledger_entry)
+    let c = int.saturating_add(asked_rings, int.saturating_add(adapter_meta, adapter_tables))
+    int.saturating_add(int.saturating_add(a, b), int.saturating_add(c, ledger_entry))
 }
 
 /// Allocate the bounded per-room cascade state charged by `cascade_room_cost` (K8).
@@ -84,10 +90,10 @@ pub fn alloc_room_budget(limits: router.RoomLimits, link_limits: LinkLimits) -> 
     list.try_reserve(mut stream_rx, ROOM_STREAM_BUF_BYTES)?
     let mut stream_tx: Bytes = list.new()
     list.try_reserve(mut stream_tx, ROOM_STREAM_BUF_BYTES)?
-    let mut histories: List[rtp.history.History[Bytes]] = list.new()
+    let mut histories: List[rtp.history.History[quic.PayloadSlice]] = list.new()
     list.try_reserve(mut histories, layers)?
     for _ in 0u64 .. layers {
-        let h: rtp.history.History[Bytes] = rtp.history.history(LAYER_HISTORY_SLOTS, LAYER_HISTORY_AGE_NS)?
+        let h: rtp.history.History[quic.PayloadSlice] = rtp.history.history(LAYER_HISTORY_SLOTS, LAYER_HISTORY_AGE_NS)?
         list.push(mut histories, take h)
     }
     let mut grant_ledger: List[GrantEntry] = list.new()

@@ -6,13 +6,14 @@ pub type DownInfo: key {
     target: Target
 }
 
-/// A publication as every unit knows it: its owner, the owner's home unit and
-/// its shape.
+/// A publication as every unit knows it: its owner, the owner's home unit,
+/// its shape, its section and its origin.
 pub type PublicationInfo: key {
     owner: peer.Gen,
     home: u16,
     shape: Shape,
-    section: u8
+    section: u8,
+    origin: Origin
 }
 
 // ---- Readers ----
@@ -159,6 +160,62 @@ pub fn observer_publication(o: Observer, room: peer.RoomId, p: PublicationId) ->
     None
 }
 
+pub fn observer_publications(o: Observer, room: peer.RoomId) -> List[(PublicationId, PublicationInfo)] {
+    let mut out: List[(PublicationId, PublicationInfo)] = list.new()
+    if let Some(i) = observed_room(o, room) {
+        for x in o.rooms[i].publications {
+            list.push(mut out, (x.id, x.info))
+        }
+    }
+    take out
+}
+
+pub fn observer_fences(o: Observer, room: peer.RoomId) -> List[(u64, u64)] {
+    let mut out: List[(u64, u64)] = list.new()
+    if let Some(i) = observed_room(o, room) {
+        for s in o.rooms[i].seats {
+            if let Some(ep) = s.fence {
+                list.push(mut out, (s.id, ep))
+            }
+        }
+    }
+    take out
+}
+
+pub fn observer_lease(o: Observer, room: peer.RoomId) -> Option[(u64, u32)] {
+    let i = observed_room(o, room)?
+    o.rooms[i].lease
+}
+
+pub fn observer_causes(o: Observer, room: peer.RoomId) -> u8 {
+    match observed_room(o, room) {
+        Some(i) => o.rooms[i].causes,
+        None => 0,
+    }
+}
+
+pub fn observer_suspended(o: Observer, room: peer.RoomId) -> bool {
+    observer_causes(o, room) != 0
+}
+
+pub fn observer_seated(o: Observer, room: peer.RoomId, who: peer.Gen) -> bool {
+    let Some(i) = observed_room(o, room) else {
+        return false
+    }
+    observed_home(o.rooms[i], who) != None
+}
+
+pub fn observer_next_id(o: Observer, room: peer.RoomId) -> Option[u64] {
+    let i = observed_room(o, room)?
+    let mut next = 1u64
+    for s in o.rooms[i].seats {
+        if s.id >= next {
+            next = s.id + 1
+        }
+    }
+    Some(next)
+}
+
 pub fn observer_fenced(o: Observer, room: peer.RoomId, who: peer.Gen) -> bool {
     let Some(i) = observed_room(o, room) else {
         return true
@@ -250,7 +307,15 @@ fn project(mut r: ObservedRoom, home: u16, c: Change) -> Result[Answer, RouterEr
                 return Error(NoPublication)
             }
             list.try_reserve(mut r.publications, 1) ?=> |cap| Capacity(cap)
-            list.push(mut r.publications, ObservedPublication(id: id, info: PublicationInfo(owner: who, home: h, shape: s, section: section)))
+            list.push(mut r.publications, ObservedPublication(id: id, info: PublicationInfo(owner: who, home: h, shape: s, section: section, origin: Local)))
+            return Ok(Shaped(id: id, shape: s))
+        },
+        PublishRemote(who: who, id: id, shape: s, section: section, via: via, ..) => {
+            if observed_home(r, who) == None {
+                return Error(NoParticipant)
+            }
+            list.try_reserve(mut r.publications, 1) ?=> |cap| Capacity(cap)
+            list.push(mut r.publications, ObservedPublication(id: id, info: PublicationInfo(owner: who, home: 0, shape: s, section: section, origin: Remote(via: via))))
             return Ok(Shaped(id: id, shape: s))
         },
         Subscribe(room: room, who: who, p: p, target: target, ..) => {
@@ -278,8 +343,13 @@ fn project(mut r: ObservedRoom, home: u16, c: Change) -> Result[Answer, RouterEr
             project_leave(mut r, i, who)
         },
         Revoke(id: id, epoch: epoch, ..) => {
-            let Some(i) = observed_seat(r, id) else {
-                return Error(NoParticipant)
+            let i = match observed_seat(r, id) {
+                Some(idx) => idx,
+                None => {
+                    list.try_reserve(mut r.seats, 1) ?=> |cap| Capacity(cap)
+                    list.push(mut r.seats, ObservedSeat(id: id, active: None, fence: None))
+                    list.len(r.seats) - 1
+                },
             }
             let raised = order.max(epoch, match r.seats[i].fence {
                 Some(f) => f,
@@ -299,6 +369,12 @@ fn project(mut r: ObservedRoom, home: u16, c: Change) -> Result[Answer, RouterEr
                 r.causes | bit
             } else {
                 r.causes & ~bit
+            }
+        },
+        SetLease(deadline_ms: dl, guard_ms: g, ..) => {
+            r.lease = match dl {
+                Some(d) => Some((d, g)),
+                None => None,
             }
         },
         _ => (),

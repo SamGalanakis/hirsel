@@ -472,6 +472,17 @@ unsafe fn run_config_inner(
         &mut RunMain<'_>,
     ) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>>,
 ) -> Result<u8, crate::run_stop::EndReason> {
+    #[cfg(not(feature = "standalone"))]
+    let measured = if crate::run_stop::is_contained() && config.scheduler.event.is_none() {
+        crate::embed::measure::provider().map(|scheduler| Config {
+            scheduler,
+            ..*config
+        })
+    } else {
+        None
+    };
+    #[cfg(not(feature = "standalone"))]
+    let config = measured.as_ref().unwrap_or(config);
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
         #[cfg(feature = "testing")]

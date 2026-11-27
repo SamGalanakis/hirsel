@@ -145,8 +145,6 @@ final class RuntimeTests: XCTestCase {
             let first = try await session.api.call.main.answer(0, deadline: 0)
             let firstTime = start.duration(to: clock.now)
             let memoryAtStart = memory()
-            let workerCount = hirsel_gate_workers()
-            let workers = workerCount == UInt32.max ? "unavailable" : String(workerCount)
             XCTAssertEqual(first, .returned(7))
             var calls: [Duration] = []
             for index in 0..<1000 {
@@ -156,7 +154,7 @@ final class RuntimeTests: XCTestCase {
                 XCTAssertEqual(result, .returned(UInt64(index + 7)))
             }
             calls.sort()
-            print("HIRSEL_MEASUREMENT p50=\(calls[499]) p99=\(calls[989]) start_to_first=\(firstTime) \(memoryAtStart) worker_threads=\(workers)")
+            print("HIRSEL_MEASUREMENT p50=\(calls[499]) p99=\(calls[989]) start_to_first=\(firstTime) \(memoryAtStart)")
             try await session.close()
         }
         let runtime = try Runtime.start(grants: baseGrants)
@@ -164,6 +162,16 @@ final class RuntimeTests: XCTestCase {
         try await runtime.stop()
         try await withRuntime { _ in
             print("HIRSEL_MEASUREMENT stop_then_start=\(beforeStop.duration(to: clock.now))")
+        }
+    }
+
+    func testWorkerAndFiberCounts() async throws {
+        hirsel_embed_harness_measure_fibers(1)
+        defer { hirsel_embed_harness_measure_fibers(0) }
+        try await withRuntime { _ in
+            let workerCount = hirsel_gate_workers()
+            let workers = workerCount == UInt32.max ? "unavailable" : String(workerCount)
+            print("HIRSEL_MEASUREMENT worker_threads=\(workers) live_fibers=\(hirsel_embed_harness_live_fibers())")
         }
     }
 

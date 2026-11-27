@@ -16,6 +16,7 @@ pub mod kernel;
 mod kernel_step;
 mod lanes;
 pub mod launch;
+pub(crate) mod measure;
 pub mod registry;
 mod room;
 pub mod ws;

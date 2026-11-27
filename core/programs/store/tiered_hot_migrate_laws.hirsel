@@ -135,7 +135,34 @@ fn test_l102_hot_migrate_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 fn hot_reverse(mut phase: Migration) -> Result[(), Error] {
     migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "moved", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
         Ok(Some((1000000u64 - k, v)))
+    })?
+    migrate_table(mut phase, "other", std.codec.key_u64(), std.codec.of_u64(), "moved2", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some((k, v)))
     })
+}
+
+// Seeds `other` with keys 0..n and `k % 97`, then makes it Tiered.
+fn hot_seed_other(mut db: Db, n: u64) -> Result[(), Error] waits {
+    let other = table(mut db, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let other_id = other.id
+    let Committed(_) = run(mut db, Some(100000000u64), copy_env((other, n)), fn(mut tx: Tx, env: (Table[u64, u64], u64)) -> Result[(), Error] {
+        for k in 0u64 .. env.1 {
+            put(mut tx, env.0, k, k % 97)?
+        }
+        Ok(())
+    })? else {
+        fail("L102 merge: the second seed did not commit")
+    }
+    set_residency(mut db, other_id, Tiered)?
+    let _ = checkpoint(mut db)?
+    Ok(())
+}
+
+// The second target: model rows, stamps published (F2) and placed once.
+fn l102_second(d: Dir, mut db: Db, n: u64) -> Result[(), Error] waits {
+    hot_rows(mut db, string.from("moved2"), n)?
+    let moved2 = table(mut db, "moved2", std.codec.key_u64(), std.codec.of_u64())?
+    l102_stamps(d, db, moved2.id)
 }
 
 // `moved` holds exactly key 1,000,000 - k with value k % 97 for k in 0..n.
@@ -161,22 +188,68 @@ fn l102_reversed(d: Dir, mut db: Db, n: u64) -> Result[(), Error] waits {
     l102_stamps(d, db, target_id)
 }
 
+fn hot_collide(mut phase: Migration) -> Result[(), Error] {
+    migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "moved", std.codec.key_u64(), std.codec.of_u64(), fn(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+        Ok(Some(((1000000u64 - k) % 3000u64, v)))
+    })
+}
+
+// L102 (e) after build cuts: keys k and k + 3000 collide, never inside one
+// run, so the duplicate is met in the merge, after scratch cuts set the build
+// pin. The refusal is the Memory path's `Exists("moved")`, the source keeps
+// its model rows, a holder-free cut leaves no owner-3 pin, and reopen agrees.
+fn l102_merge_refused(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, hot_options(65536)?)?
+    let _ = hot_seed(mut db, 6000)?
+    match run_migration(mut db, tasks, code.describe(hot_collide)) {
+        Error(Exists(name)) => {
+            if name != "moved" {
+                fail("L102 (e): the merge duplicate named another table")
+            }
+        },
+        _ => fail("L102 (e): a duplicate met in the merge was not Exists"),
+    }
+    // Fixture guard: the build cut at least once before the refusal.
+    if !l102_owner3_pin(db) {
+        fail("L102 (e): the fixture refused before any build cut")
+    }
+    hot_rows(mut db, string.from("rows"), 6000)?
+    let _ = checkpoint(mut db)?
+    if l102_owner3_pin(db) {
+        fail("L102 (e): an owner-3 pin outlived a holder-free cut after the refusal")
+    }
+    close(take db)?
+    let mut again = open(tasks, d, c, r, hot_options(65536)?)?
+    hot_rows(mut again, string.from("rows"), 6000)?
+    if let Ok(_) = table(mut again, "moved", std.codec.key_u64(), std.codec.of_u64()) {
+        fail("L102 (e): the refused target is listed after reopen")
+    }
+    close(take again)
+}
+
 // L102 (a), merge: a `migrate_table` that reverses key order. Each run past
 // the first is below its predecessor, so the build turns to the merge (run 0
 // in the second scratch id, later runs in the first), and the merged target
-// must hold exactly the model rows with no scratch frame reachable. Red
-// before the merge: `MigrationFault` on the first out-of-order run.
+// must hold exactly the model rows with no scratch frame reachable. A second
+// Tiered target in the same plan builds after it, cutting past `dirty_bytes`
+// while the first's packed tree sits in the working map: each target's
+// stamps must be published and placed once. Red before the merge:
+// `MigrationFault` on the first out-of-order run.
 @test
 fn test_l102_hot_migrate_merge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, hot_options(65536)?)?
     let _ = hot_seed(mut db, 6000)?
+    hot_seed_other(mut db, 5000)?
     run_migration(mut db, tasks, code.describe(hot_reverse))?
     l102_reversed(d, mut db, 6000)?
+    l102_second(d, mut db, 5000)?
     let _ = checkpoint(mut db)?
     close(take db)?
     let mut again = open(tasks, d, c, r, hot_options(65536)?)?
     l102_reversed(d, mut again, 6000)?
-    close(take again)
+    l102_second(d, mut again, 5000)?
+    close(take again)?
+    l102_merge_refused(disk_test_directory(d), c, r, tasks)
 }
 
 // A new index on a Tiered table would build through seal's child cut on the

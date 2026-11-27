@@ -31,14 +31,15 @@ fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error
 }
 
 // Keeps the builder's reserved stamps ahead of its next draws. A push draws
-// at most one leaf, its BLOBs and a branch per level; reserved stamps left
-// unused stay consumed (§11.4).
+// at most one leaf, a BLOB per entry of that leaf (a leaf holds at most 4,096
+// bytes, so at most 4,096 entries) and a branch per level (at most 64);
+// reserved stamps left unused stay consumed (§11.4).
 fn hot_reserve(mut db: Db, mut builder: StreamBuilder) -> Result[(), Error] {
-    if builder.stamp_high > builder.next_stamp && builder.stamp_high - builder.next_stamp >= 256u64 {
+    if builder.stamp_high > builder.next_stamp && builder.stamp_high - builder.next_stamp >= 4224u64 {
         return Ok(())
     }
     let low = pages.holder_next_node(db.holders)
-    let Some(high) = int.checked_add(low, 4096u64) else {
+    let Some(high) = int.checked_add(low, 16384u64) else {
         return Error(Limit(Ids))
     }
     if high == 18446744073709551615u64 {

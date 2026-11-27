@@ -1,81 +1,79 @@
 --------------------------- MODULE TraceFleetMove ---------------------------
 (*
- * TLA+/TLC trace-validation wrapper over FleetMove (docs/spec/fleet.md FLT-8, T1).
- * Reads a canonical SM1 NDJSON trace emitted by `std.sim.trace.ndjson`
- * (`seed`, `index`, `event: {tag, value}`, `actions`, `state`) via CommunityModules Json
- * and checks that every recorded kernel/sim transition is admitted by FleetMove.
+ * Replay one Place's SM1 trace against FleetMove (docs/spec/fleet.md FLT-8, T1).
+ * check_proofs.py validates the capture and gives each full holder ID a local
+ * integer name before passing the rows to TLC.
  *)
-EXTENDS FleetMove, Json, IOUtils, Sequences
+EXTENDS FleetMove, Json, IOUtils
 
-TraceFile ==
-    IF "TRACE_FILE" \in DOMAIN IOEnv THEN IOEnv.TRACE_FILE ELSE "sample_trace.ndjson"
+TraceLog == ndJsonDeserialize(IOEnv.TRACE_FILE)
 
-TraceLog == ndJsonDeserialize(TraceFile)
+VARIABLES l, holders
 
-VARIABLE l
-
-traceVars == <<vars, l>>
+traceVars == <<vars, l, holders>>
 
 TraceInit ==
     /\ Init
     /\ l = 1
+    /\ holders = [h \in {head.holder} |-> TraceLog[1].state.holder]
 
 Logline == TraceLog[l]
 
-MatchAuthPrimary ==
-    /\ Logline.event.tag = "Sm1AuthPrimary"
-    /\ AuthPrimary(Logline.event.value)
-    /\ head'.epoch = Logline.state.epoch
-    /\ head'.permit_attempt = Logline.state.permit_attempt
-    /\ incumbent' = Logline.state.incumbent
-    /\ l' = l + 1
+MatchClaim(claim, op) ==
+    /\ claim.attempt = op.attempt
+    /\ claim.class.tag = op.class
+    /\ claim.expect.epoch = op.expect_epoch
+    /\ claim.expect.holder = holders[op.expect_holder]
 
-MatchAuthRecovery ==
-    /\ Logline.event.tag = "Sm1AuthRecovery"
-    /\ AuthRecovery(Logline.event.value)
-    /\ head'.epoch = Logline.state.epoch
-    /\ head'.permit_attempt = Logline.state.permit_attempt
-    /\ incumbent' = Logline.state.incumbent
-    /\ l' = l + 1
+MatchNewClaim(claim) ==
+    \E op \in inflight' \ inflight : MatchClaim(claim, op)
 
-MatchSpawnContinue ==
-    /\ Logline.event.tag = "Sm1SpawnContinue"
-    /\ SpawnContinue
-    /\ head'.epoch = Logline.state.epoch
-    /\ head'.permit_attempt = Logline.state.permit_attempt
-    /\ l' = l + 1
+MatchAction ==
+    LET event == Logline.event
+    IN \/ /\ event.tag = "Sm1AuthPrimary"
+          /\ AuthPrimary(event.value[1])
+          /\ MatchNewClaim(event.value[2])
+       \/ /\ event.tag = "Sm1AuthRecovery"
+          /\ AuthRecovery(event.value[1])
+          /\ MatchNewClaim(event.value[2])
+       \/ /\ event.tag = "Sm1SpawnContinue"
+          /\ SpawnContinue
+          /\ MatchNewClaim(event.value)
+       \/ /\ event.tag = "Sm1ExecCas"
+          /\ \E op \in inflight :
+                /\ MatchClaim(event.value[1], op)
+                /\ ExecCas(op)
+                /\ event.value[2] = (head'.epoch > head.epoch)
+       \/ /\ event.tag = "Sm1ReadSettle"
+          /\ ReadSettle
 
-MatchExecCas ==
-    /\ Logline.event.tag = "Sm1ExecCas"
-    /\ \E op \in inflight :
-           /\ op.attempt = Logline.event.value[1]
-           /\ op.expect_epoch = Logline.event.value[2]
-           /\ ExecCas(op)
-           /\ head'.epoch = Logline.state.epoch
-           /\ head'.origin_epoch = Logline.state.origin_epoch
-           /\ head'.permit_attempt = Logline.state.permit_attempt
-    /\ l' = l + 1
+(* The model allocates before CAS. The simulator exposes the winning ID only
+ * after CAS. Bind on first install and enforce a bijection over seen holders.
+ *)
+MatchHolder(observed) ==
+    IF head'.holder \in DOMAIN holders
+    THEN /\ holders[head'.holder] = observed
+         /\ UNCHANGED holders
+    ELSE /\ \A h \in DOMAIN holders : holders[h] # observed
+         /\ holders' = [h \in DOMAIN holders \cup {head'.holder} |->
+                            IF h = head'.holder THEN observed ELSE holders[h]]
 
-MatchReadSettle ==
-    /\ Logline.event.tag = "Sm1ReadSettle"
-    /\ ReadSettle
-    /\ incumbent' = Logline.state.incumbent
-    /\ Cardinality(open_permits') = Logline.state.open_count
-    /\ l' = l + 1
+MatchState ==
+    LET state == Logline.state
+    IN /\ MatchHolder(state.holder)
+       /\ head'.epoch = state.epoch
+       /\ head'.origin_epoch = state.origin_epoch
+       /\ head'.permit_attempt = state.permit_attempt
+       /\ incumbent' = state.incumbent
+       /\ Cardinality(open_permits') = state.open_count
 
 TraceNext ==
     IF l <= Len(TraceLog)
-    THEN \/ MatchAuthPrimary
-         \/ MatchAuthRecovery
-         \/ MatchSpawnContinue
-         \/ MatchExecCas
-         \/ MatchReadSettle
+    THEN /\ MatchAction
+         /\ MatchState
+         /\ l' = l + 1
     ELSE UNCHANGED traceVars
 
 TraceSpec == TraceInit /\ [][TraceNext]_traceVars
-
-\* When TLC finishes without deadlock and reaches Len(TraceLog) + 1, the SM1 trace conformed.
-TraceAccepted ==
-    (l <= Len(TraceLog)) \/ (head.origin_epoch = head.epoch)
 
 =============================================================================

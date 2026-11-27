@@ -1,8 +1,9 @@
 # Fleet Formal Specifications and Proofs
 
-Opt-in verification artifacts for the Hirsel Fleet per-Place move-authorization protocol
-(`docs/spec/fleet.md`, `core/programs/fleet`). These checks are not part of the pre-push path;
-run them explicitly via `python3 proofs/fleet/check_proofs.py`.
+Verification artifacts for the Hirsel Fleet per-Place move-authorization protocol
+(`docs/spec/fleet.md`, `core/programs/fleet`). The nightly laws stage replays the
+fresh three-host SM1 capture. Run the bounded exploration and other proofs on demand
+via `python3 proofs/fleet/check_proofs.py`.
 
 ## Artifacts
 
@@ -25,7 +26,9 @@ and `/tmp/ref-veil` or `$VEIL_DIR` for Veil):
 
 ```sh
 python3 proofs/fleet/check_proofs.py --only all
-python3 proofs/fleet/check_proofs.py --only tlc --trace sample_trace.ndjson
+python3 proofs/fleet/check_proofs.py --only tlc
+python3 proofs/fleet/check_proofs.py --only trace
+python3 proofs/fleet/check_proofs.py --only trace --trace-from-tests tests.json
 python3 proofs/fleet/check_proofs.py --only quint
 python3 proofs/fleet/check_proofs.py --only veil
 ```

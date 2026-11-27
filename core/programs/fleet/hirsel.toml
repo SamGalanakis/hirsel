@@ -33,3 +33,6 @@ grants = ["Clock", "Random", "Tasks"]
 
 [tests.runs."fleet@1/laws/sim_fleet_scale_1000_hosts"]
 limit = 536870912
+
+[tests.runs."fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf"]
+grants = ["Stdout"]

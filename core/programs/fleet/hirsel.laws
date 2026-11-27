@@ -13,5 +13,5 @@ fleet@1/laws/sim_fleet_scale_1000_hosts src=f2f350de5e756c54 sig=fe4b30a8946a4d2
 fleet@1/laws/sim_fleet_scale_50_hosts src=9c9cff372284db34 sig=fe4b30a8946a4d27 run=b8720e32dc0c26eb bug=00026f91da7ce7d2 oracle=08f576a2f697148b rows=pending
 fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=45e6ebd9852167b5 sig=e621a888280ada62 run=b8720e32dc0c26eb bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
 fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=6310b3a16ea8393d sig=74da9c94018e5482 run=b8720e32dc0c26eb bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending
-fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=e8c713ee15fe986e sig=ea4024fcc49d8214 run=5ffc56bae06a36d7 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
+fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=33eb168f85f5d0aa sig=dc0bb34fda1f910a run=9fb8ef06378478a6 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
 fleet@1/laws/sim_three_stale_open_races_with_message_hold src=3ee151ac517f3f3d sig=664ee0c54a763e8b run=b8720e32dc0c26eb bug=a4cdfb4659042089 oracle=0538449336f9c901 rows=pending

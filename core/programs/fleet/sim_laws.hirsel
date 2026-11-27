@@ -430,15 +430,26 @@ fn sim_acto_desired_state_edits_and_conformance() -> Result[(), ()] {
     Ok(())
 }
 
-type Sm1TraceEvent: codec + key = Sm1AuthPrimary(u64) | Sm1AuthRecovery(u64) | Sm1SpawnContinue | Sm1ExecCas(u64, u64) | Sm1ReadSettle
+type Sm1TraceClaim: codec + key {
+    attempt: u64,
+    expect: move_kernel.HeadPair,
+    class: move_kernel.ClaimClass
+}
+
+type Sm1TraceEvent: codec + key = Sm1AuthPrimary(u64, Sm1TraceClaim) | Sm1AuthRecovery(u64, Sm1TraceClaim) | Sm1SpawnContinue(Sm1TraceClaim) | Sm1ExecCas(Sm1TraceClaim, bool) | Sm1ReadSettle
 
 type Sm1TraceState: codec + key {
+    place_id: u64,
     epoch: u64,
-    holder: u64,
+    holder: move_kernel.Id16,
     origin_epoch: u64,
     permit_attempt: u64,
     incumbent: u64,
     open_count: u64
+}
+
+fn sm1_claim(auth: move_kernel.ClaimAuth) -> Sm1TraceClaim {
+    Sm1TraceClaim(attempt: auth.attempt.lo, expect: option.unwrap(auth.expect), class: auth.class)
 }
 
 fn sm1_snapshot(reg: MockRegister, st: move_kernel.State) -> Sm1TraceState {
@@ -447,8 +458,9 @@ fn sm1_snapshot(reg: MockRegister, st: move_kernel.State) -> Sm1TraceState {
         None => (0u64, 0u64),
     }
     Sm1TraceState(
+        place_id: st.place_id,
         epoch: reg.head.pair.epoch,
-        holder: reg.head.pair.holder.lo,
+        holder: reg.head.pair.holder,
         origin_epoch: oe,
         permit_attempt: pa,
         incumbent: st.incumbent_node,
@@ -459,11 +471,12 @@ fn sm1_snapshot(reg: MockRegister, st: move_kernel.State) -> Sm1TraceState {
 /// bug: Drop or corrupt SM1 NDJSON/ITF transition traces or fail to preserve >2^53 integers when exporting move_kernel runs.
 /// oracle: docs/spec/fleet.md FLT-8 SM1 canonical NDJSON (TLC) and ITF (Quint/Apalache) export over a 3-host move_kernel simulation.
 @test
-fn sim_sm1_trace_export_ndjson_and_itf() -> Result[(), ()] {
+fn sim_sm1_trace_export_ndjson_and_itf(out: Stdout) -> Result[(), ()] waits {
     // K9 opt-in check: None capture skips encoding and allocation.
     let mut disabled: Option[std.sim.trace.Tape[Sm1TraceEvent, move_kernel.Action, Sm1TraceState]] = None
     let no_acts: List[move_kernel.Action] = list.new()
-    result.unwrap(std.sim.trace.record(mut disabled, Sm1SpawnContinue, no_acts, Sm1TraceState(epoch: 1, holder: 1, origin_epoch: 1, permit_attempt: 0, incumbent: 1, open_count: 0)))
+    let no_claim = Sm1TraceClaim(attempt: 1001, expect: move_kernel.HeadPair(epoch: 1, holder: move_kernel.id16_from_u64(1)), class: Continue)
+    result.unwrap(std.sim.trace.record(mut disabled, Sm1SpawnContinue(no_claim), no_acts, Sm1TraceState(place_id: 1, epoch: 1, holder: move_kernel.id16_from_u64(1), origin_epoch: 1, permit_attempt: 0, incumbent: 1, open_count: 0)))
     let None = disabled else {
         fail("K9: None capture must remain None")
     }
@@ -476,50 +489,50 @@ fn sim_sm1_trace_export_ndjson_and_itf() -> Result[(), ()] {
     let Some(auth1) = find_issued_claim(acts1) else {
         fail("SM1: missing auth1")
     }
-    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthPrimary(2), acts1, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthPrimary(2, sm1_claim(auth1)), acts1, sm1_snapshot(reg, st)))
     // 2. AuthRecovery(3) sharing expect=(1, 1)
     let (s2, acts2) = move_kernel.step(take st, RequestRecovery(3, 1, 1, 1))
     st = take s2
     let Some(auth2) = find_issued_claim(acts2) else {
         fail("SM1: missing auth2")
     }
-    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthRecovery(3), acts2, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthRecovery(3, sm1_claim(auth2)), acts2, sm1_snapshot(reg, st)))
     // 3. SpawnContinue on incumbent 1 at epoch 1
     let cont1 = move_kernel.ClaimAuth(expect: Some(reg.head.pair), attempt: move_kernel.id16_from_u64(1001), class: Continue)
-    result.unwrap(std.sim.trace.record(mut capture, Sm1SpawnContinue, no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1SpawnContinue(sm1_claim(cont1)), no_acts, sm1_snapshot(reg, st)))
     // 4. ExecCas(auth2 -> wins epoch 2!)
     let _ = result.unwrap(mock_cas(mut reg, auth2))
-    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(auth2.attempt.lo, 1), no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(sm1_claim(auth2), true), no_acts, sm1_snapshot(reg, st)))
     // 5. ExecCas(auth1 -> delayed A->B Superseded!)
     if let Error(_) = mock_cas(mut reg, auth1) {} else {
         fail("SM1: delayed auth1 should be Superseded")
     }
-    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(auth1.attempt.lo, 1), no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(sm1_claim(auth1), false), no_acts, sm1_snapshot(reg, st)))
     // 6. ExecCas(cont1 -> in-flight janitor Superseded!)
     if let Error(_) = mock_cas(mut reg, cont1) {} else {
         fail("SM1: janitor cont1 should be Superseded")
     }
-    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(1001, 1), no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(sm1_claim(cont1), false), no_acts, sm1_snapshot(reg, st)))
     // 7. ReadSettle via HeadRead -> settles incumbent=3, open_permits=0
     let (s3, acts3) = move_kernel.step(take st, HeadRead(reg.head))
     st = take s3
     result.unwrap(std.sim.trace.record(mut capture, Sm1ReadSettle, acts3, sm1_snapshot(reg, st)))
     // 8-9. Post-move Continue restart on C (epoch 3, preserving permit_attempt=2)
     let cont2 = move_kernel.ClaimAuth(expect: Some(reg.head.pair), attempt: move_kernel.id16_from_u64(1002), class: Continue)
-    result.unwrap(std.sim.trace.record(mut capture, Sm1SpawnContinue, no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1SpawnContinue(sm1_claim(cont2)), no_acts, sm1_snapshot(reg, st)))
     let h3 = result.unwrap(mock_cas(mut reg, cont2))
     let (s4, acts4) = move_kernel.step(take st, LocalRestartObserved(3, 2, h3))
     st = take s4
-    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(1002, 2), acts4, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(sm1_claim(cont2), true), acts4, sm1_snapshot(reg, st)))
     // 10-12. Second move 3 -> 1 at epoch 3 -> epoch 4 + ReadSettle
     let (s5, acts5) = move_kernel.step(take st, RequestMove(1, 2, 2, 1))
     st = take s5
     let Some(auth3) = find_issued_claim(acts5) else {
         fail("SM1: missing auth3")
     }
-    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthPrimary(1), acts5, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1AuthPrimary(1, sm1_claim(auth3)), acts5, sm1_snapshot(reg, st)))
     let _ = result.unwrap(mock_cas(mut reg, auth3))
-    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(auth3.attempt.lo, 3), no_acts, sm1_snapshot(reg, st)))
+    result.unwrap(std.sim.trace.record(mut capture, Sm1ExecCas(sm1_claim(auth3), true), no_acts, sm1_snapshot(reg, st)))
     let (s6, acts6) = move_kernel.step(take st, HeadRead(reg.head))
     st = take s6
     result.unwrap(std.sim.trace.record(mut capture, Sm1ReadSettle, acts6, sm1_snapshot(reg, st)))
@@ -576,7 +589,8 @@ fn sim_sm1_trace_export_ndjson_and_itf() -> Result[(), ()] {
     }
     // Verify lossless >2^53 integer export (9007199254740993 = 2^53 + 1) in both NDJSON and ITF.
     let mut hi_cap: Option[std.sim.trace.Tape[Sm1TraceEvent, move_kernel.Action, Sm1TraceState]] = Some(result.unwrap(std.sim.trace.start(9007199254740993)))
-    result.unwrap(std.sim.trace.record(mut hi_cap, Sm1ExecCas(9007199254740993, 1), no_acts, Sm1TraceState(epoch: 9007199254740993, holder: 18446744073709551615, origin_epoch: 9007199254740993, permit_attempt: 9007199254740993, incumbent: 1, open_count: 0)))
+    let hi_holder = move_kernel.Id16(lo: 9007199254740993, hi: 18446744073709551615)
+    result.unwrap(std.sim.trace.record(mut hi_cap, Sm1ReadSettle, no_acts, Sm1TraceState(place_id: 1, epoch: 9007199254740993, holder: hi_holder, origin_epoch: 9007199254740993, permit_attempt: 9007199254740993, incumbent: 1, open_count: 0)))
     let Some(hi_tape) = hi_cap else {
         fail("SM1 hi_tape missing")
     }
@@ -587,19 +601,20 @@ fn sim_sm1_trace_export_ndjson_and_itf() -> Result[(), ()] {
         let Some(ep_v) = std.json.pointer(nd_doc, "/state/epoch") else {
             fail("SM1 NDJSON >2^53 epoch missing")
         }
-        let Some(h_v) = std.json.pointer(nd_doc, "/state/holder") else {
+        let Some(h_v) = std.json.pointer(nd_doc, "/state/holder/hi") else {
             fail("SM1 NDJSON u64::MAX holder missing")
         }
         if std.json.as_u64(ep_v) != Some(9007199254740993) || std.json.as_u64(h_v) != Some(18446744073709551615) {
             fail("SM1 NDJSON lost precision on >2^53 integer")
         }
         let itf_doc = result.unwrap(std.json.parse(r_hi, hi_itf))
-        let Some(Str(h_big)) = std.json.pointer(itf_doc, "/states/0/state/holder/#bigint") else {
+        let Some(Str(h_big)) = std.json.pointer(itf_doc, "/states/0/state/holder/hi/#bigint") else {
             fail("SM1 ITF u64::MAX #bigint missing")
         }
         if text.as_string(h_big) != "18446744073709551615" {
             fail("SM1 ITF lost precision on u64::MAX")
         }
     }
+    let _ = stdout.write(out, ndjson)
     Ok(())
 }

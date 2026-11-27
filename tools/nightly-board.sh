@@ -246,6 +246,19 @@ if (( toolchain_status == 0 )); then
     printf 'Store retention trace check exited %s.\n' "$trace_status" >>"$run/run.log"
     law_status=${law_status:-$trace_status}
   }
+  mkdir -p "$run/laws/fleet-sm1-trace"
+  {
+    "$checkout/$compiler/hirsel" test core/programs/fleet --libraries core \
+        --exact fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf --json --rerun \
+        --test-timeout 300 --store "$run/fleet-sm1-trace" \
+        >"$run/laws/fleet-sm1-trace/tests.json" &&
+    python3 proofs/fleet/check_proofs.py --only trace \
+        --trace-from-tests "$run/laws/fleet-sm1-trace/tests.json"
+  } >>"$run/run.log" 2>&1 || {
+    trace_status=$?
+    printf 'Fleet law red (SM1 trace check exit %s). See %s/laws/fleet-sm1-trace/tests.json.\n' "$trace_status" "$run" >>"$run/run.log"
+    law_status=${law_status:-$trace_status}
+  }
 elif [[ -z "$law_status" ]]; then
   law_status=$toolchain_status
 fi

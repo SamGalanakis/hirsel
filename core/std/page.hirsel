@@ -3181,7 +3181,6 @@ fn edit_batch_branch(root: Arc[Page], touched: List[(u64, List[PagePiece])], fir
 
 fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, first: u64, rightmost: bool, rebuild: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let lvl = level(root.image)
-    let domain = root.image.domain
     if lvl == 0 {
         if !rebuild {
             if let Some(take parts) = edit_batch_leaf(root, source, edit_at, start, end, inline, mut next)? {
@@ -3192,16 +3191,24 @@ fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64,
         if !changed {
             return Ok(one_trim_piece(root))
         }
-        return batch_pieces(rows, domain, 0, mut next)
+        return batch_pieces(rows, root.image.domain, 0, mut next)
     }
     let mut touched: List[(u64, List[PagePiece])] = list.new()
     let mut at = start
     let size = count(root.image)
-    for slot in 0u64 .. size {
+    while at < end {
         let from = at
+        let mut slot = size - 1
+        if !rightmost {
+            edit_at(source, at, scoped fn(edit: SourceEdit) -> Result[(), Error] {
+                slot = option.unwrap(descend(root.image, edit.key))
+                Ok(())
+            })?
+        }
+        at += 1
         if slot + 1 == size {
             at = end
-        } else if !rightmost {
+        } else if at < end {
             let high = option.unwrap(key_at(root.image, slot + 1))
             while at < end {
                 let mut before = false
@@ -3215,11 +3222,9 @@ fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64,
                 at += 1
             }
         }
-        if at != from {
-            let base = edit_page(root.kids[slot], lvl - 1, resident_edit_frame)?
-            let pieces = batch_path(base, source, edit_at, from, at, inline, first, rightmost, rebuild, mut next)?
-            list.push(mut touched, (slot, take pieces))
-        }
+        let base = edit_page(root.kids[slot], lvl - 1, resident_edit_frame)?
+        let pieces = batch_path(base, source, edit_at, from, at, inline, first, rightmost, rebuild, mut next)?
+        list.push(mut touched, (slot, take pieces))
     }
     if !rebuild {
         if let Some(take parts) = edit_batch_branch(root, touched, first, mut next)? {
@@ -3245,8 +3250,8 @@ fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64,
         let row = option.unwrap(entry(root.image, slot))
         list.push(mut rows, PageSlot(row: take row, kid: Some(clone(root.kids[slot])), blob: None))
     }
-    batch_children(mut rows, domain, lvl - 1, first, mut next)?
-    batch_pieces(rows, domain, lvl, mut next)
+    batch_children(mut rows, root.image.domain, lvl - 1, first, mut next)?
+    batch_pieces(rows, root.image.domain, lvl, mut next)
 }
 
 /// Apply strictly increasing, distinct edits to a resident row tree.
@@ -3261,16 +3266,11 @@ pub fn apply_sorted_batch(mut root: Arc[Page], ops: List[BatchEdit], inline: u64
 fn above_rightmost(root: Arc[Page], key: Bytes) -> Result[bool, Error] {
     let image = view root.image
     let n = count(image)
-    if n == 0 {
-        return Ok(true)
-    }
-    let lvl = level(image)
-    if lvl == 0 {
+    if level(image) == 0 || n == 0 {
         let (slot, _) = search(image, key)
         return Ok(slot == n)
     }
-    let tail = edit_page(root.kids[n - 1], lvl - 1, resident_edit_frame)?
-    above_rightmost(tail, key)
+    above_rightmost(edit_page(root.kids[n - 1], level(image) - 1, resident_edit_frame)?, key)
 }
 
 /// Apply strictly increasing edits without a separate copy of the source rows.

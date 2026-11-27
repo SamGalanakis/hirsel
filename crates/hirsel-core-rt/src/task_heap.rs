@@ -341,16 +341,12 @@ impl Page {
         }
         let slab = class.fits_slab();
         let (backing, start) = if slab {
-            let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
+            let (allocation, start) = slabs::Slab::allocate(heap.shard);
             (Backing::Slab(allocation), start)
         } else {
             let headroom = if own_prefix(class.kind) == 0 { 0 } else { SLAB };
-            let (extent, start) = slabs::Extent::allocate(
-                Arc::as_ptr(heap).addr(),
-                class.stride,
-                class.align.max(SLAB),
-                headroom,
-            );
+            let (extent, start) =
+                slabs::Extent::allocate(heap.shard, class.stride, class.align.max(SLAB), headroom);
             (Backing::Dedicated(extent), start)
         };
         let data = Self {
@@ -493,6 +489,7 @@ impl Page {
 /// A serial dispatcher owns the local lists. Foreign workers may publish a
 /// page notification while its custodian runs, waits, or changes workers.
 pub(crate) struct Heap {
+    shard: usize,
     returned: returns::Queue,
     // An idle worker can purge detached stock while the task runs.
     cache: OnceLock<Box<Mutex<PageCache>>>,
@@ -501,10 +498,10 @@ pub(crate) struct Heap {
     // Either EMPTY_HEADS or the start of this heap's State allocation.
     heads: Cell<NonNull<Heads>>,
 }
-
 impl Default for Heap {
     fn default() -> Self {
         Self {
+            shard: slabs::next_shard(),
             returned: returns::Queue::new(),
             cache: OnceLock::new(),
             pending: Cell::new(false),
@@ -512,7 +509,6 @@ impl Default for Heap {
         }
     }
 }
-
 impl Drop for Heap {
     fn drop(&mut self) {
         let heads = self.heads.get();

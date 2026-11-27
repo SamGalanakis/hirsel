@@ -48,8 +48,9 @@ pub(super) fn retaining() -> bool {
     RETAINED.load(Ordering::Relaxed) != 0
 }
 
-fn shard_for(heap_address: usize) -> usize {
-    (heap_address ^ (heap_address >> 12)) / 16 % SHARD_COUNT
+pub(crate) fn next_shard() -> usize {
+    static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+    NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARD_COUNT
 }
 
 struct Shard {
@@ -421,7 +422,7 @@ pub(crate) struct Slab {
 unsafe impl Send for Slab {}
 
 impl Slab {
-    pub(crate) fn allocate(heap_address: usize) -> (Self, NonNull<u8>) {
+    pub(crate) fn allocate(shard: usize) -> (Self, NonNull<u8>) {
         if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
             crate::run_stop::raise(stop);
         }
@@ -430,7 +431,6 @@ impl Slab {
             let start = slab.start;
             return (slab, start);
         }
-        let shard = shard_for(heap_address);
         let mut pool = SHARDS[shard].lock().unwrap();
         if let Some((range, index)) = pool.retained.pop() {
             RETAINED.fetch_sub(1, Ordering::Relaxed);
@@ -465,9 +465,24 @@ impl Slab {
             }
         };
         drop(pool);
-        let fresh = map_range(memory, want, min, SLAB, 0);
+        let mut fresh = Some(map_range(memory, want, min, SLAB, 0));
         let mut pool = SHARDS[shard].lock().unwrap();
-        let range = pool.insert_range(fresh);
+        // Another worker may have inserted the range this shard needed while
+        // this mapping was in flight. Use it and drop the duplicate reservation.
+        if let Some((range, index, start)) = pool.claim_slab() {
+            drop(pool);
+            drop(fresh);
+            return (
+                Self {
+                    range,
+                    start,
+                    index,
+                    shard,
+                },
+                start,
+            );
+        }
+        let range = pool.insert_range(fresh.take().unwrap());
         // SAFETY: `range` was just inserted under this shard lock and is empty.
         let claimed = unsafe {
             let r = range.as_ptr().as_mut().unwrap();
@@ -531,7 +546,7 @@ unsafe impl Send for Extent {}
 
 impl Extent {
     pub(super) fn allocate(
-        heap_address: usize,
+        shard: usize,
         bytes: usize,
         align: usize,
         prefix: usize,
@@ -553,7 +568,6 @@ impl Extent {
             let payload = unsafe { extent.base.add(prefix) };
             return (extent, payload);
         }
-        let shard = shard_for(heap_address);
         let mut pool = SHARDS[shard].lock().unwrap();
         let mut claimed = pool.claim_run(granules, align, prefix);
         if claimed.is_none() && !pool.retained.is_empty() {
@@ -580,18 +594,27 @@ impl Extent {
                 }
             };
             drop(pool);
-            let fresh = map_range(memory, want, min, align, prefix);
+            let mut fresh = Some(map_range(memory, want, min, align, prefix));
             pool = SHARDS[shard].lock().unwrap();
-            let range = pool.insert_range(fresh);
-            // SAFETY: `range` was just inserted under this shard lock and aligned
-            // so granule 0 satisfies `align` at `base + prefix`.
-            let found = unsafe {
-                let r = range.as_ptr().as_mut().unwrap();
-                r.claim_run(granules, align, prefix)
-                    .map(|start| (range, start, r.start(start)))
-            };
-            drop(pool);
-            found.unwrap_or_else(|| host_memory())
+            // As with slabs, prefer a range inserted while this mapping was in
+            // flight; the duplicate reservation is unmapped instead of inflating
+            // the shard's next geometric size.
+            if let Some(found) = pool.claim_run(granules, align, prefix) {
+                drop(pool);
+                drop(fresh);
+                found
+            } else {
+                let range = pool.insert_range(fresh.take().unwrap());
+                // SAFETY: `range` was just inserted under this shard lock and aligned
+                // so granule 0 satisfies `align` at `base + prefix`.
+                let found = unsafe {
+                    let r = range.as_ptr().as_mut().unwrap();
+                    r.claim_run(granules, align, prefix)
+                        .map(|start| (range, start, r.start(start)))
+                };
+                drop(pool);
+                found.unwrap_or_else(|| host_memory())
+            }
         };
         // SAFETY: `prefix` lies inside the claimed extent.
         let payload = unsafe { base.add(prefix) };

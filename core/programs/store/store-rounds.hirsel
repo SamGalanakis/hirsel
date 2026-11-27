@@ -116,12 +116,12 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
         }
     }
     let mut collections = pages.new_page_tree(CollectionMap, pages.holder_heads(db.holders)[0u64].roots.collections.inline)
-    let private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+    let private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
     let mut next_stamp = private_from
     let mut ranges: List[KeptRange] = list.with_capacity(list.len(built))
     for shipped_range in built {
         if shipped_range.kind != 0 && shipped_range.residency == ResidentMemory {
-            let key = deploy_result(prefix(shipped_range.id))?
+            let key = deploy_result(failure_result_from_rep(catalog.prefix(shipped_range.id)))?
             deploy_result(failure_result_from_rep(pages.put_collection(mut collections, key, shipped_range.tree, shipped_range.kind, private_from, mut next_stamp)))?
         }
         list.push(mut ranges, KeptRange(id: shipped_range.id, kind: shipped_range.kind, residency: shipped_range.residency))
@@ -163,7 +163,7 @@ fn hold_import(mut db: Db, take collections: pages.PageTree) -> Result[pages.Pag
 fn hold_import_emitted(mut db: Db, take collections: pages.PageTree) -> Result[(pages.PageTree, Map[u64, std.page.PagePtr]), DeployError] waits {
     let mut held = pages.empty_roots()
     held.collections = take collections
-    let watermark = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+    let watermark = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
     let Some(following) = int.checked_add(pages.holder_next_pin(db.holders), 1) else {
         return Error(Store(Limit(Ids)))
     }
@@ -193,7 +193,7 @@ fn shipped_ranges(collections: pages.PageTree, ranges: List[RangeChange]) -> Res
         let (kind, residency) = match shipped_range.catalog {
             Some(raw) => {
                 let k = pages.descriptor_kind_byte(catalog_kind(decode_catalog(raw)?.record))
-                let res = match std.page.lookup(collections.root, prefix(shipped_range.id)?) {
+                let res = match std.page.lookup(collections.root, failure_result_from_rep(catalog.prefix(shipped_range.id))?) {
                     Some(desc) => pages.collection_descriptor(desc).residency,
                     None => ResidentMemory,
                 }
@@ -229,7 +229,7 @@ fn kept_ranges(kept: KeptImport) -> Result[List[ImportedRange], DeployError] {
             list.push(mut out, ImportedRange(id: shipped_range.id, kind: 0, tree: None, slot: None, rows: 0, charge: 0, count: 0, digest: 0, residency: ResidentMemory))
             continue
         }
-        let key = deploy_result(prefix(shipped_range.id))?
+        let key = deploy_result(failure_result_from_rep(catalog.prefix(shipped_range.id)))?
         let Some((slot, desc)) = std.page.collection_slot(kept.tree.root, key) else {
             return Error(Store(Missing("import range")))
         }
@@ -467,7 +467,7 @@ pub fn apply_round(mut db: Db, take checked: ValidatedRound) -> Result[u64, Depl
     }
     let mut tree = take kept_tree
     let dirty_bytes = disk_state(db).options.dirty_bytes
-    let mut private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+    let mut private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
     let mut next_stamp = private_from
     for take op in take ops {
         let RoundOp(key: take key, value: take value, prior: prior) = take op
@@ -482,7 +482,7 @@ pub fn apply_round(mut db: Db, take checked: ValidatedRound) -> Result[u64, Depl
                 pages.set_next_node(mut db.holders, next_stamp - 1)
                 let packed_tree = hold_import(mut db, take tree)?
                 tree = take packed_tree
-                private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+                private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
                 next_stamp = private_from
             }
             continue
@@ -564,7 +564,7 @@ fn range_totals(tree: pages.PageTree, ranges: List[KeptRange]) -> Result[List[Ra
 }
 
 fn range_rows(tree: pages.PageTree, id: u32) -> Result[u64, Error] {
-    match std.page.lookup(tree.root, prefix(id)?) {
+    match std.page.lookup(tree.root, failure_result_from_rep(catalog.prefix(id))?) {
         Some(raw) => Ok(pages.collection_descriptor(raw).rows),
         None => Ok(0u64),
     }

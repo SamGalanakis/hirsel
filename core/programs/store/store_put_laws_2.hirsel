@@ -20,7 +20,7 @@ fn agg_parts(key: u64, value: u64) -> Result[List[(u64, u64)], Capacity] {
 }
 
 fn agg_row(id: u32, group: u64, members: u64, sum: u64) -> Result[(Bytes, Bytes), Error] {
-    let mut key = prefix(id)?
+    let mut key = failure_result_from_rep(catalog.prefix(id))?
     list.put_word_be(mut key, group)
     let mut value: Bytes = list.new()
     list.put_word_le(mut value, members)
@@ -64,9 +64,9 @@ fn agg_expected(id: u32, model: List[Option[u64]], upto: Option[u64]) -> Result[
 
 fn agg_stored(db: Db, id: u32) -> Result[List[(Bytes, Bytes)], Error] {
     let s = snapshot(db)
-    let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1))?)?
     let mut out: List[(Bytes, Bytes)] = list.new()
-    while let Some((take key, value)) = next_bytes(mut cursor)? {
+    while let Some((take key, value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         list.push(mut out, (take key, failure_result_from_rep(types.copied(value))?))
     }
     Ok(take out)
@@ -347,7 +347,7 @@ fn frame_boundary_points() -> bool {
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
     let mut ops: pages.DataRows = pages.new_data_rows()
-    let key = result.unwrap(logical_key(1, types.key_word(7)))
+    let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
     list.push(mut value, 0u8)
@@ -436,14 +436,14 @@ pub fn law_changes_rewritten_equal(c: Clock) -> bool waits {
     let mut right = result.unwrap(scan_raw(b, 1, Unbounded, Unbounded))
     let mut sum: u64 = 0
     for k in 0u64 .. 96 {
-        let x = option.unwrap(result.unwrap(next_bytes(mut left)))
-        let y = option.unwrap(result.unwrap(next_bytes(mut right)))
-        if x.0 != result.unwrap(logical_key(1, types.key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
+        let x = option.unwrap(result.unwrap(failure_result_from_rep(catalog.next_bytes(mut left))))
+        let y = option.unwrap(result.unwrap(failure_result_from_rep(catalog.next_bytes(mut right))))
+        if x.0 != result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(k)))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
             return false
         }
         sum += decode_word(x.1)
     }
-    sum == 4656 && result.unwrap(next_bytes(mut left)) == None && result.unwrap(next_bytes(mut right)) == None
+    sum == 4656 && result.unwrap(failure_result_from_rep(catalog.next_bytes(mut left))) == None && result.unwrap(failure_result_from_rep(catalog.next_bytes(mut right))) == None
 }
 
 @test
@@ -518,7 +518,7 @@ fn cell_and_table_frame() -> bool {
             seal_cell_edits(mut ops, cells)
         }
         for k in 1u64 .. 3 {
-            let key = result.unwrap(logical_key(2, types.key_word(k)))
+            let key = result.unwrap(failure_result_from_rep(catalog.logical_key(2, types.key_word(k))))
             pages.push_data_row(mut ops, format.DataOp(key: take key, value: None, trim: None, prior: None))
         }
         if offset == 1 {

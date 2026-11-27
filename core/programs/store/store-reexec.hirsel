@@ -426,15 +426,15 @@ pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySourc
     replay_source(db, b, v)
 }
 
-fn replay_declaration_base(source: ReplaySource) -> DeclarationBase {
-    DeclarationBase(store: source.store, opened: source.open, version: source.call.base, stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
+fn replay_declaration_base(source: ReplaySource) -> catalog.DeclarationBase {
+    catalog.DeclarationBase(store: types.StoreKey(hi: source.store.hi, lo: source.store.lo), opened: source.open, version: source.call.base, stamp: std.page.stamp(std.page.image_of(source.base.catalog.root)), changes: 0, live: 0)
 }
 
 pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
     if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) {
         return Error(Foreign)
     }
-    let plan = SchemaPlan(store: db.store, roots: pages.share_roots(source.base), next_node: pages.holder_next_node(db.holders), next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: db.limits.value)
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(source.base), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), 0, db.ceiling, true, db.limits.value), store: db.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
     Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
 }
 
@@ -446,7 +446,7 @@ pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: D
     let Open = selected.mode else {
         return Error(Foreign)
     }
-    if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {
+    if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) || !catalog.same_declaration_base(selected.inner, replay_declaration_base(source)) {
         return Error(Foreign)
     }
     complete_declaration(selected)?

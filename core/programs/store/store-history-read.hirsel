@@ -260,7 +260,7 @@ fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, r
                 journal_decode(path, current.kind, list.slice(raw, current.payload, current.end))
             })?
             journal_apply(path, mut replay, take event)?
-            over_ceiling(journal_account(replay)?, ceiling)?
+            failure_result_from_rep(catalog.over_ceiling(journal_account(replay)?, ceiling))?
             frames += 1
         } else if disk_kind_limit(current.kind) != None {
             return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))

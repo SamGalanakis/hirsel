@@ -598,7 +598,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     }
     let participants = cut_participants(draft, NoHolderChange)?
     let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
-    let mut next_stamp = stamp_after(pages.holder_next_node(draft.holders))?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
     let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536)?
     let (take layout, take packed) = history_write_page_cut(mut source.client, held.head.store, held.head.pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline)?
@@ -617,7 +617,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     }
     let recovered = history_paged_capture(mut source, held.head, 1048576)?
     let tip = view recovered.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: pages.share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?, bases: pages.no_tail_bases())
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: pages.share_roots(tip.roots), watermark: failure_result_from_rep(catalog.stamp_after(recovered.next_node))?, bases: pages.no_tail_bases())
     if get(law_reader(snap), snap, rows, 7)? != Some(value) {
         fail("pack objects created by the cut lost the imported row")
     }
@@ -670,7 +670,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
         fail("the fixture has the wrong install base")
     }
     durable(mut writer, done.ticket)?
-    let fence = writer.fence
+    let fence = catalog.current_fence(writer.schema)
     let refused = install_bound_activation(mut writer, take stale, 12, schema_binding)
     let after = snapshot(writer)
     if get(result.unwrap(reader(writer, 0u64)), after, rows, 9)? != Some(9u64) {
@@ -679,7 +679,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     if let Error(Foreign) = refused {} else {
         fail("the stale activation was admitted")
     }
-    if version(after) != acknowledged || writer.fence != fence {
+    if version(after) != acknowledged || catalog.current_fence(writer.schema) != fence {
         fail("the refused activation changed the writer")
     }
     let unpublished = system_table(writer, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())

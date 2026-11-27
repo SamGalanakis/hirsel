@@ -1,0 +1,52 @@
+pub opaque type SchemaState {
+    fence: u32,
+    next_table: u32
+}
+
+pub fn schema_state(fence: u32, next_table: u32) -> SchemaState {
+    SchemaState(fence: fence, next_table: next_table)
+}
+
+pub fn current_fence(schema: SchemaState) -> u32 {
+    schema.fence
+}
+
+pub fn next_table_id(schema: SchemaState) -> u32 {
+    schema.next_table
+}
+
+pub fn propose_fence(mut schema: SchemaState, fence: u32) -> u32 {
+    replace(mut schema.fence, fence)
+}
+
+pub fn restore_fence(mut schema: SchemaState, previous: u32) {
+    schema.fence = previous
+}
+
+pub fn set_next_table(mut schema: SchemaState, next_table: u32) {
+    schema.next_table = next_table
+}
+
+pub type SchemaPlan: send {
+    roots: pages.Roots,
+    next_node: u64,
+    next_table: u32,
+    live: u64,
+    ceiling: u64,
+    retained: bool,
+    changed: bool,
+    superseded: List[u32],
+    // Whether a Tiered build may be queued: only in the prepare child, whose
+    // write_prepared and run_deferred_migrates cut it (§13.10a). A hot
+    // Migrate has no Tiered build (lane 3224) and refuses Tiered(Migrate).
+    defer_tiered: bool,
+    // Each declared Log's retention, in declaration order (§14.4a). Only a
+    // whole declaration's install (`seal`, an activation) binds it.
+    retention: List[LogRetention],
+    // The largest value the plan may write: the store's recorded limit.
+    value_limit: u64
+}
+
+pub fn schema_plan(take roots: pages.Roots, next_node: u64, next_table: u32, live: u64, ceiling: u64, retained: bool, value_limit: u64) -> SchemaPlan {
+    SchemaPlan(roots: take roots, next_node: next_node, next_table: next_table, live: live, ceiling: ceiling, retained: retained, changed: false, superseded: list.new(), defer_tiered: false, retention: list.new(), value_limit: value_limit)
+}

@@ -184,7 +184,7 @@ fn describe_collect(mut packs: CapturePacks, p: PreparedCapture) -> Result[Descr
 }
 
 fn describe_descriptor(mut packs: CapturePacks, root: std.page.PagePtr, id: u32) -> Result[Option[Bytes], Error] waits {
-    capture_lookup(mut packs, root, CollectionMap, prefix(id)?)
+    capture_lookup(mut packs, root, CollectionMap, failure_result_from_rep(catalog.prefix(id))?)
 }
 
 fn describe_collection(mut packs: CapturePacks, names: List[DescribeName], root: std.page.PagePtr, deltas: List[DescribeDelta], path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[DescribeEntry, Error] waits {

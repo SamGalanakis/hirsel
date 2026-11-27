@@ -21,14 +21,14 @@ fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped
 }
 
 fn fetch_raw(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    match fetch_logical(tx, logical_key(id, key)?)? {
+    match fetch_logical(tx, failure_result_from_rep(catalog.logical_key(id, key))?)? {
         Some(v) => Ok(Some(failure_result_from_rep(types.copied(v))?)),
         None => Ok(None)
     }
 }
 
 fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
-    let p = logical_key(id, key)?
+    let p = failure_result_from_rep(catalog.logical_key(id, key))?
     let frame = put_frame(tx, p, val, tx.frame_bytes)?
     let exists = match std.page.collection_child(tx.roots.collections.root, list.slice(p, 0, 4)) {
         Some(_) => true,
@@ -37,7 +37,7 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
     if !exists {
         let height = tree_height(tx.roots.collections)
         let mut draw = reserve_ids(mut tx, height)?
-        define_collection(mut tx.roots.collections, id, 1, tx.private_from, mut draw)?
+        failure_result_from_rep(catalog.define_collection(mut tx.roots.collections, id, 1, tx.private_from, mut draw))?
         tx.resident += 126
     }
     apply_put(mut tx, take p, failure_result_from_rep(types.copied(val))?, false)?
@@ -53,7 +53,7 @@ fn put_logical_key(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Err
 }
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
-    let p = logical_key(id, key)?
+    let p = failure_result_from_rep(catalog.logical_key(id, key))?
     let Some(refund) = delete_refund(tx, p)? else {
         return Ok(false)
     }
@@ -84,7 +84,7 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
 }
 
 fn get_raw(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    let p = logical_key(id, key)?
+    let p = failure_result_from_rep(catalog.logical_key(id, key))?
     match pages.get_page_row(s.roots.collections, p) {
         Some(v) => Ok(Some(failure_result_from_rep(types.copied(v))?)),
         None => Ok(None)
@@ -102,7 +102,7 @@ fn decode_word(b: Bytes) -> u64 {
 fn raw_test_db(c: Clock, cap: u64) -> Db {
     let mut db = test_db(c, cap)
     result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
-        define_store_collection(mut tree, 1, 1, mut stamp)
+        failure_result_from_rep(catalog.define_store_collection(mut tree, 1, 1, mut stamp))
     }))
     db.resident = 126
     take db
@@ -233,7 +233,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     let held = snapshot(db)
     let before = version(held)
     let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[pages.PageRange, Error] {
-        let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
+        let rows = byte_cursor(tx.roots.collections, Included(failure_result_from_rep(catalog.prefix(1))?), failure_result_from_rep(catalog.prefix(2))?)?
         put_bytes(mut tx, 1, types.key_word(0), types.key_word(9999))?
         Ok(take rows)
     })
@@ -253,14 +253,14 @@ pub fn law_snapshots(c: Clock) -> bool {
         if value_at(held, k) != k + 1 {
             return false
         }
-        match result.unwrap(next_bytes(mut rows)) {
+        match result.unwrap(failure_result_from_rep(catalog.next_bytes(mut rows))) {
             Some((_, v)) => if decode_word(v) != k + 1 {
                 return false
             },
             None => return false
         }
     }
-    version(held) == before && result.unwrap(next_bytes(mut rows)) == None
+    version(held) == before && result.unwrap(failure_result_from_rep(catalog.next_bytes(mut rows))) == None
 }
 
 // L15: reads see their own writes. The two point reads precede the adjacent
@@ -297,8 +297,8 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
             if done.value != 46 || list.len(done.reads) != 4 {
                 return false
             }
-            let one = result.unwrap(logical_key(t.id, types.key_word(1)))
-            let two = result.unwrap(logical_key(t.id, types.key_word(2)))
+            let one = result.unwrap(failure_result_from_rep(catalog.logical_key(t.id, types.key_word(1))))
+            let two = result.unwrap(failure_result_from_rep(catalog.logical_key(t.id, types.key_word(2))))
             let lo = result.unwrap(lower_bytes(t.id, Excluded(types.key_word(1)), false))
             let middle = result.unwrap(lower_bytes(t.id, Excluded(types.key_word(2)), false))
             let hi = result.unwrap(lower_bytes(t.id, Included(types.key_word(3)), true))
@@ -578,14 +578,14 @@ pub fn law_reader_task(c: Clock, tasks: Tasks) -> bool waits {
             if value_at(s, k) != k + 1 {
                 return false
             }
-            match result.unwrap(next_bytes(mut rows)) {
+            match result.unwrap(failure_result_from_rep(catalog.next_bytes(mut rows))) {
                 Some((_, v)) => if decode_word(v) != k + 1 {
                     return false
                 },
                 None => return false
             }
         }
-        version(s) == 24 && result.unwrap(next_bytes(mut rows)) == None
+        version(s) == 24 && result.unwrap(failure_result_from_rep(catalog.next_bytes(mut rows))) == None
     })
     for k in 0u64 .. 1000 {
         if !put_one(mut db, k % 24, 10000 + k) {
@@ -760,7 +760,7 @@ fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
 
 fn catalog_put(mut db: Db, roots: pages.Roots, k: Bytes, v: Bytes) -> Result[pages.Roots, Error] {
     pages.edit_next_node(mut db.holders, scoped fn(mut stamp: u64) -> Result[pages.Roots, Error] {
-        catalog_insert(mut stamp, roots, k, v)
+        failure_result_from_rep(catalog.catalog_insert(mut stamp, roots, k, v))
     })
 }
 

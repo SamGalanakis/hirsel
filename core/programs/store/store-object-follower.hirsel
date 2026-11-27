@@ -215,7 +215,7 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
         if latest.checkpoint.seq <= old.current.entry.seq {
             let state = copy_follow_state(old_capture.state)?
             let initial = journal_replay(take state, old.next_node, default_limits())?
-            over_ceiling(journal_account(initial)?, ceiling)?
+            failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, ceiling))?
             return history_rebase_suffix(mut source, latest, old.current.entry, take initial, ceiling)
         }
     }
@@ -270,7 +270,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let resident = journal_account(replay)?
     let JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: latest, tag, next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)
-    Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, stamp_after(next_node)?)?))
+    Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
 }
 
 fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: HistoryMark, raw: Bytes, at_most: u64, ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
@@ -281,7 +281,7 @@ fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: 
     let (take recovered, _) = history_open_checkpoint(mut source, captured, mark, raw, take manifest, ceiling)?
     let resident = journal_account(recovered)?
     let JournalReplay(state: take state, next_node: stamp, ..) = take recovered
-    Ok(Some(follow_capture(captured.store, take state, resident, None, 0, stamp_after(stamp)?)?))
+    Ok(Some(follow_capture(captured.store, take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(stamp))?)?))
 }
 
 fn check_floor_missing[T](mut source: ObjectPackRead, captured: HistoryHead, take loaded: Result[T, Error], mut scratch: Bytes) -> Result[T, Error] waits {

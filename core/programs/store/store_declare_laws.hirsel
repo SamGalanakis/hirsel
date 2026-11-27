@@ -227,9 +227,9 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
     let _ = finish(mut declaration, take target_decl)?
     let _ = seal(mut db, take declaration)?
     let after = snapshot(db)
-    let mut cursor = byte_cursor(after.roots.collections, Included(prefix(ix.id)?), prefix(ix.id + 1)?)?
+    let mut cursor = byte_cursor(after.roots.collections, Included(failure_result_from_rep(catalog.prefix(ix.id))?), failure_result_from_rep(catalog.prefix(ix.id + 1))?)?
     for expected in 0u64 .. rows {
-        let Some((index_key, raw)) = next_bytes(mut cursor)? else {
+        let Some((index_key, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? else {
             return Error(MigrationFault)
         }
         if list.len(index_key) != 12 || list.len(raw) != 12 || format.read_le(raw, 0, 4) != 8 {
@@ -241,7 +241,7 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
             return Error(MigrationFault)
         }
     }
-    if let Some(_) = next_bytes(mut cursor)? {
+    if let Some(_) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         return Error(MigrationFault)
     }
     Ok(())
@@ -272,7 +272,7 @@ fn cover_sum(key: u64, value: u64) -> Result[u64, Capacity] {
 }
 
 fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[(), Error] {
-    let mut logical = prefix(index_id)?
+    let mut logical = failure_result_from_rep(catalog.prefix(index_id))?
     list.put_word_be(mut logical, key)
     list.put_word_be(mut logical, key)
     let s = snapshot(db)
@@ -387,7 +387,7 @@ fn covering_revision_case(d: Dir, c: Clock, r: Random, tasks: Tasks, drift: Drif
     // the row codec's own for a default or `from` this release changes. Give
     // its entry a different payload too.
     let mut prior = schema_plan(db)
-    let mut record = catalog_entry_in(prior.roots.catalog, ix.catalog_key)?
+    let mut record = catalog_entry_in(prior.schema.roots.catalog, ix.catalog_key)?
     let mut prior_revision: Bytes = list.new()
     list.fill(mut prior_revision, 32, 1u8)
     match drift {
@@ -404,15 +404,15 @@ fn covering_revision_case(d: Dir, c: Clock, r: Random, tasks: Tasks, drift: Drif
         _ => (),
     }
     let raw = encode_catalog(record)?
-    prior.roots = catalog_insert(mut prior.next_node, pages.share_roots(prior.roots), ix.catalog_key, raw)?
-    let mut fake_key = prefix(ix.id)?
+    prior.schema.roots = failure_result_from_rep(catalog.catalog_insert(mut prior.schema.next_node, pages.share_roots(prior.schema.roots), ix.catalog_key, raw))?
+    let mut fake_key = failure_result_from_rep(catalog.prefix(ix.id))?
     list.put_word_be(mut fake_key, 5u64)
     list.put_word_be(mut fake_key, 5u64)
     let mut fake_payload: Bytes = list.new()
     list.put_word_le(mut fake_payload, 0u16)
     list.put_word_le(mut fake_payload, 99u64)
-    let _ = failure_result_from_rep(pages.put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node))?
-    prior.changed = true
+    let _ = failure_result_from_rep(pages.put_page_row(mut prior.schema.roots.collections, fake_key, fake_payload, prior.schema.next_node + 1, mut prior.schema.next_node))?
+    prior.schema.changed = true
     let _ = publish_schema_plan(mut db, take prior)?
     let now = drift_codec(drift)
     let read_modes: Inline[Mode, 2] =[Open, Follower]
@@ -787,8 +787,8 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         let mut found = 0u64
         let mut target: Bytes = list.new()
         {
-            let mut cursor = byte_cursor(tx.roots.collections, Included(prefix(index_id)?), prefix(index_id + 1)?)?
-            while let Some((row_key, _)) = next_bytes(mut cursor)? {
+            let mut cursor = byte_cursor(tx.roots.collections, Included(failure_result_from_rep(catalog.prefix(index_id))?), failure_result_from_rep(catalog.prefix(index_id + 1))?)?
+            while let Some((row_key, _)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
                 found += 1
                 target = failure_result_from_rep(types.copied(row_key))?
             }

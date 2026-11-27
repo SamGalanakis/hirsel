@@ -262,7 +262,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
     for at in 0u64 .. list.len(queued) {
         compact_queue_row(mut work, source, first_added + at, queued[at], seq, row)?
     }
-    let key = prefix(row.collection)?
+    let key = failure_result_from_rep(catalog.prefix(row.collection))?
     for slot in 0u64 .. list.len(work.roots) {
         let Some(edge) = promotion_collection_root(work.roots[slot].collections, row.collection)? else {
             continue

@@ -1,12 +1,12 @@
 // Ships the whole preparation; later catch-up rounds ship ROUND deltas onto it.
 pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
-    let mut built_roots = pages.share_roots(staged.plan.roots)
-    let mut built_next_node = staged.plan.next_node
+    let mut built_roots = pages.share_roots(staged.plan.schema.roots)
+    let mut built_next_node = staged.plan.schema.next_node
     let mut extra_rewrites: List[ActivationRewrite] = list.new()
     let has_pending_indexes = list.len(staged.plan.pending_indexes) != 0
     if has_pending_indexes {
         let mut ctx = child_cut_context(source)
-        deploy_result(run_deferred_index_builds_roots(mut ctx, source.stamp.opened, staged.plan.pending_indexes, staged.plan.bindings, mut built_roots, mut built_next_node, staged.plan.live, staged.plan.ceiling, staged.plan.retained))?
+        deploy_result(run_deferred_index_builds_roots(mut ctx, source.stamp.opened, staged.plan.pending_indexes, staged.plan.bindings, mut built_roots, mut built_next_node, staged.plan.schema.live, staged.plan.schema.ceiling, staged.plan.schema.retained))?
         save_child_cut_pack(source, ctx.next_pack)
     }
     if list.len(staged.queued_rewrites) != 0 {
@@ -19,7 +19,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
         }
     }
     let delta = deploy_result(catalog_changes(pages.holder_heads(source.db.holders)[0].roots, built_roots))?
-    let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.next_table))?
+    let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.schema.next_table))?
     let has_tiered = pages.tiered_collections(pages.holder_heads(source.db.holders)[0].roots.collections.root) || pages.tiered_collections(built_roots.collections.root)
     let snap = snapshot_from(source.db, 0u64, source.stamp.head, built_roots, int.saturating_add(built_next_node, 1))
     let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
@@ -31,7 +31,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
             let mut cursor = deploy_result(entries_of(built_roots.collections, desc.id))?
             let mut row_total = 0u64
             let mut checksum = std.check.start()
-            while let Some((key, value)) = deploy_result(next_bytes(mut cursor))? {
+            while let Some((key, value)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut cursor)))? {
                 deploy_result(checksum_row(mut checksum, key, value))?
                 row_total += 1
             }
@@ -40,7 +40,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
     }
     let base: ExportStamp = clone(source.stamp)
     let ctx = format.DiskContext(store: store_key_to_rep(source.db.store), role: 6, seq: source.stamp.opened)
-    let meta = PreparedMeta(base: take base, target: take target, next_table: staged.plan.next_table, changes: list.len(delta), ranges: list.len(inventory))
+    let meta = PreparedMeta(base: take base, target: take target, next_table: staged.plan.schema.next_table, changes: list.len(delta), ranges: list.len(inventory))
     let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     let mut encoded_meta: Bytes = list.new()
     std.codec.encode(metadata_codec, meta, mut encoded_meta) ?=> |_| Scratch(Limit(Value))
@@ -73,7 +73,7 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
             write_tiered_prepared_rows_direct(mut file, source.dir, source.db.store, source.db.writer_pin_bytes, snap, desc.id, row_codec)?
         } else {
             let mut rows = deploy_result(entries_of(built_roots.collections, desc.id))?
-            while let Some((take key, value)) = deploy_result(next_bytes(mut rows))? {
+            while let Some((take key, value)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut rows)))? {
                 let row = PreparedRow(key: take key, value: deploy_result(failure_result_from_rep(types.copied(value)))?)
                 scratch_result(write_prepared_frame(mut file, 0x0084, row_codec, row))?
             }
@@ -352,7 +352,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     if !payload.rewrites_checked && list.len(payload.rewrites) != 0 {
         let mut has_cold_rewrite = false
         for row in payload.rewrites {
-            let id_key = deploy_result(prefix(row.id))?
+            let id_key = deploy_result(failure_result_from_rep(catalog.prefix(row.id)))?
             if let Some((_, desc)) = std.page.collection_slot(lease.collections.root, id_key) {
                 if pages.collection_descriptor(desc).residency != ResidentMemory {
                     has_cold_rewrite = true
@@ -487,7 +487,7 @@ fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {
 fn planned_catalog(mut plan: SchemaPlan, delta: List[CatalogChange]) -> Result[(), DeployError] {
     for changed in delta {
         let agrees = {
-            let current = pages.get_page_row(plan.roots.catalog, changed.key)
+            let current = pages.get_page_row(plan.schema.roots.catalog, changed.key)
             match changed.before {
                 Some(expected) => match current {
                     Some(raw) => catalog_bytes_equal(raw, expected),
@@ -503,30 +503,30 @@ fn planned_catalog(mut plan: SchemaPlan, delta: List[CatalogChange]) -> Result[(
             return Error(ImportMalformed)
         }
         if let Some(raw) = changed.after {
-            let roots = deploy_result(catalog_insert(mut plan.next_node, plan.roots, changed.key, raw))?
-            plan.roots = take roots
+            let roots = deploy_result(failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, plan.schema.roots, changed.key, raw)))?
+            plan.schema.roots = take roots
         } else {
-            deploy_result(remove_store_row(mut plan.roots.catalog, changed.key, mut plan.next_node))?
+            deploy_result(failure_result_from_rep(catalog.remove_store_row(mut plan.schema.roots.catalog, changed.key, mut plan.schema.next_node)))?
         }
     }
     Ok(())
 }
 
 fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result[(), DeployError] {
-    let private_from = deploy_result(stamp_after(plan.next_node))?
+    let private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(plan.schema.next_node)))?
     let mut next_stamp = private_from
     plan.step_drift = true
     for replaced in imported {
-        let had_tiered = deploy_result(table_is_tiered(plan.roots.collections, replaced.id))?
+        let had_tiered = deploy_result(table_is_tiered(plan.schema.roots.collections, replaced.id))?
         if had_tiered {
-            deploy_result(discard_replayed_collection(mut plan.roots.collections, replaced.id))?
-            deploy_result(failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, 1))))?
-            list.push(mut plan.superseded, replaced.id)
+            deploy_result(discard_replayed_collection(mut plan.schema.roots.collections, replaced.id))?
+            deploy_result(failure_result_from_rep(types.capacity(list.try_reserve(mut plan.schema.superseded, 1))))?
+            list.push(mut plan.schema.superseded, replaced.id)
         }
         if replaced.kind == 0 {
-            let _ = deploy_result(drop_collection(mut plan.roots.collections, replaced.id, private_from, mut next_stamp))?
+            let _ = deploy_result(failure_result_from_rep(catalog.drop_collection(mut plan.schema.roots.collections, replaced.id, private_from, mut next_stamp)))?
         } else {
-            let key = deploy_result(prefix(replaced.id))?
+            let key = deploy_result(failure_result_from_rep(catalog.prefix(replaced.id)))?
             let slot: Option[std.page.Slot] = if replaced.residency == ResidentMemory {
                 match view replaced.tree {
                     Some(page) => Some(HotPage(arc.share(page))),
@@ -535,10 +535,10 @@ fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result
             } else {
                 clone(replaced.slot)
             }
-            deploy_result(put_collection_with_residency(mut plan.roots.collections, key, take slot, replaced.rows, replaced.charge, replaced.kind, replaced.residency, private_from, mut next_stamp))?
+            deploy_result(put_collection_with_residency(mut plan.schema.roots.collections, key, take slot, replaced.rows, replaced.charge, replaced.kind, replaced.residency, private_from, mut next_stamp))?
         }
     }
-    deploy_result(failure_result_from_rep(pages.canonical_tree(mut plan.roots.collections)))?
-    plan.next_node = next_stamp - 1
+    deploy_result(failure_result_from_rep(pages.canonical_tree(mut plan.schema.roots.collections)))?
+    plan.schema.next_node = next_stamp - 1
     Ok(())
 }

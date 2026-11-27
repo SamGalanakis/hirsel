@@ -217,7 +217,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         open_heads(mut prepared, take state)?
         pages.set_next_node(mut prepared.holders, replay.next_node)
         prepared.limits = replay.limits
-        prepared.next_table = replay.state.next_table
+        catalog.set_next_table(mut prepared.schema, replay.state.next_table)
         prepared.resident = journal_account(replay)?
         rebuild_keyed_credit(mut prepared, 0, options.journal_limit)?
         Ok(take prepared)
@@ -312,7 +312,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache), authority_kind)))
     }
     db.checkpointed = generation
-    db.fence = fence
+    catalog.restore_fence(mut db.schema, fence)
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
     let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: optional_host_stream_id_from_rep(attached_sid), attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
@@ -507,15 +507,15 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     // objects@1 has no Tiered publisher (§13.6a); its open refuses a Tiered account.
     failure_result_from_rep(types.require_memory_collections(pages.holders_tiered(participants.roots), tiered_refusal_to_rep(Install)))?
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
-    over_ceiling(base.account, available_resident(db))?
+    failure_result_from_rep(catalog.over_ceiling(base.account, available_resident(db)))?
     if let Some(wanted) = target {
         if let Some(problem) = types.journal_floor(wanted.checkpoint, wanted.journal, wanted.frame) {
             return Error(Full(Journal(problem)))
         }
-        over_ceiling(base.account, wanted.resident)?
+        failure_result_from_rep(catalog.over_ceiling(base.account, wanted.resident))?
     }
     let manifest_bytes = cut_manifest_size(db, delta)
-    let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut workspace = history_buffers(65536)?
     let cache_dir = pack_cache_directory(object_state(db).cache)
     let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {

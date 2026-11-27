@@ -35,7 +35,7 @@ pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
 fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], target_binding: Option[Inline[u8, 32]], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
     let staged = accept_cutover(mut db, request)?
     let base = view staged.meta.base
-    if pages.holder_heads(db.holders)[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
+    if pages.holder_heads(db.holders)[0].head != base.head || catalog.next_table_id(db.schema) != base.next_table || current_activation != base.activation {
         return Error(Drift)
     }
     let target = view staged.meta.target
@@ -49,11 +49,11 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     }
     let disk_limit = disk_state(db).options.resident_limit
     let mut schema_change = schema_plan(db)
-    schema_change.ceiling = disk_limit
+    schema_change.schema.ceiling = disk_limit
     planned_catalog(mut schema_change, staged.delta)?
     let ranges = kept_ranges(staged)?
     planned_ranges(mut schema_change, ranges)?
-    let has_tiered = pages.tiered_collections(schema_change.roots.collections.root) || store_has_tiered(db)
+    let has_tiered = pages.tiered_collections(schema_change.schema.roots.collections.root) || store_has_tiered(db)
     let started_pager = if has_tiered {
         match db.pager {
             Some(_) => false,
@@ -72,21 +72,21 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(take problem)
     }
     // STORE-SPEC §1.2: a release activates only over Public indexes.
-    if let Some(take name) = deploy_result(unready_index(schema_change.roots.catalog))? {
+    if let Some(take name) = deploy_result(unready_index(schema_change.schema.roots.catalog))? {
         if started_pager {
             stop_residency_pager(mut db)
         }
         return Error(Store(NotReady(take name)))
     }
     let tiered_reserve = tiered_plan_reserve(disk_state(db).options)
-    schema_change.next_table = staged.meta.next_table
-    schema_change.live = install_account(db, schema_change.roots)?
+    schema_change.schema.next_table = staged.meta.next_table
+    schema_change.schema.live = install_account(db, schema_change.schema.roots)?
     let admitted_before = if has_tiered {
-        int.saturating_add(schema_change.live, tiered_reserve)
+        int.saturating_add(schema_change.schema.live, tiered_reserve)
     } else {
-        schema_change.live
+        schema_change.schema.live
     }
-    deploy_result(over_ceiling(admitted_before, disk_limit))?
+    deploy_result(failure_result_from_rep(catalog.over_ceiling(admitted_before, disk_limit)))?
     let mut installation = staged_migration(db, take schema_change, false, list.new())
     let Some(release_at) = int.checked_add(base.head, 1u64) else {
         return Error(Store(Limit(Ids)))
@@ -102,13 +102,13 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let prior = deploy_result(failure_result_from_rep(types.copied(old_describe)))?
     let release = release_from(target, request.digest)?
     deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
-    installation.plan.live = install_account(db, installation.plan.roots)?
+    installation.plan.schema.live = install_account(db, installation.plan.schema.roots)?
     let admitted_after = if has_tiered {
-        int.saturating_add(installation.plan.live, tiered_reserve)
+        int.saturating_add(installation.plan.schema.live, tiered_reserve)
     } else {
-        installation.plan.live
+        installation.plan.schema.live
     }
-    deploy_result(over_ceiling(admitted_after, disk_limit))?
+    deploy_result(failure_result_from_rep(catalog.over_ceiling(admitted_after, disk_limit)))?
     if host.mono_ns(db.clock) >= request.deadline || !before_cut() {
         if started_pager {
             stop_residency_pager(mut db)

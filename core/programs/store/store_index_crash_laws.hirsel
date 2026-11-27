@@ -141,9 +141,9 @@ fn index_build_sums_match(db: Db, schema: IndexBuildSchema) -> Result[bool, Erro
         }
     }
     let id = schema.by_sum.id
-    let mut stored = byte_cursor(image.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut stored = byte_cursor(image.roots.collections, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1))?)?
     for group in 0u64 .. 8 {
-        let Some((key, raw)) = next_bytes(mut stored)? else {
+        let Some((key, raw)) = failure_result_from_rep(catalog.next_bytes(mut stored))? else {
             return Ok(false)
         }
         if list.len(key) != 12 || list.len(raw) != 16 {
@@ -154,7 +154,7 @@ fn index_build_sums_match(db: Db, schema: IndexBuildSchema) -> Result[bool, Erro
             return Ok(false)
         }
     }
-    Ok(match next_bytes(mut stored)? {
+    Ok(match failure_result_from_rep(catalog.next_bytes(mut stored))? {
         None => true,
         Some(_) => false,
     })
@@ -192,7 +192,7 @@ fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: boo
     let id = schema.by_v.id
     let mut expected: List[Bytes] = list.new()
     for k in 0u64 .. 96 {
-        let mut logical = prefix(id)?
+        let mut logical = failure_result_from_rep(catalog.prefix(id))?
         list.put_word_be(mut logical, k + 2000)
         list.put_word_be(mut logical, k)
         list.push(mut expected, take logical)
@@ -230,10 +230,10 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
     let schema = index_build_schema_kind(mut db, Migrate, d7_seed_kind(seed))?
     d7_index_write(mut db, schema.rows, 1u64, 10u64)?
     // The fixture skips only set_residency's public kind check.
-    residency_to_tiered(mut db, schema.by_v.id, prefix(schema.by_v.id)?)?
+    residency_to_tiered(mut db, schema.by_v.id, failure_result_from_rep(catalog.prefix(schema.by_v.id))?)?
     {
         let base = pages.holder_heads(db.holders)[0].roots.collections
-        let Some((ColdPage(_), descriptor)) = std.page.collection_slot(base.root, prefix(schema.by_v.id)?) else {
+        let Some((ColdPage(_), descriptor)) = std.page.collection_slot(base.root, failure_result_from_rep(catalog.prefix(schema.by_v.id))?) else {
             fail("L68: the checkpoint must store the index in a Cold leaf")
         }
         if seed != D7Unique && pages.collection_descriptor(descriptor).row_bytes != 86 {
@@ -280,7 +280,7 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
         fail("L68: the schema cut must publish Backfilling(None)")
     }
     let tree = pages.holder_heads(db.holders)[0].roots.collections
-    let Some((HotPage(root), fields)) = std.page.collection_slot(tree.root, prefix(schema.by_v.id)?) else {
+    let Some((HotPage(root), fields)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(schema.by_v.id))?) else {
         fail("L68: the schema cut must publish the empty index root")
     }
     let descriptor = pages.collection_descriptor(fields)
@@ -306,7 +306,7 @@ fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] 
     if !demote_index(mut plan, schema.by_v.catalog_key)? {
         fail("L68(f): the fixture must start with a Public index")
     }
-    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..) = take plan
+    let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..), ..) = take plan
     pages.set_next_node(mut db.holders, ids)
     let replacement = ProposedMain(roots: take roots, head: pages.holder_heads(db.holders)[0].head + 1, at: pages.holder_heads(db.holders)[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None, step_rows: list.new(), step_drift: false)
     refused_cut_bytes(mut db, ReplaceMain(take replacement, None))
@@ -416,7 +416,7 @@ fn d7_check_chunk_capacity(mut db: Db) -> Result[(), Error] waits {
 
 fn d7_check_tiered_sums(mut db: Db, schema: IndexBuildSchema) -> Result[(), Error] waits {
     d7_index_write(mut db, schema.rows, 6u64, 40u64)?
-    residency_to_tiered(mut db, schema.by_sum.id, prefix(schema.by_sum.id)?)?
+    residency_to_tiered(mut db, schema.by_sum.id, failure_result_from_rep(catalog.prefix(schema.by_sum.id))?)?
     rebuild_aggregate(mut db, schema.by_sum)?
     d7_finish_index(mut db)?
     let Seen(Seen(value: Ok(Totals(count: 2, sum: 72)), ..)) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(100000), copy_env(schema.by_sum), fn(tx: Tx, sums: Aggregate[u64]) -> Result[Totals, Error] {

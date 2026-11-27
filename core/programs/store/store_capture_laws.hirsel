@@ -81,11 +81,11 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
         let mut name = string.from("table-")
         string.push_u64(mut name, int.widen(i + 10))
         let record = Catalog(record: CatalogTable, id: i, owner: 0, epoch: 1, key: list.new(), schemas: list.new(), next: 1, by: list.new(), revision: list.new())
-        list.push(mut catalog_rows, std.page.Entry(key: table_key(name)?, cell: InlineValue(encode_catalog(record)?)))
+        list.push(mut catalog_rows, std.page.Entry(key: failure_result_from_rep(catalog.table_key(name))?, cell: InlineValue(encode_catalog(record)?)))
     }
-    let mut schemas: List[ValueSchema] = list.with_capacity(32)
+    let mut schemas: List[catalog.ValueSchema] = list.with_capacity(32)
     for i in 1u16 .. 33 {
-        list.push(mut schemas, ValueSchema(number: i, fingerprint: 0, schema: capture_test_fill(4096, 17)))
+        list.push(mut schemas, catalog.ValueSchema(number: i, fingerprint: 0, schema: capture_test_fill(4096, 17)))
     }
     let index_record = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(CATALOG_REVISION_MAX, 19))
     let large_value = encode_catalog(index_record)?
@@ -97,7 +97,7 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     list.append(mut blob_bytes, failure_result_from_rep(types.capacity(format.disk_seal(large, 72, 0x0022, 1, payload)))?)
     disk_write_synced(d, "p-2", blob_bytes)?
     let reference = std.page.BlobRef(stamp: 1, len: list.len(large_value), checksum: std.check.xxh3(large_value, 0, list.len(large_value)), pack: 2, offset: 72, body: 0)
-    list.push(mut catalog_rows, std.page.Entry(key: catalog_index_key(1, "large")?, cell: BlobValue(reference)))
+    list.push(mut catalog_rows, std.page.Entry(key: failure_result_from_rep(catalog.catalog_index_key(1, "large"))?, cell: BlobValue(reference)))
     let leaf = failure_result_from_rep(pages.page_result(std.page.encode(catalog_rows, 0, 2, Unprefixed)))?
     let mut root = capture_test_page(mut raw, data, leaf)?
     for height in 1u8 .. 65 {

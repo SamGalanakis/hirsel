@@ -130,7 +130,7 @@ fn blob_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result
 // Makes the table Tiered and cuts, so every row is Cold after a reopen.
 fn cold_table(take opened: Db, table_id: u32) -> Result[(), Error] waits {
     let mut db = take opened
-    let id = prefix(table_id)?
+    let id = failure_result_from_rep(catalog.prefix(table_id))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
@@ -138,7 +138,7 @@ fn cold_table(take opened: Db, table_id: u32) -> Result[(), Error] waits {
         }
         (arc.share(here), failure_result_from_rep(pages.rooted_collection_record(here, before[52u64], ResidentTiered))?)
     }
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?

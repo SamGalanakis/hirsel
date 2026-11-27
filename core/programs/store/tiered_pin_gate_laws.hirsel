@@ -461,7 +461,7 @@ fn gate_l88_hot_slots(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCras
         fail("L88 (c): the puts commit")
     }
     let s = snapshot(db)
-    match std.page.collection_slot(s.roots.collections.root, prefix(rows.id)?) {
+    match std.page.collection_slot(s.roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) {
         Some((HotPage(_), _)) => (),
         _ => fail("L88 (c): puts before any cut leave the captured Tiered root Hot"),
     }

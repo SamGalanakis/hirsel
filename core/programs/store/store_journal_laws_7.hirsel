@@ -205,7 +205,7 @@ fn journal_test_empty_commit_skip(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     if r_pure.value != Some(100u64) || list.len(r_pure.reads) != 1u64 {
         fail("L91 E2: pure read value or reads wrong")
     }
-    let expected_key = logical_key(rows.id, types.key_word(1u64))?
+    let expected_key = failure_result_from_rep(catalog.logical_key(rows.id, types.key_word(1u64)))?
     match r_pure.reads[0u64] {
         Point(k) if k == expected_key => (),
         _ => fail("L91 E2: pure read Point mismatch"),

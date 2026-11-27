@@ -29,7 +29,7 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
             if let Some(HotBlob(body)) = std.page.blob_slot(page, reference.body) {
                 if !map.contains(pending.seen, reference.stamp) {
                     let suffix = option.unwrap(std.page.key_at(image, slot))
-                    let key = logical_key(collection, suffix)?
+                    let key = failure_result_from_rep(catalog.logical_key(collection, suffix))?
                     let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
                     failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
                     failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, 1)))?
@@ -121,7 +121,7 @@ fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack
         if slot != first && (following > cap || slot - first == 4294967295) {
             failure_result_from_rep(types.capacity(list.try_reserve(mut packs, 1)))?
             list.push(mut packs, PlannedPack(seq: seq, first: first, end: slot, size: extent, payload_bytes: payload))
-            seq = stamp_after(seq)?
+            seq = failure_result_from_rep(catalog.stamp_after(seq))?
             first = slot
             let (fresh_extent, fresh_room) = tiered_frame_extent(72, 0, width, key_width)?
             extent = fresh_extent
@@ -137,7 +137,7 @@ fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack
     if end != first {
         failure_result_from_rep(types.capacity(list.try_reserve(mut packs, 1)))?
         list.push(mut packs, PlannedPack(seq: seq, first: first, end: end, size: extent, payload_bytes: payload))
-        seq = stamp_after(seq)?
+        seq = failure_result_from_rep(catalog.stamp_after(seq))?
     }
     Ok(TieredPackRun(class: class, frames: take frames, packs: take packs, next_pack: seq))
 }

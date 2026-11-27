@@ -298,7 +298,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, replay.immutable)?
     if list.len(commit.keyed) != 0 {
         let before = keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
-        let mut draw = stamp_after(replay.next_node)?
+        let mut draw = failure_result_from_rep(catalog.stamp_after(replay.next_node))?
         failure_result_from_rep(pages.materialize_keyed_edits(mut replay.state.tips[i].roots, commit.keyed, 0, mut draw))?
         if !replay.immutable {
             failure_result_from_rep(pages.canonical_roots(mut replay.state.tips[i].roots))?
@@ -327,7 +327,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
     if list.len(ops) == 0 {
         return Ok(())
     }
-    let mut next_stamp = stamp_after(ids)?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(ids))?
     let domain = pages.tree_domain(tree)
     let mut processed = 0u64
     for slot in 0u64 .. list.len(ops) {

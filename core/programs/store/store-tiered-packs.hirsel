@@ -16,9 +16,9 @@ fn tiered_page_index_key(collection: u32, image: std.page.Image) -> Result[Bytes
         1u64
     }
     if let Some(suffix) = std.page.key_at(image, slot) {
-        return logical_key(collection, suffix)
+        return failure_result_from_rep(catalog.logical_key(collection, suffix))
     }
-    prefix(collection)
+    failure_result_from_rep(catalog.prefix(collection))
 }
 
 fn begin_tiered_pack(owner: StoreId, seq: u64, class: u8, cap: u64) -> Result[TieredPackDraft, Error] {

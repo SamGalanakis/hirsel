@@ -621,7 +621,7 @@ fn walk_entry(j: u64, primary: Option[u64]) -> Bytes {
 }
 
 fn walk_stored(db: Db, id: u32, edited: Bytes) -> Result[Bytes, Error] {
-    let p = logical_key(id, edited)?
+    let p = failure_result_from_rep(catalog.logical_key(id, edited))?
     match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, p) {
         Some(v) => failure_result_from_rep(types.copied(v)),
         None => Error(Missing("walk fixture entry")),
@@ -735,7 +735,7 @@ fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fa
         fail("§1.2 walker: a report walk gave the wrong number of findings")
     }
     for i in 0u64 .. list.len(expected) {
-        if reported[i].index != name || reported[i].entry != logical_key(id, edited)? || !walk_fault_is(reported[i].fault, expected[i]) {
+        if reported[i].index != name || reported[i].entry != failure_result_from_rep(catalog.logical_key(id, edited))? || !walk_fault_is(reported[i].fault, expected[i]) {
             fail("§1.2 walker: a report finding names the wrong index, entry or fault")
         }
     }
@@ -749,7 +749,7 @@ fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fa
     if list.len(found) != 1 {
         fail("§1.2 walker: a corrupted index must give exactly one finding")
     }
-    if found[0].index != name || found[0].entry != logical_key(id, edited)? || !walk_fault_is(found[0].fault, fault) {
+    if found[0].index != name || found[0].entry != failure_result_from_rep(catalog.logical_key(id, edited))? || !walk_fault_is(found[0].fault, fault) {
         fail("§1.2 walker: the finding names the wrong index, entry or fault")
     }
     let sums_serves = if let Public = lix_state(fx.db, "totals")? {

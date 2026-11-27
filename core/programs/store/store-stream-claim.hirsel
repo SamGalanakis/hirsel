@@ -131,7 +131,7 @@ fn stream_tail_apply(key: String, slice: Bytes, row: format.BatchRow, seq: u64, 
                     journal_decode(key, frame.kind, list.slice(slice, frame.payload, frame.end))
                 })?
                 journal_apply(key, mut replay, take event)?
-                over_ceiling(journal_account(replay)?, ceiling)?
+                failure_result_from_rep(catalog.over_ceiling(journal_account(replay)?, ceiling))?
             } else {
                 return Error(failure_from_rep(format.disk_fault(key, row.offset + at, Kind(int.widen(frame.kind)))))
             }

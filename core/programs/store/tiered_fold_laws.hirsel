@@ -72,7 +72,7 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
 }
 
 fn l79_cut_table(base: std.page.PagePtr, total_rows: u64, row_bytes: u64, mut next_stamp: u64) -> Result[pages.Roots, Error] {
-    let key = prefix(9)?
+    let key = failure_result_from_rep(catalog.prefix(9))?
     let mut descriptor = failure_result_from_rep(pages.collection_header(base.stamp, total_rows, row_bytes, 1, ResidentTiered))?
     list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
@@ -116,7 +116,7 @@ fn l79_cut_emits_folded_tree(source: TieredPageSource, base: std.page.PagePtr, o
     if pages.tree_stamp(sealed) != pages.tree_stamp(folded.collections) {
         fail("T6: publishing a physical location must keep the Memory map's planned stamp")
     }
-    let key = prefix(9)?
+    let key = failure_result_from_rep(catalog.prefix(9))?
     let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(sealed.root, key) else {
         fail("L79: the prepared holder must name the emitted Tiered root")
     }
@@ -321,7 +321,7 @@ fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Resu
     journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?
     let mut parent_tree = pages.share_page_tree(replay.state.tips[0u64].roots.collections)
     let mut child_tree = pages.share_page_tree(replay.state.tips[1u64].roots.collections)
-    stamp = stamp_after(replay.next_node)?
+    stamp = failure_result_from_rep(catalog.stamp_after(replay.next_node))?
     let parent_effects = fold_page_tree(source, mut parent_tree, mut stamp)?
     let child_effects = fold_page_tree(source, mut child_tree, mut stamp)?
     let mut observed: List[u64] = list.new()
@@ -335,7 +335,7 @@ fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Resu
     if list.len(observed) != 3 || observed[0u64] != 40 || observed[1u64] != 41 || observed[2u64] != 42 || list.len(child_effects) != 0 {
         fail("L87(d): only the parent records both Cold leaves and the Cold parent")
     }
-    let map_key = prefix(9)?
+    let map_key = failure_result_from_rep(catalog.prefix(9))?
     let Some((HotPage(parent_rows), _)) = std.page.collection_slot(parent_tree.root, map_key) else {
         fail("L87(d): the parent's fold must materialize the merged leaf")
     }

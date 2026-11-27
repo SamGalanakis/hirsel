@@ -395,7 +395,7 @@ declaration_base	store-declare.hirsel	store	store	-
 follower_base	store-declare.hirsel	catalog	catalog	L3
 same_declaration_base	store-declare.hirsel	catalog	catalog	L3
 new_declaration	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
-declare_projector_name	store-declare.hirsel	catalog	catalog	L3
+declare_projector_name	store-declare.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 validate_local_projector	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
 declare_verify	store-declare.hirsel	store	store	-
 seal_verify	store-declare.hirsel	store	store	-
@@ -422,11 +422,11 @@ active_table	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs
 declaration_index_name	store-declare.hirsel	catalog	catalog	L3
 remove_declared_index	store-declare.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
 declaration_revision	store-declare.hirsel	catalog	catalog	L3
-index_revision	store-declare.hirsel	catalog	catalog	L3
+index_revision	store-declare.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 revision_part	store-declare.hirsel	catalog	catalog	L3
 note_cause	store-declare.hirsel	catalog	catalog	L3
 rebuild_cause	store-declare.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
-codec_revision	store-declare.hirsel	catalog	catalog	L3
+append_fingerprint	store-declare.hirsel	catalog	catalog	L3
 index	store-declare.hirsel	store	store	-
 covering	store-declare.hirsel	store	store	-
 covering_row	store-declare.hirsel	store	store	-
@@ -435,9 +435,9 @@ existing_index_record	store-declare.hirsel	catalog	store	-	push-up catalog -> st
 settle_index_record	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 10)
 build_declared_record	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 11)
 index_payload_number	store-declare.hirsel	catalog	catalog	L3
-index_payload_readers	store-declare.hirsel	catalog	catalog	L3
+index_payload_readers	store-declare.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 finish	store-declare.hirsel	store	store	-
-complete_declaration	store-declare.hirsel	catalog	catalog	L3
+complete_declaration	store-declare.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 seal	store-declare.hirsel	store	store	-
 seal_follower	store-declare.hirsel	store	store	-
 migrate_table	store-declare.hirsel	store	store	-
@@ -740,7 +740,7 @@ shape_byte	store-index-registry.hirsel	indexes	indexes	L10
 entry_kind	store-index-registry.hirsel	indexes	indexes	L10
 index_claims	store-index-registry.hirsel	indexes	indexes	L10
 IndexState	store-index-registry.hirsel	store	store	-
-copied_state	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by settle_index_record)
+copied_state	store-index-registry.hirsel	indexes	store	-	Root types at the catalog boundary (L3)
 record_public	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by catalog_index_handle)
 malformed	store-index-registry.hirsel	indexes	pages	L2	pull-down indexes -> manifest (used by add_lineage_cell); pull-down manifest -> pages (used by next_page_range)
 take_le	store-index-registry.hirsel	indexes	indexes	L10
@@ -1158,7 +1158,7 @@ MigrationPreview	store-migration.hirsel	store	store	-
 preview_migration	store-migration.hirsel	store	store	-
 catalog_collection_name	store-migration.hirsel	catalog	catalog	L3
 catalog_descriptions	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
-catalog_positions	store-migration.hirsel	catalog	catalog	L3
+catalog_positions	store-migration.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 preview_catalog_changes	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
 ParkEntry	store-mux.hirsel	pager	pager	L5
 ParkQueue	store-mux.hirsel	pager	pager	L5
@@ -2111,7 +2111,7 @@ admit_existing	store-streams.hirsel	store	store	-
 admit_next	store-streams.hirsel	store	store	-
 admit_commit	store-streams.hirsel	store	store	-
 lower_bytes	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by open_scan)
-byte_cursor	store-streams.hirsel	txn	catalog	L3	pull-down txn -> indexes (used by find_index_name); pull-down indexes -> catalog (used by migrate_build)
+byte_cursor	store-streams.hirsel	txn	store	-	Root types at the catalog boundary (L3)
 reverse_byte_cursor	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by resume_data)
 next_bytes	store-streams.hirsel	txn	catalog	L3	pull-down txn -> catalog (used by complete_declaration)
 stream_live	store-streams.hirsel	store	store	-
@@ -2828,14 +2828,14 @@ Readers	store.hirsel	store	store	-
 Table	store.hirsel	store	store	-
 IndexKind	store.hirsel	store	store	-
 Index	store.hirsel	store	store	-
-PageRows	store.hirsel	catalog	catalog	L3
-RowDecoder	store.hirsel	catalog	catalog	L3
+PageRows	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
+RowDecoder	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 row_schemas	store.hirsel	store	store	-
 decoded	store.hirsel	catalog	catalog	L3
 read_le	store.hirsel	format	format	L1
-row_value	store.hirsel	catalog	catalog	L3
+row_value	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 encode_key	store.hirsel	catalog	catalog	L3
-typed_bound	store.hirsel	catalog	catalog	L3
+typed_bound	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 writable	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
 fetch_bytes	store.hirsel	store	store	-
 fetch	store.hirsel	store	store	-
@@ -2843,9 +2843,9 @@ key_span	store.hirsel	store	store	-
 published_value	store.hirsel	store	store	-
 publish_row	store.hirsel	txn	txn	L12
 reads_key	store.hirsel	store	store	-
-index_decoder	store.hirsel	catalog	catalog	L3
+index_decoder	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 prefix_after	store.hirsel	catalog	catalog	L3
-index_bound	store.hirsel	catalog	catalog	L3
+index_bound	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 table_key	store.hirsel	catalog	catalog	L3
 index_prefix	store.hirsel	catalog	catalog	L3
 catalog_index_key	store.hirsel	catalog	catalog	L3
@@ -2857,7 +2857,7 @@ remove_store_row	store.hirsel	catalog	catalog	L3
 remove_store_collection	store.hirsel	catalog	catalog	L3
 system_table	store.hirsel	store	store	-
 stage_create_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
-readers	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+readers	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 table	store.hirsel	store	store	-
 stage_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
 catalog_handle	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)

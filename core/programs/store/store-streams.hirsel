@@ -220,7 +220,7 @@ fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: 
     let caller_prefix = failure_result_from_rep(types.copied(edits.caller_prefix))?
     let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
     for reclaimed in 0u64 .. 3u64 {
-        let Some((take key, _)) = next_page_range(mut rows)? else {
+        let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
             break
         }
         let Some(name) = optional_stream_key_from_rep(format.parse_stream_key(key)) else {
@@ -264,7 +264,7 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
     let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
     let mut deletes: List[Bytes] = list.with_capacity(metadata.count)
     for _ in 0u64 .. metadata.count {
-        let Some((take key, _)) = next_page_range(mut rows)? else {
+        let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
             return Error(failure_from_rep(pages.malformed(0)))
         }
         if stream_admit_held(db, key) {
@@ -303,7 +303,7 @@ pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: sco
     for _ in 0u64 .. 8u64 {
         let caller = {
             let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_key)), true, false, Some(clone(b"\x02"))))?
-            let Some((take key, _)) = next_page_range(mut rows)? else {
+            let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
                 return Ok(None)
             }
             if list.len(key) < 2u64 {
@@ -353,7 +353,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
     let mut edits: List[StreamSweepEdit] = list.new()
     let mut deletes: List[Bytes] = list.new()
     for _ in 0u64 .. 8u64 {
-        let Some((take key, _)) = next_page_range(mut rows)? else {
+        let Some((take key, _)) = failure_result_from_rep(catalog.next_page_range(mut rows))? else {
             after = None;
             break
         }
@@ -726,20 +726,20 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
 
 fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error] {
     match limit {
-        Unbounded => prefix(if high {
+        Unbounded => failure_result_from_rep(catalog.prefix(if high {
             id + 1
         } else {
             id
-        }),
+        })),
         Included(k) => {
-            let mut p = logical_key(id, k)?
+            let mut p = failure_result_from_rep(catalog.logical_key(id, k))?
             if high {
                 list.push(mut p, 0u8)
             }
             Ok(take p)
         },
         Excluded(k) => {
-            let mut p = logical_key(id, k)?
+            let mut p = failure_result_from_rep(catalog.logical_key(id, k))?
             if !high {
                 list.push(mut p, 0u8)
             }
@@ -760,10 +760,6 @@ fn byte_cursor(data: pages.PageTree, take low: Bound[Bytes], high: Bytes) -> Res
 
 fn reverse_byte_cursor(data: pages.PageTree, low: Bytes, high: Bytes) -> Result[pages.PageRange, Error] {
     failure_result_from_rep(pages.open_page_range(data, Some(failure_result_from_rep(types.copied(high))?), false, true, Some(failure_result_from_rep(types.copied(low))?)))
-}
-
-fn next_bytes(mut rows: pages.PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    next_page_range(mut rows)
 }
 
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.

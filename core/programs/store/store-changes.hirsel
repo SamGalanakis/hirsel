@@ -42,7 +42,7 @@ fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, E
 
 fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Result[bool, Error] {
     while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, high) {
-        let logical = logical_key(id, key)?
+        let logical = failure_result_from_rep(catalog.logical_key(id, key))?
         let value_width = if comparison == Less {
             0u64
         } else {
@@ -297,7 +297,7 @@ fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pa
         if already {
             continue
         }
-        let key = prefix(id)?
+        let key = failure_result_from_rep(catalog.prefix(id))?
         let has_before = match std.page.lookup(before.root, key) {
             Some(_) => true,
             None => false,

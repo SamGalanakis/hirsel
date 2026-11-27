@@ -120,9 +120,9 @@ fn refusal_attach_descriptors(mut db: Db, memory_id: u32, tiered_id: u32) -> Res
     // Format 4 still rejects Tiered collection pages. Supply the AP7 values in
     // an ordinary leaf for this admission test. The fixture is never published.
     let mut rows: List[std.page.Row] = list.new()
-    list.push(mut rows, std.page.Row(key: prefix(memory_id)?, value: refusal_descriptor(false), charge: 126))
-    list.push(mut rows, std.page.Row(key: prefix(tiered_id)?, value: refusal_descriptor(true), charge: 126))
-    let mut stamp = stamp_after(pages.holder_next_node(db.holders))?
+    list.push(mut rows, std.page.Row(key: failure_result_from_rep(catalog.prefix(memory_id))?, value: refusal_descriptor(false), charge: 126))
+    list.push(mut rows, std.page.Row(key: failure_result_from_rep(catalog.prefix(tiered_id))?, value: refusal_descriptor(true), charge: 126))
+    let mut stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let root = failure_result_from_rep(pages.page_result(std.page.bulk(rows, Unprefixed, 1024, mut stamp)))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections)
     tree.root = option.unwrap(take root)
@@ -333,9 +333,9 @@ fn test_l70_cache_overlap() -> Result[(), Error] {
 @test
 fn test_l68_replay_overlay_table() -> Result[(), Error] {
     let mut main_overlay = empty_replay_overlay(None)
-    let mut logical = prefix(9)?
+    let mut logical = failure_result_from_rep(catalog.prefix(9))?
     list.push(mut logical, 5u8)
-    let mut larger = prefix(9)?
+    let mut larger = failure_result_from_rep(catalog.prefix(9))?
     list.push(mut larger, 6u8)
     let value = string.into_bytes(string.from("stored"))
     replay_overlay_edit(mut main_overlay, "j-1", 72, logical, 4, ReplayPut(arc.new(take value)))?
@@ -611,7 +611,7 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
     let mut slots: List[std.page.Slot] = list.new()
     list.push(mut slots, ColdPage(ptr))
     let root = failure_result_from_rep(pages.page_result(std.page.attach(take disk_image, take slots, list.new())))?
-    let logical = prefix(9)?
+    let logical = failure_result_from_rep(catalog.prefix(9))?
     let Some((ColdPage(found), descriptor)) = std.page.collection_slot(root, logical) else {
         fail("L68: lazy attach lost the table root's location")
     }
@@ -666,7 +666,7 @@ fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     // the Memory map and list pages.
     let verified = validate_directory_graph(fixtures, owner, clone(manifest), true)?
     let loaded = rebuild_page_store(take verified, None)?
-    let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, prefix(9)?) else {
+    let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: recovery forced or discarded the Cold root")
     }
     let rows: u64 = list.word_le(row, 36)
@@ -714,7 +714,7 @@ fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Resul
 }
 
 fn l68_check_replay_root(tree: pages.PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
-    let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(tree.root, prefix(9)?) else {
+    let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: replay forced the base page")
     }
     let recorded_rows: u64 = list.word_le(descriptor, 36)
@@ -778,7 +778,7 @@ fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
     let mut replay = l68_replay_base()?
     replay.next_node = 299
     journal_apply("j-1", mut replay, Fork(format.JournalFork(id: 1, parent: 0, forked_at: 0, name: "beta", watermark: 500)))?
-    if stamp_after(replay.next_node)? != 500 {
+    if failure_result_from_rep(catalog.stamp_after(replay.next_node))? != 500 {
         fail("L87(e): replay did not reserve the stamps below the fork watermark")
     }
     journal_apply("j-1", mut replay, l68_replay_put(1, 1, 7, "second")?)?
@@ -822,7 +822,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     map.insert(mut source.locator.rows, 8u64, cold)
     let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(manifest), true, None)?
     let loaded = rebuild_page_store(take verified, Some(view source.locator))?
-    let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, prefix(9)?) else {
+    let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
     }
     if ptr.pack != 8 || ptr.offset != 72 || ptr.stamp != 40 {

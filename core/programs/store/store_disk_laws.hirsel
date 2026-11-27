@@ -13,7 +13,7 @@ fn law_leaf_range_stop(c: Clock) -> bool waits {
     }
     let s = snapshot(db)
     let sh = view t
-    let root = option.unwrap(std.page.collection_child(s.roots.collections.root, result.unwrap(prefix(sh.id))))
+    let root = option.unwrap(std.page.collection_child(s.roots.collections.root, result.unwrap(failure_result_from_rep(catalog.prefix(sh.id)))))
     let Some(first) = std.page.child(root, 0) else {
         return false
     }
@@ -96,7 +96,7 @@ pub fn law_frame_size(c: Clock) -> bool {
         if id == 2 {
             list.append(mut key, types.key_word(k % 4))
         }
-        let physical = result.unwrap(logical_key(id, key))
+        let physical = result.unwrap(failure_result_from_rep(catalog.logical_key(id, key)))
         if operation % 5 == 0 {
             if model[k].present {
                 size = result.unwrap(edit_frame(ops, below, 0, physical, None, size, 16777280))
@@ -495,7 +495,7 @@ fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
     let (id, take manifest) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take manifest)?
     let loaded = disk_loaded(id, take validated)?
-    over_ceiling(pages.page_row_account(loaded.all), ceiling)?
+    failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }
 
@@ -503,7 +503,7 @@ fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[DiskLoaded, Er
     let (id, take manifest) = disk_read_page_manifest("MANIFEST", raw)?
     let validated = validate_page_manifest(d, id, take manifest)?
     let loaded = disk_loaded(id, take validated)?
-    over_ceiling(pages.page_row_account(loaded.all), ceiling)?
+    failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }
 

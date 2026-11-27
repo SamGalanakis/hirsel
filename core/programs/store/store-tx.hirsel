@@ -602,7 +602,7 @@ fn pop_table_edge[K, V](mut tx: Tx, t: Table[K, V], reverse: bool) -> Result[Opt
         list.push(mut after, 0u8)
         note_read(tx, Span(take low, take after))?
     }
-    let k = decoded(std.codec.decode_key(t.key, list.slice(key, 4, list.len(key))))?
+    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(t.key, list.slice(key, 4, list.len(key)))))?
     let v = row_value(t.readers, t.id, raw)?
     let plan = plan_delete(tx, t.id, t.readers.current, indexes, key, raw)?
     let popped = if let Some(take cached) = take candidate {
@@ -631,7 +631,7 @@ fn pop_tx_view_edge(mut cached: TxView, collection: u32, prefix_key: Bytes, reve
         Ok(())
     })))?
     match take row {
-        Some((suffix, take value)) => Ok(Some((logical_key(collection, suffix)?, take value))),
+        Some((suffix, take value)) => Ok(Some((failure_result_from_rep(catalog.logical_key(collection, suffix))?, take value))),
         None => Ok(None),
     }
 }

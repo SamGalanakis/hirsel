@@ -1,14 +1,14 @@
 // I3's read-handle checks (STORE-SPEC §1.2 "Read handles"): a handle's
 // catalog key must still name its id in the roots a read sees, and an index
 // handle's record must also be Public.
-fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
+pub fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], types.Failure] {
     Ok(arc.new(take key))
 }
 
 // The catalog root page bytes a handle resolved against, for `readable`: empty
 // when the root is a branch or holds a BLOB cell, whose lookup reads more than
 // the root's bytes.
-fn catalog_page(catalog: pages.PageTree) -> Result[Arc[Bytes], Error] {
+pub fn catalog_page(catalog: pages.PageTree) -> Result[Arc[Bytes], types.Failure] {
     let image = std.page.image_of(catalog.root)
     if std.page.level(image) != 0 {
         return Ok(arc.new(list.new()))
@@ -16,7 +16,7 @@ fn catalog_page(catalog: pages.PageTree) -> Result[Arc[Bytes], Error] {
     if let Some(_) = std.page.body(catalog.root, 0) {
         return Ok(arc.new(list.new()))
     }
-    Ok(arc.new(failure_result_from_rep(types.copied(std.page.payload(image)))?))
+    Ok(arc.new(types.copied(std.page.payload(image))?))
 }
 
 // I3's catalog check. `page` is the catalog root page the handle was resolved
@@ -25,7 +25,7 @@ fn catalog_page(catalog: pages.PageTree) -> Result[Arc[Bytes], Error] {
 // lists the handle's id under its key and the lookup is skipped.
 // An index read also needs its record Public (§1.2). On the fast path the
 // record is the one the handle saw, so the handle's flag answers.
-fn index_readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32, public: bool) -> Result[(), Error] {
+pub fn index_readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32, public: bool) -> Result[(), types.Failure] {
     if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
         if public {
             return Ok(())
@@ -36,7 +36,7 @@ fn index_readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32, public: 
         return Error(Stale(id))
     }
     if list.len(raw) < 5 {
-        return Error(failure_from_rep(pages.malformed(0)))
+        return Error(pages.malformed(0))
     }
     if format.read_le(raw, 1, 4) != int.widen(id) {
         return Error(Stale(id))
@@ -47,14 +47,14 @@ fn index_readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32, public: 
     Ok(())
 }
 
-fn readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
+pub fn readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), types.Failure] {
     if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
         return Ok(())
     }
     match pages.get_page_row(roots.catalog, key) {
         Some(raw) => {
             if list.len(raw) < 5 {
-                return Error(failure_from_rep(pages.malformed(0)))
+                return Error(pages.malformed(0))
             }
             if format.read_le(raw, 1, 4) == int.widen(id) {
                 Ok(())

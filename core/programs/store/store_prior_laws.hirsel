@@ -191,12 +191,12 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let mut db = open(tasks, directory, c, r, options)?
     let _ = law_table(mut db, "big", std.codec.key_u64(), std.codec.of_bytes())?
     let baseline = db.resident
-    let logical = logical_key(1, types.key_word(7))?
+    let logical = failure_result_from_rep(catalog.logical_key(1, types.key_word(7)))?
     let width = 12582912u64
     {
         // Seed a valid checkpoint from a writer whose write limit held 12 MiB.
         // The law also runs with the public write limit compiled to 8 MiB.
-        let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
+        let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
         let first = next_stamp
         let raw = prior_fixture_value(width)
         pages.edit_head_collection(mut db.holders, 0, scoped fn(mut tree: pages.PageTree) -> Result[(), Error] {
@@ -256,7 +256,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 }
 
 fn install_cold_companion(mut roots: pages.Roots, stamp: u64) -> Result[(), Error] {
-    let warm_key = prefix(1)?
+    let warm_key = failure_result_from_rep(catalog.prefix(1))?
     let (take resident_root, take resident_descriptor) = {
         let Some((warm_root, warm_descriptor)) = std.page.collection_entry(roots.collections.root, warm_key) else {
             return Error(Missing("warm fixture root"))
@@ -270,7 +270,7 @@ fn install_cold_companion(mut roots: pages.Roots, stamp: u64) -> Result[(), Erro
     list.put_word_le(mut descriptor, 257u32)
     let mut descriptors: List[std.page.Entry] = list.new()
     list.push(mut descriptors, std.page.Entry(key: take warm_key, cell: InlineValue(take resident_descriptor)))
-    list.push(mut descriptors, std.page.Entry(key: prefix(9)?, cell: InlineValue(take descriptor)))
+    list.push(mut descriptors, std.page.Entry(key: failure_result_from_rep(catalog.prefix(9))?, cell: InlineValue(take descriptor)))
     let mut slots: List[std.page.Slot] = list.new()
     list.push(mut slots, HotPage(take resident_root))
     list.push(mut slots, ColdPage(cold))
@@ -358,7 +358,7 @@ fn batch_law_edits(round: u64) -> Result[pages.DataRows, Error] {
     for i in 0u64 .. 3072 {
         let k = 3071 - i
         let id: u32 = int.truncate(1 + k % 2)
-        let key = logical_key(id, types.key_word(k))?
+        let key = failure_result_from_rep(catalog.logical_key(id, types.key_word(k)))?
         let choice = (k * 41 + round * 107 + k * round * 59) % 211
         if round >= 2 && choice >= 13 {
             continue
@@ -436,7 +436,7 @@ fn batch_law_bounds(root: Arc[std.page.Page], low: Option[View[Bytes]], high: Op
 
 fn batch_law_compare(candidate: pages.PageTree, oracle: pages.PageTree) -> Result[(), Error] {
     for id in 1u32 .. 3 {
-        let collection = prefix(id)?
+        let collection = failure_result_from_rep(catalog.prefix(id))?
         let want = option.unwrap(std.page.collection_child(oracle.root, collection))
         let got = option.unwrap(std.page.collection_child(candidate.root, collection))
         if std.page.totals(want) != std.page.totals(got) {
@@ -497,15 +497,15 @@ fn source_layout_equal(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> bool {
 fn source_layout_witness(outlined: bool) -> Result[(), Error] {
     let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 1u64
-    define_store_collection(mut base, 1, 1, mut ids)?
+    failure_result_from_rep(catalog.define_store_collection(mut base, 1, 1, mut ids))?
     let first = ids + 1
-    let id_key = prefix(1)?
+    let id_key = failure_result_from_rep(catalog.prefix(1))?
     let mut staged = pages.new_data_rows()
     let mut journal: List[format.JournalOp] = list.new()
     let mut edits: List[std.page.BatchEdit] = list.new()
     for i in 0u64 .. 5 {
         let key = source_layout_key(i)
-        let logical = logical_key(1, key)?
+        let logical = failure_result_from_rep(catalog.logical_key(1, key))?
         let width = if outlined {
             1023 + (i % 3)
         } else {
@@ -596,7 +596,7 @@ fn source_rightmost_witness() -> Result[(), Error] {
     for i in 5u64 .. 7 {
         let key = types.key_word(i)
         let raw = prior_fixture_value(32)
-        list.push(mut journal, format.JournalOp(key: logical_key(1, key)?, value: Some(clone(raw)), prior: 0, trim: None))
+        list.push(mut journal, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, key))?, value: Some(clone(raw)), prior: 0, trim: None))
         list.push(mut right_edits, std.page.BatchEdit(key: take key, value: Some(BatchBytes(take raw)), prior: Some(0u32)))
     }
     failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps)))?
@@ -635,7 +635,7 @@ fn batch_law_same_pages(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> Result[
 }
 
 fn batch_law_collection_edits(ops: pages.DataRows, order: format.DataOrder, id: u32) -> Result[List[std.page.BatchEdit], Error] {
-    let collection = prefix(id)?
+    let collection = failure_result_from_rep(catalog.prefix(id))?
     let mut edits: List[std.page.BatchEdit] = list.new()
     for slot in 0u64 .. pages.data_row_count(ops) {
         let op = ordered_row(ops, order, slot)
@@ -657,7 +657,7 @@ fn batch_law_rows(ops: List[u64], prior: u32) -> Result[List[format.JournalOp], 
     for n in ops {
         let mut raw = prior_fixture_value(8)
         list.set_word_le(mut raw, 0, n)
-        list.push(mut rows, format.JournalOp(key: logical_key(1, types.key_word(n))?, value: Some(take raw), prior: prior, trim: None))
+        list.push(mut rows, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(n)))?, value: Some(take raw), prior: prior, trim: None))
     }
     Ok(take rows)
 }
@@ -710,7 +710,7 @@ fn batch_law_join() -> Result[(), Error] {
 fn batch_law_3152() -> Result[(), Error] {
     let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
-    define_store_collection(mut base, 1, 1, mut ids)?
+    failure_result_from_rep(catalog.define_store_collection(mut base, 1, 1, mut ids))?
     let mut account = ReplayTieredAccount(total: 0, exact: true)
     let mut both: List[u64] = list.new()
     list.push(mut both, 1u64)
@@ -731,15 +731,15 @@ fn batch_law_3152() -> Result[(), Error] {
     for n in 3u64 .. 5 {
         let mut raw = prior_fixture_value(8)
         list.set_word_le(mut raw, 0, n)
-        pages.push_data_row(mut ops, format.DataOp(key: logical_key(1, types.key_word(n))?, value: Some(pages.stage_value(take raw, 1024)), trim: None, prior: None))
+        pages.push_data_row(mut ops, format.DataOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(n)))?, value: Some(pages.stage_value(take raw, 1024)), trim: None, prior: None))
     }
     let order = failure_result_from_rep(types.capacity(pages.data_order(ops)))?
     let first = ids + 1
     let mut draw = first
     materialize_ordered_rows(mut inserted, ops, order, false, first, mut draw)?
     failure_result_from_rep(pages.canonical_tree(mut inserted))?
-    let collection = option.unwrap(std.page.collection_child(inserted.root, prefix(1)?))
-    let (_, descriptor) = option.unwrap(std.page.collection_entry(inserted.root, prefix(1)?))
+    let collection = option.unwrap(std.page.collection_child(inserted.root, failure_result_from_rep(catalog.prefix(1))?))
+    let (_, descriptor) = option.unwrap(std.page.collection_entry(inserted.root, failure_result_from_rep(catalog.prefix(1))?))
     let leaf = list.capacity(std.page.payload(std.page.image_of(collection)))
     let map_leaf = list.capacity(std.page.payload(std.page.image_of(inserted.root)))
     if leaf != 95 || map_leaf != 24 + 4 + 4 + 3 + list.len(descriptor) || draw - first != 2 {
@@ -767,8 +767,8 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     }
     let mut oracle = pages.new_page_tree(CollectionMap, 1024)
     let mut oracle_ids = 0u64
-    define_store_collection(mut oracle, 1, 1, mut oracle_ids)?
-    define_store_collection(mut oracle, 2, 1, mut oracle_ids)?
+    failure_result_from_rep(catalog.define_store_collection(mut oracle, 1, 1, mut oracle_ids))?
+    failure_result_from_rep(catalog.define_store_collection(mut oracle, 2, 1, mut oracle_ids))?
     let mut live_tree = pages.share_page_tree(oracle)
     let mut replay = pages.share_page_tree(oracle)
     let mut live_ids = oracle_ids + 1
@@ -779,7 +779,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     let mut edited: List[Arc[std.page.Page]] = list.new()
     let mut rebuilt: List[Arc[std.page.Page]] = list.new()
     for id in 1u32 .. 3 {
-        let Some(start) = std.page.collection_child(oracle.root, prefix(id)?) else {
+        let Some(start) = std.page.collection_child(oracle.root, failure_result_from_rep(catalog.prefix(id))?) else {
             return Error(Missing("batch collection"))
         }
         list.push(mut edited, arc.share(start))
@@ -856,11 +856,11 @@ fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir
 fn replay_prior_grants() -> Result[(), Error] {
     let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
-    define_store_collection(mut base, 1, 1, mut ids)?
+    failure_result_from_rep(catalog.define_store_collection(mut base, 1, 1, mut ids))?
     let seed = ids
     let mut wrong: List[format.JournalOp] = list.new()
-    list.push(mut wrong, format.JournalOp(key: logical_key(1, types.key_word(0))?, value: Some(prior_fixture_value(65536)), prior: 0, trim: None))
-    list.push(mut wrong, format.JournalOp(key: logical_key(1, types.key_word(1))?, value: None, prior: 1, trim: None))
+    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: Some(prior_fixture_value(65536)), prior: 0, trim: None))
+    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, prior: 1, trim: None))
     let mut account = ReplayTieredAccount(total: 0, exact: true)
     // 4 KiB covers the fault but cannot admit the first 64 KiB value copy.
     let readonly_refusal = bound bytes 4096 {
@@ -898,15 +898,15 @@ fn replay_prior_grants() -> Result[(), Error] {
             }
         }
         let mut mismatch: List[format.JournalOp] = list.new()
-        list.push(mut mismatch, format.JournalOp(key: logical_key(1, types.key_word(0))?, value: None, prior: 65536, trim: None))
-        list.push(mut mismatch, format.JournalOp(key: logical_key(1, types.key_word(1))?, value: None, prior: 0, trim: None))
+        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: None, prior: 65536, trim: None))
+        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, prior: 0, trim: None))
         match journal_apply_ops("wrong existing prior", mut candidate_ids, mut candidate, mismatch, mut account, immutable) {
             Error(Corrupt(Fault(why: Malformed, ..))) => (),
             _ => return Error(Missing("existing row accepted a mismatched prior")),
         }
-        mismatch[0].key = logical_key(1, types.key_word(1))?
+        mismatch[0].key = failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?
         mismatch[0].prior = 0
-        mismatch[1].key = logical_key(1, types.key_word(2))?
+        mismatch[1].key = failure_result_from_rep(catalog.logical_key(1, types.key_word(2)))?
         let mut empty = pages.share_page_tree(base)
         let mut empty_ids = seed
         journal_apply_ops("zero-prior deletes", mut empty_ids, mut empty, mismatch, mut account, immutable)?

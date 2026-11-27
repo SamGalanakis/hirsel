@@ -51,7 +51,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     if list.len(wire) != 104 || format.word_be(wire, 51) != 2 || format.read_le(wire, 59, 4) != 7 || format.word_be(wire, 82) != 3 || format.read_le(wire, 90, 4) != 0 {
         fail("L63: the encoder must use the deciding root's priors in key order")
     }
-    let Some((HotPage(ready), descriptor)) = std.page.collection_slot(plan.tree.root, prefix(9)?) else {
+    let Some((HotPage(ready), descriptor)) = std.page.collection_slot(plan.tree.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L63: the plan must prepare the changed collection")
     }
     if format.read_le(descriptor, 36, 8) != 3 || format.read_le(descriptor, 44, 8) != 258 || tiered_attempt_state(attempt).touched_bytes != 75 {
@@ -63,7 +63,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     if list.compare_bytes(revised, string.as_bytes("update")) != Equal {
         fail("L63: the staged overwrite does not match the wire edit")
     }
-    let Some((ColdPage(unchanged), _)) = std.page.collection_slot(base.root, prefix(9)?) else {
+    let Some((ColdPage(unchanged), _)) = std.page.collection_slot(base.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L63: planning changed its deciding base")
     }
     if unchanged != ptr {

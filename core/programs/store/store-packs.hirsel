@@ -330,7 +330,7 @@ fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, 
     for row in queued {
         let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
         failure_result_from_rep(pages.page_result(std.page.insert(mut root, types.key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw)))?
-        deferred_next = stamp_after(deferred_next)?
+        deferred_next = failure_result_from_rep(catalog.stamp_after(deferred_next))?
     }
     Ok(())
 }

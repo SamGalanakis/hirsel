@@ -35,7 +35,7 @@ fn tiered_stage_collection_edit(attempt: core.Cell[TieredTouchSet], visible: Map
     let ready = stage_tiered_row(attempt, visible, root, empty_root, key, value, staged.inline, kind == LogCollection, private_from, mut next_stamp)?
     let revised = if kind == LogCollection {
         let limits = descriptor_bounds(descriptor)
-        failure_result_from_rep(pages.log_record(ready, limits.first, stamp_after(limits.next)?, ResidentTiered))?
+        failure_result_from_rep(pages.log_record(ready, limits.first, failure_result_from_rep(catalog.stamp_after(limits.next))?, ResidentTiered))?
     } else {
         failure_result_from_rep(pages.rooted_collection_record(ready, pages.descriptor_kind_byte(kind), ResidentTiered))?
     }
@@ -197,7 +197,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, By
             let Some(extractor) = bound_extractor(db.indexes, record) else {
                 return Error(Stale(record.id))
             }
-            let first = stamp_after(pages.holder_next_node(db.holders))?
+            let first = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
             Ok(draft_tiered_index_chunk(attempt, pins.frames, pages.holder_heads(db.holders)[0].roots.collections, record, extractor, rows, first))
         })
         let state = tiered_finish(take attempt)
@@ -216,7 +216,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, By
 
 fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
     let shape = catalog_index(record)?.shape
-    let Some((edge, _)) = std.page.collection_slot(tree.root, prefix(record.id)?) else {
+    let Some((edge, _)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(record.id))?) else {
         return Error(Stale(record.id))
     }
     let mut operations = pages.empty_ops()

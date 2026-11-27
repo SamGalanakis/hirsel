@@ -114,7 +114,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
     let mut draft = begin_tiered_pack(owner, 9, 3, 8192)?
     let width = std.page.sealed_size(std.page.image_of(page))
     let frame = PackFrame(stamp: 43, size: width, body: PageBody(take page))
-    let Some(leaf) = add_tiered_pack_frame(mut draft, frame, 9, logical_key(9, types.key_word(1))?, fn(stamp: u64) -> std.page.PagePtr {
+    let Some(leaf) = add_tiered_pack_frame(mut draft, frame, 9, failure_result_from_rep(catalog.logical_key(9, types.key_word(1)))?, fn(stamp: u64) -> std.page.PagePtr {
         std.page.unlocated(stamp)
     })? else {
         fail("L84: the leaf fits its pack")

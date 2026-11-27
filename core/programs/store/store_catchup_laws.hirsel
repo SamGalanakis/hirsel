@@ -51,7 +51,7 @@ fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes,
     })
     let mut out: List[(Bytes, u64)] = list.new()
     for (v, k) in pairs {
-        let mut logical = prefix(id)?
+        let mut logical = failure_result_from_rep(catalog.prefix(id))?
         list.put_word_be(mut logical, v)
         list.push(mut out, (take logical, k))
     }
@@ -60,9 +60,9 @@ fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes,
 
 fn lcu_unique_entries(db: Db, id: u32) -> Result[List[(Bytes, u64)], Error] {
     let s = snapshot(db)
-    let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1))?)?
     let mut out: List[(Bytes, u64)] = list.new()
-    while let Some((take key, value)) = next_bytes(mut cursor)? {
+    while let Some((take key, value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         let owner: u64 = list.word_be(value, 4)
         list.push(mut out, (take key, owner))
     }
@@ -70,11 +70,11 @@ fn lcu_unique_entries(db: Db, id: u32) -> Result[List[(Bytes, u64)], Error] {
 }
 
 fn lcu_public(db: Db, id: u32) -> Result[bool, Error] {
-    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(index_prefix(0)?), index_prefix(4294967295u32)?)?
-    while let Some((_, raw)) = next_bytes(mut records)? {
+    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(failure_result_from_rep(catalog.index_prefix(0))?), failure_result_from_rep(catalog.index_prefix(4294967295u32))?)?
+    while let Some((_, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
         let record = decode_catalog(raw)?
         if record.id == id {
-            return Ok(record_public(raw))
+            return Ok(catalog.record_public(raw))
         }
     }
     Ok(false)

@@ -194,7 +194,7 @@ pub fn check_keyed_policy(policy: KeyedPolicy) -> Result[(), Error] {
 
 fn read_keyed_policy(raw: Bytes) -> Result[KeyedPolicy, Error] {
     let codec: std.codec.Codec[KeyedPolicy] = std.codec.of()
-    decoded(std.codec.decode(codec, raw))
+    failure_result_from_rep(catalog.decoded(std.codec.decode(codec, raw)))
 }
 
 pub fn keyed_policy(db: Db, op: Bytes) -> Result[Option[KeyedPolicy], Error] {
@@ -493,7 +493,7 @@ fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Resul
         let policy = read_keyed_policy(raw_policy)?
         credit = add_keyed_credit(credit, claim_terminal_credit(db.ceiling, policy, list.len(raw_claim)))
     }
-    over_ceiling(int.saturating_add(db.resident, int.saturating_add(credit.resident, credit.padding)), db.ceiling)?
+    failure_result_from_rep(catalog.over_ceiling(int.saturating_add(db.resident, int.saturating_add(credit.resident, credit.padding)), db.ceiling))?
     if let Some(room) = journal_refusal(uncovered, credit.journal, journal_limit) {
         return Error(Full(Journal(room)))
     }

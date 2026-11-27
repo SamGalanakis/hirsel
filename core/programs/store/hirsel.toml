@@ -7,6 +7,10 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"store-catalog-schema.hirsel" = "catalog"
+"store-api-migration.hirsel" = "store"
+"store-api-declare.hirsel" = "store"
+"store-catalog-work.hirsel" = "catalog"
 "store-holders.hirsel" = "pages"
 "store-api-tail.hirsel" = "store"
 "store-api-layout.hirsel" = "store"
@@ -144,9 +148,9 @@ std = { major = 1 }
 "store-verify.hirsel" = "store"
 "store-expiry.hirsel" = "store"
 "store-inspect.hirsel" = "store"
-"store-handle-check.hirsel" = "store"
-"store-declare.hirsel" = "store"
-"store-migration.hirsel" = "store"
+"store-handle-check.hirsel" = "catalog"
+"store-declare.hirsel" = "catalog"
+"store-migration.hirsel" = "catalog"
 "store-projector.hirsel" = "store"
 "store-tail.hirsel" = "pages"
 "store-read.hirsel" = "store"

@@ -48,7 +48,7 @@ fn tx_read_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, rows_t
         fail("Tx reads: fixture puts commit")
     }
     for id in[handles.rows.id, handles.ix.id] {
-        let Some((root, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(id)?) else {
+        let Some((root, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(id))?) else {
             fail("Tx reads: the fixture has its table and index")
         }
         if std.page.level(std.page.image_of(root)) == 0 {

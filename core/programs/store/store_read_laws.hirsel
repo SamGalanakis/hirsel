@@ -87,7 +87,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if pages.holder_heads(db.holders)[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) {
         return false
     }
-    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(1)))) {
+    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(1))))) {
         Some(v) => if decode_word(v) != 11 {
             return false
         },
@@ -138,7 +138,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     if pages.holder_heads(db.holders)[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) {
         return false
     }
-    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
+    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(2))))) {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
@@ -551,11 +551,11 @@ fn lookup_cover_points(c: Clock) -> bool waits {
     list.append(mut suffix, types.key_word(1))
     list.push(mut suffix, 0u8)
     let span = match reads[0] {
-        Span(low, high) => low == result.unwrap(logical_key(2, types.key_word(1))) && high == result.unwrap(logical_key(2, suffix)),
+        Span(low, high) => low == result.unwrap(failure_result_from_rep(catalog.logical_key(2, types.key_word(1)))) && high == result.unwrap(failure_result_from_rep(catalog.logical_key(2, suffix))),
         _ => false
     }
     let point = match reads[1] {
-        Point(key) => key == result.unwrap(logical_key(1, types.key_word(1))),
+        Point(key) => key == result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))),
         _ => false
     }
     if !span || !point {

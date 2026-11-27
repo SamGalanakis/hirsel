@@ -20,7 +20,7 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
         return Error(Limit(Name))
     }
     if let Some(_) = branch(db, name) {
-        return Error(Exists(named(name)?))
+        return Error(Exists(failure_result_from_rep(catalog.named(name))?))
     }
     let id = pages.holder_next_branch(db.holders)
     if id == 4294967295 {
@@ -60,7 +60,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         }
     }
     let id = pages.holder_next_branch(db.holders)
-    let watermark = stamp_after(pages.holder_next_node(db.holders))?
+    let watermark = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let (take head, take indexed_name, take frame) = disk_allocation(scoped fn() -> Result[(pages.Head, String, Option[Bytes]), Error] {
         let source = pages.holder_heads(db.holders)[parent]
         let head = pages.Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: pages.share_roots(source.roots), head: source.head, at: source.at)

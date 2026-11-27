@@ -115,7 +115,7 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.Pa
         let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
         let width = std.page.sealed_size(std.page.image_of(page))
         let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
-        let key = logical_key(9, types.key_word(slot))?
+        let key = failure_result_from_rep(catalog.logical_key(9, types.key_word(slot)))?
         let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
             std.page.unlocated(stamp)
         })? else {
@@ -160,7 +160,7 @@ fn l88_probe_keeps_progress(captured: TieredPageSource, pack: pages.PagePack, or
 fn l88_assert_current_pin(mut db: Db, name: String, captured: Snapshot, current: std.page.PagePtr) -> Result[(), Error] waits {
     let _ = pin(mut db, name, captured)?
     let retained = option.unwrap(pinned(db, name))
-    let key = prefix(9)?
+    let key = failure_result_from_rep(catalog.prefix(9))?
     let (edge, _) = option.unwrap(std.page.collection_slot(retained.roots.collections.root, key))
     let ColdPage(found) = edge else {
         fail("L88(h): a stamp-equal pin must use the sealed head, even when the capture is Hot")
@@ -205,7 +205,7 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
     draw = 80
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
-    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, prefix(9)?, HotPage(take page), mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, failure_result_from_rep(catalog.prefix(9))?, HotPage(take page), mut draw)))?
     pages.set_head_collection(mut db.holders, 0, take tree)
     let hot_capture = snapshot(db)
     let old_bytes_current = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)

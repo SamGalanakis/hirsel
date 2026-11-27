@@ -460,7 +460,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
     let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
     let mut staged = deploy_result(rewrite_law_replace_indexed(source, tasks))?
-    let rows = deploy_result(catalog_handle(source.db.store, staged.plan.roots.catalog, "rewrite", std.codec.key_u64(), codec))?
+    let rows = deploy_result(catalog_handle(source.db.store, staged.plan.schema.roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     if rows.id == old_rows.id {
         fail("L51(e″): the staging did not replace the table")
     }
@@ -504,7 +504,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
         if row.body != body {
             fail("L51(e″): replaced range lost the staged edit")
         }
-        let mut index_key = deploy_result(prefix(due.id))?
+        let mut index_key = deploy_result(failure_result_from_rep(catalog.prefix(due.id)))?
         list.put_word_be(mut index_key, row.due)
         list.put_word_be(mut index_key, key)
         let Some(_) = pages.get_page_row(current.roots.collections, index_key) else {
@@ -595,7 +595,7 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         fail("L51(e″): untargeted row is missing")
     }
     for (deadline, key) in[(10u64, 1u64), (20u64, 2u64)] {
-        let mut index_key = deploy_result(prefix(due.id))?
+        let mut index_key = deploy_result(failure_result_from_rep(catalog.prefix(due.id)))?
         list.put_word_be(mut index_key, deadline)
         list.put_word_be(mut index_key, key)
         let Some(before) = pages.get_page_row(prior.roots.collections, index_key) else {

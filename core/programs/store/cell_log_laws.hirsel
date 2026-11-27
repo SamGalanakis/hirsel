@@ -192,8 +192,8 @@ fn cell_log_frame_case() -> bool {
     for byte in trim_array {
         list.push(mut trims, byte)
     }
-    let seven = result.unwrap(prefix(7))
-    let eight = result.unwrap(prefix(8))
+    let seven = result.unwrap(failure_result_from_rep(catalog.prefix(7)))
+    let eight = result.unwrap(failure_result_from_rep(catalog.prefix(8)))
     let mut encoded: Bytes = list.new()
     format.encode_log_trim(mut encoded, seven, 258, 1030)
     format.encode_log_trim(mut encoded, eight, 513, 0)
@@ -346,7 +346,7 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let _ = cell_law_commit(mut db, cell, a)?
     let _ = checkpoint(mut db)?
     cell_law_require(db.resident == baseline + 270, "same pinned cell version")?
-    let key = prefix(cell.binding.id)?
+    let key = failure_result_from_rep(catalog.prefix(cell.binding.id))?
     let sizes: Inline[u64, 6] =[255, 257, 256, 1025, 256, 255]
     for width in sizes {
         let value = cell_law_value(width - 6, 9)
@@ -450,7 +450,7 @@ fn log_rollback_law(mut db: Db, target: Log[Bytes]) -> Result[(), Error] waits {
 }
 
 fn append_fill_law(s: Snapshot, id: u32) -> Result[(), Error] {
-    let map_key = prefix(id)?
+    let map_key = failure_result_from_rep(catalog.prefix(id))?
     let Some(root) = std.page.collection_child(s.roots.collections.root, map_key) else {
         return Error(Missing("log root"))
     }
@@ -564,7 +564,7 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         Ok(())
     })?
     durable(mut db, trim_law_receipt(take written)?)?
-    let id_key = prefix(target.binding.id)?
+    let id_key = failure_result_from_rep(catalog.prefix(target.binding.id))?
     let held = snapshot(db)
     let Some(before) = std.page.collection_child(held.roots.collections.root, id_key) else {
         return Error(Missing("pretrim root"))
@@ -652,7 +652,7 @@ fn log_diff_pages(r: Reader, a: Snapshot, b: Snapshot, id: u32) -> Result[(), Er
     cell_law_require(list.len(rest.changes) == 1 && list.len(rest.trimmed) == 0 && rest.next == None, "resume excludes returned span")?
     let inside = changes_page(r, Some(clone(a)), b, low, publish_law_key(id, 2), Limits(rows: 1, byte_limit: 1))?
     cell_law_require(list.len(inside.trimmed) == 1 && inside.trimmed[0].hi == publish_law_key(id, 2) && inside.next == None, "oversize first span inside range")?
-    let bounds_page = changes_page(r, Some(clone(a)), b, prefix(id)?, high, Limits(rows: 1, byte_limit: 4))?
+    let bounds_page = changes_page(r, Some(clone(a)), b, failure_result_from_rep(catalog.prefix(id))?, high, Limits(rows: 1, byte_limit: 4))?
     cell_law_require(list.len(bounds_page.bounds) == 1 && bounds_page.next == Some(publish_law_key(id, 0)), "bounds precedes span")?
     Ok(())
 }
@@ -669,13 +669,13 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
     let reading = reader(db, 0)?
     let id = log_handle.binding.id
     let initialized = changes(reading, undeclared, empty)?
-    cell_law_require(list.len(initialized.bounds) == 1 && initialized.bounds[0] == prefix(id)? && list.len(initialized.rows) == 0, "one-sided log bounds")?
+    cell_law_require(list.len(initialized.bounds) == 1 && initialized.bounds[0] == failure_result_from_rep(catalog.prefix(id))? && list.len(initialized.rows) == 0, "one-sided log bounds")?
     let cell_commit = run(mut db, None, copy_env(cell), fn(mut tx: Tx, target: Cell[u64]) -> Result[(), Error] {
         cell_set(mut tx, target, 42u64)
     })?
     let _ = trim_law_receipt(take cell_commit)?
-    let cell_low = prefix(cell.binding.id)?
-    let cell_high = prefix(cell.binding.id + 1)?
+    let cell_low = failure_result_from_rep(catalog.prefix(cell.binding.id))?
+    let cell_high = failure_result_from_rep(catalog.prefix(cell.binding.id + 1))?
     let cell_span = span_changes(reading, snapshot(db), cell_low, cell_high)?
     cell_law_require(list.len(cell_span) == 1 && cell_span[0].tree_key == cell_low && published_cell(cell, cell_span[0])? == Some(published_test_word(42)), "published inline cell")?
     let mut span_reader = open_span_changes(reading, snapshot(db), cell_low, cell_high)?
@@ -684,7 +684,7 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
         return Error(Missing("duplicate streamed cell"))
     }
     let mut backwards = reverse_byte_cursor(snapshot(db).roots.collections, cell_low, cell_high)?
-    let Some((reverse_key, _)) = next_bytes(mut backwards)? else {
+    let Some((reverse_key, _)) = failure_result_from_rep(catalog.next_bytes(mut backwards))? else {
         return Error(Missing("inline cell on reverse lower bound"))
     }
     cell_law_require(reverse_key == cell_low, "reverse cell key")?
@@ -695,7 +695,7 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
     log_diff_write(mut db, None, log_handle, 4, 5, 0, 3)?
     let b = snapshot(db)
     let delta = changes(reading, a, b)?
-    cell_law_require(list.len(delta.bounds) == 1 && delta.bounds[0] == prefix(id)? && list.len(delta.trimmed) == 1 && list.len(delta.rows) == 1, "bounds span and row")?
+    cell_law_require(list.len(delta.bounds) == 1 && delta.bounds[0] == failure_result_from_rep(catalog.prefix(id))? && list.len(delta.trimmed) == 1 && list.len(delta.rows) == 1, "bounds span and row")?
     cell_law_require(delta.trimmed[0].lo == publish_law_key(id, 0) && delta.trimmed[0].hi == publish_law_key(id, 3), "trim span")?
     cell_law_require(delta.rows[0].tree_key == publish_law_key(id, 4) && published_log(log_handle, delta.rows[0])? == Some(published_test_word(4)), "published appended row")?
     log_diff_pages(reading, a, b, id)?
@@ -718,7 +718,7 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
     let all_trimmed = changes(reading, b, emptied)?
     cell_law_require(list.len(all_trimmed.trimmed) == 1 && all_trimmed.trimmed[0].hi == publish_law_key(id, 5), "span stops at old next")?
     let now_empty = changes(reading, before_appends, emptied)?
-    cell_law_require(list.len(now_empty.bounds) == 1 && now_empty.bounds[0] == prefix(id)? && list.len(now_empty.trimmed) == 0 && list.len(now_empty.rows) == 0, "equal empty roots with different bounds")
+    cell_law_require(list.len(now_empty.bounds) == 1 && now_empty.bounds[0] == failure_result_from_rep(catalog.prefix(id))? && list.len(now_empty.trimmed) == 0 && list.len(now_empty.rows) == 0, "equal empty roots with different bounds")
 }
 
 // §14.4a retention: after each sweep slice every Log's bounds equal the hand

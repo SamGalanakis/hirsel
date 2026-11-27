@@ -22,9 +22,9 @@ pub fn expire_rows[K, V](mut d: Declare, mut t: TableDecl[K, V], by: StaticFn[fn
     active_table(d, t)?
     d.failed = true
     let key = std.codec.key_u64()
-    let lookup_key = catalog_index_key(t.handle.id, EXPIRY_INDEX)?
+    let lookup_key = failure_result_from_rep(catalog.catalog_index_key(t.handle.id, EXPIRY_INDEX))?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
-    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
+    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.schema.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
     let existing = existing_index_record(d, lookup_key, EXPIRY_INDEX)?
     let rebuilt_for = settle_index_record(mut d, lookup_key, EXPIRY_INDEX, take existing, mut proposed, ends)?
     let schema_binding = expiry_binding(t.handle, proposed, by)
@@ -48,11 +48,11 @@ fn expiry_binding[K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -
 // A row's one entry `id ‖ at u64 BE ‖ primary`, or none.
 fn extract_expiry[K, V](extractor: ExpiryExtractor[K, V], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
     let t = view extractor.table
-    let k = decoded(std.codec.decode_key(t.key, primary))?
+    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(t.key, primary)))?
     let v = row_value(t.readers, t.id, raw)?
     let mut keys: List[Bytes] = list.new()
     if let Some(at) = (code.callable(extractor.by))(k, v) {
-        let mut row = prefix(extractor.id)?
+        let mut row = failure_result_from_rep(catalog.prefix(extractor.id))?
         std.codec.encode_key(std.codec.key_u64(), at, mut row)
         list.append(mut row, primary)
         if list.len(row) > 4096 {
@@ -120,7 +120,7 @@ pub fn sweep_expired(mut db: Db, limits: Limits) -> Result[Swept, Error] waits {
 
 // The expiry index of `owner` names a row it does not have.
 fn expiry_drift(mut tx: Tx, owner: u32) -> Result[Error, Error] {
-    let record = catalog_entry_in(tx.roots.catalog, catalog_index_key(owner, EXPIRY_INDEX)?)?
+    let record = catalog_entry_in(tx.roots.catalog, failure_result_from_rep(catalog.catalog_index_key(owner, EXPIRY_INDEX))?)?
     let mut seen: List[(u32, u32)] = list.new()
     list.push(mut seen, (owner, record.id))
     Ok(drift_stop(mut tx, take seen))
@@ -136,8 +136,8 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
     list.push(mut end_key, 3u8)
     let roots = pages.holder_heads(db.holders)[0].roots
     let mut records = byte_cursor(roots.catalog, Included(take low), end_key)?
-    while let Some((take key, raw)) = next_bytes(mut records)? {
-        if !record_public(raw) || declaration_index_name(key)? != EXPIRY_INDEX {
+    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
+        if !catalog.record_public(raw) || failure_result_from_rep(catalog.declaration_index_name(key))? != EXPIRY_INDEX {
             continue
         }
         let record = decode_catalog(raw)?
@@ -145,16 +145,16 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
             continue
         }
         let high = if now == 18446744073709551615u64 {
-            prefix(record.id + 1)?
+            failure_result_from_rep(catalog.prefix(record.id + 1))?
         } else {
-            let mut k = prefix(record.id)?
+            let mut k = failure_result_from_rep(catalog.prefix(record.id))?
             std.codec.encode_key(std.codec.key_u64(), now + 1, mut k)
             take k
         }
-        let mut due = byte_cursor(roots.collections, Included(prefix(record.id)?), high)?
-        while let Some((take entry_key, _)) = next_bytes(mut due)? {
+        let mut due = byte_cursor(roots.collections, Included(failure_result_from_rep(catalog.prefix(record.id))?), high)?
+        while let Some((take entry_key, _)) = failure_result_from_rep(catalog.next_bytes(mut due))? {
             let primary = failure_result_from_rep(types.copied(list.slice(entry_key, 12, list.len(entry_key))))?
-            let size = match pages.get_page_row(roots.collections, logical_key(record.owner, primary)?) {
+            let size = match pages.get_page_row(roots.collections, failure_result_from_rep(catalog.logical_key(record.owner, primary))?) {
                 Some(row) => list.len(row),
                 None => 0u64,
             }

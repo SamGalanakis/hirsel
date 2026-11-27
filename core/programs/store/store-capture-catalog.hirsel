@@ -28,11 +28,11 @@ fn capture_catalog_name(path: String, at: u64, key: Bytes) -> Result[String, Err
     if list.len(key) < name_at || list.len(key) - name_at > 255 {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
-    catalog_collection_name(key, if name_at == 5 {
+    failure_result_from_rep(catalog.catalog_collection_name(key, if name_at == 5 {
         2u8
     } else {
         1u8
-    })
+    }))
 }
 
 fn capture_count_catalog(mut packs: CapturePacks, root: std.page.PagePtr) -> Result[(u64, u64), Error] waits {

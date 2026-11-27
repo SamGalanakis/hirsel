@@ -61,7 +61,7 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         // non-empty rows). Must produce Drift.
         let mut plan = schema_plan(db)
         {
-            let record = deploy_result(catalog_entry_in(plan.roots.catalog, ix.catalog_key))?
+            let record = deploy_result(catalog_entry_in(plan.schema.roots.catalog, ix.catalog_key))?
             let Some(extractor) = bound_extractor(db.indexes, record) else {
                 fail("F4 case A: expected bound extractor")
             }
@@ -90,8 +90,8 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         for k in 1u64 .. 5 {
             deploy_result(d7_index_write(mut db, rows, k, k * 10u64))?
         }
-        let rows_key = deploy_result(prefix(rows.id))?
-        let by_v_key = deploy_result(prefix(by_v.id))?
+        let rows_key = deploy_result(failure_result_from_rep(catalog.prefix(rows.id)))?
+        let by_v_key = deploy_result(failure_result_from_rep(catalog.prefix(by_v.id)))?
         deploy_result(residency_to_tiered(mut db, rows.id, take rows_key))?
         deploy_result(residency_to_tiered(mut db, by_v.id, take by_v_key))?
         let _ = deploy_result(checkpoint(mut db))?
@@ -180,8 +180,8 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         for k in 1u64 .. 5 {
             deploy_result(d7_index_write(mut db, rows, k, k * 10u64))?
         }
-        let rows_key = deploy_result(prefix(rows.id))?
-        let by_v_key = deploy_result(prefix(by_v.id))?
+        let rows_key = deploy_result(failure_result_from_rep(catalog.prefix(rows.id)))?
+        let by_v_key = deploy_result(failure_result_from_rep(catalog.prefix(by_v.id)))?
         deploy_result(residency_to_tiered(mut db, rows.id, take rows_key))?
         deploy_result(residency_to_tiered(mut db, by_v.id, take by_v_key))?
         let _ = deploy_result(checkpoint(mut db))?

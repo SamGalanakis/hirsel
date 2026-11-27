@@ -68,9 +68,9 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
     list.push(mut end_key, 3u8)
     let mut out: List[IndexCoverage] = list.new()
     let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take low), end_key)?
-    while let Some((take key, raw)) = next_bytes(mut records)? {
+    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
         let record = decode_catalog(raw)?
-        let coverage = if !record_public(raw) {
+        let coverage = if !catalog.record_public(raw) {
             NotPublic
         } else if let None = bound_extractor(db.indexes, record) {
             Unbound
@@ -78,7 +78,7 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
             Walked
         }
         failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
-        list.push(mut out, IndexCoverage(table: record.owner, index: declaration_index_name(key)?, coverage: coverage))
+        list.push(mut out, IndexCoverage(table: record.owner, index: failure_result_from_rep(catalog.declaration_index_name(key))?, coverage: coverage))
     }
     Ok(take out)
 }
@@ -95,8 +95,8 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
     let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take low), end_key)?
-    while let Some((take key, raw)) = next_bytes(mut records)? {
-        if !record_public(raw) {
+    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
+        if !catalog.record_public(raw) {
             continue
         }
         let record = decode_catalog(raw)?
@@ -149,7 +149,7 @@ fn verify_step_read(db: Db, mut walk: IndexWalk, limit: u64, direct: bool) -> Re
         walk.sums = None
         return Ok((WalkReport(checked: walk.checked, done: true, findings: list.new()), None))
     }
-    let name = declaration_index_name(key)?
+    let name = failure_result_from_rep(catalog.declaration_index_name(key))?
     let mut findings: List[WalkFinding] = list.new()
     if let Sums = catalog_index(record)?.shape {
         walk_sums(db, mut walk, record, name, limit, mut findings, direct)?
@@ -264,15 +264,15 @@ fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direc
         return Ok(VerifyTieredEntries(take rows, 0))
     }
     let start = match cursor {
-        Some(after) => Excluded(logical_key(id, after)?),
-        None => Included(prefix(id)?),
+        Some(after) => Excluded(failure_result_from_rep(catalog.logical_key(id, after))?),
+        None => Included(failure_result_from_rep(catalog.prefix(id))?),
     }
-    Ok(VerifyMemoryEntries(byte_cursor(data, take start, prefix(id + 1)?)?))
+    Ok(VerifyMemoryEntries(byte_cursor(data, take start, failure_result_from_rep(catalog.prefix(id + 1))?)?))
 }
 
 fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     match walk {
-        VerifyMemoryEntries(mut cursor) => next_bytes(mut cursor),
+        VerifyMemoryEntries(mut cursor) => failure_result_from_rep(catalog.next_bytes(mut cursor)),
         VerifyTieredEntries(rows, mut at) => {
             if at == list.len(rows) {
                 return Ok(None)
@@ -438,7 +438,7 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limi
         } else {
             list.slice(entry_key, (extractor.key_end)(entry_key)?, list.len(entry_key))
         }
-        let mut logical = prefix(record.owner)?
+        let mut logical = failure_result_from_rep(catalog.prefix(record.owner))?
         list.append(mut logical, primary)
         let fault = walk_point(db, s, source, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
             walk_check_entry_row(extractor, entry_key, raw, primary, stored)
@@ -460,7 +460,7 @@ fn walk_check_entry_row(extractor: RegisteredIndex, entry_key: Bytes, raw: Bytes
     let values = (extractor.extract)(row, primary)?
     for produced in values.keys {
         if produced == entry_key {
-            return Ok(if same_bytes(values.payload, raw) {
+            return Ok(if catalog.same_bytes(values.payload, raw) {
                 None
             } else {
                 Some(Payload)

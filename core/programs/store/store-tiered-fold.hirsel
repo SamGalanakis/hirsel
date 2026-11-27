@@ -350,7 +350,7 @@ fn fold_log_before(cut: TieredPageSource, current: std.page.Slot, overlay: Arc[p
         }
         if let Some((last_key, _)) = std.omap.last(previous.entries) {
             let seq: u64 = list.word_be(last_key, 4)
-            end_seq = order.max(end_seq, stamp_after(seq)?)
+            end_seq = order.max(end_seq, failure_result_from_rep(catalog.stamp_after(seq))?)
         }
     }
     let before = if floor >= end_seq {
@@ -475,7 +475,7 @@ fn fold_page_tree(cut: TieredPageSource, mut tree: pages.PageTree, mut next_stam
 
 fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[Arc[std.page.Page], Error] waits {
     let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        prefix(id)
+        failure_result_from_rep(catalog.prefix(id))
     })?
     let (base, _) = option.unwrap(std.page.collection_slot(root, key))
     let folded = fold_collection(cut, base, empty_root, edits, inherited, inline, mut next_stamp, mut effects)?

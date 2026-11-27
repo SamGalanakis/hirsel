@@ -69,7 +69,7 @@ fn tiered_changes(r: Reader, a: Snapshot, b: Snapshot, take lo: Option[Bytes], h
         let Some(take diff) = take deferred else {
             break
         }
-        let next_collection = prefix(diff.id + 1)?
+        let next_collection = failure_result_from_rep(catalog.prefix(diff.id + 1))?
         if !tiered_row_changes(r, a, b, mut out, take diff)? {
             break
         }
@@ -88,14 +88,14 @@ fn tiered_changes(r: Reader, a: Snapshot, b: Snapshot, take lo: Option[Bytes], h
 // key the target holds with no equal base row is a put. False when the page
 // filled.
 fn tiered_row_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutput, take diff: TieredRowDiff) -> Result[bool, Error] waits {
-    let collection = prefix(diff.id)?
+    let collection = failure_result_from_rep(catalog.prefix(diff.id))?
     let low = match diff.start {
-        Some(suffix) => logical_key(diff.id, suffix)?,
+        Some(suffix) => failure_result_from_rep(catalog.logical_key(diff.id, suffix))?,
         None => failure_result_from_rep(types.copied(collection))?
     }
     let high = match diff.stop {
-        Some(suffix) => logical_key(diff.id, suffix)?,
-        None => prefix(diff.id + 1)?
+        Some(suffix) => failure_result_from_rep(catalog.logical_key(diff.id, suffix))?,
+        None => failure_result_from_rep(catalog.prefix(diff.id + 1))?
     }
     let spans = tiered_diff_spans(r, a, b, diff, low, high)?
     for span in spans {
@@ -186,7 +186,7 @@ fn tiered_slot_stamp(slot: std.page.Slot) -> u64 {
 // window edges. Otherwise the span is the whole range (§1.5).
 fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: TieredRowDiff, low: Bytes, high: Bytes) -> Result[List[(Bytes, Bytes)], Error] waits {
     let mut spans: List[(Bytes, Bytes)] = list.new()
-    let key = prefix(diff.id)?
+    let key = failure_result_from_rep(catalog.prefix(diff.id))?
     let both = diff.before && diff.after && tiered_diff_paged(a, key) && tiered_diff_paged(b, key)
     if !both {
         list.push(mut spans, (failure_result_from_rep(types.copied(low))?, failure_result_from_rep(types.copied(high))?))
@@ -382,10 +382,10 @@ fn tiered_diff_push(mut spans: List[(Bytes, Bytes)], take lo: Bytes, take hi: By
 }
 
 fn tiered_diff_add_span(mut spans: List[(Bytes, Bytes)], id: u32, edge: TieredDiffEdge, low: Bytes, high: Bytes) -> Result[(), Error] {
-    let lo = logical_key(id, edge.lo)?
+    let lo = failure_result_from_rep(catalog.logical_key(id, edge.lo))?
     let hi = match edge.hi {
-        Some(suffix) => logical_key(id, suffix)?,
-        None => prefix(id + 1)?,
+        Some(suffix) => failure_result_from_rep(catalog.logical_key(id, suffix))?,
+        None => failure_result_from_rep(catalog.prefix(id + 1))?,
     }
     tiered_diff_push(mut spans, take lo, take hi, low, high)
 }
@@ -442,7 +442,7 @@ fn tiered_diff_fill(r: Reader, s: Snapshot, id: u32, mut side: TieredDiffSide, h
 // key order, read through `s`'s own pin root when the collection is Tiered.
 fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: Bytes) -> Result[List[(Bytes, Arc[Bytes])], Error] waits {
     let tree = view s.roots.collections
-    let key = prefix(id)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
     let Some((_, descriptor)) = std.page.collection_slot(tree.root, key) else {
         return Ok(list.new())
     }
@@ -469,7 +469,7 @@ fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: B
         let mut rows: List[(Bytes, Arc[Bytes])] = list.new()
         let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(types.copied(low))?), high)?
         while list.len(rows) < TIERED_DIFF_BATCH {
-            let Some((take row_key, take value)) = next_bytes(mut cursor)? else {
+            let Some((take row_key, take value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? else {
                 break
             }
             list.push(mut rows, (take row_key, take value))

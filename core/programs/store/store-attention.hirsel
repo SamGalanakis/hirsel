@@ -80,7 +80,7 @@ pub fn attention(db: Db) -> Result[Attention, Error] {
     let mut drift: List[IndexDrift] = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut drift, list.len(db.drift))))?
     for seen in db.drift {
-        list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count, demoted: seen.demoted))
+        list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: failure_result_from_rep(catalog.named(seen.index))?, count: seen.count, demoted: seen.demoted))
     }
     let reclaims = reclaim_state(db)
     Ok(Attention(indexes: index_reports(db)?, drift: take drift, reclaim_failures: reclaims.count, reclaim_pending: reclaims.pending))
@@ -103,11 +103,11 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
     list.push(mut end_key, 3u8)
     let mut out: List[IndexReport] = list.new()
     let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take first_key), end_key)?
-    while let Some((take key, raw)) = next_bytes(mut records)? {
+    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
         let record = decode_catalog(raw)?
         let state = copied_state(catalog_index(record)?.state)?
         failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
-        list.push(mut out, IndexReport(table: record.owner, id: record.id, index: declaration_index_name(key)?, state: take state))
+        list.push(mut out, IndexReport(table: record.owner, id: record.id, index: failure_result_from_rep(catalog.declaration_index_name(key))?, state: take state))
     }
     Ok(take out)
 }
@@ -158,8 +158,4 @@ fn count_demotions(mut db: Db, demoted: List[(u32, u32)]) -> Result[(), Error] {
         }
     }
     Ok(())
-}
-
-fn named(s: String) -> Result[String, Error] {
-    Ok(string.from(s))
 }

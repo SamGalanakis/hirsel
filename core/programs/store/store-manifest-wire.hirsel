@@ -392,5 +392,5 @@ fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
         ReplacePin(slot, held) => pages.holder_record_bytes(db.holders) - pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots) + pin_root_bytes(held.name, held.roots),
         _ => pages.holder_record_bytes(db.holders),
     }
-    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
+    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, catalog.current_fence(db.schema))
 }

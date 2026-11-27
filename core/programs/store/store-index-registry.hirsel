@@ -27,7 +27,7 @@ type IndexRegistry: send {
     entries: Map[(u32, u32, u16), RegisteredIndex],
     next_ordinal: u64,
     // Each Log the declaration keeps to its newest n (§14.4a), by id.
-    retention: Map[u32, LogRetention]
+    retention: Map[u32, catalog.LogRetention]
 }
 
 fn empty_index_registry() -> IndexRegistry {
@@ -45,16 +45,10 @@ fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegis
 fn entry_key_end[J](key: std.codec.Key[J]) -> own[send] fn(Bytes) -> Result[u64, Error] {
     let end: own[send] fn(Bytes) -> Result[u64, Error] = fn(raw: Bytes) -> Result[u64, Error] {
         let mut at = 4u64
-        let _ = decoded(std.codec.take_key_with(raw, mut at, key))?
+        let _ = failure_result_from_rep(catalog.decoded(std.codec.take_key_with(raw, mut at, key)))?
         Ok(at)
     }
     take end
-}
-
-type IndexProjection[K, V, P]: send {
-    by: StaticFn[fn(K, V) -> Result[P, Capacity]],
-    codec: std.codec.Codec[P],
-    number: Option[u16]
 }
 
 type DeclaredExtractor[J, K, V, P]: send {
@@ -63,18 +57,18 @@ type DeclaredExtractor[J, K, V, P]: send {
     id: u32,
     key: std.codec.Key[J],
     by: StaticFn[fn(K, V) -> Result[List[J], Capacity]],
-    project: Option[IndexProjection[K, V, P]],
+    project: Option[catalog.IndexProjection[K, V, P]],
     cover_row: bool
 }
 
 fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
     let t = view extractor.table
-    let k = decoded(std.codec.decode_key(t.key, primary))?
+    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(t.key, primary)))?
     let v = row_value(t.readers, t.id, raw)?
     let js = failure_result_from_rep(types.capacity((code.callable(extractor.by))(k, v)))?
     let mut encoded: List[Bytes] = list.new()
     for j in js {
-        let mut row = prefix(extractor.id)?
+        let mut row = failure_result_from_rep(catalog.prefix(extractor.id))?
         std.codec.encode_key(extractor.key, j, mut row)
         if let Many = extractor.kind {
             list.append(mut row, primary)
@@ -114,7 +108,7 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
     Ok(IndexValue(keys: take keys, payload: take payload, sums: list.new()))
 }
 
-fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J], take project: Option[IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
+fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J], take project: Option[catalog.IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
     let extractor: DeclaredExtractor[J, K, V, P] = DeclaredExtractor(table: clone(t), kind: kind, id: record.id, key: key, by: by, project: take project, cover_row: cover_row)
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_declared(extractor, raw, primary)
@@ -223,20 +217,14 @@ fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[()
     Ok(())
 }
 
-fn find_index_name(catalog: pages.PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
-    let mut cursor = byte_cursor(catalog, Included(index_prefix(table_id)?), index_prefix(table_id + 1)?)?
-    while let Some((key, raw)) = next_bytes(mut cursor)? {
+fn find_index_name(catalog_tree: pages.PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
+    let mut cursor = byte_cursor(catalog_tree, Included(failure_result_from_rep(catalog.index_prefix(table_id))?), failure_result_from_rep(catalog.index_prefix(table_id + 1))?)?
+    while let Some((key, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         if format.read_le(raw, 1, 4) == int.widen(index_id) {
-            return declaration_index_name(key)
+            return failure_result_from_rep(catalog.declaration_index_name(key))
         }
     }
     Error(Stale(index_id))
-}
-
-type ValueSchema: shareable + send {
-    number: u16,
-    fingerprint: u64,
-    schema: Bytes
 }
 
 type Catalog {
@@ -245,7 +233,7 @@ type Catalog {
     owner: u32,
     epoch: u64,
     key: Bytes,
-    schemas: List[ValueSchema],
+    schemas: List[catalog.ValueSchema],
     next: u16,
     by: Bytes,
     // The length-prefixed composite identity, empty when absent.
@@ -334,10 +322,6 @@ fn copied_state(state: IndexState) -> Result[IndexState, Error] {
     })
 }
 
-fn record_public(raw: Bytes) -> bool {
-    list.len(raw) > 0 && raw[list.len(raw) - 1] == 0u8
-}
-
 fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
     if at > list.len(raw) || width > list.len(raw) - at {
         return Error(failure_from_rep(pages.malformed(at)))
@@ -378,12 +362,12 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         }
     }
     let schema_count = take_le(raw, mut at, 2)?
-    let mut schemas: List[ValueSchema] = list.new()
+    let mut schemas: List[catalog.ValueSchema] = list.new()
     for _ in 0u64 .. schema_count {
         let number: u16 = int.truncate(take_le(raw, mut at, 2)?)
         let fingerprint = take_le(raw, mut at, 8)?
         let schema = take_blob(raw, mut at)?
-        list.push(mut schemas, ValueSchema(number: number, fingerprint: fingerprint, schema: take schema))
+        list.push(mut schemas, catalog.ValueSchema(number: number, fingerprint: fingerprint, schema: take schema))
     }
     let next_number: u16 = int.truncate(take_le(raw, mut at, 2)?)
     let by = take_blob(raw, mut at)?
@@ -659,17 +643,17 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     Ok(())
 }
 
-fn index_catalog_in(catalog: pages.PageTree, id: u32) -> Result[List[Catalog], Error] {
-    let low = index_prefix(id)?
-    let high = index_prefix(id + 1)?
+fn index_catalog_in(catalog_tree: pages.PageTree, id: u32) -> Result[List[Catalog], Error] {
+    let low = failure_result_from_rep(catalog.index_prefix(id))?
+    let high = failure_result_from_rep(catalog.index_prefix(id + 1))?
     // The catalog is resident and flat, so its ranks count the table's index
     // records without a cursor; a table with none, the common case, opens none.
-    if std.page.rank(catalog.root, high, false) == std.page.rank(catalog.root, low, false) {
+    if std.page.rank(catalog_tree.root, high, false) == std.page.rank(catalog_tree.root, low, false) {
         return Ok(list.new())
     }
-    let mut cursor = byte_cursor(catalog, Included(take low), high)?
+    let mut cursor = byte_cursor(catalog_tree, Included(take low), high)?
     let mut out: List[Catalog] = list.new()
-    while let Some((_, raw)) = next_bytes(mut cursor)? {
+    while let Some((_, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         list.push(mut out, decode_catalog(raw)?)
     }
     Ok(take out)
@@ -693,7 +677,7 @@ fn bound_indexes(tx: Tx, table_id: u32, schema: u16) -> Result[List[(u64, Catalo
 // `schema` is the table's current value schema, which names the extractors
 // bound for it. The expiry sweep deletes through here by table id (§1.2).
 fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
-    let p = logical_key(table_id, key)?
+    let p = failure_result_from_rep(catalog.logical_key(table_id, key))?
     let plan = {
         let Some(old) = transaction_row(tx, p)? else {
             return Ok(false)

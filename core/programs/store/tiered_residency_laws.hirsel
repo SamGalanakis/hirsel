@@ -55,7 +55,7 @@ fn residency_memory_stamps(page: Arc[std.page.Page], mut stamps: List[u64]) {
 }
 
 fn residency_mode(db: Db, id: u32) -> Result[(std.page_descriptor.CollectionKind, std.page_descriptor.Residency), Error] {
-    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, prefix(id)?) else {
+    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, failure_result_from_rep(catalog.prefix(id))?) else {
         fail("residency: the table is in main's collection map")
     }
     Ok((mode.kind, mode.residency))
@@ -105,7 +105,7 @@ fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks
     let _ = pin(mut db, "before", before)?
     let mut held_stamps: List[u64] = list.new()
     {
-        let Some((page, _)) = std.page.collection_entry(before.roots.collections.root, prefix(rows.id)?) else {
+        let Some((page, _)) = std.page.collection_entry(before.roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
             fail("residency: the pinned holder has the table")
         }
         residency_memory_stamps(arc.share(page), mut held_stamps)
@@ -182,7 +182,7 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     }
     let mut loaded: List[u64] = list.new()
     {
-        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
             fail("residency: main has the table")
         }
         residency_memory_stamps(arc.share(page), mut loaded)
@@ -270,14 +270,14 @@ fn test_set_residency_restamps_hot_pages_back_to_memory(d: Dir, c: Clock, r: Ran
     }
     let before = snapshot(db)
     {
-        let Some((HotPage(_), _)) = std.page.collection_slot(before.roots.collections.root, prefix(rows.id)?) else {
+        let Some((HotPage(_), _)) = std.page.collection_slot(before.roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
             fail("residency: the Snapshot holds a Hot Tiered root")
         }
     }
     set_residency(mut db, rows.id, Memory)?
     let mut loaded: List[u64] = list.new()
     {
-        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
             fail("residency: main has the table")
         }
         residency_memory_stamps(arc.share(page), mut loaded)
@@ -287,7 +287,7 @@ fn test_set_residency_restamps_hot_pages_back_to_memory(d: Dir, c: Clock, r: Ran
     let Some(held) = pinned(db, "hot") else {
         fail("residency: the pin publishes")
     }
-    let Some((ColdPage(sealed), _)) = std.page.collection_slot(held.roots.collections.root, prefix(rows.id)?) else {
+    let Some((ColdPage(sealed), _)) = std.page.collection_slot(held.roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
         fail("residency: the pin's cut seals the Snapshot's Hot Tiered tree")
     }
     let walk = compact_walk_from(d, db, sealed)?
@@ -442,7 +442,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
     let _ = seal(mut db, take declaring)?
     log_append_entries(mut db, events, 0, 300)?
     {
-        let Some((root, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+        let Some((root, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(events.binding.id))?) else {
             fail("Tiered Log: main has the Log")
         }
         if std.page.level(std.page.image_of(root)) == 0 {
@@ -454,7 +454,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
         fail("Tiered Log: main's descriptor names the Log Tiered")
     }
     {
-        let Some((ColdPage(_), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+        let Some((ColdPage(_), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(events.binding.id))?) else {
             fail("Tiered Log: the residency cut leaves the Log's root Cold")
         }
     }

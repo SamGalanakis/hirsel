@@ -14,7 +14,7 @@ type TieredPromotionNeed: key = PromotionPageStamp(u64) | PromotionBlobStamp(u64
 type TieredPromotionHit: shareable + send = PromotedPage(std.page.Slot) | PromotedBlob(std.page.BlobSlot)
 
 fn promotion_collection_root(tree: pages.PageTree, collection: u32) -> Result[Option[std.page.Slot], Error] {
-    let key = prefix(collection)?
+    let key = failure_result_from_rep(catalog.prefix(collection))?
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, key) else {
         return Ok(None)
     }
@@ -315,7 +315,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
                 continue
             }
         }
-        let key = prefix(collection)?
+        let key = failure_result_from_rep(catalog.prefix(collection))?
         let draw_from = next_stamp
         let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
             let mut candidate = arc.share(map_root)
@@ -373,7 +373,7 @@ fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource
 
 fn promotion_materialize_collection(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], resolved_bases: Map[u32, std.page.Slot], root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
     let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        prefix(id)
+        failure_result_from_rep(catalog.prefix(id))
     })?
     let location = match option.unwrap(std.page.collection_slot(captured_root, key)) {
         (ColdPage(ptr), _) => ptr,

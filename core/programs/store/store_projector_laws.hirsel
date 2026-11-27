@@ -119,7 +119,7 @@ fn newest_slot(tx: Tx, image_table: Table[(u32, u64), Slot], inputs: List[u32], 
 
 fn projector_merge_law(mut tx: Tx, image_table: Table[(u32, u64), Slot], merge: Merge, limits: Limits) -> Result[Option[Bytes], Error] {
     let low = match merge.resume {
-        Some(raw) => decoded(std.codec.decode_key(std.codec.key_u64(), raw))?,
+        Some(raw) => failure_result_from_rep(catalog.decoded(std.codec.decode_key(std.codec.key_u64(), raw)))?,
         None => 0u64,
     }
     let keys = merge_keys(tx, image_table, merge.inputs, low, limits.rows)?
@@ -204,13 +204,13 @@ fn tail_rows(db: Db, fixture: ProjectorFixture, slot: u8) -> Result[Map[u64, Opt
         return Error(MigrationFault)
     }
     let source: Table[u64, u64] = clone(fixture.source_table)
-    let page = changes_page(projector_reader(db)?, Some(base), snapshot(db), prefix(source.id)?, prefix(source.id + 1)?, Limits(rows: 4096, byte_limit: 1048576))?
+    let page = changes_page(projector_reader(db)?, Some(base), snapshot(db), failure_result_from_rep(catalog.prefix(source.id))?, failure_result_from_rep(catalog.prefix(source.id + 1))?, Limits(rows: 4096, byte_limit: 1048576))?
     if page.next != None {
         return Error(MigrationFault)
     }
     for change in page.changes {
         let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
-        let key = decoded(std.codec.decode_key(source.key, raw_key))?
+        let key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(source.key, raw_key)))?
         let value = match change.value {
             Some(raw) => Some(row_value(source.readers, source.id, raw)?),
             None => None,

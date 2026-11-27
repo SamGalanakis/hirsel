@@ -27,17 +27,17 @@ fn l62_prepare_count_snapshot(mut db: Db, d: Dir, collection: u32) -> Result[(),
     let ptr = l62_write_count_page(d, db.store, 10, collection, branch_page, mut packs, mut ids)?
     let mut row = failure_result_from_rep(pages.collection_header(42, 2, 172, 1, ResidentTiered))?
     list.copy_from_slice(mut row, 0, std.page.encode_ptr(ptr))
-    let id = prefix(collection)?
+    let id = failure_result_from_rep(catalog.prefix(collection))?
     let mut descriptors: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut descriptors, std.page.Entry(key: take id, cell: InlineValue(take row)))
-    let map_stamp = stamp_after(order.max(pages.holder_next_node(db.holders), 100))?
+    let map_stamp = failure_result_from_rep(catalog.stamp_after(order.max(pages.holder_next_node(db.holders), 100)))?
     let map_image = failure_result_from_rep(pages.page_result(std.page.encode(descriptors, 0, map_stamp, CollectionMap)))?
     let mut children: List[std.page.Slot] = list.with_capacity(1)
     list.push(mut children, ColdPage(ptr))
     let mut roots = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     roots.root = failure_result_from_rep(pages.page_result(std.page.attach(take map_image, take children, list.new())))?
     roots.paging = Some(arc.new(pages.TieredReadInventory(packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
-    let mut draw = stamp_after(map_stamp)?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(map_stamp))?
     let mut account = ReplayTieredAccount(total: 172, exact: true)
     let inserted = format.JournalOp(key: log_key(collection, 2)?, value: Some(string.into_bytes(string.from("insert"))), prior: 0, trim: None)
     replay_tiered_op("j-1", mut roots, mut draw, mut account, ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: None), inserted)?

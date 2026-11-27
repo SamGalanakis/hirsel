@@ -18,13 +18,6 @@ pub type Tail[K, V] {
     next: Option[Bytes]
 }
 
-fn tiered_source(roots: pages.Roots, id: u32) -> Result[bool, Error] {
-    let Some(descriptor) = std.page.lookup(roots.collections.root, prefix(id)?) else {
-        return Ok(false)
-    }
-    Ok(pages.collection_descriptor(descriptor).residency == ResidentTiered)
-}
-
 // `read_tail`: the tail of `decl` over `source`, from `resume` (inclusive) or the source's
 // first key, within `l`. None when the projection has no published image of
 // `source` on the Tx's branch, or the Tx carries no pin at the image's
@@ -36,7 +29,7 @@ fn tiered_source(roots: pages.Roots, id: u32) -> Result[bool, Error] {
 pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume: Option[Bytes], l: Limits) -> Result[Option[Tail[K, V]], Error] {
     page_limits(l)?
     check_table_read(tx, source)?
-    if tiered_source(tx.roots, source.id)? {
+    if failure_result_from_rep(catalog.tiered_source(tx.roots, source.id))? {
         return Error(Tiered(Tail))
     }
     let row = projection_row(tx, decl)?
@@ -56,9 +49,9 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     let base = view bases[slot]
     let low = match resume {
         Some(key) => failure_result_from_rep(types.copied(key))?,
-        None => prefix(source.id)?,
+        None => failure_result_from_rep(catalog.prefix(source.id))?,
     }
-    let high = prefix(source.id + 1)?
+    let high = failure_result_from_rep(catalog.prefix(source.id + 1))?
     let mut out = change_output(Some(l))
     if low < high {
         let after = if pages.data_row_count(tx.ops.rows) == 0 && list.len(tx.below) == 0 {
@@ -83,7 +76,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     let mut rows: List[(K, Option[V])] = list.with_capacity(list.len(found))
     for change in found {
         let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
-        let key = decoded(std.codec.decode_key(source.key, raw_key))?
+        let key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(source.key, raw_key)))?
         let value = match change.value {
             Some(raw) => Some(row_value(source.readers, source.id, raw)?),
             None => None,

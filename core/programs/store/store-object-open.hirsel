@@ -176,7 +176,7 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
         failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))
     })?
     let initial = journal_replay(take first, 0, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))?
-    over_ceiling(journal_account(initial)?, options.resident_limit)?
+    failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, options.resident_limit))?
     let id = failure_result_from_rep(types.capacity(types.disk_identity(r)))?
     let admitted = prepare_writer(store_key_from_rep(id), initial)?
     if let Some(mut attaching) = link {

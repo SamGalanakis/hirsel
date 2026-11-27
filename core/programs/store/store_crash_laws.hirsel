@@ -386,12 +386,12 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         66u8
     } else {
         65u8
-    }) || db.fence != 1 {
+    }) || catalog.current_fence(db.schema) != 1 {
         return Ok(false)
     }
     let new_release = get(result.unwrap(reader(db, 0u64)), snap, release, 98u64)?
     if installed {
-        if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 {
+        if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || catalog.next_table_id(db.schema) != 10u32 {
             return Ok(false)
         }
     } else if let Some(_) = new_release {
@@ -670,7 +670,7 @@ fn lix_expected(id: u32, model: List[Option[u64]]) -> Result[List[Bytes], Error]
             }
             let keys = failure_result_from_rep(types.capacity(lix_keys(k, v)))?
             if keys[0] == j || keys[1] == j {
-                let mut logical = prefix(id)?
+                let mut logical = failure_result_from_rep(catalog.prefix(id))?
                 list.put_word_be(mut logical, j)
                 list.put_word_be(mut logical, k)
                 list.push(mut out, take logical)
@@ -682,9 +682,9 @@ fn lix_expected(id: u32, model: List[Option[u64]]) -> Result[List[Bytes], Error]
 
 fn lix_entries(db: Db, id: u32) -> Result[List[Bytes], Error] {
     let s = snapshot(db)
-    let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1))?)?
     let mut out: List[Bytes] = list.new()
-    while let Some((take key, _)) = next_bytes(mut cursor)? {
+    while let Some((take key, _)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         list.push(mut out, take key)
     }
     Ok(take out)

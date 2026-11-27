@@ -14,7 +14,7 @@ pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bou
     if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
+    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let start = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     read_snapshot_collection_page(read_handle, s, t.id, table_decoder(t), Included(take start), take high, l)
@@ -26,7 +26,7 @@ pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
     if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
-    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
+    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let start = index_bound(ix.id, ix.key, lo, false)?
     read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Included(take start), take high, l)
@@ -43,7 +43,7 @@ fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: B
         return Error(Stale(r.source))
     }
     page_limits(limits)?
-    readable(s.roots, catalog_key, seen, id)?
+    failure_result_from_rep(catalog.readable(s.roots, catalog_key, seen, id))?
     Ok(true)
 }
 
@@ -61,7 +61,7 @@ pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
     if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
-    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
+    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
     Ok(Paged(read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Excluded(take final_item), take high, l)?))
 }
@@ -69,13 +69,13 @@ pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
 fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, decoder: RowDecoder[K, V], take low: Bound[Bytes], take high: Bytes, limits: Limits) -> Result[Page[K, V], Error] waits {
     let data = view s.roots.collections
     if let Some(inventory) = view data.paging {
-        let id = prefix(source)?
+        let id = failure_result_from_rep(catalog.prefix(source))?
         if let Some((edge, descriptor)) = std.page.collection_slot(data.root, id) {
             let tiered_rows = pages.collection_descriptor(descriptor).residency == ResidentTiered
             let tiered_owner = if source == decoder.table {
                 false
             } else {
-                let owner = std.page.lookup(data.root, prefix(decoder.table)?)
+                let owner = std.page.lookup(data.root, failure_result_from_rep(catalog.prefix(decoder.table))?)
                 match owner {
                     Some(record) => pages.collection_descriptor(record).residency == ResidentTiered,
                     None => false
@@ -104,7 +104,7 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                             }
                         } else {
                             let mut cursor = resume_data(data, start, high, previous, false)?
-                            next_bytes(mut cursor)?
+                            failure_result_from_rep(catalog.next_bytes(mut cursor))?
                         }
                         let Some((take key, raw)) = take found else {
                             return Ok(PageEnd)
@@ -119,12 +119,12 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
             }
         }
     }
-    let start = scan_page_start(low, prefix(source)?)?
-    let Some(take opened) = collection_cursor(data, source, start, high, false)? else {
+    let start = scan_page_start(low, failure_result_from_rep(catalog.prefix(source))?)?
+    let Some(take opened) = failure_result_from_rep(catalog.collection_cursor(data, source, start, high, false))? else {
         return Ok(Page(rows: list.new(), byte_count: 0, next: None))
     }
     let mut cursor = take opened
-    let leading = prefix(source)?
+    let leading = failure_result_from_rep(catalog.prefix(source))?
     read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: pages.CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
         let stepped = std.page.cursor_read(mut current.walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[SnapshotPageStep[K, V], Error] {
             if full {

@@ -389,9 +389,9 @@ fn put_collection_with_residency(mut tree: pages.PageTree, key: Bytes, take slot
 }
 
 fn define_empty_tiered_collection(mut tree: pages.PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
-    let first = stamp_after(final_item)?
+    let first = failure_result_from_rep(catalog.stamp_after(final_item))?
     let mut draw = first
-    put_collection_with_residency(mut tree, prefix(id)?, None, 0, 0, kind, ResidentTiered, first, mut draw)?
+    put_collection_with_residency(mut tree, failure_result_from_rep(catalog.prefix(id))?, None, 0, 0, kind, ResidentTiered, first, mut draw)?
     failure_result_from_rep(pages.canonical_tree(mut tree))?
     final_item = draw - 1
     Ok(())
@@ -638,12 +638,12 @@ fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Res
 // Flushes every HotPage currently in `builder.levels` into class-3/4 packs via
 // one `hold_import_emitted` cut, replacing each HotPage with its ColdPage(ptr).
 fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree) -> Result[(), DeployError] waits {
-    let mut temp_stamp = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+    let mut temp_stamp = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
     let Some(take root_node) = stream_temporary_root_multi(builder.levels, mut temp_stamp)? else {
         return Ok(())
     }
     let StreamNode(slot: take root_slot, rows: root_rows, charge: root_charge, ..) = take root_node
-    let key = deploy_result(prefix(builder.id))?
+    let key = deploy_result(failure_result_from_rep(catalog.prefix(builder.id)))?
     let private_from = temp_stamp
     deploy_result(put_collection_with_residency(mut collections, key, Some(take root_slot), root_rows, root_charge, builder.kind, ResidentTiered, private_from, mut temp_stamp))?
     deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
@@ -804,8 +804,8 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
         }
         let finished = stream_finish_range(mut builder)?
         stamp_cursor = builder.next_stamp
-        let key = deploy_result(prefix(target.id))?
-        let private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+        let key = deploy_result(failure_result_from_rep(catalog.prefix(target.id)))?
+        let private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
         let mut map_stamp = private_from
         match take finished {
             Some(take node) => {

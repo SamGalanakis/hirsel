@@ -250,8 +250,8 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     // An injected equal fingerprint with unequal bytes must not reuse number 0.
     let mut meta = result.unwrap(catalog_entry(db, old.catalog_key))
     let writer = result.unwrap(std.codec.schema(old_codec()))
-    let mut schemas: List[ValueSchema] = list.new()
-    list.push(mut schemas, ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.schema_fingerprint(new_codec())), schema: take writer))
+    let mut schemas: List[catalog.ValueSchema] = list.new()
+    list.push(mut schemas, catalog.ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.schema_fingerprint(new_codec())), schema: take writer))
     meta.schemas = take schemas
     let raw = result.unwrap(encode_catalog(meta))
     let base = pages.share_roots(pages.holder_heads(db.holders)[0].roots)
@@ -377,7 +377,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
     }
     let now = snapshot(db)
     let sh = view current
-    let acc = result.unwrap(span_changes(result.unwrap(reader(db, 0u64)), now, result.unwrap(prefix(sh.id)), result.unwrap(prefix(sh.id + 1))))
+    let acc = result.unwrap(span_changes(result.unwrap(reader(db, 0u64)), now, result.unwrap(failure_result_from_rep(catalog.prefix(sh.id))), result.unwrap(failure_result_from_rep(catalog.prefix(sh.id + 1)))))
     if list.len(acc) != 2 || result.unwrap(published_value(sh, acc[0])) != Some(two_words(10, 7)) || result.unwrap(published_value(sh, acc[1])) != Some(two_words(20, 9)) {
         return false
     }
@@ -654,7 +654,7 @@ pub fn law_migrate(c: Clock, tasks: Tasks) -> bool waits {
         _ => return false
     }
     let fourth = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
-    if version(snapshot(db)) != 4 || db.next_table != 5 || fourth.id != 3 {
+    if version(snapshot(db)) != 4 || catalog.next_table_id(db.schema) != 5 || fourth.id != 3 {
         return false
     }
     if list.len(result.unwrap(index_catalog(db, 3))) != 1 || result.unwrap(bonus_order(snapshot(db), ix_b)) != 305010702090 {

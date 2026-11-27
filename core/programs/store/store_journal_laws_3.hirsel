@@ -2,7 +2,7 @@ pub fn journal_law_call_vector() -> bool {
     let mut value: Bytes = list.with_capacity(34)
     result.unwrap(format.le(mut value, 0, 2))
     list.fill(mut value, 32, 4u8)
-    let key = result.unwrap(logical_key(1, types.key_word(7)))
+    let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
     let mut data: pages.DataRows = pages.new_data_rows()
     pages.push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let mut stream_value: Bytes = list.new()
@@ -355,7 +355,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         },
         None => return false
     }
-    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
+    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(2))))) {
         return false
     }
     // I4 with a pin: three overwrites of key 9 leave obsolete charges.
@@ -408,7 +408,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if stream_now(after, s) != (2u64, 2u64) || !stream_reply_is(after, s, string.as_bytes("r2")) {
         return false
     }
-    match pages.get_page_row(pages.holder_heads(after.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(9)))) {
+    match pages.get_page_row(pages.holder_heads(after.holders)[0].roots.collections, result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(9))))) {
         Some(v) => if decode_word(v) != 5 {
             return false
         },

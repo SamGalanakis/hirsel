@@ -70,8 +70,8 @@ fn tiered_range_inventory_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, sna
     let Some(inventory) = view snap.roots.collections.paging else {
         return Error(Io(Closed))
     }
-    let low = prefix(collection_id)?
-    let high = prefix(collection_id + 1u32)?
+    let low = failure_result_from_rep(catalog.prefix(collection_id))?
+    let high = failure_result_from_rep(catalog.prefix(collection_id + 1u32))?
     let mut previous: Option[Bytes] = None
     let mut row_total = 0u64
     let mut checksum = std.check.start()
@@ -87,8 +87,8 @@ fn write_tiered_prepared_rows_direct(mut file: FrameFile, d: Dir, id: StoreId, w
     let Some(inventory) = view snap.roots.collections.paging else {
         return Error(Store(Io(Closed)))
     }
-    let low = deploy_result(prefix(collection_id))?
-    let high = deploy_result(prefix(collection_id + 1u32))?
+    let low = deploy_result(failure_result_from_rep(catalog.prefix(collection_id)))?
+    let high = deploy_result(failure_result_from_rep(catalog.prefix(collection_id + 1u32)))?
     let mut previous: Option[Bytes] = None
     while let Some((take key, value, take resume)) = deploy_result(snapshot_tiered_span_step_direct(d, id, writer_pin_bytes, snap, inventory, low, high, previous))? {
         let row = PreparedRow(key: take key, value: deploy_result(failure_result_from_rep(types.copied(value)))?)
@@ -108,12 +108,12 @@ fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Sna
             return Error(Drift)
         }
         let low = match diff.start {
-            Some(suffix) => deploy_result(logical_key(diff.id, suffix))?,
-            None => deploy_result(prefix(diff.id))?,
+            Some(suffix) => deploy_result(failure_result_from_rep(catalog.logical_key(diff.id, suffix)))?,
+            None => deploy_result(failure_result_from_rep(catalog.prefix(diff.id)))?,
         }
         let high = match diff.stop {
-            Some(suffix) => deploy_result(logical_key(diff.id, suffix))?,
-            None => deploy_result(prefix(diff.id + 1u32))?,
+            Some(suffix) => deploy_result(failure_result_from_rep(catalog.logical_key(diff.id, suffix)))?,
+            None => deploy_result(failure_result_from_rep(catalog.prefix(diff.id + 1u32)))?,
         }
         let mut left_prev: Option[Bytes] = None
         let mut right_prev: Option[Bytes] = None
@@ -183,7 +183,7 @@ fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Sna
 }
 
 fn catch_up_next_row(d: Dir, id: StoreId, writer_pin_bytes: u64, snap: Snapshot, collection_id: u32, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
-    let key = prefix(collection_id)?
+    let key = failure_result_from_rep(catalog.prefix(collection_id))?
     let Some((_, desc)) = std.page.collection_slot(snap.roots.collections.root, key) else {
         return Ok(None)
     }
@@ -198,7 +198,7 @@ fn catch_up_next_row(d: Dir, id: StoreId, writer_pin_bytes: u64, snap: Snapshot,
         None => Included(failure_result_from_rep(types.copied(low))?),
     }
     let mut cursor = byte_cursor(snap.roots.collections, take start, high)?
-    match next_bytes(mut cursor)? {
+    match failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         Some((take k, take v)) => {
             let res = failure_result_from_rep(types.copied(k))?
             Ok(Some((take k, take v, take res)))
@@ -417,7 +417,7 @@ fn apply_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
     for qr in queued {
         if qr.staged_range {
             if let Some(mut ctx) = child_cut {
-                let private_from = stamp_after(next_node)?
+                let private_from = failure_result_from_rep(catalog.stamp_after(next_node))?
                 let mut draw = private_from
                 child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut collections, failure_result_from_rep(types.copied(qr.logical))?, ReplayPut(arc.new(failure_result_from_rep(types.copied(qr.raw))?)), private_from, mut draw)?
                 failure_result_from_rep(pages.canonical_tree(mut collections))?
@@ -426,7 +426,7 @@ fn apply_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
                     child_cut_tiered(mut collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_node)?
                 }
             } else {
-                let private_from = stamp_after(next_node)?
+                let private_from = failure_result_from_rep(catalog.stamp_after(next_node))?
                 let mut draw = private_from
                 collections = apply_tiered_rewrite_backend(clone_pager_backend(backend), store_id, writer_pin_bytes, opened, pages.share_page_tree(collections), failure_result_from_rep(types.copied(qr.logical))?, failure_result_from_rep(types.copied(qr.raw))?, private_from, mut draw)?
                 failure_result_from_rep(pages.canonical_tree(mut collections))?
@@ -434,7 +434,7 @@ fn apply_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u64,
             }
         } else {
             if let None = child_cut {
-                let private_from = stamp_after(next_node)?
+                let private_from = failure_result_from_rep(catalog.stamp_after(next_node))?
                 let mut draw = private_from
                 collections = apply_tiered_rewrite_backend(clone_pager_backend(backend), store_id, writer_pin_bytes, opened, pages.share_page_tree(collections), failure_result_from_rep(types.copied(qr.logical))?, failure_result_from_rep(types.copied(qr.raw))?, private_from, mut draw)?
                 failure_result_from_rep(pages.canonical_tree(mut collections))?
@@ -450,10 +450,10 @@ fn resolve_queued_rewrites(take backend: TieredPageBackend, writer_pin_bytes: u6
     if list.len(staged.queued_rewrites) == 0 {
         return Ok(list.new())
     }
-    check_queued_rewrites(clone_pager_backend(backend), writer_pin_bytes, opened, store_id, staged, staged.plan.roots.collections)?
+    check_queued_rewrites(clone_pager_backend(backend), writer_pin_bytes, opened, store_id, staged, staged.plan.schema.roots.collections)?
     let queued = replace(mut staged.queued_rewrites, list.new())
-    let rows = apply_queued_rewrites(take backend, writer_pin_bytes, opened, store_id, mut staged.plan.roots.collections, mut staged.plan.next_node, queued, mut child_cut)?
-    staged.plan.changed = true
+    let rows = apply_queued_rewrites(take backend, writer_pin_bytes, opened, store_id, mut staged.plan.schema.roots.collections, mut staged.plan.schema.next_node, queued, mut child_cut)?
+    staged.plan.schema.changed = true
     Ok(take rows)
 }
 
@@ -522,7 +522,7 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
         }) {
             return Error(ImportMalformed)
         }
-        let id_key = deploy_result(prefix(row.id))?
+        let id_key = deploy_result(failure_result_from_rep(catalog.prefix(row.id)))?
         let Some((_, desc)) = std.page.collection_slot(tree.root, id_key) else {
             return Error(ImportMalformed)
         }
@@ -530,7 +530,7 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
         if fields.kind != TableCollection {
             return Error(ImportMalformed)
         }
-        let logical = logical_key(row.id, row.key) ?=> |_| ImportMalformed
+        let logical = failure_result_from_rep(catalog.logical_key(row.id, row.key)) ?=> |_| ImportMalformed
         if fields.residency == ResidentMemory {
             let Some(_) = pages.get_page_row(tree, logical) else {
                 return Error(ImportMalformed)
@@ -562,7 +562,7 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
                     ReplayAbsent => return Ok(false),
                 }
             }
-            let Some((edge, _)) = std.page.collection_slot(tree.root, prefix(cid)?) else {
+            let Some((edge, _)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(cid))?) else {
                 return Ok(false)
             }
             tiered_seek(attempt, SeekKey(failure_result_from_rep(types.copied(key))?))
@@ -585,31 +585,31 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[ActivationRewrite], base_
 // Tiered tables use a cut read on K (`CUT_PIN_BYTES`) through `retry_fold_edit`.
 fn apply_import_rewrites_tiered(db: Db, mut plan: SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployError] waits {
     for row in rewrites {
-        let key = deploy_result(logical_key(row.id, row.key))?
+        let key = deploy_result(failure_result_from_rep(catalog.logical_key(row.id, row.key)))?
         let raw = deploy_result(failure_result_from_rep(types.copied(row.value)))?
-        if !deploy_result(table_is_tiered(plan.roots.collections, row.id))? {
-            let _ = deploy_result(insert_row(mut plan.next_node, mut plan.roots, take key, take raw))?
+        if !deploy_result(table_is_tiered(plan.schema.roots.collections, row.id))? {
+            let _ = deploy_result(failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take key, take raw)))?
             continue
         }
         let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
             Some(requests) => Some(view requests),
             None => None,
         }
-        let id_key = deploy_result(prefix(row.id))?
-        let first = deploy_result(stamp_after(plan.next_node))?
+        let id_key = deploy_result(failure_result_from_rep(catalog.prefix(row.id)))?
+        let first = deploy_result(failure_result_from_rep(catalog.stamp_after(plan.schema.next_node)))?
         let (take updated, rows, charge, kind_byte, draw0) = {
-            let cut = deploy_result(tx_page_source(pager, plan.roots.collections))?
-            let Some((edge, desc)) = std.page.collection_slot(plan.roots.collections.root, id_key) else {
+            let cut = deploy_result(tx_page_source(pager, plan.schema.roots.collections))?
+            let Some((edge, desc)) = std.page.collection_slot(plan.schema.roots.collections.root, id_key) else {
                 return Error(ImportMalformed)
             }
             let desc_fields = pages.collection_descriptor(desc)
             let kind_byte = pages.descriptor_kind_byte(desc_fields.kind)
-            let Some(empty_root) = view plan.roots.collections.empty_collection else {
+            let Some(empty_root) = view plan.schema.roots.collections.empty_collection else {
                 fail("store: missing empty collection page")
             }
             let mut stamp_draw = first
             let mut effects: Option[List[TieredFoldEffect]] = None
-            let updated = deploy_result(fold_materialize_row(cut, edge, empty_root, key, pages.ReplayRow(base: 0u32, now: ReplayPut(arc.new(take raw))), plan.roots.collections.inline, false, first, mut stamp_draw, mut effects))?
+            let updated = deploy_result(fold_materialize_row(cut, edge, empty_root, key, pages.ReplayRow(base: 0u32, now: ReplayPut(arc.new(take raw))), plan.schema.roots.collections.inline, false, first, mut stamp_draw, mut effects))?
             let (rows, charge) = match view updated {
                 HotPage(p) => std.page.totals(p),
                 ColdPage(_) => (desc_fields.rows, desc_fields.row_bytes),
@@ -617,9 +617,9 @@ fn apply_import_rewrites_tiered(db: Db, mut plan: SchemaPlan, rewrites: List[Act
             (take updated, rows, charge, kind_byte, stamp_draw)
         }
         let mut draw = draw0
-        deploy_result(put_collection_with_residency(mut plan.roots.collections, id_key, Some(take updated), rows, charge, kind_byte, ResidentTiered, first, mut draw))?
-        deploy_result(failure_result_from_rep(pages.canonical_tree(mut plan.roots.collections)))?
-        plan.next_node = draw - 1
+        deploy_result(put_collection_with_residency(mut plan.schema.roots.collections, id_key, Some(take updated), rows, charge, kind_byte, ResidentTiered, first, mut draw))?
+        deploy_result(failure_result_from_rep(pages.canonical_tree(mut plan.schema.roots.collections)))?
+        plan.schema.next_node = draw - 1
     }
     Ok(())
 }
@@ -636,16 +636,16 @@ fn run_deferred_migrates(mut ctx: ChildCutContext, opened: u64, mut plan: Schema
     }
     let pending = replace(mut plan.pending_migrates, list.new())
     for take job in take pending {
-        let low = prefix(job.from_id)?
-        let high = prefix(job.from_id + 1u32)?
+        let low = failure_result_from_rep(catalog.prefix(job.from_id))?
+        let high = failure_result_from_rep(catalog.prefix(job.from_id + 1u32))?
         let mut previous: Option[Bytes] = None
         let mut read = 0u64
         let mut written = 0u64
         loop {
             let mut batch: List[(Bytes, Bytes)] = list.new()
             {
-                let snap = Snapshot(store: ctx.store, open: opened, branch: 0u32, head: 0u64, roots: pages.share_roots(plan.roots), watermark: plan.next_node + 1, bases: pages.no_tail_bases())
-                let Some(inventory) = view plan.roots.collections.paging else {
+                let snap = Snapshot(store: ctx.store, open: opened, branch: 0u32, head: 0u64, roots: pages.share_roots(plan.schema.roots), watermark: plan.schema.next_node + 1, bases: pages.no_tail_bases())
+                let Some(inventory) = view plan.schema.roots.collections.paging else {
                     return Error(Io(Closed))
                 }
                 while list.len(batch) < INDEX_CHUNK {
@@ -660,40 +660,40 @@ fn run_deferred_migrates(mut ctx: ChildCutContext, opened: u64, mut plan: Schema
                 break
             }
             read += list.len(batch)
-            let private_from = stamp_after(plan.next_node)?
+            let private_from = failure_result_from_rep(catalog.stamp_after(plan.schema.next_node))?
             let mut draw = private_from
             for (logical, raw) in batch {
                 let suffix = list.slice(logical, 4, list.len(logical))
                 if let Some((take new_key, take new_raw)) = (job.convert)(suffix, raw)? {
-                    let target_key = logical_key(job.to_id, new_key)?
-                    if let Some(_) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, plan.roots.collections, target_key)? {
-                        return Error(Exists(named(job.to_name)?))
+                    let target_key = failure_result_from_rep(catalog.logical_key(job.to_id, new_key))?
+                    if let Some(_) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, plan.schema.roots.collections, target_key)? {
+                        return Error(Exists(failure_result_from_rep(catalog.named(job.to_name))?))
                     }
-                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut plan.roots.collections, take target_key, ReplayPut(arc.new(take new_raw)), private_from, mut draw)?
+                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut plan.schema.roots.collections, take target_key, ReplayPut(arc.new(take new_raw)), private_from, mut draw)?
                     written += 1
                 }
             }
-            failure_result_from_rep(pages.canonical_tree(mut plan.roots.collections))?
-            plan.next_node = draw - 1
-            if tiered_tree_hot_bytes(plan.roots.collections)? >= ctx.dirty_bytes {
-                child_cut_tiered(mut plan.roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, plan.next_node)?
+            failure_result_from_rep(pages.canonical_tree(mut plan.schema.roots.collections))?
+            plan.schema.next_node = draw - 1
+            if tiered_tree_hot_bytes(plan.schema.roots.collections)? >= ctx.dirty_bytes {
+                child_cut_tiered(mut plan.schema.roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, plan.schema.next_node)?
             }
         }
         // Drop source table and its old indexes from collections.
-        let former = remove_store_collection(mut plan.roots.collections, job.from_id, mut plan.next_node)?
-        discard_replayed_collection(mut plan.roots.collections, job.from_id)?
-        if !plan.retained {
-            plan.live = int.saturating_sub(plan.live, former)
+        let former = failure_result_from_rep(catalog.remove_store_collection(mut plan.schema.roots.collections, job.from_id, mut plan.schema.next_node))?
+        discard_replayed_collection(mut plan.schema.roots.collections, job.from_id)?
+        if !plan.schema.retained {
+            plan.schema.live = int.saturating_sub(plan.schema.live, former)
         }
         for old_id in job.olds {
-            let charge = remove_store_collection(mut plan.roots.collections, old_id, mut plan.next_node)?
-            discard_replayed_collection(mut plan.roots.collections, old_id)?
-            if !plan.retained {
-                plan.live = int.saturating_sub(plan.live, charge)
+            let charge = failure_result_from_rep(catalog.remove_store_collection(mut plan.schema.roots.collections, old_id, mut plan.schema.next_node))?
+            discard_replayed_collection(mut plan.schema.roots.collections, old_id)?
+            if !plan.schema.retained {
+                plan.schema.live = int.saturating_sub(plan.schema.live, charge)
             }
         }
-        if tiered_tree_hot_bytes(plan.roots.collections)? >= ctx.dirty_bytes {
-            child_cut_tiered(mut plan.roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, plan.next_node)?
+        if tiered_tree_hot_bytes(plan.schema.roots.collections)? >= ctx.dirty_bytes {
+            child_cut_tiered(mut plan.schema.roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, plan.schema.next_node)?
         }
         if let Some(slot) = job.preview_slot {
             if let Some(mut backfills) = plan.preview {
@@ -729,8 +729,8 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
         let shape = catalog_index(record)?.shape
         let target_tiered = table_is_tiered(roots.collections, record.id)?
         let source_tiered = table_is_tiered(roots.collections, record.owner)?
-        let low = prefix(record.owner)?
-        let high = prefix(record.owner + 1u32)?
+        let low = failure_result_from_rep(catalog.prefix(record.owner))?
+        let high = failure_result_from_rep(catalog.prefix(record.owner + 1u32))?
         let mut previous: Option[Bytes] = None
         loop {
             let mut batch: List[(Bytes, Bytes)] = list.new()
@@ -761,16 +761,16 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
                 break
             }
             if !target_tiered {
-                let mut tmp = SchemaPlan(store: ctx.store, roots: pages.share_roots(roots), next_node: next_node, next_table: 0u32, live: live_bytes, ceiling: ceiling, retained: retained, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), defer_tiered: false, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: ctx.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
                 let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, bindings[bind_idx].index, batch, false, false, false)?
                 if let Some(_) = dup {
-                    return Error(Conflict(named(job.name)?))
+                    return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
                 }
-                roots = pages.share_roots(tmp.roots)
-                next_node = tmp.next_node
+                roots = pages.share_roots(tmp.schema.roots)
+                next_node = tmp.schema.next_node
                 continue
             }
-            let private_from = stamp_after(next_node)?
+            let private_from = failure_result_from_rep(catalog.stamp_after(next_node))?
             let mut draw = private_from
             for (logical, raw) in batch {
                 let primary = list.slice(logical, 4, list.len(logical))
@@ -790,7 +790,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
                             if let Some(existing) = view prior {
                                 let owner = list.slice(existing, 4, unique_owner_end(existing)?)
                                 if owner != primary {
-                                    return Error(Conflict(named(job.name)?))
+                                    return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
                                 }
                             }
                             failure_result_from_rep(types.copied(payload))?
@@ -820,7 +820,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
         let mut published = copied_record(record)?
         set_index_state(mut published, Public)?
         let raw_cat = encode_catalog(published)?
-        roots = catalog_insert(mut next_node, roots, job.catalog_key, raw_cat)?
+        roots = failure_result_from_rep(catalog.catalog_insert(mut next_node, roots, job.catalog_key, raw_cat))?
     }
     Ok(())
 }

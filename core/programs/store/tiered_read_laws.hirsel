@@ -669,7 +669,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let mut roots = pages.empty_roots()
     roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take children, list.new())))?
     let capture = pages.share_roots(roots)
-    let id = prefix(9)?
+    let id = failure_result_from_rep(catalog.prefix(9))?
     let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
     let frame = PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
     let Some(place) = add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
@@ -739,7 +739,7 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
     list.put_word_le(mut descriptor, 4u64)
     list.put_word_le(mut descriptor, 1u64)
-    let id = prefix(9)?
+    let id = failure_result_from_rep(catalog.prefix(9))?
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: clone(id), cell: InlineValue(take descriptor)))
     let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 100, CollectionMap)))?

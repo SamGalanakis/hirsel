@@ -1,0 +1,3 @@
+fn forge_declare_state() -> store.catalog.DeclareState {
+    store.catalog.DeclareState(base: fail("unreachable"))
+}

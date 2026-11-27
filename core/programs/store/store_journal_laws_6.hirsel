@@ -49,7 +49,7 @@ fn journal_test_fork_history(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let child = disk_test_directory(d)
     let scratch = disk_test_directory(d)
     let mut db = deploy_result(open(tasks, child, c, r, options))?
-    db.fence = 1
+    catalog.restore_fence(mut db.schema, 1)
     let beta = deploy_result(fork_history(mut db))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)
@@ -132,7 +132,7 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
 
 fn count_stream_effect(mut db: Db, key: Bytes, effect: u64) -> Ticket waits {
     let saved = result.unwrap(run(mut db, None, (copy_env(key), effect), fn(mut tx, args) -> Result[(), Error] {
-        let row = logical_key(1u32, types.key_word(args.1))?
+        let row = failure_result_from_rep(catalog.logical_key(1u32, types.key_word(args.1)))?
         let prior = match pages.get_page_row(tx.roots.collections, row) {
             Some(value) => decode_word(value),
             None => 0u64,
@@ -201,7 +201,7 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         _ => return Error(5u64),
     }
     for effect in[10u64, 20u64] {
-        let row = result.unwrap(logical_key(1u32, types.key_word(effect)))
+        let row = result.unwrap(failure_result_from_rep(catalog.logical_key(1u32, types.key_word(effect))))
         match pages.get_page_row(pages.holder_heads(after.holders)[0].roots.collections, row) {
             Some(value) if decode_word(value) == 1u64 => (),
             _ => return Error(effect),

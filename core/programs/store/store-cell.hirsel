@@ -23,7 +23,7 @@ pub fn cell_schemas[V](c: Cell[V]) -> Arc[RowSchemas] {
 
 pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Cell[V], Error] {
     let cell_binding = declare_value_collection(mut d, name, CatalogCell, list.new(), take value)?
-    let key = arc.new(prefix(cell_binding.id)?)
+    let key = arc.new(failure_result_from_rep(catalog.prefix(cell_binding.id))?)
     Ok(Cell(binding: take cell_binding, key: take key))
 }
 
@@ -32,40 +32,40 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
         return Error(MigrationFault)
     }
     d.failed = true
-    declaration_name(name)?
-    let key = table_key(name)?
+    failure_result_from_rep(catalog.declaration_name(name))?
+    let key = failure_result_from_rep(catalog.table_key(name))?
     let schema = std.codec.schema(value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
-    let (take record, created) = match pages.get_page_row(d.plan.roots.catalog, key) {
+    let (take selected, created) = match pages.get_page_row(d.plan.schema.roots.catalog, key) {
         Some(raw) => {
             let existing = decode_catalog(raw)?
             if catalog_kind(existing.record) != catalog_kind(form) {
                 if let Migrate = d.mode {
-                    return Error(Exists(named(name)?))
+                    return Error(Exists(failure_result_from_rep(catalog.named(name))?))
                 }
-                return Error(Changed(named(name)?))
+                return Error(Changed(failure_result_from_rep(catalog.named(name))?))
             }
             if map.contains(d.tables, existing.id) {
-                return Error(Exists(named(name)?))
+                return Error(Exists(failure_result_from_rep(catalog.named(name))?))
             }
             (take existing, false)
         },
         None => {
             let Migrate = d.mode else {
-                return Error(Missing(named(name)?))
+                return Error(Missing(failure_result_from_rep(catalog.named(name))?))
             }
-            let initial = Catalog(record: take form, id: d.plan.next_table, owner: 0, epoch: 1, key: failure_result_from_rep(types.copied(key_schema))?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
+            let initial = Catalog(record: take form, id: d.plan.schema.next_table, owner: 0, epoch: 1, key: failure_result_from_rep(types.copied(key_schema))?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
             (take initial, true)
         },
     }
-    let mut catalog = take record
-    let mut number = catalog.next
-    for old in catalog.schemas {
+    let mut record = take selected
+    let mut number = record.next
+    for old in record.schemas {
         if old.fingerprint == fp && old.schema == schema {
             number = old.number
         }
     }
-    if number == catalog.next {
+    if number == record.next {
         let Migrate = d.mode else {
             return Error(Missing("schema"))
         }
@@ -73,28 +73,28 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
             return Error(Limit(Ids))
         }
     }
-    let resolved = readers(value, catalog, number, schema)?
-    if number == catalog.next {
-        list.push(mut catalog.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-        catalog.next += 1
-        stage_value_collection(mut d.plan, key, catalog, created)?
+    let resolved = readers(value, record, number, schema)?
+    if number == record.next {
+        list.push(mut record.schemas, catalog.ValueSchema(number: number, fingerprint: fp, schema: take schema))
+        record.next += 1
+        stage_value_collection(mut d.plan, key, record, created)?
     }
-    map.insert(mut d.tables, catalog.id, true)
+    map.insert(mut d.tables, record.id, true)
     d.failed = false
-    Ok(ValueCollection(store: d.plan.store, id: catalog.id, catalog_key: catalog_key_handle(take key)?, catalog_page: catalog_page(d.plan.roots.catalog)?, readers: take resolved))
+    Ok(ValueCollection(store: d.plan.store, id: record.id, catalog_key: failure_result_from_rep(catalog.catalog_key_handle(take key))?, catalog_page: failure_result_from_rep(catalog.catalog_page(d.plan.schema.roots.catalog))?, readers: take resolved))
 }
 
-fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, created: bool) -> Result[(), Error] {
-    let wire = encode_catalog(catalog)?
-    let mut live_bytes = catalog_recharge(plan.live, plan.roots, key, wire, plan.retained)
-    let base = pages.share_roots(plan.roots)
-    let mut roots = catalog_insert(mut plan.next_node, base, key, wire)?
-    let mut next_id = plan.next_table
+fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: Catalog, created: bool) -> Result[(), Error] {
+    let wire = encode_catalog(record)?
+    let mut live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key, wire, plan.schema.retained)
+    let base = pages.share_roots(plan.schema.roots)
+    let mut roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, base, key, wire))?
+    let mut next_id = plan.schema.next_table
     if created {
         if next_id == 4294967295 {
             return Error(Limit(Ids))
         }
-        define_store_collection(mut roots.collections, catalog.id, pages.descriptor_kind_byte(catalog_kind(catalog.record)), mut plan.next_node)?
+        failure_result_from_rep(catalog.define_store_collection(mut roots.collections, record.id, pages.descriptor_kind_byte(catalog_kind(record.record)), mut plan.schema.next_node))?
         live_bytes = int.saturating_add(live_bytes, 126)
         next_id += 1
     }
@@ -105,7 +105,7 @@ fn readable_value[V](store_id: StoreId, roots: pages.Roots, schema_binding: Valu
     if !types.same(store_id.hi, store_id.lo, schema_binding.store.hi, schema_binding.store.lo) {
         return Error(Foreign)
     }
-    readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id)
+    failure_result_from_rep(catalog.readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id))
 }
 
 fn lower_cell_edit(layers: List[Arc[pages.Staged]], id: u32) -> Option[View[pages.CellEdit]] in layers {
@@ -232,7 +232,7 @@ fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
 }
 
 fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Error] {
-    let key = prefix(id)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
     let (reverts, old_width, old_charge) = {
         let current = cell_current(tx, id, key)
         if cell_matches(current, wanted) {
@@ -327,7 +327,7 @@ fn fold_cell_edits(mut cells: Map[u32, pages.CellEdit], layers: List[Arc[pages.S
 
 fn seal_cell_edits(mut rows: pages.DataRows, cells: Map[u32, pages.CellEdit]) {
     for (id, edit) in cells {
-        let key = result.unwrap(prefix(id))
+        let key = result.unwrap(failure_result_from_rep(catalog.prefix(id)))
         match edit {
             CellPut(value) => pages.push_data_row(mut rows, format.DataOp(key: take key, value: Some(clone(value)), trim: None, prior: None)),
             CellDelete => pages.push_data_row(mut rows, format.DataOp(key: take key, value: None, trim: None, prior: None)),
@@ -337,7 +337,7 @@ fn seal_cell_edits(mut rows: pages.DataRows, cells: Map[u32, pages.CellEdit]) {
 }
 
 pub fn published_cell[V](c: Cell[V], change: Change) -> Result[Option[Bytes], Error] {
-    if change.tree_key != prefix(c.binding.id)? {
+    if change.tree_key != failure_result_from_rep(catalog.prefix(c.binding.id))? {
         return Error(Missing("cell"))
     }
     publish_row(c.binding.id, c.binding.readers, change)

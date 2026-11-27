@@ -16,8 +16,8 @@ fn page_row_count(tree: pages.PageTree) -> u64 {
 fn test_paged_row_account() -> Result[(), Error] {
     let mut next_stamp = 1u64
     let mut collections = pages.new_page_tree(CollectionMap, 0)
-    define_collection(mut collections, 8, 1, 1, mut next_stamp)?
-    let key = logical_key(8, types.key_word(1))?
+    failure_result_from_rep(catalog.define_collection(mut collections, 8, 1, 1, mut next_stamp))?
+    let key = failure_result_from_rep(catalog.logical_key(8, types.key_word(1)))?
     failure_result_from_rep(pages.put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp))?
     let mut participants: List[pages.PageRoots] = list.with_capacity(3)
     list.push(mut participants, pages.PageRoots(collections: pages.share_page_tree(collections), streams: pages.new_page_tree(Unprefixed, 0), catalog: pages.new_page_tree(Unprefixed, 0), keyed: list.new()))
@@ -27,7 +27,7 @@ fn test_paged_row_account() -> Result[(), Error] {
     }
     let changed_from = next_stamp
     failure_result_from_rep(pages.put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp))?
-    define_collection(mut collections, 9, 2, changed_from, mut next_stamp)?
+    failure_result_from_rep(catalog.define_collection(mut collections, 9, 2, changed_from, mut next_stamp))?
     list.push(mut participants, pages.PageRoots(collections: pages.share_page_tree(collections), streams: pages.new_page_tree(Unprefixed, 0), catalog: pages.new_page_tree(Unprefixed, 0), keyed: list.new()))
     // The same value is written under a new blob stamp.
     let rewritten_from = next_stamp
@@ -44,23 +44,23 @@ fn test_paged_row_account() -> Result[(), Error] {
 fn test_paged_collection_paths() -> Result[(), Error] {
     let mut stamps = 1u64
     let mut tree = pages.new_page_tree(CollectionMap, 1024)
-    define_collection(mut tree, 7, 1, 1, mut stamps)?
-    define_collection(mut tree, 9, 2, 1, mut stamps)?
+    failure_result_from_rep(catalog.define_collection(mut tree, 7, 1, 1, mut stamps))?
+    failure_result_from_rep(catalog.define_collection(mut tree, 9, 2, 1, mut stamps))?
     let mut small: Bytes = list.with_capacity(64)
     list.fill(mut small, 64, 7u8)
     for row in 0u64 .. 160 {
-        failure_result_from_rep(pages.put_page_row(mut tree, logical_key(7, types.key_word(row))?, small, 1, mut stamps))?
+        failure_result_from_rep(pages.put_page_row(mut tree, failure_result_from_rep(catalog.logical_key(7, types.key_word(row)))?, small, 1, mut stamps))?
     }
     let earlier = pages.share_page_tree(tree)
     let floor = stamps
     for row in 0u64 .. 40 {
-        if !failure_result_from_rep(pages.remove_page_row(mut tree, logical_key(7, types.key_word(row))?, floor, mut stamps))? {
+        if !failure_result_from_rep(pages.remove_page_row(mut tree, failure_result_from_rep(catalog.logical_key(7, types.key_word(row)))?, floor, mut stamps))? {
             return Error(Missing("present row"))
         }
     }
     let mut large: Bytes = list.with_capacity(1025)
     list.fill(mut large, 1025, 55u8)
-    let rewritten = logical_key(7, types.key_word(100))?
+    let rewritten = failure_result_from_rep(catalog.logical_key(7, types.key_word(100)))?
     failure_result_from_rep(pages.put_page_row(mut tree, rewritten, large, floor, mut stamps))?
     {
         let Some(current) = pages.get_page_row(tree, rewritten) else {
@@ -74,7 +74,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
         }
     }
     {
-        let Some(subtree) = std.page.collection_child(tree.root, prefix(7)?) else {
+        let Some(subtree) = std.page.collection_child(tree.root, failure_result_from_rep(catalog.prefix(7))?) else {
             return Error(Missing("collection"))
         }
         let (row_count, _) = std.page.totals(subtree)
@@ -84,21 +84,21 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     }
     let mut forward = failure_result_from_rep(pages.open_page_range(tree, None, true, false, None))?
     for row in 40u64 .. 160 {
-        let Some((key, _)) = next_page_range(mut forward)? else {
+        let Some((key, _)) = failure_result_from_rep(catalog.next_page_range(mut forward))? else {
             return Error(Missing("range row"))
         }
-        if key != logical_key(7, types.key_word(row))? {
+        if key != failure_result_from_rep(catalog.logical_key(7, types.key_word(row)))? {
             return Error(Foreign)
         }
     }
-    if let Some(_) = next_page_range(mut forward)? {
+    if let Some(_) = failure_result_from_rep(catalog.next_page_range(mut forward))? {
         return Error(Foreign)
     }
-    let mut reverse = failure_result_from_rep(pages.open_page_range(tree, Some(logical_key(7, types.key_word(111))?), false, true, None))?
-    let Some((key, _)) = next_page_range(mut reverse)? else {
+    let mut reverse = failure_result_from_rep(pages.open_page_range(tree, Some(failure_result_from_rep(catalog.logical_key(7, types.key_word(111)))?), false, true, None))?
+    let Some((key, _)) = failure_result_from_rep(catalog.next_page_range(mut reverse))? else {
         return Error(Missing("reverse row"))
     }
-    if key != logical_key(7, types.key_word(110))? {
+    if key != failure_result_from_rep(catalog.logical_key(7, types.key_word(110)))? {
         return Error(Foreign)
     }
     let delta = (compare_page_collections(earlier, tree)?).rows
@@ -106,7 +106,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
         return Error(Foreign)
     }
     for row in 0u64 .. 40 {
-        if delta[row].tree_key != logical_key(7, types.key_word(row))? {
+        if delta[row].tree_key != failure_result_from_rep(catalog.logical_key(7, types.key_word(row)))? {
             return Error(Foreign)
         }
         if let Some(_) = delta[row].value {
@@ -122,10 +122,10 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     if list.compare_bytes(replacement, large) != Equal {
         return Error(Foreign)
     }
-    if !drop_collection(mut tree, 9, floor, mut stamps)? {
+    if !failure_result_from_rep(catalog.drop_collection(mut tree, 9, floor, mut stamps))? {
         return Error(Missing("empty index"))
     }
-    if let None = std.page.collection_child(earlier.root, prefix(9)?) {
+    if let None = std.page.collection_child(earlier.root, failure_result_from_rep(catalog.prefix(9))?) {
         return Error(Missing("held index"))
     }
     Ok(())
@@ -133,7 +133,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
 
 fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] waits {
     let tree = pages.holder_heads(db.holders)[0u64].roots.collections
-    let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else {
+    let Some(root) = std.page.collection_child(tree.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
         return Error(Missing("collection"))
     }
     let image = std.page.image_of(root)
@@ -187,7 +187,7 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         return Error(Missing("middle insert"))
     }
     {
-        let Some(root) = std.page.collection_child(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some(root) = std.page.collection_child(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
             return Error(Missing("collection"))
         }
         let image = std.page.image_of(root)

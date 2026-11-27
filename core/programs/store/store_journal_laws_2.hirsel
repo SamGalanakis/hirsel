@@ -142,7 +142,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let mut options = journal_crash_options()
     options.resident_limit = 710
     let mut db = deploy_result(open(tasks, disk_test_directory(d), c, r, options))?
-    db.fence = 1
+    catalog.restore_fence(mut db.schema, 1)
     deploy_result(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
     let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
     let initial = deploy_result(run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
@@ -258,7 +258,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         list.push(mut values, std.page.Row(key: types.key_word(key), value: take raw, charge: 1108))
     }
     pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
-        bulk_store_collection(mut tree, rows.id, 1, values, mut stamp)
+        failure_result_from_rep(catalog.bulk_store_collection(mut tree, rows.id, 1, values, mut stamp))
     })?
     let first = disk_state(db).pages.next_pack
     let _ = checkpoint(mut db)?

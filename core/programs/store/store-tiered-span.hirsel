@@ -12,7 +12,7 @@ fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
             break
         }
         let collection: u32 = list.word_be(id, 0)
-        let collection_end = prefix(collection + 1)?
+        let collection_end = failure_result_from_rep(catalog.prefix(collection + 1))?
         let from = if low <= id {
             view id
         } else {
@@ -37,7 +37,7 @@ fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
     }
     if pages.collection_descriptor(descriptor).residency == ResidentMemory {
         let mut cursor = byte_cursor(data, Included(failure_result_from_rep(types.copied(low))?), high)?
-        return next_bytes(mut cursor)
+        return failure_result_from_rep(catalog.next_bytes(mut cursor))
     }
     let (take start, take stop) = tiered_scan_bounds(descriptor, collection, failure_result_from_rep(types.copied(low))?, failure_result_from_rep(types.copied(high))?)?
     if start >= stop {

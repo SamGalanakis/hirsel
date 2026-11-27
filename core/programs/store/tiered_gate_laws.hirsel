@@ -12,7 +12,7 @@
 // In every generation the walker over every published root finds each stamp
 // at exactly one (pack, offset), in a listed pack on disk (L88).
 fn gate_walk_roots(d: Dir, db: Db, roots: pages.Roots, collection: u32, mut walk: CompactWalk) -> Result[(), Error] waits {
-    match std.page.collection_slot(roots.collections.root, prefix(collection)?) {
+    match std.page.collection_slot(roots.collections.root, failure_result_from_rep(catalog.prefix(collection))?) {
         Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
         _ => fail("L88: a cut leaves every published holder's Tiered root Cold"),
     }
@@ -285,7 +285,7 @@ fn test_l87_each_promoted_holder_crash_after_rename(d: Dir, c: Clock, r: Random,
 fn gate_page(d: Dir, db: Db, ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], Error] waits {
     let path = paged_pack_path(ptr.pack)?
     let wire = disk_read_file(d, path, 4194304)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
     Ok(arc.share(fold_page(frame)))
 }
 

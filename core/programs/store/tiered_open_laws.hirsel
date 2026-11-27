@@ -130,7 +130,7 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
     })? else {
         fail("L68: fixture inserts did not commit")
     }
-    let id = prefix(rows.id)?
+    let id = failure_result_from_rep(catalog.prefix(rows.id))?
     let memory_leaf = {
         let Some((here, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) else {
             fail("L68: the fixture has no collection")
@@ -161,7 +161,7 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
         fail("L68: the fixture value 30 must be one byte")
     }
     let mut hot = arc.share(memory_leaf)
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut hot, row_key, take written, None, 1024, first, mut draw)))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)

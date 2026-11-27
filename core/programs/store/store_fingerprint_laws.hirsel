@@ -70,7 +70,7 @@ fn fingerprint_default_payload(key: u64, value: FingerprintDefault) -> Result[u6
 
 // Keep the other four inputs unchanged when emulating the previous release.
 fn fingerprint_forge(mut plan: SchemaPlan, catalog_key: Bytes, offset: u64, part: Bytes) -> Result[(), Error] {
-    let mut record = catalog_entry_in(plan.roots.catalog, catalog_key)?
+    let mut record = catalog_entry_in(plan.schema.roots.catalog, catalog_key)?
     if list.len(record.revision) != 160 || list.len(part) != 32 {
         fail("L103: invalid fixture composite layout")
     }
@@ -78,8 +78,8 @@ fn fingerprint_forge(mut plan: SchemaPlan, catalog_key: Bytes, offset: u64, part
         record.revision[offset + i] = part[i]
     }
     let encoded = encode_catalog(record)?
-    plan.roots = catalog_insert(mut plan.next_node, pages.share_roots(plan.roots), catalog_key, encoded)?
-    plan.changed = true
+    plan.schema.roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, pages.share_roots(plan.schema.roots), catalog_key, encoded))?
+    plan.schema.changed = true
     Ok(())
 }
 
@@ -87,21 +87,21 @@ fn fingerprint_old_writer(mut plan: SchemaPlan, primary_table: Table[u64, Finger
     // Version 3 schema with one non-defaulted u64 field v, at the exact current
     // definition path. The current full schema stays available at number 1.
     let writer = option.unwrap(std.hex.decode(b"03010000001e00000073746f72652e73746f72652e46696e6765727072696e7444656661756c74000000000001000000000100000076061300000000"))
-    let mut catalog = catalog_entry_in(plan.roots.catalog, primary_table.catalog_key)?
+    let mut table_record = catalog_entry_in(plan.schema.roots.catalog, primary_table.catalog_key)?
     let current = result.unwrap(std.codec.schema(primary_table.readers.codec))
-    let mut schemas: List[ValueSchema] = list.new()
-    list.push(mut schemas, ValueSchema(number: 0, fingerprint: std.codec.fingerprint_of(writer), schema: take writer))
-    list.push(mut schemas, ValueSchema(number: 1, fingerprint: std.codec.fingerprint_of(current), schema: take current))
-    catalog.schemas = take schemas
-    catalog.next = 2
-    let record = encode_catalog(catalog)?
-    plan.roots = catalog_insert(mut plan.next_node, pages.share_roots(plan.roots), primary_table.catalog_key, record)?
-    let mut key = prefix(primary_table.id)?
+    let mut schemas: List[catalog.ValueSchema] = list.new()
+    list.push(mut schemas, catalog.ValueSchema(number: 0, fingerprint: std.codec.fingerprint_of(writer), schema: take writer))
+    list.push(mut schemas, catalog.ValueSchema(number: 1, fingerprint: std.codec.fingerprint_of(current), schema: take current))
+    table_record.schemas = take schemas
+    table_record.next = 2
+    let record = encode_catalog(table_record)?
+    plan.schema.roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, pages.share_roots(plan.schema.roots), primary_table.catalog_key, record))?
+    let mut key = failure_result_from_rep(catalog.prefix(primary_table.id))?
     list.put_word_be(mut key, 5u64)
     let mut row: Bytes = list.new()
     list.put_word_le(mut row, 0u16)
     list.put_word_le(mut row, 11u64)
-    let _ = failure_result_from_rep(pages.put_page_row(mut plan.roots.collections, key, row, plan.next_node + 1, mut plan.next_node))?
+    let _ = failure_result_from_rep(pages.put_page_row(mut plan.schema.roots.collections, key, row, plan.schema.next_node + 1, mut plan.schema.next_node))?
     Ok(())
 }
 

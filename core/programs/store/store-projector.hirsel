@@ -124,17 +124,17 @@ pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
     let _ = checked_name(pages.projector_pin_name(name, 0))?
     let rows_name = "hirsel.projections"
     let dictionary: std.codec.Codec[Projection] = std.codec.of()
-    let table_key_bytes = table_key(rows_name)?
-    if let Some(raw) = pages.get_page_row(d.plan.roots.catalog, table_key_bytes) {
+    let table_key_bytes = failure_result_from_rep(catalog.table_key(rows_name))?
+    if let Some(raw) = pages.get_page_row(d.plan.schema.roots.catalog, table_key_bytes) {
         let descriptor = decode_catalog(raw)?
         if option.copied(map.get(d.tables, descriptor.id)) == Some(true) {
-            let rows = catalog_handle(d.plan.store, d.plan.roots.catalog, take rows_name, std.codec.key_string(), dictionary)?
-            return Ok(ProjectionDecl(rows: take rows, name: named(name)?))
+            let rows = catalog_handle(d.plan.store, d.plan.schema.roots.catalog, take rows_name, std.codec.key_string(), dictionary)?
+            return Ok(ProjectionDecl(rows: take rows, name: failure_result_from_rep(catalog.named(name))?))
         }
     }
     let declared = declare_table_inner(mut d, rows_name, std.codec.key_string(), dictionary)?
     let rows = finish(mut d, take declared)?
-    Ok(ProjectionDecl(rows: take rows, name: named(name)?))
+    Ok(ProjectionDecl(rows: take rows, name: failure_result_from_rep(catalog.named(name))?))
 }
 
 // The state a registered projector keeps between steps; the step itself is
@@ -341,12 +341,12 @@ fn projection_page[K, V](p: Projector[K, V], base: Option[Snapshot], target: Sna
     if !types.same(p.input.store.hi, p.input.store.lo, target.store.hi, target.store.lo) {
         return Error(Foreign)
     }
-    readable(target.roots, p.input.catalog_key, p.input.catalog_page, p.input.id)?
+    failure_result_from_rep(catalog.readable(target.roots, p.input.catalog_key, p.input.catalog_page, p.input.id))?
     let low = match resume {
         Some(key) => failure_result_from_rep(types.copied(key))?,
-        None => prefix(p.input.id)?,
+        None => failure_result_from_rep(catalog.prefix(p.input.id))?,
     }
-    let page = changes_page(p.reads, base, target, low, prefix(p.input.id + 1)?, limits)?
+    let page = changes_page(p.reads, base, target, low, failure_result_from_rep(catalog.prefix(p.input.id + 1))?, limits)?
     if list.len(page.trimmed) > 0 || list.len(page.bounds) > 0 {
         return Error(failure_from_rep(pages.malformed(0)))
     }
@@ -485,7 +485,7 @@ type ProjectionAbort[A] = ProjectionMoved | ProjectionFailed(ProjectError[A])
 
 fn apply_projection_change[K, V, E: inert + send, A](mut tx: Tx, input: Table[K, V], fold: Fold[E, K, V, A], change: Change, generation: u32, at: u64) -> Result[(), ProjectError[A]] {
     let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
-    let key = decoded(std.codec.decode_key(input.key, raw_key)) ?=> Store
+    let key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(input.key, raw_key))) ?=> Store
     let value = match change.value {
         Some(raw) => Some(row_value(input.readers, input.id, raw) ?=> Store),
         None => None,
@@ -951,7 +951,7 @@ fn remove_pin(mut db: Db, owner: pages.PinOwner, name: String) -> Result[Ticket,
     healthy(db)?
     let k = pin_index(db, owner, name)
     if k == list.len(pages.holder_pins(db.holders)) {
-        return Error(Missing(named(name)?))
+        return Error(Missing(failure_result_from_rep(catalog.named(name))?))
     }
     cut_install(mut db, RemovePin(k))
 }

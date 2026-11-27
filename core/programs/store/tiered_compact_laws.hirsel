@@ -24,7 +24,7 @@ fn compact_walk_frame(d: Dir, db: Db, ptr: std.page.PagePtr, mut walk: CompactWa
     })
     let path = paged_pack_path(ptr.pack)?
     let wire = disk_read_file(d, path, 4194304)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
     let page = fold_page(frame)
     let image = std.page.image_of(page)
     for slot in 0u64 .. std.page.count(image) {
@@ -52,12 +52,12 @@ fn compact_walk_blob(d: Dir, db: Db, body: std.page.BlobRef, mut walk: CompactWa
     })
     let path = paged_pack_path(body.pack)?
     let wire = disk_read_file(d, path, 4194304)?
-    let _ = read_tiered_frame(path, db.store, TieredBlob(body), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
+    let _ = read_tiered_frame(path, db.store, TieredBlob(body), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
     Ok(())
 }
 
 fn compact_walk(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] waits {
-    let id = prefix(collection)?
+    let id = failure_result_from_rep(catalog.prefix(collection))?
     let Some((ColdPage(root), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) else {
         fail("L88 (h): each cut leaves the Log root Cold")
     }
@@ -233,7 +233,7 @@ fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, 
     })? else {
         fail("L87 (b): fixture puts did not commit")
     }
-    let id = prefix(rows.id)?
+    let id = failure_result_from_rep(catalog.prefix(rows.id))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
@@ -244,7 +244,7 @@ fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, 
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L87 (b): the fixture table must span more than one leaf")
     }
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
@@ -274,7 +274,7 @@ fn compact_branch_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_count: u6
 }
 
 fn compact_branch_root(db: Db, slot: u64, collection: u32) -> Result[std.page.PagePtr, Error] {
-    match std.page.collection_slot(pages.holder_heads(db.holders)[slot].roots.collections.root, prefix(collection)?) {
+    match std.page.collection_slot(pages.holder_heads(db.holders)[slot].roots.collections.root, failure_result_from_rep(catalog.prefix(collection))?) {
         Some((ColdPage(located), _)) => Ok(located),
         _ => fail("L87 (b): each cut leaves every branch's root Cold"),
     }
@@ -518,8 +518,8 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
     options.compact_permille = 1001
     let mut db = open(tasks, d, c, r, options)?
     let original = compact_branch_root(db, 0, rows.id)?
-    let id = prefix(rows.id)?
-    let start = stamp_after(pages.holder_next_node(db.holders))?
+    let id = failure_result_from_rep(catalog.prefix(rows.id))?
+    let start = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut restored = 0u64
     let mut limit = 0u64
     loop {
@@ -810,7 +810,7 @@ fn l100_a_run(d: Dir, c: Clock, r: Random, tasks: Tasks, demote_main: bool) -> R
         fail("L100 (a): the probe retires P")
     }
     l100_pin_check_reads(settled, clone(rows), clone(v1), clone(v2))?
-    let pin_root = match std.page.collection_slot(pages.holder_pins(settled.holders)[0u64].roots.collections.root, prefix(rows.id)?) {
+    let pin_root = match std.page.collection_slot(pages.holder_pins(settled.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) {
         Some((ColdPage(located), _)) => located,
         _ => fail("L100 (a): pin's collection root stays Cold"),
     }

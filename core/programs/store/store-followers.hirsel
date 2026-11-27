@@ -157,7 +157,7 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         let torn_tail = walk.torn_tail
         let replay = capture_scan(id, take walk, take initial)?
         let resident = journal_account(replay)?
-        over_ceiling(int.saturating_add(old_charge, resident), ceiling)?
+        failure_result_from_rep(catalog.over_ceiling(int.saturating_add(old_charge, resident), ceiling))?
         check_read_only_manifest(d, raw)?
         if let Some(old) = previous {
             if let Some(regressed_id) = behind_branch(replay.state, old.state) {
@@ -173,7 +173,7 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
             return Error(Limit(Ids))
         }
         let JournalReplay(state: take state, next_node: last_stamp, ..) = take replay
-        let capture = follow_capture(id, take state, resident, None, serial, stamp_after(last_stamp)?)?
+        let capture = follow_capture(id, take state, resident, None, serial, failure_result_from_rep(catalog.stamp_after(last_stamp))?)?
         progress.next_id = next_serial
         progress.last = Some(LogCaptureAttempt(key: take key, capture_id: serial))
         return Ok(Some(take capture))
@@ -562,10 +562,10 @@ fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> R
     }
     let recovered = read_only_checkpoint(directory, id, take manifest)?
     let resident = journal_account(recovered)?
-    over_ceiling(resident, ceiling)?
+    failure_result_from_rep(catalog.over_ceiling(resident, ceiling))?
     check_read_only_manifest(directory, raw)?
     let JournalReplay(state: take state, next_node, ..) = take recovered
-    Ok(Some(follow_capture(id, take state, resident, None, 0, stamp_after(next_node)?)?))
+    Ok(Some(follow_capture(id, take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
 }
 
 pub fn follower_floor(mut f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits {

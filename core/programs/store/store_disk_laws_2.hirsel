@@ -125,11 +125,11 @@ pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     let now = snapshot(reopened)
     let mut leftovers = result.unwrap(scan_raw(now, 1, Unbounded, Unbounded))
     let mut old_index = result.unwrap(scan_raw(now, 2, Unbounded, Unbounded))
-    let empty_old = match result.unwrap(next_bytes(mut leftovers)) {
+    let empty_old = match result.unwrap(failure_result_from_rep(catalog.next_bytes(mut leftovers))) {
         None => true,
         Some(_) => false
     }
-    let empty_index = match result.unwrap(next_bytes(mut old_index)) {
+    let empty_index = match result.unwrap(failure_result_from_rep(catalog.next_bytes(mut old_index))) {
         None => true,
         Some(_) => false
     }
@@ -497,7 +497,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
         match take made {
             Ok(Error(Full(Allocation(_)))) => {
                 refusals += 1
-                if pages.holder_heads(db.holders)[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || db.next_table != 2 || page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 512 {
+                if pages.holder_heads(db.holders)[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || catalog.next_table_id(db.schema) != 2 || page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 512 {
                     return false
                 }
                 let persisted = result.unwrap(disk_load(child, 1048576))
@@ -507,7 +507,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             },
             Ok(Ok(commit_ticket)) => {
                 successes += 1
-                if pages.holder_heads(db.holders)[0].head != 514 || db.checkpointed != 3 || db.next_table != 3 {
+                if pages.holder_heads(db.holders)[0].head != 514 || db.checkpointed != 3 || catalog.next_table_id(db.schema) != 3 {
                     return false
                 }
                 result.unwrap(durable(mut db, commit_ticket))
@@ -677,19 +677,19 @@ fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
     let mut tree = pages.new_page_tree(CollectionMap, 1024)
     let mut stamps = 1u64
     for id in 1u32 .. 5 {
-        define_collection(mut tree, id, 1, 1, mut stamps)?
-        failure_result_from_rep(pages.put_page_row(mut tree, logical_key(id, types.key_word(1))?, string.as_bytes("x"), 1, mut stamps))?
+        failure_result_from_rep(catalog.define_collection(mut tree, id, 1, 1, mut stamps))?
+        failure_result_from_rep(pages.put_page_row(mut tree, failure_result_from_rep(catalog.logical_key(id, types.key_word(1)))?, string.as_bytes("x"), 1, mut stamps))?
     }
-    define_collection(mut tree, 5, 1, 1, mut stamps)?
-    bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
+    failure_result_from_rep(catalog.define_collection(mut tree, 5, 1, 1, mut stamps))?
+    failure_result_from_rep(catalog.bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps))?
     for id in 1u32 .. 5 {
-        if !failure_result_from_rep(pages.remove_page_row(mut tree, logical_key(id, types.key_word(1))?, 1, mut stamps))? {
+        if !failure_result_from_rep(pages.remove_page_row(mut tree, failure_result_from_rep(catalog.logical_key(id, types.key_word(1)))?, 1, mut stamps))? {
             return Error(Foreign)
         }
     }
     let mut children: List[Arc[std.page.Page]] = list.with_capacity(6)
     for id in 1u32 .. 7 {
-        let Some((page, descriptor)) = std.page.collection_entry(tree.root, prefix(id)?) else {
+        let Some((page, descriptor)) = std.page.collection_entry(tree.root, failure_result_from_rep(catalog.prefix(id))?) else {
             return Error(Foreign)
         }
         let image = std.page.image_of(page)

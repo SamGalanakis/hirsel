@@ -1,5 +1,5 @@
 fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64) -> Result[(), Error] waits {
-    let id = prefix(collection)?
+    let id = failure_result_from_rep(catalog.prefix(collection))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take raw, inventory, place, take leaf, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
@@ -8,7 +8,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         let image = std.page.image_of(here)
         let mut draft = begin_tiered_pack(db.store, pack_seq, 3, 4096)?
         let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
-        let first_key = logical_key(collection, option.unwrap(std.page.key_at(image, 0)))?
+        let first_key = failure_result_from_rep(catalog.logical_key(collection, option.unwrap(std.page.key_at(image, 0))))?
         let Some(place) = add_tiered_pack_frame(mut draft, frame, collection, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
             fail("L62: the fixture leaf has no owning edge")
         })? else {
@@ -25,7 +25,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         (take raw, inventory, place, arc.share(here), take descriptor)
     }
     disk_write_synced(d, paged_pack_path(pack_seq)?, raw)?
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw)))?
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, ColdPage(place), mut draw)))?
@@ -54,9 +54,9 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
 fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Result[(), Error] {
     let id = events.binding.id
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
-    let trimmed = format.JournalOp(key: prefix(id)?, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
+    let trimmed = format.JournalOp(key: failure_result_from_rep(catalog.prefix(id))?, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
     let mut value: Bytes = list.with_capacity(6)
     list.put_word_le(mut value, events.binding.readers.current)
@@ -194,7 +194,7 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
 
 fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
     let collection = rows_handle.id
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
@@ -418,7 +418,7 @@ fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[
 
 fn l62_replay_index_owner(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
     let mut data = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)

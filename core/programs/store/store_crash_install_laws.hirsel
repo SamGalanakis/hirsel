@@ -94,7 +94,7 @@ fn l97_schema(mut d: Declare) -> Result[Index[u64, u64, u64, ()], Error] {
 }
 
 fn l97_residency(db: Db, id: u32) -> Result[std.page_descriptor.Residency, DeployError] {
-    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, deploy_result(prefix(id))?) else {
+    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, deploy_result(failure_result_from_rep(catalog.prefix(id)))?) else {
         fail("L97: a collection is missing from main's map")
     }
     Ok(mode.residency)

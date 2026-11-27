@@ -132,7 +132,7 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
 }
 
 fn l69_cold_root(db: Db, collection: u32) -> Result[std.page.PagePtr, Error] {
-    match std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(collection)?) {
+    match std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, failure_result_from_rep(catalog.prefix(collection))?) {
         Some((ColdPage(located), _)) => Ok(located),
         _ => fail("L69: the cut leaves the Tiered table root Cold"),
     }

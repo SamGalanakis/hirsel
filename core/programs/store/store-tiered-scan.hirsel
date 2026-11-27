@@ -137,7 +137,7 @@ fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
         let Some(take row) = take found else {
             break
         }
-        let mut logical = logical_key(collection, row.key)?
+        let mut logical = failure_result_from_rep(catalog.logical_key(collection, row.key))?
         if let Some(edits) = overlay {
             if let Some(_) = replay_overlay_at(edits, logical) {
                 if reverse {

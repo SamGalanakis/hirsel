@@ -30,7 +30,7 @@ fn store_has_tiered(db: Db) -> bool {
 // index build refuses before it changes the plan. Only the prepare child,
 // which cuts the build, defers one.
 fn refuse_hot_tiered_build(plan: SchemaPlan, tiered: bool) -> Result[(), Error] {
-    if tiered && !plan.defer_tiered {
+    if tiered && !plan.schema.defer_tiered {
         return Error(Tiered(Migrate))
     }
     Ok(())

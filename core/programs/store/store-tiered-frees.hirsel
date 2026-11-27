@@ -68,7 +68,7 @@ type TieredDeferredQueue {
 
 fn enqueue_tiered_free(mut queue: TieredDeferredQueue, take row: DeferredFree) -> Result[u64, Error] {
     let seq = queue.next_seq
-    let following = stamp_after(seq)?
+    let following = failure_result_from_rep(catalog.stamp_after(seq))?
     let (take pending, issued) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[u64, DeferredFree], u64), Error] {
         let mut draw = queue.issued
         let (take rows, _) = std.omap.insert(mut draw, queue.rows, seq, clone(row))

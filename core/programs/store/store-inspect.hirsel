@@ -33,11 +33,11 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
     let mut names: Map[u32, String] = map.new()
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
-    let mut records = byte_cursor(s.roots.catalog, Included(table_key("")?), end_key)?
-    while let Some((take key, raw)) = next_bytes(mut records)? {
+    let mut records = byte_cursor(s.roots.catalog, Included(failure_result_from_rep(catalog.table_key(""))?), end_key)?
+    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
         let record = decode_catalog(raw)?
         let (name, owner_name, form, state) = if let CatalogIndex(index_meta) = view record.record {
-            let index_name = declaration_index_name(key)?
+            let index_name = failure_result_from_rep(catalog.declaration_index_name(key))?
             let table_name = match map.get(names, record.owner) {
                 Some(found) => string.from(found),
                 None => return Error(failure_from_rep(pages.malformed(0))),
@@ -48,7 +48,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             }
             (take index_name, take table_name, form, copied_state(index_meta.state)?)
         } else {
-            let own = catalog_collection_name(key, pages.descriptor_kind_byte(catalog_kind(record.record)))?
+            let own = failure_result_from_rep(catalog.catalog_collection_name(key, pages.descriptor_kind_byte(catalog_kind(record.record))))?
             map.insert(mut names, record.id, string.from(own))
             let form: EntryForm = match record.record {
                 CatalogCell => CellForm,
@@ -57,7 +57,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             }
             (string.from(own), take own, form, Public)
         }
-        let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, prefix(record.id)?) {
+        let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, failure_result_from_rep(catalog.prefix(record.id))?) {
             Some((_, map_value)) => {
                 let descriptor = pages.collection_descriptor(map_value)
                 (descriptor.rows, descriptor.row_bytes, descriptor.residency == ResidentTiered)
@@ -169,7 +169,7 @@ pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
     for seen in attention(db)?.indexes {
         if let Failed(_, _) = seen.state {
             failure_result_from_rep(types.capacity(list.try_reserve(mut failed, 1)))?
-            list.push(mut failed, named(seen.index)?)
+            list.push(mut failed, failure_result_from_rep(catalog.named(seen.index))?)
         }
     }
     Ok(RepairOutcome(findings: take findings, built: take built, failed: take failed))

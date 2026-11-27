@@ -1,5 +1,5 @@
 pub opaque type StagedMigration {
-    base: DeclarationBase,
+    inner: catalog.DeclareState,
     plan: SchemaPlan,
     declared: bool,
     // The projectors the staged declaration registered, which activation
@@ -19,13 +19,13 @@ type ActivationRewrite: codec + send {
 }
 
 fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool, take registered: List[DeclaredProjector]) -> StagedMigration {
-    StagedMigration(base: declaration_base(db), plan: take plan, declared, projectors: take registered, first_table: db.next_table, base_rows: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), rewrites: map.new(), queued_rewrites: list.new())
+    StagedMigration(inner: catalog.declaration_state(declaration_base(db)), plan: take plan, declared, projectors: take registered, first_table: catalog.next_table_id(db.schema), base_rows: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), rewrites: map.new(), queued_rewrites: list.new())
 }
 
 /// The staged catalog and rows of a standalone install, read with `reader(db, _)`:
 /// the install's counterpart of `staged_snapshot` on the export side.
 pub fn staged_install_snapshot(db: Db, staged: StagedMigration) -> Snapshot {
-    snapshot_from(db, 0u64, pages.holder_heads(db.holders)[0].head, staged.plan.roots, int.saturating_add(staged.plan.next_node, 1))
+    snapshot_from(db, 0u64, pages.holder_heads(db.holders)[0].head, staged.plan.schema.roots, int.saturating_add(staged.plan.schema.next_node, 1))
 }
 
 fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
@@ -36,8 +36,8 @@ fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
 }
 
 fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old: Bytes, raw: Bytes) -> Result[(), Error] {
-    let mut indexes = byte_cursor(plan.roots.catalog, Included(index_prefix(id)?), index_prefix(id + 1)?)?
-    while let Some((name_key, encoded)) = next_bytes(mut indexes)? {
+    let mut indexes = byte_cursor(plan.schema.roots.catalog, Included(failure_result_from_rep(catalog.index_prefix(id))?), failure_result_from_rep(catalog.index_prefix(id + 1))?)?
+    while let Some((name_key, encoded)) = failure_result_from_rep(catalog.next_bytes(mut indexes))? {
         let record = decode_catalog(encoded)?
         let mut verified = false
         let bindings = list.len(plan.bindings)
@@ -48,7 +48,7 @@ fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old
                 let before = (ix.extract)(old, key)?
                 let after = (ix.extract)(raw, key)?
                 if before.keys != after.keys || before.payload != after.payload || before.sums != after.sums {
-                    return Error(Changed(declaration_index_name(name_key)?))
+                    return Error(Changed(failure_result_from_rep(catalog.declaration_index_name(name_key))?))
                 }
                 verified = true
                 break
@@ -67,7 +67,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         if !types.same(plan.store.hi, plan.store.lo, t.store.hi, t.store.lo) {
             return Error(Foreign)
         }
-        let record = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
+        let record = catalog_entry_in(plan.schema.roots.catalog, t.catalog_key)?
         if catalog_kind(record.record) != TableCollection || record.id != t.id {
             return Error(Stale(t.id))
         }
@@ -75,19 +75,19 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
         if t.readers.current != current.number || t.readers.schemas.value != current.schema || t.readers.schemas.key != record.key {
             return Error(Schema(int.widen(current.number)))
         }
-        let key = encode_key(t.key, k)?
-        let logical = logical_key(t.id, key)?
+        let key = failure_result_from_rep(catalog.encode_key(t.key, k))?
+        let logical = failure_result_from_rep(catalog.logical_key(t.id, key))?
         // A table the staging replaced has its rows only in the staged range (v2.103).
         let staged_range = t.id >= staged.first_table
         let mut raw: Bytes = list.new()
         failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(current.number), 2)))?
         std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-        if list.len(raw) > staged.plan.value_limit {
+        if list.len(raw) > staged.plan.schema.value_limit {
             return Error(Limit(Value))
         }
         let _ = row_value(t.readers, t.id, raw)?
         let tiered = if staged_range {
-            table_is_tiered(plan.roots.collections, t.id)?
+            table_is_tiered(plan.schema.roots.collections, t.id)?
         } else {
             table_is_tiered(staged.base_rows, t.id)?
         }
@@ -108,7 +108,7 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
     let live_bytes = {
         let plan = view staged.plan
         let found = if staged_range {
-            pages.get_page_row(plan.roots.collections, logical)
+            pages.get_page_row(plan.schema.roots.collections, logical)
         } else {
             pages.get_page_row(staged.base_rows, logical)
         }
@@ -116,37 +116,37 @@ pub fn stage_rewrite[K, V](mut staged: StagedMigration, t: Table[K, V], k: K, v:
             return Error(Missing("row"))
         }
         check_rewrite_indexes(plan, t.id, schema_number, key, old, raw)?
-        let mut kept = plan.live
-        if staged_range || !plan.retained {
-            if let Some(previous) = pages.get_page_row(plan.roots.collections, logical) {
+        let mut kept = plan.schema.live
+        if staged_range || !plan.schema.retained {
+            if let Some(previous) = pages.get_page_row(plan.schema.roots.collections, logical) {
                 kept -= entry(logical, previous)
             }
         }
         let live_bytes = int.saturating_add(kept, entry(logical, raw))
-        over_ceiling(live_bytes, plan.ceiling)?
+        failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
         live_bytes
     }
     let address = (t.id, take key)
     if !staged_range && map.contains(staged.rewrites, address) {
         return Error(Exists("rewrite"))
     }
-    let mut roots = pages.share_roots(staged.plan.roots)
-    let mut ids = staged.plan.next_node
-    let _ = insert_row(mut ids, mut roots, take logical, take raw)?
+    let mut roots = pages.share_roots(staged.plan.schema.roots)
+    let mut ids = staged.plan.schema.next_node
+    let _ = failure_result_from_rep(catalog.insert_row(mut ids, mut roots, take logical, take raw))?
     // The staged range carries the edit, so the frame gets no row for it.
     if !staged_range {
         failure_result_from_rep(types.capacity(map.try_reserve(mut staged.rewrites, 1)))?
         map.insert(mut staged.rewrites, take address, ())
     }
-    staged.plan.roots = take roots
-    staged.plan.next_node = ids
-    staged.plan.live = live_bytes
-    staged.plan.changed = true
+    staged.plan.schema.roots = take roots
+    staged.plan.schema.next_node = ids
+    staged.plan.schema.live = live_bytes
+    staged.plan.schema.changed = true
     Ok(())
 }
 
 fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let exists = match pages.get_page_row(plan.roots.catalog, table_key(name)?) {
+    let exists = match pages.get_page_row(plan.schema.roots.catalog, failure_result_from_rep(catalog.table_key(name))?) {
         Some(_) => true,
         None => false
     }
@@ -157,24 +157,24 @@ fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
 }
 
 fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
-    let p = logical_key(t.id, encode_key(t.key, k)?)?
+    let p = failure_result_from_rep(catalog.logical_key(t.id, failure_result_from_rep(catalog.encode_key(t.key, k))?))?
     let mut raw: Bytes = list.new()
     failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(t.readers.current), 2)))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    if list.len(raw) > plan.value_limit {
+    if list.len(raw) > plan.schema.value_limit {
         return Error(Limit(Value))
     }
-    let mut live_bytes = plan.live
-    if !plan.retained {
-        if let Some(old) = pages.get_page_row(plan.roots.collections, p) {
+    let mut live_bytes = plan.schema.live
+    if !plan.schema.retained {
+        if let Some(old) = pages.get_page_row(plan.schema.roots.collections, p) {
             live_bytes -= entry(p, old)
         }
     }
     live_bytes = int.saturating_add(live_bytes, entry(p, raw))
-    over_ceiling(live_bytes, plan.ceiling)?
-    let _ = insert_row(mut plan.next_node, mut plan.roots, take p, take raw)?
-    plan.live = live_bytes
-    plan.changed = true
+    failure_result_from_rep(catalog.over_ceiling(live_bytes, plan.schema.ceiling))?
+    let _ = failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take p, take raw))?
+    plan.schema.live = live_bytes
+    plan.schema.changed = true
     plan.step_drift = true
     Ok(())
 }
@@ -219,7 +219,7 @@ pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activa
 }
 
 fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[HistoryActivation]) -> Result[(), Error] waits {
-    if !same_declaration_base(staged.base, declaration_base(db)) {
+    if !catalog.same_declaration_base(staged.inner, declaration_base(db)) {
         return Error(Foreign)
     }
     let mut working_staged = take staged
@@ -234,13 +234,14 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     let StagedMigration(plan: take staged_plan, declared: declared, projectors: take registered, ..) = take working_staged
     let mut plan = take staged_plan
     let registration = if declared {
-        Some((declared_index_registry(replace(mut plan.bindings, list.new())), replace(mut plan.retention, list.new())))
+        Some((declared_index_registry(replace(mut plan.bindings, list.new())), replace(mut plan.schema.retention, list.new())))
     } else {
         None
     }
-    let old_fence = db.fence
-    if is_disk(db) {
-        db.fence = 1
+    let old_fence = if is_disk(db) {
+        catalog.propose_fence(mut db.schema, 1)
+    } else {
+        catalog.current_fence(db.schema)
     }
     match publish_schema_plan_binding(mut db, take plan, activation, None) {
         Ok(_) => {
@@ -252,7 +253,7 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
             Ok(())
         },
         Error(take problem) => {
-            db.fence = old_fence;
+            catalog.restore_fence(mut db.schema, old_fence);
             Error(take problem)
         }
     }
@@ -264,8 +265,8 @@ fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, 
 
 // `drop_pin` is the import pin an install removes in the same cut (§3.5a).
 fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation: Option[HistoryActivation], drop_pin: Option[u64]) -> Result[Ticket, Error] waits {
-    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live_bytes, bindings: take bindings, superseded: take superseded, chunk_freed: take chunk_freed, step_rows: take step_rows, step_drift: step_drift, ..) = take prepared
-    over_ceiling(live_bytes, available_resident(db))?
+    let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live_bytes, superseded: take superseded, ..), bindings: take bindings, chunk_freed: take chunk_freed, step_rows: take step_rows, step_drift: step_drift, ..) = take prepared
+    failure_result_from_rep(catalog.over_ceiling(live_bytes, available_resident(db)))?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: pages.holder_heads(db.holders)[0u64].head + 1, at: pages.holder_heads(db.holders)[0u64].at, tables: tables, activation, drop_pin: drop_pin, superseded: take superseded, chunk_freed: take chunk_freed, step_rows: take step_rows, step_drift: step_drift)
     let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids)))?
@@ -288,8 +289,8 @@ fn encode_rewrite_frame(staged: StagedMigration, take extra: List[ActivationRewr
     let mut size = 4u64
     let limit = option.unwrap(disk_kind_limit(0x0085))
     for ((id, key), _) in staged.rewrites {
-        let logical = deploy_result(logical_key(id, key))?
-        let Some(raw) = pages.get_page_row(staged.plan.roots.collections, logical) else {
+        let logical = deploy_result(failure_result_from_rep(catalog.logical_key(id, key)))?
+        let Some(raw) = pages.get_page_row(staged.plan.schema.roots.collections, logical) else {
             return Error(Store(Missing("row")))
         }
         size = int.saturating_add(size, 12 + list.len(key) + list.len(raw))
@@ -431,10 +432,10 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
         }) {
             return Error(ImportMalformed)
         }
-        if pages.collection_kind(tree, deploy_result(prefix(row.id))?) != Some(TableCollection) {
+        if pages.collection_kind(tree, deploy_result(failure_result_from_rep(catalog.prefix(row.id)))?) != Some(TableCollection) {
             return Error(ImportMalformed)
         }
-        let logical = logical_key(row.id, row.key) ?=> |_| ImportMalformed
+        let logical = failure_result_from_rep(catalog.logical_key(row.id, row.key)) ?=> |_| ImportMalformed
         let Some(_) = pages.get_page_row(tree, logical) else {
             return Error(ImportMalformed)
         }
@@ -444,9 +445,9 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
 
 fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]) -> Result[(), DeployError] {
     for row in rewrites {
-        let key = deploy_result(logical_key(row.id, row.key))?
+        let key = deploy_result(failure_result_from_rep(catalog.logical_key(row.id, row.key)))?
         let raw = deploy_result(failure_result_from_rep(types.copied(row.value)))?
-        let _ = deploy_result(insert_row(mut plan.next_node, mut plan.roots, take key, take raw))?
+        let _ = deploy_result(failure_result_from_rep(catalog.insert_row(mut plan.schema.next_node, mut plan.schema.roots, take key, take raw)))?
     }
     Ok(())
 }
@@ -473,7 +474,7 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
     let Some(lease) = disk_state(db).lease else {
         return Error(ExportMismatch)
     }
-    let key = deploy_result(table_key(name))?
+    let key = deploy_result(failure_result_from_rep(catalog.table_key(name)))?
     let mut old = 0u32
     if let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.catalog, key) {
         let record = deploy_result(decode_catalog(raw))?
@@ -484,8 +485,8 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
     let mut base: List[(Bytes, Bytes)] = list.new()
     if old != 0 {
         let tree = view lease.collections
-        let mut rows = deploy_result(byte_cursor(tree, Included(deploy_result(prefix(old))?), deploy_result(prefix(old + 1))?))?
-        while let Some((take logical, raw)) = deploy_result(next_bytes(mut rows))? {
+        let mut rows = deploy_result(byte_cursor(tree, Included(deploy_result(failure_result_from_rep(catalog.prefix(old)))?), deploy_result(failure_result_from_rep(catalog.prefix(old + 1)))?))?
+        while let Some((take logical, raw)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut rows)))? {
             list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(failure_result_from_rep(types.copied(raw)))?))
         }
     }

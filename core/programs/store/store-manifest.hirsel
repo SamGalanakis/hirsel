@@ -873,7 +873,7 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
     } else {
         requested
     }
-    over_ceiling(admitted, target.resident)
+    failure_result_from_rep(catalog.over_ceiling(admitted, target.resident))
 }
 
 // A cut made while an export lease is held reads back the packs it wrote

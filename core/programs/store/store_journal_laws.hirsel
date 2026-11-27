@@ -2,9 +2,9 @@
 // frame's branch/version/at. An unknown branch or a repeated version is Gap.
 pub fn journal_law_apply() -> bool {
     let mut replay = journal_initial()
-    result.unwrap(define_store_collection(mut replay.state.tips[0].roots.collections, 1, 1, mut replay.next_node))
+    result.unwrap(failure_result_from_rep(catalog.define_store_collection(mut replay.state.tips[0].roots.collections, 1, 1, mut replay.next_node)))
     for head in 1u64 .. 4 {
-        let key = result.unwrap(logical_key(1, types.key_word(7)))
+        let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
         let mut data: List[format.JournalOp] = list.new()
         let prior: u32 = if head == 1 {
             0
@@ -49,7 +49,7 @@ pub fn journal_law_apply() -> bool {
         },
         _ => return false
     }
-    let key = result.unwrap(logical_key(1, types.key_word(7)))
+    let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
     let mut deletes: List[format.JournalOp] = list.new()
     list.push(mut deletes, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: None, prior: 9, trim: None))
     let removed = format.JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), keyed: list.new(), call: None, payload: 0)
@@ -183,7 +183,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut stored: Bytes = list.new()
     result.unwrap(format.le(mut stored, 0, 2))
     result.unwrap(format.le(mut stored, 70, 8))
-    let key = result.unwrap(logical_key(1, types.key_word(7)))
+    let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
     let mut written: pages.DataRows = pages.new_data_rows()
     pages.push_data_row(mut written, format.DataOp(key: take key, value: Some(PageValue(take stored)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
@@ -699,7 +699,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 1048576
     let mut db = deploy_result(open(tasks, source, c, r, options))?
-    db.fence = 1
+    catalog.restore_fence(mut db.schema, 1)
     deploy_result(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     if !typed_put(mut db, rows, 1, 11) {

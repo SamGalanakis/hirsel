@@ -167,7 +167,7 @@ fn random_reads_both(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], 
 }
 
 fn random_walk_root(d: Dir, db: Db, s: Snapshot, rows: Table[u64, Bytes], mut walk: CompactWalk) -> Result[(), Error] waits {
-    match std.page.collection_slot(s.roots.collections.root, prefix(rows.id)?) {
+    match std.page.collection_slot(s.roots.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) {
         Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
         _ => fail("L69 random: a cut leaves every published root Cold"),
     }
@@ -263,7 +263,7 @@ fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) ->
     })? else {
         fail("L69 random: the fixture puts commit")
     }
-    let id = prefix(rows.id)?
+    let id = failure_result_from_rep(catalog.prefix(rows.id))?
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
@@ -274,7 +274,7 @@ fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) ->
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L69 random: the rows table spans more than one leaf")
     }
-    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
@@ -408,9 +408,9 @@ fn random_check_diff(seen: List[Change], rows: Table[u64, Bytes], marks: Table[u
     }
     for at in 0u64 .. list.len(seen) {
         let owner = list.slice(seen[at].tree_key, 0, 4)
-        let t: Table[u64, Bytes] = if owner == prefix(rows.id)? {
+        let t: Table[u64, Bytes] = if owner == failure_result_from_rep(catalog.prefix(rows.id))? {
             clone(rows)
-        } else if owner == prefix(marks.id)? {
+        } else if owner == failure_result_from_rep(catalog.prefix(marks.id))? {
             clone(marks)
         } else {
             fail("L69 random: a diff names only rows of the two tables")

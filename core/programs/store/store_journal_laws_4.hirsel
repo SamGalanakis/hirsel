@@ -602,7 +602,7 @@ fn test_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), (
 fn window_law_commit(ctx: format.DiskContext, offset: u64, head: u64, width: u64) -> Bytes {
     let mut value: Bytes = list.with_capacity(width)
     list.fill(mut value, width, 119u8)
-    let key = result.unwrap(logical_key(1, types.key_word(head)))
+    let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(head))))
     let mut data = pages.new_data_rows()
     pages.push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: store_key_from_rep(ctx.store), branch: 0, version: head), at: head + 100, seed: 0)
@@ -622,7 +622,7 @@ fn window_law_image(d: Dir, c: Clock, id: StoreId, raw: Bytes, start: u64, frame
     }
     disk_write_synced(d, "j-7", raw)?
     let mut initial = journal_initial()
-    define_store_collection(mut initial.state.tips[0].roots.collections, 1, 1, mut initial.next_node)?
+    failure_result_from_rep(catalog.define_store_collection(mut initial.state.tips[0].roots.collections, 1, 1, mut initial.next_node))?
     let recovered = journal_recover(d, id, 7, c, take initial)?
     if recovered.end != expected_end || recovered.uncovered != expected_end - 72 || recovered.replay.state.tips[0].head != expected_head {
         return Error(Missing("window commit prefix"))

@@ -89,7 +89,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
         Error(_) => return Some(StepDrift),
     }
     let mut ids: List[u32] = list.new()
-    let mut catalog: List[StepOp] = list.with_capacity(list.len(moved))
+    let mut catalog_rows: List[StepOp] = list.with_capacity(list.len(moved))
     for take change in take moved {
         let CatalogChange(key: take key, before: take was, after: take now) = take change
         let (Some(take prior_raw), Some(take raw)) = (take was, take now) else {
@@ -100,7 +100,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
             _ => return Some(StepDrift),
         }
         list.push(mut ids, moved_id)
-        list.push(mut catalog, StepOp(key: take key, value: Some(take raw), prior: format.stored_prior(Some(view prior_raw))))
+        list.push(mut catalog_rows, StepOp(key: take key, value: Some(take raw), prior: format.stored_prior(Some(view prior_raw))))
     }
     // F4: every superseded collection id must be one of the moved index ids
     // AND must be empty in the published main root (non-empty bulk rebuild or
@@ -110,7 +110,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
         if !list_contains_u32(ids, id) {
             return Some(StepDrift)
         }
-        let id_key = match prefix(id) {
+        let id_key = match failure_result_from_rep(catalog.prefix(id)) {
             Ok(take k) => take k,
             Error(_) => return Some(StepDrift),
         }
@@ -156,7 +156,7 @@ fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
     if !step_collections_covered(before.collections, after.collections, ids, superseded, row_owners) {
         return Some(StepDrift)
     }
-    Some(StepReady(ExportStep(version: main.head, catalog: take catalog, superseded: take superseded, rows: take rows)))
+    Some(StepReady(ExportStep(version: main.head, catalog: take catalog_rows, superseded: take superseded, rows: take rows)))
 }
 
 fn list_contains_u32(items: List[u32], target: u32) -> bool {
@@ -477,7 +477,7 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
     let lease_attempt = deploy_result(failure_result_from_rep(types.copied(attempt)))?
-    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: db.next_table, activation: match activation {
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: match activation {
         Some(given) => given,
         None => 0u64
     }, terminal: db.file_seq, end: db.file_end)
@@ -547,7 +547,7 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
-    if db.next_table != lease.next_table {
+    if catalog.next_table_id(db.schema) != lease.next_table {
         return Error(Drift)
     }
     let from = deploy_result(log_directory(db))?
@@ -568,7 +568,7 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
         let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(failure_result_from_rep(types.copied(attempt)))?, Some(lease.activation))?
         return Ok(Full(take renewed))
     }
-    let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: db.next_table, activation: lease.activation, terminal: db.file_seq, end: db.file_end)
+    let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: lease.activation, terminal: db.file_seq, end: db.file_end)
     let packs: List[u64] = clone(lease.packs)
     let kept = ExportLease(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[ExportLease]) {
@@ -741,14 +741,14 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     } else {
         live_bytes
     }
-    deploy_result(over_ceiling(admitted, options.resident_limit))?
+    deploy_result(failure_result_from_rep(catalog.over_ceiling(admitted, options.resident_limit)))?
     let mut db = empty_db(c, id, options)
     deploy_result(open_heads(mut db, take state))?
     db.resident = live_bytes
     db.tiered = tiered_account.total
     db.limits = selected.limits
     pages.set_next_node(mut db.holders, ids)
-    db.next_table = stamp.next_table
+    catalog.set_next_table(mut db.schema, stamp.next_table)
     Ok(Preparation(db: take db, stamp: take stamp, shipped: None, dir: d, next_pack: cell.new(selected.next_pack), pack_bytes: options.pack_bytes, dirty_bytes: options.dirty_bytes, deferred_frees: list.new()))
 }
 
@@ -760,7 +760,7 @@ fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
         return Error(ExportMismatch)
     }
     let codec: std.codec.Codec[ExportStamp] = std.codec.of()
-    let stamp = deploy_result(decoded(std.codec.decode(codec, list.slice(raw, frame.payload, frame.end))))?
+    let stamp = deploy_result(failure_result_from_rep(catalog.decoded(std.codec.decode(codec, list.slice(raw, frame.payload, frame.end)))))?
     if list.len(stamp.attempt) != 16 || stamp.store_hi != head.context.store.hi || stamp.store_lo != head.context.store.lo || stamp.opened != head.context.seq || stamp.branch != 0 || stamp.terminal == 0 || stamp.end < 72 || stamp.activation > stamp.head {
         return Error(ExportMismatch)
     }
@@ -880,7 +880,7 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
             return Error(failure_from_rep(format.disk_fault(file, 0, Gap(step.version))))
         }
         for id in step.superseded {
-            let id_key = prefix(id)?
+            let id_key = failure_result_from_rep(catalog.prefix(id))?
             let had: Option[(std.page.Slot, pages.CollectionDescriptor)] = match std.page.collection_slot(replay.state.tips[0u64].roots.collections.root, id_key) {
                 Some((root, desc)) => Some((clone(root), pages.collection_descriptor(desc))),
                 None => None,
@@ -899,11 +899,11 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
                             list.push(mut replay.deferred_frees, DeferredFree(branch_id: 0u32, target: take target))
                         }
                     }
-                    let _ = remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node)?
+                    let _ = failure_result_from_rep(catalog.remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node))?
                     define_empty_tiered_collection(mut replay.state.tips[0u64].roots.collections, id, pages.descriptor_kind_byte(fields.kind), mut replay.next_node)?
                 } else {
-                    let _ = remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node)?
-                    define_store_collection(mut replay.state.tips[0u64].roots.collections, id, pages.descriptor_kind_byte(fields.kind), mut replay.next_node)?
+                    let _ = failure_result_from_rep(catalog.remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node))?
+                    failure_result_from_rep(catalog.define_store_collection(mut replay.state.tips[0u64].roots.collections, id, pages.descriptor_kind_byte(fields.kind), mut replay.next_node))?
                 }
             }
             failure_result_from_rep(types.capacity(list.try_reserve(mut replay.superseded, 1)))?

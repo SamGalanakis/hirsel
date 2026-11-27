@@ -571,7 +571,7 @@ fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) ->
             if at == list.len(delta) {
                 return false
             }
-            if delta[at].tree_key != result.unwrap(logical_key(1, types.key_word(k))) {
+            if delta[at].tree_key != result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(k)))) {
                 return false
             }
             let good = match delta[at].value {
@@ -683,8 +683,8 @@ pub fn law_shared_changes(c: Clock) -> bool waits {
         return false
     }
     let after = snapshot(db)
-    let low = result.unwrap(prefix(1))
-    let high = result.unwrap(prefix(2))
+    let low = result.unwrap(failure_result_from_rep(catalog.prefix(1)))
+    let high = result.unwrap(failure_result_from_rep(catalog.prefix(2)))
     let delta = result.unwrap(result.unwrap(bound bytes 4096 {
         changes(result.unwrap(reader(db, 0u64)), before, after)
     })).rows

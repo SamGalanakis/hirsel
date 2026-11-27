@@ -120,7 +120,7 @@ fn memory_span_step(mut cursor: Option[pages.PageRange], tree: pages.PageTree, l
             Some(take active) => take active,
             None => resume_data(tree, low, high, previous, false)?,
         }
-        let found = next_bytes(mut walk)?
+        let found = failure_result_from_rep(catalog.next_bytes(mut walk))?
         let Some((take key, take value)) = take found else {
             return Ok(None)
         }
@@ -147,7 +147,7 @@ pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List
         return snapshot_tiered_span(r, s, inventory, lo, hi)
     }
     let mut cursor = byte_cursor(s.roots.collections, Included(failure_result_from_rep(types.copied(lo))?), hi)?
-    while let Some((take key, take value)) = next_bytes(mut cursor)? {
+    while let Some((take key, take value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
         list.push(mut out, Change(tree_key: take key, value: Some(take value)))
     }
     Ok(take out)
@@ -197,8 +197,8 @@ pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[
     if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
-    let mut key = prefixed(t.id, 8, false)?
+    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
+    let mut key = failure_result_from_rep(catalog.prefixed(t.id, 8, false))?
     std.codec.encode_key(t.key, k, mut key)
     snapshot_point(r, s, key, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[V], Error] {
         match stored {
@@ -213,12 +213,12 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
     if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
+    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let tree = view s.roots.collections
     if let Some(inventory) = view tree.paging {
-        let id = prefix(t.id)?
+        let id = failure_result_from_rep(catalog.prefix(t.id))?
         if let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) {
             let fields = pages.collection_descriptor(descriptor)
             if fields.residency == ResidentTiered {
@@ -233,7 +233,7 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
             }
         }
     }
-    count_page_rows(s.roots.collections, t.id, low, high)
+    failure_result_from_rep(catalog.count_page_rows(s.roots.collections, t.id, low, high))
 }
 
 fn decode_row_key[K, V](r: RowDecoder[K, V], row_key: Bytes, raw: Bytes) -> Result[(K, Option[Bytes]), Error] {
@@ -249,9 +249,9 @@ fn decode_row_key[K, V](r: RowDecoder[K, V], row_key: Bytes, raw: Bytes) -> Resu
     } else {
         list.slice(row_key, at, list.len(row_key))
     }
-    let k = decoded(std.codec.decode_key(r.key, key))?
+    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(r.key, key)))?
     let primary = if let Some(_) = r.skip {
-        Some(logical_key(r.table, key)?)
+        Some(failure_result_from_rep(catalog.logical_key(r.table, key))?)
     } else {
         None
     }
@@ -287,7 +287,7 @@ fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bou
     if !types.same(s.store.hi, s.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
+    failure_result_from_rep(catalog.readable(s.roots, t.catalog_key, t.catalog_page, t.id))?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     open_snapshot_rows(s, t.id, take low, take high, reverse, table_decoder(t))
@@ -297,15 +297,15 @@ fn open_snapshot_rows[K, V](s: Snapshot, source: u32, take low: Bytes, take high
     let captured: Snapshot = clone(s)
     let data = view s.roots.collections
     let tiered = if let Some(_) = data.paging {
-        let source_tiered = collection_is_tiered(data, prefix(source)?)
-        source_tiered || (source != decoder.table && collection_is_tiered(data, prefix(decoder.table)?))
+        let source_tiered = collection_is_tiered(data, failure_result_from_rep(catalog.prefix(source))?)
+        source_tiered || (source != decoder.table && collection_is_tiered(data, failure_result_from_rep(catalog.prefix(decoder.table))?))
     } else {
         false
     }
     let cursor: Option[pages.CollectionCursor] = if tiered {
         None
     } else {
-        collection_cursor(data, source, low, high, reverse)?
+        failure_result_from_rep(catalog.collection_cursor(data, source, low, high, reverse))?
     }
     let done = if let None = cursor {
         !tiered || list.len(low) < 4
@@ -335,7 +335,7 @@ pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound
     if !types.same(s.store.hi, s.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
-    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
+    failure_result_from_rep(catalog.index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     open_snapshot_rows(s, ix.id, take low, take high, false, index_decoder(ix))
@@ -411,7 +411,7 @@ pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Err
     let selected = {
         let data = view rows.capture.roots.collections
         if let Some(inventory) = view data.paging {
-            if let Some((edge, descriptor)) = std.page.collection_slot(data.root, prefix(rows.source)?) {
+            if let Some((edge, descriptor)) = std.page.collection_slot(data.root, failure_result_from_rep(catalog.prefix(rows.source))?) {
                 if pages.collection_descriptor(descriptor).residency == ResidentTiered {
                     let Some((take key, take result)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
                         rows.done = true
@@ -423,7 +423,7 @@ pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Err
             }
         }
         let mut cursor = resume_data(data, rows.low, rows.high, rows.last, rows.reverse)?
-        let Some((take key, raw)) = next_bytes(mut cursor)? else {
+        let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? else {
             rows.done = true
             return Ok(None)
         }
@@ -455,7 +455,7 @@ fn next_memory_snapshot[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder
 }
 
 fn decode_table_row[K, V](decoder: RowDecoder[K, V], suffix: Bytes, raw: Bytes) -> Result[(K, V), Error] {
-    let key = decoded(std.codec.decode_key(decoder.key, suffix))?
+    let key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(decoder.key, suffix)))?
     Ok((take key, row_value(decoder.readers, decoder.table, raw)?))
 }
 
@@ -475,7 +475,7 @@ fn check_table_read[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
     if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)
+    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))
 }
 
 fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
@@ -499,7 +499,7 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
         tx_tiered_count(tx, t.id, low, high)?
     } else {
         let data = transaction_collection_pages(tx)?
-        count_page_rows(data, t.id, low, high)?
+        failure_result_from_rep(catalog.count_page_rows(data, t.id, low, high))?
     }
     note_read(tx, Span(take low, take high))?
     Ok(n)
@@ -511,7 +511,7 @@ fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: B
     let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
         None
     } else {
-        collection_cursor(tree, t.id, low, high, reverse)?
+        failure_result_from_rep(catalog.collection_cursor(tree, t.id, low, high, reverse))?
     }
     Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
 }
@@ -605,8 +605,8 @@ fn prefix_limits[K, Q](id: u32, full: std.codec.Key[K], leading: std.codec.Key[Q
     if !matches {
         return Error(Schema(0))
     }
-    let low = logical_key(id, encode_key(leading, q)?)?
-    let high = prefix_after(low)?
+    let low = failure_result_from_rep(catalog.logical_key(id, failure_result_from_rep(catalog.encode_key(leading, q))?))?
+    let high = failure_result_from_rep(catalog.prefix_after(low))?
     Ok((take low, take high))
 }
 
@@ -629,7 +629,7 @@ fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Err
     if !types.same(tx.store.hi, tx.store.lo, ix.store.hi, ix.store.lo) {
         return Error(Foreign)
     }
-    index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)
+    failure_result_from_rep(catalog.index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public))
 }
 
 pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
@@ -662,7 +662,7 @@ fn open_index_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> 
     }
     // Below `high`, `low` starts with the index's prefix: `prefix_after` only
     // leaves it at or past the next id, and `high` never passes that id.
-    let leading = prefix(id)?
+    let leading = failure_result_from_rep(catalog.prefix(id))?
     let Some((edge, residency)) = std.page.collection_residency(tree.root, leading) else {
         return Ok((None, false))
     }
@@ -773,7 +773,7 @@ fn step_entry[P, T](mut cursor: EntryCursor, read: EntryRead, reads: View[core.L
 // The index key and primary key of an entry, and where its payload starts in `raw`.
 fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec: std.codec.Key[K], key: Bytes, raw: Bytes) -> Result[(J, K, u64), Error] {
     let mut at = 4u64
-    let j = decoded(std.codec.take_key_with(key, mut at, index_key))?
+    let j = failure_result_from_rep(catalog.decoded(std.codec.take_key_with(key, mut at, index_key)))?
     let payload_start = if let Unique = kind {
         if at != list.len(key) {
             return Error(failure_from_rep(pages.malformed(at)))
@@ -787,7 +787,7 @@ fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec
     } else {
         list.slice(key, at, list.len(key))
     }
-    let k = decoded(std.codec.decode_key(primary_codec, primary))?
+    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(primary_codec, primary)))?
     Ok((take j, take k, payload_start))
 }
 
@@ -798,7 +798,7 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
         let payload = list.slice(raw, start, list.len(raw))
         let value = match row_readers {
             Some(registered) => row_value(registered, id, payload)?,
-            None => decoded(std.codec.decode(payload_codec, payload))?,
+            None => failure_result_from_rep(catalog.decoded(std.codec.decode(payload_codec, payload)))?,
         }
         Ok((take j, take k, take value))
     })
@@ -840,7 +840,7 @@ pub fn next_i8_entry[K, T](mut r: IndexEntries[(), K, List[i8]], visit: scoped[v
                 }
                 Ok(visit(take k, Owned(row_value(registered, id, payload)?)))
             },
-            None => Ok(visit(take k, Owned(decoded(std.codec.decode(payload_codec, payload))?))),
+            None => Ok(visit(take k, Owned(failure_result_from_rep(catalog.decoded(std.codec.decode(payload_codec, payload)))?))),
         }
     })
 }

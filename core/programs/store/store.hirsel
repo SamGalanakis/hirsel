@@ -38,14 +38,13 @@ pub opaque type Db {
     // The writer partition every call's attempt is counted against (§13.2).
     writer_pin_bytes: u64,
     indexes: IndexRegistry,
-    fence: u32,
+    schema: catalog.SchemaState,
     skip_test_teardown: bool,
     disk: Option[DiskState],
     clock: Clock,
     holders: pages.HolderTable,
     followers: List[BranchFollower],
     limits: StoreLimits,
-    next_table: u32,
     file_seq: u64,
     file_end: u64,
     frame_seq: u64,
@@ -93,7 +92,7 @@ fn retaining(db: Db) -> bool {
 fn state_with_delta(db: Db, delta: HolderDelta) -> Result[pages.State, Capacity] {
     let mut tips: List[pages.Tip] = list.with_capacity(list.len(pages.holder_heads(db.holders)))
     let mut kept: List[pages.Pin] = list.with_capacity(list.len(pages.holder_pins(db.holders)))
-    let mut tables = db.next_table
+    let mut tables = catalog.next_table_id(db.schema)
     for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
         if let RemoveHead(gone) = delta {
             if slot == gone {
@@ -200,7 +199,7 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
             let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
             let count_bytes = keyed_root_record_bytes(roots.keyed)
             pages.replace_head(mut db.holders, 0, take roots, head, at, old_bytes, count_bytes)
-            db.next_table = tables
+            catalog.set_next_table(mut db.schema, tables)
             if let Some(slot) = gone {
                 remove_head(mut db, slot)
             }
@@ -399,11 +398,11 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), schema: catalog.schema_state(0, 1), skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
-    db.fence
+    catalog.current_fence(db.schema)
 }
 
 pub fn is_disk(db: Db) -> bool {
@@ -455,7 +454,7 @@ fn checked_name(name: String) -> Result[String, Error] {
     if string.byte_len(name) > 255 {
         return Error(Limit(Name))
     }
-    named(name)
+    failure_result_from_rep(catalog.named(name))
 }
 
 pub fn branch(db: Db, name: String) -> Option[Branch] {
@@ -507,7 +506,7 @@ fn cut_install_emitted(mut db: Db, take delta: HolderDelta, mut emitted: Option[
     }
     let live_bytes = memory_cut_account(proposed)?
     if admission {
-        over_ceiling(live_bytes, available_resident(db))?
+        failure_result_from_rep(catalog.over_ceiling(live_bytes, available_resident(db)))?
     }
     let commit_ticket = record_memory_cut(mut db, live_bytes)
     install_holder_delta(mut db, take delta)
@@ -545,7 +544,7 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
     if i == 0 || pages.holder_heads(db.holders)[i].parent != 0 || pages.holder_heads(db.holders)[0].head != pages.holder_heads(db.holders)[i].forked_at {
         return Error(Diverged(b.id))
     }
-    let merged = ProposedMain(roots: pages.share_roots(pages.holder_heads(db.holders)[i].roots), head: pages.holder_heads(db.holders)[i].head, at: pages.holder_heads(db.holders)[i].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
+    let merged = ProposedMain(roots: pages.share_roots(pages.holder_heads(db.holders)[i].roots), head: pages.holder_heads(db.holders)[i].head, at: pages.holder_heads(db.holders)[i].at, tables: catalog.next_table_id(db.schema), activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
     let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, merged.head, merged.roots, pages.holder_next_node(db.holders))))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
@@ -1231,28 +1230,6 @@ fn covered(db: Db, mark: Mark) -> bool {
     }
 }
 
-fn prefix(id: u32) -> Result[Bytes, Error] {
-    prefixed(id, 0, false)
-}
-
-// The 4-byte big-endian id, in a buffer with room for `rest` more bytes.
-fn prefixed(id: u32, rest: u64, tail: bool) -> Result[Bytes, Error] {
-    let mut p: Bytes = if tail {
-        bytebuf.with_tail(4 + rest)
-    } else {
-        list.with_capacity(4 + rest)
-    }
-    list.put_word_be(mut p, id)
-    Ok(take p)
-}
-
-// One allocation: the key is appended into the prefix's spare capacity.
-fn logical_key(id: u32, key: Bytes) -> Result[Bytes, Error] {
-    let mut p = prefixed(id, list.len(key), false)?
-    list.append(mut p, key)
-    Ok(take p)
-}
-
 pub fn body_capacity(mut tx: Tx, problem: Capacity) {
     tx.refusal = Some(problem)
 }
@@ -1439,42 +1416,29 @@ pub fn row_schemas[K, V](t: Table[K, V]) -> Arc[RowSchemas] {
     arc.share(t.readers.schemas)
 }
 
-fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
-    match take r {
-        Ok(take x) => Ok(take x),
-        Error(e) => Error(Decode(e))
-    }
-}
-
 fn row_value[V](r: Readers[V], id: u32, raw: Bytes) -> Result[V, Error] {
     if list.len(raw) < 2 {
         return Error(Decode(Truncated(0)))
     }
     let number: u16 = int.truncate(format.read_le(raw, 0, 2))
     if number == r.current {
-        return decoded(std.codec.decode_at(r.codec, raw, 2))
+        return failure_result_from_rep(catalog.decoded(std.codec.decode_at(r.codec, raw, 2)))
     }
     let n: u64 = int.widen(number)
     if n >= list.len(r.older) {
         return Error(Stale(id))
     }
     match r.older[n] {
-        Some(old) => decoded(std.codec.read_at(old, raw, 2)),
+        Some(old) => failure_result_from_rep(catalog.decoded(std.codec.read_at(old, raw, 2))),
         None => Error(Stale(id))
     }
-}
-
-fn encode_key[K](k: std.codec.Key[K], value: K) -> Result[Bytes, Error] {
-    let mut raw: Bytes = list.new()
-    std.codec.encode_key(k, value, mut raw)
-    Ok(take raw)
 }
 
 fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], Error] {
     match limit {
         Unbounded => Ok(Unbounded),
-        Included(x) => Ok(Included(encode_key(k, x)?)),
-        Excluded(x) => Ok(Excluded(encode_key(k, x)?))
+        Included(x) => Ok(Included(failure_result_from_rep(catalog.encode_key(k, x))?)),
+        Excluded(x) => Ok(Excluded(failure_result_from_rep(catalog.encode_key(k, x))?))
     }
 }
 
@@ -1482,7 +1446,7 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error]
     if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
+    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))?
     bound_indexes(tx, t.id, t.readers.current)
 }
 
@@ -1491,7 +1455,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Byt
     if !types.same(tx.store.hi, tx.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
+    failure_result_from_rep(catalog.readable(tx.roots, t.catalog_key, t.catalog_page, t.id))?
     let mut p: Bytes = list.with_capacity(12)
     list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
@@ -1514,7 +1478,7 @@ pub fn key_span[K, V](t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read
 // encoding may differ in length and layout. A key of another table (an index row's key
 // included) is Missing("table").
 pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes], Error] {
-    let mine = prefix(t.id)?
+    let mine = failure_result_from_rep(catalog.prefix(t.id))?
     if list.len(c.tree_key) < 4 || list.slice(c.tree_key, 0, 4) != list.slice(mine, 0, 4) {
         return Error(Missing("table"))
     }
@@ -1559,73 +1523,30 @@ fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
     RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
 }
 
-fn prefix_after(raw: Bytes) -> Result[Bytes, Error] {
-    let mut out = failure_result_from_rep(types.copied(raw))?
-    let mut i = list.len(out)
-    while i > 0 {
-        i -= 1
-        if out[i] != 255 {
-            let byte = out[i] + 1
-            let _ = list.set(mut out, i, byte)
-            while list.len(out) > i + 1 {
-                let _ = list.pop(mut out)
-            }
-            return Ok(take out)
-        }
-    }
-    Ok(take out)
-}
-
 fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -> Result[Bytes, Error] {
     match limit {
-        Unbounded => prefix(if high {
+        Unbounded => failure_result_from_rep(catalog.prefix(if high {
             ix + 1
         } else {
             ix
-        }),
+        })),
         Included(x) => {
-            let p = logical_key(ix, encode_key(key, x)?)?;
+            let p = failure_result_from_rep(catalog.logical_key(ix, failure_result_from_rep(catalog.encode_key(key, x))?))?;
             if high {
-                prefix_after(p)
+                failure_result_from_rep(catalog.prefix_after(p))
             } else {
                 Ok(take p)
             }
         },
         Excluded(x) => {
-            let p = logical_key(ix, encode_key(key, x)?)?;
+            let p = failure_result_from_rep(catalog.logical_key(ix, failure_result_from_rep(catalog.encode_key(key, x))?))?;
             if high {
                 Ok(take p)
             } else {
-                prefix_after(p)
+                failure_result_from_rep(catalog.prefix_after(p))
             }
         }
     }
-}
-
-fn table_key(name: String) -> Result[Bytes, Error] {
-    if string.byte_len(name) > 255 {
-        return Error(Limit(Name))
-    }
-    let mut k: Bytes = list.new()
-    list.push(mut k, 1u8)
-    list.append(mut k, string.as_bytes(name))
-    Ok(take k)
-}
-
-fn index_prefix(id: u32) -> Result[Bytes, Error] {
-    let mut k: Bytes = list.new()
-    list.push(mut k, 2u8)
-    list.append(mut k, prefix(id)?)
-    Ok(take k)
-}
-
-fn catalog_index_key(id: u32, name: String) -> Result[Bytes, Error] {
-    if string.byte_len(name) > 255 {
-        return Error(Limit(Name))
-    }
-    let mut k = index_prefix(id)?
-    list.append(mut k, string.as_bytes(name))
-    Ok(take k)
 }
 
 fn catalog_entry_in(catalog: pages.PageTree, k: Bytes) -> Result[Catalog, Error] {
@@ -1635,61 +1556,27 @@ fn catalog_entry_in(catalog: pages.PageTree, k: Bytes) -> Result[Catalog, Error]
     }
 }
 
-fn stamp_after(final_item: u64) -> Result[u64, Error] {
-    let Some(next_stamp) = int.checked_add(final_item, 1) else {
-        return Error(Limit(Ids))
-    }
-    Ok(next_stamp)
-}
-
-fn define_store_collection(mut tree: pages.PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
-    let first = stamp_after(final_item)?
-    let mut next_stamp = first
-    define_collection(mut tree, id, kind, first, mut next_stamp)?
-    failure_result_from_rep(pages.canonical_tree(mut tree))?
-    final_item = next_stamp - 1
-    Ok(())
-}
-
-fn bulk_store_collection(mut tree: pages.PageTree, id: u32, kind: u8, rows: List[std.page.Row], mut final_item: u64) -> Result[(), Error] {
-    let first = stamp_after(final_item)?
-    let mut next_stamp = first
-    bulk_collection(mut tree, id, kind, rows, first, mut next_stamp)?
-    failure_result_from_rep(pages.canonical_tree(mut tree))?
-    final_item = next_stamp - 1
-    Ok(())
-}
-
-fn remove_store_row(mut tree: pages.PageTree, key: Bytes, mut final_item: u64) -> Result[(), Error] {
-    let first = stamp_after(final_item)?
-    let mut next_stamp = first
-    let _ = failure_result_from_rep(pages.remove_page_row(mut tree, key, first, mut next_stamp))?
-    failure_result_from_rep(pages.canonical_tree(mut tree))?
-    final_item = next_stamp - 1
-    Ok(())
-}
-
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     healthy(db)?
-    catalog_handle(db.store, pages.holder_heads(db.holders)[0].roots.catalog, named(name)?, take key, take value)
+    catalog_handle(db.store, pages.holder_heads(db.holders)[0].roots.catalog, failure_result_from_rep(catalog.named(name))?, take key, take value)
 }
 
 fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[(), Error] {
-    let k = table_key(name)?
-    if let Some(_) = pages.get_page_row(plan.roots.catalog, k) {
-        return Error(Exists(named(name)?))
+    let k = failure_result_from_rep(catalog.table_key(name))?
+    if let Some(_) = pages.get_page_row(plan.schema.roots.catalog, k) {
+        return Error(Exists(failure_result_from_rep(catalog.named(name))?))
     }
     let schema = std.codec.schema(value) ?=> |_| Schema(0)
-    let mut schemas: List[ValueSchema] = list.new()
+    let mut schemas: List[catalog.ValueSchema] = list.new()
     let fp = std.codec.fingerprint_of(schema)
-    list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
-    let id = plan.next_table
+    list.push(mut schemas, catalog.ValueSchema(number: 0, fingerprint: fp, schema: take schema))
+    let id = plan.schema.next_table
     let c = Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
-    let base = pages.share_roots(plan.roots)
-    let mut roots = catalog_insert(mut plan.next_node, base, k, raw)?
-    define_store_collection(mut roots.collections, id, 1, mut plan.next_node)?
+    let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, k, raw, plan.schema.retained)
+    let base = pages.share_roots(plan.schema.roots)
+    let mut roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, base, k, raw))?
+    failure_result_from_rep(catalog.define_store_collection(mut roots.collections, id, 1, mut plan.schema.next_node))?
     plan.step_drift = true
     keep_schema(mut plan, take roots, int.saturating_add(live_bytes, 126), id + 1)
 }
@@ -1718,20 +1605,20 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
     healthy(db)?
     let mut plan = schema_plan(db)
     let target = stage_table(mut plan, name, take key, take value)?
-    if plan.changed {
+    if plan.schema.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     }
     Ok(take target)
 }
 
 fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let k = table_key(name)?
-    let mut c = match pages.get_page_row(plan.roots.catalog, k) {
+    let k = failure_result_from_rep(catalog.table_key(name))?
+    let mut c = match pages.get_page_row(plan.schema.roots.catalog, k) {
         Some(raw) => decode_catalog(raw)?,
-        None => return Error(Missing(named(name)?))
+        None => return Error(Missing(failure_result_from_rep(catalog.named(name))?))
     }
     if catalog_kind(c.record) != TableCollection {
-        return Error(Missing(named(name)?))
+        return Error(Missing(failure_result_from_rep(catalog.named(name))?))
     }
     let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     if key_schema != c.key {
@@ -1749,24 +1636,24 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     }
     // Resolve before publishing a schema addition: Schema is always without effect.
     let resolved = readers(value, c, number, schema)?
-    let key_handle = catalog_key_handle(take k)?
-    let seen = catalog_page(plan.roots.catalog)?
+    let key_handle = failure_result_from_rep(catalog.catalog_key_handle(take k))?
+    let seen = failure_result_from_rep(catalog.catalog_page(plan.schema.roots.catalog))?
     if !found {
-        list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
+        list.push(mut c.schemas, catalog.ValueSchema(number: number, fingerprint: fp, schema: take schema))
         c.next += 1
         let raw = encode_catalog(c)?
-        let live_bytes = catalog_recharge(plan.live, plan.roots, key_handle, raw, plan.retained)
-        let base = pages.share_roots(plan.roots)
-        let roots = catalog_insert(mut plan.next_node, base, key_handle, raw)?
-        let next_id = plan.next_table
+        let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key_handle, raw, plan.schema.retained)
+        let base = pages.share_roots(plan.schema.roots)
+        let roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, base, key_handle, raw))?
+        let next_id = plan.schema.next_table
         keep_schema(mut plan, take roots, live_bytes, next_id)?
     }
     Ok(Table(store: plan.store, id: c.id, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved))
 }
 
-fn catalog_handle[K, V](store_id: StoreId, catalog: pages.PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let k = table_key(name)?
-    let c = match pages.get_page_row(catalog, k) {
+fn catalog_handle[K, V](store_id: StoreId, catalog_tree: pages.PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let k = failure_result_from_rep(catalog.table_key(name))?
+    let c = match pages.get_page_row(catalog_tree, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(take name))
     }
@@ -1783,110 +1670,74 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: pages.PageTree, take name: S
         if prior.fingerprint == fp && prior.schema == schema {
             let number = prior.number
             let resolved = readers(value, c, number, schema)?
-            return Ok(Table(store: store_id, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved))
+            return Ok(Table(store: store_id, id: c.id, catalog_key: failure_result_from_rep(catalog.catalog_key_handle(take k))?, catalog_page: failure_result_from_rep(catalog.catalog_page(catalog_tree))?, key: key, readers: take resolved))
         }
     }
     Error(Schema(int.widen(c.next)))
 }
 
-fn catalog_index_handle[J, K, V, P](catalog: pages.PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J], take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
-    let public = match pages.get_page_row(catalog, k) {
-        Some(raw) => record_public(raw),
+fn catalog_index_handle[J, K, V, P](catalog_tree: pages.PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J], take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
+    let public = match pages.get_page_row(catalog_tree, k) {
+        Some(raw) => catalog.record_public(raw),
         None => false,
     }
     let lendable = lends_i8_rows(payload)
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: entry_kind(catalog_index(c)?.shape)?, payload: take payload, payload_codec: payload_codec, public: public, lendable: lendable))
+    Ok(Index(store: t.store, id: c.id, catalog_key: failure_result_from_rep(catalog.catalog_key_handle(take k))?, catalog_page: failure_result_from_rep(catalog.catalog_page(catalog_tree))?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: entry_kind(catalog_index(c)?.shape)?, payload: take payload, payload_codec: payload_codec, public: public, lendable: lendable))
 }
 
 fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {
-    let indexes = index_catalog_in(plan.roots.catalog, table_id)?
+    let indexes = index_catalog_in(plan.schema.roots.catalog, table_id)?
     let mut ids: List[u32] = list.new()
     list.push(mut ids, table_id)
     for ix in indexes {
         list.push(mut ids, ix.id)
     }
-    let mut roots = pages.share_roots(plan.roots)
-    let mut live_bytes = plan.live
-    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.superseded, list.len(ids))))?
+    let mut roots = pages.share_roots(plan.schema.roots)
+    let mut live_bytes = plan.schema.live
+    failure_result_from_rep(types.capacity(list.try_reserve(mut plan.schema.superseded, list.len(ids))))?
     for id in ids {
-        let charge = remove_store_collection(mut roots.collections, id, mut plan.next_node)?
+        let charge = failure_result_from_rep(catalog.remove_store_collection(mut roots.collections, id, mut plan.schema.next_node))?
         // 3150 F2: a dropped table and its indexes supersede their ids.
         discard_replayed_collection(mut roots.collections, id)?
-        list.push(mut plan.superseded, id)
-        if !plan.retained {
+        list.push(mut plan.schema.superseded, id)
+        if !plan.schema.retained {
             live_bytes = int.saturating_sub(live_bytes, charge)
         }
     }
-    let low = index_prefix(table_id)?
-    let high = index_prefix(table_id + 1)?
+    let low = failure_result_from_rep(catalog.index_prefix(table_id))?
+    let high = failure_result_from_rep(catalog.index_prefix(table_id + 1))?
     let mut cursor = byte_cursor(roots.catalog, Included(take low), high)?
-    while let Some((k, v)) = next_bytes(mut cursor)? {
-        if !plan.retained {
+    while let Some((k, v)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
+        if !plan.schema.retained {
             live_bytes = int.saturating_sub(live_bytes, entry(k, v))
         }
-        remove_store_row(mut roots.catalog, k, mut plan.next_node)?
+        failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, k, mut plan.schema.next_node))?
     }
-    if let Some(raw) = pages.get_page_row(plan.roots.catalog, catalog_key) {
-        if !plan.retained {
+    if let Some(raw) = pages.get_page_row(plan.schema.roots.catalog, catalog_key) {
+        if !plan.schema.retained {
             live_bytes = int.saturating_sub(live_bytes, entry(catalog_key, raw))
         }
     }
-    remove_store_row(mut roots.catalog, catalog_key, mut plan.next_node)?
+    failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, catalog_key, mut plan.schema.next_node))?
     drop_migrate_source(mut plan, table_id)
     plan.step_drift = true
-    let next_id = plan.next_table
+    let next_id = plan.schema.next_table
     keep_schema(mut plan, take roots, live_bytes, next_id)
-}
-
-// What a migrate builds before its cut: the new roots and the account.
-type Built {
-    roots: pages.Roots,
-    live: u64,
-    read: u64,
-    written: u64
-}
-
-fn over_ceiling(live_bytes: u64, ceiling: u64) -> Result[(), Error] {
-    if live_bytes > ceiling {
-        return Error(Full(Resident(Capacity(requested: live_bytes, available: ceiling))))
-    }
-    Ok(())
-}
-
-fn insert_row(mut ids: u64, mut roots: pages.Roots, take p: Bytes, take raw: Bytes) -> Result[bool, Error] {
-    let replaced = match pages.get_page_row(roots.collections, p) {
-        Some(_) => true,
-        None => false
-    }
-    let first = stamp_after(ids)?
-    let mut next_stamp = first
-    let collection_key = list.slice(p, 0, 4)
-    let exists = match std.page.collection_child(roots.collections.root, collection_key) {
-        Some(_) => true,
-        None => false,
-    }
-    if !exists {
-        define_collection(mut roots.collections, list.word_be(p, 0), 1, first, mut next_stamp)?
-    }
-    failure_result_from_rep(pages.put_page_row(mut roots.collections, p, raw, first, mut next_stamp))?
-    failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
-    ids = next_stamp - 1
-    Ok(replaced)
 }
 
 // AP13. Collect and admit the encoded workspace, sort the destination
 // records, then build the table and each index bottom up.
-fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes, value_limit: u64) -> Result[Built, Error] {
+fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes, value_limit: u64) -> Result[catalog.Built, Error] {
     let mut roots = take base
     let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
-    let mut schemas: List[ValueSchema] = list.new()
-    list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
+    let mut schemas: List[catalog.ValueSchema] = list.new()
+    list.push(mut schemas, catalog.ValueSchema(number: number, fingerprint: fp, schema: take schema))
     let table_raw = encode_catalog(Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
     let mut live_bytes = int.saturating_add(start, 126 + entry(target, table_raw))
     let mut workspace = live_bytes
-    over_ceiling(workspace, ceiling)?
-    let Some(source_root) = std.page.collection_child(source.root, prefix(from.id)?) else {
+    failure_result_from_rep(catalog.over_ceiling(workspace, ceiling))?
+    let Some(source_root) = std.page.collection_child(source.root, failure_result_from_rep(catalog.prefix(from.id))?) else {
         return Error(Stale(from.id))
     }
     let (source_rows, _) = std.page.totals(source_root)
@@ -1895,7 +1746,7 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
     loop {
         // Decode each source row from the page in place, with no owned copy.
         let read = std.page.cursor_read(mut original, scoped fn(key: Bytes, raw: Bytes) -> Result[(K, V, u64), Error] {
-            let decoded_key = decoded(std.codec.decode_key(from.key, key))?
+            let decoded_key = failure_result_from_rep(catalog.decoded(std.codec.decode_key(from.key, key)))?
             Ok((take decoded_key, row_value(from.readers, from.id, raw)?, list.len(raw)))
         })
         let Some(take found) = take read else {
@@ -1903,7 +1754,7 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
         }
         let (take k, take v, source_width) = found?
         if let Some((k2, v2)) = failure_result_from_rep(types.capacity(f(k, v)))? {
-            let encoded = encode_key(to_key, k2)?
+            let encoded = failure_result_from_rep(catalog.encode_key(to_key, k2))?
             if list.len(encoded) > 4092 {
                 return Error(Limit(Key))
             }
@@ -1918,7 +1769,7 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
             }
             let charge = 62 + format.round8(4 + list.len(encoded)) + format.round8(list.len(raw))
             workspace = int.saturating_add(workspace, charge + 8)
-            over_ceiling(workspace, ceiling)?
+            failure_result_from_rep(catalog.over_ceiling(workspace, ceiling))?
             live_bytes = int.saturating_add(live_bytes, charge)
             list.push(mut new_rows, std.page.Row(key: take encoded, value: take raw, charge: charge))
         }
@@ -1926,56 +1777,42 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
     sort_bulk_rows(mut new_rows)?
     for slot in 1u64 .. list.len(new_rows) {
         if new_rows[slot - 1].key == new_rows[slot].key {
-            return Error(Exists(named(to_name)?))
+            return Error(Exists(failure_result_from_rep(catalog.named(to_name))?))
         }
     }
     let written = list.len(new_rows)
-    bulk_store_collection(mut roots.collections, id, 1, new_rows, mut ids)?
-    let former = remove_store_collection(mut roots.collections, from.id, mut ids)?
+    failure_result_from_rep(catalog.bulk_store_collection(mut roots.collections, id, 1, new_rows, mut ids))?
+    let former = failure_result_from_rep(catalog.remove_store_collection(mut roots.collections, from.id, mut ids))?
     if !retained {
         live_bytes = int.saturating_sub(live_bytes, former)
     }
     for old in olds {
-        let charge = remove_store_collection(mut roots.collections, old.id, mut ids)?
+        let charge = failure_result_from_rep(catalog.remove_store_collection(mut roots.collections, old.id, mut ids))?
         if !retained {
             live_bytes = int.saturating_sub(live_bytes, charge)
         }
     }
-    let low = index_prefix(from.id)?
-    let high = index_prefix(from.id + 1)?
+    let low = failure_result_from_rep(catalog.index_prefix(from.id))?
+    let high = failure_result_from_rep(catalog.index_prefix(from.id + 1))?
     let mut catalog_rows = byte_cursor(roots.catalog, Included(take low), high)?
-    while let Some((k, v)) = next_bytes(mut catalog_rows)? {
+    while let Some((k, v)) = failure_result_from_rep(catalog.next_bytes(mut catalog_rows))? {
         if !retained {
             live_bytes = int.saturating_sub(live_bytes, entry(k, v))
         }
-        remove_store_row(mut roots.catalog, k, mut ids)?
+        failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, k, mut ids))?
     }
     if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
         if !retained {
             live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
         }
     }
-    remove_store_row(mut roots.catalog, from.catalog_key, mut ids)?
-    roots = catalog_insert(mut ids, roots, target, table_raw)?
+    failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, from.catalog_key, mut ids))?
+    roots = failure_result_from_rep(catalog.catalog_insert(mut ids, roots, target, table_raw))?
     if !retained {
         live_bytes = pages.one_page_account(roots)
     }
-    over_ceiling(live_bytes, ceiling)?
-    Ok(Built(roots: take roots, live: live_bytes, read: source_rows, written: written))
-}
-
-fn same_bytes(a: Bytes, b: Bytes) -> bool {
-    a == b
-}
-
-fn catalog_insert(mut ids: u64, roots: pages.Roots, k: Bytes, v: Bytes) -> Result[pages.Roots, Error] {
-    let mut edited = pages.share_roots(roots)
-    let first = stamp_after(ids)?
-    let mut next_stamp = first
-    failure_result_from_rep(pages.put_page_row(mut edited.catalog, k, v, first, mut next_stamp))?
-    failure_result_from_rep(pages.canonical_tree(mut edited.catalog))?
-    ids = next_stamp - 1
-    Ok(take edited)
+    failure_result_from_rep(catalog.over_ceiling(live_bytes, ceiling))?
+    Ok(catalog.Built(roots: take roots, live: live_bytes, read: source_rows, written: written))
 }
 
 fn bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {
@@ -2005,14 +1842,14 @@ fn check_table_write[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let indexes = check_table_write(tx, t)?
     let tail = tx.frame_tail == pages.OPEN_FRAME_TAIL
-    let mut p = prefixed(t.id, 8, tail)?
+    let mut p = failure_result_from_rep(catalog.prefixed(t.id, 8, tail))?
     std.codec.encode_key(t.key, k, mut p)
     put_impl(mut tx, t, indexes, take p, v, tail)
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     let indexes = check_table_write(tx, t)?
-    let key = encode_key(t.key, k)?
+    let key = failure_result_from_rep(catalog.encode_key(t.key, k))?
     delete_impl(mut tx, t.id, t.readers.current, indexes, key)
 }
 
@@ -2263,7 +2100,7 @@ pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.
 }
 
 pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {
-    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.roots, int.saturating_add(staged.plan.next_node, 1))
+    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.schema.roots, int.saturating_add(staged.plan.schema.next_node, 1))
 }
 
 pub type PreparedTarget: codec + send {
@@ -2306,7 +2143,7 @@ type PreparedRow: codec + send {
 fn catalog_changes(base: pages.Roots, target: pages.Roots) -> Result[List[CatalogChange], Error] {
     let mut edits: List[CatalogChange] = list.new()
     let mut before = failure_result_from_rep(pages.open_page_range(base.catalog, None, true, false, None))?
-    while let Some((take key, old_arc)) = next_page_range(mut before)? {
+    while let Some((take key, old_arc)) = failure_result_from_rep(catalog.next_page_range(mut before))? {
         match pages.get_page_row(target.catalog, key) {
             Some(new) => if list.compare_bytes(new, old_arc) != Equal {
                 list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: Some(failure_result_from_rep(types.copied(new))?)))
@@ -2315,7 +2152,7 @@ fn catalog_changes(base: pages.Roots, target: pages.Roots) -> Result[List[Catalo
         }
     }
     let mut after = failure_result_from_rep(pages.open_page_range(target.catalog, None, true, false, None))?
-    while let Some((take key, new)) = next_page_range(mut after)? {
+    while let Some((take key, new)) = failure_result_from_rep(catalog.next_page_range(mut after))? {
         let exists = match pages.get_page_row(base.catalog, key) {
             Some(_) => true,
             None => false
@@ -2350,7 +2187,7 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
             // An index OLD left Backfilling or Failed that the preparation
             // finished under the same id: its entries ship as a replaced range.
             if let (Some(before), Some(after)) = (change.before, change.after) {
-                if catalog_kind(decode_catalog(after)?.record) == IndexCollection && !record_public(before) {
+                if catalog_kind(decode_catalog(after)?.record) == IndexCollection && !catalog.record_public(before) {
                     list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(failure_result_from_rep(types.copied(after))?)))
                 }
             }
@@ -2390,7 +2227,7 @@ fn entries_of(data: pages.PageTree, id: u32) -> Result[pages.PageRange, Error] {
     if id == 4294967295u32 {
         return Error(failure_from_rep(pages.malformed(0u64)))
     }
-    byte_cursor(data, Included(prefix(id)?), prefix(id + 1u32)?)
+    byte_cursor(data, Included(failure_result_from_rep(catalog.prefix(id))?), failure_result_from_rep(catalog.prefix(id + 1u32))?)
 }
 
 fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Result[(), Error] {
@@ -2409,7 +2246,7 @@ fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[Li
         let mut cursor = entries_of(data, desc.id)?
         let mut row_total = 0u64
         let mut checksum = std.check.start()
-        while let Some((key, value)) = next_bytes(mut cursor)? {
+        while let Some((key, value)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
             checksum_row(mut checksum, key, value)?
             row_total += 1
         }
@@ -2420,8 +2257,8 @@ fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[Li
 
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = failure_result_from_rep(types.capacity(current_state(source.db)))?
-    state.tips[0].roots = pages.share_roots(staged.plan.roots)
-    over_ceiling(failure_result_from_rep(types.capacity(pages.state_account(state)))?, available_resident(source.db))
+    state.tips[0].roots = pages.share_roots(staged.plan.schema.roots)
+    failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(types.capacity(pages.state_account(state)))?, available_resident(source.db)))
 }
 
 fn db_target(db: Db) -> Option[TargetLimits] {
@@ -2683,7 +2520,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     let live_bytes = journal_account(replay)?
     let JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
     check_stream_quota(state.tips[0u64].roots.streams, options.streams_max)?
-    over_ceiling(live_bytes, options.resident_limit)?
+    failure_result_from_rep(catalog.over_ceiling(live_bytes, options.resident_limit))?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
         let roots = failure_result_from_rep(types.capacity(pages.state_roots(state)))?
         Ok(int.saturating_add(resident_images(roots, Some(view loaded.lists)), location_storage_charge(loaded.locations)))
@@ -2826,7 +2663,7 @@ fn open_heads(mut db: Db, take state: pages.State) -> Result[(), Error] {
         total += branch_root_bytes(name, roots)
         if br != 0 {
             let key = disk_allocation(scoped fn() -> Result[String, Error] {
-                named(name)
+                failure_result_from_rep(catalog.named(name))
             })?
             map.insert(mut names, take key, br)
         }
@@ -2897,9 +2734,9 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         let mut initial = read_only_checkpoint(d, id, take manifest)?
         initial.immutable = true
         let replay = capture_scan(id, take walk, take initial)?
-        over_ceiling(journal_account(replay)?, options.resident_limit)?
+        failure_result_from_rep(catalog.over_ceiling(journal_account(replay)?, options.resident_limit))?
         let main = view replay.state.tips[0u64]
-        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: pages.share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: capture_tail_bases(replay.state.pins)?)))
+        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: pages.share_roots(main.roots), watermark: failure_result_from_rep(catalog.stamp_after(replay.next_node))?, bases: capture_tail_bases(replay.state.pins)?)))
     }
 }
 
@@ -2959,10 +2796,10 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     } else {
         None
     }
-    db.fence = fence
+    catalog.restore_fence(mut db.schema, fence)
     db.limits = limits
     pages.set_next_node(mut db.holders, next_node)
-    db.next_table = next_table
+    catalog.set_next_table(mut db.schema, next_table)
     db.file_seq = seq
     db.tiered = tiered
     db.page_resident = resident_pages
@@ -3107,10 +2944,10 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?
     let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
-    over_ceiling(base.account, available_resident(db))?
+    failure_result_from_rep(catalog.over_ceiling(base.account, available_resident(db)))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?
-    let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let prev_first = match disk_state(db).pages.deferred {
         Some(low) => low,
         None => disk_state(db).record_cut,
@@ -3657,7 +3494,7 @@ fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
         list.push(mut input, std.page.Row(key: types.key_word(i), value: result.unwrap(failure_result_from_rep(types.copied(raw))), charge: 94))
     }
     result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
-        bulk_store_collection(mut tree, t.id, 1, input, mut stamp)
+        failure_result_from_rep(catalog.bulk_store_collection(mut tree, t.id, 1, input, mut stamp))
     }))
     db.resident = pages.one_page_account(pages.holder_heads(db.holders)[0].roots)
 }

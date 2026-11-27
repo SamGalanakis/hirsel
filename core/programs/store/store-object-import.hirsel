@@ -27,7 +27,7 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     let Preparation(db: take recovered, ..) = take source
     let mut draft = take recovered
     draft.store = store_key_from_rep(id)
-    draft.fence = 1
+    catalog.restore_fence(mut draft.schema, 1)
     let (manifest, take locator) = history_import_base(mut client, draft, options, mut workspace, deadline)?
     match history_publish_base(mut client, store_key_from_rep(id), store_key_from_rep(holder), 1, metadata, manifest, locator, mut workspace, deadline, None) {
         Ok(_) => Ok(store_key_from_rep(id)),
@@ -42,8 +42,8 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     })?
     let blank = new_page_locations()
     let base = page_retry_base(blank, map.new(), participants.holders, participants.roots)?
-    over_ceiling(base.account, options.resident_limit)?
-    let mut next_stamp = stamp_after(pages.holder_next_node(draft.holders))?
+    failure_result_from_rep(catalog.over_ceiling(base.account, options.resident_limit))?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
     let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
     let limit = order.max(options.pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit)?

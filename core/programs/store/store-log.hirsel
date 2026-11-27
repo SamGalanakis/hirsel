@@ -19,16 +19,6 @@ pub fn log_schemas[V](l: Log[V]) -> Arc[RowSchemas] {
 // the newest n: the head's retention sweep trims the older ones.
 pub type Retain: codec = Forever | Keep(u64)
 
-// A declared `Keep(n)`, untyped, for the sweep. It is part of the release's
-// declaration, like an index's extractor, so the catalog does not hold it.
-type LogRetention: shareable + send {
-    id: u32,
-    catalog_key: Arc[Bytes],
-    catalog_page: Arc[Bytes],
-    // None: the declaration says Forever.
-    keep: Option[u64]
-}
-
 pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[V], retain: Retain) -> Result[Log[V], Error] {
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
     let collection = declare_value_collection(mut d, name, CatalogLog, schema, take value)?
@@ -36,14 +26,14 @@ pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[
         Forever => None,
         Keep(n) => Some(n),
     }
-    list.push(mut d.plan.retention, LogRetention(id: collection.id, catalog_key: arc.share(collection.catalog_key), catalog_page: arc.share(collection.catalog_page), keep: keep))
+    list.push(mut d.plan.schema.retention, catalog.LogRetention(id: collection.id, catalog_key: arc.share(collection.catalog_key), catalog_page: arc.share(collection.catalog_page), keep: keep))
     Ok(Log(binding: take collection))
 }
 
 // The store's retention is a whole declaration's (`seal`, an activation's
 // install): every Log it declares `Keep(n)`, and no other.
-fn bind_retention(mut db: Db, take declared: List[LogRetention]) {
-    let mut held: Map[u32, LogRetention] = map.new()
+fn bind_retention(mut db: Db, take declared: List[catalog.LogRetention]) {
+    let mut held: Map[u32, catalog.LogRetention] = map.new()
     for take r in take declared {
         let id = r.id
         if let Some(_) = r.keep {
@@ -85,7 +75,7 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
             continue
         }
         let roots = pages.holder_heads(db.holders)[0].roots
-        if let Error(_) = readable(roots, r.catalog_key, r.catalog_page, id) {
+        if let Error(_) = failure_result_from_rep(catalog.readable(roots, r.catalog_key, r.catalog_page, id)) {
             continue
         }
         let Ok(held) = committed_log_bounds(roots.collections, id) else {
@@ -120,7 +110,7 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
 }
 
 fn log_key(id: u32, seq: u64) -> Result[Bytes, Error] {
-    let mut key = prefixed(id, 8, false)?
+    let mut key = failure_result_from_rep(catalog.prefixed(id, 8, false))?
     list.put_word_be(mut key, seq)
     Ok(take key)
 }
@@ -130,7 +120,7 @@ fn descriptor_bounds(descriptor: Bytes) -> LogBounds {
 }
 
 fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Error] {
-    let key = prefix(id)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
     }
@@ -142,7 +132,7 @@ fn transaction_log_state(tx: Tx, id: u32) -> Result[pages.LogState, Error] {
         return Ok(existing)
     }
     let tree = view tx.roots.collections
-    let key = prefix(id)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
     }
@@ -217,7 +207,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
 
 pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
     readable_value(tx.store, tx.roots, l.binding)?
-    note_read(tx, Point(prefix(l.binding.id)?))?
+    note_read(tx, Point(failure_result_from_rep(catalog.prefix(l.binding.id))?))?
     transaction_log_bounds(tx, l.binding.id)
 }
 
@@ -253,13 +243,13 @@ pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
     let id = l.binding.id
     let current = transaction_log_bounds(tx, id)?
     if current.first == current.next {
-        note_read(tx, Span(prefix(id)?, prefix(id + 1)?))?
+        note_read(tx, Span(failure_result_from_rep(catalog.prefix(id))?, failure_result_from_rep(catalog.prefix(id + 1))?))?
         return Ok(None)
     }
     let seq = current.next - 1
     let key = log_key(id, seq)?
     let row = transaction_row(tx, key)?
-    note_read(tx, Span(take key, prefix(id + 1)?))?
+    note_read(tx, Span(take key, failure_result_from_rep(catalog.prefix(id + 1))?))?
     decode_log_last(l, seq, row)
 }
 
@@ -346,7 +336,7 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
         None
     } else {
-        collection_cursor(tx.roots.collections, id, committed_low, committed_high, false)?
+        failure_result_from_rep(catalog.collection_cursor(tx.roots.collections, id, committed_low, committed_high, false))?
     }
     let tail = LogRangeTail(id: id, seq: order.max(head.next, lower), end: upper)
     let codec = std.codec.key_u64()
@@ -493,7 +483,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
         if state.limits.first == state.head.first {
             continue
         }
-        let key = prefix(id)?
+        let key = failure_result_from_rep(catalog.prefix(id))?
         // A Tiered Log's floor is staged by the Tiered write plan, whose
         // `TieredDropped` figure the frame carries (§13.3).
         let dropped = if tiered_data_key(tx.roots.collections, key) {
@@ -521,7 +511,7 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
 }
 
 pub fn published_log[V](l: Log[V], change: Change) -> Result[Option[Bytes], Error] {
-    if list.len(change.tree_key) != 12 || list.slice(change.tree_key, 0, 4) != prefix(l.binding.id)? {
+    if list.len(change.tree_key) != 12 || list.slice(change.tree_key, 0, 4) != failure_result_from_rep(catalog.prefix(l.binding.id))? {
         return Error(Missing("log"))
     }
     publish_row(l.binding.id, l.binding.readers, change)
@@ -561,7 +551,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
         }
     }
     let mut rows = byte_cursor(tree, Included(take low), high)?
-    while let Some((take key, take value)) = next_bytes(mut rows)? {
+    while let Some((take key, take value)) = failure_result_from_rep(catalog.next_bytes(mut rows))? {
         list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
     }
     Ok(())
@@ -570,7 +560,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
 // With a shared Cold Log root, only the retained suffix can differ. Dense
 // sequence bounds make the two overlay cursors advance in lockstep.
 fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: pages.PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
-    let key = prefix(id)?
+    let key = failure_result_from_rep(catalog.prefix(id))?
     let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else {
         return Ok(false)
     }
@@ -634,7 +624,7 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
     window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
     if a.branch != b.branch && overlap_first < overlap_next && !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
-        let key = prefix(id)?
+        let key = failure_result_from_rep(catalog.prefix(id))?
         let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(types.key_word(overlap_first)))
         let mut current = start_diff(std.page.collection_child(b.roots.collections.root, key), Some(types.key_word(overlap_first)))
         let _ = page_change_rows(mut out, id, mut previous, mut current, Some(types.key_word(overlap_next)))?

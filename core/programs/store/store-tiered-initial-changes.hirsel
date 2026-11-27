@@ -15,7 +15,7 @@ fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
             list.push(mut out.bounds, failure_result_from_rep(types.copied(id))?)
         }
         let collection: u32 = list.word_be(id, 0)
-        let collection_end = prefix(collection + 1)?
+        let collection_end = failure_result_from_rep(catalog.prefix(collection + 1))?
         let from = if low <= id {
             view id
         } else {

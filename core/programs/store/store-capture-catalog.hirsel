@@ -1,3 +1,4 @@
+// Captures still admit the 416-byte pre-v2.172 index revision until the next format word.
 const CATALOG_REVISION_MAX: u64 = 32 + 4 * 96
 
 type CaptureCatalog {

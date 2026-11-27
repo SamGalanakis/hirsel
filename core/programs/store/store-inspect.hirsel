@@ -8,7 +8,7 @@ pub type EntryForm: key + shareable + send = TableForm | IndexForm(IndexKind) | 
 /// One catalog record and its collection's descriptor: `rows` and `charge`
 /// are the CollectionRoot's exact row count and row charge (AP4), and `tiered`
 /// its residency. `table` is an index's table, else the record's own name.
-/// `revision` is the index's composite revision (§1.2), empty otherwise.
+/// `revision` is the index's composite identity (§1.2), empty otherwise.
 pub type CatalogEntry: send {
     name: String,
     table: String,
@@ -80,7 +80,7 @@ const OPERATOR_ROWS: u64 = 1024u64
 const OPERATOR_SCRUB_BYTES: u64 = 16777216u64
 
 /// What `verify_release` found. `changed` names each index whose composite
-/// revision this release would change (a Migrate rebuilds it, an Open refuses
+/// identity this release would change (a Migrate rebuilds it, an Open refuses
 /// `Changed`); `faults` are scrub faults; `findings` come from a report walk
 /// under this release's extractors, `checked` the rows and entries it read;
 /// `coverage` says which indexes the walk could not check, and why.

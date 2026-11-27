@@ -248,6 +248,7 @@ type Catalog {
     schemas: List[ValueSchema],
     next: u16,
     by: Bytes,
+    // The length-prefixed composite identity, empty when absent.
     revision: Bytes
 }
 

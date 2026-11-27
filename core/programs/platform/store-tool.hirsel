@@ -181,7 +181,7 @@ fn describe_entry(entry: store.DescribeEntry, stats: bool) -> String {
         string.push(mut text, " ")
         string.push(mut text, state_text(entry.state))
         if list.len(entry.revision) != 0 {
-            string.push(mut text, " revision ")
+            string.push(mut text, " identity ")
             string.push(mut text, std.hex.encode(entry.revision))
         }
     }

@@ -18,8 +18,8 @@ pub opaque type Declare {
     failed: bool,
     conflict: Option[String],
     versioned: bool,
-    // A verify declaration (`declare_verify`): an index whose code or codec
-    // revision changed binds the release's extractor to the stored index
+    // A verify declaration (`declare_verify`): an index whose composite
+    // identity changed binds the release's extractor to the stored index
     // instead of refusing Changed, and its name is kept here.
     verifying: Option[List[String]],
     projector_names: Map[String, ()],
@@ -81,7 +81,7 @@ fn validate_local_projector[K, V](d: Declare, decl: ProjectionDecl, source: Tabl
 }
 
 /// An Open declaration for `hirsel store verify` (§1.2 "The index walker"):
-/// an index whose extractor or codec revision differs from the one that
+/// an index whose composite identity or projection revision differs from the one that
 /// built it binds this release's extractor to the stored entries, so the
 /// walker checks them with the code that will read them. Seal it with
 /// `seal_verify`, which commits nothing.
@@ -92,7 +92,7 @@ pub fn declare_verify(db: Db) -> Result[Declare, Error] {
 }
 
 /// Binds a verify declaration's extractors to the open store and returns
-/// the indexes whose revision changed. It never commits: a declaration that
+/// the indexes whose identity changed. It never commits: a declaration that
 /// would change the catalog is refused `Changed`.
 pub fn seal_verify(mut db: Db, take d: Declare) -> Result[List[String], Error] {
     healthy(db)?
@@ -209,7 +209,7 @@ pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Erro
 
 // A Preparation is read from a disk store's export, and its catalog is
 // installed back into that disk store, so its declaration is versioned like
-// the disk store's own: an unchanged index keeps its code.revision and is
+// the disk store's own: an unchanged index keeps its composite identity and is
 // not rebuilt.
 pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]]) -> Result[Declare, Error] waits {
     let mut d = match configure {
@@ -353,24 +353,23 @@ fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Err
     Ok(list.new())
 }
 
-// An index's composite revision: its extractor's code revision, then the
-// codec revisions of K, V, J and P, which cover what decoding reads (defaults,
-// `via` bodies). A change to any of them changes what the index holds.
-// The composite revision and the end of each of its parts, in
-// `revision_part` order, which names the input a rebuild comes from.
+// The composite identity is the extractor revision, then the storage fingerprints
+// of the table key, row, index key and payload codecs. The ends name each part
+// for dry-run. Memory stores omit the composite.
+const INDEX_IDENTITY_BYTES: u64 = 160
+
 fn index_revision[F, J, K, V, P](versioned: bool, by: StaticFn[F], t: Table[K, V], key: std.codec.Key[J], codec: std.codec.Codec[P]) -> Result[(Bytes, List[u64]), Error] {
     let mut out = declaration_revision(versioned, by)?
     let mut ends: List[u64] = list.new()
-    list.push(mut ends, list.len(out))
     if versioned {
-        codec_revision(mut out, std.codec.key_revision(t.key))?
-        list.push(mut ends, list.len(out))
-        codec_revision(mut out, std.codec.revision(t.readers.codec))?
-        list.push(mut ends, list.len(out))
-        codec_revision(mut out, std.codec.key_revision(key))?
-        list.push(mut ends, list.len(out))
-        codec_revision(mut out, std.codec.revision(codec))?
-        list.push(mut ends, list.len(out))
+        append_fingerprint(mut out, std.codec.key_fingerprint(t.key))?
+        append_fingerprint(mut out, std.codec.fingerprint(t.readers.codec))?
+        append_fingerprint(mut out, std.codec.key_fingerprint(key))?
+        append_fingerprint(mut out, std.codec.fingerprint(codec))?
+        let boundaries: Inline[u64, 5] =[32, 64, 96, 128, INDEX_IDENTITY_BYTES]
+        for end in boundaries {
+            list.push(mut ends, end)
+        }
     }
     Ok((take out, take ends))
 }
@@ -397,9 +396,8 @@ fn note_cause(mut out: String, what: String) {
 }
 
 // Why a declared index differs from its stored record (`hirsel dry-run`'s
-// rebuild report): the inputs that changed, by the parts of the revision.
-// A stored revision of another length was written before the composite
-// revision (v2.112), so its parts cannot be told apart.
+// rebuild report): the catalog changes and the parts of the composite identity.
+// Older identities lack comparable storage fingerprints.
 fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[String, Error] {
     let old_index = catalog_index(old)?
     let proposed_index = catalog_index(proposed)?
@@ -420,7 +418,7 @@ fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[Str
         note_cause(mut out, "projection")
     }
     if old.revision != proposed.revision {
-        if list.len(old.revision) != list.len(proposed.revision) {
+        if list.len(old.revision) != INDEX_IDENTITY_BYTES || list.len(proposed.revision) != INDEX_IDENTITY_BYTES {
             note_cause(mut out, "revision layout")
         } else {
             let mut from = 0u64
@@ -436,8 +434,8 @@ fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[Str
     Ok(take out)
 }
 
-fn codec_revision(mut out: Bytes, take revision: Option[Bytes]) -> Result[(), Error] {
-    let Some(part) = revision else {
+fn append_fingerprint(mut out: Bytes, take fingerprint: Option[Bytes]) -> Result[(), Error] {
+    let Some(part) = fingerprint else {
         return Error(Missing("revision"))
     }
     list.append(mut out, part)

@@ -1,12 +1,30 @@
 use super::*;
+use hirsel_core_layout::Row;
+use std::collections::HashSet;
+
+fn share_rows(module: &mut Module, rows: &mut HashSet<Row>) {
+    for row in &mut module.types {
+        match rows.get(row) {
+            Some(held) => *row = held.clone(),
+            None => {
+                rows.insert(row.clone());
+            }
+        }
+    }
+}
 
 impl UnitModule {
+    fn decode_body(bytes: &[u8], values: &crate::instances::Bindings) -> Module {
+        let mut module = normal::assembly_module(bytes);
+        crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
+        module
+    }
+
     pub(super) fn into_bound(self, annex: &Annex, identity: &Identity) -> Module {
         match self {
             Self::Decoded(module) => *module,
             Self::Encoded(bytes, values) => {
-                let mut module = normal::assembly_module(&bytes);
-                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
+                let mut module = Self::decode_body(&bytes, &values);
                 let symbol = hirsel_core_ir::symbol(identity.digest());
                 bind_module(&mut module, annex, Some(&symbol));
                 module
@@ -17,25 +35,43 @@ impl UnitModule {
     /// Decode an encoded unit in place. Units hold most of their rows in
     /// common: each decoded row equal to one in `rows` is that one, and each
     /// other is added to `rows`.
-    pub(super) fn decode(&mut self, rows: &mut std::collections::HashSet<hirsel_core_layout::Row>) {
+    fn decode(&mut self, rows: &mut HashSet<Row>) {
         let Self::Encoded(bytes, values) = self else {
             return;
         };
-        let mut module = normal::assembly_module(bytes);
-        crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
-        for row in &mut module.types {
-            match rows.get(row) {
-                Some(held) => *row = held.clone(),
-                None => {
-                    rows.insert(row.clone());
-                }
-            }
-        }
+        let mut module = Self::decode_body(bytes, values);
+        share_rows(&mut module, rows);
         *self = Self::Decoded(Box::new(module));
     }
 }
 
 impl Unit {
+    /// Inspect a unit for std selection without retaining its decoded body.
+    pub(in crate::native) fn unbound(&self) -> Cow<'_, Module> {
+        match &self.module {
+            UnitModule::Decoded(module) => Cow::Borrowed(module),
+            UnitModule::Encoded(bytes, values) => {
+                Cow::Owned(UnitModule::decode_body(bytes, values))
+            }
+        }
+    }
+
+    pub(in crate::native) fn decode(&mut self, rows: &mut HashSet<Row>) {
+        self.module.decode(rows);
+    }
+
+    /// Take the bound Core module, sharing its type rows with the others in
+    /// the same release unit.
+    pub(in crate::native) fn into_bound(
+        self,
+        identity: &Identity,
+        rows: &mut HashSet<Row>,
+    ) -> Module {
+        let mut module = self.module.into_bound(&self.annex, identity);
+        share_rows(&mut module, rows);
+        module
+    }
+
     /// The owner of the unit's private callable variants, including the values
     /// bound to its body's computed constant slots.
     pub(in crate::native) fn owner(&self) -> io::Result<ContentHash> {

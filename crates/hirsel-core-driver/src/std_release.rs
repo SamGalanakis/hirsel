@@ -44,11 +44,13 @@ use super::{recipe_build::Unit, release::LentBodies};
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use crate::store::remote::{self, Remote};
 use hirsel_core_ir::step_contexts::Summary;
-use hirsel_core_ir::{Callee, FuncId, Identity, Param, source::NativeObject};
+use hirsel_core_ir::{FuncId, Identity, source::NativeObject};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 #[path = "std_release/held.rs"]
 mod held;
+#[path = "std_release/select.rs"]
+mod select;
 #[path = "std_release/stored.rs"]
 mod stored;
 use stored::{
@@ -138,83 +140,6 @@ struct ModuleRoots {
     reached: BTreeSet<Identity>,
 }
 
-/// The plain library roots assigned to the side and the units they reach.
-fn program_side(
-    units: &BTreeMap<Identity, Unit>,
-    entry: &Identity,
-) -> (Vec<Identity>, BTreeSet<Identity>) {
-    let reach = |from: Vec<Identity>| {
-        let mut seen = BTreeSet::new();
-        let mut work = from;
-        while let Some(identity) = work.pop() {
-            if !library(&identity.definition) {
-                continue;
-            }
-            let Some(unit) = units.get(&identity) else {
-                continue;
-            };
-            if !seen.insert(identity) {
-                continue;
-            }
-            for function in unit.module().functions.iter().filter(|f| f.body.is_none()) {
-                let callee = unit.module().identity(function.instance);
-                if units.contains_key(&callee) && !seen.contains(&callee) {
-                    work.push(callee);
-                }
-            }
-        }
-        seen
-    };
-    let plain = |identity: &Identity| {
-        identity != entry
-            && library(&identity.definition)
-            && identity.closures.is_empty()
-            && identity.dictionaries.is_empty()
-    };
-    let mut local_roots = Vec::new();
-    for (identity, unit) in units {
-        if plain(identity) {
-            continue;
-        }
-        // Specialised library instances already lower in the program unit.
-        // Keep their plain callees there too, as for program helpers and
-        // closures. The entry can still call the side directly.
-        let first_helper = usize::from(identity == entry);
-        for function in &unit.module().functions[first_helper..] {
-            let Some(body) = &function.body else { continue };
-            for call in &body.calls {
-                if let Callee::Direct(callee) = call.callee {
-                    let function = &unit.module().functions[callee.index()];
-                    let signature = &unit.module().signatures[function.signature.index()];
-                    // These calls pass only floating-point values: the side
-                    // can optimise the routine before the caller inlines it.
-                    if signature.dest.is_none()
-                        && matches!(signature.results.as_slice(), [ty] if ty.is_float())
-                        && signature
-                            .params
-                            .iter()
-                            .all(|param| matches!(param, Param::Value(ty) if ty.is_float()))
-                    {
-                        continue;
-                    }
-                    let callee = unit.module().identity(function.instance);
-                    if plain(&callee) {
-                        local_roots.push(callee);
-                    }
-                }
-            }
-        }
-    }
-    let held = reach(local_roots);
-    let roots: Vec<Identity> = units
-        .iter()
-        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held::root(u.module(), FuncId(0)))
-        .map(|(i, _)| i.clone())
-        .collect();
-    let reached = reach(roots.clone());
-    (roots, reached)
-}
-
 /// The suffix of the std's own hidden names.
 const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
@@ -263,7 +188,7 @@ pub(crate) fn std_side(
     if let Some(side) = prebuilt_side(units, library, kin)? {
         return Ok(side);
     }
-    let (roots, reached) = program_side(units, entry);
+    let (roots, reached) = select::program_side(units, entry);
     if roots.is_empty() {
         return Ok(empty(side_key(kin, false, &[], &[])?));
     }
@@ -616,6 +541,12 @@ fn lower_module(
     record: &mut StdRecord,
 ) -> Result<Vec<u8>, NativeStop> {
     let reached: Vec<Identity> = units.keys().cloned().collect();
+    {
+        let mut rows = std::collections::HashSet::new();
+        for unit in units.values_mut() {
+            unit.decode(&mut rows);
+        }
+    }
     let bindings = super::recipe_build::bind_annexes(
         &mut units,
         &BTreeMap::new(),

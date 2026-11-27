@@ -79,11 +79,13 @@ decoded and joined (`join_modules`) before the first partition is lowered.
    still refuses it at 2 GiB committed: the checker's high-water (about 1.85 GB) plus about
    250 MB that assembly commits beyond it. `hirsel build --release` and `run --release` already
    hand off (commit 5b680336).
-2. **Decode by partition.** `Publication::std_side` decodes every unit, and `release_objects`
-   joins all modules, before `emit_release_unit` cuts partitions. Choose the partitions from the
-   recipe (encoded sizes and the call graph), then decode, join, lower and emit one partition at
-   a time. This removes the about 560 MiB of decoded Core IR that 3172's profile showed, so
-   assembly's live peak fits inside the pages the checker returned.
+2. **Decode by partition.** Std selection checks prebuilt owners against the encoded
+   publication. Without a prebuilt match it decodes one unit at a time to collect the selection
+   graph, and decodes the selected std closure on a cache miss. The program's units stay encoded
+   through source-map binding. Program assembly still decodes the units together for callable
+   specialization and joins them before `emit_release_unit` cuts partitions. The remaining work
+   is to plan those partitions from the recipe and carry the program-wide decisions into each
+   partition's decoding, lowering and emission.
 3. **Hand off in test sessions.** `TestSession` keeps its checked product for later tests. Give
    each release unit a published recipe at preparation and assemble from it, so the session drops
    the product once every launch is published.

@@ -662,9 +662,12 @@ pub(super) fn release_objects(
         .collect();
     let mut modules = Vec::with_capacity(units.len());
     let mut owners = Vec::with_capacity(units.len());
-    for unit in units.into_values() {
-        owners.push(unit.owner()?);
-        modules.push(Cow::Owned(unit.into_module()));
+    {
+        let mut rows = std::collections::HashSet::new();
+        for (identity, unit) in units {
+            owners.push(unit.owner()?);
+            modules.push(Cow::Owned(unit.into_bound(&identity, &mut rows)));
+        }
     }
     let mut owners = owners.into_iter();
     let body_keys = crate::callable_variants::prepare_inputs(

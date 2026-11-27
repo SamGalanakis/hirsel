@@ -128,13 +128,6 @@ pub(super) struct Memos {
 }
 
 impl Unit {
-    pub(super) fn into_module(self) -> Module {
-        let UnitModule::Decoded(module) = self.module else {
-            unreachable!("release assembly prepares its modules together");
-        };
-        *module
-    }
-
     pub(super) fn module(&self) -> &Module {
         let UnitModule::Decoded(module) = &self.module else {
             unreachable!("this assembly prepares its modules together");
@@ -212,8 +205,7 @@ impl CheckProduct {
             .as_ref()
             .map(crate::entry_show::ErrorShown::encode);
         let index = Memos::open(options, &entry, store)?;
-        // Keep the canonical bytes through publication. Release std selection
-        // needs the decoded program, so assemble that view after publication.
+        // Keep the canonical bytes through publication for deferred assembly.
         let defer_modules = matches!(options.backend, Backend::Cranelift) || options.optimize;
         let Released {
             units,
@@ -1348,7 +1340,7 @@ impl Publication {
 
     /// Assemble with prebuilt objects from the library image's store.
     pub(crate) fn assemble_with(
-        mut self,
+        self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
         library: Option<&Path>,
@@ -1361,7 +1353,7 @@ impl Publication {
     /// publication under `options` takes ([`std_side`]), prebuilt in
     /// `library` (a library image's store) or not; None for any other.
     pub(crate) fn std_side(
-        &mut self,
+        &self,
         options: &NativeOptions,
         library: Option<&Path>,
     ) -> Result<Option<StdSide>, NativeStop> {
@@ -1369,11 +1361,6 @@ impl Publication {
         if !options.llvm_release() {
             return Ok(None);
         }
-        let mut rows = std::collections::HashSet::new();
-        for unit in self.units.values_mut() {
-            unit.module.decode(&mut rows);
-        }
-        drop(rows);
         std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
     }
 

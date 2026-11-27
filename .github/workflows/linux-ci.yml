@@ -37,6 +37,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap lld python3-venv zstd
+          # The Exec law pins this system tool with O_NOFOLLOW.
+          if [[ -L /bin/cat ]]; then
+            ls -l /bin/cat
+            cp -L -- /bin/cat "$RUNNER_TEMP/hirsel-cat"
+            sudo install -m 0755 -- "$RUNNER_TEMP/hirsel-cat" /bin/cat
+          fi
+          [[ -f /bin/cat && -x /bin/cat && ! -L /bin/cat ]]
       - name: Cache Cargo downloads
         uses: actions/cache@v4
         with:

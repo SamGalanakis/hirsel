@@ -14,62 +14,57 @@ unsafe extern "C" {
     fn sys_icache_invalidate(start: *mut libc::c_void, len: usize);
 }
 
-fn done(result: libc::c_int) -> io::Result<()> {
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
 pub(crate) fn page() -> usize {
     // SAFETY: sysconf reads one integer.
     unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
 }
 
+/// Say why a host call failed, in the laws' output.
+fn failed(what: &str) -> io::Error {
+    let error = io::Error::last_os_error();
+    #[cfg(test)]
+    eprintln!("hirsel-code: {what}: {error}");
+    let _ = what;
+    error
+}
+
 pub(crate) fn register() -> io::Result<()> {
     // SAFETY: the call reads one fact about the process.
     match unsafe { pthread_jit_write_protect_supported_np() } {
-        0 => Err(io::ErrorKind::Unsupported.into()),
+        0 => {
+            #[cfg(test)]
+            eprintln!("hirsel-code: this process has no JIT write window");
+            Err(io::ErrorKind::Unsupported.into())
+        }
         _ => Ok(()),
     }
 }
 
-/// Reserve `bytes`: the first half a `MAP_JIT` range, the second ordinary memory.
+/// Reserve `bytes` as one `MAP_JIT` range: a `MAP_JIT` mapping cannot be placed at a
+/// chosen address, so the data band is part of it and is never mapped executable.
 pub(crate) fn reserve(bytes: usize) -> io::Result<usize> {
-    let band = bytes / 2;
-    let anonymous = libc::MAP_PRIVATE | libc::MAP_ANON;
-    let mut failed = io::ErrorKind::Unsupported.into();
-    // A `MAP_JIT` mapping cannot be placed with `MAP_FIXED`, so the text band is asked
-    // for at the address of a hole just made; another thread may take the hole first.
-    for _ in 0..8 {
-        // SAFETY: fresh anonymous mappings, and unmapping only what this call mapped.
-        unsafe {
-            let at = libc::mmap(
-                std::ptr::null_mut(),
-                bytes,
-                libc::PROT_NONE,
-                anonymous,
-                -1,
-                0,
-            );
-            if at == libc::MAP_FAILED {
-                return Err(io::Error::last_os_error());
-            }
-            libc::munmap(at, band);
-            let text = libc::mmap(at, band, libc::PROT_NONE, anonymous | libc::MAP_JIT, -1, 0);
-            if text == at {
-                return Ok(at as usize);
-            }
-            if text == libc::MAP_FAILED {
-                failed = io::Error::last_os_error();
-            } else {
-                libc::munmap(text, band);
-            }
-            libc::munmap(at.byte_add(band), band);
-        }
+    let flags = libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT;
+    // SAFETY: a fresh anonymous mapping at an address the kernel picks.
+    let at = unsafe { libc::mmap(std::ptr::null_mut(), bytes, libc::PROT_NONE, flags, -1, 0) };
+    if at != libc::MAP_FAILED {
+        return Ok(at as usize);
     }
-    Err(failed)
+    failed("mmap MAP_JIT PROT_NONE");
+    // Some kernels give a `MAP_JIT` range only with its full protection.
+    let all = libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC;
+    // SAFETY: as above; the range is closed before anything can use it.
+    unsafe {
+        let at = libc::mmap(std::ptr::null_mut(), bytes, all, flags, -1, 0);
+        if at == libc::MAP_FAILED {
+            return Err(failed("mmap MAP_JIT rwx"));
+        }
+        if libc::mprotect(at, bytes, libc::PROT_NONE) != 0 {
+            let error = failed("mprotect MAP_JIT none");
+            libc::munmap(at, bytes);
+            return Err(error);
+        }
+        Ok(at as usize)
+    }
 }
 
 pub(crate) fn release(at: usize, bytes: usize) {
@@ -88,7 +83,10 @@ pub(crate) fn protect(at: usize, bytes: usize, access: Access) -> io::Result<()>
         Access::Execute => return Ok(()),
     };
     // SAFETY: the range is inside the caller's reservation.
-    done(unsafe { libc::mprotect(at as *mut libc::c_void, bytes, protection) })
+    match unsafe { libc::mprotect(at as *mut libc::c_void, bytes, protection) } {
+        0 => Ok(()),
+        _ => Err(failed("mprotect")),
+    }
 }
 
 /// Give the pages of a range back. They may keep their bytes.

@@ -269,7 +269,8 @@ alias can write live code.
 
 ## PACK-5: The code slab on Apple targets
 
-- **macOS arm64.** The text band is one anonymous `MAP_JIT` reservation. Only the pack host
+- **macOS arm64.** Both bands are one anonymous `MAP_JIT` reservation, because a `MAP_JIT`
+  mapping cannot be placed beside another; the data band is never mapped executable. Only the pack host
   binary carries the hardened-runtime JIT entitlement; standalone executables are
   unchanged. One dedicated OS **loader thread**, which never runs a task or a fiber, does
   every write to the text band: it opens its per-thread write window, writes, and closes
@@ -277,8 +278,7 @@ alias can write live code.
   `sys_icache_invalidate` over the run and performs steps 6 and 7. The window is per
   thread, so no worker ever sees the band writable; a text run that is being filled is
   executable to them, and no address in it has left the loader. The data band is
-  ordinary anonymous memory published with one `mprotect`, placed directly after the text
-  band. Recycling follows PACK-4, except that returned pages may keep their bytes
+  published with one `mprotect`. Recycling follows PACK-4, except that returned pages may keep their bytes
   (`MADV_FREE`), so a range is filled with the trap pattern when it is next mapped. A
   process whose `MAP_JIT` reservation is denied has no slab (`Unsupported`).
 - **iOS, and any host that denies dynamic code.** There is no slab. Every image is

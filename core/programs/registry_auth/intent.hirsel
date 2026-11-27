@@ -1,0 +1,293 @@
+// Package registry §1. P is the verified Phase 0 library root supplied by admission.
+pub type Subject: shareable + send = Workload(String, String, String) | SigningKey(Bytes)
+
+pub type Publication: shareable + send {
+    root: String,
+    identity: String,
+    version: String,
+    description: String,
+    source_commit: Option[String],
+    enrollment: Option[List[Subject]]
+}
+
+pub type Status: shareable + send = Retire(String, String) | Reinstate(String) | Advise(String, String) | Takedown(String, String)
+
+pub type Action: shareable + send = Publish(Publication) | Rebind(List[Subject]) | ChangeStatus(String, Option[String], Status)
+
+pub type Intent: shareable + send {
+    origin: String,
+    scope: String,
+    generation: u64,
+    action: Action
+}
+
+pub type Refusal: key = InvalidIntent | InvalidSubjects | Unauthorized | StaleGeneration | EnrollmentRefused | Unavailable
+
+fn cat(a: String, b: String) -> String {
+    let mut out = string.from(a)
+    string.push(mut out, b)
+    take out
+}
+
+fn decimal(n: u64) -> String {
+    let mut out = string.new()
+    string.push_u64(mut out, n)
+    take out
+}
+
+fn quoted(s: String) -> String {
+    let mut out = string.new()
+    std.json.push_quoted(mut out, s)
+    take out
+}
+
+fn nullable(value: Option[String]) -> String {
+    match value {
+        Some(s) => quoted(s),
+        None => string.from("null"),
+    }
+}
+
+fn tuple(parts: List[String]) -> String {
+    cat(cat("[", std.string.join(parts, ",")), "]")
+}
+
+pub fn digest(s: String) -> String {
+    let hash = std.sha256.hash(string.as_bytes(s))
+    let mut raw: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut raw, hash[i])
+    }
+    std.hex.encode(raw)
+}
+
+fn lower_hex(s: String, n: u64) -> bool {
+    if string.byte_len(s) != n {
+        return false
+    }
+    for b in string.as_bytes(s) {
+        if !int.is_ascii_digit(b) && !(b >= b'a' && b <= b'f') {
+            return false
+        }
+    }
+    true
+}
+
+fn dns_label(s: String, limit: u64) -> bool {
+    let n = string.byte_len(s)
+    if n == 0 || n > limit || std.string.starts_with(s, "-") || std.string.ends_with(s, "-") {
+        return false
+    }
+    for b in string.as_bytes(s) {
+        if !(b >= b'a' && b <= b'z') && !int.is_ascii_digit(b) && b != b'-' {
+            return false
+        }
+    }
+    true
+}
+
+fn dns_name(s: String) -> bool {
+    if string.byte_len(s) > 253 || std.string.find(s, 0, ".") == None {
+        return false
+    }
+    let mut at: u64 = 0
+    while let Some((part, next)) = std.string.next_split(s, at, ".") {
+        if !dns_label(part, 63) {
+            return false
+        }
+        if next > string.byte_len(s) {
+            for b in string.as_bytes(part) {
+                if !int.is_ascii_digit(b) {
+                    return true
+                }
+            }
+            return false
+        }
+        at = next
+    }
+    false
+}
+
+fn valid_scope(s: String) -> bool {
+    match std.string.split_once(s, "/") {
+        Some((host, tenant)) => dns_name(host) && dns_label(tenant, 64),
+        None => dns_name(s),
+    }
+}
+
+fn valid_origin(s: String) -> bool {
+    let Some(site) = std.string.strip_prefix(s, "https://") else {
+        return false
+    }
+    match std.string.split_once(site, ":") {
+        None => dns_name(site),
+        Some((name, port)) => {
+            let Ok(n) = std.int.parse_uint(port, 10) else {
+                return false
+            }
+            dns_name(name) && n > 0 && n <= 65535 && n != 443 && decimal(n) == port
+        },
+    }
+}
+
+fn field(mut out: String, raw: String) {
+    string.push(mut out, ",")
+    string.push(mut out, raw)
+}
+
+fn pair(a: String, b: String) -> String {
+    let mut out = cat("[", a)
+    field(mut out, b)
+    cat(out, "]")
+}
+
+fn subject_wire(s: Subject) -> String {
+    match s {
+        Workload(issuer, id, workflow) => {
+            let mut out = string.from("[\"oidc\"")
+            field(mut out, quoted(issuer))
+            field(mut out, quoted(id))
+            field(mut out, quoted(workflow))
+            cat(out, "]")
+        },
+        SigningKey(key) => pair("\"ed25519\"", quoted(std.base64.encode_string(key))),
+    }
+}
+
+pub fn subject_set(subjects: List[Subject]) -> Result[String, Refusal] {
+    if list.len(subjects) == 0 {
+        return Error(InvalidSubjects)
+    }
+    let mut parts: List[String] = list.new()
+    for s in subjects {
+        if !valid_subject(s) {
+            return Error(InvalidSubjects)
+        }
+        let wire = subject_wire(s)
+        if list.len(parts) > 0 && parts[list.len(parts) - 1] >= wire {
+            return Error(InvalidSubjects)
+        }
+        list.push(mut parts, take wire)
+    }
+    Ok(tuple(parts))
+}
+
+fn status_tag(s: Status) -> String {
+    match s {
+        Retire(_, _) => string.from("retire"),
+        Reinstate(_) => string.from("reinstate"),
+        Advise(_, _) => string.from("advise"),
+        Takedown(_, _) => string.from("takedown"),
+    }
+}
+
+fn status_payload(s: Status) -> Result[String, Refusal] {
+    match s {
+        Retire(reason, message) => {
+            if reason != "security" && reason != "deprecated" && reason != "invalid" && reason != "renamed" && reason != "other" {
+                return Error(InvalidIntent)
+            }
+            Ok(pair(quoted(reason), quoted(message)))
+        },
+        Reinstate(message) => Ok(cat(cat("[", quoted(message)), "]")),
+        Advise(id, hash) => {
+            if !lower_hex(hash, 64) {
+                return Error(InvalidIntent)
+            }
+            Ok(pair(quoted(id), quoted(hash)))
+        },
+        Takedown(reason, message) => Ok(pair(quoted(reason), quoted(message))),
+    }
+}
+
+fn package_label(scope: String, identity: String, version: String) -> bool {
+    let Some((name, major)) = std.string.split_once(identity, "@") else {
+        return false
+    }
+    let Some(local) = std.string.strip_prefix(name, cat(scope, "/")) else {
+        return false
+    }
+    let b = string.as_bytes(local)
+    if string.byte_len(name) > 255 || list.len(b) == 0 || list.len(b) > 64 || b[0] < b'a' || b[0] > b'z' {
+        return false
+    }
+    for c in b {
+        if !(c >= b'a' && c <= b'z') && !int.is_ascii_digit(c) && c != b'_' {
+            return false
+        }
+    }
+    let Ok(_) = std.semver.parse(version) else {
+        return false
+    }
+    let Some((version_major, _)) = std.string.split_once(version, ".") else {
+        return false
+    }
+    version_major == major && std.string.find(version, 0, "+") == None
+}
+
+fn action_fields(i: Intent) -> Result[(String, Option[String], String), Refusal] {
+    match i.action {
+        Publish(p) => {
+            if !package_label(i.scope, p.identity, p.version) || !lower_hex(p.root, 64) {
+                return Error(InvalidIntent)
+            }
+            if let Some(commit) = p.source_commit {
+                if !lower_hex(commit, 40) && !lower_hex(commit, 64) {
+                    return Error(InvalidIntent)
+                }
+            }
+            let enrollment = match p.enrollment {
+                Some(set) => subject_set(set)?,
+                None => string.from("null"),
+            }
+            let mut body = cat("[", quoted(p.identity))
+            field(mut body, quoted(p.version))
+            field(mut body, quoted(p.description))
+            field(mut body, nullable(p.source_commit))
+            field(mut body, enrollment)
+            Ok((string.from("publish"), Some(clone(p.root)), cat(body, "]")))
+        },
+        Rebind(next) => Ok((string.from("scope-rebind"), None, subject_set(next)?)),
+        ChangeStatus(root, prev, status) => {
+            if !lower_hex(root, 64) {
+                return Error(InvalidIntent)
+            }
+            if let Some(p) = prev {
+                if !lower_hex(p, 64) {
+                    return Error(InvalidIntent)
+                }
+            }
+            Ok((status_tag(status), Some(clone(root)), pair(nullable(prev), status_payload(status)?)))
+        },
+    }
+}
+
+pub fn intent_wire(i: Intent) -> Result[String, Refusal] {
+    if !valid_origin(i.origin) || !valid_scope(i.scope) {
+        return Error(InvalidIntent)
+    }
+    let (tag, root, body) = action_fields(i)?
+    let mut out = string.from("[\"hirsel-intent-v1\"")
+    field(mut out, quoted(i.origin))
+    field(mut out, quoted(tag))
+    field(mut out, quoted(i.scope))
+    field(mut out, quoted(decimal(i.generation)))
+    field(mut out, nullable(root))
+    field(mut out, body)
+    Ok(cat(out, "]"))
+}
+
+pub fn audience(i: Intent) -> Result[String, Refusal] {
+    let (tag, root, _) = action_fields(i)?
+    let p: String = match root {
+        Some(hash) => clone(hash),
+        None => string.from("-"),
+    }
+    let mut out = cat(i.origin, "/intent/")
+    string.push(mut out, tag)
+    string.push(mut out, "/")
+    string.push(mut out, p)
+    string.push(mut out, "/")
+    string.push(mut out, digest(intent_wire(i)?))
+    Ok(take out)
+}

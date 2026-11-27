@@ -1,0 +1,21 @@
+[package]
+name = "hirsel.ai/registry_auth"
+version = "1.0.0"
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"intent.hirsel" = "registry_auth"
+"subjects.hirsel" = "registry_auth"
+"enrollment.hirsel" = "registry_auth"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"auth_laws.hirsel" = "registry_auth"
+
+[workspace]
+members = []

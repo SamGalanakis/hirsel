@@ -1,0 +1,282 @@
+// One pool for pinned JWKS, authenticated organization records and domain enrollment.
+// DNS and each connection are subject to the same public-address grant.
+pub opaque type Lookup {
+    pool: std.http_client.Pool
+}
+
+pub fn lookup(n: Net, clock: Clock, tasks: Tasks) -> Result[Lookup, Refusal] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, Rule(dir: Connect, prefix: V4(0), bits: 0, ports: (1, 65535), reach: Public))
+    list.push(mut rules, Rule(dir: Connect, prefix: V6(0, 0), bits: 0, ports: (1, 65535), reach: Public))
+    list.push(mut rules, Tls(names: "*", ports: (1, 65535), trust: SystemPin))
+    list.push(mut rules, Resolve(names: "*"))
+    let Ok(public_net) = net.narrow(n, rules) else {
+        return Error(Unavailable)
+    }
+    let mut limits = std.http_client.limits(std.jwt.MAX_JWKS)
+    limits.redirects = Return
+    let Ok(pool) = std.http_client.pool(public_net, clock, tasks, System, limits) else {
+        return Error(Unavailable)
+    }
+    Ok(Lookup(pool: take pool))
+}
+
+fn fetch_document(client: Lookup, url: String, deadline_ns: u64) -> Result[String, Refusal] waits {
+    if !https_url(url) {
+        return Error(EnrollmentRefused)
+    }
+    let mut body: Bytes = list.new()
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "User-Agent", value: Public(b"Hirsel-registry")))
+    let req = std.http_client.Fetch(method: "GET", url: clone(url), headers: take headers, body: list.new())
+    match std.http_client.fetch_all(std.http_client.handle(client.pool), req, mut body, deadline_ns) {
+        Ok(h) if std.http_client.status(h) == 200 => match string.from_utf8(take body) {
+            Ok(take text) => Ok(take text),
+            Error(_) => Error(EnrollmentRefused),
+        },
+        _ => Error(Unavailable),
+    }
+}
+
+// Inputs from the committed release log and write-once reservation at the exact scope.
+pub type Authority: shareable + send {
+    scope: String,
+    generation: u64,
+    subjects: List[Subject]
+}
+
+pub type ScopeState = Unclaimed | Reserved(Authority) | Committed(Authority)
+
+pub opaque type Enrollment {
+    intent_digest: String,
+    signer: String,
+    evidence: String
+}
+
+pub type Admission {
+    intent: String,
+    auth: String,
+    enrollment_evidence: Option[String],
+    next_authority: Option[Authority]
+}
+
+fn initial(i: Intent) -> Result[List[Subject], Refusal] {
+    if let Publish(p) = i.action {
+        if let Some(set) = p.enrollment {
+            if i.generation == 0 {
+                return Ok(clone(set))
+            }
+        }
+    }
+    Error(EnrollmentRefused)
+}
+
+fn enrollment_value(i: Intent) -> Result[String, Refusal] {
+    let mut out = string.from("[\"hirsel-enroll-v1\"")
+    field(mut out, quoted(i.origin))
+    field(mut out, quoted(i.scope))
+    field(mut out, subject_set(initial(i)?)?)
+    Ok(cat(out, "]"))
+}
+
+fn source(i: Intent, v: Verified) -> Result[(String, String), Refusal] {
+    if let Some((host, tenant)) = std.string.split_once(i.scope, "/") {
+        let Some(org) = view v.organization else {
+            return Error(EnrollmentRefused)
+        }
+        let Workload(issuer, _, _) = view v.subject else {
+            return Error(EnrollmentRefused)
+        }
+        if org.host != host || std.string.to_lower(org.login) != tenant {
+            return Error(EnrollmentRefused)
+        }
+        return Ok((clone(issuer), cat(cat(org.org_api, "/orgs/"), tenant)))
+    }
+    Ok((string.from("domain"), cat(cat("https://", i.scope), "/.well-known/hirsel-registry.json")))
+}
+
+type OrgRecord {
+    login: String,
+    id: u64,
+    description: String,
+    seen: std.set.Set[String]
+}
+
+fn read_record(s: String, mut c: std.json.Cursor) -> Result[OrgRecord, std.json.Error] {
+    let seed = OrgRecord(login: string.new(), id: 0, description: string.new(), seen: std.set.new())
+    std.json.record_of(s, mut c, take seed, fn(k: String, text: String, mut cursor: std.json.Cursor, mut rec: OrgRecord) -> Result[(), std.json.Error] {
+        if !std.set.insert(mut rec.seen, clone(k)) {
+            return Error(Syntax(0))
+        }
+        if k == "login" {
+            rec.login = std.json.read_string(text, mut cursor)?
+        } else if k == "id" {
+            rec.id = std.json.read_u64(text, mut cursor)?
+        } else if k == "description" {
+            rec.description = std.json.read_string(text, mut cursor)?
+        } else {
+            std.json.skip_value(text, mut cursor)?
+        }
+        Ok(())
+    })
+}
+
+fn endorsement(description: String, hash: String) -> bool {
+    let line = cat("hirsel-enroll-v1=", hash)
+    let mut at: u64 = 0
+    while let Some((s, next)) = std.string.next_line(description, at) {
+        if s == line {
+            return true
+        }
+        at = next
+    }
+    false
+}
+
+fn member(set: List[Subject], s: Subject) -> bool {
+    let wire = subject_wire(s)
+    for candidate in set {
+        if subject_wire(candidate) == wire {
+            return true
+        }
+    }
+    false
+}
+
+fn confirm_document(i: Intent, v: Verified, document: String) -> Result[Enrollment, Refusal] {
+    let (profile, url) = source(i, v)?
+    let value = enrollment_value(i)?
+    if digest(intent_wire(i)?) != v.intent_digest || !member(initial(i)?, v.subject) {
+        return Error(EnrollmentRefused)
+    }
+    if profile == "domain" {
+        // Equality with the encoded, validated proposal checks every field and canonical byte.
+        if document != value {
+            return Error(EnrollmentRefused)
+        }
+    } else {
+        let Some(org) = view v.organization else {
+            return Error(EnrollmentRefused)
+        }
+        let Ok(rec) = std.json.decode(document, read_record) else {
+            return Error(EnrollmentRefused)
+        }
+        if rec.login != org.login || decimal(rec.id) != org.id || !endorsement(rec.description, digest(value)) {
+            return Error(EnrollmentRefused)
+        }
+    }
+    let mut evidence = cat("[", quoted(profile))
+    field(mut evidence, quoted(url))
+    field(mut evidence, value)
+    Ok(Enrollment(intent_digest: clone(v.intent_digest), signer: subject_wire(v.subject), evidence: cat(evidence, "]")))
+}
+
+pub fn fetch_enrollment(client: Lookup, i: Intent, v: Verified, deadline_ns: u64) -> Result[Enrollment, Refusal] waits {
+    if digest(intent_wire(i)?) != v.intent_digest || !member(initial(i)?, v.subject) {
+        return Error(EnrollmentRefused)
+    }
+    let (_, url) = source(i, v)?
+    let document = fetch_document(client, url, deadline_ns)?
+    confirm_document(i, v, document)
+}
+
+fn check_authority(a: Authority, i: Intent, v: Verified) -> Result[(), Refusal] {
+    if a.scope != i.scope || a.generation != i.generation {
+        return Error(StaleGeneration)
+    }
+    if !member(a.subjects, v.subject) {
+        return Error(Unauthorized)
+    }
+    Ok(())
+}
+
+// Committed release and latest status predecessor at the captured status parent.
+pub type StatusHead: shareable + send {
+    scope: String,
+    root: String,
+    previous_event: Option[String]
+}
+
+fn check_head(i: Intent, head: Option[StatusHead]) -> Result[(), Refusal] {
+    if let ChangeStatus(root, prev, _) = view i.action {
+        let Some(h) = view head else {
+            return Error(Unauthorized)
+        }
+        if h.scope != i.scope || h.root != root || h.previous_event != prev {
+            return Error(Unauthorized)
+        }
+    }
+    Ok(())
+}
+
+// Call against the origin's current scope state at the sequencer's chosen parent.
+// next_authority takes effect only when its bind or rebind commits.
+pub fn authorize(origin: String, i: Intent, state: ScopeState, v: Verified, enrollment: Option[Enrollment], head: Option[StatusHead], now: u64) -> Result[Admission, Refusal] {
+    let wire = intent_wire(i)?
+    if origin != i.origin || digest(wire) != v.intent_digest {
+        return Error(Unauthorized)
+    }
+    check_head(i, head)?
+    if let Some(exp) = v.expires {
+        if now >= exp {
+            return Error(Unauthorized)
+        }
+    }
+    let mut evidence: Option[String] = None
+    let mut next: Option[Authority] = None
+    match state {
+        Unclaimed => {
+            let set = initial(i)?
+            let Some(doc) = view enrollment else {
+                return Error(EnrollmentRefused)
+            }
+            if doc.intent_digest != v.intent_digest || doc.signer != subject_wire(v.subject) || !member(set, v.subject) {
+                return Error(EnrollmentRefused)
+            }
+            evidence = Some(clone(doc.evidence))
+            next = Some(Authority(scope: clone(i.scope), generation: 1, subjects: take set))
+        },
+        Reserved(a) => {
+            let set = initial(i)?
+            check_authority(a, i, v)?
+            if subject_set(set)? != subject_set(a.subjects)? {
+                return Error(EnrollmentRefused)
+            }
+            next = Some(Authority(scope: clone(a.scope), generation: 1, subjects: clone(a.subjects)))
+        },
+        Committed(a) => {
+            check_authority(a, i, v)?
+            if a.generation == 0 {
+                return Error(StaleGeneration)
+            }
+            match i.action {
+                Rebind(set) => {
+                    if a.generation == 18446744073709551615u64 {
+                        return Error(StaleGeneration)
+                    }
+                    next = Some(Authority(scope: clone(a.scope), generation: a.generation + 1, subjects: clone(set)))
+                },
+                Publish(p) => {
+                    if let Some(_) = p.enrollment {
+                        return Error(EnrollmentRefused)
+                    }
+                },
+                ChangeStatus(_, _, Takedown(_, _)) => return Error(Unauthorized),
+                ChangeStatus(_, _, _) => (),
+            }
+        },
+    }
+    Ok(Admission(intent: take wire, auth: auth_row(v), enrollment_evidence: take evidence, next_authority: take next))
+}
+
+pub fn authorize_legal(origin: String, i: Intent, legal_key: Bytes, signature: Bytes, head: StatusHead) -> Result[Admission, Refusal] {
+    if i.origin != origin || i.generation != 0 {
+        return Error(Unauthorized)
+    }
+    let ChangeStatus(_, _, Takedown(_, _)) = view i.action else {
+        return Error(Unauthorized)
+    }
+    check_head(i, Some(clone(head)))?
+    let v = verify_key(i, legal_key, signature)?
+    Ok(Admission(intent: intent_wire(i)?, auth: auth_row(v), enrollment_evidence: None, next_authority: None))
+}

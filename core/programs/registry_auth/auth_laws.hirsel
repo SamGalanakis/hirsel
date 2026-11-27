@@ -1,0 +1,176 @@
+// Registry §1 and §3 fixtures. Python JSON and hashlib frame the intent and library roots.
+// Ed25519 signatures come from an independent signer, with distinct issuer and publisher keys.
+const ORIGIN: String = "https://pkg.hirsel.ai"
+
+const ISSUER: String = "https://token.actions.example"
+
+const FORGE_TWO: String = "https://ci.other.example"
+
+const SCOPE: String = "github.com/acme"
+
+const DOMAIN: String = "acme.dev"
+
+const ROOT_A: String = "3fa0b782d93c5e3eb44c73c26e2ba180862253051ca63e3f6c003f121e43dee9"
+
+const ROOT_B: String = "187d1e1208b41f7d6d91e120805544e5fe2fb6ceef85d14949f54e1b2b0b04be"
+
+const JWKS: String = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"ci\",\"x\":\"iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w\",\"alg\":\"EdDSA\"}]}"
+
+const OTHER_JWKS: String = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"ci\",\"x\":\"gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q\",\"alg\":\"EdDSA\"}]}"
+
+const PUBLIC_KEY: String = "7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E="
+
+const FIRST: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvcHVibGlzaC8zZmEwYjc4MmQ5M2M1ZTNlYjQ0YzczYzI2ZTJiYTE4MDg2MjI1MzA1MWNhNjNlM2Y2YzAwM2YxMjFlNDNkZWU5LzhhYmZiOTJkMjZjNjFlN2ZhNzlkYzljMjgyMTUyZDNlYzY4Y2E4Y2ZjYmEzMmFlZThmYmRjNDM5NTc4NjlmZGEiLCJleHAiOjIwMCwiaWF0Ijo5MCwibmJmIjo5MCwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3B1Ymxpc2gueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.366Ws_daY4yAZzmxuqY7pe4UI1n-jZtAhyH-bECMutltokKb8YurKw6RhVig61fwiw2KXQXBnKYGYEd1KcQFCA"
+
+const RENAME: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvcHVibGlzaC8zZmEwYjc4MmQ5M2M1ZTNlYjQ0YzczYzI2ZTJiYTE4MDg2MjI1MzA1MWNhNjNlM2Y2YzAwM2YxMjFlNDNkZWU5Lzc1MDkxNDNlMGEwMjI0MDQ0OTc5MGFhOTM5MDI3YTc3Njg0ZTY0OTczZDA3MTFlYThkYWM2MDhjMjVkNmJjYjIiLCJleHAiOjIwMCwiaWF0Ijo5MCwibmJmIjo5MCwicmVwb3NpdG9yeV9vd25lciI6InJlbmFtZWQiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeSI6InJlbmFtZWQvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJyZW5hbWVkL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3B1Ymxpc2gueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.MSsunG7r0vsM7lOgCYu944qVrWyJFb6lj7DxkXnnFjTZOXO9wShCFVRVBJLGpW9FIC2hlQmAU0gt9fdARiLxAw"
+
+const BAD_ISSUER: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL2NpLm90aGVyLmV4YW1wbGUiLCJhdWQiOiJodHRwczovL3BrZy5oaXJzZWwuYWkvaW50ZW50L3B1Ymxpc2gvM2ZhMGI3ODJkOTNjNWUzZWI0NGM3M2MyNmUyYmExODA4NjIyNTMwNTFjYTYzZTNmNmMwMDNmMTIxZTQzZGVlOS83NTA5MTQzZTBhMDIyNDA0NDk3OTBhYTkzOTAyN2E3NzY4NGU2NDk3M2QwNzExZWE4ZGFjNjA4YzI1ZDZiY2IyIiwiZXhwIjoyMDAsImlhdCI6OTAsIm5iZiI6OTAsInJlcG9zaXRvcnlfb3duZXIiOiJhY21lIiwicmVwb3NpdG9yeV9vd25lcl9pZCI6IjQyIiwicmVwb3NpdG9yeV9pZCI6IjEyMyIsInJlcG9zaXRvcnkiOiJhY21lL2J1aWxkIiwid29ya2Zsb3dfcmVmIjoiYWNtZS9idWlsZC8uZ2l0aHViL3dvcmtmbG93cy9wdWJsaXNoLnltbEByZWZzL2hlYWRzL21haW4ifQ.QBt8HZvkWbuSK3qdLCLyrnfXvOsf1ueCLwGKYRcEAkhNURthDTIT9-UnFkdIsgTe40LmZo2732WRcTueRPUpDQ"
+
+const OTHER_OWNER: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvcHVibGlzaC8zZmEwYjc4MmQ5M2M1ZTNlYjQ0YzczYzI2ZTJiYTE4MDg2MjI1MzA1MWNhNjNlM2Y2YzAwM2YxMjFlNDNkZWU5Lzc1MDkxNDNlMGEwMjI0MDQ0OTc5MGFhOTM5MDI3YTc3Njg0ZTY0OTczZDA3MTFlYThkYWM2MDhjMjVkNmJjYjIiLCJleHAiOjIwMCwiaWF0Ijo5MCwibmJmIjo5MCwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDMiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3B1Ymxpc2gueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.FXI5yMzw5lmpl6ctgEhAdW-umQDSGojt4a8gC9m6o00M9xrse8ICpoUtkb6MmkJ0Ef_3k-nAlcEyN-ubxy5CAA"
+
+const OTHER_REPO: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvcHVibGlzaC8zZmEwYjc4MmQ5M2M1ZTNlYjQ0YzczYzI2ZTJiYTE4MDg2MjI1MzA1MWNhNjNlM2Y2YzAwM2YxMjFlNDNkZWU5Lzc1MDkxNDNlMGEwMjI0MDQ0OTc5MGFhOTM5MDI3YTc3Njg0ZTY0OTczZDA3MTFlYThkYWM2MDhjMjVkNmJjYjIiLCJleHAiOjIwMCwiaWF0Ijo5MCwibmJmIjo5MCwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJyZXBvc2l0b3J5X2lkIjoiMTI0IiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL3B1Ymxpc2gueW1sQHJlZnMvaGVhZHMvbWFpbiJ9.qwi1UaTQEtccz9kmBb0WjqAx_NJCd6gAC1H9qZu1B8IkwmE7OQR4ratMBCLl38rXtj1JMUP-BmC9KXupJf8PAA"
+
+const OTHER_FLOW: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvcHVibGlzaC8zZmEwYjc4MmQ5M2M1ZTNlYjQ0YzczYzI2ZTJiYTE4MDg2MjI1MzA1MWNhNjNlM2Y2YzAwM2YxMjFlNDNkZWU5Lzc1MDkxNDNlMGEwMjI0MDQ0OTc5MGFhOTM5MDI3YTc3Njg0ZTY0OTczZDA3MTFlYThkYWM2MDhjMjVkNmJjYjIiLCJleHAiOjIwMCwiaWF0Ijo5MCwibmJmIjo5MCwicmVwb3NpdG9yeV9vd25lciI6ImFjbWUiLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNDIiLCJyZXBvc2l0b3J5X2lkIjoiMTIzIiwicmVwb3NpdG9yeSI6ImFjbWUvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJhY21lL2J1aWxkLy5naXRodWIvd29ya2Zsb3dzL290aGVyLnltbEByZWZzL2hlYWRzL21haW4ifQ.oaBmS-acgx9woZcaGSiOLZKjDE5n2AKNYfCiNxe-ueWnOoCKVHqTNdRvC8jXhJuyy5cARJIO9rvt6YoUSUpXCg"
+
+const EXTRA_AUD: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6WyJodHRwczovL3BrZy5oaXJzZWwuYWkvaW50ZW50L3B1Ymxpc2gvM2ZhMGI3ODJkOTNjNWUzZWI0NGM3M2MyNmUyYmExODA4NjIyNTMwNTFjYTYzZTNmNmMwMDNmMTIxZTQzZGVlOS83NTA5MTQzZTBhMDIyNDA0NDk3OTBhYTkzOTAyN2E3NzY4NGU2NDk3M2QwNzExZWE4ZGFjNjA4YzI1ZDZiY2IyIiwiZXh0cmEiXSwiZXhwIjoyMDAsImlhdCI6OTAsIm5iZiI6OTAsInJlcG9zaXRvcnlfb3duZXIiOiJhY21lIiwicmVwb3NpdG9yeV9vd25lcl9pZCI6IjQyIiwicmVwb3NpdG9yeV9pZCI6IjEyMyIsInJlcG9zaXRvcnkiOiJhY21lL2J1aWxkIiwid29ya2Zsb3dfcmVmIjoiYWNtZS9idWlsZC8uZ2l0aHViL3dvcmtmbG93cy9wdWJsaXNoLnltbEByZWZzL2hlYWRzL21haW4ifQ.9AlEHCNNEDYewRXcPgfyx34wyrJz2khcHXlNh3xi1i3SKsmA07guLaJPl4oq3hakYCdBxLuv99Igj1gEmud0BQ"
+
+const MOVE: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZXhhbXBsZSIsImF1ZCI6Imh0dHBzOi8vcGtnLmhpcnNlbC5haS9pbnRlbnQvc2NvcGUtcmViaW5kLy0vYmYzZmU2MmYyNGQwNTEzMDMzN2M1MGMyMTM0MDAwZGU5NTcwOWMyMzMxYTVkZDMyZDk2ZThjMGNmZjUwNTZkYiIsImV4cCI6MjAwLCJpYXQiOjkwLCJuYmYiOjkwLCJyZXBvc2l0b3J5X293bmVyIjoicmVuYW1lZCIsInJlcG9zaXRvcnlfb3duZXJfaWQiOiI0MiIsInJlcG9zaXRvcnlfaWQiOiIxMjMiLCJyZXBvc2l0b3J5IjoicmVuYW1lZC9idWlsZCIsIndvcmtmbG93X3JlZiI6InJlbmFtZWQvYnVpbGQvLmdpdGh1Yi93b3JrZmxvd3MvcHVibGlzaC55bWxAcmVmcy9oZWFkcy9tYWluIn0.nrimlQIBWNn2CtU5eh-U7EbF3M8IQP6AZZJUYhWS1H9RPpLfIeNPeYarF-hKfimA0p6BCXfd-N1UqmyzHSO5Bw"
+
+const AFTER_MOVE: String = "eyJhbGciOiJFZERTQSIsImtpZCI6ImNpIn0.eyJpc3MiOiJodHRwczovL2NpLm90aGVyLmV4YW1wbGUiLCJhdWQiOiJodHRwczovL3BrZy5oaXJzZWwuYWkvaW50ZW50L3B1Ymxpc2gvM2ZhMGI3ODJkOTNjNWUzZWI0NGM3M2MyNmUyYmExODA4NjIyNTMwNTFjYTYzZTNmNmMwMDNmMTIxZTQzZGVlOS84Zjc2NjM0MTBiYjQwYWFkNGE3ZTJhNjM2NTRkZWE2MjJiYzIzNmY1MjgyYzljZDIxZDZmYzczNzkwNzcxMGFjIiwiZXhwIjoyMDAsImlhdCI6OTAsIm5iZiI6OTAsInJlcG9zaXRvcnlfb3duZXIiOiJuZXciLCJyZXBvc2l0b3J5X293bmVyX2lkIjoiNyIsInJlcG9zaXRvcnlfaWQiOiI3NyIsInJlcG9zaXRvcnkiOiJuZXcvYnVpbGQiLCJ3b3JrZmxvd19yZWYiOiJuZXcvYnVpbGQvLmdpdGh1Yi93b3JrZmxvd3MvcHVibGlzaC55bWxAcmVmcy9oZWFkcy9tYWluIn0.GWfM6MO--9xScppETe6x9FPzI2suDb-mIovIsIcfNqqXwC16bUxvveIY4zB9o_D-2rFkHJ0ym45OZHThyLQ6Dw"
+
+const DOMAIN_SIG: String = "5BacQfgA/3BXBBIyXv19H0nS+tYcZX+SSoZQgwzK2VqfnI0tLqfWDeXMFZuwWxsB25Mk7ezlKAPskdDW+6APAw=="
+
+const STATUS_SIG: String = "zZo+1/ugXNNMKJm5bQdNqw0qmEKsGEUYSu5G9kqjeA7qRKM3adQKsDW6OvILSl1ujED3yaJf0aCScBx9+PAeBA=="
+
+const ORG_DOCUMENT: String = "{\"login\":\"acme\",\"id\":42,\"description\":\"Builds\\nhirsel-enroll-v1=5cac60070e70d573c9af42bf7702048d2e105201ce5c46acabd198aa471d8019\"}"
+
+const DOMAIN_DOCUMENT: String = "[\"hirsel-enroll-v1\",\"https://pkg.hirsel.ai\",\"acme.dev\",[[\"ed25519\",\"7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=\"]]]"
+
+const FIRST_INTENT: String = "[\"hirsel-intent-v1\",\"https://pkg.hirsel.ai\",\"publish\",\"github.com/acme\",\"0\",\"3fa0b782d93c5e3eb44c73c26e2ba180862253051ca63e3f6c003f121e43dee9\",[\"github.com/acme/pkg@1\",\"1.0.0\",\"fixture\",null,[[\"oidc\",\"https://token.actions.example\",\"owner/42\",\"123/.github/workflows/publish.yml@refs/heads/main\"]]]]"
+
+const FIRST_ROW: String = "[[\"oidc\",\"https://token.actions.example\",\"owner/42\",\"123/.github/workflows/publish.yml@refs/heads/main\"],\"8abfb92d26c61e7fa79dc9c282152d3ec68ca8cfcba32aee8fbdc43957869fda\",\"947382c4ace4d1b181de39c243ae2be38e6e7c50824dafabdf88fb83ba0107ad\",null]"
+
+const FIRST_EVIDENCE: String = "[\"https://token.actions.example\",\"https://api.github.com/orgs/acme\",[\"hirsel-enroll-v1\",\"https://pkg.hirsel.ai\",\"github.com/acme\",[[\"oidc\",\"https://token.actions.example\",\"owner/42\",\"123/.github/workflows/publish.yml@refs/heads/main\"]]]]"
+
+fn one(take s: Subject) -> List[Subject] {
+    let mut subjects: List[Subject] = list.new()
+    list.push(mut subjects, take s)
+    take subjects
+}
+
+fn ci_subject() -> Subject {
+    Workload(string.from(ISSUER), string.from("owner/42"), string.from("123/.github/workflows/publish.yml@refs/heads/main"))
+}
+
+fn moved_subject() -> Subject {
+    Workload(string.from(FORGE_TWO), string.from("repo/77"), string.from("77/.github/workflows/publish.yml@refs/heads/main"))
+}
+
+fn fixture_profile(issuer: String, document: String) -> Profile {
+    let f = Forge(issuer: clone(issuer), jwks_url: cat(issuer, "/keys"), allow: std.jwt.allow(EdDsa), host: "github.com", org_api: "https://api.github.com")
+    result.unwrap(load_keys(f, document))
+}
+
+fn release(scope: String, generation: u64, root: String, description: String, take set: Option[List[Subject]]) -> Intent {
+    let p = Publication(root: clone(root), identity: cat(scope, "/pkg@1"), version: "1.0.0", description: clone(description), source_commit: None, enrollment: take set)
+    Intent(origin: string.from(ORIGIN), scope: clone(scope), generation: generation, action: Publish(take p))
+}
+
+fn denied[T](take value: Result[T, Refusal]) -> bool {
+    match value {
+        Error(_) => true,
+        Ok(_) => false,
+    }
+}
+
+fn require(ok: bool, why: String) {
+    if !ok {
+        fail(clone(why))
+    }
+}
+
+fn decode_fixture(s: String) -> Bytes {
+    option.unwrap(std.base64.decode(string.as_bytes(s)))
+}
+
+fn bind_org(p: Profile) -> Authority {
+    let first = release(SCOPE, 0, ROOT_A, "fixture", Some(one(ci_subject())))
+    let v = result.unwrap(verify_workload(first, ci_subject(), FIRST, p, 100))
+    require(denied(confirm_document(first, v, "{}")), "a job cannot enroll its organization alone")
+    let wrong_line = std.string.replace(ORG_DOCUMENT, "hirsel-enroll", "prefix hirsel-enroll")
+    require(denied(confirm_document(first, v, wrong_line)), "delegation occupies a whole line")
+    let bad_owner = std.string.replace(ORG_DOCUMENT, "42,", "43,")
+    require(denied(confirm_document(first, v, bad_owner)), "org API and JWT must agree on the numeric owner")
+    let evidence = result.unwrap(confirm_document(first, v, ORG_DOCUMENT))
+    let admit = result.unwrap(authorize(ORIGIN, first, Unclaimed, v, Some(take evidence), None, 100))
+    // These are the complete bytes for the immutable sidecars and the public auth log field.
+    // Compare against independent wire fixtures, including ordinary SHA-256 of the whole compact token.
+    require(admit.intent == FIRST_INTENT && admit.auth == FIRST_ROW && admit.enrollment_evidence == Some(string.from(FIRST_EVIDENCE)), "G13: only public evidence and token digest cross admission")
+    require(std.string.find(admit.intent, 0, FIRST) == None && std.string.find(admit.auth, 0, FIRST) == None && std.string.find(FIRST_EVIDENCE, 0, FIRST) == None, "G13: a live bearer cannot occur in a durable write")
+    option.unwrap(clone(admit.next_authority))
+}
+
+fn oidc_authority() {
+    let p = fixture_profile(ISSUER, JWKS)
+    let current = bind_org(p)
+    let intent = release(SCOPE, 1, ROOT_A, "fixture", None)
+    let v = result.unwrap(verify_workload(intent, ci_subject(), RENAME, p, 100))
+    let state = Committed(clone(current))
+    let admitted = result.unwrap(authorize(ORIGIN, intent, state, v, None, None, 100))
+    require(admitted.intent == result.unwrap(intent_wire(intent)), "renamed org retains its original scope")
+    let other = release(SCOPE, 1, ROOT_B, "fixture", None)
+    require(denied(verify_workload(other, ci_subject(), RENAME, p, 100)), "a genuine A token refuses B")
+    let changed = release(SCOPE, 1, ROOT_A, "changed", None)
+    require(denied(verify_workload(changed, ci_subject(), RENAME, p, 100)), "metadata binds the token")
+    let mut elsewhere: Intent = clone(intent)
+    elsewhere.origin = string.from("https://registry.other")
+    require(denied(verify_workload(elsewhere, ci_subject(), RENAME, p, 100)), "origin binds audience")
+    require(denied(authorize("https://registry.other", intent, state, v, None, None, 100)), "receiver checks its configured origin")
+    require(denied(verify_workload(intent, ci_subject(), BAD_ISSUER, p, 100)), "pinned issuer")
+    require(denied(verify_workload(intent, ci_subject(), OTHER_REPO, p, 100)), "signed repository id binds workflow")
+    require(denied(verify_workload(intent, ci_subject(), OTHER_FLOW, p, 100)), "exact workflow ref")
+    require(denied(verify_workload(intent, ci_subject(), OTHER_OWNER, p, 100)), "a recycled login cannot replace numeric owner")
+    require(denied(verify_workload(intent, ci_subject(), EXTRA_AUD, p, 100)), "single intent audience")
+    require(denied(verify_workload(intent, ci_subject(), RENAME, p, 200)), "expiry boundary")
+    let mut move_intent: Intent = clone(intent)
+    move_intent.action = Rebind(one(moved_subject()))
+    let mover = result.unwrap(verify_workload(move_intent, ci_subject(), MOVE, p, 100))
+    let moved = result.unwrap(authorize(ORIGIN, move_intent, state, mover, None, None, 100))
+    let next: Authority = option.unwrap(clone(moved.next_authority))
+    require(next.scope == SCOPE && next.generation == 2 && list.len(next.subjects) == 1 && member(next.subjects, moved_subject()), "rebind replaces only subjects and increments generation")
+    let new_state = Committed(take next)
+    require(denied(authorize(ORIGIN, move_intent, new_state, mover, None, None, 100)), "replay of previous generation")
+    let after = release(SCOPE, 2, ROOT_A, "fixture", None)
+    let moved_profile = fixture_profile(FORGE_TWO, OTHER_JWKS)
+    let proof = result.unwrap(verify_workload(after, moved_subject(), AFTER_MOVE, moved_profile, 100))
+    let _ = result.unwrap(authorize(ORIGIN, after, new_state, proof, None, None, 100))
+}
+
+fn key_authority() {
+    let key = decode_fixture(PUBLIC_KEY)
+    let first = release(DOMAIN, 0, ROOT_A, "fixture", Some(one(SigningKey(clone(key)))))
+    let v = result.unwrap(verify_key(first, key, decode_fixture(DOMAIN_SIG)))
+    require(denied(authorize(ORIGIN, first, Unclaimed, v, None, None, 100)), "first-use signature still needs domain endorsement")
+    require(denied(confirm_document(first, v, cat(DOMAIN_DOCUMENT, "\n"))), "well-known enrollment requires canonical bytes")
+    let doc = result.unwrap(confirm_document(first, v, DOMAIN_DOCUMENT))
+    let prior = Authority(scope: string.from(DOMAIN), generation: 0, subjects: one(ci_subject()))
+    require(denied(authorize(ORIGIN, first, Reserved(take prior), v, None, None, 100)), "a new well-known key cannot replace a reservation")
+    let accepted = result.unwrap(authorize(ORIGIN, first, Unclaimed, v, Some(take doc), None, 100))
+    let current: Authority = option.unwrap(clone(accepted.next_authority))
+    require(denied(authorize(ORIGIN, first, Committed(clone(current)), v, None, None, 100)), "a committed domain cannot be enrolled again")
+    let status = Intent(origin: string.from(ORIGIN), scope: string.from(DOMAIN), generation: 1, action: ChangeStatus(string.from(ROOT_A), None, Retire(string.from("security"), string.from("broken"))))
+    let proof = result.unwrap(verify_key(status, key, decode_fixture(STATUS_SIG)))
+    let mut head = StatusHead(scope: string.from(DOMAIN), root: string.from(ROOT_A), previous_event: None)
+    let state = Committed(take current)
+    let row = result.unwrap(authorize(ORIGIN, status, state, proof, None, Some(clone(head)), 100))
+    require(std.string.ends_with(row.auth, cat(cat(",null,", quoted(STATUS_SIG)), "]")), "direct Ed25519 proof carries only the public signature")
+    head.previous_event = Some(string.from(ROOT_B))
+    require(denied(authorize(ORIGIN, status, state, proof, None, Some(take head), 100)), "status predecessor replay")
+}
+
+@test
+fn publisher_authority() -> Result[(), ()] {
+    oidc_authority()
+    key_authority()
+    Ok(())
+}

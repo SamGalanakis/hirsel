@@ -1,0 +1,184 @@
+// Administrator configuration. This profile uses GitHub Actions claim semantics,
+// including on a configured enterprise forge. No URL comes from a token.
+pub type Forge: shareable + send {
+    issuer: String,
+    jwks_url: String,
+    allow: std.jwt.Allow,
+    host: String,
+    org_api: String
+}
+
+pub opaque type Profile: shareable + send {
+    forge: Forge,
+    keys: std.jwt.PublicKeys
+}
+
+pub opaque type Verified {
+    intent_digest: String,
+    subject: Subject,
+    expires: Option[u64],
+    token_sha256: Option[String],
+    signature: Option[String],
+    organization: Option[Organization]
+}
+
+type Organization {
+    login: String,
+    id: String,
+    host: String,
+    org_api: String
+}
+
+fn positive(s: String) -> bool {
+    if s == "" || std.string.starts_with(s, "0") {
+        return false
+    }
+    for b in string.as_bytes(s) {
+        if !int.is_ascii_digit(b) {
+            return false
+        }
+    }
+    true
+}
+
+fn valid_selector(s: String) -> bool {
+    let Some((repo_id, selector)) = std.string.split_once(s, "/") else {
+        return false
+    }
+    let Some((path, branch)) = std.string.split_once(selector, "@refs/") else {
+        return false
+    }
+    positive(repo_id) && path != "" && branch != "" && !std.string.starts_with(path, "/")
+}
+
+fn valid_subject(s: Subject) -> bool {
+    match s {
+        Workload(issuer, id, workflow) => {
+            let Some((kind, number)) = std.string.split_once(id, "/") else {
+                return false
+            }
+            https_url(issuer) && (kind == "owner" || kind == "repo") && positive(number) && valid_selector(workflow)
+        },
+        SigningKey(key) => match std.jwt.ed25519_key(clone(key)) {
+            Ok(_) => true,
+            Error(_) => false,
+        },
+    }
+}
+
+fn https_url(url: String) -> bool {
+    let Ok(parsed) = std.uri.parse(url) else {
+        return false
+    }
+    std.string.starts_with(url, "https://") && parsed.host != None && parsed.userinfo == None && parsed.fragment == None
+}
+
+fn asymmetric(a: std.jwt.Alg) -> bool {
+    match a {
+        Rs256 => true,
+        Es256 => true,
+        EdDsa => true,
+        _ => false,
+    }
+}
+
+fn load_keys(f: Forge, document: String) -> Result[Profile, Refusal] {
+    if !https_url(f.issuer) || !https_url(f.jwks_url) || !https_url(f.org_api) || !dns_name(f.host) || !asymmetric(f.allow.first) {
+        return Error(Unauthorized)
+    }
+    for alg in f.allow.rest {
+        if !asymmetric(alg) {
+            return Error(Unauthorized)
+        }
+    }
+    let Ok(keys) = std.jwt.jwks_public(document) else {
+        return Error(Unauthorized)
+    }
+    if std.jwt.public_len(keys) == 0 {
+        return Error(Unauthorized)
+    }
+    Ok(Profile(forge: clone(f), keys: take keys))
+}
+
+pub fn fetch_profile(client: Lookup, f: Forge, deadline_ns: u64) -> Result[Profile, Refusal] waits {
+    let document = fetch_document(client, f.jwks_url, deadline_ns)?
+    load_keys(f, document)
+}
+
+type WorkflowClaims {
+    owner: String,
+    owner_id: String,
+    repository: String,
+    repo_id: String,
+    workflow: String
+}
+
+fn read_workflow(s: String, mut c: std.json.Cursor) -> Result[WorkflowClaims, std.json.Error] {
+    let seed = WorkflowClaims(owner: string.new(), owner_id: string.new(), repository: string.new(), repo_id: string.new(), workflow: string.new())
+    std.json.record_of(s, mut c, take seed, fn(k: String, text: String, mut v: std.json.Cursor, mut claims: WorkflowClaims) -> Result[(), std.json.Error] {
+        if k == "repository_owner" {
+            claims.owner = std.json.read_string(text, mut v)?
+        } else if k == "repository_owner_id" {
+            claims.owner_id = std.json.read_string(text, mut v)?
+        } else if k == "repository" {
+            claims.repository = std.json.read_string(text, mut v)?
+        } else if k == "repository_id" {
+            claims.repo_id = std.json.read_string(text, mut v)?
+        } else if k == "workflow_ref" {
+            claims.workflow = std.json.read_string(text, mut v)?
+        } else {
+            std.json.skip_value(text, mut v)?
+        }
+        Ok(())
+    })
+}
+
+pub fn verify_workload(i: Intent, requested: Subject, token: String, p: Profile, now: u64) -> Result[Verified, Refusal] {
+    let Workload(issuer, id, selector) = view requested else {
+        return Error(Unauthorized)
+    }
+    if issuer != p.forge.issuer || !valid_subject(requested) {
+        return Error(Unauthorized)
+    }
+    let rules = std.jwt.Rules(allow: clone(p.forge.allow), now_secs: now, leeway_secs: 0, iss: Some(clone(issuer)), aud: Some(audience(i)?), require_exp: true)
+    let Ok(jwt) = std.jwt.verify_jwt_public(token, rules, p.keys) else {
+        return Error(Unauthorized)
+    }
+    if list.len(jwt.claims.aud) != 1 || jwt.claims.iat == None {
+        return Error(Unauthorized)
+    }
+    let Ok(c) = std.json.decode(jwt.claims.json, read_workflow) else {
+        return Error(Unauthorized)
+    }
+    let Some((owner, name)) = std.string.split_once(c.repository, "/") else {
+        return Error(Unauthorized)
+    }
+    let Some(path) = std.string.strip_prefix(c.workflow, cat(c.repository, "/")) else {
+        return Error(Unauthorized)
+    }
+    if c.owner == "" || owner != c.owner || name == "" || std.string.find(name, 0, "/") != None || !positive(c.owner_id) || !positive(c.repo_id) {
+        return Error(Unauthorized)
+    }
+    if cat(cat(c.repo_id, "/"), path) != selector || (id != cat("owner/", c.owner_id) && id != cat("repo/", c.repo_id)) {
+        return Error(Unauthorized)
+    }
+    let org = Organization(login: clone(c.owner), id: clone(c.owner_id), host: clone(p.forge.host), org_api: clone(p.forge.org_api))
+    Ok(Verified(intent_digest: digest(intent_wire(i)?), subject: clone(requested), expires: jwt.claims.exp, token_sha256: Some(digest(token)), signature: None, organization: Some(take org)))
+}
+
+pub fn verify_key(i: Intent, key: Bytes, signature: Bytes) -> Result[Verified, Refusal] {
+    let wire = intent_wire(i)?
+    let subject = SigningKey(clone(key))
+    if !valid_subject(subject) || list.len(signature) != 64 || !ed25519.verify(key, string.as_bytes(wire), signature) {
+        return Error(Unauthorized)
+    }
+    Ok(Verified(intent_digest: digest(wire), subject: take subject, expires: None, token_sha256: None, signature: Some(std.base64.encode_string(signature)), organization: None))
+}
+
+fn auth_row(v: Verified) -> String {
+    let mut out = cat("[", subject_wire(v.subject))
+    field(mut out, quoted(v.intent_digest))
+    field(mut out, nullable(v.token_sha256))
+    field(mut out, nullable(v.signature))
+    cat(out, "]")
+}

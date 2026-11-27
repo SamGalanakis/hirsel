@@ -27,6 +27,10 @@ pub(super) fn parse(l: &mut Line<'_>, defs: &[ValueId]) -> R<Inst> {
         AllocPlace::Region(l.value()?)
     } else if l.eat("lent_frame") {
         AllocPlace::LentFrame(l.value()?)
+    } else if l.eat("file_buffer") {
+        AllocPlace::FileBuffer
+    } else if l.eat("file_partner") {
+        AllocPlace::FilePartner(l.value()?)
     } else if l.eat("byte_head") {
         AllocPlace::ByteHead
     } else if l.eat("byte_tail") {
@@ -50,4 +54,17 @@ pub(super) fn parse(l: &mut Line<'_>, defs: &[ValueId]) -> R<Inst> {
         size,
         align,
     })
+}
+
+pub(super) fn format_place(place: AllocPlace) -> String {
+    match place {
+        AllocPlace::Current => String::new(),
+        AllocPlace::Like(b) => format!(" like v{}", b.0),
+        AllocPlace::Region(r) => format!(" in v{}", r.0),
+        AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
+        AllocPlace::FileBuffer => " file_buffer".into(),
+        AllocPlace::FilePartner(r) => format!(" file_partner v{}", r.0),
+        AllocPlace::ByteHead => " byte_head".into(),
+        AllocPlace::ByteTail(r) => format!(" byte_tail v{}", r.0),
+    }
 }

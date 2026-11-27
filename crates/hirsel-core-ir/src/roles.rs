@@ -810,10 +810,11 @@ impl<'a> Seal<'a> {
                 }
                 match place {
                     AllocPlace::Like(v) => self.used(v, Use::Block),
-                    AllocPlace::Region(v) | AllocPlace::LentFrame(v) | AllocPlace::ByteTail(v) => {
-                        self.used(v, Use::Other)
-                    }
-                    AllocPlace::Current | AllocPlace::ByteHead => {}
+                    AllocPlace::Region(v)
+                    | AllocPlace::LentFrame(v)
+                    | AllocPlace::ByteTail(v)
+                    | AllocPlace::FilePartner(v) => self.used(v, Use::Other),
+                    AllocPlace::Current | AllocPlace::ByteHead | AllocPlace::FileBuffer => {}
                 }
                 self.used(charge, Use::Other);
                 self.used(size, Use::Other);

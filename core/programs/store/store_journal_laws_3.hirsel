@@ -152,7 +152,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         advance_frame_offset(mut state, size)
     })
-    handoff(mut db, Some(take raw))?
+    handoff(mut db, Some(Detached(take raw)))?
     Ok(commit_ticket)
 }
 

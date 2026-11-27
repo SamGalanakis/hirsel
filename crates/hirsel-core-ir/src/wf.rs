@@ -1131,7 +1131,8 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             if let AllocPlace::Like(v)
             | AllocPlace::Region(v)
             | AllocPlace::LentFrame(v)
-            | AllocPlace::ByteTail(v) = place
+            | AllocPlace::ByteTail(v)
+            | AllocPlace::FilePartner(v) = place
             {
                 c.is(v, Ty::Ptr)?;
             }
@@ -1145,16 +1146,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                     "lent frame bytes back only sequence storage".into()
                 })?;
             }
-            if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
-                need(
-                    align == 8
-                        && matches!(
-                            edge,
-                            Some(F::Seq(item)) if **item == F::Scalar(Scalar::U8)
-                        ),
-                    || "split byte backing requires a word-aligned byte sequence".into(),
-                )?;
-            }
+            places::check_byte_backing(place, align, edge)?;
             // Region storage is stable and stable storage is in a region (crate docs,
             // "Cleanup classes"); an own block names the edge that will own it.
             need(

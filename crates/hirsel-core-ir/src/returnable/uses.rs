@@ -67,7 +67,8 @@ pub(super) fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> I
             if let AllocPlace::Like(x)
             | AllocPlace::Region(x)
             | AllocPlace::LentFrame(x)
-            | AllocPlace::ByteTail(x) = place
+            | AllocPlace::ByteTail(x)
+            | AllocPlace::FilePartner(x) = place
             {
                 *x = f(*x);
             }

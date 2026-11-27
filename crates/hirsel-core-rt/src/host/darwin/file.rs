@@ -4,6 +4,14 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
+pub(crate) fn allocate_buffer(
+    _: &crate::Context,
+    _: Option<usize>,
+    _: usize,
+) -> Option<std::ptr::NonNull<u8>> {
+    None
+}
+
 fn checked(rc: isize) -> io::Result<isize> {
     if rc < 0 {
         Err(io::Error::last_os_error())

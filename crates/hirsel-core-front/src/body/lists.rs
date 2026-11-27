@@ -512,24 +512,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_with_capacity_at(item, count, result, AllocPlace::Current, 8, n)
     }
 
-    pub(super) fn bytes_from_tail(
-        &mut self,
-        head: ValueId,
-        count: ValueId,
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let item = scalar(Scalar::U8);
-        let carrier = self.list_carrier(item, n)?;
-        let cap = self.carrier_word(head, carrier, SeqWord::Cap, n);
-        let data = self.carrier_word(head, carrier, SeqWord::Data, n);
-        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        let null = self.konst(Ty::Ptr, 0, n)?;
-        let owns = self.list_compare(CompareOp::Ne, cap, zero, n);
-        let key = self.list_choose(owns, data, null, n);
-        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), 8, n)
-    }
-
     pub(super) fn list_with_capacity_at(
         &mut self,
         item: TyId,

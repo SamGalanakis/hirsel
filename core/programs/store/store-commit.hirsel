@@ -108,7 +108,7 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
     }
 }
 
-fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> (Outcome[R, A], Option[Bytes]) {
+fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> (Outcome[R, A], Option[format.DraftFrame]) {
     db.call_streams.keyed_credit = txn.draft_credit(db.call_streams.keyed_credit, ran.keyed)
     if i == 0u64 {
         for reply_slot in 0u64 .. pages.data_row_count(ran.replies) {
@@ -142,7 +142,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
                 pager.admit_dirty(mut state.tiered, branch_id, take written)
             }
             let size = match frame {
-                Some(raw) => list.len(raw),
+                Some(raw) => format.frame_length(raw),
                 None => 0u64
             }
             advance_frame_offset(mut state, size)
@@ -250,7 +250,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[(Admitt
     }
     if is_disk(db) {
         let refusal = match ran.frame {
-            Some(raw) => txn.journal_refusal(queue_accounting(disk_state(db)).uncovered, list.len(raw), txn.available_journal(disk_state(db).options.journal_limit, txn.draft_credit(db.call_streams.keyed_credit, ran.keyed))),
+            Some(raw) => txn.journal_refusal(queue_accounting(disk_state(db)).uncovered, format.frame_length(raw), txn.available_journal(disk_state(db).options.journal_limit, txn.draft_credit(db.call_streams.keyed_credit, ran.keyed))),
             None => None,
         }
         if let Some(overflow) = refusal {
@@ -285,7 +285,10 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[(Admitt
         Ready(take ready, take plan) => (take ready, take plan),
         OverLimit(take rejected, problem) => return Ok((OverLimit(take rejected, problem), None)),
     }
-    let cut = txn.settlement_cut(db.accounting, admitted.tiered, admitted.frame != None)
+    let cut = txn.settlement_cut(db.accounting, admitted.tiered, match admitted.frame {
+        Some(_) => true,
+        None => false
+    })
     Ok((Ready(take admitted, take publication), Some(cut)))
 }
 
@@ -300,17 +303,29 @@ fn settle_and_wait[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admi
     }
     let mut draft = take admitted
     if let NoCut = decision {} else {
+        if let Some(InGroup(n)) = draft.frame {
+            let saved = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+                failure_result_from_rep(types.capacity(journal.copy_draft(journal.draft_group(dir_state(disk_state(db))), n)))
+            })
+            match take saved {
+                Ok(take raw) => {
+                    draft.frame = Some(Detached(take raw))
+                },
+                Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+                Error(take problem) => return Error(take problem),
+            }
+        }
         match cut_install(mut db, NoHolderChange) {
             Ok(_) => {},
             Error(Full(c)) => return Ok(OverLimit(take draft, c)),
             Error(take e) => return Error(take e)
         }
-        if let (Reseal, Some(take frame)) = (decision, replace(mut draft.frame, None)) {
+        if let (Reseal, Some(Detached(take frame))) = (decision, replace(mut draft.frame, None)) {
             let mut raw = take frame
             if let Error(c) = format.seal_frame(mut raw, format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: file_seq(db)), file_end(db)) {
                 return Ok(OverLimit(take draft, Allocation(c)))
             }
-            draft.frame = Some(take raw)
+            draft.frame = Some(Detached(take raw))
         }
     }
     wait_for_frame_room(mut db, draft.frame)?
@@ -339,27 +354,6 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
             Ok(take outcome)
         },
         OverLimit(_, c) => Ok(Refused(c)),
-    }
-}
-
-fn frame_draft[R, A](db: Db, base: pages.PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
-    match take finished {
-        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
-        DraftFault(take problem) => Ok(DraftFault(take problem)),
-        Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
-        Prepared(take ready) => {
-            let mut prepared = take ready
-            let skipped = draft_is_empty(db, force_frame, rec, settlement, prepared)
-            prepared.skipped = skipped
-            if !skipped && is_disk(db) {
-                let deltas: Option[View[List[Option[format.TieredDataDelta]]]] = match prepared.plan {
-                    Some(plan) => Some(view plan.deltas),
-                    None => None,
-                }
-                prepared.frame = Some(encode_staged(ci, Some(view base), Some(prepared.base_stamp), deltas, mut prepared.ops, prepared.order, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, file_seq(db), file_end(db), db.limits.frame)?)
-            }
-            Ok(Prepared(take prepared))
-        },
     }
 }
 

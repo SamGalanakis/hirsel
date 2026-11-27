@@ -270,6 +270,8 @@ void hirsel_core_frame_refund(const HirselCoreContext *, uint64_t bytes);
 HirselCoreAllocation hirsel_core_admit_lent_frame(const HirselCoreContext *, uint8_t *frame, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_head(const HirselCoreContext *, size_t bytes, uint64_t charge, bool charge_overflow);
 HirselCoreAllocation hirsel_core_alloc_byte_tail(const HirselCoreContext *, uint8_t *head, size_t bytes, uint64_t charge, bool charge_overflow);
+HirselCoreAllocation hirsel_core_alloc_file_buffer(const HirselCoreContext *, size_t bytes, uint64_t charge, bool charge_overflow);
+HirselCoreAllocation hirsel_core_alloc_file_partner(const HirselCoreContext *, uint8_t *head, size_t bytes, uint64_t charge, bool charge_overflow);
 uint8_t *hirsel_core_promote_frame_list(const HirselCoreContext *, uint8_t *data, uint64_t capacity, uint64_t len, size_t stride);
 /* Physical backing for a block already admitted by the current task. */
 void *hirsel_core_alloc_admitted(const HirselCoreContext *, HirselCoreLimitRecord *, size_t bytes,

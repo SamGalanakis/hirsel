@@ -4,6 +4,8 @@ use hirsel_core_net::{FileRequest, file_ring::FileRing};
 use std::cell::Cell;
 use std::{io, os::fd::RawFd};
 
+pub(crate) use crate::task_heap::file_buffers::allocate as allocate_buffer;
+
 thread_local! {
     static TIED: io::Result<Option<FileRing>> = hirsel_core_net::reactor().and_then(|backend| {
         if backend.completes_files() {
@@ -105,6 +107,13 @@ pub(crate) fn write_part(
 ) -> io::Result<usize> {
     if ring {
         return with_ring(|issuer| {
+            if align == crate::provider::DIRECT_ALIGNMENT
+                && let Some(pair) = crate::task_heap::file_buffers::registration(bytes)
+            {
+                // Registration is an optimization. A busy issuer or a pin
+                // limit leaves the ordinary Direct write available.
+                let _ = issuer.register_buffers(&pair);
+            }
             let len = bytes.len().min(i32::MAX as usize & !(align as usize - 1));
             let entry =
                 issuer.write_entry(fd, &bytes[..len], offset.map_or(u64::MAX, |at| at as u64));

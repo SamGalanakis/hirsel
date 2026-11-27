@@ -6,6 +6,7 @@
 //! returned slots, and an outstanding slot pins its page until collection.
 mod dedicated;
 mod idle;
+mod page;
 pub(crate) use idle::{has_retaining, idle_wait, purge};
 mod returns;
 pub(crate) mod slabs;
@@ -245,13 +246,15 @@ struct Spread {
 enum Backing {
     Slab(slabs::Slab),
     Dedicated(slabs::Extent),
+    #[cfg(target_os = "linux")]
+    File(file_buffers::Backing),
 }
 
 impl Backing {
     fn dedicated(&self) -> &slabs::Extent {
         match self {
             Self::Dedicated(extent) => extent,
-            Self::Slab(_) => unreachable!("expected dedicated backing"),
+            _ => unreachable!("expected a reusable dedicated extent"),
         }
     }
 }
@@ -349,44 +352,7 @@ impl Page {
                 slabs::Extent::allocate(heap.shard, class.stride, class.align.max(SLAB), headroom);
             (Backing::Dedicated(extent), start)
         };
-        let data = Self {
-            heap: Arc::clone(heap),
-            returned: returns::Inbox::new(),
-            backing,
-            dedicated_payer: dedicated_payer
-                .map_or_else(MaybeUninit::uninit, MaybeUninit::new)
-                .into(),
-            payer_delta: (class.payer_offset as usize).into(),
-            class: class.into(),
-            slots: Self::slots(start, class).into(),
-            spread: Spread::default().into(),
-        };
-        if slab {
-            let page: PagePointer = start.cast();
-            // SAFETY: the start of a new slab has room for its aligned descriptor.
-            unsafe { page.as_ptr().write(data) };
-            page
-        } else {
-            let page = NonNull::from(Box::leak(Box::new(data)));
-            // SAFETY: the boxed descriptor has a stable address and has
-            // yet to publish the mapping's sole payload.
-            unsafe {
-                let header = page.as_ref();
-                let payer_address = header.dedicated_payer.get().addr();
-                header
-                    .payer_delta
-                    .get()
-                    .write(payer_address.wrapping_sub(start.addr().get()));
-            }
-            dedicated_index(start)
-                .lock()
-                .unwrap()
-                .get_or_insert_with(|| {
-                    HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
-                })
-                .insert(start.addr().get(), IndexedPage(page));
-            page
-        }
+        Self::with_backing(heap, class, dedicated_payer, backing, start)
     }
 
     fn slots(start: NonNull<u8>, class: Class) -> Slots {
@@ -472,12 +438,14 @@ impl Page {
                         slab.dispose();
                     }
                 }
-                Backing::Dedicated(_) => unreachable!("only slabs are disposed here"),
+                _ => unreachable!("only slabs are disposed here"),
             }
         } else if let Some(memory) = crate::units::memory() {
             match page.backing {
                 Backing::Slab(slab) => memory.put_slab(slab),
                 Backing::Dedicated(mapping) => memory.put_page(mapping),
+                #[cfg(target_os = "linux")]
+                Backing::File(_) => (),
             }
         } else {
             drop(page.backing);
@@ -1206,7 +1174,9 @@ pub(crate) unsafe fn try_grow_in_place(
             return false;
         }
         let class = Class::dedicated(bytes, align, kind, true);
-        let backing = header.backing.dedicated();
+        let Backing::Dedicated(backing) = &header.backing else {
+            return false;
+        };
         let reused_reservation = class.stride <= backing.extent(payload);
         if !backing.extend(payload, class.stride) {
             return false;
@@ -1542,6 +1512,11 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
         slots.live -= 1;
         let heap = state.0;
         if payload.addr().get() & (SLAB - 1) == 0 {
+            #[cfg(target_os = "linux")]
+            if matches!(page.as_ref().backing, Backing::File(_)) {
+                Page::destroy(page);
+                return;
+            }
             let mut cache = heap.cache().lock().unwrap();
             if crate::units::memory().is_some() {
                 cache.dedicated.return_to_pool(page);
@@ -2427,3 +2402,6 @@ thread_local! {
 
 #[cfg(feature = "memcheck")]
 mod allocation_check;
+
+#[cfg(target_os = "linux")]
+pub(crate) mod file_buffers;

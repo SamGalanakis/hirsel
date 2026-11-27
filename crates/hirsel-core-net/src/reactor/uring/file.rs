@@ -19,8 +19,34 @@ use std::{
 pub struct FileBuffers(Arc<Buffers>);
 
 struct Buffers {
-    maps: [Mapping; 2],
+    maps: [BufferMapping; 2],
     owned: AtomicBool,
+}
+
+struct BufferMapping {
+    allocation: Mapping,
+    offset: usize,
+    len: usize,
+}
+
+impl BufferMapping {
+    fn new(len: usize, align: usize) -> io::Result<Self> {
+        let mapped = len
+            .checked_add(align - 1)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOMEM))?;
+        let allocation = Mapping::new(mapped)?;
+        let offset = allocation.base.addr().wrapping_neg() & (align - 1);
+        Ok(Self {
+            allocation,
+            offset,
+            len,
+        })
+    }
+
+    fn base(&self) -> *mut u8 {
+        // SAFETY: the mapping includes at least align - 1 spare bytes.
+        unsafe { self.allocation.base.add(self.offset) }
+    }
 }
 
 impl Drop for FileBuffers {
@@ -31,10 +57,19 @@ impl Drop for FileBuffers {
 
 impl FileBuffers {
     pub fn new(bytes_per_buffer: usize) -> io::Result<Self> {
+        Self::new_aligned(bytes_per_buffer, 1)
+    }
+
+    /// Each payload starts at the requested power-of-two alignment. Only
+    /// payload bytes are pinned when an issuer registers the pair.
+    pub fn new_aligned(bytes_per_buffer: usize, align: usize) -> io::Result<Self> {
+        if !align.is_power_of_two() || bytes_per_buffer == 0 {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
         Ok(Self(Arc::new(Buffers {
             maps: [
-                Mapping::new(bytes_per_buffer)?,
-                Mapping::new(bytes_per_buffer)?,
+                BufferMapping::new(bytes_per_buffer, align)?,
+                BufferMapping::new(bytes_per_buffer, align)?,
             ],
             owned: AtomicBool::new(true),
         })))
@@ -45,7 +80,40 @@ impl FileBuffers {
         // SAFETY: FileBuffers is the only writer. Issuer references keep the
         // mappings alive and only inspect their addresses. Writes borrow
         // the bytes until their CQE.
-        unsafe { std::slice::from_raw_parts_mut(mapping.base, mapping.len) }
+        unsafe { std::slice::from_raw_parts_mut(mapping.base(), mapping.len) }
+    }
+}
+
+/// One independently owned payload. Its partner and any issuers retain
+/// the mappings. Only the owner of this half can modify its bytes.
+pub struct FileBuffer {
+    pair: Arc<FileBuffers>,
+    slot: usize,
+}
+
+impl FileBuffers {
+    pub fn split(self) -> [FileBuffer; 2] {
+        let pair = Arc::new(self);
+        [
+            FileBuffer {
+                pair: pair.clone(),
+                slot: 0,
+            },
+            FileBuffer { pair, slot: 1 },
+        ]
+    }
+}
+
+impl FileBuffer {
+    pub fn pair(&self) -> &Arc<FileBuffers> {
+        &self.pair
+    }
+
+    pub fn bytes(&mut self) -> &mut [u8] {
+        let map = &self.pair.0.maps[self.slot];
+        // SAFETY: split consumed the original mutable owner and created
+        // exactly one FileBuffer per slot. Issuers only retain the mapping.
+        unsafe { std::slice::from_raw_parts_mut(map.base(), map.len) }
     }
 }
 
@@ -238,7 +306,7 @@ impl FileRing {
         let len = u32::try_from(bytes.len()).expect("file write exceeds SQE length");
         if let Some(buffers) = &self.state.borrow().registered
             && let Some(slot) = buffers.maps.iter().position(|mapping| {
-                let start = mapping.base.addr();
+                let start = mapping.base().addr();
                 addr.checked_sub(start).is_some_and(|offset| {
                     offset < mapping.len && bytes.len() <= mapping.len - offset
                 })
@@ -270,7 +338,7 @@ impl FileRing {
             state.registered = None;
         }
         let iov = buffers.0.maps.each_ref().map(|m| libc::iovec {
-            iov_base: m.base.cast(),
+            iov_base: m.base().cast(),
             iov_len: m.len,
         });
         // SAFETY: the issuer retains these mappings until replacement or close.

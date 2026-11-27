@@ -20,3 +20,15 @@ pub fn from_tail(mut head: Bytes, n: u64) -> Bytes
 /// Appends src[start .. end] from Inline[u8, N] when the range and spare
 /// capacity both fit. Returns false with the destination unchanged otherwise.
 pub fn append_inline[A: plain](mut out: Bytes, src: A, start: u64, end: u64) -> bool
+
+/// Two independently owned 4096-aligned buffers for Direct file writes.
+/// Each has capacity n and the charge of list.with_capacity(n).
+pub fn file_pair(n: u64) -> (Bytes, Bytes) {
+    let mut first = file_buffer(n)
+    let second = file_partner(mut first, n)
+    (take first, take second)
+}
+
+fn file_buffer(n: u64) -> Bytes
+
+fn file_partner(mut first: Bytes, n: u64) -> Bytes

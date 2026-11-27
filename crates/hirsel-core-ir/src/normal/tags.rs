@@ -325,6 +325,8 @@ tags!(AllocPlace {
     4 => LentFrame(part0),
     5 => ByteHead,
     6 => ByteTail(part0),
+    7 => FileBuffer,
+    8 => FilePartner(part0),
 });
 
 tags!(Counted {

@@ -25,8 +25,8 @@ fn builtin_arity(module: &str, name: &str) -> Option<(usize, usize)> {
         ("list" | "deque" | "heap", "slots_move" | "slots_list_move") => (1, 5),
         ("int" | "string" | "list" | "deque", "work_steps") => (0, 2),
         ("bytebuf", "append_inline") => (1, 4),
-        ("bytebuf", "freeze" | "as_bytes" | "with_tail") => (0, 1),
-        ("bytebuf", "from_tail") => (0, 2),
+        ("bytebuf", "freeze" | "as_bytes" | "with_tail" | "file_buffer") => (0, 1),
+        ("bytebuf", "from_tail" | "file_partner") => (0, 2),
         ("bytebuf", "try_reserve_hint") => (0, 3),
         ("map", "new") => (2, 0),
         ("map", "hash" | "place" | "strong") => (1, 1),
@@ -126,7 +126,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     8,
                     n,
                 )),
-                "from_tail" => Some(self.bytes_from_tail(vals[0]?, vals[1]?, result, n)),
+                "file_buffer" => Some(self.list_with_capacity_at(
+                    scalar(Scalar::U8),
+                    vals[0]?,
+                    result,
+                    AllocPlace::FileBuffer,
+                    4096,
+                    n,
+                )),
+                "file_partner" | "from_tail" => {
+                    Some(self.paired_bytes(name == "file_partner", vals[0]?, vals[1]?, result, n))
+                }
                 "try_reserve_hint" => Some(self.list_try_reserve(
                     scalar(Scalar::U8),
                     vals[0]?,

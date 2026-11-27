@@ -1,9 +1,93 @@
 fn encode_staged(ci: CallInfo, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], mut ops: pages.DataRows, order: format.DataOrder, tail: u64, streams: pages.DataRows, call: Option[format.CallSection], rec: Option[CallRecord], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+    let mut empty: Bytes = list.new()
+    let encoded = encode_staged_at(mut empty, 0, ci, base, prior_stamp, tiered, mut ops, order, tail, streams, call, rec, settlement, keyed, seq, offset, frame_limit)?
+    match take encoded {
+        Detached(take raw) => Ok(take raw),
+        InGroup(_) => fail("store: detached encoder has no group space"),
+    }
+}
+
+fn encode_staged_at(mut active: Bytes, available: u64, ci: CallInfo, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], mut ops: pages.DataRows, order: format.DataOrder, tail: u64, streams: pages.DataRows, call: Option[format.CallSection], rec: Option[CallRecord], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[format.DraftFrame, Capacity] {
     if let Some(record) = rec {
-        return pager.encode_frame(store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(format.CallView(key: view record.key, args: view record.args, issuer: record.stream.caller.issuer, subject: view record.stream.caller.subject, t: record.stream.id.t, n: record.stream.id.n, revision: view record.revision, code: view record.code)), settlement, keyed, seq, offset, frame_limit)
+        return pager.encode_frame(mut active, available, store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(format.CallView(key: view record.key, args: view record.args, issuer: record.stream.caller.issuer, subject: view record.stream.caller.subject, t: record.stream.id.t, n: record.stream.id.n, revision: view record.revision, code: view record.code)), settlement, keyed, seq, offset, frame_limit)
     }
     match call {
-        Some(section) => pager.encode_frame(store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(format.CallView(key: view section.record.key, args: view section.record.args, issuer: section.record.stream.caller.issuer, subject: view section.record.stream.caller.subject, t: section.record.stream.id.t, n: section.record.stream.id.n, revision: view section.record.revision, code: view section.record.code)), section.settlement, keyed, seq, offset, frame_limit),
-        None => pager.encode_frame(store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, None, None, keyed, seq, offset, frame_limit),
+        Some(section) => pager.encode_frame(mut active, available, store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, Some(format.CallView(key: view section.record.key, args: view section.record.args, issuer: section.record.stream.caller.issuer, subject: view section.record.stream.caller.subject, t: section.record.stream.id.t, n: section.record.stream.id.n, revision: view section.record.revision, code: view section.record.code)), section.settlement, keyed, seq, offset, frame_limit),
+        None => pager.encode_frame(mut active, available, store_key_to_rep(ci.id.store), ci.id.branch, ci.id.version, ci.at, base, prior_stamp, tiered, mut ops, order, tail, streams, None, None, keyed, seq, offset, frame_limit),
+    }
+}
+
+type GroupDraft {
+    ci: CallInfo,
+    base: pages.PageTree,
+    stamp: u64,
+    deltas: Option[List[Option[format.TieredDataDelta]]],
+    ops: pages.DataRows,
+    order: format.DataOrder,
+    tail: u64,
+    streams: pages.DataRows,
+    call: Option[format.CallSection],
+    rec: Option[CallRecord],
+    settlement: Option[format.Settlement],
+    keyed: Option[format.KeyedDraft],
+    seq: u64,
+    offset: u64,
+    frame_limit: u64,
+    start: u64,
+    available: u64
+}
+
+fn write_group_draft(mut active: Bytes, take input: GroupDraft) -> Result[(GroupDraft, format.DraftFrame), Capacity] {
+    let mut draft = take input
+    list.truncate(mut active, draft.start)
+    let encoded = {
+        let deltas: Option[View[List[Option[format.TieredDataDelta]]]] = match draft.deltas {
+            Some(rows) => Some(view rows),
+            None => None,
+        }
+        encode_staged_at(mut active, draft.available, draft.ci, Some(view draft.base), Some(draft.stamp), deltas, mut draft.ops, draft.order, draft.tail, draft.streams, draft.call, draft.rec, draft.settlement, draft.keyed, draft.seq, draft.offset, draft.frame_limit)?
+    }
+    Ok((take draft, take encoded))
+}
+
+fn frame_draft[R, A](db: Db, base: pages.PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+    match take finished {
+        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
+        DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
+        Prepared(take ready) => {
+            let mut prepared = take ready
+            let skipped = draft_is_empty(db, force_frame, rec, settlement, prepared)
+            prepared.skipped = skipped
+            if !skipped && is_disk(db) {
+                if let DirBackend(directory) = disk_state(db).backend {
+                    let group = journal.draft_group(directory)
+                    let (start, available) = journal.group_cursor(group, file_end(db))
+                    let deltas = match prepared.plan {
+                        Some(mut plan) => Some(replace(mut plan.deltas, list.new())),
+                        None => None,
+                    }
+                    let input = GroupDraft(ci: ci, base: pages.share_page_tree(base), stamp: prepared.base_stamp, deltas: take deltas, ops: replace(mut prepared.ops, pages.new_data_rows()), order: replace(mut prepared.order, InOrder), tail: prepared.frame_tail, streams: replace(mut prepared.stream_ops, pages.new_data_rows()), call: replace(mut prepared.call, None), rec: clone(rec), settlement: clone(settlement), keyed: replace(mut prepared.keyed, None), seq: file_seq(db), offset: file_end(db), frame_limit: db.limits.frame, start, available)
+                    let (take encoded, take frame) = cell.with(journal.group_buffer(group), take input, write_group_draft)?
+                    let GroupDraft(ops: take ops, streams: take streams, order: take order, call: take call, deltas: take restored, keyed: take keyed, ..) = take encoded
+                    prepared.ops = take ops
+                    prepared.stream_ops = take streams
+                    prepared.order = take order
+                    prepared.call = take call
+                    prepared.keyed = take keyed
+                    if let Some(mut plan) = prepared.plan {
+                        plan.deltas = option.unwrap(take restored)
+                    }
+                    prepared.frame = Some(take frame)
+                } else {
+                    let deltas: Option[View[List[Option[format.TieredDataDelta]]]] = match prepared.plan {
+                        Some(plan) => Some(view plan.deltas),
+                        None => None,
+                    }
+                    prepared.frame = Some(Detached(encode_staged(ci, Some(view base), Some(prepared.base_stamp), deltas, mut prepared.ops, prepared.order, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, file_seq(db), file_end(db), db.limits.frame)?))
+                }
+            }
+            Ok(Prepared(take prepared))
+        },
     }
 }

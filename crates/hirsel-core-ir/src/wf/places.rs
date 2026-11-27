@@ -103,3 +103,18 @@ pub(super) fn address(c: &Ctx, ats: &mut Vec<At>, i: usize, a: &AddressInfo) -> 
     ats.push(at);
     Ok(())
 }
+
+pub(super) fn check_byte_backing(place: AllocPlace, align: u64, edge: Option<&FieldTy>) -> R {
+    if let Some(required) = match place {
+        AllocPlace::ByteHead | AllocPlace::ByteTail(_) => Some(8),
+        AllocPlace::FileBuffer | AllocPlace::FilePartner(_) => Some(4096),
+        _ => None,
+    } {
+        need(
+            align == required
+                && matches!(edge, Some(FieldTy::Seq(item)) if **item == FieldTy::Scalar(Scalar::U8)),
+            || format!("byte backing requires a {required}-aligned byte sequence"),
+        )?;
+    }
+    Ok(())
+}

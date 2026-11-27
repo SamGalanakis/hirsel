@@ -95,6 +95,23 @@ pub enum AllocPlace {
     /// The current limit. A nonnull pointer is data exclusively lent from a
     /// nonempty owning Bytes carrier, which may have an unused tail.
     ByteTail(ValueId),
+    /// First aligned byte sequence of a pair for fixed file I/O.
+    FileBuffer,
+    /// Partner of an exclusively lent first sequence, paid independently.
+    FilePartner(ValueId),
+}
+
+impl AllocPlace {
+    /// Runtime entry and optional first-buffer operand for a paired byte allocation.
+    pub fn byte_allocator(self) -> Option<(&'static str, Option<ValueId>)> {
+        Some(match self {
+            Self::ByteHead => ("hirsel_core_alloc_byte_head", None),
+            Self::ByteTail(head) => ("hirsel_core_alloc_byte_tail", Some(head)),
+            Self::FileBuffer => ("hirsel_core_alloc_file_buffer", None),
+            Self::FilePartner(head) => ("hirsel_core_alloc_file_partner", Some(head)),
+            _ => return None,
+        })
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

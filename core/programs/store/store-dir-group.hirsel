@@ -4,13 +4,14 @@ pub opaque type GroupHead {
     active: core.Cell[Bytes],
     spare: core.Cell[Option[Bytes]],
     returned: Receiver[Bytes],
-    max_frames: u64,
+    max_frames: u32,
     max_bytes: u64,
     mark: core.Cell[GroupMark]
 }
 
 type GroupMark {
-    frames: u64,
+    frames: u32,
+    prefix: u32,
     size: u64,
     last_frame: u64
 }
@@ -26,10 +27,10 @@ pub fn group_storage(reserve: u64) -> u64 {
 pub fn group_head(group_commits: u32, group_bytes: u32, header: Bytes, take returned: Receiver[Bytes]) -> GroupHead {
     let limit = group_payload(int.widen(group_bytes))
     let room = journal_group_room(limit)
-    let mut active: Bytes = list.with_capacity_aligned(room, 4096)
-    let spare: Bytes = list.with_capacity_aligned(room, 4096)
+    let (take first, take spare) = bytebuf.file_pair(room)
+    let mut active = take first
     list.append(mut active, header)
-    GroupHead(active: cell.new(take active), spare: cell.new(Some(take spare)), returned: take returned, max_frames: int.widen(group_commits), max_bytes: limit, mark: cell.new(GroupMark(frames: 0, size: 0, last_frame: 0)))
+    GroupHead(active: cell.new(take active), spare: cell.new(Some(take spare)), returned: take returned, max_frames: group_commits, max_bytes: limit, mark: cell.new(GroupMark(frames: 0, prefix: int.truncate(list.len(header)), size: 0, last_frame: 0)))
 }
 
 fn acquire_spare(group: GroupHead, wait: bool) -> Result[Option[Bytes], types.Failure] waits {
@@ -50,6 +51,10 @@ fn acquire_spare(group: GroupHead, wait: bool) -> Result[Option[Bytes], types.Fa
 }
 
 pub fn seal_group(group: GroupHead, sender: Sender[DirJournalMsg], wait: bool) -> Result[(), types.Failure] waits {
+    seal_group_keep(group, sender, wait, 0)
+}
+
+pub fn seal_group_keep(group: GroupHead, sender: Sender[DirJournalMsg], wait: bool, draft: u64) -> Result[(), types.Failure] waits {
     let mark = cell.get(group.mark)
     if mark.frames == 0 {
         return Ok(())
@@ -59,19 +64,44 @@ pub fn seal_group(group: GroupHead, sender: Sender[DirJournalMsg], wait: bool) -
     }
     let mut next = take spare
     list.clear(mut next)
-    let sealed = cell.replace(group.active, list.new())
-    let used = list.len(sealed)
-    list.append(mut next, list.slice(sealed, used - used % 4096, used))
+    let mut sealed = cell.replace(group.active, list.new())
+    let used = group_used(mark)
+    list.append(mut next, list.slice(sealed, used - used % 4096, used + draft))
+    list.truncate(mut sealed, used)
     cell.set(group.active, take next)
-    cell.set(group.mark, GroupMark(frames: 0, size: 0, last_frame: mark.last_frame))
+    cell.set(group.mark, GroupMark(frames: 0, prefix: int.truncate(used % 4096), size: 0, last_frame: mark.last_frame))
     match channel.send(sender, Group(take sealed, mark.last_frame, mark.size)) {
         Ok(()) => Ok(()),
         Error(_) => Error(Poisoned(Closed)),
     }
 }
 
-fn append_bytes(mut into: Bytes, take raw: Bytes) {
-    list.append(mut into, raw)
+fn group_used(mark: GroupMark) -> u64 {
+    let prefix: u64 = int.widen(mark.prefix)
+    prefix + mark.size
+}
+
+pub fn group_cursor(group: GroupHead, offset: u64) -> (u64, u64) {
+    // A frame's choice of backing depends only on its position and length.
+    // The head seals a window-crossing frame before accepting the next one.
+    (group_used(cell.get(group.mark)), group.max_bytes - offset % group.max_bytes)
+}
+
+pub fn group_buffer(group: GroupHead) -> View[core.Cell[Bytes]] in group {
+    view group.active
+}
+
+pub fn copy_draft(group: GroupHead, size: u64) -> Result[Bytes, Capacity] {
+    cell.with(group.active, (group_used(cell.get(group.mark)), size), fn(mut active: Bytes, take at: (u64, u64)) -> Result[Bytes, Capacity] {
+        let mut frame: Bytes = list.with_capacity(at.1 + format.BINDING_BYTES)
+        list.append(mut frame, list.slice(active, at.0, at.0 + at.1))
+        Ok(take frame)
+    })
+}
+
+fn append_bytes(mut into: Bytes, take input: (u64, Bytes)) {
+    list.truncate(mut into, input.0)
+    list.append(mut into, input.1)
 }
 
 pub fn append_frame(group: GroupHead, sender: Sender[DirJournalMsg], take raw: Bytes, number: u64) -> Result[(), types.Failure] waits {
@@ -83,22 +113,28 @@ pub fn append_frame(group: GroupHead, sender: Sender[DirJournalMsg], take raw: B
         // The worker writes an oversized frame in aligned pieces and acks the last.
         let mut next = option.unwrap(acquire_spare(group, true)?)
         list.clear(mut next)
-        let block = cell.replace(group.active, list.new())
-        let first = list.len(block)
+        let mut block = cell.replace(group.active, list.new())
+        let first = group_used(cell.get(group.mark))
+        list.truncate(mut block, first)
         let tail = (first + size) % 4096
         if tail > size {
             list.append(mut next, list.slice(block, first - (tail - size), first))
         }
         list.append(mut next, list.slice(raw, size - order.min(size, tail), size))
         cell.set(group.active, take next)
+        cell.set(group.mark, GroupMark(frames: 0, prefix: int.truncate(tail), size: 0, last_frame: number))
         return match channel.send(sender, Oversized(take block, take raw, number)) {
             Ok(()) => Ok(()),
             Error(_) => Error(Poisoned(Closed)),
         }
     }
-    cell.with(group.active, take raw, append_bytes)
+    cell.with(group.active, (group_used(cell.get(group.mark)), take raw), append_bytes)
+    publish_frame(group, sender, size, number)
+}
+
+pub fn publish_frame(group: GroupHead, sender: Sender[DirJournalMsg], size: u64, number: u64) -> Result[(), types.Failure] waits {
     let prior = cell.get(group.mark)
-    let mark = GroupMark(frames: prior.frames + 1, size: prior.size + size, last_frame: number)
+    let mark = GroupMark(frames: prior.frames + 1, prefix: prior.prefix, size: prior.size + size, last_frame: number)
     cell.set(group.mark, mark)
     if mark.frames >= group.max_frames || mark.size >= group.max_bytes {
         seal_group(group, sender, true)?
@@ -107,6 +143,8 @@ pub fn append_frame(group: GroupHead, sender: Sender[DirJournalMsg], take raw: B
 }
 
 pub fn reset_header(group: GroupHead, take header: Bytes) {
+    let initial = GroupMark(frames: 0, prefix: int.truncate(list.len(header)), size: 0, last_frame: cell.get(group.mark).last_frame)
+    cell.set(group.mark, initial)
     cell.with(group.active, take header, fn(mut active: Bytes, take raw: Bytes) {
         list.clear(mut active)
         list.append(mut active, raw)

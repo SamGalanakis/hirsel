@@ -144,7 +144,8 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
                 AllocPlace::Like(v)
                 | AllocPlace::Region(v)
                 | AllocPlace::LentFrame(v)
-                | AllocPlace::ByteTail(v) => f(v),
+                | AllocPlace::ByteTail(v)
+                | AllocPlace::FilePartner(v) => f(v),
                 _ => {}
             }
         }

@@ -141,9 +141,18 @@ pub fn submit_group(state: DirJournalState, wait: bool) -> Result[(), types.Fail
     seal_group(state.group, state.journal, wait)
 }
 
-pub fn queue_frame(state: DirJournalState, take raw: Bytes, number: u64) -> Result[(), types.Failure] waits {
-    append_frame(state.group, state.journal, take raw, number)?
-    if !state.head_managed {
+pub fn draft_group(state: DirJournalState) -> View[GroupHead] in state {
+    view state.group
+}
+
+pub fn queue_frame(state: DirJournalState, take frame: format.DraftFrame, number: u64) -> Result[(), types.Failure] waits {
+    let size = format.frame_length(frame)
+    match take frame {
+        InGroup(n) => publish_frame(state.group, state.journal, n, number)?,
+        Detached(take raw) => append_frame(state.group, state.journal, take raw, number)?,
+    }
+    let window = state.group.max_bytes
+    if !state.head_managed || (state.file_end - size) / window != state.file_end / window {
         submit_group(state, true)?
     }
     Ok(())

@@ -518,3 +518,45 @@ fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
     }
     Ok(())
 }
+
+// A draft can finish encoding before journal admission refuses it. The
+// following seal must preserve its predecessor and exclude the refused bytes.
+@test
+fn journal_refused_group_suffix(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let schema = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    durable(mut db, schema)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = manage_journal_groups(mut db)
+    let first = journal_put_ticket(mut db, rows, 1)?
+    // Exhaust the journal allowance after the first frame.
+    if let Some(mut state) = db.disk {
+        state.options.journal_limit = queue_accounting(state).uncovered
+    }
+    let refused = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env, 2, 12)
+    })?
+    let Refused(Journal(_)) = take refused else {
+        return Error(Missing("journal refusal"))
+    }
+    let seq = file_seq(db)
+    let end = file_end(db)
+    durable(mut db, first)?
+    close(take db)?
+    let raw = read_journal_prefix(dir, result.unwrap(manifest.disk_path("j-", seq, "")), (end + 4095) / 4096 * 4096)?
+    for b in list.slice(raw, end, list.len(raw)) {
+        if b != 0u8 {
+            return Error(Missing("refused bytes reached disk"))
+        }
+    }
+    let mut reopened = open(tasks, dir, c, r, options)?
+    let recovered = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rd = reader(reopened, 0u64)?
+    let snap = snapshot(reopened)
+    if get(rd, snap, recovered, 1)? != Some(11u64) || get(rd, snap, recovered, 2)? != None {
+        return Error(Missing("journal prefix"))
+    }
+    close(take reopened)
+}

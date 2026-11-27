@@ -190,6 +190,19 @@ pub fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[st
 // reserved, and is hashed from there, so sealing allocates nothing and needs no
 // allocation isolation when a commit seals its frame at the file end.
 pub fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    seal_frame_at(mut out, 0, ctx, offset)
+}
+
+pub type DraftFrame = InGroup(u64) | Detached(Bytes)
+
+pub fn frame_length(frame: DraftFrame) -> u64 {
+    match frame {
+        InGroup(n) => n,
+        Detached(raw) => list.len(raw),
+    }
+}
+
+pub fn seal_frame_at(mut out: Bytes, start: u64, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
     let end = list.len(out)
     if list.capacity(out) - end < BINDING_BYTES {
         fail("store: frame has no room for its check binding")
@@ -197,10 +210,10 @@ pub fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), C
     put_binding(mut out, ctx, offset)?
     let mut state = std.check.start()
     std.check.add(mut state, out, end, end + BINDING_BYTES)
-    std.check.add(mut state, out, 0, 8)
-    std.check.add(mut state, out, 16, end)
+    std.check.add(mut state, out, start, start + 8)
+    std.check.add(mut state, out, start + 16, end)
     list.truncate(mut out, end)
-    list.set_word_le(mut out, 8, std.check.finish(state))
+    list.set_word_le(mut out, start + 8, std.check.finish(state))
     Ok(())
 }
 

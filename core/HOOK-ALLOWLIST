@@ -532,3 +532,5 @@ core@1/channel/receive_until
 core@1/host/try_lock_shared
 core@1/host/zero_at
 core@1/list/with_capacity_aligned
+# Phase 1b (2026-11-27, STORE-SPEC §3.3b): the head owns the Direct buffer pair.
+core@1/bytebuf/file_pair

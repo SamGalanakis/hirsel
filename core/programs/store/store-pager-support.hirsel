@@ -61,7 +61,7 @@ pub fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], nex
     Ok(())
 }
 
-pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], mut ops: pages.DataRows, order: format.DataOrder, tail: u64, streams: pages.DataRows, call: Option[format.CallView], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[Bytes, Capacity] {
+pub fn encode_frame(mut active: Bytes, available: u64, store: types.StoreKey, branch: u32, version: u64, at: u64, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], mut ops: pages.DataRows, order: format.DataOrder, tail: u64, streams: pages.DataRows, call: Option[format.CallView], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, frame_limit: u64) -> Result[format.DraftFrame, Capacity] {
     let keyed_size = match keyed {
         Some(draft) => format.keyed_frame_bytes(draft.edits),
         None => 0u64
@@ -105,6 +105,10 @@ pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, b
     if size + 16 > frame_limit {
         return Error(Capacity(requested: size + 16, available: frame_limit))
     }
+    if 16 + size + format.BINDING_BYTES <= available {
+        write_frame(mut active, store, branch, version, at, base, prior_stamp, tiered, ops, order, streams, call, settlement, keyed, seq, offset, size, data, control, stream_count, sections + keyed_sections)?
+        return Ok(InGroup(16 + size))
+    }
     let room = 16 + size + format.BINDING_BYTES
     let mut out: Bytes = if tail == 0 {
         bytebuf.from_tail(mut ops.first[0].key, room)
@@ -115,6 +119,12 @@ pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, b
     } else {
         list.with_capacity(room)
     }
+    write_frame(mut out, store, branch, version, at, base, prior_stamp, tiered, ops, order, streams, call, settlement, keyed, seq, offset, size, data, control, stream_count, sections + keyed_sections)?
+    Ok(Detached(take out))
+}
+
+fn write_frame(mut out: Bytes, store: types.StoreKey, branch: u32, version: u64, at: u64, base: Option[View[pages.PageTree]], prior_stamp: Option[u64], tiered: Option[View[List[Option[format.TieredDataDelta]]]], ops: pages.DataRows, order: format.DataOrder, streams: pages.DataRows, call: Option[format.CallView], settlement: Option[format.Settlement], keyed: Option[format.KeyedDraft], seq: u64, offset: u64, size: u64, data: bool, control: Option[u64], stream_count: u64, sections: u64) -> Result[(), Capacity] {
+    let start = list.len(out)
     format.le(mut out, 0x0011, 2)?
     format.le(mut out, 1, 2)?
     format.le(mut out, size, 4)?
@@ -122,7 +132,7 @@ pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, b
     format.le(mut out, int.widen(branch), 4)?
     format.le(mut out, version, 8)?
     format.le(mut out, at, 8)?
-    format.le(mut out, sections + keyed_sections, 1)?
+    format.le(mut out, sections, 1)?
     if data {
         encode_data_ops(mut out, base, prior_stamp, tiered, ops, order)?
     }
@@ -138,8 +148,8 @@ pub fn encode_frame(store: types.StoreKey, branch: u32, version: u64, at: u64, b
     if let Some(draft) = keyed {
         format.encode_keyed_edits(mut out, draft.edits)?
     }
-    format.seal_frame(mut out, format.DiskContext(store: store, role: 2, seq: seq), offset)?
-    Ok(take out)
+    format.seal_frame_at(mut out, start, format.DiskContext(store: store, role: 2, seq: seq), offset)?
+    Ok(())
 }
 
 pub fn ordered_row(ops: pages.DataRows, order: format.DataOrder, slot_order: u64) -> View[format.DataOp] in ops {

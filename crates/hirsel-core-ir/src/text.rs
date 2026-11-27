@@ -576,14 +576,7 @@ impl Printer {
                             AllocKind::Region => "region".into(),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
                         };
-                        let place = match place {
-                            AllocPlace::Current => String::new(),
-                            AllocPlace::Like(b) => format!(" like v{}", b.0),
-                            AllocPlace::Region(r) => format!(" in v{}", r.0),
-                            AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
-                            AllocPlace::ByteHead => " byte_head".into(),
-                            AllocPlace::ByteTail(r) => format!(" byte_tail v{}", r.0),
-                        };
+                        let place = allocation::format_place(*place);
                         format!(
                             "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}",
                             def(*result),

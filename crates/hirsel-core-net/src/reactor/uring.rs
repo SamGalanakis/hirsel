@@ -14,7 +14,7 @@ use std::{
 };
 mod completion;
 mod file;
-pub use file::{FileBuffers, FileRequest, FileRing};
+pub use file::{FileBuffer, FileBuffers, FileRequest, FileRing};
 mod ring;
 mod watch;
 use completion::Completion;

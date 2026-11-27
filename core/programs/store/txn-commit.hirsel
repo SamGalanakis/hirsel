@@ -154,7 +154,7 @@ pub type Prepared[R, A] {
     tiered: Option[u64],
     plan: Option[pager.TieredWritePlan],
     live: u64,
-    frame: Option[Bytes],
+    frame: Option[format.DraftFrame],
     ops: pages.DataRows,
     order: format.DataOrder,
     base_stamp: u64,
@@ -258,7 +258,7 @@ pub type Ran[R, A, Info, Event] {
     exact: bool,
     admits_rows: bool,
     skipped: bool,
-    frame: Option[Bytes],
+    frame: Option[format.DraftFrame],
     info: Info,
     reads: List[Event]
 }

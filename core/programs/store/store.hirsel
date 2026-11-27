@@ -804,19 +804,24 @@ fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Optio
     store_body_at(mut db, i, wall, steps, keep_reply, body)
 }
 
-fn handoff(mut db: Db, take frame: Option[Bytes]) -> Result[(), Error] waits {
+fn handoff(mut db: Db, take frame: Option[format.DraftFrame]) -> Result[(), Error] waits {
     let Some(take raw) = take frame else {
         return Ok(())
     }
-    let sent = list.len(raw)
+    let sent = format.frame_length(raw)
     let closed = match disk_state(db).backend {
         DirBackend(directory) => match journal.queue_frame(directory, take raw, db.frame_seq) {
             Ok(()) => false,
             Error(_) => true,
         },
-        ObjectBackend(writer) => match channel.send(object_writer.sender(writer), Frame(take raw, db.frame_seq)) {
-            Ok(()) => false,
-            Error(_) => true,
+        ObjectBackend(writer) => {
+            let Detached(take bytes_out) = take raw else {
+                fail("store: object journal needs an owned frame")
+            }
+            match channel.send(object_writer.sender(writer), Frame(take bytes_out, db.frame_seq)) {
+                Ok(()) => false,
+                Error(_) => true,
+            }
         },
     }
     if closed {
@@ -918,44 +923,6 @@ pub fn sync_notices(mut db: Db) -> Option[Receiver[()]] {
         },
         None => None
     }
-}
-
-/// `durable` without waiting: whether t's commit is synced now. A journal that ended
-/// without an ack is terminal, as in journal_receive.
-pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
-    if !types.same(db.store.hi, db.store.lo, t.store.hi, t.store.lo) || t.open != open_number(db) {
-        return Error(Foreign)
-    }
-    if object_writer_open(db) && covered(db, t.mark) {
-        return Ok(true)
-    }
-    if let Some(e) = journal_poison(db) {
-        return Error(Poisoned(e))
-    }
-    if let Cut(generation) = t.mark {
-        if is_disk(db) {
-            disk_wait_cut(db, generation)?
-            return Ok(true)
-        }
-    }
-    let drained = journal_poll_groups(mut db)
-    if object_writer_open(db) && covered(db, t.mark) {
-        return Ok(true)
-    }
-    let _ = drained ?=> durable_latch_error
-    if covered(db, t.mark) {
-        return Ok(true)
-    }
-    let pending = match db.disk {
-        Some(state) => try_journal_receive(state),
-        None => return Ok(true)
-    }
-    match take pending {
-        Ok(take ack) => journal_ack(mut db, take ack) ?=> durable_latch_error,
-        Error(Empty) => {},
-        Error(Closed) => journal_ack(mut db, Broken(Closed))?,
-    }
-    Ok(covered(db, t.mark))
 }
 
 fn covered(db: Db, mark: Mark) -> bool {

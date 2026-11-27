@@ -39,7 +39,7 @@ pub use udp_group::UdpMember;
 pub use uring::{FileEntry, FileRequest};
 pub mod file_ring {
     #[cfg(target_os = "linux")]
-    pub use super::uring::{FileBuffers, FileRing};
+    pub use super::uring::{FileBuffer, FileBuffers, FileRing};
 }
 #[cfg(target_os = "linux")]
 use uring::{Uring, msg_ring_wake};

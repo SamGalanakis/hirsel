@@ -168,11 +168,26 @@ pub fn submit_journal_group(mut db: Db, wait: bool) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
+fn wait_for_frame_room(mut db: Db, frame: Option[format.DraftFrame]) -> Result[(), Error] waits {
     if let Some(raw) = frame {
-        let size = list.len(raw)
+        let size = format.frame_length(raw)
         while queue_accounting(disk_state(db)).inflight > db.limits.frame - size {
-            submit_journal_group(mut db, true)?
+            let closed = match disk_state(db).backend {
+                DirBackend(directory) => {
+                    let keep = match raw {
+                        InGroup(n) => n,
+                        Detached(_) => 0u64
+                    }
+                    match journal.seal_group_keep(journal.draft_group(directory), journal.dir_sender(directory), true, keep) {
+                        Ok(()) => false,
+                        Error(_) => true,
+                    }
+                },
+                ObjectBackend(_) => false,
+            }
+            if closed {
+                return failed_handoff(mut db)
+            }
             let acknowledged = journal_receive(db)
             journal_ack(mut db, take acknowledged)?
         }
@@ -197,7 +212,7 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
             return Ok(0)
         }
     }
-    let drained = journal_poll_groups(mut db)
+    let drained = poll_ticket(mut db, t.mark)
     if object_writer_open(db) && covered(db, t.mark) {
         return Ok(match drained {
             Ok(groups) => groups,
@@ -249,6 +264,21 @@ fn journal_ack(mut db: Db, take ack: JournalAck) -> Result[(), Error] {
             },
         }
     })
+}
+
+fn poll_ticket(mut db: Db, mark: Mark) -> Result[u64, Error] {
+    if object_writer_open(db) {
+        return journal_poll_groups(mut db)
+    }
+    let mut groups = 0u64
+    while !covered(db, mark) {
+        let Some(take ack) = close_ack(db) else {
+            break
+        }
+        journal_ack(mut db, take ack)?
+        groups += 1
+    }
+    Ok(groups)
 }
 
 fn journal_poll(mut db: Db) -> Result[(), Error] {
@@ -353,4 +383,42 @@ fn close_ack(db: Db) -> Option[JournalAck] {
         Ok(ack) => Some(ack),
         Error(_) => None,
     }
+}
+
+/// `durable` without waiting: whether t's commit is synced now. A journal that ended
+/// without an ack is terminal, as in journal_receive.
+pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
+    if !types.same(db.store.hi, db.store.lo, t.store.hi, t.store.lo) || t.open != open_number(db) {
+        return Error(Foreign)
+    }
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(true)
+    }
+    if let Some(e) = journal_poison(db) {
+        return Error(Poisoned(e))
+    }
+    if let Cut(generation) = t.mark {
+        if is_disk(db) {
+            disk_wait_cut(db, generation)?
+            return Ok(true)
+        }
+    }
+    let drained = poll_ticket(mut db, t.mark)
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(true)
+    }
+    let _ = drained ?=> durable_latch_error
+    if covered(db, t.mark) {
+        return Ok(true)
+    }
+    let pending = match db.disk {
+        Some(state) => try_journal_receive(state),
+        None => return Ok(true)
+    }
+    match take pending {
+        Ok(take ack) => journal_ack(mut db, take ack) ?=> durable_latch_error,
+        Error(Empty) => {},
+        Error(Closed) => journal_ack(mut db, Broken(Closed))?,
+    }
+    Ok(covered(db, t.mark))
 }

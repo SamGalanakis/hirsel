@@ -229,20 +229,17 @@ impl Function<'_, '_, '_> {
                         &[ctx, frame, size, charge, overflow],
                     )?;
                     [values[0], values[1], values[2]]
-                } else if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
+                } else if let Some((name, head)) = place.byte_allocator() {
                     let overflow = overflow.map_or_else(
                         || self.b.ins().iconst(types::I8, 0),
                         |v| self.values[v.index()],
                     );
                     let mut args = vec![ctx];
                     let mut signature = vec![p];
-                    let name = if let AllocPlace::ByteTail(head) = place {
+                    if let Some(head) = head {
                         args.push(self.get(head));
                         signature.push(p);
-                        "hirsel_core_alloc_byte_tail"
-                    } else {
-                        "hirsel_core_alloc_byte_head"
-                    };
+                    }
                     args.extend([size, charge, overflow]);
                     signature.extend([u, u, boolean]);
                     let r = self.c_call(name, &signature, &[p, u, u], &args)?;

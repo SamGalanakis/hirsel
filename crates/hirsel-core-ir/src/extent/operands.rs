@@ -151,7 +151,8 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             if let AllocPlace::Like(x)
             | AllocPlace::Region(x)
             | AllocPlace::LentFrame(x)
-            | AllocPlace::ByteTail(x) = place
+            | AllocPlace::ByteTail(x)
+            | AllocPlace::FilePartner(x) = place
             {
                 uses.push(v(x));
             }

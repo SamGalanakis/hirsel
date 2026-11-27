@@ -674,41 +674,8 @@ impl From<Result<NonNull<u8>, Capacity>> for Allocation {
     }
 }
 
-/// Admit a small byte buffer, with physical backing for one second buffer.
-/// # Safety
-/// Context is live and task-exclusive. The nonempty buffer has the given charge.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_alloc_byte_head(
-    context: *const Context,
-    bytes: usize,
-    charge: u64,
-    overflow: bool,
-) -> Allocation {
-    crate::split_bytes::key(unsafe { &*context }, bytes, (!overflow).then_some(charge)).into()
-}
-
-/// Admit a byte buffer, using unused backing beside a lent head when it fits.
-/// # Safety
-/// Context is live and task-exclusive. A nonnull head belongs to a live
-/// exclusively lent Bytes carrier with nonzero capacity.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_alloc_byte_tail(
-    context: *const Context,
-    head: *mut u8,
-    bytes: usize,
-    charge: u64,
-    overflow: bool,
-) -> Allocation {
-    unsafe {
-        crate::split_bytes::tail(
-            &*context,
-            NonNull::new(head),
-            bytes,
-            (!overflow).then_some(charge),
-        )
-    }
-    .into()
-}
+mod byte_buffers;
+pub use byte_buffers::*;
 
 /// The consuming grow row's two outputs; both targets return them in registers.
 #[repr(C)]

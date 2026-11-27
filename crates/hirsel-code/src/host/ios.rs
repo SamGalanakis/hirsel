@@ -38,6 +38,16 @@ pub(crate) fn discard(_at: usize, _bytes: usize) {}
 
 pub(crate) const KEEPS: bool = false;
 
+/// How many mappings `[low, high)` is in, and how many of them allow no access. This
+/// host does not count them.
+pub(crate) fn mappings(_low: usize, _high: usize) -> Option<(usize, usize)> {
+    None
+}
+
+/// Whether `write` can write a published text run, so a dead image's instructions on a
+/// page a live image shares are filled with traps.
+pub(crate) const FILLS: bool = false;
+
 pub(crate) fn write(work: &mut dyn FnMut()) {
     work()
 }

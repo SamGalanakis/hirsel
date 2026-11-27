@@ -257,14 +257,29 @@ alias can write live code.
    No address in the cohort leaves the loader before step 7. A slab whose process cannot
    register for that `membarrier` command is not created (`Unsupported`), and its host runs
    Places in separate processes.
-5. **Recycle.** A cohort is dead when every image in it has count zero (PACK-6). The
-   loader removes its rows from the PC table, waits until no hazard slot names the old
-   table (PACK-9), then maps both runs `PROT_NONE` and returns their pages
-   (`MADV_DONTNEED`). A stale jump into a dead cohort faults. The range may later open as
-   a new cohort; step 2 above runs before it is published again. Only whole dead cohorts
-   are recycled: a live page is never written. So an image whose count is zero stays
-   mapped and executable while another image of its cohort is alive, and a stale jump
-   into it runs its old code instead of faulting.
+5. **Retire and recycle.** An image is dead when its count is zero (PACK-6). The thread
+   that drops the last count only hands the image to the loader: it takes no lock,
+   allocates nothing and makes no system call, so a dispatching worker can be that
+   thread. The loader **reclaims** the dead images it was handed at the start of each
+   load and whenever the pack host calls `reclaim`. For each one it:
+   1. removes the image from the interning table, unless a newer install of the same
+      digest is there;
+   2. removes the image's row from the PC table in every chunk the image spans and waits
+      until no hazard slot names an old array (PACK-9);
+   3. maps each text page on which the image was the last live one `PROT_NONE` and
+      returns it (`MADV_DONTNEED`). A stale jump into such a page faults. An image that
+      dies before its cohort is published has its text filled with traps instead, and
+      its wholly dead pages are closed when the cohort is published.
+   A text page that a live image shares is never written on Linux. So the part of a
+   dead image on a page it shares with a live image of its cohort stays mapped and
+   executable, and a stale jump into it runs its old code instead of faulting, until the
+   last image on that page dies. A page the host refuses to close is counted
+   (`unrevoked`) and stays out of use. A dead image's bytes count as installed until its
+   cohort is recycled.
+
+   A cohort is dead when every image in it is dead. The loader then maps both its runs
+   `PROT_NONE`, returns their pages, and returns the ranges to the slab. The range may
+   later open as a new cohort; step 2 above runs before it is published again.
 6. **`mseal`** is never applied to a slab.
 
 ## PACK-5: The code slab on Apple targets
@@ -279,7 +294,10 @@ alias can write live code.
   thread, so no worker ever sees the band writable; a text run that is being filled is
   executable to them, and no address in it has left the loader. The data band is
   published with one `mprotect`. Recycling follows PACK-4, except that returned pages may keep their bytes
-  (`MADV_FREE`), so a range is filled with the trap pattern when it is next mapped. A
+  (`MADV_FREE`), so a range is filled with the trap pattern when it is next mapped.
+  Reclaiming a dead image follows PACK-4 step 5, and the loader thread also fills the
+  part of the dead image on a page a live image shares with the trap pattern, then
+  invalidates the instruction cache over it; a stale jump into it traps. A
   process that has no per-thread write window (a virtual machine guest, for one) or whose
   `MAP_JIT` reservation is denied has no slab (`Unsupported`).
 - **iOS, and any host that denies dynamic code.** There is no slab. Every image is
@@ -324,8 +342,9 @@ entry whose `signature` digest equals the digest of `F`.
    how many generations are alive or for how long.
 6. **Installed code.** A pool has an **installed-code byte budget**. A load that would
    exceed it fails with `Capacity`.
-7. **Unload.** When an image's count reaches zero it leaves the interning table at once,
-   and its cohort is recycled when the cohort is dead (PACK-4).
+7. **Unload.** When an image's count reaches zero it is handed to the loader, which
+   retires it at its next reclaim and recycles its cohort when the cohort is dead
+   (PACK-4 step 5). Until that reclaim, a load of the same digest installs a new image.
 
 ## PACK-7: The import mask
 
@@ -364,15 +383,15 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
    digest: [u8; 16])`, where `start` is an offset in the text band and `digest` is the
    first 16 bytes of the module digest. The text band is divided into 2 MiB chunks; each
    chunk has one immutable sorted array of the rows that overlap it, reached through a
-   directory indexed by chunk. A publish or a recycle builds new arrays for the chunks it
-   touches and swaps their directory entries.
+   directory indexed by chunk. A publish, a reclaim of a dead image or a recycle builds
+   new arrays for the chunks it touches and swaps their directory entries.
 4. **Readers** are signal handlers: the profile sampler and the fault reporter. A reader
    claims a free **hazard slot** of the table's 64 by storing the array pointer in it,
    re-reads the directory entry to confirm it, searches, and clears the slot. It allocates
    nothing, takes no lock and reads no thread-local state, so a handler that interrupts
    another reader on its own thread claims a second slot. A replaced array is freed when
-   no hazard slot holds it. An image has one row from its publish until its cohort is
-   recycled.
+   no hazard slot holds it. An image has one row from its publish until the loader
+   reclaims it after its death (PACK-4 step 5).
 5. **Samples.** The sampler records, for the interrupted PC, each frame-pointer return
    address and the return-address candidate (the word at the stack pointer on x86-64, the
    link register on aarch64), the pair `(digest, text offset)` the table gives at capture.

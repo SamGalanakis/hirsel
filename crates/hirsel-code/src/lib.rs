@@ -8,16 +8,19 @@ use hirsel_core_ids::ContentHash;
 use hirsel_mod::{Import, Malformed, Mask, Module};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 mod fixup;
 mod host;
+mod retire;
 mod runs;
 mod table;
 
 use host::Access;
+use retire::Retire;
 use runs::Runs;
 pub use table::Hit;
 use table::{Owner, Table};
@@ -118,8 +121,10 @@ struct Cohort {
     bytes: u64,
     /// Bytes of images that were retired when their count reached zero.
     retired: u64,
-    /// Every image installed in it: its PC table row and its module digest.
+    /// Every live image installed in it: its PC table row and its module digest.
     images: Vec<(Owner, ContentHash)>,
+    /// How many live images have text on each page of the text run.
+    pages: Vec<u32>,
 }
 
 /// The writable pages ahead of the open cohort: `(next free offset, end)` per band.
@@ -135,7 +140,9 @@ struct Slab {
     cohorts: HashMap<u64, Cohort>,
     open: Option<u64>,
     next: u64,
-    images: HashMap<ContentHash, Weak<Image>>,
+    /// The live image of each digest and which install it is.
+    images: HashMap<ContentHash, (u64, Weak<Image>)>,
+    installs: u64,
     admitted: HashMap<ContentHash, ContentHash>,
     quarantined: HashSet<ContentHash>,
     installed: u64,
@@ -152,10 +159,19 @@ struct Shared {
     retired: Mutex<u64>,
     updates: AtomicU64,
     table: Table,
+    /// The dead images whose retirement the loader has not done yet.
+    pending: AtomicPtr<Retire>,
+    /// Bytes of dead text pages the host refused to close.
+    unrevoked: AtomicU64,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        let mut next = *self.pending.get_mut();
+        while !next.is_null() {
+            // SAFETY: the list owns each record on it and nothing else reaches the list.
+            next = unsafe { Box::from_raw(next) }.next;
+        }
         if self.config.band_bytes > 0 {
             host::release(self.base, 2 * self.config.band_bytes);
         }
@@ -176,31 +192,7 @@ struct Image {
     /// change only under the retired lock.
     slots: AtomicU32,
     retired: AtomicBool,
-}
-
-impl Drop for Image {
-    fn drop(&mut self) {
-        let shared = &*self.shared;
-        let mut slab = shared.slab.lock().unwrap();
-        let me: *const Image = self;
-        if slab
-            .images
-            .get(&self.digest)
-            .is_some_and(|held| held.as_ptr() == me)
-        {
-            slab.images.remove(&self.digest);
-        }
-        let Some(id) = self.cohort else { return };
-        let cohort = slab.cohorts.get_mut(&id).unwrap();
-        cohort.live -= 1;
-        if self.retired.load(Ordering::Relaxed) {
-            cohort.retired += self.bytes;
-        }
-        let dead = cohort.live == 0 && cohort.state != State::Open;
-        if dead {
-            shared.recycle(&mut slab, id);
-        }
-    }
+    retire: Option<Box<Retire>>,
 }
 
 impl Shared {
@@ -232,29 +224,6 @@ impl Shared {
         }
     }
 
-    /// Unmap a dead cohort and return its runs (PACK-4 step 5).
-    fn recycle(&self, slab: &mut Slab, id: u64) {
-        let cohort = slab.cohorts.remove(&id).unwrap();
-        // No reader of the PC table names the cohort once this returns.
-        self.table.change(cohort.text, &[]);
-        // A run that cannot be unmapped stays as it is and is never used again.
-        let gone = |at: usize, (start, end): (usize, usize)| {
-            let gone = end == start || host::protect(at, end - start, Access::None).is_ok();
-            if gone && end > start {
-                host::discard(at, end - start);
-            }
-            gone
-        };
-        if gone(self.text(cohort.text.0), cohort.text) {
-            slab.text.give(cohort.text.0, cohort.text.1 - cohort.text.0);
-        }
-        if gone(self.data(cohort.data.0), cohort.data) {
-            slab.data.give(cohort.data.0, cohort.data.1 - cohort.data.0);
-        }
-        slab.installed -= cohort.bytes;
-        *self.retired.lock().unwrap() -= cohort.retired;
-    }
-
     /// Close the open cohort and publish it (PACK-4 step 4).
     fn publish(&self, slab: &mut Slab) {
         let Some(id) = slab.open.take() else { return };
@@ -278,6 +247,8 @@ impl Shared {
             Ok(()) => {
                 let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| *row).collect();
                 self.table.change(text, &rows);
+                // Close the pages whose every image died before the batch closed.
+                self.revoke(cohort, (0, cohort.pages.len()), (0, 0));
                 State::Published
             }
             Err(_) => State::Failed,
@@ -343,6 +314,7 @@ impl Shared {
                                     bytes: 0,
                                     retired: 0,
                                     images: Vec::new(),
+                                    pages: Vec::new(),
                                 },
                             );
                             id
@@ -432,6 +404,7 @@ impl Loader {
             open: None,
             next: 0,
             images: HashMap::new(),
+            installs: 0,
             admitted: HashMap::new(),
             quarantined: HashSet::new(),
             installed: 0,
@@ -445,6 +418,8 @@ impl Loader {
             retired: Mutex::new(0),
             updates: AtomicU64::new(0),
             table,
+            pending: AtomicPtr::new(null_mut()),
+            unrevoked: AtomicU64::new(0),
         })))
     }
 
@@ -470,6 +445,7 @@ impl Loader {
     pub fn fault(&self, pc: usize) -> Option<(ContentHash, u32)> {
         let hit = self.resolve(pc)?;
         let mut slab = self.0.slab.lock().unwrap();
+        self.0.reclaim(&mut slab);
         let at = pc - self.0.base - hit.offset as usize;
         let digest = slab
             .cohorts
@@ -483,12 +459,33 @@ impl Loader {
 
     /// The bytes of every image in a cohort that is not yet recycled.
     pub fn installed(&self) -> u64 {
+        self.reclaim();
         self.0.slab.lock().unwrap().installed
     }
 
     /// The bytes that count against the retired-code budget.
     pub fn retired(&self) -> u64 {
+        self.reclaim();
         *self.0.retired.lock().unwrap()
+    }
+
+    /// Retire every image whose last handle was dropped (PACK-4 step 5). A load does
+    /// this too; a pack host also calls it from a thread that dispatches nothing, so
+    /// dead code stops being reachable without waiting for the next load.
+    pub fn reclaim(&self) {
+        self.0.reclaim(&mut self.0.slab.lock().unwrap());
+    }
+
+    /// How many mappings the text band is in and how many of them are closed, where the
+    /// host counts them.
+    pub fn mappings(&self) -> Option<(usize, usize)> {
+        let text = self.0.text(0);
+        host::mappings(text, text + self.0.config.band_bytes)
+    }
+
+    /// Bytes of dead text the host refused to close or fill. They stay out of use.
+    pub fn unrevoked(&self) -> u64 {
+        self.0.unrevoked.load(Ordering::Relaxed)
     }
 
     /// The `Code` of the entry `identity` of the module `bytes`, installing the module
@@ -522,19 +519,19 @@ impl Loader {
             return self.prelinked(&header.key());
         }
         let digest = hirsel_mod::digest(bytes);
-        // Declared before the lock so that it is dropped after it: an image's drop
-        // takes the lock.
         let image;
         let published;
         {
             let mut slab = shared.slab.lock().unwrap();
+            shared.reclaim(&mut slab);
             if slab.admitted.get(&header.key()) != Some(&digest) {
                 return Err(Refusal::NotAdmitted);
             }
             if slab.quarantined.contains(&digest) {
                 return Err(Refusal::Quarantined);
             }
-            let (leads, held) = match slab.images.get(&digest).and_then(Weak::upgrade) {
+            let held = slab.images.get(&digest).and_then(|held| held.1.upgrade());
+            let (leads, held) = match held {
                 Some(held) => (false, held),
                 None => self.install(&mut slab, &module, digest)?,
             };
@@ -554,13 +551,16 @@ impl Loader {
         let config = &self.0.config;
         let held = config.prelinked.iter().find(|held| held.key == *key);
         let held = held.ok_or(Refusal::NotPrelinked)?;
-        // Declared before the lock so that it is dropped after it.
-        let image;
         let mut slab = self.0.slab.lock().unwrap();
+        self.0.reclaim(&mut slab);
         if slab.quarantined.contains(&held.digest) {
             return Err(Refusal::Quarantined);
         }
-        image = match slab.images.get(&held.digest).and_then(Weak::upgrade) {
+        let live = slab
+            .images
+            .get(&held.digest)
+            .and_then(|held| held.1.upgrade());
+        let image = match live {
             Some(image) => image,
             None => {
                 let image = Arc::new(Image {
@@ -572,8 +572,20 @@ impl Loader {
                     entries: held.entries.to_vec(),
                     slots: AtomicU32::new(0),
                     retired: AtomicBool::new(false),
+                    retire: Some(Box::new(Retire {
+                        next: null_mut(),
+                        serial: slab.installs,
+                        digest: held.digest,
+                        cohort: None,
+                        text: (0, 0),
+                        bytes: 0,
+                        retired: false,
+                    })),
                 });
-                slab.images.insert(held.digest, Arc::downgrade(&image));
+                let serial = slab.installs;
+                slab.images
+                    .insert(held.digest, (serial, Arc::downgrade(&image)));
+                slab.installs += 1;
                 image
             }
         };
@@ -681,12 +693,36 @@ impl Loader {
                 .collect(),
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
+            retire: Some(Box::new(Retire {
+                next: null_mut(),
+                serial: slab.installs,
+                digest,
+                cohort: Some(cohort),
+                text: (at, text.len()),
+                bytes,
+                retired: false,
+            })),
         });
-        slab.images.insert(digest, Arc::downgrade(&image));
+        let serial = slab.installs;
+        slab.images.insert(digest, (serial, Arc::downgrade(&image)));
+        slab.installs += 1;
         slab.installed += bytes;
         let record = slab.cohorts.get_mut(&cohort).unwrap();
         record.live += 1;
         record.bytes += bytes;
+        if !text.is_empty() {
+            let first = record.text.0 / shared.page;
+            let pages = (
+                at / shared.page - first,
+                (at + text.len() - 1) / shared.page - first,
+            );
+            if record.pages.len() <= pages.1 {
+                record.pages.resize(pages.1 + 1, 0);
+            }
+            for page in pages.0..=pages.1 {
+                record.pages[page] += 1;
+            }
+        }
         Ok((leads, image))
     }
 

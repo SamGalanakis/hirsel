@@ -82,6 +82,10 @@ pub(crate) fn discard(at: usize, bytes: usize) {
 /// Whether a discarded range may still hold its bytes when it is next mapped.
 pub(crate) const KEEPS: bool = false;
 
+/// Whether `write` can write a published text run, so a dead image's instructions on a
+/// page a live image shares are filled with traps.
+pub(crate) const FILLS: bool = false;
+
 /// Run `work`, which writes text runs mapped for `Access::Patch`.
 pub(crate) fn write(work: &mut dyn FnMut()) {
     work()
@@ -129,6 +133,23 @@ pub(crate) fn publish(at: usize, bytes: usize) -> io::Result<()> {
             0,
         )
     })
+}
+
+/// How many mappings `[low, high)` is in, and how many of them allow no access.
+pub(crate) fn mappings(low: usize, high: usize) -> Option<(usize, usize)> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    let (mut all, mut closed) = (0, 0);
+    for line in maps.lines() {
+        let (range, rest) = line.split_once(' ')?;
+        let (start, end) = range.split_once('-')?;
+        let start = usize::from_str_radix(start, 16).ok()?;
+        let end = usize::from_str_radix(end, 16).ok()?;
+        if start < high && end > low {
+            all += 1;
+            closed += usize::from(rest.starts_with("---"));
+        }
+    }
+    Some((all, closed))
 }
 
 /// The protection letters of the mapping that holds `at`, as the kernel reports them.

@@ -97,6 +97,16 @@ pub(crate) fn discard(at: usize, bytes: usize) {
 
 pub(crate) const KEEPS: bool = true;
 
+/// How many mappings `[low, high)` is in, and how many of them allow no access. This
+/// host does not count them.
+pub(crate) fn mappings(_low: usize, _high: usize) -> Option<(usize, usize)> {
+    None
+}
+
+/// Whether `write` can write a published text run, so a dead image's instructions on a
+/// page a live image shares are filled with traps.
+pub(crate) const FILLS: bool = true;
+
 struct Job(*mut (dyn FnMut() + 'static));
 // SAFETY: the sender waits for the job to end, so the closure outlives its one use.
 unsafe impl Send for Job {}

@@ -413,6 +413,7 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     let (entry, text) = (first.entry(), first.text());
     assert_eq!(call(&first, 1), 102);
     drop(first);
+    loader.reclaim();
     if std::env::var_os(CHILD).is_some() {
         // The child jumps into the dead cohort, which ends it.
         // SAFETY: none; the law is that this call faults.
@@ -482,15 +483,93 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
     assert_eq!((call(&waiting, 1), call(&flushed, 1)), (3, 4));
 
     drop(waiting);
-    // A dead image in a live cohort: its page is never written, so it stays as it was
-    // and still counts as installed.
+    loader.reclaim();
+    // A dead image in a live cohort: a live image shares its page, so the page stays
+    // executable, and its bytes still count as installed.
     assert_eq!(host::protection(loader.0.text(0)), host::LIVE);
     assert_eq!((call(&flushed, 1), loader.installed()), (4, 2 * size()));
     drop(flushed);
+    loader.reclaim();
     assert_eq!(
         (host::protection(loader.0.text(0)), loader.installed()),
         ("---p".into(), 0)
     );
+}
+
+/// PACK-4 step 5 and PACK-9: when an image dies in a cohort that lives on, its address
+/// stops resolving in every chunk it spanned and each page that held only its text is
+/// closed, while a batch neighbour on its last page still runs and resolves. Dropping
+/// the last handle does not wait for the loader.
+#[test]
+fn a_dead_image_in_a_live_cohort_stops_resolving_and_its_own_pages_are_closed() {
+    if !host::slab() {
+        return;
+    }
+    let loader = Loader::new(Config {
+        installed_bytes: 8 << 20,
+        batch: Duration::from_secs(60),
+        ..config()
+    })
+    .unwrap();
+    // The first image's text runs past the first 2 MiB chunk and ends inside a page.
+    const WIDE: usize = (2 << 20) + 4096 + 100;
+    let mut wide = image(1);
+    wide.text.resize(WIDE, 0);
+    wide.spans[0].length = WIDE as u32;
+    let (wide, small) = (wide.encode(), image(2).encode());
+    for bytes in [&wide, &small] {
+        loader.admit(
+            Module::parse(bytes).unwrap().header.key(),
+            hirsel_mod::digest(bytes),
+        );
+    }
+    let (wide, small) = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| loader.load::<Leaf>(&wide, &IDENTITY, false).unwrap());
+        while loader.installed() == 0 {
+            std::thread::yield_now();
+        }
+        let flushed = loader.load::<Leaf>(&small, &IDENTITY, true).unwrap();
+        (waiting.join().unwrap(), flushed)
+    });
+    let (text, page) = (wide.text(), loader.0.page);
+    let shared = text + WIDE / page * page;
+    assert_eq!(small.text(), text + WIDE.next_multiple_of(64));
+    assert_eq!((call(&wide, 1), call(&small, 1)), (3, 4));
+    let installed = loader.installed();
+
+    // The last handle is dropped while another thread holds the loader's lock.
+    let (sent, dropped) = std::sync::mpsc::channel();
+    let held = loader.0.slab.lock().unwrap();
+    let dropping = std::thread::spawn(move || {
+        drop(wide);
+        sent.send(()).unwrap();
+    });
+    dropped
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the drop waited for the loader");
+    drop(held);
+    dropping.join().unwrap();
+    loader.reclaim();
+
+    for pc in [text, text + (2 << 20), text + WIDE - 1] {
+        assert_eq!(loader.resolve(pc), None);
+    }
+    assert_eq!(
+        loader.resolve(small.text()),
+        Some(Hit {
+            digest: small.digest().0[..16].try_into().unwrap(),
+            offset: 0,
+        })
+    );
+    assert_eq!(
+        [text, shared - page, shared].map(host::protection),
+        ["---p".to_string(), "---p".to_string(), host::LIVE.into()]
+    );
+    // The neighbour runs, and the dead image's bytes stay installed until the cohort goes.
+    assert_eq!((call(&small, 1), loader.installed()), (4, installed));
+    assert_eq!(loader.unrevoked(), 0);
+    drop(small);
+    assert_eq!(loader.installed(), 0);
 }
 
 /// `activate` is a compare-and-swap on the version, the retired budget refuses without
@@ -662,6 +741,7 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
     assert_eq!(loader.fault(&loader as *const Loader as usize), None);
     drop(code);
+    loader.reclaim();
     assert_eq!(loader.resolve(pc), None);
     assert_eq!(loader.resolve(wide.text() + (2 << 20)), hit(&wide, 2 << 20));
 }

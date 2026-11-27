@@ -30,7 +30,38 @@ pub const UNBOUNDED: i64 = 1 << 62;
 /// without emitting any scheduling event or ending a slice.
 pub const EMBED_QUANTUM: i64 = 65_536;
 pub const SLICE: u64 = crate::abi_layout::STEP_SLICE as u64;
+/// The first id no task has taken. Ids are nonzero and never reused in a
+/// process: a caught `OutOfTime` names its account by id (`is_active`).
 static NEXT: AtomicU64 = AtomicU64::new(1);
+/// The ids one task takes from [`NEXT`] at a time.
+const ID_RANGE: u64 = 64;
+
+/// A task's unspent account ids: `next..end`. A new task holds none and takes
+/// its first range at its first `bound steps`, so opening an account writes no
+/// line another worker reads.
+#[derive(Default)]
+pub(crate) struct Ids {
+    next: u64,
+    end: u64,
+}
+
+impl Ids {
+    fn take(&mut self) -> u64 {
+        if self.next == self.end {
+            self.next = NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                    id.checked_add(ID_RANGE)
+                })
+                .unwrap_or_else(|_| {
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds"))
+                });
+            self.end = self.next + ID_RANGE;
+        }
+        let id = self.next;
+        self.next += 1;
+        id
+    }
+}
 
 #[inline(always)]
 pub(crate) fn initial_unbounded_steps() -> i64 {
@@ -124,14 +155,9 @@ pub unsafe extern "C" fn hirsel_core_test_step_report(
 }
 
 impl Account {
-    fn open(left: u64, parent: Option<Arc<Account>>) -> Arc<Self> {
-        let id = NEXT
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .unwrap_or_else(|_| {
-                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds"))
-            });
+    fn open(ids: &mut Ids, left: u64, parent: Option<Arc<Account>>) -> Arc<Self> {
         Arc::new(Self {
-            id,
+            id: ids.take(),
             parent,
             state: Mutex::new(State {
                 left,
@@ -245,7 +271,9 @@ pub(crate) fn share(child: &mut Context, parent: &Context) {
 /// A flow stage's private copy of the wiring task's remaining steps (MEM-30).
 pub(crate) fn copy(stage: &mut Context, parent: &Context) {
     if let Some(left) = remaining(parent) {
-        stage.step_bounds.push(Bound(Account::open(left, None)));
+        stage
+            .step_bounds
+            .push(Bound(Account::open(&mut stage.step_ids, left, None)));
         stage.step_slice_tail = SLICE;
         stage.steps = 0;
         draw(stage);
@@ -271,7 +299,7 @@ pub(crate) fn grant(context: &mut Context) -> Option<(Arc<Account>, u64)> {
 /// A helper's root context starts with its private grant, the account
 /// returned to read its residual once the helper's unit is done.
 pub(crate) fn install_grant(context: &mut Context, grant: Option<u64>) -> Option<Arc<Account>> {
-    let account = Account::open(grant?, None);
+    let account = Account::open(&mut context.step_ids, grant?, None);
     context.step_bounds.push(Bound(account.clone()));
     context.step_slice_tail = SLICE;
     context.steps = 0;
@@ -378,9 +406,8 @@ pub unsafe extern "C" fn hirsel_core_step_enter_at(
     } else {
         context.steps = 0;
     }
-    context
-        .step_bounds
-        .push(Bound(Account::open(steps, parent)));
+    let account = Account::open(&mut context.step_ids, steps, parent);
+    context.step_bounds.push(Bound(account));
     draw(context);
     #[cfg(feature = "prof")]
     crate::mem_prof::scope_enter(1, 0, steps, false);
@@ -534,4 +561,43 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A caught `OutOfTime` names its account by id, so two accounts that are
+    /// ever open in one process never share one, whichever tasks opened them and
+    /// however many ranges those tasks went through.
+    #[test]
+    fn accounts_opened_by_concurrent_tasks_have_distinct_ids() {
+        let per_task = 2 * ID_RANGE as usize + 3;
+        let tasks: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut context = Context::new(1 << 16);
+                    (0..per_task)
+                        .map(|_| {
+                            // SAFETY: this thread owns the context.
+                            unsafe {
+                                assert!(hirsel_core_step_enter(&mut context, 1));
+                                let id = context.step_bounds.last().unwrap().0.id;
+                                hirsel_core_step_leave(&mut context);
+                                id
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut ids: Vec<u64> = tasks
+            .into_iter()
+            .flat_map(|task| task.join().unwrap())
+            .collect();
+        assert!(ids.iter().all(|id| *id != 0));
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 4 * per_task);
+    }
 }

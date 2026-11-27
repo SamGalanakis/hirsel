@@ -1,10 +1,10 @@
 # In-process code loading
 
 *Specified 2026-11-27 (lane packing-p1-loader-3253, from the ratified in-process packing
-proposal). Rules PACK-1 to PACK-10. This is slice P1, the loader core. Each rule says what is
-built; the rest is specified, not built. The hot call ABI, the typed export adapter, `Held`
-and the language surface of `core.code` over these rules are slice P2 and are not specified
-here.*
+proposal). Rules PACK-1 to PACK-10 are slice P1, the loader core. Rules from PACK-11 are
+slice P2 (lane packing-p2-hot-abi-3281), the hot call ABI. Each rule says what is built; the
+rest is specified, not built. The typed export adapter, `Held` and the language surface of
+`core.code` over these rules are slice P2 and are specified as they are built.*
 
 A **pack host** is an OS process that runs many Places. It installs compiled Hirsel code
 while it runs, calls it, replaces it and unloads it. This chapter defines the artifact it
@@ -404,6 +404,31 @@ ends the host.
 | `Quarantined` | the digest faulted on this host |
 | `NotPrelinked` | the host has no slab and its image lacks the key |
 | `Unsupported` | the host cannot publish code (PACK-4), or a module's alignment is above a page |
+
+## PACK-11: The context line
+
+Every native function takes its task's context as a hidden first argument. Its first 64
+bytes are one cache line, and a context starts on a 64-byte boundary. Loaded code and
+linked code read these words at the same offsets:
+
+| offset | bytes | word | meaning |
+|---:|---:|---|---|
+| 0 | 8 | `payer` | the slot of the byte budget that pays now ([MEM-19](budgets.md#mem-19-limits)) |
+| 8 | 8 | `events` | the task's event gate; zero when nothing observes the task |
+| 16 | 8 | `steps` | the signed remaining step window ([MEM-30](budgets.md#mem-30-step-bounds)) |
+| 24 | 8 | `stack_limit` | the lowest stack address an activation may enter with ([FAIL-17](failure.md)) |
+| 32 | 16 | `fast_salt` | the two map salt words |
+| 48 | 8 | `heap_heads` | the task heap's size-class free-list heads; null until code pops blocks inline |
+| 56 | 8 | `execution` | the Place execution this task runs for; null for a task of the process's own run |
+
+The prepared map hash key follows at 64 and the strong key at 96. A change to any of these
+offsets changes the runtime ABI revision (PACK-2), so a module built for another layout is
+refused `Mismatch(abi)`.
+
+A step account's identity is a number that is never zero and never used twice in a
+process. A task takes identities from the process in ranges of 64 and takes its first
+range when it first opens an account, so opening a `bound steps` writes no memory another
+worker reads.
 
 ## Gates
 

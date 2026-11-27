@@ -93,9 +93,15 @@ pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
 // FAIL-17: the task's stack limit word, in the Context's first cache line.
 pub const CONTEXT_STACK_LIMIT: usize = 24;
-pub const CONTEXT_MAP_HASH_KEY: usize = 32;
-pub const CONTEXT_MAP_FAST_SALT: usize = 64;
-pub const CONTEXT_MAP_STRONG_KEY: usize = 80;
+// PACK-11: the Context's first 64 bytes are its hot line: payer, events, steps,
+// stack limit, the two fast map salt words, the task heap's free-list heads and
+// the Execution record. The two prepared map keys follow it.
+pub const CONTEXT_MAP_FAST_SALT: usize = 32;
+pub const CONTEXT_HEAP_HEADS: usize = 48;
+pub const CONTEXT_EXECUTION: usize = 56;
+pub const CONTEXT_LINE: usize = 64;
+pub const CONTEXT_MAP_HASH_KEY: usize = 64;
+pub const CONTEXT_MAP_STRONG_KEY: usize = 96;
 // MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
 // most one slice; with none current it starts at 2^62. A larger word means no
 // bound is current.

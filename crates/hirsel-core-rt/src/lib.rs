@@ -127,7 +127,7 @@ pub struct Capacity {
 
 /// The hidden first argument of native functions. A task owns its context;
 /// custody can carry funding records beyond this context's lifetime.
-#[repr(C)]
+#[repr(C, align(64))]
 pub struct Context {
     // Funding's first word is the one frozen current-record pointer.
     pub(crate) current: Funding,
@@ -145,8 +145,15 @@ pub struct Context {
     /// the task first runs ([`stack::commit`]); an isolate saves it and a `Stack`
     /// refusal releases the cleanup margin below it ([`stack::hirsel_core_stack_out`]).
     pub stack_limit: usize,
-    pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) map_fast_salt: [u64; 2],
+    /// The task heap's size-class free-list heads, at the frozen offset
+    /// CONTEXT_HEAP_HEADS. Null until generated code pops small blocks inline
+    /// (packing slice P5); nothing reads it before then.
+    pub(crate) heap_heads: *const u8,
+    /// The Place execution this task runs for, at the frozen offset
+    /// CONTEXT_EXECUTION (PACK-11). Null for a task of the process's own run.
+    pub(crate) execution: *const u8,
+    pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) map_strong_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) run: *const crate::process::Config,
     /// The limit `stack_limit` returns to when the cleanup margin is restored.
@@ -164,6 +171,8 @@ pub struct Context {
     pub(crate) host_files: *mut host_file::Files,
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
     pub(crate) step_bounds: Vec<steps::Bound>,
+    /// This task's unspent step account ids ([`steps::Ids`]).
+    pub(crate) step_ids: steps::Ids,
     #[cfg(feature = "testing")]
     pub(crate) step_observation: Option<steps::Observation>,
     pub(crate) step_slice_tail: u64,
@@ -202,6 +211,9 @@ fn map_keys(key: &[u8; 16]) -> MapKeys {
 
 const _: () = {
     assert!(std::mem::offset_of!(Context, map_fast_salt) == abi_layout::CONTEXT_MAP_FAST_SALT);
+    assert!(std::mem::offset_of!(Context, heap_heads) == abi_layout::CONTEXT_HEAP_HEADS);
+    assert!(std::mem::offset_of!(Context, execution) == abi_layout::CONTEXT_EXECUTION);
+    assert!(std::mem::align_of::<Context>() == abi_layout::CONTEXT_LINE);
     assert!(std::mem::offset_of!(Context, map_strong_key) == abi_layout::CONTEXT_MAP_STRONG_KEY);
 };
 
@@ -243,6 +255,9 @@ impl Context {
             events: 0,
             steps: steps::initial_unbounded_steps(),
             step_bounds: Vec::new(),
+            step_ids: steps::Ids::default(),
+            heap_heads: std::ptr::null(),
+            execution: std::ptr::null(),
             #[cfg(feature = "testing")]
             step_observation: None,
             step_slice_tail: steps::SLICE,

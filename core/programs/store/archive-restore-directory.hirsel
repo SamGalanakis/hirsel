@@ -5,14 +5,34 @@ pub type Restored: send {
 }
 
 fn restore_origin_for(point: RestorePoint, attempt: Inline[u8, 16]) -> manifest.RestoreOrigin {
-    manifest.RestoreOrigin(parent: store_key_to_rep(point.token.parent), binding_id: point.token.binding_id, branch: point.branch, version: point.version, at: point.at, boundary: point.token.boundary, attempt)
+    manifest.RestoreOrigin(parent: store_key_to_rep(point.token.parent), binding_id: point.token.binding_id, branch: point.branch, version: point.version, at: point.at, boundary: point.token.boundary, attempt, capture_attempt: point.token.capture_attempt)
 }
 
 fn restore_same_origin(m: manifest.PageManifest, o: manifest.RestoreOrigin) -> bool {
     let Some(saved) = view m.origin else {
         return false
     }
-    saved.parent == o.parent && saved.binding_id == o.binding_id && saved.branch == o.branch && saved.version == o.version && saved.at == o.at && saved.boundary == o.boundary && saved.attempt == o.attempt
+    restore_matches(saved, o, false)
+}
+
+fn restore_matches(saved: manifest.RestoreOrigin, wanted: manifest.RestoreOrigin, exact_retry: bool) -> bool {
+    saved.parent == wanted.parent && saved.binding_id == wanted.binding_id && saved.capture_attempt == wanted.capture_attempt && saved.boundary == wanted.boundary && saved.attempt == wanted.attempt && (exact_retry || (saved.branch == wanted.branch && saved.version == wanted.version && saved.at == wanted.at))
+}
+
+fn restore_is_pinned(target: RestoreTarget) -> bool {
+    if let Boundary(_) = target {
+        true
+    } else {
+        false
+    }
+}
+
+fn restore_saved_point(selected: RestorePoint, saved: manifest.RestoreOrigin) -> RestorePoint {
+    let mut point = selected
+    point.branch = saved.branch
+    point.version = saved.version
+    point.at = saved.at
+    point
 }
 
 // Stage the parent under the destination fence. The ordinary writer folds the verified
@@ -130,28 +150,30 @@ fn restore_write_foundation(private_dir: Dir, to: Dir, child: StoreId, point: Re
 
 fn restore_work_name(origin: manifest.RestoreOrigin) -> Result[String, DeployError] {
     let body = deploy_result(failure_result_from_rep(manifest.restore_origin_payload(origin)))?
-    let mut name = string.from("restore-")
+    let mut name = string.from("r-")
     string.push(mut name, std.hex.encode(body))
     Ok(take name)
 }
 
 // A crash may leave the origin-named reservation before the EXPORT rename.
-fn refuse_reserved_genesis(d: Dir) -> Result[(), Error] waits {
+fn restore_pending_origin(d: Dir) -> Result[Option[manifest.RestoreOrigin], Error] waits {
     let mut listing = failure_result_from_rep(manifest.disk_io(host.entries(d, None)))?
     let mut raw: Bytes = list.with_capacity(4096)
     loop {
         list.clear(mut raw)
         if failure_result_from_rep(manifest.disk_io(host.next_entries(mut listing, mut raw)))? == 0 {
-            return Ok(())
+            return Ok(None)
         }
         let mut pos = 0u64
         while pos < list.len(raw) {
             let size: u16 = list.word_le(raw, pos + 1)
             let start = pos + 3
             pos = start + int.widen(size)
-            if pos - start == 8u64 + 2u64 * manifest.RESTORE_ORIGIN_PAYLOAD && list.slice(raw, start, start + 8) == b"restore-" {
-                if let Some(_) = std.hex.decode(list.slice(raw, start + 8, pos)) {
-                    return Error(ExportDirectory)
+            if pos - start == 2u64 + 2u64 * manifest.RESTORE_ORIGIN_PAYLOAD && list.slice(raw, start, start + 2) == b"r-" {
+                if let Some(body) = std.hex.decode(list.slice(raw, start + 2, pos)) {
+                    if let Some(saved) = manifest.restore_origin_from_payload(body) {
+                        return Ok(Some(saved))
+                    }
                 }
             }
         }
@@ -280,7 +302,7 @@ pub fn restore(tasks: Tasks, from: Dir, to: Dir, c: Clock, r: Random, options: O
         return Error(ExportMismatch)
     }
     let mut input = StampedBackup(from)
-    restore_directory(tasks, mut input, to, c, r, options, point, attempt)
+    restore_directory(tasks, mut input, to, c, r, options, point, attempt, restore_is_pinned(target))
 }
 
 pub type RestoreSource = StampedBackup(Dir) | ArchivedStore(std.object.Client, StoreId, u64)
@@ -291,15 +313,13 @@ pub fn restore_from_archive(tasks: Tasks, take sink: std.object.Client, parent: 
         return Error(ExportMismatch)
     }
     let mut input = ArchivedStore(take src, parent, op_ms)
-    restore_directory(tasks, mut input, to, c, r, options, point, attempt)
+    restore_directory(tasks, mut input, to, c, r, options, point, attempt, restore_is_pinned(target))
 }
 
-fn restore_directory(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16]) -> Result[Restored, DeployError] waits {
-    let work = restore_work_name(restore_origin_for(point, attempt))?
+fn restore_directory(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], exact_retry: bool) -> Result[Restored, DeployError] waits {
     let fenced = deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))?
     let published = deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))?
-    if fenced || published {
-        let origin = restore_origin_for(point, attempt)
+    let saved = if fenced || published {
         let check = if fenced {
             let raw = scratch_result(failure_result_from_rep(manifest.disk_read_file(to, "EXPORT", 4096)))?
             manifest.disk_read_page_manifest("EXPORT", raw)
@@ -307,10 +327,27 @@ fn restore_directory(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, 
             manifest.read_page_manifest_file(to)
         }
         match take check {
-            Ok((_, take m)) if restore_same_origin(m, origin) => (),
+            Ok((_, take m)) => match m.origin {
+                Some(o) => Some(o),
+                None => return Error(Scratch(Exists("restore target")))
+            },
             _ => return Error(Scratch(Exists("restore target"))),
         }
+    } else if exact_retry {
+        scratch_result(restore_pending_origin(to))?
     } else {
+        None
+    }
+    let point = if let Some(existing) = saved {
+        if !restore_matches(existing, restore_origin_for(selected, attempt), exact_retry) {
+            return Error(Scratch(Exists("restore target")))
+        }
+        restore_saved_point(selected, existing)
+    } else {
+        selected
+    }
+    let work = restore_work_name(restore_origin_for(point, attempt))?
+    if !fenced && !published {
         let resuming = match host.open_dir(to, work) {
             Ok(_) => true,
             Error(NotFound) => false,

@@ -34,6 +34,7 @@ core@1/bytebuf/from_tail
 core@1/bytebuf/try_reserve_hint
 core@1/bytebuf/with_tail
 # DECISIONS.md 2026-11-24 (gavel 1A, MEM-29): the task-local Cell[T].
+core@1/cell/get
 core@1/cell/into_inner
 core@1/cell/new
 core@1/cell/replace

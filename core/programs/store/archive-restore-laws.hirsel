@@ -117,13 +117,39 @@ fn test_la5_backup_fresh_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let parent_position = deploy_result(position(mut db, parent_ticket))?
     let wanted = version(snapshot(db))
     let _ = deploy_result(archive_hold_put(mut db, rows, 2, 34, 10))?
+    let fork_source = snapshot(db)
+    let (other, born) = deploy_result(fork(mut db, "selected", fork_source))?
+    deploy_result(durable(mut db, born))?
+    let branch_target = Version(other.id, version(fork_source))
     let backup_attempt = exit_attempt(23)
     let job = begin_backup(mut db, exported, clone(backup_attempt))?
     let _ = export_copy(take job)?
     release_export(mut db, backup_attempt)
     let attempt: Inline[u8, 16] =[19; 16]
     let result_child = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
-    restore_law_crash_points(exported, c, r, tasks, opts, result_child.point)?
+    let RestorePresent(branch_point) = plan_backup_restore(exported, branch_target)? else {
+        fail("missing fork in stamped backup")
+    }
+    restore_law_crash_points(exported, c, r, tasks, opts, branch_point)?
+    let separate = disk_test_directory(d)
+    let nonce = exit_attempt(31)
+    let second_job = begin_backup(mut db, separate, clone(nonce))?
+    let _ = export_copy(take second_job)?
+    release_export(mut db, nonce)
+    let RestorePresent(other_copy) = plan_backup_restore(separate, Version(0, wanted))? else {
+        fail("missing separately captured version")
+    }
+    if other_copy.token.boundary != result_child.point.token.boundary || other_copy.token.capture_attempt == result_child.point.token.capture_attempt {
+        fail("fixture did not capture the same cut twice")
+    }
+    match restore(tasks, separate, child_dir, c, r, opts, Boundary(other_copy.token), attempt) {
+        Error(Scratch(Exists(_))) => (),
+        _ => fail("a different EXPORT capture resumed the reservation"),
+    }
+    let independent = restore(tasks, exported, disk_test_directory(d), c, r, opts, Boundary(branch_point.token),[29; 16])?
+    if independent.point.branch != 0 || independent.child == result_child.child {
+        fail("fresh boundary restore did not select main")
+    }
     let retry = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
     if result_child.child == parent || retry.child != result_child.child {
         fail("restore did not reserve a fresh persistent child identity")
@@ -274,7 +300,10 @@ fn restore_law_crash_points(exported: Dir, c: Clock, r: Random, tasks: Tasks, op
                 _ => fail("ordinary open saw a partially published child"),
             }
         }
-        let recovered = restore(tasks, exported, rebooted, c, r, opts, Version(selected.branch, selected.version), attempt)?
+        let recovered = restore(tasks, exported, rebooted, c, r, opts, Boundary(selected.token), attempt)?
+        if recovered.point.branch != selected.branch || recovered.point.version != selected.version || recovered.point.at != selected.at {
+            fail("pinned retry lost its original branch provenance")
+        }
         if let Some(reserved) = expected {
             if recovered.child != reserved {
                 fail("retry replaced the reserved identity")

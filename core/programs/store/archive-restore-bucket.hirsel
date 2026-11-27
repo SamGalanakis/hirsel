@@ -52,7 +52,7 @@ fn restore_check_keys(mut dst: std.object.Client, held: Map[String, ()], due: u6
 
 const RESTORE_RESERVATION: String = "restore-reservation"
 
-fn restore_bucket_reservation(mut dst: std.object.Client, origin: manifest.RestoreOrigin, r: Random, due: u64) -> Result[StoreId, Error] waits {
+fn restore_bucket_reservation(mut dst: std.object.Client, origin: manifest.RestoreOrigin, exact_retry: bool, r: Random, due: u64) -> Result[(StoreId, manifest.RestoreOrigin), Error] waits {
     let mut raw: Bytes = list.with_capacity(4096)
     match history.history_fetch(mut dst, RESTORE_RESERVATION, mut raw, due) {
         Ok(_) => (),
@@ -76,13 +76,16 @@ fn restore_bucket_reservation(mut dst: std.object.Client, origin: manifest.Resto
         Error(take other) => return Error(failure_from_rep(take other)),
     }
     let (id, take fence) = disk_read_page_manifest(RESTORE_RESERVATION, raw)?
-    if id == store_key_from_rep(origin.parent) || !restore_same_origin(fence, origin) {
+    let Some(saved) = fence.origin else {
         return Error(Exists("restore destination"))
     }
-    Ok(id)
+    if id == store_key_from_rep(origin.parent) || !restore_matches(saved, origin, exact_retry) {
+        return Error(Exists("restore destination"))
+    }
+    Ok((id, saved))
 }
 
-fn restore_bucket_published(mut dst: std.object.Client, origin: manifest.RestoreOrigin, due: u64) -> Result[Option[StoreId], Error] waits {
+fn restore_bucket_published(mut dst: std.object.Client, origin: manifest.RestoreOrigin, exact_retry: bool, due: u64) -> Result[Option[(StoreId, manifest.RestoreOrigin)], Error] waits {
     let mut body = failure_result_from_rep(manifest.disk_read_buffer(history.HISTORY_HEAD_LIMIT))?
     match history.history_fetch_head(mut dst, mut body, due) {
         Ok(_) => (),
@@ -94,10 +97,13 @@ fn restore_bucket_published(mut dst: std.object.Client, origin: manifest.Restore
     let head = capture.head
     let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut dst, head, due))?
     let m = failure_result_from_rep(history.history_read_manifest(mut dst, head.store, mark, head.checkpoint.seq, due))?
-    if !restore_same_origin(m, origin) {
+    let Some(saved) = m.origin else {
         return Error(Exists("head"))
     }
-    Ok(Some(store_key_from_rep(head.store)))
+    if !restore_matches(saved, origin, exact_retry) {
+        return Error(Exists("head"))
+    }
+    Ok(Some((store_key_from_rep(head.store), saved)))
 }
 
 fn restore_emit_bucket(mut dst: std.object.Client, d: Dir, child: StoreId, origin: manifest.RestoreOrigin, release: RestoreRelease, level_name: String, r: Random, due: u64) -> Result[(), Error] waits {
@@ -144,8 +150,10 @@ fn restore_emit_bucket(mut dst: std.object.Client, d: Dir, child: StoreId, origi
     match restore_check_keys(mut dst, held, due) {
         Ok(_) => (),
         Error(Exists(_)) => {
-            if restore_bucket_published(mut dst, origin, due)? == Some(child) {
-                return Ok(())
+            if let Some((found, _)) = restore_bucket_published(mut dst, origin, false, due)? {
+                if found == child {
+                    return Ok(())
+                }
             }
             return Error(Exists("restore destination"))
         },
@@ -158,8 +166,8 @@ fn restore_emit_bucket(mut dst: std.object.Client, d: Dir, child: StoreId, origi
     match history.history_write_head_finish(mut dst, take sent, mut workspace.body, mut workspace.witness, due) {
         HistoryApplied(_) => Ok(()),
         HistoryRefused(take e) => Error(Remote(take e)),
-        _ => match restore_bucket_published(mut dst, origin, due)? {
-            Some(found) if found == child => Ok(()),
+        _ => match restore_bucket_published(mut dst, origin, false, due)? {
+            Some((found, _)) if found == child => Ok(()),
             Some(_) => Error(Exists("head")),
             None => Error(Undecided),
         },

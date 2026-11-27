@@ -487,13 +487,13 @@ fn format14_manifest_law() -> Result[(), Error] {
         return Error(Foreign)
     }
     let token = manifest.RestoreBoundary(source_kind: 0, base_ordinal: 8, base_digest: 71, unit: 12, epoch: 0, unit_digest: 72, frame_end: 300)
-    bound_manifest.origin = Some(manifest.RestoreOrigin(parent: types.StoreKey(hi: 3, lo: 4), binding_id: 11, branch: 2, version: 9, at: 100, boundary: token, attempt:[7; 16]))
+    bound_manifest.origin = Some(manifest.RestoreOrigin(parent: types.StoreKey(hi: 3, lo: 4), binding_id: 0, branch: 2, version: 9, at: 100, boundary: token, attempt: [7; 16], capture_attempt: [19; 16]))
     let child_raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), bound_manifest))?
     let (_, take child) = disk_read_page_manifest(path, child_raw)?
     let Some(origin) = child.origin else {
         fail("a restored MANIFEST lost RESTORE_ORIGIN")
     }
-    if list.len(child_raw) != list.len(bound_raw) + 125 || origin.parent != types.StoreKey(hi: 3, lo: 4) || origin.binding_id != 11 || origin.branch != 2 || origin.version != 9 || origin.at != 100 || origin.boundary != token || origin.attempt !=[7u8; 16] {
+    if list.len(child_raw) != list.len(bound_raw) + 141 || origin.parent != types.StoreKey(hi: 3, lo: 4) || origin.binding_id != 0 || origin.branch != 2 || origin.version != 9 || origin.at != 100 || origin.boundary != token || origin.attempt !=[7u8; 16] || origin.capture_attempt !=[19u8; 16] {
         fail("RESTORE_ORIGIN changed its parent, selected transition or attempt")
     }
     let mut overflow = failure_result_from_rep(types.copied(payload))?

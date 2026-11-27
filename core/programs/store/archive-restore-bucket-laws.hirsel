@@ -15,6 +15,10 @@ fn restore_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result
     let parent = db.store
     let rows = deploy_result(archive_hold_table(mut db))?
     let _ = deploy_result(archive_hold_put(mut db, rows, 1, 0x71, 31))?
+    let fork_source = snapshot(db)
+    let (other, born) = deploy_result(fork(mut db, "selected", fork_source))?
+    deploy_result(durable(mut db, born))?
+    let branch_target = Version(other.id, version(fork_source))
     let capture_attempt = exit_attempt(1)
     let captured = begin_backup(mut db, backup_dir, clone(capture_attempt))?
     let _ = export_copy(take captured)?
@@ -28,9 +32,9 @@ fn restore_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result
         _ => fail("accepted overlapping source and child namespaces"),
     }
     let attempt: Inline[u8, 16] =[7; 16]
-    let result_child = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Latest, attempt, DF_OP_MS, plain_restore_release)?
+    let result_child = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, branch_target, attempt, DF_OP_MS, plain_restore_release)?
     let replayed = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Boundary(result_child.point.token), attempt, DF_OP_MS, plain_restore_release)?
-    if replayed.child != result_child.child || result_child.child == parent {
+    if replayed.point.branch != other.id || replayed.child != result_child.child || result_child.child == parent {
         fail("Bucket restore identity or retry")
     }
     match restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Latest,[8; 16], DF_OP_MS, plain_restore_release) {

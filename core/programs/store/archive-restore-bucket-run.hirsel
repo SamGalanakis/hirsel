@@ -1,6 +1,6 @@
-fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.object.Client, work: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], level_name: String, deadline: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
+fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.object.Client, work: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], exact_retry: bool, level_name: String, deadline: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
     let mut point = selected
-    let origin = restore_origin_for(point, attempt)
+    let requested = restore_origin_for(point, attempt)
     let stamp = restore_stage(mut source, work, point)?
     let recovered = open_copied(work, c, stamp.attempt, options, false)?
     for branch_head in pages.holder_heads(recovered.db.holders) {
@@ -25,15 +25,16 @@ fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.o
     point.activation = release.activation
     point.binding = release.binding
     let _ = take recovered
-    if let Some(published) = deploy_result(restore_bucket_published(mut dst, origin, deadline))? {
-        return Ok(Restored(child: published, point, attempt))
+    if let Some((published, saved)) = deploy_result(restore_bucket_published(mut dst, requested, exact_retry, deadline))? {
+        return Ok(Restored(child: published, point: restore_saved_point(point, saved), attempt))
     }
     restore_fold(tasks, work, c, r, options, point, stamp)?
     let (_, take checked) = deploy_result(read_page_manifest_file(work))?
     if let Error(_) = manifest.require_object_memory_manifest(checked) {
         return Error(UnsupportedResidency)
     }
-    let child = deploy_result(restore_bucket_reservation(mut dst, origin, r, deadline))?
+    let (child, origin) = deploy_result(restore_bucket_reservation(mut dst, requested, exact_retry, r, deadline))?
+    point = restore_saved_point(point, origin)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(work, "foundation"))))?
     let foundation = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(work, "foundation"))))?
     deploy_result(restore_write_foundation(work, foundation, child, point, origin))?
@@ -58,7 +59,7 @@ pub fn restore_to_bucket(tasks: Tasks, take input: RestoreSource, mut destinatio
     let mut tmp = string.with_capacity(64)
     string.push(mut tmp, "restore-")
     let work = scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut tmp))))?
-    let answer_out = restore_bucket_staged(tasks, mut source, mut destination, work, c, r, options, point, attempt, level_name, deadline, verify)
+    let answer_out = restore_bucket_staged(tasks, mut source, mut destination, work, c, r, options, point, attempt, restore_is_pinned(target), level_name, deadline, verify)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, tmp))))?
     take answer_out
 }

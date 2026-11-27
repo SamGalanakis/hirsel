@@ -101,16 +101,16 @@ fn check_directory_sizing_boundary(o: Overrides) {
 //   six journal channels: 632
 //   writer state: 1,768
 //   resident: 1,048,576
-//   cut phase: round8(16,777,685) + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
-//            = 33,749,652, above the write peak of 2 × 16,777,296
-//   total: 101,954,980
+//   cut phase: round8(16,777,701) + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
+//            = 33,749,668, above the write peak of 2 × 16,777,296
+//   total: 101,954,996
 @test
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     if journal_channel_bytes() != 632 {
         fail("§1.1: the six Directory channels cost 632 bytes")
     }
     let o = group_override(67108864)
-    let need = 101954980u64
+    let need = 101954996u64
     match (bound bytes 0u64 {
         directory_writer_need(o)
     }) {
@@ -151,11 +151,11 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
 //   writer state: 1,768
 //   resident: 1,048,576
 //   write peak: 2 × 327,760 = 655,520, above the cut phase
-//     max(65,536, round8(72 + 16 + 236 + 65,536 + 20 + 125)) + 65,536 + 2 × 95,326
-//     + (4,096 + 262,144) = 588,436 and recovery 65,536 + 327,760 = 393,296
+//     max(65,536, round8(72 + 16 + 236 + 65,536 + 20 + 141)) + 65,536 + 2 × 95,326
+//     + (4,096 + 262,144) = 588,452 and recovery 65,536 + 327,760 = 393,296
 //   total: 1,817,520 <= 2,097,152
-// The same sizes with the ceilings need 34,911,652 (the cut phase,
-// 33,749,652, wins there; directory_grant_covers_journal_worker keeps the
+// The same sizes with the ceilings need 34,911,668 (the cut phase,
+// 33,749,668, wins there; directory_grant_covers_journal_worker keeps the
 // default figure).
 @test
 fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
@@ -168,7 +168,7 @@ fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         fail("§11.1 AP4a: the small Directory Place need")
     }
     o.limits = None
-    if directory_writer_need(o) != 34911652u64 {
+    if directory_writer_need(o) != 34911668u64 {
         fail("§1.1: the same sizes at the ceilings")
     }
     o.limits = Some(small_place_limits())
@@ -217,14 +217,14 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //   lifetime before resident = 3,245,307. Resident adds 1,048,576.
 // Journal holds two 16,777,296 B frames. Recovery holds an entry and
 // decoded frame (33,554,744 B), or one checkpoint entry and one pack.
-// The cut wins at 68,493,644 B:
-//   output: 16,777,688 (MANIFEST file bound 72 + 16 + 236 + 16,777,216 + 20 + 125,
+// The cut wins at 68,493,692 B:
+//   output: 16,777,704 (MANIFEST file bound 72 + 16 + 236 + 16,777,216 + 20 + 141,
 //     charged as a byte sequence rounded up to 8)
 //   workspace: round8(229 + 33 + 32 × (32,768 + 255)) for the packet,
-//     16,777,688 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
-//   PUT: max(8 MiB + 24 for one multipart part, 16,777,688 for the encoded MANIFEST)
+//     16,777,704 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
+//   PUT: max(8 MiB + 24 for one multipart part, 16,777,704 for the encoded MANIFEST)
 //   cut work: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
-// T_floor = 72,787,527. The place needs T_floor + 80 + 1,434 = 72,789,041
+// T_floor = 72,787,575. The place needs T_floor + 80 + 1,434 = 72,789,089
 // (the follower starter's 1,434 is L85's; Options carries its 32-byte limits
 // and its 80-byte claim_auth).
 @test
@@ -233,8 +233,8 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let kind: Kind = Bucket(lanes)
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
-    let writer_need = 72787527u64
-    let need = 72789041u64
+    let writer_need = 72787575u64
+    let need = 72789089u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != history.MIB {
         fail("§1.1: the Bucket place plan at its exact share")
@@ -272,16 +272,16 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 
 // §1.1 and §11.1 AP4a: the same Bucket place with the small limits. The
 // lifetime terms (3,245,307 before resident) do not depend on the limits.
-// The cut still wins, at 1,909,092 B:
-//   output: round8(72 + 16 + 236 + 65,536 + 20 + 125) = 66,008 (MANIFEST file bound)
-//   workspace: 1,057,000 for the packet, 66,008 for the comparison
-//     buffer, 2 × 65,776 for heads and 64 for the key = 1,254,624
-//   PUT: max(66,008 + 24 for the one multipart part, 66,008) = 66,032
+// The cut still wins, at 1,909,140 B:
+//   output: round8(72 + 16 + 236 + 65,536 + 20 + 141) = 66,024 (MANIFEST file bound)
+//   workspace: 1,057,000 for the packet, 66,024 for the comparison
+//     buffer, 2 × 65,776 for heads and 64 for the key = 1,254,640
+//   PUT: max(66,024 + 24 for the one multipart part, 66,024) = 66,048
 //   cut work: 65,536 + 2 × 95,326 + (4,096 + 262,144) = 522,428
 // above the write peak 2 × 327,760 = 655,520 and recovery
-// max(327,912 + 327,760, 1,057,000 + 66,008) = 1,123,008.
-// T_floor = 3,245,307 + 1,048,576 + 1,909,092 = 6,202,975; the place needs
-// 6,202,975 + 80 + 1,434 = 6,204,489 (72,789,041 at the ceilings).
+// max(327,912 + 327,760, 1,057,000 + 66,024) = 1,123,024.
+// T_floor = 3,245,307 + 1,048,576 + 1,909,140 = 6,203,023; the place needs
+// 6,203,023 + 80 + 1,434 = 6,204,537 (72,789,089 at the ceilings).
 @test
 fn small_bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let lanes = bucket_law_lanes(1)
@@ -289,8 +289,8 @@ fn small_bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
     o.limits = Some(small_place_limits())
-    let writer_need = 6202975u64
-    let need = 6204489u64
+    let writer_need = 6203023u64
+    let need = 6204537u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != history.MIB {
         fail("§11.1 AP4a: the small Bucket place plan at its exact share")

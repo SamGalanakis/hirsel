@@ -17,12 +17,13 @@ pub type RestoreOrigin: shareable + send {
     version: u64,
     at: u64,
     boundary: RestoreBoundary,
-    attempt: Inline[u8, 16]
+    attempt: Inline[u8, 16],
+    capture_attempt: Inline[u8, 16]
 }
 
 pub const RESTORE_ORIGIN_KIND: u16 = 0x0071
 
-pub const RESTORE_ORIGIN_PAYLOAD: u64 = 109
+pub const RESTORE_ORIGIN_PAYLOAD: u64 = 125
 
 pub const RESTORE_ORIGIN_FRAME: u64 = 16 + RESTORE_ORIGIN_PAYLOAD
 
@@ -64,22 +65,41 @@ pub fn restore_origin_payload(o: RestoreOrigin) -> Result[Bytes, types.Failure] 
     for i in 0u64 .. 16 {
         list.push(mut body, o.attempt[i])
     }
+    for i in 0u64 .. 16 {
+        list.push(mut body, o.capture_attempt[i])
+    }
     Ok(take body)
 }
 
 fn decode_restore_origin(file: String, frame: format.DiskFrame, payload: Bytes, child: types.StoreKey) -> Result[RestoreOrigin, types.Failure] {
-    if frame.flags != 1 || list.len(payload) != RESTORE_ORIGIN_PAYLOAD {
+    let Some(origin) = restore_origin_from_payload(payload) else {
         return Error(format.disk_fault(file, frame.payload, Malformed))
+    }
+    if frame.flags != 1 || origin.parent == child {
+        return Error(format.disk_fault(file, frame.payload, Malformed))
+    }
+    Ok(origin)
+}
+
+pub fn restore_origin_from_payload(payload: Bytes) -> Option[RestoreOrigin] {
+    if list.len(payload) != RESTORE_ORIGIN_PAYLOAD {
+        return None
     }
     let parent = types.StoreKey(hi: format.read_le(payload, 0, 8), lo: format.read_le(payload, 8, 8))
     let source_kind = payload[44]
     let b = RestoreBoundary(source_kind, base_ordinal: format.read_le(payload, 45, 8), base_digest: format.read_le(payload, 53, 8), unit: format.read_le(payload, 61, 8), epoch: format.read_le(payload, 69, 8), unit_digest: format.read_le(payload, 77, 8), frame_end: format.read_le(payload, 85, 8))
-    if parent == child || b.base_ordinal == 0 || b.unit == 0 || source_kind > format.ARCHIVE_SOURCE_OBJECTS {
-        return Error(format.disk_fault(file, frame.payload, Malformed))
+    if b.base_ordinal == 0 || b.unit == 0 || source_kind > format.ARCHIVE_SOURCE_OBJECTS {
+        return None
     }
     let mut attempt: Inline[u8, 16] =[0; 16]
+    let mut capture_attempt: Inline[u8, 16] =[0; 16]
     for i in 0u64 .. 16 {
+        capture_attempt[i] = payload[109 + i]
         attempt[i] = payload[93 + i]
     }
-    Ok(RestoreOrigin(parent, binding_id: format.read_le(payload, 16, 8), branch: int.truncate(format.read_le(payload, 24, 4)), version: format.read_le(payload, 28, 8), at: format.read_le(payload, 36, 8), boundary: b, attempt))
+    let binding_id = format.read_le(payload, 16, 8)
+    if binding_id != 0 && capture_attempt !=[0u8; 16] {
+        return None
+    }
+    Some(RestoreOrigin(parent, binding_id, branch: int.truncate(format.read_le(payload, 24, 4)), version: format.read_le(payload, 28, 8), at: format.read_le(payload, 36, 8), boundary: b, attempt, capture_attempt))
 }

@@ -279,6 +279,98 @@ fn compare_page_collections(before: PageTree, after: PageTree) -> Result[Changes
     Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
 }
 
+fn defer_replay_overlays(tree: PageTree, before: PageTree, after: PageTree, skip_ids: List[u32], mut deferred: List[TieredRowDiff]) -> Result[(), Error] {
+    let Some(overlays) = view tree.replay else {
+        return Ok(())
+    }
+    let mut cursor = std.omap.range(overlays.collections, Unbounded, Unbounded)
+    while let Some((id, _)) = std.omap.next(mut cursor) {
+        if list_contains_u32(skip_ids, id) {
+            continue
+        }
+        let mut already = false
+        for item in deferred {
+            if item.id == id {
+                already = true
+            }
+        }
+        if already {
+            continue
+        }
+        let key = prefix(id)?
+        let has_before = match std.page.lookup(before.root, key) {
+            Some(_) => true,
+            None => false,
+        }
+        let has_after = match std.page.lookup(after.root, key) {
+            Some(_) => true,
+            None => false,
+        }
+        if has_before || has_after {
+            list.push(mut deferred, TieredRowDiff(id: id, start: None, stop: None, before: has_before, after: has_after))
+        }
+    }
+    Ok(())
+}
+
+// Catch-up diff (§3.5a, §13.10a, 3177 F4): walks every collection, skips every
+// id superseded by a replay step in this round, diffs Memory collections
+// inline, and collects every Tiered collection (including replay-overlaid
+// Tiered collections whose base descriptor did not move) into `deferred`
+// without stopping at the first Tiered collection.
+fn catch_up_compare_collections(before: PageTree, after: PageTree, skip_ids: List[u32]) -> Result[(Changes, List[TieredRowDiff]), Error] {
+    let has_replay = (if let Some(_) = view before.replay {
+        true
+    } else {
+        false
+    }) || (if let Some(_) = view after.replay {
+        true
+    } else {
+        false
+    })
+    if tree_stamp(before) == tree_stamp(after) && !has_replay {
+        return Ok((Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()), list.new()))
+    }
+    let mut out = change_output(None)
+    let mut deferred: List[TieredRowDiff] = list.new()
+    let mut left = start_diff(Some(view before.root), None)
+    let mut right = start_diff(Some(view after.root), None)
+    while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, None) {
+        let id: u32 = list.word_be(key, 0)
+        if list_contains_u32(skip_ids, id) {
+            diff_advance(mut left, mut right, comparison)
+            continue
+        }
+        let kind = {
+            let descriptor = if comparison == Less {
+                std.page_walk.value(left)
+            } else {
+                std.page_walk.value(right)
+            }
+            unwrap_collection_descriptor(descriptor).kind
+        }
+        let more = match kind {
+            CellCollection => page_change_cell(mut out, key, left, right, comparison, None)?,
+            LogCollection => page_change_log(mut out, key, left, right, comparison, None, None)?,
+            _ => if comparison != Equal || compare_row_versions(left, right) != Equal {
+                collection_row_changes(mut out, id, left, right, comparison, None, None)?
+            } else {
+                true
+            },
+        }
+        if !more {
+            if let Some(take d) = replace(mut out.deferred, None) {
+                list.push(mut deferred, take d)
+            }
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    defer_replay_overlays(before, before, after, skip_ids, mut deferred)?
+    defer_replay_overlays(after, before, after, skip_ids, mut deferred)?
+    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
+    Ok((Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds), take deferred))
+}
+
 pub type Trimmed {
     lo: Bytes,
     hi: Bytes

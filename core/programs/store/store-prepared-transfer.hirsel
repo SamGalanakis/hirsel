@@ -1,0 +1,545 @@
+// Ships the whole preparation; later catch-up rounds ship ROUND deltas onto it.
+pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
+    let mut built_roots = share_roots(staged.plan.roots)
+    let mut built_next_node = staged.plan.next_node
+    let mut extra_rewrites: List[ActivationRewrite] = list.new()
+    let has_pending_indexes = list.len(staged.plan.pending_indexes) != 0
+    if has_pending_indexes {
+        let mut ctx = child_cut_context(source)
+        deploy_result(run_deferred_index_builds_roots(mut ctx, source.stamp.opened, staged.plan.pending_indexes, staged.plan.bindings, mut built_roots, mut built_next_node, staged.plan.live, staged.plan.ceiling, staged.plan.retained))?
+        save_child_cut_pack(source, ctx.next_pack)
+    }
+    if list.len(staged.queued_rewrites) != 0 {
+        let backend = PagerDirect(source.dir, source.db.store)
+        deploy_result(check_queued_rewrites(clone_pager_backend(backend), source.db.writer_pin_bytes, source.stamp.opened, source.db.store, staged, built_roots.collections))?
+        let mut cut_opt: Option[ChildCutContext] = Some(child_cut_context(source))
+        extra_rewrites = deploy_result(apply_queued_rewrites(take backend, source.db.writer_pin_bytes, source.stamp.opened, source.db.store, mut built_roots.collections, mut built_next_node, staged.queued_rewrites, mut cut_opt))?
+        if let Some(ctx) = cut_opt {
+            save_child_cut_pack(source, ctx.next_pack)
+        }
+    }
+    let delta = deploy_result(catalog_changes(source.db.heads[0].roots, built_roots))?
+    let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.next_table))?
+    let has_tiered = tiered_collections(source.db.heads[0].roots.collections.root) || tiered_collections(built_roots.collections.root)
+    let snap = snapshot_from(source.db, 0u64, source.stamp.head, built_roots, int.saturating_add(built_next_node, 1))
+    let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
+    for desc in ranges {
+        if deploy_result(table_is_tiered(built_roots.collections, desc.id))? {
+            let (row_total, digest) = deploy_result(tiered_range_inventory_direct(source.dir, source.db.store, source.db.writer_pin_bytes, snap, desc.id))?
+            list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: digest))
+        } else {
+            let mut cursor = deploy_result(entries_of(built_roots.collections, desc.id))?
+            let mut row_total = 0u64
+            let mut checksum = std.check.start()
+            while let Some((key, value)) = deploy_result(next_bytes(mut cursor))? {
+                deploy_result(checksum_row(mut checksum, key, value))?
+                row_total += 1
+            }
+            list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: std.check.finish(checksum)))
+        }
+    }
+    let base: ExportStamp = clone(source.stamp)
+    let ctx = DiskContext(store: source.db.store, role: 6, seq: source.stamp.opened)
+    let meta = PreparedMeta(base: take base, target: take target, next_table: staged.plan.next_table, changes: list.len(delta), ranges: list.len(inventory))
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let mut encoded_meta: Bytes = list.new()
+    std.codec.encode(metadata_codec, meta, mut encoded_meta) ?=> |_| Scratch(Limit(Value))
+    if list.len(encoded_meta) > 1048832 {
+        return Error(Scratch(Limit(Value)))
+    }
+    let source_map = if has_tiered {
+        deploy_result(export_source_map(delta, source.stamp.next_table, staged.plan.migrate_sources))?
+    } else {
+        list.new()
+    }
+    let rewrites = encode_rewrite_frame(staged, take extra_rewrites)?
+    let mut file = scratch_result(open_frames(d, "PREPARED", ctx))?
+    let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
+    let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
+    scratch_result(write_prepared_payload(mut file, 0x0081, encoded_meta))?
+    for change in delta {
+        scratch_result(write_prepared_frame(mut file, 0x0082, delta_codec, change))?
+    }
+    for desc in inventory {
+        scratch_result(write_prepared_frame(mut file, 0x0083, inventory_codec, desc))?
+    }
+    if list.len(source_map) != 0 {
+        let source_map_codec: std.codec.Codec[List[MigrateSource]] = std.codec.of()
+        scratch_result(write_prepared_frame(mut file, 0x008B, source_map_codec, source_map))?
+    }
+    for desc in inventory {
+        if deploy_result(table_is_tiered(built_roots.collections, desc.id))? {
+            write_tiered_prepared_rows_direct(mut file, source.dir, source.db.store, source.db.writer_pin_bytes, snap, desc.id, row_codec)?
+        } else {
+            let mut rows = deploy_result(entries_of(built_roots.collections, desc.id))?
+            while let Some((take key, value)) = deploy_result(next_bytes(mut rows))? {
+                let row = PreparedRow(key: take key, value: deploy_result(copied(value))?)
+                scratch_result(write_prepared_frame(mut file, 0x0084, row_codec, row))?
+            }
+        }
+    }
+    if let Some(raw) = rewrites {
+        scratch_result(write_prepared_payload(mut file, 0x0085, raw))?
+    }
+    scratch_result(finish_frames(take file))?
+    let carried: Option[(Roots, u64)] = if has_pending_indexes {
+        Some((share_roots(built_roots), built_next_node))
+    } else {
+        None
+    }
+    source.shipped = Some(ShippedImport(ranges: deploy_result(shipped_ranges(built_roots.collections, ranges))?, round: 0, staged_roots: take carried))
+    Ok(())
+}
+
+type ValidatedRange: send {
+    id: u32,
+    kind: u8,
+    rows: List[std.page.Row],
+    count: u64,
+    digest: u64,
+    row_bytes: u64,
+    over_inline: u64,
+    residency: std.page_descriptor.Residency
+}
+
+pub opaque type ValidatedImport: send {
+    meta: PreparedMeta,
+    delta: List[CatalogChange],
+    ranges: List[ValidatedRange],
+    rewrites: List[ActivationRewrite],
+    digest: Inline[u8, 32],
+    charge: u64,
+    source_map: List[MigrateSource],
+    dir: Option[Dir],
+    rewrites_checked: bool
+}
+
+fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inventory, residency: std.page_descriptor.Residency, inline_threshold: u64, codec: std.codec.Codec[PreparedRow], mut charge: u64) -> Result[ValidatedRange, DeployError] waits {
+    if desc.id != expected.id {
+        return Error(ImportMalformed)
+    }
+    let (kind, schema_number, unique) = match expected.catalog {
+        Some(raw) => {
+            let meta = deploy_result(decode_catalog(raw))?
+            let unique = match meta.record {
+                CatalogIndex(IndexRecord(shape: Entries(Unique), ..)) => true,
+                _ => false,
+            }
+            (descriptor_kind_byte(catalog_kind(meta.record)), meta.next, unique)
+        },
+        None => {
+            if desc.count != 0u64 {
+                return Error(ImportMalformed)
+            }
+            (0u8, 0u16, false)
+        },
+    }
+    if (kind == 3 || kind == 4) && desc.count != 0 {
+        return Error(ImportMalformed)
+    }
+    let keep_rows = residency == ResidentMemory
+    let mut rows: List[std.page.Row] = list.new()
+    let mut prev_suffix: Option[Bytes] = None
+    let mut digest = std.check.start()
+    let mut range_row_bytes = 0u64
+    let mut over_inline = 0u64
+    for i in 0u64 .. desc.count {
+        let PreparedRow(key: take key, value: take encoded) = prepared_frame(mut input, 0x0084, codec)?
+        if list.len(key) < 4 || list.len(key) > 4096 || list.len(encoded) > VALUE_LIMIT {
+            return Error(ImportMalformed)
+        }
+        let seen: u32 = list.word_be(key, 0)
+        let suffix = list.slice(key, 4, list.len(key))
+        let in_order = if keep_rows {
+            i == 0 || rows[i - 1].key < suffix
+        } else {
+            match view prev_suffix {
+                Some(prev) => prev < suffix,
+                None => true,
+            }
+        }
+        if seen != desc.id || !in_order {
+            return Error(ImportMalformed)
+        }
+        if kind == 1 {
+            if list.len(encoded) < 2 || read_le(encoded, 0, 2) + 1 != int.widen(schema_number) {
+                return Error(ImportMalformed)
+            }
+        } else if kind == 2 {
+            // An index entry carries its payload: a Unique entry starts with
+            // its owner's primary, and either kind may carry a projection.
+            if unique {
+                let owner_end = unique_owner_end(encoded) ?=> |_| ImportMalformed
+                if owner_end == 4 {
+                    return Error(ImportMalformed)
+                }
+            }
+        } else if list.len(encoded) != 0 {
+            return Error(ImportMalformed)
+        }
+        deploy_result(checksum_row(mut digest, key, encoded))?
+        let row_charge = entry(key, encoded)
+        range_row_bytes = int.saturating_add(range_row_bytes, row_charge)
+        if list.len(encoded) > inline_threshold {
+            over_inline += 1
+        }
+        if keep_rows {
+            charge = int.saturating_add(charge, row_charge)
+            list.push(mut rows, std.page.Row(key: deploy_result(copied(suffix))?, value: take encoded, charge: row_charge))
+        } else {
+            prev_suffix = Some(deploy_result(copied(suffix))?)
+        }
+    }
+    if std.check.finish(digest) != desc.digest {
+        return Error(ImportMalformed)
+    }
+    if kind != 0 {
+        charge = int.saturating_add(charge, 126)
+    }
+    Ok(ValidatedRange(id: desc.id, kind: kind, rows: take rows, count: desc.count, digest: desc.digest, row_bytes: range_row_bytes, over_inline: over_inline, residency: residency))
+}
+
+// M1 may run in a task while OLD serves. It checks all scratch input before
+// the head can reserve ids or attach the result to an attempt.
+pub fn validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
+    validate_prepared_inner(None, d)
+}
+
+fn validate_prepared_on(db: Db, d: Dir) -> Result[ValidatedImport, DeployError] waits {
+    validate_prepared_inner(Some(view db), d)
+}
+
+fn validate_prepared_inner(owner: Option[View[Db]], d: Dir) -> Result[ValidatedImport, DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let header = scratch_result(prepared_read(mut file, 72u64))?
+    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let mut digest = std.sha256.start()
+    std.sha256.add(mut digest, header, 0u64, 72u64)
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
+    let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
+    let meta = prepared_frame(mut input, 0x0081, metadata_codec)?
+    if list.len(meta.base.attempt) != 16 || meta.base.store_hi != head.context.store.hi || meta.base.store_lo != head.context.store.lo || meta.base.opened != head.context.seq || meta.base.branch != 0 || meta.base.next_table == 0 || meta.next_table < meta.base.next_table || list.len(meta.target.digest) != 32 || list.len(meta.target.release) != 32 || list.len(meta.target.describe) == 0 {
+        return Error(ImportMalformed)
+    }
+    let mut delta: List[CatalogChange] = list.new()
+    for i in 0u64 .. meta.changes {
+        let changed = prepared_frame(mut input, 0x0082, delta_codec)?
+        if i != 0 && !(delta[i - 1u64].key < changed.key) {
+            return Error(ImportMalformed)
+        }
+        validate_delta(changed, meta.base.next_table)?
+        list.push(mut delta, take changed)
+    }
+    let needed = deploy_result(changed_ranges(delta, meta.base.next_table, meta.next_table))?
+    if list.len(needed) != meta.ranges {
+        return Error(ImportMalformed)
+    }
+    let mut inventory: List[Inventory] = list.new()
+    for _ in 0u64 .. meta.ranges {
+        list.push(mut inventory, prepared_frame(mut input, 0x0083, inventory_codec)?)
+    }
+    let source_map = if meta.changes != 0 {
+        read_optional_source_map(mut input)?
+    } else {
+        list.new()
+    }
+    validate_source_map(source_map, delta, meta.base.next_table)?
+    let residencies: List[std.page_descriptor.Residency] = if meta.ranges == 0 {
+        list.new()
+    } else {
+        let base_descs = match owner {
+            Some(db) => match disk_state(db).lease {
+                Some(lease) => deploy_result(base_descriptors_from_tree(lease.collections))?,
+                None => deploy_result(base_descriptors_from_tree(db.heads[0u64].roots.collections))?,
+            },
+            None => deploy_result(read_export_base_descriptors(d, head.context.store))?,
+        }
+        derive_range_residencies(base_descs, needed, source_map, meta.base.next_table, false)?
+    }
+    let inline_threshold = match owner {
+        Some(db) => db.heads[0u64].roots.collections.inline,
+        None => 256u64,
+    }
+    let mut ranges: List[ValidatedRange] = list.new()
+    let mut charge = 0u64
+    for i in 0u64 .. meta.ranges {
+        let desc = inventory[i]
+        let checked_range = read_valid_range(mut input, needed[i], desc, residencies[i], inline_threshold, row_codec, mut charge)?
+        list.push(mut ranges, take checked_range)
+    }
+    let rewrites = read_rewrite_frame(mut input)?
+    let PreparedInput(file: take done, digest: take hashed, ..) = take input
+    scratch_result(disk_io(host.close(take done)))?
+    let mut rewrites_checked = false
+    if let Some(db) = owner {
+        if list.len(rewrites) != 0 {
+            validate_rewrite_base_tiered(db, rewrites, meta.base.next_table, ranges)?
+            rewrites_checked = true
+        }
+    }
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: std.sha256.finish(hashed), charge: charge, source_map: take source_map, dir: Some(d), rewrites_checked: rewrites_checked))
+}
+
+type ImportedRange: send {
+    id: u32,
+    kind: u8,
+    tree: Option[Arc[std.page.Page]],
+    slot: Option[std.page.Slot],
+    rows: u64,
+    charge: u64,
+    count: u64,
+    digest: u64,
+    residency: std.page_descriptor.Residency
+}
+
+pub opaque type Imported: send {
+    meta: PreparedMeta,
+    delta: List[CatalogChange],
+    ranges: List[ImportedRange],
+    rewrites: List[ActivationRewrite],
+    digest: Inline[u8, 32],
+    dir: Option[Dir],
+    pass2_low: u64,
+    pass2_high: u64,
+    pass2_inline: u64,
+    has_tiered: bool,
+    rewrites_checked: bool
+}
+
+pub opaque type ImportWork: send {
+    payload: ValidatedImport,
+    low: u64,
+    high: u64,
+    inline: u64
+}
+
+pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[ImportWork, DeployError] {
+    deploy_result(activation_install_allowed(db))?
+    deploy_result(healthy(db))?
+    if !is_disk(db) || validated.meta.base.opened != open_number(db) || validated.meta.base.store_hi != db.store.hi || validated.meta.base.store_lo != db.store.lo || !matches_export(db, validated.meta.base) {
+        return Error(ExportMismatch)
+    }
+    let mut payload = take validated
+    let lease: Arc[ExportLease] = match disk_state(db).lease {
+        Some(held) => arc.share(held),
+        None => return Error(ExportMismatch),
+    }
+    // Authoritative residency derivation from OLD's leased base + 0x008B (§13.10a).
+    let needed = deploy_result(changed_ranges(payload.delta, payload.meta.base.next_table, payload.meta.next_table))?
+    let base_descs = deploy_result(base_descriptors_from_tree(lease.collections))?
+    let residencies = derive_range_residencies(base_descs, needed, payload.source_map, payload.meta.base.next_table, true)?
+    let mut has_tiered = false
+    let mut memory_charge = 0u64
+    for i in 0u64 .. list.len(payload.ranges) {
+        payload.ranges[i].residency = residencies[i]
+        if payload.ranges[i].kind != 0 {
+            memory_charge = int.saturating_add(memory_charge, 126)
+            if residencies[i] == ResidentTiered {
+                has_tiered = true
+            } else {
+                memory_charge = int.saturating_add(memory_charge, payload.ranges[i].row_bytes)
+            }
+        }
+    }
+    payload.charge = memory_charge
+    if has_tiered && !store_has_tiered(db) {
+        deploy_result(admit_tiered_plan(db))?
+    }
+    // Check Memory rewrites synchronously; never read Cold pages inside reserve_import.
+    if !payload.rewrites_checked && list.len(payload.rewrites) != 0 {
+        let mut has_cold_rewrite = false
+        for row in payload.rewrites {
+            let id_key = deploy_result(prefix(row.id))?
+            if let Some((_, desc)) = std.page.collection_slot(lease.collections.root, id_key) {
+                if collection_descriptor(desc).residency != ResidentMemory {
+                    has_cold_rewrite = true
+                }
+            }
+        }
+        if !has_cold_rewrite {
+            validate_rewrite_base(db, payload)?
+            payload.rewrites_checked = true
+        }
+    }
+    let current = disk_state(db).options.resident_limit
+    // An import pin still held is stale: this import's keep replaces it.
+    let exact = install_account(db, share_roots(db.heads[0u64].roots))?
+    let reserve_delta = if has_tiered && !store_has_tiered(db) {
+        tiered_plan_reserve(disk_state(db).options)
+    } else {
+        0u64
+    }
+    let requested = int.saturating_add(int.saturating_add(exact, payload.charge), reserve_delta)
+    if requested > current {
+        return Error(Store(Full(Resident(Capacity(requested: requested, available: current)))))
+    }
+    let low = db.next_node
+    let inline = db.heads[0u64].roots.collections.inline
+    let mut high = low
+    for checked_range in payload.ranges {
+        if checked_range.kind == 0 {
+            continue
+        }
+        let n = checked_range.count
+        let bodies = if checked_range.residency == ResidentMemory {
+            let mut b = 0u64
+            for row in checked_range.rows {
+                if list.len(row.value) > inline {
+                    b += 1
+                }
+            }
+            b
+        } else {
+            checked_range.over_inline
+        }
+        let Some(pages) = int.checked_mul(n, 2) else {
+            return Error(IdBound)
+        }
+        let Some(with_pages) = int.checked_add(high, pages) else {
+            return Error(IdBound)
+        }
+        let Some(end) = int.checked_add(with_pages, bodies + 1) else {
+            return Error(IdBound)
+        }
+        high = end
+    }
+    if high == 18446744073709551615u64 {
+        return Error(IdBound)
+    }
+    db.next_node = high
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.imported = None
+        state.reserving = Some(payload.digest)
+    })
+    db.ceiling = int.saturating_sub(current, payload.charge)
+    Ok(ImportWork(payload: take payload, low: low, high: high, inline: inline))
+}
+
+fn matches_export(db: Db, base: ExportStamp) -> bool {
+    match disk_state(db).lease {
+        Some(kept) => kept.attempt == base.attempt && kept.terminal == base.terminal && kept.end == base.end && kept.head == base.head && kept.next_table == base.next_table && kept.activation == base.activation,
+        None => false,
+    }
+}
+
+pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
+    let ImportWork(payload: take payload, low: low, high: high, inline: inline) = take work
+    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: digest, dir: import_dir, rewrites_checked: rewrites_checked, ..) = take payload
+    let mut ids = low + 1
+    let mut imported: List[ImportedRange] = list.with_capacity(list.len(ranges))
+    let mut has_tiered = false
+    for checked_range in ranges {
+        if checked_range.kind == 0 {
+            list.push(mut imported, ImportedRange(id: checked_range.id, kind: 0, tree: None, slot: None, rows: 0, charge: 0, count: 0, digest: checked_range.digest, residency: ResidentMemory))
+            continue
+        }
+        if checked_range.residency == ResidentTiered {
+            has_tiered = true
+            list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: None, slot: None, rows: checked_range.count, charge: checked_range.row_bytes, count: checked_range.count, digest: checked_range.digest, residency: ResidentTiered))
+            continue
+        }
+        let built = deploy_result(page_result(std.page.bulk(checked_range.rows, Collection, inline, mut ids)))?
+        if ids - 1 > high {
+            return Error(IdBound)
+        }
+        list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take built, slot: None, rows: checked_range.count, charge: checked_range.row_bytes, count: checked_range.count, digest: checked_range.digest, residency: ResidentMemory))
+    }
+    let pass2_low = ids - 1
+    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, rewrites: take rewrites, digest: digest, dir: import_dir, pass2_low: pass2_low, pass2_high: high, pass2_inline: inline, has_tiered: has_tiered, rewrites_checked: rewrites_checked))
+}
+
+pub fn imported_digest(value: Imported) -> Inline[u8, 32] {
+    value.digest
+}
+
+pub fn prepared_matches(value: ValidatedImport, describe: Bytes, release: Bytes, digest: Bytes) -> bool {
+    let target = view value.meta.target
+    target.describe == describe && target.release == release && target.digest == digest
+}
+
+pub fn identity_words(db: Db) -> (u64, u64) {
+    (db.store.hi, db.store.lo)
+}
+
+pub type Cutover: send {
+    attempt: Bytes,
+    digest: Inline[u8, 32],
+    deadline: u64
+}
+
+type TargetLimits {
+    resident: u64,
+    pack: u64,
+    checkpoint: u64,
+    journal: u64,
+    frame: u64,
+    tiered_reserve: u64,
+    has_tiered: bool
+}
+
+fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {
+    a == b
+}
+
+fn planned_catalog(mut plan: SchemaPlan, delta: List[CatalogChange]) -> Result[(), DeployError] {
+    for changed in delta {
+        let agrees = {
+            let current = get_page_row(plan.roots.catalog, changed.key)
+            match changed.before {
+                Some(expected) => match current {
+                    Some(raw) => catalog_bytes_equal(raw, expected),
+                    None => false
+                },
+                None => match current {
+                    None => true,
+                    Some(_) => false
+                },
+            }
+        }
+        if !agrees {
+            return Error(ImportMalformed)
+        }
+        if let Some(raw) = changed.after {
+            let roots = deploy_result(catalog_insert(mut plan.next_node, plan.roots, changed.key, raw))?
+            plan.roots = take roots
+        } else {
+            deploy_result(remove_store_row(mut plan.roots.catalog, changed.key, mut plan.next_node))?
+        }
+    }
+    Ok(())
+}
+
+fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result[(), DeployError] {
+    let private_from = deploy_result(stamp_after(plan.next_node))?
+    let mut next_stamp = private_from
+    plan.step_drift = true
+    for replaced in imported {
+        let had_tiered = deploy_result(table_is_tiered(plan.roots.collections, replaced.id))?
+        if had_tiered {
+            deploy_result(discard_replayed_collection(mut plan.roots.collections, replaced.id))?
+            deploy_result(capacity(list.try_reserve(mut plan.superseded, 1)))?
+            list.push(mut plan.superseded, replaced.id)
+        }
+        if replaced.kind == 0 {
+            let _ = deploy_result(drop_collection(mut plan.roots.collections, replaced.id, private_from, mut next_stamp))?
+        } else {
+            let key = deploy_result(prefix(replaced.id))?
+            let slot: Option[std.page.Slot] = if replaced.residency == ResidentMemory {
+                match view replaced.tree {
+                    Some(page) => Some(HotPage(arc.share(page))),
+                    None => None,
+                }
+            } else {
+                clone(replaced.slot)
+            }
+            deploy_result(put_collection_with_residency(mut plan.roots.collections, key, take slot, replaced.rows, replaced.charge, replaced.kind, replaced.residency, private_from, mut next_stamp))?
+        }
+    }
+    deploy_result(canonical_tree(mut plan.roots.collections))?
+    plan.next_node = next_stamp - 1
+    Ok(())
+}

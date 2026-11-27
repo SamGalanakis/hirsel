@@ -177,7 +177,7 @@ fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible
     Ok(None)
 }
 
-type TieredIndexChunk = ChunkReady(TieredWritePlan) | ChunkDuplicate(Bytes, Bytes)
+type TieredIndexChunk = ChunkReady(TieredWritePlan, List[StepOp]) | ChunkDuplicate(Bytes, Bytes)
 
 fn index_build_has_overlay(tree: PageTree, id: u32) -> bool {
     if let Some(replay) = view tree.replay {
@@ -264,7 +264,22 @@ fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[Tie
         }
     }
     let order = capacity(data_order(operations.rows))?
-    Ok(ChunkReady(prepare_tiered_writes(attempt, visible, tree, operations.rows, order, first)?))
+    let write_plan = prepare_tiered_writes(attempt, visible, tree, operations.rows, order, first)?
+    let mut step_rows: List[StepOp] = list.with_capacity(data_row_count(operations.rows))
+    for slot in 0u64 .. data_row_count(operations.rows) {
+        let op = ordered_row(operations.rows, order, slot)
+        let prior = match write_plan.deltas[slot] {
+            Some(TieredPrior(w)) => w,
+            _ => 0u32,
+        }
+        let val: Option[Bytes] = match op.value {
+            Some(BlobBody(raw)) => Some(copied(raw)?),
+            Some(PageValue(raw)) => Some(copied(raw)?),
+            None => None,
+        }
+        list.push(mut step_rows, StepOp(key: copied(op.key)?, value: take val, prior: prior))
+    }
+    Ok(ChunkReady(take write_plan, take step_rows))
 }
 
 fn tiered_chunk_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, staged: DataOps, key: Bytes) -> Result[Option[Arc[Bytes]], Error] {

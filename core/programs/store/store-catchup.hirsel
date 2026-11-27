@@ -33,18 +33,24 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     if stamp.terminal < base.terminal || (stamp.terminal == base.terminal && stamp.end < base.end) || stamp.head < base.head {
         return Error(ExportMismatch)
     }
-    if stamp.next_table != base.next_table || map.len(staged.rewrites) != 0 {
+    if stamp.next_table != base.next_table || map.len(staged.rewrites) != 0 || list.len(staged.queued_rewrites) != 0 {
         return Error(Drift)
     }
     // Rounds follow the PREPARED file OLD keeps.
     let Some(take kept) = replace(mut source.shipped, None) else {
         return Error(ExportMismatch)
     }
-    let ShippedImport(ranges: take round_ranges, round: last_round) = take kept
+    let ShippedImport(ranges: take round_ranges, round: last_round, staged_roots: take carried) = take kept
+    if let Some((take built_roots, built_next_node)) = take carried {
+        staged.plan.roots = take built_roots
+        staged.plan.next_node = order.max(staged.plan.next_node, built_next_node)
+        staged.plan.pending_indexes = list.new()
+    }
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let before = share_roots(source.db.heads[0].roots)
     let state = deploy_result(capacity(current_state(source.db)))?
-    let initial = deploy_result(journal_replay(take state, source.db.next_node, source.db.limits))?
+    let mut initial = deploy_result(journal_replay(take state, source.db.next_node, source.db.limits))?
+    initial.tiered.total = source.db.tiered
     let steps = read_steps(d, stamp)?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
     if replayed.state.tips[0].head != stamp.head {
@@ -53,25 +59,47 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let moved = deploy_result(catalog_changes(before, replayed.state.tips[0].roots))?
     follow_moves(mut staged.plan, moved, round_ranges)?
     let shipped = catch_up_indexes(staged.plan, round_ranges)?
-    let tail = deploy_result(compare_page_collections(before.collections, replayed.state.tips[0].roots.collections))?
+    let (take tail, take deferred) = deploy_result(catch_up_compare_collections(before.collections, replayed.state.tips[0].roots.collections, replayed.superseded))?
+    let mut row_changes: List[CatchUpChange] = list.with_capacity(list.len(tail.rows))
+    for row in tail.rows {
+        let after_val: Option[Arc[Bytes]] = match view row.value {
+            Some(v) => Some(arc.share(v)),
+            None => None,
+        }
+        list.push(mut row_changes, CatchUpChange(tree_key: deploy_result(copied(row.tree_key))?, before: None, after: take after_val))
+    }
+    if list.len(deferred) != 0 {
+        let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: share_roots(before), watermark: source.db.next_node + 1, bases: no_tail_bases())
+        let after_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: stamp.head, roots: share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: no_tail_bases())
+        let tiered_rows = catch_up_tiered_diffs(source.dir, id, source.db.writer_pin_bytes, before_snap, after_snap, deferred)?
+        for take item in take tiered_rows {
+            list.push(mut row_changes, take item)
+        }
+    }
     let next_node = order.max(staged.plan.next_node, replayed.next_node)
     staged.plan.next_node = next_node
     let mut touched: List[Touch] = list.new()
-    deploy_result(patch_index_ranges(mut staged.plan, before.collections, shipped, tail.rows, mut touched))?
-    let ops = deploy_result(round_ops(staged.plan.roots.collections, mut touched))?
+    let mut cut_ctx = child_cut_context(source)
+    deploy_result(patch_index_ranges(mut cut_ctx, stamp.opened, mut staged.plan, before.collections, shipped, row_changes, mut touched))?
+    save_child_cut_pack(source, cut_ctx.next_pack)
+    let ops = deploy_result(round_ops_direct(source.dir, id, source.db.writer_pin_bytes, stamp.opened, staged.plan.roots.collections, mut touched))?
     let round_totals = deploy_result(range_totals(staged.plan.roots.collections, round_ranges))?
     let round = last_round + 1
     write_round(d, id, RoundMeta(round: round, from: clone(source.stamp), to: clone(stamp), ops: list.len(ops), totals: take round_totals), ops)?
     let live_bytes = deploy_result(journal_account(replayed))?
-    let JournalReplay(state: take advanced, ..) = take replayed
+    let JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
     source.db.resident = live_bytes
+    source.db.tiered = tiered_account.total
+    for take freed in take freed_rows {
+        list.push(mut source.deferred_frees, take freed)
+    }
     source.db.next_node = staged.plan.next_node
     source.stamp = take stamp
-    source.shipped = Some(ShippedImport(ranges: take round_ranges, round: round))
+    source.shipped = Some(ShippedImport(ranges: take round_ranges, round: round, staged_roots: None))
     staged.base = declaration_base(source.db)
     staged.base_rows = share_page_tree(source.db.heads[0].roots.collections)
-    Ok(list.len(tail.rows))
+    Ok(list.len(row_changes))
 }
 
 // OLD's steps move only index records' build states (`export_step`). A record
@@ -126,12 +154,8 @@ fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[Ca
         }
         let kind = {
             let CatalogIndex(index_meta) = view record.record else {
-                let id_key = deploy_result(prefix(record.id))?
-                if let Some(root) = std.page.collection_child(plan.roots.collections.root, id_key) {
-                    let (rows, _) = std.page.totals(root)
-                    if rows != 0 {
-                        return Error(Drift)
-                    }
+                if deploy_result(range_rows(plan.roots.collections, record.id))? != 0 {
+                    return Error(Drift)
                 }
                 continue
             }
@@ -163,12 +187,12 @@ fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[Ca
 // written, so two rows that trade a Unique key do not collide on the way.
 // A Unique key two rows claim at the new head fails the round with Conflict,
 // as a full build of the same rows does.
-fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[Change], mut touched: List[Touch]) -> Result[(), Error] {
+fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(), Error] waits {
     if list.len(shipped) == 0 || list.len(rows) == 0 {
         return Ok(())
     }
     let bindings = replace(mut plan.bindings, list.new())
-    let patched = patch_entries(plan, bindings, before, shipped, rows, mut touched)
+    let patched = patch_entries(mut ctx, opened, plan, bindings, before, shipped, rows, mut touched)
     plan.bindings = take bindings
     let (take roots, live_bytes, next_node) = patched?
     plan.next_node = next_node
@@ -176,14 +200,15 @@ fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[Catc
     keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
-fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[Change], mut touched: List[Touch]) -> Result[(Roots, u64, u64), Error] {
+fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(Roots, u64, u64), Error] waits {
     let mut roots = share_roots(plan.roots)
     let mut live_bytes = plan.live
-    let first = stamp_after(plan.next_node)?
+    let mut first = stamp_after(plan.next_node)?
     let mut next_stamp = first
     let mut additions: List[(u64, Bytes, Bytes, Bytes)] = list.new()
     for i in 0u64 .. list.len(shipped) {
         let target = view shipped[i]
+        let target_tiered = table_is_tiered(roots.collections, target.record.id)?
         let extractor = view bindings[target.binding].index
         for row in rows {
             if list.len(row.tree_key) < 4 {
@@ -194,14 +219,20 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
                 continue
             }
             let primary = list.slice(row.tree_key, 4, list.len(row.tree_key))
-            let old_keys: List[Bytes] = match get_page_row(before, row.tree_key) {
+            let old_keys: List[Bytes] = match view row.before {
                 Some(raw) => {
                     let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
                     take keys
                 },
-                None => list.new(),
+                None => match get_page_row(before, row.tree_key) {
+                    Some(raw) => {
+                        let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
+                        take keys
+                    },
+                    None => list.new(),
+                },
             }
-            let current: Option[IndexValue] = match row.value {
+            let current: Option[IndexValue] = match row.after {
                 Some(raw) => Some((extractor.extract)(raw, primary)?),
                 None => None,
             }
@@ -213,14 +244,24 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
                 if kept {
                     continue
                 }
-                let Some(charge) = owned_entry(roots.collections, key, target.kind, primary)? else {
+                let Some(charge) = owned_entry_direct(ctx, opened, roots.collections, key, target.kind, primary)? else {
                     continue
                 }
-                if !plan.retained {
+                if !target_tiered && !plan.retained {
                     live_bytes = int.saturating_sub(live_bytes, charge)
                 }
-                note_touch(mut touched, roots.collections, key)?
-                let _ = remove_page_row(mut roots.collections, key, first, mut next_stamp)?
+                note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
+                if target_tiered {
+                    child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, copied(key)?, ReplayAbsent, first, mut next_stamp)?
+                    if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
+                        canonical_tree(mut roots.collections)?
+                        child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
+                        first = stamp_after(next_stamp - 1)?
+                        next_stamp = first
+                    }
+                } else {
+                    let _ = remove_page_row(mut roots.collections, key, first, mut next_stamp)?
+                }
             }
             if let Some(take value) = take current {
                 let IndexValue(keys: take keys, payload: take payload, ..) = take value
@@ -232,20 +273,33 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
     }
     for (i, key, payload, primary) in additions {
         let target = view shipped[i]
-        if let Some(prior) = get_page_row(roots.collections, key) {
+        let target_tiered = table_is_tiered(roots.collections, target.record.id)?
+        if let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, roots.collections, key)? {
             if let Unique = target.kind {
                 if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
                     return Error(Conflict(named(target.name)?))
                 }
             }
-            if !plan.retained {
+            if !target_tiered && !plan.retained {
                 live_bytes = int.saturating_sub(live_bytes, entry(key, prior))
             }
         }
-        live_bytes = int.saturating_add(live_bytes, entry(key, payload))
-        over_ceiling(live_bytes, plan.ceiling)?
-        note_touch(mut touched, roots.collections, key)?
-        put_page_row(mut roots.collections, key, payload, first, mut next_stamp)?
+        if !target_tiered {
+            live_bytes = int.saturating_add(live_bytes, entry(key, payload))
+            over_ceiling(live_bytes, plan.ceiling)?
+        }
+        note_touch_direct(mut touched, ctx, opened, roots.collections, key)?
+        if target_tiered {
+            child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, copied(key)?, ReplayPut(arc.new(copied(payload)?)), first, mut next_stamp)?
+            if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
+                canonical_tree(mut roots.collections)?
+                child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
+                first = stamp_after(next_stamp - 1)?
+                next_stamp = first
+            }
+        } else {
+            put_page_row(mut roots.collections, key, payload, first, mut next_stamp)?
+        }
     }
     canonical_tree(mut roots.collections)?
     Ok((take roots, live_bytes, next_stamp - 1))
@@ -253,8 +307,8 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
 
 // The charge of `key`'s entry when it belongs to `primary`. A Unique entry
 // another row holds is that row's, and stays.
-fn owned_entry(tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] {
-    let Some(prior) = get_page_row(tree, key) else {
+fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] waits {
+    let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)? else {
         return Ok(None)
     }
     if let Unique = kind {
@@ -263,6 +317,58 @@ fn owned_entry(tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> R
         }
     }
     Ok(Some(entry(key, prior)))
+}
+
+fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: PageTree, key: Bytes) -> Result[(), Error] waits {
+    let prior = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)?
+    let seq = list.len(touched)
+    let note = Touch(key: copied(key)?, seq: seq, prior: take prior)
+    capacity(list.try_reserve(mut touched, 1))?
+    list.push(mut touched, take note)
+    Ok(())
+}
+
+fn round_ops_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64, after: PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] waits {
+    list.sort(mut touched, fn(a: Touch, b: Touch) -> Order {
+        match bytes_order(a.key, b.key) {
+            Equal => if a.seq < b.seq {
+                Less
+            } else if b.seq < a.seq {
+                Greater
+            } else {
+                Equal
+            },
+            other => other,
+        }
+    })
+    let mut ops: List[RoundOp] = list.new()
+    for i in 0u64 .. list.len(touched) {
+        let note = view touched[i]
+        if i != 0 && touched[i - 1].key == note.key {
+            continue
+        }
+        let new = child_get_row(d, id, writer_pin_bytes, opened, after, note.key)?
+        match take new {
+            Some(take raw) => {
+                let had = match note.prior {
+                    Some(prior) => {
+                        if prior == raw {
+                            continue
+                        }
+                        true
+                    },
+                    None => false,
+                }
+                list.push(mut ops, RoundOp(key: copied(note.key)?, value: Some(take raw), prior: had))
+            },
+            None => {
+                if let Some(_) = note.prior {
+                    list.push(mut ops, RoundOp(key: copied(note.key)?, value: None, prior: true))
+                }
+            },
+        }
+    }
+    Ok(take ops)
 }
 
 fn contains_bytes(keys: List[Bytes], key: Bytes) -> bool {

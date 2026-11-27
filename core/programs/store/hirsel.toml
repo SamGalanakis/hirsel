@@ -101,6 +101,9 @@ std = { major = 1 }
 "store-prepared-check.hirsel" = "store"
 "store-catchup.hirsel" = "store"
 "store-rounds.hirsel" = "store"
+"store-prepared-transfer.hirsel" = "store"
+"store-tiered-transfer.hirsel" = "store"
+"store-tiered-transfer-child.hirsel" = "store"
 "store-install.hirsel" = "store"
 "store-object-cut.hirsel" = "store"
 "store-activation.hirsel" = "store"
@@ -191,6 +194,7 @@ dirs = ["."]
 "store_crash_laws.hirsel" = "store"
 "store_index_crash_laws.hirsel" = "store"
 "store_catchup_laws.hirsel" = "store"
+"store_catchup_f4_laws.hirsel" = "store"
 "store_crash_install_laws.hirsel" = "store"
 "store_law_schema.hirsel" = "store"
 "store_claim_crash_laws.hirsel" = "store"
@@ -842,3 +846,6 @@ limit = 134217728
 
 [tests.runs."store@1/store/bucket_claim_auth_race_c_stream_janitor_after_move"]
 limit = 402653184
+
+[tests.runs."store@1/store/test_f4_superseded_redefinition_and_tiered_catchup_diff"]
+limit = 536870912

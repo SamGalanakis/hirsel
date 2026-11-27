@@ -308,7 +308,7 @@ fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] 
     }
     let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..) = take plan
     db.next_node = ids
-    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None)
+    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None, step_rows: list.new(), step_drift: false)
     refused_cut_bytes(mut db, ReplaceMain(take replacement, None))
 }
 

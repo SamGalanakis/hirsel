@@ -260,7 +260,7 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
 
 // A build chunk's totals: each row's groups and values, gathered and
 // sorted by group, then added to each group's totals in one write.
-fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)]) -> Result[(), Error] {
+fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], mut written_ops: Option[List[StepOp]]) -> Result[(), Error] {
     let mut parts: List[GroupPart] = list.new()
     for (logical, raw) in rows {
         let primary = list.slice(logical, 4, list.len(logical))
@@ -276,6 +276,7 @@ fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bo
         let group = view groups[at]
         let added = counts[at]
         let total = added_sums[at]
+        let prior_width = stored_prior(get_page_row(collections, group))
         let (members, sum) = match get_page_row(collections, group) {
             Some(prior) => {
                 if !retained {
@@ -292,6 +293,10 @@ fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bo
         live_bytes = int.saturating_add(live_bytes, entry(group, value))
         over_ceiling(live_bytes, ceiling)?
         put_page_row(mut collections, group, value, first, mut next_stamp)?
+        if let Some(mut step_rows) = written_ops {
+            capacity(list.try_reserve(mut step_rows, 1))?
+            list.push(mut step_rows, StepOp(key: copied(group)?, value: Some(copied(value)?), prior: prior_width))
+        }
     }
     Ok(())
 }

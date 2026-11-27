@@ -175,6 +175,8 @@ pub fn prepare_deploy[G: send, H: shareable + inert + send](p: PrepareConfig[G, 
 }
 
 fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], mut source: store.Preparation) -> Result[(), PrepareError] waits {
+    // §3.4 Completion witness: remove any stale unwitnessed PREPARED before preparing.
+    let _ = host.remove(p.scratch, "PREPARED")
     let registered = match placed(p.place, p.n_place) {
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),

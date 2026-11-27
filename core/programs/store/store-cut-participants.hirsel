@@ -8,7 +8,11 @@ type ProposedMain {
     // (§3.5a "The kept import").
     drop_pin: Option[u64],
     superseded: List[u32],
-    chunk_freed: Option[TieredFreed]
+    chunk_freed: Option[TieredFreed],
+    // D-CU-1: rows this schema commit itself wrote, and whether the commit is
+    // non-replayable under an export lease.
+    step_rows: List[StepOp],
+    step_drift: bool
 }
 
 type HolderDelta = NoHolderChange | AddHead(Head, String) | RemoveHead(u64) | AddPin(Pin) | RemovePin(u64) | ReplacePin(u64, Pin) | ReplaceMain(ProposedMain, Option[u64])
@@ -115,7 +119,7 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
             ReplacePin(_, pinned_now) => pinned_now.serial == held.serial,
             _ => false,
         }
-        if added && !pin_shares_head(db, held) {
+        if added && held.owner != ImportPin && !pin_shares_head(db, held) {
             current.promote = Some(list.len(current.roots))
         }
         note_held_roots(mut current.holders, 1, held.serial, held.roots)

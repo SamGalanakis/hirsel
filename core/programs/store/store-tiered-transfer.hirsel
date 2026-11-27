@@ -1,0 +1,825 @@
+// M3b-S3 Tiered transfer internals (STORE-SPEC §3.5a, §13.10a):
+// - 0x008B migrate source map codec and residency derivation on OLD;
+// - Pass-2 streaming bottom-up Tiered page builder with chunked `hold_import` cuts;
+// - Child Tiered scratch cuts, streaming inventory/row emission, deferred Tiered diffs,
+//   and Tiered round application on OLD and child;
+// - Queued Cold `stage_rewrite` validation and activation application;
+// - Chunked Tiered `migrate_table` and declared index builds in the prepare child.
+// One entry of PREPARED frame 0x008B (role 6, limit 1,048,832): binds a new
+// migrated table id to its base source table id on OLD.
+type MigrateSource: codec + send {
+    target: u32,
+    source: u32
+}
+
+// One queued Cold rewrite from `stage_rewrite` (§3.5a, §13.10a). Checked in
+// one writer call attempt in the consuming `waits` call (`write_prepared`,
+// `install_activation`).
+type QueuedRewrite: send {
+    id: u32,
+    schema: u16,
+    key: Bytes,
+    logical: Bytes,
+    raw: Bytes,
+    staged_range: bool
+}
+
+// One deferred Tiered `migrate_table` conversion queued by `stage_migrate`
+// and executed in chunked commits inside `prepare_migration`.
+type DeferredMigrate: send {
+    from_id: u32,
+    to_id: u32,
+    to_name: String,
+    olds: List[u32],
+    convert: own[send] fn(Bytes, Bytes) -> Result[Option[(Bytes, Bytes)], Error],
+    preview_slot: Option[u64]
+}
+
+// One deferred Tiered index build queued by `stage_index_build` and executed
+// in chunked commits in the consuming `waits` call (`write_prepared`, `seal`,
+// `install_activation`).
+type DeferredIndexBuild: send {
+    catalog_key: Bytes,
+    name: String,
+    record_raw: Bytes,
+    preview_slot: Option[u64]
+}
+
+// One row change for catch-up: carries `before` when read from a Tiered diff
+// so `patch_index_ranges` does not re-read Cold rows.
+type CatchUpChange {
+    tree_key: Bytes,
+    before: Option[Arc[Bytes]],
+    after: Option[Arc[Bytes]]
+}
+
+// Child scratch-pack state for Tiered prepare builds and catch-up rounds.
+type ChildCutContext: send {
+    dir: Dir,
+    store: StoreId,
+    next_pack: u64,
+    pack_bytes: u64,
+    dirty_bytes: u64,
+    writer_pin_bytes: u64
+}
+
+fn record_migrate_source(mut plan: SchemaPlan, from_id: u32, to_id: u32) -> Result[(), Error] {
+    let mut base_source = from_id
+    let mut found: Option[u64] = None
+    for i in 0u64 .. list.len(plan.migrate_sources) {
+        if plan.migrate_sources[i].target == from_id {
+            base_source = plan.migrate_sources[i].source
+            found = Some(i)
+            break
+        }
+    }
+    if let Some(at) = found {
+        let mut kept: List[MigrateSource] = list.with_capacity(list.len(plan.migrate_sources))
+        for i in 0u64 .. list.len(plan.migrate_sources) {
+            if i != at {
+                list.push(mut kept, plan.migrate_sources[i])
+            }
+        }
+        plan.migrate_sources = take kept
+    }
+    capacity(list.try_reserve(mut plan.migrate_sources, 1))?
+    list.push(mut plan.migrate_sources, MigrateSource(target: to_id, source: base_source))
+    Ok(())
+}
+
+fn drop_migrate_source(mut plan: SchemaPlan, id: u32) {
+    if list.len(plan.migrate_sources) == 0 {
+        return ()
+    }
+    let mut kept: List[MigrateSource] = list.new()
+    for item in plan.migrate_sources {
+        if item.target != id {
+            list.push(mut kept, item)
+        }
+    }
+    plan.migrate_sources = take kept
+}
+
+// Filters `sources` to new tables present in `delta` whose source is a base
+// table (< `base_next_table`), sorted strictly increasing by `target`.
+fn export_source_map(delta: List[CatalogChange], base_next_table: u32, sources: List[MigrateSource]) -> Result[List[MigrateSource], Error] {
+    if list.len(sources) == 0 {
+        return Ok(list.new())
+    }
+    let mut new_tables: Map[u32, ()] = map.new()
+    for change in delta {
+        if let Some(raw) = view change.after {
+            let record = decode_catalog(raw)?
+            if catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+                map.insert(mut new_tables, record.id, ())
+            }
+        }
+    }
+    let mut out: List[MigrateSource] = list.new()
+    for item in sources {
+        if item.source < base_next_table && map.contains(new_tables, item.target) {
+            list.push(mut out, item)
+        }
+    }
+    list.sort(mut out, fn(a: MigrateSource, b: MigrateSource) -> Order {
+        order.compare(a.target, b.target)
+    })
+    Ok(take out)
+}
+
+// Validates the 0x008B source-map frame against `delta` and `base_next_table`
+// (§13.10a): strictly increasing targets, each target a new table in `delta`,
+// each source < `base_next_table`.
+fn validate_source_map(source_map: List[MigrateSource], delta: List[CatalogChange], base_next_table: u32) -> Result[(), DeployError] {
+    if list.len(source_map) == 0 {
+        return Ok(())
+    }
+    let mut new_tables: Map[u32, ()] = map.new()
+    for change in delta {
+        if let Some(raw) = view change.after {
+            let record = deploy_result(decode_catalog(raw))?
+            if catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+                map.insert(mut new_tables, record.id, ())
+            }
+        }
+    }
+    for i in 0u64 .. list.len(source_map) {
+        let item = source_map[i]
+        if i != 0 && !(source_map[i - 1u64].target < item.target) {
+            return Error(ImportMalformed)
+        }
+        if item.target < base_next_table || !map.contains(new_tables, item.target) {
+            return Error(ImportMalformed)
+        }
+        if item.source == 0 || item.source >= base_next_table {
+            return Error(ImportMalformed)
+        }
+    }
+    Ok(())
+}
+
+// Extracts every collection's (id -> (kind, residency)) from a CollectionMap root.
+fn collect_base_descriptors(root: Arc[std.page.Page], mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    let height = std.page.level(image)
+    for slot in 0u64 .. std.page.count(image) {
+        if height != 0 {
+            collect_base_descriptors(option.unwrap(std.page.child(root, slot)), mut out)?
+            continue
+        }
+        let key = option.unwrap(std.page.key_at(image, slot))
+        let id: u32 = list.word_be(key, 0)
+        let desc = unwrap_collection_descriptor(std.page.value_at(root, slot))
+        capacity(map.try_reserve(mut out, 1))?
+        map.insert(mut out, id, (desc.kind, desc.residency))
+    }
+    Ok(())
+}
+
+fn base_descriptors_from_tree(tree: PageTree) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], Error] {
+    let mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = map.new()
+    collect_base_descriptors(tree.root, mut out)?
+    Ok(take out)
+}
+
+// Reads only MANIFEST and the class-0 CollectionMap pages of main's root in `d`
+// to learn base collection residencies during Pass 1 when `validate_prepared(d)`
+// runs without OLD's `Db`. Returns empty map when `d` has no `MANIFEST`.
+fn read_export_base_descriptors(d: Dir, id: StoreId) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], Error] waits {
+    let mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = map.new()
+    let manifest_raw = match host.open(d, "MANIFEST", Read) {
+        Ok(take fd) => {
+            let mut file = take fd
+            let limit = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
+            let read_res = read_disk_file_bounded(mut file, "MANIFEST", limit)
+            disk_io(host.close(take file))?
+            read_res?
+        },
+        Error(NotFound) => return Ok(take out),
+        Error(problem) => return Error(Io(problem)),
+    }
+    let (owner, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
+        disk_read_page_manifest("MANIFEST", manifest_raw)
+    })?
+    if !same(owner, id) || list.len(manifest.branches) == 0 {
+        return Ok(take out)
+    }
+    let root_ptr = manifest.branches[0u64].roots.collections
+    if root_ptr.stamp == 0 {
+        return Ok(take out)
+    }
+    read_collection_map_descriptors(d, id, root_ptr, mut out)?
+    Ok(take out)
+}
+
+fn read_disk_file_bounded(mut file: HostFile, name: String, limit: u64) -> Result[Bytes, Error] waits {
+    let mut out: Bytes = list.new()
+    let mut chunk: Bytes = list.with_capacity(16384)
+    loop {
+        list.clear(mut chunk)
+        let n = disk_io(host.read(mut file, mut chunk))?
+        if n == 0 {
+            return Ok(take out)
+        }
+        if list.len(out) + n > limit {
+            return Error(disk_fault(name, list.len(out), Malformed))
+        }
+        capacity(list.try_reserve(mut out, n))?
+        list.append(mut out, list.slice(chunk, 0, n))
+    }
+}
+
+fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]) -> Result[(), Error] waits {
+    if ptr.stamp == 0 {
+        return Ok(())
+    }
+    let path = paged_pack_path(ptr.pack)?
+    let mut file = disk_io(host.open(d, path, Read))?
+    let width: u64 = int.widen(ptr.len)
+    let wire = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
+    disk_io(host.close(take file))?
+    let (height, take children, take found_descs) = disk_allocation(scoped fn() -> Result[(u8, List[std.page.PagePtr], List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]), Error] {
+        let image = page_result(std.page.decode(copied(list.slice(wire, 16, 16 + width))?, CollectionMap))?
+        let lvl = std.page.level(image)
+        let mut kids: List[std.page.PagePtr] = list.new()
+        let mut descs: List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = list.new()
+        for slot in 0u64 .. std.page.count(image) {
+            if lvl != 0 {
+                if let Some(PageEdge(child)) = std.page.owning_edge(image, slot) {
+                    list.push(mut kids, child)
+                }
+            } else {
+                let row = option.unwrap(std.page.entry(image, slot))
+                if let InlineValue(raw) = row.cell {
+                    let cid: u32 = list.word_be(row.key, 0)
+                    let desc = collection_descriptor(raw)
+                    list.push(mut descs, (cid, desc.kind, desc.residency))
+                }
+            }
+        }
+        Ok((lvl, take kids, take descs))
+    })?
+    for (cid, kind, residency) in found_descs {
+        capacity(map.try_reserve(mut out, 1))?
+        map.insert(mut out, cid, (kind, residency))
+    }
+    if height != 0 {
+        for child in children {
+            read_collection_map_descriptors(d, id, child, mut out)?
+        }
+    }
+    Ok(())
+}
+
+// Derives each shipped range's residency from OLD's base descriptors and the
+// 0x008B source map (§13.10a "Residency of a shipped range"). Validates that
+// every source in `source_map` is a base table when `check_sources` is true.
+fn derive_range_residencies(base: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], needed: List[RangeChange], source_map: List[MigrateSource], base_next_table: u32, check_sources: bool) -> Result[List[std.page_descriptor.Residency], DeployError] {
+    let mut source_by_target: Map[u32, u32] = map.new()
+    for item in source_map {
+        if check_sources {
+            match map.get(base, item.source) {
+                Some((TableCollection, _)) => (),
+                _ => return Error(ImportMalformed),
+            }
+        }
+        map.insert(mut source_by_target, item.target, item.source)
+    }
+    // First pass: resolve all non-index ranges so new indexes on new migrated
+    // tables see their owner table's target residency.
+    let mut target_residency: Map[u32, std.page_descriptor.Residency] = map.new()
+    for (id, (_, res)) in base {
+        map.insert(mut target_residency, id, res)
+    }
+    for change in needed {
+        let Some(raw) = view change.catalog else {
+            continue
+        }
+        let record = deploy_result(decode_catalog(raw))?
+        let kind = catalog_kind(record.record)
+        if kind == IndexCollection {
+            continue
+        }
+        let res: std.page_descriptor.Residency = if change.id < base_next_table {
+            match map.get(base, change.id) {
+                Some((_, old_res)) => old_res,
+                None => ResidentMemory,
+            }
+        } else if kind == TableCollection {
+            match map.get(source_by_target, change.id) {
+                Some(src) => match map.get(base, src) {
+                    Some((_, src_res)) => src_res,
+                    None => ResidentMemory,
+                },
+                None => ResidentMemory,
+            }
+        } else {
+            ResidentMemory
+        }
+        map.insert(mut target_residency, change.id, res)
+    }
+    let mut out: List[std.page_descriptor.Residency] = list.with_capacity(list.len(needed))
+    for change in needed {
+        let Some(raw) = view change.catalog else {
+            list.push(mut out, ResidentMemory)
+            continue
+        }
+        let record = deploy_result(decode_catalog(raw))?
+        let res: std.page_descriptor.Residency = if change.id < base_next_table {
+            match map.get(base, change.id) {
+                Some((_, old_res)) => old_res,
+                None => ResidentMemory,
+            }
+        } else if catalog_kind(record.record) == IndexCollection {
+            match map.get(target_residency, record.owner) {
+                Some(owner_res) => owner_res,
+                None => ResidentMemory,
+            }
+        } else {
+            match map.get(target_residency, change.id) {
+                Some(r) => r,
+                None => ResidentMemory,
+            }
+        }
+        list.push(mut out, res)
+    }
+    Ok(take out)
+}
+
+// Installs a collection entry with an explicit residency and rebuilt
+// descriptor into `tree` (supports both HotPage and ColdPage roots).
+fn put_collection_with_residency(mut tree: PageTree, key: Bytes, take slot: Option[std.page.Slot], rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency, private_from: u64, mut ids: u64) -> Result[(), Error] {
+    if residency == ResidentMemory {
+        let built: Option[Arc[std.page.Page]] = match take slot {
+            Some(HotPage(page)) => Some(take page),
+            None => None,
+            Some(ColdPage(_)) => return Error(malformed(0)),
+        }
+        return put_collection(mut tree, key, take built, kind, private_from, mut ids)
+    }
+    let empty_root = match view tree.empty_collection {
+        Some(shared) => arc.share(shared),
+        None => fail("store: missing empty collection page"),
+    }
+    match take slot {
+        None => {
+            let record = match kind {
+                4 => log_record(empty_root, 0, 0, ResidentTiered)?,
+                _ => rooted_collection_record(empty_root, kind, ResidentTiered)?,
+            }
+            page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids))
+        },
+        Some(HotPage(page)) => {
+            let record = match kind {
+                4 => log_record(page, 0, rows, ResidentTiered)?,
+                _ => rooted_collection_record(page, kind, ResidentTiered)?,
+            }
+            page_result(std.page.insert(mut tree.root, key, record, Some(take page), tree.inline, private_from, mut ids))
+        },
+        Some(ColdPage(ptr)) => {
+            let record = collection_header(ptr.stamp, rows, charge, kind, ResidentTiered)?
+            page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids))?
+            page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids))
+        },
+    }
+}
+
+fn define_empty_tiered_collection(mut tree: PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
+    let first = stamp_after(final_item)?
+    let mut draw = first
+    put_collection_with_residency(mut tree, prefix(id)?, None, 0, 0, kind, ResidentTiered, first, mut draw)?
+    canonical_tree(mut tree)?
+    final_item = draw - 1
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 streaming bottom-up Tiered page builder with chunked hold_import cuts
+// ---------------------------------------------------------------------------
+type StreamNode {
+    slot: std.page.Slot,
+    stamp: u64,
+    level: u8,
+    first: Bytes,
+    last: Bytes,
+    rows: u64,
+    charge: u64
+}
+
+type StreamBuilder {
+    id: u32,
+    kind: u8,
+    inline: u64,
+    dirty_bytes: u64,
+    hot_bytes: u64,
+    leaf_rows: List[std.page.Row],
+    leaf_sum: u64,
+    leaf_prefix: u64,
+    levels: List[List[StreamNode]],
+    next_stamp: u64,
+    stamp_high: u64
+}
+
+fn new_stream_builder(id: u32, kind: u8, inline: u64, dirty_bytes: u64, first_stamp: u64, stamp_high: u64) -> StreamBuilder {
+    StreamBuilder(id: id, kind: kind, inline: inline, dirty_bytes: dirty_bytes, hot_bytes: 0, leaf_rows: list.new(), leaf_sum: 0, leaf_prefix: 0, levels: list.new(), next_stamp: first_stamp, stamp_high: stamp_high)
+}
+
+fn stream_draw_stamp(mut cursor: u64, high: u64) -> Result[u64, DeployError] {
+    if cursor > high {
+        return Error(IdBound)
+    }
+    let drawn = cursor
+    cursor += 1
+    Ok(drawn)
+}
+
+fn stream_leaf_row_width(key_len: u64, value_len: u64, inline: u64) -> u64 {
+    let cell = if value_len <= inline {
+        3 + value_len
+    } else {
+        43u64
+    }
+    4 + key_len + cell
+}
+
+fn stream_compressed(sum: u64, n: u64, p: u64) -> u64 {
+    24 + sum - (n - 1) * p
+}
+
+fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), DeployError] {
+    let n = list.len(leaf_rows)
+    let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
+    let mut blobs: List[std.page.BlobSlot] = list.new()
+    let mut rows = 0u64
+    let mut charge = 0u64
+    let mut hot = 0u64
+    let mut first: Bytes = list.new()
+    let mut last_key: Bytes = list.new()
+    let mut idx = 0u64
+    for take row in take leaf_rows {
+        let std.page.Row(key: take key, value: take value, charge: row_charge) = take row
+        if idx == 0 {
+            first = deploy_result(copied(key))?
+        }
+        if idx + 1 == n {
+            last_key = deploy_result(copied(key))?
+        }
+        idx += 1
+        rows += 1
+        charge = int.saturating_add(charge, row_charge)
+        let width = list.len(value)
+        if width <= inline {
+            list.push(mut page_entries, std.page.Entry(key: take key, cell: InlineValue(take value)))
+        } else {
+            let ordinal: u16 = int.truncate(list.len(blobs))
+            let blob_stamp = stream_draw_stamp(mut cursor, high)?
+            let checksum = std.check.xxh3(value, 0, width)
+            let reference = std.page.BlobRef(stamp: blob_stamp, len: width, checksum: checksum, pack: 0, offset: 0, body: ordinal)
+            hot = int.saturating_add(hot, 8 + width)
+            list.push(mut blobs, HotBlob(arc.new(take value)))
+            list.push(mut page_entries, std.page.Entry(key: take key, cell: BlobValue(reference)))
+        }
+    }
+    let id = stream_draw_stamp(mut cursor, high)?
+    let image = deploy_result(page_result(std.page.encode(page_entries, 0u8, id, Collection)))?
+    hot = int.saturating_add(hot, std.page.sealed_size(image))
+    let page = deploy_result(page_result(std.page.attach(take image, list.new(), take blobs)))?
+    Ok((StreamNode(slot: HotPage(take page), stamp: id, level: 0u8, first: take first, last: take last_key, rows: rows, charge: charge), hot))
+}
+
+fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), DeployError] {
+    let n = hi - lo
+    let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
+    let mut kids: List[std.page.Slot] = list.with_capacity(n)
+    let mut rows = 0u64
+    let mut charge = 0u64
+    let lvl = nodes[lo].level + 1u8
+    for i in lo .. hi {
+        let node = view nodes[i]
+        rows += node.rows
+        charge = int.saturating_add(charge, node.charge)
+        let sep: Bytes = if i == lo {
+            list.new()
+        } else {
+            deploy_result(page_result(std.page.separator(nodes[i - 1u64].last, node.first)))?
+        }
+        let ptr = match node.slot {
+            ColdPage(place) => place,
+            HotPage(_) => std.page.unlocated(node.stamp),
+        }
+        list.push(mut page_entries, std.page.Entry(key: take sep, cell: Child(std.page.Branch(child: ptr, rows: node.rows, charge: node.charge))))
+        list.push(mut kids, clone(node.slot))
+    }
+    let id = stream_draw_stamp(mut cursor, high)?
+    let image = deploy_result(page_result(std.page.encode(page_entries, lvl, id, Collection)))?
+    let hot = std.page.sealed_size(image)
+    let page = deploy_result(page_result(std.page.attach(take image, take kids, list.new())))?
+    let first = deploy_result(copied(nodes[lo].first))?
+    let last_key = deploy_result(copied(nodes[hi - 1u64].last))?
+    Ok((StreamNode(slot: HotPage(take page), stamp: id, level: lvl, first: take first, last: take last_key, rows: rows, charge: charge), hot))
+}
+
+fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool, DeployError] {
+    if hi - lo <= 2 {
+        return Ok(true)
+    }
+    let mut sum = 4u64 + 52u64
+    let mut first_sep: Bytes = list.new()
+    let mut common = 0u64
+    for i in lo + 1u64 .. hi {
+        let sep = deploy_result(page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first)))?
+        sum += 4 + 52 + list.len(sep)
+        if i == lo + 1u64 {
+            common = list.len(sep)
+            first_sep = take sep
+        } else {
+            common = std.page.common_prefix(first_sep, sep)
+        }
+    }
+    Ok(stream_compressed(sum, hi - lo, common) <= 4096)
+}
+
+fn stream_push_node(mut builder: StreamBuilder, lvl_idx: u64, take node: StreamNode) -> Result[(), DeployError] {
+    while list.len(builder.levels) <= lvl_idx {
+        list.push(mut builder.levels, list.new())
+    }
+    list.push(mut builder.levels[lvl_idx], take node)
+    // Keep at least 2 children on the right tail so finalization never hits a
+    // unary branch when a full prefix splits off.
+    let node_count = list.len(builder.levels[lvl_idx])
+    if node_count >= 4 && !stream_branch_fits(builder.levels[lvl_idx], 0, node_count)? {
+        let split = node_count - 2
+        let (take parent, hot) = stream_encode_branch(builder.levels[lvl_idx], 0, split, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, hot)
+        let mut tail: List[StreamNode] = list.with_capacity(2)
+        for i in split .. node_count {
+            list.push(mut tail, clone_stream_node(builder.levels[lvl_idx][i]))
+        }
+        builder.levels[lvl_idx] = take tail
+        stream_push_node(mut builder, lvl_idx + 1, take parent)?
+    }
+    Ok(())
+}
+
+fn clone_stream_node(node: StreamNode) -> StreamNode {
+    StreamNode(slot: clone(node.slot), stamp: node.stamp, level: node.level, first: clone(node.first), last: clone(node.last), rows: node.rows, charge: node.charge)
+}
+
+// Collapses a copy of `tree_levels` into one uniform-height AP3 root for a flush
+// cut (temporary wrapper stamps drawn from `temp_stamp`, never touching the
+// reserved stamp block).
+fn stream_temporary_root_multi(tree_levels: List[List[StreamNode]], mut temp_stamp: u64) -> Result[Option[StreamNode], DeployError] {
+    let max_stamp = 18446744073709551614u64
+    let mut carry: List[StreamNode] = list.new()
+    for idx in 0u64 .. list.len(tree_levels) {
+        let mut group: List[StreamNode] = list.new()
+        for node in tree_levels[idx] {
+            list.push(mut group, clone_stream_node(node))
+        }
+        for take item in take carry {
+            list.push(mut group, take item)
+        }
+        if list.len(group) == 0 {
+            carry = list.new()
+            continue
+        }
+        let mut has_higher = false
+        for j in idx + 1u64 .. list.len(tree_levels) {
+            if list.len(tree_levels[j]) != 0 {
+                has_higher = true
+            }
+        }
+        if !has_higher && list.len(group) == 1 {
+            return Ok(Some(clone_stream_node(group[0u64])))
+        }
+        let (take wrapped, _) = stream_wrap_level(group, mut temp_stamp, max_stamp)?
+        carry = take wrapped
+    }
+    while list.len(carry) > 1 {
+        let (take wrapped, _) = stream_wrap_level(carry, mut temp_stamp, max_stamp)?
+        carry = take wrapped
+    }
+    if list.len(carry) == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(clone_stream_node(carry[0u64])))
+    }
+}
+
+fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Result[(List[StreamNode], u64), DeployError] {
+    let n = list.len(nodes)
+    let mut out: List[StreamNode] = list.new()
+    let mut hot = 0u64
+    let mut lo = 0u64
+    while lo < n {
+        let mut hi = lo + 1
+        while hi < n && stream_branch_fits(nodes, lo, hi + 1)? {
+            hi += 1
+        }
+        if hi == n - 1 && hi - lo >= 2 {
+            hi = if hi - lo == 2 {
+                n
+            } else {
+                hi - 1
+            }
+        }
+        let (take parent_node, added) = stream_encode_branch(nodes, lo, hi, mut cursor, high)?
+        hot = int.saturating_add(hot, added)
+        list.push(mut out, take parent_node)
+        lo = hi
+    }
+    Ok((take out, hot))
+}
+
+// Flushes every HotPage currently in `builder.levels` into class-3/4 packs via
+// one `hold_import_emitted` cut, replacing each HotPage with its ColdPage(ptr).
+fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: PageTree) -> Result[(), DeployError] waits {
+    let mut temp_stamp = deploy_result(stamp_after(db.next_node))?
+    let Some(take root_node) = stream_temporary_root_multi(builder.levels, mut temp_stamp)? else {
+        return Ok(())
+    }
+    let StreamNode(slot: take root_slot, rows: root_rows, charge: root_charge, ..) = take root_node
+    let key = deploy_result(prefix(builder.id))?
+    let private_from = temp_stamp
+    deploy_result(put_collection_with_residency(mut collections, key, Some(take root_slot), root_rows, root_charge, builder.kind, ResidentTiered, private_from, mut temp_stamp))?
+    deploy_result(canonical_tree(mut collections))?
+    db.next_node = temp_stamp - 1
+    let (take packed, emitted) = hold_import_emitted(mut db, share_page_tree(collections))?
+    collections = take packed
+    for l in 0u64 .. list.len(builder.levels) {
+        for j in 0u64 .. list.len(builder.levels[l]) {
+            let is_hot = if let HotPage(_) = view builder.levels[l][j].slot {
+                true
+            } else {
+                false
+            }
+            if is_hot {
+                let s = builder.levels[l][j].stamp
+                if let Some(ptr) = map.get(emitted, s) {
+                    builder.levels[l][j].slot = ColdPage(ptr)
+                }
+            }
+        }
+    }
+    builder.hot_bytes = 0
+    Ok(())
+}
+
+fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: PageTree, take row: std.page.Row) -> Result[(), DeployError] waits {
+    let key_len = list.len(row.key)
+    let val_len = list.len(row.value)
+    let width = stream_leaf_row_width(key_len, val_len, builder.inline)
+    let mut fits = true
+    let mut next_prefix = key_len
+    if list.len(builder.leaf_rows) != 0 {
+        next_prefix = std.page.common_prefix(builder.leaf_rows[0u64].key, row.key)
+        fits = stream_compressed(builder.leaf_sum + width, list.len(builder.leaf_rows) + 1, next_prefix) <= 4096
+    }
+    if !fits {
+        let ready_rows = replace(mut builder.leaf_rows, list.new())
+        let (take leaf_node, hot) = stream_encode_leaf(take ready_rows, builder.inline, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, hot)
+        stream_push_node(mut builder, 0u64, take leaf_node)?
+        builder.leaf_sum = 0
+        builder.leaf_prefix = 0
+        if builder.hot_bytes >= builder.dirty_bytes {
+            stream_flush_chunk(mut db, mut builder, mut collections)?
+        }
+        next_prefix = key_len
+    }
+    builder.leaf_sum += width
+    builder.leaf_prefix = next_prefix
+    list.push(mut builder.leaf_rows, take row)
+    Ok(())
+}
+
+fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode], DeployError] {
+    if list.len(builder.leaf_rows) != 0 {
+        let ready_rows = replace(mut builder.leaf_rows, list.new())
+        let (take leaf_node, hot) = stream_encode_leaf(take ready_rows, builder.inline, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, hot)
+        stream_push_node(mut builder, 0u64, take leaf_node)?
+    }
+    let mut carry: List[StreamNode] = list.new()
+    for idx in 0u64 .. list.len(builder.levels) {
+        let mut group: List[StreamNode] = list.new()
+        for node in builder.levels[idx] {
+            list.push(mut group, clone_stream_node(node))
+        }
+        for take item in take carry {
+            list.push(mut group, take item)
+        }
+        if list.len(group) == 0 {
+            carry = list.new()
+            continue
+        }
+        let mut has_higher = false
+        for j in idx + 1u64 .. list.len(builder.levels) {
+            if list.len(builder.levels[j]) != 0 {
+                has_higher = true
+            }
+        }
+        if !has_higher && list.len(group) == 1 {
+            return Ok(Some(clone_stream_node(group[0u64])))
+        }
+        let (take wrapped, added) = stream_wrap_level(group, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, added)
+        carry = take wrapped
+    }
+    while list.len(carry) > 1 {
+        let (take wrapped, added) = stream_wrap_level(carry, mut builder.next_stamp, builder.stamp_high)?
+        builder.hot_bytes = int.saturating_add(builder.hot_bytes, added)
+        carry = take wrapped
+    }
+    if list.len(carry) == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(clone_stream_node(carry[0u64])))
+    }
+}
+
+// Pass 2 (§13.10a): re-reads PREPARED sequentially for Tiered ranges only,
+// streaming each range bottom-up into `collections` and flushing via
+// `hold_import` cuts at `dirty_bytes`. Re-derives each range's digest; a
+// mismatch forgets the import and returns `ImportMalformed`.
+fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mut collections: PageTree, low: u64, high: u64, inline: u64) -> Result[(), DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let header = scratch_result(prepared_read(mut file, 72u64))?
+    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start(), peek: None)
+    let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
+    let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
+    let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
+    let meta = prepared_frame(mut input, 0x0081, metadata_codec)?
+    for _ in 0u64 .. meta.changes {
+        let _ = prepared_frame(mut input, 0x0082, delta_codec)?
+    }
+    let mut inventory: List[Inventory] = list.with_capacity(meta.ranges)
+    for _ in 0u64 .. meta.ranges {
+        list.push(mut inventory, prepared_frame(mut input, 0x0083, inventory_codec)?)
+    }
+    if meta.changes != 0 {
+        let _ = read_optional_source_map(mut input)?
+    }
+    if list.len(inventory) != list.len(ranges) {
+        return Error(ImportMalformed)
+    }
+    let dirty_bytes = disk_state(db).options.dirty_bytes
+    let mut stamp_cursor = low + 1
+    for i in 0u64 .. list.len(ranges) {
+        let desc = inventory[i]
+        let target = view ranges[i]
+        if target.id != desc.id || target.count != desc.count || target.digest != desc.digest {
+            return Error(ImportMalformed)
+        }
+        if target.kind == 0 || target.residency == ResidentMemory {
+            for _ in 0u64 .. desc.count {
+                let _ = prepared_frame(mut input, 0x0084, row_codec)?
+            }
+            continue
+        }
+        let mut builder = new_stream_builder(target.id, target.kind, inline, dirty_bytes, stamp_cursor, high)
+        let mut digest = std.check.start()
+        for _ in 0u64 .. desc.count {
+            let PreparedRow(key: take key, value: take encoded) = prepared_frame(mut input, 0x0084, row_codec)?
+            if list.len(key) < 4 {
+                return Error(ImportMalformed)
+            }
+            let key_id: u32 = list.word_be(key, 0)
+            if key_id != target.id {
+                return Error(ImportMalformed)
+            }
+            deploy_result(checksum_row(mut digest, key, encoded))?
+            let row_charge = entry(key, encoded)
+            let suffix = deploy_result(copied(list.slice(key, 4, list.len(key))))?
+            stream_push_row(mut db, mut builder, mut collections, std.page.Row(key: take suffix, value: take encoded, charge: row_charge))?
+        }
+        if std.check.finish(digest) != target.digest {
+            return Error(ImportMalformed)
+        }
+        let finished = stream_finish_range(mut builder)?
+        stamp_cursor = builder.next_stamp
+        let key = deploy_result(prefix(target.id))?
+        let private_from = deploy_result(stamp_after(db.next_node))?
+        let mut map_stamp = private_from
+        match take finished {
+            Some(take node) => {
+                let StreamNode(slot: take node_slot, rows: node_rows, charge: node_charge, ..) = take node
+                deploy_result(put_collection_with_residency(mut collections, key, Some(take node_slot), node_rows, node_charge, target.kind, ResidentTiered, private_from, mut map_stamp))?
+            },
+            None => {
+                deploy_result(put_collection_with_residency(mut collections, key, None, 0, 0, target.kind, ResidentTiered, private_from, mut map_stamp))?
+            },
+        }
+        deploy_result(canonical_tree(mut collections))?
+        db.next_node = map_stamp - 1
+        if builder.hot_bytes >= dirty_bytes {
+            let (take packed, _) = hold_import_emitted(mut db, share_page_tree(collections))?
+            collections = take packed
+        }
+    }
+    let PreparedInput(file: take done, ..) = take input
+    scratch_result(disk_io(host.close(take done)))?
+    Ok(())
+}

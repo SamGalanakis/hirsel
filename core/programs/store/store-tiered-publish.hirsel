@@ -26,7 +26,9 @@ type TieredCutStage: send {
     // T8 step 3's added rows, live then fold order, and step 4's drain.
     queue: CutQueue,
     // The probes this cut leaves running and the inventories it leases.
-    compaction: TieredCompaction
+    compaction: TieredCompaction,
+    // Stamp -> PagePtr emitted by this cut's Tiered stage (for Pass-2 chunk cuts).
+    emitted: Map[u64, std.page.PagePtr]
 }
 
 fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
@@ -151,7 +153,12 @@ fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), (
     }
     let head = view db.heads[0]
     for id in replacement.superseded {
-        let (root, _) = option.unwrap(std.page.collection_slot(head.roots.collections.root, prefix(id)?))
+        let Some((root, desc)) = std.page.collection_slot(head.roots.collections.root, prefix(id)?) else {
+            continue
+        }
+        if collection_descriptor(desc).residency != ResidentTiered {
+            continue
+        }
         let mut effects: List[TieredFoldEffect] = list.new()
         fold_record_lost(root, map.new(), map.new(), true, mut effects)?
         for take effect in take effects {
@@ -224,7 +231,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     tiered_emit_queue(mut pending, moving)?
     let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = take pending
     if list.len(pages) == 0 && list.len(blobs) == 0 && !folded {
-        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction))
+        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction, emitted: map.new()))
     }
     let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
     let page_run = layout_tiered_packs(take pages, 3, blob_run.next_pack, cap)?
@@ -239,7 +246,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
         let collections = seal_holder_tiered(held.collections, emitted)?
         list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
     }
-    Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction))
+    Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction, emitted: take emitted))
 }
 
 // T8 step 4 reads queued pages through the installed inventory. A cut with

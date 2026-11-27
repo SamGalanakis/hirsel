@@ -1,0 +1,212 @@
+fn f4_tiered_options() -> Result[Options, Error] {
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(268435456u64)
+    overrides.writer_pin_bytes = Some(34471936u64)
+    overrides.cache_bytes = Some(80u64 * 1048576u64)
+    Ok(sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("tiered test sizing"))
+}
+
+fn f4_tiered_setup(mut db: Db) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()]), Error] waits {
+    let mut decl = declare(db, Migrate)?
+    let mut rows_decl = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut decl, mut rows_decl, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let rows = finish(mut decl, take rows_decl)?
+    let pad_decl = declare_table(mut decl, "pad", std.codec.key_u64(), std.codec.of_bytes())?
+    let pad = finish(mut decl, take pad_decl)?
+    let _ = seal(mut db, take decl)?
+    let Committed(_) = run(mut db, None, copy_env(pad), fn(mut tx: Tx, pad_table: Table[u64, Bytes]) -> Result[(), Error] {
+        let payload = install_fixture_bytes(16384u64, 0x5Au8)
+        for k in 0u64 .. 64 {
+            put(mut tx, pad_table, k, copied(payload)?)?
+        }
+        Ok(())
+    })? else {
+        return Error(MigrationFault)
+    }
+    Ok((rows, take ix))
+}
+
+// Review 3177 F4 law:
+// (A) Non-empty superseded redefinition under an export lease (AP13 bulk
+//     build of a Backfilling index) returns Drift from `advance_export`.
+// (B) Tiered demotion + 3150 F1 trace (write a->b, FORK beta, demote,
+//     write b->c, build chunk, write c->b) under an export lease ships
+//     `superseded` in STEPS 0x0089; child replay drops only main's overlay
+//     (preserving beta's Arc), queues old Cold base in `deferred_frees`,
+//     drops exact `account_tiered` when single-branch, and catch-up diff
+//     skips the superseded index while still diffing the Tiered table.
+@test
+fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    // --- Case A: non-empty AP13 bulk redefinition under a lease -> Drift ---
+    {
+        let dir_a = disk_test_directory(d)
+        let scratch_a = disk_test_directory(d)
+        let opts = disk_crash_options("install")
+        let mut db = deploy_result(open(tasks, dir_a, c, r, opts))?
+        let mut decl = deploy_result(declare(db, Migrate))?
+        let key = std.codec.key_u64()
+        let mut t_decl = deploy_result(declare_table(mut decl, "rows", key, std.codec.of_u64()))?
+        let ix = deploy_result(index(mut decl, mut t_decl, "by_v", Many, code.describe(lix_keys), key))?
+        let t = deploy_result(finish(mut decl, take t_decl))?
+        let _ = deploy_result(seal(mut db, take decl))?
+        for k in 0u64 .. 32 {
+            deploy_result(lix_write(mut db, t, k, Some(k * 5 + 1)))?
+        }
+        deploy_result(rebuild_index(mut db, ix))?
+        let attempt = install_fixture_bytes(16u64, 0xA1u8)
+        let export_job = begin_export_copy(mut db, scratch_a, clone(attempt), 0u64)?
+        let _exported = export_copy(take export_job)?
+        // Under the lease: non-empty AP13 bulk redefinition of the Backfilling
+        // index (moves Backfilling(None) -> Public and replaces collection with
+        // non-empty rows). Must produce Drift.
+        let mut plan = schema_plan(db)
+        {
+            let record = deploy_result(catalog_entry_in(plan.roots.catalog, ix.catalog_key))?
+            let Some(extractor) = bound_extractor(db.indexes, record) else {
+                fail("F4 case A: expected bound extractor")
+            }
+            let _ = deploy_result(build_declared_index(mut plan, ix.catalog_key, record, extractor, false))?
+        }
+        let _ = deploy_result(publish_schema_plan(mut db, take plan))?
+        match advance_export(mut db, scratch_a, attempt) {
+            Error(Drift) => (),
+            Ok(_) => fail("F4 case A: non-empty superseded redefinition under lease must return Drift"),
+            Error(take other) => return Error(take other),
+        }
+        deploy_result(close(take db))?
+    }
+    // --- Case B1: Tiered 3150 F1 trace + FORK overlay + deferred_frees + skip ---
+    {
+        let dir_b = disk_test_directory(d)
+        let scratch_b = disk_test_directory(d)
+        let opts = deploy_result(f4_tiered_options())?
+        let mut db = deploy_result(open(tasks, dir_b, c, r, opts))?
+        let mut init_decl = deploy_result(declare(db, Migrate))?
+        let mut init_staging = deploy_result(finish_migration(db, take init_decl))?
+        let init_desc = install_fixture_bytes(32u64, 65u8)
+        deploy_result(stage_activation(mut init_staging, 1u64, None, init_desc, std.codec.of_bytes(), init_desc))?
+        deploy_result(install_activation(mut db, take init_staging))?
+        let (rows, by_v) = deploy_result(f4_tiered_setup(mut db))?
+        for k in 1u64 .. 5 {
+            deploy_result(d7_index_write(mut db, rows, k, k * 10u64))?
+        }
+        let rows_key = deploy_result(prefix(rows.id))?
+        let by_v_key = deploy_result(prefix(by_v.id))?
+        deploy_result(residency_to_tiered(mut db, rows.id, take rows_key))?
+        deploy_result(residency_to_tiered(mut db, by_v.id, take by_v_key))?
+        let _ = deploy_result(checkpoint(mut db))?
+        let attempt = install_fixture_bytes(16u64, 0xB2u8)
+        let export_job = begin_export_copy(mut db, scratch_b, clone(attempt), 1u64)?
+        let exported = export_copy(take export_job)?
+        let child_opts = deploy_result(f4_tiered_options())?
+        let child = open_export(exported.dir, c, clone(attempt), child_opts)?
+        // 3150 F1 trace under the lease: write 10->20, FORK beta, demote by_v,
+        // write 20->30, build chunk, write 30->20.
+        deploy_result(d7_index_write(mut db, rows, 1u64, 20u64))?
+        let from = snapshot(db)
+        let (_, fork_ticket) = deploy_result(fork(mut db, "beta", from))?
+        deploy_result(durable(mut db, fork_ticket))?
+        deploy_result(rebuild_index(mut db, by_v))?
+        deploy_result(d7_index_write(mut db, rows, 1u64, 30u64))?
+        let _ = deploy_result(index_build_step(mut db, 2u64))?
+        deploy_result(d7_index_write(mut db, rows, 1u64, 20u64))?
+        let Tail(take tail) = advance_export(mut db, scratch_b, clone(attempt))? else {
+            fail("F4 case B1: expected Tail round")
+        }
+        let _ = copy_export_tail(take tail, exported.dir)?
+        let new_stamp = read_export_stamp(exported.dir)?
+        let steps = read_steps(exported.dir, new_stamp)?
+        let mut saw_superseded = false
+        for step in steps {
+            if list_contains_u32(step.superseded, by_v.id) {
+                saw_superseded = true
+            }
+        }
+        if !saw_superseded {
+            fail("F4 case B1: expected superseded by_v.id in STEPS 0x0089")
+        }
+        let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
+        let before = share_roots(child.db.heads[0].roots)
+        let state = deploy_result(capacity(current_state(child.db)))?
+        let mut initial = deploy_result(journal_replay(take state, child.db.next_node, child.db.limits))?
+        initial.tiered.total = child.db.tiered
+        let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
+        if !list_contains_u32(replayed.superseded, by_v.id) {
+            fail("F4 case B1: replay must record superseded by_v.id")
+        }
+        if list.len(replayed.deferred_frees) == 0 {
+            fail("F4 case B1: replay supersede must queue old Cold root in deferred_frees")
+        }
+        if list.len(replayed.state.tips) < 2 {
+            fail("F4 case B1: expected forked branch beta in replayed tips")
+        }
+        let beta_entry = law_read_key(by_v.id, 20u64, Some(1u64))
+        let Some(ReplayRow(now: ReplayPut(_), ..)) = tiered_replayed_row(replayed.state.tips[1].roots.collections, beta_entry) else {
+            fail("F4 case B1: forked branch beta must keep its pre-demotion overlay Arc")
+        }
+        let (_, take deferred) = deploy_result(catch_up_compare_collections(before.collections, replayed.state.tips[0].roots.collections, replayed.superseded))?
+        let mut saw_rows = false
+        for item in deferred {
+            if item.id == by_v.id {
+                fail("F4 case B1: catch-up diff must skip superseded index id")
+            }
+            if item.id == rows.id {
+                saw_rows = true
+            }
+        }
+        if !saw_rows {
+            fail("F4 case B1: catch-up diff must continue past and defer Tiered table")
+        }
+        let before_snap = Snapshot(store: id, open: new_stamp.opened, branch: 0u32, head: child.stamp.head, roots: share_roots(before), watermark: child.db.next_node + 1, bases: no_tail_bases())
+        let after_snap = Snapshot(store: id, open: new_stamp.opened, branch: 0u32, head: new_stamp.head, roots: share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: no_tail_bases())
+        let diffs = catch_up_tiered_diffs(exported.dir, id, child.db.writer_pin_bytes, before_snap, after_snap, deferred)?
+        if list.len(diffs) != 1 || diffs[0].tree_key != law_read_key(rows.id, 1u64, None) {
+            fail("F4 case B1: Tiered catch-up diff must report exact changed table row")
+        }
+        deploy_result(close(take db))?
+    }
+    // --- Case B2: single-branch exact ReplayTieredAccount drops superseded bytes ---
+    {
+        let dir_c = disk_test_directory(d)
+        let scratch_c = disk_test_directory(d)
+        let opts = deploy_result(f4_tiered_options())?
+        let mut db = deploy_result(open(tasks, dir_c, c, r, opts))?
+        let mut init_decl = deploy_result(declare(db, Migrate))?
+        let mut init_staging = deploy_result(finish_migration(db, take init_decl))?
+        let init_desc = install_fixture_bytes(32u64, 65u8)
+        deploy_result(stage_activation(mut init_staging, 1u64, None, init_desc, std.codec.of_bytes(), init_desc))?
+        deploy_result(install_activation(mut db, take init_staging))?
+        let (rows, by_v) = deploy_result(f4_tiered_setup(mut db))?
+        for k in 1u64 .. 5 {
+            deploy_result(d7_index_write(mut db, rows, k, k * 10u64))?
+        }
+        let rows_key = deploy_result(prefix(rows.id))?
+        let by_v_key = deploy_result(prefix(by_v.id))?
+        deploy_result(residency_to_tiered(mut db, rows.id, take rows_key))?
+        deploy_result(residency_to_tiered(mut db, by_v.id, take by_v_key))?
+        let _ = deploy_result(checkpoint(mut db))?
+        let attempt = install_fixture_bytes(16u64, 0xC3u8)
+        let export_job = begin_export_copy(mut db, scratch_c, clone(attempt), 1u64)?
+        let exported = export_copy(take export_job)?
+        let child_opts = deploy_result(f4_tiered_options())?
+        let child = open_export(exported.dir, c, clone(attempt), child_opts)?
+        let before_tiered = child.db.tiered
+        deploy_result(rebuild_index(mut db, by_v))?
+        let Tail(take tail) = advance_export(mut db, scratch_c, clone(attempt))? else {
+            fail("F4 case B2: expected Tail round")
+        }
+        let _ = copy_export_tail(take tail, exported.dir)?
+        let new_stamp = read_export_stamp(exported.dir)?
+        let steps = read_steps(exported.dir, new_stamp)?
+        let id = StoreId(hi: new_stamp.store_hi, lo: new_stamp.store_lo)
+        let state = deploy_result(capacity(current_state(child.db)))?
+        let mut initial = deploy_result(journal_replay(take state, child.db.next_node, child.db.limits))?
+        initial.tiered.total = before_tiered
+        let replayed = deploy_result(replay_export(exported.dir, id, child.stamp.terminal, child.stamp.end, new_stamp.terminal, new_stamp.end, steps, take initial))?
+        if !replayed.tiered.exact || replayed.tiered.total >= before_tiered {
+            fail("F4 case B2: exact replay account_tiered must drop superseded Tiered descriptor bytes")
+        }
+        deploy_result(close(take db))?
+    }
+    Ok(())
+}

@@ -150,7 +150,7 @@ fn refusal_import(digest: Inline[u8, 32]) -> ValidatedImport {
     let base = ExportStamp(attempt: list.new(), store_hi: 0, store_lo: 0, opened: 0, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 0, end: 0)
     let target = PreparedTarget(describe: list.new(), release: list.new(), digest: list.new(), resident_limit: 0, pack_bytes: 0, checkpoint_bytes: 0, journal_limit: 0, limits: None)
     let meta = PreparedMeta(base: take base, target: take target, next_table: 1, changes: 0, ranges: 0)
-    ValidatedImport(meta: take meta, delta: list.new(), ranges: list.new(), rewrites: list.new(), digest: digest, charge: 0)
+    ValidatedImport(meta: take meta, delta: list.new(), ranges: list.new(), rewrites: list.new(), digest: digest, charge: 0, source_map: list.new(), dir: None, rewrites_checked: false)
 }
 
 @test

@@ -24,21 +24,17 @@ type ExportLease: shareable + send {
     activation: u64
 }
 
-// A schema commit main published under the lease (§3.5a "Catch-up"): an
-// index build chunk or a verify demotion. A schema commit writes no journal
-// frame, so the round ships it as a step the child replays between the
-// tail's commits.
-type LeaseStep {
-    version: u64,
-    before: Roots,
-    after: Roots
-}
+// A schema commit main published under the lease (§3.5a "Catch-up", D-CU-1):
+// an index build chunk or a verify demotion. Captured at the cut so no old
+// Roots are retained while the lease stays open.
+type LeaseStep: send = StepDrift | StepReady(ExportStep)
 
-// A step as the round ships it: the catalog records and collection rows the
-// commit changed, each with the prior its journal op would carry.
+// A step as the round ships it: the catalog records, superseded collection ids
+// (demoted to empty; D-CU-1 / 3177 F4), and collection rows the commit wrote.
 type ExportStep: codec + send {
     version: u64,
     catalog: List[StepOp],
+    superseded: List[u32],
     rows: List[StepOp]
 }
 
@@ -60,88 +56,156 @@ type StepsMeta: codec + send {
 type ReplayStep {
     version: u64,
     catalog: List[JournalOp],
+    superseded: List[u32],
     rows: List[JournalOp]
 }
 
 const STEPS_ROLE: u8 = 10
 
-// Main's roots before a cut that moves main's head under the lease.
-fn leased_step_base(db: Db, delta: HolderDelta) -> Option[Roots] {
+// Builds the lease step at the cut before `install_holder_delta`, retaining no
+// Roots on the lease (D-CU-1, 3177 F4).
+fn build_leased_step(db: Db, delta: HolderDelta) -> Option[LeaseStep] {
     if !export_leased(db) {
         return None
     }
-    if let ReplaceMain(main, _) = delta {
-        if main.head != db.heads[0u64].head {
-            return Some(share_roots(db.heads[0u64].roots))
+    let ReplaceMain(main, _) = view delta else {
+        return None
+    }
+    if main.head == db.heads[0u64].head {
+        return None
+    }
+    let before = view db.heads[0u64].roots
+    let after = view main.roots
+    if main.step_drift || tree_stamp(before.streams) != tree_stamp(after.streams) || list.len(before.keyed) != list.len(after.keyed) {
+        return Some(StepDrift)
+    }
+    for slot in 0u64 .. list.len(before.keyed) {
+        if tree_stamp(before.keyed[slot]) != tree_stamp(after.keyed[slot]) {
+            return Some(StepDrift)
         }
     }
-    None
-}
-
-fn record_leased_step(mut db: Db, take base: Option[Roots]) {
-    let Some(take before) = take base else {
-        return ()
+    let moved = match catalog_changes(before, after) {
+        Ok(take cat_changes) => take cat_changes,
+        Error(_) => return Some(StepDrift),
     }
-    let step = LeaseStep(version: db.heads[0u64].head, before: take before, after: share_roots(db.heads[0u64].roots))
-    write_disk(mut db.disk, take step, scoped fn(mut state: DiskState, take published: LeaseStep) {
-        list.push(mut state.steps, take published)
-    })
-}
-
-// A step the child can replay changes only the build state of index records
-// and the entries of those indexes. Anything else (a merge into main, a
-// stream or keyed change) is Drift: the deploy needs a fresh preparation.
-fn export_step(step: LeaseStep) -> Result[ExportStep, DeployError] {
-    if tree_stamp(step.before.streams) != tree_stamp(step.after.streams) || list.len(step.before.keyed) != list.len(step.after.keyed) {
-        return Error(Drift)
-    }
-    for slot in 0u64 .. list.len(step.before.keyed) {
-        if tree_stamp(step.before.keyed[slot]) != tree_stamp(step.after.keyed[slot]) {
-            return Error(Drift)
-        }
-    }
-    let moved = deploy_result(catalog_changes(step.before, step.after))?
     let mut ids: List[u32] = list.new()
     let mut catalog: List[StepOp] = list.with_capacity(list.len(moved))
     for take change in take moved {
         let CatalogChange(key: take key, before: take was, after: take now) = take change
         let (Some(take prior_raw), Some(take raw)) = (take was, take now) else {
-            return Error(Drift)
+            return Some(StepDrift)
         }
-        let moved_id = deploy_result(state_move(prior_raw, raw))?
-        let Some(id) = moved_id else {
-            return Error(Drift)
+        let moved_id = match state_move(prior_raw, raw) {
+            Ok(Some(id)) => id,
+            _ => return Some(StepDrift),
         }
-        list.push(mut ids, id)
+        list.push(mut ids, moved_id)
         list.push(mut catalog, StepOp(key: take key, value: Some(take raw), prior: stored_prior(Some(view prior_raw))))
     }
-    let changed = deploy_result(compare_page_collections(step.before.collections, step.after.collections))?
-    if list.len(changed.trimmed) != 0 || list.len(changed.bounds) != 0 {
-        return Error(Drift)
+    // F4: every superseded collection id must be one of the moved index ids
+    // AND must be empty in the published main root (non-empty bulk rebuild or
+    // install replacement is Drift, never silently emptied on replay).
+    let mut superseded: List[u32] = list.with_capacity(list.len(main.superseded))
+    for id in main.superseded {
+        if !list_contains_u32(ids, id) {
+            return Some(StepDrift)
+        }
+        let id_key = match prefix(id) {
+            Ok(take k) => take k,
+            Error(_) => return Some(StepDrift),
+        }
+        let rows_after = match std.page.lookup(after.collections.root, id_key) {
+            Some(desc) => collection_descriptor(desc).rows,
+            None => return Some(StepDrift),
+        }
+        if rows_after != 0 {
+            return Some(StepDrift)
+        }
+        if !list_contains_u32(superseded, id) {
+            list.push(mut superseded, id)
+        }
     }
-    let mut rows: List[StepOp] = list.with_capacity(list.len(changed.rows))
-    for row in changed.rows {
-        if list.len(row.tree_key) < 4 {
-            return Error(Drift)
+    let mut row_owners: List[u32] = list.new()
+    let mut rows: List[StepOp] = list.with_capacity(list.len(main.step_rows))
+    for op in main.step_rows {
+        if list.len(op.key) < 4 {
+            return Some(StepDrift)
         }
-        let owner: u32 = list.word_be(row.tree_key, 0)
-        let mut moved_owner = false
-        for id in ids {
-            if id == owner {
-                moved_owner = true
-            }
+        let owner: u32 = list.word_be(op.key, 0)
+        if !list_contains_u32(ids, owner) || list_contains_u32(superseded, owner) {
+            return Some(StepDrift)
         }
-        if !moved_owner {
-            return Error(Drift)
+        if !list_contains_u32(row_owners, owner) {
+            list.push(mut row_owners, owner)
         }
-        let value: Option[Bytes] = match row.value {
-            Some(raw) => Some(deploy_result(copied(raw))?),
+        let key_copy = match copied(op.key) {
+            Ok(take k) => take k,
+            Error(_) => return Some(StepDrift),
+        }
+        let val_copy: Option[Bytes] = match view op.value {
+            Some(raw) => match copied(raw) {
+                Ok(take v) => Some(take v),
+                Error(_) => return Some(StepDrift),
+            },
             None => None,
         }
-        let prior = stored_prior(get_page_row(step.before.collections, row.tree_key))
-        list.push(mut rows, StepOp(key: deploy_result(copied(row.tree_key))?, value: take value, prior: prior))
+        list.push(mut rows, StepOp(key: take key_copy, value: take val_copy, prior: op.prior))
     }
-    Ok(ExportStep(version: step.version, catalog: take catalog, rows: take rows))
+    // Check CollectionMap descriptors: any collection whose descriptor changed
+    // must be in `ids`, and if not superseded must have recorded step_rows.
+    if !step_collections_covered(before.collections, after.collections, ids, superseded, row_owners) {
+        return Some(StepDrift)
+    }
+    Some(StepReady(ExportStep(version: main.head, catalog: take catalog, superseded: take superseded, rows: take rows)))
+}
+
+fn list_contains_u32(items: List[u32], target: u32) -> bool {
+    for item in items {
+        if item == target {
+            return true
+        }
+    }
+    false
+}
+
+fn step_collections_covered(before: PageTree, after: PageTree, ids: List[u32], superseded: List[u32], row_owners: List[u32]) -> bool {
+    if tree_stamp(before) == tree_stamp(after) {
+        return true
+    }
+    let mut left = start_diff(Some(view before.root), None)
+    let mut right = start_diff(Some(view after.root), None)
+    while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, None) {
+        let id: u32 = list.word_be(key, 0)
+        let changed = if comparison != Equal {
+            true
+        } else {
+            let a = std.page_walk.value(left)
+            let b = std.page_walk.value(right)
+            match (a, b) {
+                (Some(va), Some(vb)) => va != vb,
+                _ => true,
+            }
+        }
+        if changed {
+            if !list_contains_u32(ids, id) {
+                return false
+            }
+            if !list_contains_u32(superseded, id) && !list_contains_u32(row_owners, id) {
+                return false
+            }
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    true
+}
+
+fn record_leased_step(mut db: Db, take step: Option[LeaseStep]) {
+    let Some(take captured) = take step else {
+        return ()
+    }
+    write_disk(mut db.disk, take captured, scoped fn(mut state: DiskState, take published: LeaseStep) {
+        list.push(mut state.steps, take published)
+    })
 }
 
 // The index id when `before` and `after` are the same index record in
@@ -164,6 +228,7 @@ fn state_move(before: Bytes, after: Bytes) -> Result[Option[u32], Error] {
 fn step_bytes(steps: List[ExportStep]) -> u64 {
     let mut total = 0u64
     for step in steps {
+        total = int.saturating_add(total, list.len(step.superseded) * 4u64)
         for op in step.catalog {
             total = int.saturating_add(total, op_bytes(op))
         }
@@ -203,7 +268,7 @@ fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployErro
     if head.context.store.hi != stamp.store_hi || head.context.store.lo != stamp.store_lo || head.context.seq != stamp.head {
         return Error(ExportMismatch)
     }
-    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start())
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start(), peek: None)
     let meta_codec: std.codec.Codec[StepsMeta] = std.codec.of()
     let meta = prepared_frame(mut input, 0x0088, meta_codec)?
     if meta.head != stamp.head || meta.terminal != stamp.terminal || meta.end != stamp.end {
@@ -212,8 +277,8 @@ fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployErro
     let step_codec: std.codec.Codec[ExportStep] = std.codec.of()
     let mut steps: List[ReplayStep] = list.with_capacity(order.min(meta.steps, 65536u64))
     for _ in 0u64 .. meta.steps {
-        let ExportStep(version: at, catalog: take catalog, rows: take rows) = prepared_frame(mut input, 0x0089, step_codec)?
-        list.push(mut steps, ReplayStep(version: at, catalog: replay_ops(take catalog), rows: replay_ops(take rows)))
+        let ExportStep(version: at, catalog: take catalog, superseded: take superseded, rows: take rows) = prepared_frame(mut input, 0x0089, step_codec)?
+        list.push(mut steps, ReplayStep(version: at, catalog: replay_ops(take catalog), superseded: take superseded, rows: replay_ops(take rows)))
     }
     let PreparedInput(file: take done, ..) = take input
     scratch_result(disk_io(host.close(take done)))?
@@ -490,8 +555,11 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
         replace(mut state.steps, list.new())
     })
     let mut steps: List[ExportStep] = list.with_capacity(list.len(leased_steps))
-    for step in leased_steps {
-        list.push(mut steps, export_step(step)?)
+    for take step in take leased_steps {
+        match take step {
+            StepDrift => return Error(Drift),
+            StepReady(take ready) => list.push(mut steps, take ready),
+        }
     }
     let journaled = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, db.file_seq, db.file_end))?
     let tail = int.saturating_add(journaled, step_bytes(steps))
@@ -607,7 +675,13 @@ pub opaque type Preparation {
     db: Db,
     stamp: ExportStamp,
     // Set once PREPARED is written: every later round ships a ROUND delta.
-    shipped: Option[ShippedImport]
+    shipped: Option[ShippedImport],
+    // M3b-S3: export directory and child scratch-pack state for Tiered builds.
+    dir: Dir,
+    next_pack: core.Cell[u64],
+    pack_bytes: u64,
+    dirty_bytes: u64,
+    deferred_frees: List[DeferredFree]
 }
 
 pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
@@ -675,7 +749,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     db.limits = selected.limits
     db.next_node = ids
     db.next_table = stamp.next_table
-    Ok(Preparation(db: take db, stamp: take stamp, shipped: None))
+    Ok(Preparation(db: take db, stamp: take stamp, shipped: None, dir: d, next_pack: cell.new(selected.next_pack), pack_bytes: options.pack_bytes, dirty_bytes: options.dirty_bytes, deferred_frees: list.new()))
 }
 
 fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
@@ -794,11 +868,46 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
 }
 
 // Applies the steps through version `through` to main, each at main's head + 1.
+// D-CU-1 / 3177 F4: each superseded id drops only main's overlay share (leaving
+// any forked branch's Arc intact), deducts its Tiered bytes from exact replay
+// accounting, queues its old Cold root in `deferred_frees`, replaces it with an
+// empty collection of the same residency, and records the id in `superseded` so
+// catch-up diff skips it.
 fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep], mut stepped: u64, through: u64) -> Result[(), Error] {
     while stepped < list.len(steps) && steps[stepped].version <= through {
         let step = view steps[stepped]
         if replay.state.tips[0u64].id != 0u32 || int.checked_add(replay.state.tips[0u64].head, 1) != Some(step.version) {
             return Error(disk_fault(file, 0, Gap(step.version)))
+        }
+        for id in step.superseded {
+            let id_key = prefix(id)?
+            let had: Option[(std.page.Slot, CollectionDescriptor)] = match std.page.collection_slot(replay.state.tips[0u64].roots.collections.root, id_key) {
+                Some((root, desc)) => Some((clone(root), collection_descriptor(desc))),
+                None => None,
+            }
+            discard_replayed_collection(mut replay.state.tips[0u64].roots.collections, id)?
+            if let Some((take old_root, fields)) = take had {
+                if fields.residency == ResidentTiered {
+                    if replay.tiered.exact {
+                        replay.tiered.total = int.saturating_sub(replay.tiered.total, fields.row_bytes)
+                    }
+                    let mut effects: List[TieredFoldEffect] = list.new()
+                    fold_record_lost(old_root, map.new(), map.new(), true, mut effects)?
+                    for take effect in take effects {
+                        if let FoldDropped(take target) = take effect {
+                            capacity(list.try_reserve(mut replay.deferred_frees, 1))?
+                            list.push(mut replay.deferred_frees, DeferredFree(branch_id: 0u32, target: take target))
+                        }
+                    }
+                    let _ = remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node)?
+                    define_empty_tiered_collection(mut replay.state.tips[0u64].roots.collections, id, descriptor_kind_byte(fields.kind), mut replay.next_node)?
+                } else {
+                    let _ = remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node)?
+                    define_store_collection(mut replay.state.tips[0u64].roots.collections, id, descriptor_kind_byte(fields.kind), mut replay.next_node)?
+                }
+            }
+            capacity(list.try_reserve(mut replay.superseded, 1))?
+            list.push(mut replay.superseded, id)
         }
         journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.catalog, step.catalog, mut replay.tiered, false)?
         journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.collections, step.rows, mut replay.tiered, false)?

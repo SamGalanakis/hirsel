@@ -887,10 +887,15 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
     if !same(owner, id) {
         return Error(disk_fault("MANIFEST.tmp", 0, Header))
     }
-    let requested = manifest_account(manifest)
+    let requested = manifest.account_memory
     require_unarchived_manifest(manifest)?
-    let _ = walk_directory_graph(d, id, take manifest, true, true, settled)?
-    over_ceiling(requested, target.resident)
+    let validated = walk_directory_graph(d, id, take manifest, true, true, settled)?
+    let admitted = if validated.manifest.account_tiered != 0 || target.has_tiered {
+        int.saturating_add(requested, target.tiered_reserve)
+    } else {
+        requested
+    }
+    over_ceiling(admitted, target.resident)
 }
 
 // A cut made while an export lease is held reads back the packs it wrote

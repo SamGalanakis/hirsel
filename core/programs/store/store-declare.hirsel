@@ -146,7 +146,7 @@ fn read_only_base(source: ReadOnly) -> DeclarationBase {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 
@@ -184,7 +184,7 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 
@@ -213,7 +213,16 @@ pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Erro
 // not rebuilt.
 pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]]) -> Result[Declare, Error] waits {
     let mut d = match configure {
-        Some(callback) => declare_migration(source.db, tasks, callback)?,
+        Some(callback) => {
+            healthy(source.db)?
+            require_memory_collections(store_has_tiered(source.db), Migrate)?
+            let ctx = child_cut_context(source)
+            let (take plan, take updated_ctx) = stage_migration_plan_with(source.db, tasks, callback, schema_plan(source.db), Some(take ctx), source.stamp.opened)?
+            if let Some(done_ctx) = updated_ctx {
+                save_child_cut_pack(source, done_ctx.next_pack)
+            }
+            new_declaration(Migrate, declaration_base(source.db), take plan, true)
+        },
         None => declare(source.db, Migrate)?,
     }
     d.versioned = true
@@ -330,6 +339,7 @@ fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> R
     }
     remove_store_row(mut roots.catalog, key, mut plan.next_node)?
     let next_table = plan.next_table
+    plan.step_drift = true
     keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
@@ -674,6 +684,10 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     complete_declaration(d)?
     let Declare(plan: take candidate, projectors: take registered, ..) = take d
     let mut proposal = take candidate
+    if list.len(proposal.pending_indexes) != 0 && is_disk(db) {
+        let mut ctx = ChildCutContext(dir: log_directory(db)?, store: db.store, next_pack: disk_state(db).pages.next_pack, pack_bytes: disk_state(db).options.pack_bytes, dirty_bytes: disk_state(db).options.dirty_bytes, writer_pin_bytes: db.writer_pin_bytes)
+        run_deferred_index_builds(mut ctx, open_number(db), mut proposal)?
+    }
     let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
     let retained = replace(mut proposal.retention, list.new())
     if proposal.changed {

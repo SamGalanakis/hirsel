@@ -120,7 +120,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
 // returns the first two primary keys found under one Unique key. Outside a
 // preview that ends the chunk with `plan` untouched; a preview skips the
 // later row and keeps building, as the scratch index keeps one row per key.
-fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool, preview: bool) -> Result[Option[(Bytes, Bytes)], Error] {
+fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool, preview: bool, record_steps: bool) -> Result[Option[(Bytes, Bytes)], Error] {
     let mut record = take chunk_record
     let mut roots = share_roots(plan.roots)
     let mut live_bytes = plan.live
@@ -128,8 +128,13 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     let mut next_stamp = first
     let mut duplicate: Option[(Bytes, Bytes)] = None
     let mut cursor: Option[Bytes] = None
+    let mut chunk_steps: Option[List[StepOp]] = if record_steps {
+        Some(list.new())
+    } else {
+        None
+    }
     if let Sums = catalog_index(record)?.shape {
-        add_chunk_totals(mut roots.collections, mut live_bytes, plan.retained, plan.ceiling, first, mut next_stamp, extractor, rows)?
+        add_chunk_totals(mut roots.collections, mut live_bytes, plan.retained, plan.ceiling, first, mut next_stamp, extractor, rows, mut chunk_steps)?
         if let Some((logical, _)) = list.last(rows) {
             cursor = Some(copied(list.slice(logical, 4, list.len(logical)))?)
         }
@@ -141,6 +146,7 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
                 if list.len(row) > 4096 {
                     return Error(Limit(Key))
                 }
+                let prior_width = stored_prior(get_page_row(roots.collections, row))
                 if let Some(prior) = get_page_row(roots.collections, row) {
                     if let Entries(Unique) = catalog_index(record)?.shape {
                         let owner = list.slice(prior, 4, unique_owner_end(prior)?)
@@ -161,6 +167,10 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
                 live_bytes = int.saturating_add(live_bytes, entry(row, values.payload))
                 over_ceiling(live_bytes, plan.ceiling)?
                 put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp)?
+                if let Some(mut step_rows) = chunk_steps {
+                    capacity(list.try_reserve(mut step_rows, 1))?
+                    list.push(mut step_rows, StepOp(key: copied(row)?, value: Some(copied(values.payload)?), prior: prior_width))
+                }
             }
             cursor = Some(copied(primary)?)
         }
@@ -177,6 +187,12 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     roots = catalog_insert(mut plan.next_node, roots, key, raw)?
     let next_table = plan.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
+    if let Some(take ops) = take chunk_steps {
+        for take op in take ops {
+            capacity(list.try_reserve(mut plan.step_rows, 1))?
+            list.push(mut plan.step_rows, take op)
+        }
+    }
     Ok(take duplicate)
 }
 
@@ -265,6 +281,10 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
     over_ceiling(live_bytes, plan.ceiling)?
     let written = list.len(kept)
     bulk_store_collection(mut roots.collections, current.id, 2, take kept, mut plan.next_node)?
+    // F4: mark the replaced collection id superseded so a non-empty bulk
+    // redefinition under an export lease is caught as Drift at the cut.
+    capacity(list.try_reserve(mut plan.superseded, 1))?
+    list.push(mut plan.superseded, current.id)
     set_index_state(mut current, Public)?
     let raw = encode_catalog(current)?
     live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.retained)
@@ -286,7 +306,7 @@ fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, ext
         }
         let (take rows, done) = resident_rows_after(plan.roots, current.owner, cursor, INDEX_CHUNK)?
         read += list.len(rows)
-        let found = index_chunk(mut plan, key, copied_record(current)?, extractor, rows, done, preview)?
+        let found = index_chunk(mut plan, key, copied_record(current)?, extractor, rows, done, preview, false)?
         if let Some(take pair) = take found {
             if !preview {
                 return Ok((Some(take pair), read, 0))
@@ -395,10 +415,11 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         let chunk = prepare_tiered_index_chunk(mut db, record, rows)?
         match take chunk {
             ChunkDuplicate(take previous, take next_key) => Some((take previous, take next_key)),
-            ChunkReady(TieredWritePlan(tree: take tree, next_stamp: following, freed: take freed, ..)) => {
+            ChunkReady(TieredWritePlan(tree: take tree, next_stamp: following, freed: take freed, ..), take step_ops) => {
                 plan.roots.collections = take tree
                 plan.next_node = following - 1
                 plan.chunk_freed = Some(take freed)
+                plan.step_rows = take step_ops
                 let mut published = copied_record(record)?
                 if done {
                     set_index_state(mut published, Public)?
@@ -414,7 +435,7 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         let Some(extractor) = bound_extractor(db.indexes, record) else {
             return Error(Stale(record.id))
         }
-        index_chunk(mut plan, key, copied_record(record)?, extractor, rows, done, false)?
+        index_chunk(mut plan, key, copied_record(record)?, extractor, rows, done, false, true)?
     }
     if let Some((take first, take second)) = take found {
         let mut failed = copied_record(record)?
@@ -449,11 +470,12 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
     if tiered {
         discard_replayed_collection(mut roots.collections, id)?
         define_empty_tiered_index(mut roots.collections, id, mut plan.next_node)?
-        capacity(list.try_reserve(mut plan.superseded, 1))?
-        list.push(mut plan.superseded, id)
     } else {
         define_store_collection(mut roots.collections, id, 2, mut plan.next_node)?
     }
+    // D-CU-1: demotion supersedes the collection id for Memory and Tiered alike.
+    capacity(list.try_reserve(mut plan.superseded, 1))?
+    list.push(mut plan.superseded, id)
     let mut live_bytes = plan.live
     if !plan.retained {
         live_bytes = int.saturating_sub(live_bytes, charge)
@@ -515,6 +537,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         return Error(Foreign)
     }
     let mut proposed = take record
+    let owner_tiered = table_is_tiered(plan.roots.collections, t.id)?
     if new_index {
         let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
         if meta.id != t.id {
@@ -531,7 +554,11 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         live_bytes = catalog_recharge(live_bytes, plan.roots, t.catalog_key, changed, plan.retained)
         over_ceiling(live_bytes, plan.ceiling)?
         let mut roots = share_roots(plan.roots)
-        define_store_collection(mut roots.collections, proposed.id, 2, mut plan.next_node)?
+        if owner_tiered {
+            define_empty_tiered_index(mut roots.collections, proposed.id, mut plan.next_node)?
+        } else {
+            define_store_collection(mut roots.collections, proposed.id, 2, mut plan.next_node)?
+        }
         roots = catalog_insert(mut plan.next_node, roots, key, raw)?
         roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
         keep_schema(mut plan, take roots, live_bytes, next_table)?
@@ -539,6 +566,21 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         let _ = demote_index(mut plan, key)?
     }
     let current = catalog_entry_in(plan.roots.catalog, key)?
+    let target_tiered = table_is_tiered(plan.roots.collections, current.id)?
+    if owner_tiered || target_tiered {
+        let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
+            let slot = list.len(backfills)
+            let table_name = catalog_collection_name(t.catalog_key, 1u8)?
+            list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), cause: Some(take cause), read: 0, written: 0, outcome: Filled))
+            Some(slot)
+        } else {
+            None
+        }
+        capacity(list.try_reserve(mut plan.pending_indexes, 1))?
+        list.push(mut plan.pending_indexes, DeferredIndexBuild(catalog_key: copied(key)?, name: named(name)?, record_raw: encode_catalog(current)?, preview_slot: preview_slot))
+        plan.step_drift = true
+        return Ok(())
+    }
     let preview = if let Some(_) = plan.preview {
         true
     } else {

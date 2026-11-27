@@ -51,7 +51,7 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
     let mut digest = std.sha256.start()
     std.sha256.add(mut digest, header, 0u64, 72u64)
-    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest)
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
     let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     let meta = original_prepared_frame(mut input, 0x0081, metadata_codec)?
     if list.len(meta.base.attempt) != 16 || meta.base.store_hi != head.context.store.hi || meta.base.store_lo != head.context.store.lo || meta.base.opened != head.context.seq || meta.base.branch != 0 || meta.base.next_table == 0 || meta.next_table < meta.base.next_table || list.len(meta.target.digest) != 32 || list.len(meta.target.release) != 32 || list.len(meta.target.describe) == 0 {
@@ -74,7 +74,7 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     }
     let PreparedInput(file: take done, digest: take hashed, ..) = take input
     scratch_result(disk_io(host.close(take done)))?
-    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: list.new(), digest: std.sha256.finish(hashed), charge: 0))
+    Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: list.new(), digest: std.sha256.finish(hashed), charge: 0, source_map: list.new(), dir: None, rewrites_checked: false))
 }
 
 fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {

@@ -53,14 +53,40 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned_catalog(mut schema_change, staged.delta)?
     let ranges = kept_ranges(staged)?
     planned_ranges(mut schema_change, ranges)?
-    apply_import_rewrites(mut schema_change, staged.rewrites)?
+    let has_tiered = tiered_collections(schema_change.roots.collections.root) || store_has_tiered(db)
+    let started_pager = if has_tiered {
+        match db.pager {
+            Some(_) => false,
+            None => {
+                deploy_result(start_residency_pager(mut db))?
+                true
+            },
+        }
+    } else {
+        false
+    }
+    if let Error(take problem) = apply_import_rewrites_tiered(db, mut schema_change, staged.rewrites) {
+        if started_pager {
+            stop_residency_pager(mut db)
+        }
+        return Error(take problem)
+    }
     // STORE-SPEC §1.2: a release activates only over Public indexes.
     if let Some(take name) = deploy_result(unready_index(schema_change.roots.catalog))? {
+        if started_pager {
+            stop_residency_pager(mut db)
+        }
         return Error(Store(NotReady(take name)))
     }
+    let tiered_reserve = tiered_plan_reserve(disk_state(db).options)
     schema_change.next_table = staged.meta.next_table
     schema_change.live = install_account(db, schema_change.roots)?
-    deploy_result(over_ceiling(schema_change.live, disk_limit))?
+    let admitted_before = if has_tiered {
+        int.saturating_add(schema_change.live, tiered_reserve)
+    } else {
+        schema_change.live
+    }
+    deploy_result(over_ceiling(admitted_before, disk_limit))?
     let mut installation = staged_migration(db, take schema_change, false, list.new())
     let Some(release_at) = int.checked_add(base.head, 1u64) else {
         return Error(Store(Limit(Ids)))
@@ -77,12 +103,20 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let release = release_from(target, request.digest)?
     deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
     installation.plan.live = install_account(db, installation.plan.roots)?
-    deploy_result(over_ceiling(installation.plan.live, disk_limit))?
+    let admitted_after = if has_tiered {
+        int.saturating_add(installation.plan.live, tiered_reserve)
+    } else {
+        installation.plan.live
+    }
+    deploy_result(over_ceiling(admitted_after, disk_limit))?
     if host.mono_ns(db.clock) >= request.deadline || !before_cut() {
+        if started_pager {
+            stop_residency_pager(mut db)
+        }
         return Error(Expired)
     }
     db.ceiling = disk_limit
-    let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame)
+    let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame, tiered_reserve: tiered_reserve, has_tiered: has_tiered)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = Some(limits)
     })
@@ -95,8 +129,18 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     })
     match take installed {
         Ok(_) => Ok(release_at),
-        Error(Full(cause)) => Error(FullNew(cause)),
-        Error(take fault) => Error(Store(take fault)),
+        Error(Full(cause)) => {
+            if started_pager {
+                stop_residency_pager(mut db)
+            }
+            Error(FullNew(cause))
+        },
+        Error(take fault) => {
+            if started_pager {
+                stop_residency_pager(mut db)
+            }
+            Error(Store(take fault))
+        },
     }
 }
 

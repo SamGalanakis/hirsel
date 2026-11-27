@@ -1,0 +1,3023 @@
+name	file	v3_owner	v31_owner	landing	note
+main	main.hirsel	store	main	-
+Kind	sizes.hirsel	store	store	-
+Options	sizes.hirsel	store	store	-
+Overrides	sizes.hirsel	store	store	-
+Shortage	sizes.hirsel	store	store	-
+MIB	sizes.hirsel	store	history	L7	pull-down root -> history (used by HISTORY_PART_TARGET)
+DEFAULT_BUCKET_CLAIM_MS	sizes.hirsel	store	store	-
+DEFAULT_BUCKET_HEAD_POLL_MS	sizes.hirsel	store	store	-
+DEFAULT_BUCKET_CHECKPOINT_ENTRIES	sizes.hirsel	store	store	-
+DEFAULT_BUCKET_RETAIN	sizes.hirsel	store	store	-
+DEFAULT_STREAMS_PER_CALLER	sizes.hirsel	store	store	-
+DEFAULT_STREAM_RESIDENT_BYTES	sizes.hirsel	store	store	-
+CUT_FIXED_BYTES	sizes.hirsel	store	store	-
+KEY_LIMIT	sizes.hirsel	store	txn	L12	pull-down root -> txn (used by put_frame)
+ROW_KEY_LIMIT	sizes.hirsel	store	store	-
+small_place_limits	sizes.hirsel	store	store	-
+cut_step_bytes	sizes.hirsel	store	store	-
+WriterPlan	sizes.hirsel	store	store	-
+WriterParts	sizes.hirsel	store	store	-
+writer_parts	sizes.hirsel	store	store	-
+writer_add	sizes.hirsel	store	store	-
+writer_total	sizes.hirsel	store	store	-
+writer_shortage	sizes.hirsel	store	store	-
+derived_sizes	sizes.hirsel	store	store	-
+sized	sizes.hirsel	store	store	-
+size_or	sizes.hirsel	store	history	L7	pull-down root -> history (used by history_link_slots)
+add_size	sizes.hirsel	store	store	-
+total_sizes	sizes.hirsel	store	store	-
+shortage	sizes.hirsel	store	store	-
+cut_work	sizes.hirsel	store	store	-
+largest_resident	sizes.hirsel	store	store	-
+TieredSizes	sizes.hirsel	store	store	-
+MIN_WRITER_PINS	sizes.hirsel	store	store	-
+tiered_sizes_at	sizes.hirsel	store	store	-
+tiered_open_funded	sizes.hirsel	store	store	-
+tiered_sizes	sizes.hirsel	store	store	-
+sized_with	sizes.hirsel	store	store	-
+directory_writer_need	sizes.hirsel	store	store	-
+PlacePlan	sizes.hirsel	store	store	-
+planned	sizes.hirsel	store	store	-
+planned_options	sizes.hirsel	store	store	-
+planned_bytes	sizes.hirsel	store	store	-
+planned_sim_bytes	sizes.hirsel	store	store	-
+planned_capture	sizes.hirsel	store	store	-
+writer_plan	sizes.hirsel	store	store	-
+writer_bytes	sizes.hirsel	store	store	-
+writer_reservation	sizes.hirsel	store	store	-
+make_sized_options	sizes.hirsel	store	store	-
+JOURNAL_WORKER_SLACK	sizes.hirsel	store	store	-
+JOURNAL_WINDOW_STEP	sizes.hirsel	store	journal	L6	pull-down root -> journal (used by journal_loop)
+JOURNAL_BULK_GROUP	sizes.hirsel	store	journal	L6	pull-down root -> journal (used by journal_loop)
+JOURNAL_CHUNK_BYTES	sizes.hirsel	store	journal	L6	pull-down root -> capture (used by capture_check_need); pull-down capture -> journal (used by journal_input)
+journal_ready_bytes	sizes.hirsel	store	store	-
+journal_channel_bytes	sizes.hirsel	store	store	-
+writer_state_bytes	sizes.hirsel	store	store	-
+cut_output_bytes	sizes.hirsel	store	store	-
+history_workspace_bytes	sizes.hirsel	store	store	-
+CUT_HISTORY_RETAIN_LIMIT	sizes.hirsel	store	store	-
+cut_history_packet_room	sizes.hirsel	store	store	-
+bucket_cut_parts	sizes.hirsel	store	store	-
+disk_reservation	sizes.hirsel	store	store	-
+FollowerPlan	sizes.hirsel	store	store	-
+follower_plan	sizes.hirsel	store	store	-
+follower_from_options	sizes.hirsel	store	store	-
+plan_bytes	sizes.hirsel	store	store	-
+service_bytes	sizes.hirsel	store	store	-
+follower_starter_bytes	sizes.hirsel	store	store	-
+sim_level_bytes	sizes.hirsel	store	object_writer	L9	pull-down root -> object_writer (used by weak_publisher)
+sim_level_reservation	sizes.hirsel	store	store	-
+branch_record_bytes	sizes.hirsel	store	pages	L2	pull-down root -> pages (used by branch_root_bytes)
+pin_record_bytes	sizes.hirsel	store	pages	L2	pull-down root -> manifest (used by page_manifest_size); pull-down manifest -> pages (used by pin_root_bytes)
+round8	sizes.hirsel	store	format	L1	pull-down root -> capture (used by capture_bootstrap); pull-down capture -> pages (used by cell_record); pull-down pages -> format (used by disk_check_start)
+entry	sizes.hirsel	store	txn	L12	pull-down root -> maintenance (used by index_chunk); pull-down maintenance -> txn (used by memory_data_charge)
+stored_row_charge	sizes.hirsel	store	capture	L7	pull-down root -> capture (used by describe_delta)
+resident_row_bytes	sizes.hirsel	store	store	-
+StagedMigration	store-activation.hirsel	store	store	-
+ActivationRewrite	store-activation.hirsel	transfer	transfer	L13
+staged_migration	store-activation.hirsel	store	store	-
+staged_install_snapshot	store-activation.hirsel	store	store	-
+compare_rewrite	store-activation.hirsel	transfer	transfer	L13
+check_rewrite_indexes	store-activation.hirsel	transfer	transfer	L13
+stage_rewrite	store-activation.hirsel	store	store	-
+stage_system_table	store-activation.hirsel	transfer	transfer	L13
+stage_system_put	store-activation.hirsel	transfer	transfer	L13
+stage_activation	store-activation.hirsel	store	store	-
+activation_install_allowed	store-activation.hirsel	store	store	-
+install_activation	store-activation.hirsel	store	store	-
+install_bound_activation	store-activation.hirsel	store	store	-
+install_activation_layout	store-activation.hirsel	store	store	-
+publish_schema_plan	store-activation.hirsel	store	store	-
+publish_schema_plan_binding	store-activation.hirsel	store	store	-
+encode_rewrite_frame	store-activation.hirsel	transfer	transfer	L13
+PreparedInput	store-activation.hirsel	transfer	transfer	L13
+prepared_read	store-activation.hirsel	transfer	transfer	L13
+prepared_frame	store-activation.hirsel	transfer	transfer	L13
+prepared_payload	store-activation.hirsel	transfer	transfer	L13
+read_rewrite_frame	store-activation.hirsel	transfer	transfer	L13
+validate_rewrite_base	store-activation.hirsel	store	store	-
+apply_import_rewrites	store-activation.hirsel	transfer	transfer	L13
+prepared_rewrites	store-activation.hirsel	store	store	-
+ImportSettlement	store-activation.hirsel	store	store	-
+import_settlement	store-activation.hirsel	store	store	-
+import_migration	store-activation.hirsel	store	store	-
+Aggregate	store-aggregate.hirsel	store	store	-
+Totals	store-aggregate.hirsel	store	store	-
+GroupPart	store-aggregate.hirsel	indexes	indexes	L10
+by_group	store-aggregate.hirsel	indexes	indexes	L10
+merged_groups	store-aggregate.hirsel	indexes	indexes	L10
+AggregateExtractor	store-aggregate.hirsel	indexes	indexes	L10
+aggregate	store-aggregate.hirsel	store	store	-
+totals	store-aggregate.hirsel	store	store	-
+rebuild_aggregate	store-aggregate.hirsel	store	store	-
+aggregate_binding	store-aggregate.hirsel	indexes	indexes	L10
+extract_aggregate	store-aggregate.hirsel	indexes	indexes	L10
+group_totals	store-aggregate.hirsel	indexes	indexes	L10
+totals_bytes	store-aggregate.hirsel	indexes	indexes	L10
+plan_aggregate_edit	store-aggregate.hirsel	indexes	store	-	push-up indexes -> store (refs at layer 12)
+add_chunk_totals	store-aggregate.hirsel	indexes	txn	L12	push-up indexes -> txn (refs at layer 10)
+staged_until_decided	store-attempts.hirsel	store	store	-
+call_pin_root	store-attempts.hirsel	store	store	-
+tiered_pin_root	store-attempts.hirsel	txn	txn	L12
+refresh_call_pins	store-attempts.hirsel	txn	txn	L12
+deliver_call_miss	store-attempts.hirsel	store	store	-
+draft_call	store-attempts.hirsel	store	store	-
+CallDraft	store-attempts.hirsel	txn	txn	L12
+DraftedCall	store-attempts.hirsel	txn	txn	L12
+DraftRefusal	store-attempts.hirsel	txn	txn	L12
+metered_draft	store-attempts.hirsel	store	store	-
+raised_capacity	store-attempts.hirsel	txn	manifest	L4	pull-down txn -> manifest (used by disk_allocation)
+stopped_pending	store-attempts.hirsel	txn	txn	L12
+tx_page_row	store-attempts.hirsel	txn	txn	L12
+look	store-attempts.hirsel	store	store	-
+look_attempt	store-attempts.hirsel	txn	txn	L12
+Accounts	store-attention.hirsel	store	store	-
+accounts	store-attention.hirsel	store	store	-
+memory_page_images	store-attention.hirsel	store	store	-
+IndexDrift	store-attention.hirsel	store	store	-
+IndexReport	store-attention.hirsel	store	store	-
+Attention	store-attention.hirsel	store	store	-
+attention	store-attention.hirsel	store	store	-
+attention_mark	store-attention.hirsel	store	store	-
+index_reports	store-attention.hirsel	store	store	-
+count_drift	store-attention.hirsel	store	store	-
+trip_drift	store-attention.hirsel	store	store	-
+count_demotions	store-attention.hirsel	store	store	-
+named	store-attention.hirsel	store	catalog	L3	pull-down root -> catalog (used by declaration_name)
+BackupError	store-backup-offline.hirsel	store	store	-
+backup_lock	store-backup-offline.hirsel	capture	capture	L7
+PreparedBackup	store-backup-offline.hirsel	store	store	-
+prepare_backup	store-backup-offline.hirsel	store	store	-
+backup_offline	store-backup-offline.hirsel	store	store	-
+backup_with_writer	store-backup-offline.hirsel	store	store	-
+copy_backup_journal	store-backup-offline.hirsel	capture	capture	L7
+CATALOG_REVISION_MAX	store-capture-catalog.hirsel	capture	capture	L7
+CaptureCatalog	store-capture-catalog.hirsel	capture	capture	L7
+CaptureCatalogCount	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_name	store-capture-catalog.hirsel	capture	capture	L7
+capture_count_catalog	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_cell	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_blob	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_blob_fields	store-capture-catalog.hirsel	capture	capture	L7
+CaptureCatalogCursor	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_advance	store-capture-catalog.hirsel	capture	capture	L7
+capture_catalog_fields	store-capture-catalog.hirsel	capture	capture	L7
+CheckBranch	store-capture-check-journal.hirsel	capture	capture	L7
+CheckJournal	store-capture-check-journal.hirsel	capture	capture	L7
+check_branch_slot	store-capture-check-journal.hirsel	capture	capture	L7
+check_add_branch	store-capture-check-journal.hirsel	capture	capture	L7
+check_journal_fork	store-capture-check-journal.hirsel	capture	capture	L7
+check_journal_blob	store-capture-check-journal.hirsel	capture	capture	L7
+check_call_fields	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+check_stream_ops	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+check_keyed_ops	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+check_journal_commit	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+check_journal	store-capture-check-journal.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+CheckTotals	store-capture-check.hirsel	store	store	-
+CheckError	store-capture-check.hirsel	store	store	-
+CHECK_RETIRED	store-capture-check.hirsel	capture	capture	L7
+CheckPack	store-capture-check.hirsel	capture	capture	L7
+check_pack_row	store-capture-check.hirsel	capture	capture	L7
+check_inventory	store-capture-check.hirsel	capture	capture	L7
+check_open_pack	store-capture-check.hirsel	capture	capture	L7
+check_envelope	store-capture-check.hirsel	capture	capture	L7
+check_pack_slot	store-capture-check.hirsel	capture	capture	L7
+check_at_head	store-capture-check.hirsel	capture	capture	L7
+CheckVisits	store-capture-check.hirsel	capture	capture	L7
+check_bit	store-capture-check.hirsel	capture	capture	L7
+check_set_bit	store-capture-check.hirsel	capture	capture	L7
+check_bitmap	store-capture-check.hirsel	capture	capture	L7
+CheckWalk	store-capture-check.hirsel	capture	capture	L7
+check_arrive	store-capture-check.hirsel	capture	capture	L7
+check_blob	store-capture-check.hirsel	capture	capture	L7
+check_page	store-capture-check.hirsel	capture	capture	L7
+check_roots	store-capture-check.hirsel	capture	capture	L7
+check_reachable	store-capture-check.hirsel	capture	capture	L7
+check_emit	store-capture-check.hirsel	capture	capture	L7
+check_mark	store-capture-check.hirsel	capture	capture	L7
+check_repeat_slots	store-capture-check.hirsel	capture	capture	L7
+check_prepared	store-capture-check.hirsel	capture	store	-	push-up capture -> store (refs at layer 12)
+check_capture	store-capture-check.hirsel	store	store	-
+DescribeEntry	store-capture-describe.hirsel	store	store	-
+DescribeTotals	store-capture-describe.hirsel	store	store	-
+DescribeLine	store-capture-describe.hirsel	store	store	-
+DescribeDelta	store-capture-describe.hirsel	capture	capture	L7
+DescribeFold	store-capture-describe.hirsel	capture	capture	L7
+describe_signed	store-capture-describe.hirsel	capture	capture	L7
+describe_adjust	store-capture-describe.hirsel	capture	capture	L7
+describe_delta	store-capture-describe.hirsel	capture	capture	L7
+describe_commit	store-capture-describe.hirsel	capture	capture	L7
+DescribeName	store-capture-describe.hirsel	capture	capture	L7
+DescribeCatalogWalk	store-capture-describe.hirsel	capture	capture	L7
+describe_owner	store-capture-describe.hirsel	capture	capture	L7
+describe_collect	store-capture-describe.hirsel	capture	capture	L7
+describe_descriptor	store-capture-describe.hirsel	capture	capture	L7
+describe_collection	store-capture-describe.hirsel	capture	capture	L7
+describe_capture	store-capture-describe.hirsel	store	store	-
+describe_acquire	store-capture-describe.hirsel	capture	capture	L7
+describe_suffix	store-capture-describe.hirsel	capture	capture	L7
+describe_lines	store-capture-describe.hirsel	capture	capture	L7
+CaptureOp	store-capture-journal.hirsel	capture	capture	L7
+CaptureOps	store-capture-journal.hirsel	capture	capture	L7
+capture_data_ops	store-capture-journal.hirsel	capture	capture	L7
+capture_blob_width	store-capture-journal.hirsel	capture	capture	L7
+capture_next_op	store-capture-journal.hirsel	capture	capture	L7
+CaptureChunk	store-capture-journal.hirsel	capture	capture	L7
+new_capture_chunk	store-capture-journal.hirsel	capture	capture	L7
+capture_chunk_at	store-capture-journal.hirsel	capture	capture	L7
+capture_prefix	store-capture-journal.hirsel	capture	capture	L7
+CapturePayload	store-capture-journal.hirsel	capture	capture	L7
+capture_read_frame	store-capture-journal.hirsel	capture	capture	L7
+capture_scan_frames	store-capture-journal.hirsel	capture	capture	L7
+HeldCapturePack	store-capture-pages.hirsel	capture	capture	L7
+CapturePacks	store-capture-pages.hirsel	capture	capture	L7
+capture_packs	store-capture-pages.hirsel	capture	capture	L7
+capture_open_pack	store-capture-pages.hirsel	capture	capture	L7
+capture_pack_slot	store-capture-pages.hirsel	capture	capture	L7
+capture_with_pack	store-capture-pages.hirsel	capture	capture	L7
+capture_page	store-capture-pages.hirsel	capture	capture	L7
+capture_read_page	store-capture-pages.hirsel	capture	capture	L7
+capture_walk_pages	store-capture-pages.hirsel	capture	capture	L7
+capture_walk_list	store-capture-pages.hirsel	capture	capture	L7
+CaptureListCount	store-capture-pages.hirsel	capture	capture	L7
+CaptureListWalk	store-capture-pages.hirsel	capture	capture	L7
+capture_lists	store-capture-pages.hirsel	capture	capture	L7
+capture_lookup	store-capture-pages.hirsel	capture	capture	L7
+capture_pack_classes	store-capture-pages.hirsel	capture	capture	L7
+Purpose	store-capture.hirsel	store	store	-
+Part	store-capture.hirsel	store	store	-
+Need	store-capture.hirsel	store	store	-
+PAGE_DECODED	store-capture.hirsel	capture	capture	L7
+MANIFEST_DECODED	store-capture.hirsel	capture	capture	L7
+CAPTURE_PATH	store-capture.hirsel	capture	capture	L7
+END_IMAGE	store-capture.hirsel	capture	capture	L7
+SEG	store-capture.hirsel	capture	capture	L7
+CAPTURE_LIST_ROW	store-capture.hirsel	capture	capture	L7
+CAPTURE_BRANCH	store-capture.hirsel	capture	capture	L7
+PACK_HELD	store-capture.hirsel	capture	capture	L7
+NAME_SLOT	store-capture.hirsel	capture	capture	L7
+CAPTURE_SCRATCH	store-capture.hirsel	capture	capture	L7
+BOOTSTRAP	store-capture.hirsel	store	capture	L7	A-split body to capture (used by prepare_capture)
+PreparedSegment	store-capture.hirsel	capture	capture	L7
+PreparedCapture	store-capture.hirsel	store	store	-
+capture_add	store-capture.hirsel	capture	capture	L7
+capture_mul	store-capture.hirsel	capture	capture	L7
+capture_need_part	store-capture.hirsel	capture	capture	L7
+capture_bootstrap	store-capture.hirsel	capture	capture	L7
+capture_list_slots	store-capture.hirsel	capture	capture	L7
+capture_bitmap_bytes	store-capture.hirsel	capture	capture	L7
+capture_branch_slots	store-capture.hirsel	capture	capture	L7
+capture_check_scratch	store-capture.hirsel	capture	capture	L7
+capture_check_need	store-capture.hirsel	capture	capture	L7
+capture_need	store-capture.hirsel	store	store	-
+CaptureSelection	store-capture.hirsel	capture	capture	L7
+capture_same_manifest	store-capture.hirsel	capture	capture	L7
+capture_measure_pages	store-capture.hirsel	capture	capture	L7
+capture_measure	store-capture.hirsel	capture	capture	L7
+capture_segment_walk	store-capture.hirsel	capture	capture	L7
+capture_segment_bounds	store-capture.hirsel	capture	capture	L7
+prepare	store-capture.hirsel	store	store	-
+prepare_capture	store-capture.hirsel	capture	capture	L7
+capture_locked_bounds	store-capture.hirsel	capture	capture	L7
+CatchUpIndex	store-catchup.hirsel	transfer	transfer	L13
+catch_up_export	store-catchup.hirsel	store	store	-
+follow_moves	store-catchup.hirsel	transfer	transfer	L13
+catch_up_indexes	store-catchup.hirsel	transfer	transfer	L13
+patch_index_ranges	store-catchup.hirsel	transfer	transfer	L13
+patch_entries	store-catchup.hirsel	transfer	transfer	L13
+owned_entry	store-catchup.hirsel	transfer	transfer	L13
+contains_bytes	store-catchup.hirsel	transfer	transfer	L13
+CELL_INLINE	store-cell.hirsel	txn	txn	L12
+ValueCollection	store-cell.hirsel	txn	txn	L12
+Cell	store-cell.hirsel	store	store	-
+cell_identity	store-cell.hirsel	store	store	-
+cell_schemas	store-cell.hirsel	store	store	-
+declare_cell	store-cell.hirsel	store	store	-
+declare_value_collection	store-cell.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+stage_value_collection	store-cell.hirsel	txn	txn	L12
+readable_value	store-cell.hirsel	txn	txn	L12
+CellEdit	store-cell.hirsel	txn	pages	L2	pull-down txn -> pages (used by DataOps)
+lower_cell_edit	store-cell.hirsel	txn	txn	L12
+cell_edit	store-cell.hirsel	txn	txn	L12
+cell_current	store-cell.hirsel	txn	txn	L12
+cell_fetch	store-cell.hirsel	store	store	-
+cell_get	store-cell.hirsel	store	store	-
+cell_page_row	store-cell.hirsel	txn	txn	L12
+inline_cell	store-cell.hirsel	txn	pages	L2	pull-down txn -> pages (used by get_page_row)
+owned_cell	store-cell.hirsel	txn	pages	L2	pull-down txn -> pages (used by next_page_range)
+cell_walk_value	store-cell.hirsel	txn	read	L11	pull-down txn -> read (used by page_change_cell)
+apply_cell	store-cell.hirsel	txn	txn	L12
+cell_set	store-cell.hirsel	store	store	-
+cell_clear	store-cell.hirsel	store	store	-
+cell_wire_size	store-cell.hirsel	txn	txn	L12
+cell_charge	store-cell.hirsel	txn	txn	L12
+cell_matches	store-cell.hirsel	txn	txn	L12
+stage_cell	store-cell.hirsel	txn	txn	L12
+remove_cell_edit	store-cell.hirsel	txn	txn	L12
+fold_cell_edits	store-cell.hirsel	txn	txn	L12
+seal_cell_edits	store-cell.hirsel	txn	txn	L12
+published_cell	store-cell.hirsel	store	store	-
+diff_advance	store-changes.hirsel	read	read	L11
+ChangeOutput	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by snapshot_changes)
+change_output	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_changes)
+admit_change	store-changes.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_initial_changes)
+page_change_rows	store-changes.hirsel	read	read	L11
+page_change_cell	store-changes.hirsel	read	read	L11
+start_diff	store-changes.hirsel	read	read	L11
+diff_bound	store-changes.hirsel	read	read	L11
+change_in_range	store-changes.hirsel	read	read	L11
+page_change_trim	store-changes.hirsel	read	read	L11
+page_change_log	store-changes.hirsel	read	read	L11
+collection_row_changes	store-changes.hirsel	read	read	L11
+walk_page_changes	store-changes.hirsel	read	read	L11
+compare_page_collections	store-changes.hirsel	read	read	L11
+Trimmed	store-changes.hirsel	store	store	-
+Changes	store-changes.hirsel	store	store	-
+ChangePage	store-changes.hirsel	store	store	-
+changes_page	store-changes.hirsel	store	store	-
+encode_staged	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
+encode_frame	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
+encode_call	store-commit-wire.hirsel	format	format	L1
+encode_call_fields	store-commit-wire.hirsel	format	format	L1
+call_section_bytes	store-commit-wire.hirsel	format	format	L1
+keyed_record_size	store-commit-wire.hirsel	format	format	L1
+call_fields_size	store-commit-wire.hirsel	format	format	L1
+decode_call	store-commit-wire.hirsel	format	format	L1
+decode_call_fields	store-commit-wire.hirsel	format	format	L1
+DataOrder	store-commit-wire.hirsel	txn	format	L1	pull-down txn -> pages (used by data_order); pull-down pages -> format (used by encode_data_ops)
+data_order	store-commit-wire.hirsel	txn	pages	L2
+ordered_row	store-commit-wire.hirsel	txn	pager	L5	pull-down txn -> pager (used by prepare_tiered_writes)
+stored_prior	store-commit-wire.hirsel	txn	format	L1	pull-down txn -> format (used by encode_data_ops)
+encode_data_ops	store-commit-wire.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
+AdmittedDraft	store-commit.hirsel	txn	txn	L12
+prepare_edited_roots	store-commit.hirsel	store	store	-
+prepare_direct_edit	store-commit.hirsel	store	store	-
+direct_data_edits	store-commit.hirsel	store	store	-
+prepare_run_commit	store-commit.hirsel	store	store	-
+reserve_tiered_freed	store-commit.hirsel	store	store	-
+commit_prepared	store-commit.hirsel	store	store	-
+commit_skipped	store-commit.hirsel	store	store	-
+keyed_credit_equal	store-commit.hirsel	txn	txn	L12
+keyed_draft_empty	store-commit.hirsel	store	store	-
+draft_is_empty	store-commit.hirsel	store	store	-
+draft_row_account	store-commit.hirsel	store	store	-
+settle_draft	store-commit.hirsel	store	store	-
+settle_admit	store-commit.hirsel	store	store	-
+frame_draft	store-commit.hirsel	store	store	-
+prepare_metered_pages	store-commit.hirsel	txn	txn	L12
+materialize_rows	store-commit.hirsel	txn	txn	L12
+materialize_ordered_rows	store-commit.hirsel	txn	txn	L12
+materialize_row	store-commit.hirsel	txn	txn	L12
+materialize_collection_batch	store-commit.hirsel	txn	txn	L12
+apply_collection_batch	store-commit.hirsel	txn	pages	L2
+journal_refusal	store-commit.hirsel	txn	txn	L12
+over_bound	store-commit.hirsel	store	store	-
+store_body_at	store-commit.hirsel	store	store	-
+store_body_at_with	store-commit.hirsel	store	store	-
+append_transaction_at	store-commit.hirsel	store	store	-
+append_transaction_at_with	store-commit.hirsel	store	store	-
+note_held_roots	store-cut-participants.hirsel	manifest	manifest	L4
+visit_cut_heads	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+visit_cut_pins	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+CutParticipants	store-cut-participants.hirsel	manifest	manifest	L4
+cut_participants	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+fill_cut_manifest	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+disk_cut_state	store-cut-participants.hirsel	store	store	-
+raise_materialized_pin	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+cut_retirement	store-cut-retirement.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+Mode	store-declare.hirsel	store	store	-
+DeclarationBase	store-declare.hirsel	catalog	catalog	L3
+Declare	store-declare.hirsel	store	store	-
+TableDecl	store-declare.hirsel	store	store	-
+declared_table	store-declare.hirsel	store	store	-
+declaration_base	store-declare.hirsel	store	store	-
+follower_base	store-declare.hirsel	catalog	catalog	L3
+same_declaration_base	store-declare.hirsel	catalog	catalog	L3
+new_declaration	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
+declare_projector_name	store-declare.hirsel	catalog	catalog	L3
+validate_local_projector	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
+declare_verify	store-declare.hirsel	store	store	-
+seal_verify	store-declare.hirsel	store	store	-
+declare	store-declare.hirsel	store	store	-
+bind_declaration	store-declare.hirsel	store	store	-
+has_table	store-declare.hirsel	store	store	-
+read_only_base	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
+declare_read_only	store-declare.hirsel	store	store	-
+seal_read_only	store-declare.hirsel	store	store	-
+bind_read_only	store-declare.hirsel	store	store	-
+DeclaredCollection	store-declare.hirsel	store	store	-
+describe_declarations	store-declare.hirsel	store	store	-
+declare_follower	store-declare.hirsel	store	store	-
+declare_migration	store-declare.hirsel	store	store	-
+finish_migration	store-declare.hirsel	store	store	-
+declare_export	store-declare.hirsel	store	store	-
+finish_export_declaration	store-declare.hirsel	store	store	-
+declaration_name	store-declare.hirsel	catalog	catalog	L3
+declare_table	store-declare.hirsel	store	store	-
+declare_release_table	store-declare.hirsel	store	store	-
+declare_activation_table	store-declare.hirsel	store	store	-
+declare_table_inner	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
+active_table	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
+declaration_index_name	store-declare.hirsel	catalog	catalog	L3
+remove_declared_index	store-declare.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+declaration_revision	store-declare.hirsel	catalog	catalog	L3
+index_revision	store-declare.hirsel	catalog	catalog	L3
+revision_part	store-declare.hirsel	catalog	catalog	L3
+note_cause	store-declare.hirsel	catalog	catalog	L3
+rebuild_cause	store-declare.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+codec_revision	store-declare.hirsel	catalog	catalog	L3
+index	store-declare.hirsel	store	store	-
+covering	store-declare.hirsel	store	store	-
+covering_row	store-declare.hirsel	store	store	-
+define_index	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
+existing_index_record	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 4)
+settle_index_record	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 10)
+build_declared_record	store-declare.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 11)
+index_payload_number	store-declare.hirsel	catalog	catalog	L3
+index_payload_readers	store-declare.hirsel	catalog	catalog	L3
+finish	store-declare.hirsel	store	store	-
+complete_declaration	store-declare.hirsel	catalog	catalog	L3
+seal	store-declare.hirsel	store	store	-
+seal_follower	store-declare.hirsel	store	store	-
+migrate_table	store-declare.hirsel	store	store	-
+drop_named_table	store-declare.hirsel	store	store	-
+rename_table	store-declare.hirsel	store	store	-
+Edge	store-edge.hirsel	store	store	-
+declare_edge	store-edge.hirsel	store	store	-
+edge_target	store-edge.hirsel	txn	txn	L12
+edge_put	store-edge.hirsel	store	store	-
+edge_delete	store-edge.hirsel	store	store	-
+edge_out	store-edge.hirsel	store	store	-
+edge_out_prefix	store-edge.hirsel	store	store	-
+edge_in	store-edge.hirsel	store	store	-
+EXPIRY_INDEX	store-expiry.hirsel	maintenance	maintenance	L14
+ExpiryExtractor	store-expiry.hirsel	maintenance	maintenance	L14
+expire_rows	store-expiry.hirsel	store	store	-
+expiry_binding	store-expiry.hirsel	maintenance	maintenance	L14
+extract_expiry	store-expiry.hirsel	maintenance	maintenance	L14
+Swept	store-expiry.hirsel	store	store	-
+DueRow	store-expiry.hirsel	maintenance	maintenance	L14
+sweep_expired	store-expiry.hirsel	store	store	-
+expiry_drift	store-expiry.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+due_rows	store-expiry.hirsel	store	store	-
+ExportStamp	store-export.hirsel	store	store	-
+ExportLease	store-export.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
+LeaseStep	store-export.hirsel	transfer	transfer	L13
+ExportStep	store-export.hirsel	transfer	transfer	L13
+StepOp	store-export.hirsel	transfer	transfer	L13
+StepsMeta	store-export.hirsel	transfer	transfer	L13
+ReplayStep	store-export.hirsel	transfer	transfer	L13
+STEPS_ROLE	store-export.hirsel	transfer	transfer	L13
+leased_step_base	store-export.hirsel	store	store	-
+record_leased_step	store-export.hirsel	store	store	-
+export_step	store-export.hirsel	transfer	transfer	L13
+state_move	store-export.hirsel	transfer	transfer	L13
+step_bytes	store-export.hirsel	transfer	transfer	L13
+op_bytes	store-export.hirsel	transfer	transfer	L13
+write_steps	store-export.hirsel	transfer	transfer	L13
+read_steps	store-export.hirsel	transfer	transfer	L13
+replay_ops	store-export.hirsel	transfer	transfer	L13
+Exported	store-export.hirsel	store	store	-
+ExportSource	store-export.hirsel	transfer	transfer	L13
+ExportInto	store-export.hirsel	transfer	transfer	L13
+ExportCopy	store-export.hirsel	store	store	-
+DeployError	store-export.hirsel	store	store	-
+scratch_result	store-export.hirsel	transfer	capture	L7	pull-down transfer -> capture (used by copy_backup_journal)
+deploy_result	store-export.hirsel	transfer	transfer	L13
+copy_export_file	store-export.hirsel	transfer	transfer	L13
+copy_export_prefix	store-export.hirsel	transfer	capture	L7	pull-down transfer -> capture (used by copy_backup_journal)
+export_bytes	store-export.hirsel	transfer	transfer	L13
+export_copy	store-export.hirsel	store	store	-
+copy_log_export	store-export.hirsel	transfer	transfer	L13
+begin_export	store-export.hirsel	store	store	-
+begin_export_copy	store-export.hirsel	store	store	-
+begin_backup	store-export.hirsel	store	store	-
+begin_copy	store-export.hirsel	store	store	-
+export_leased	store-export.hirsel	store	store	-
+release_export	store-export.hirsel	store	store	-
+ExportTail	store-export.hirsel	store	store	-
+ExportRound	store-export.hirsel	store	store	-
+advance_export	store-export.hirsel	store	store	-
+tail_bytes	store-export.hirsel	transfer	transfer	L13
+segment_boundary	store-export.hirsel	transfer	transfer	L13
+copy_export_tail	store-export.hirsel	store	store	-
+append_export_range	store-export.hirsel	transfer	transfer	L13
+Preparation	store-export.hirsel	store	store	-
+open_export	store-export.hirsel	store	store	-
+open_copied	store-export.hirsel	store	store	-
+read_export_stamp	store-export.hirsel	transfer	transfer	L13
+require_empty	store-export.hirsel	transfer	transfer	L13
+copy_restore_file	store-export.hirsel	transfer	transfer	L13
+restore	store-export.hirsel	store	store	-
+replay_export	store-export.hirsel	transfer	store	-	push-up transfer -> store (refs at layer 12)
+apply_steps	store-export.hirsel	transfer	transfer	L13
+FollowerService	store-follower-service.hirsel	store	store	-
+FollowerOwner	store-follower-service.hirsel	store	store	-
+FollowerSlot	store-follower-service.hirsel	store	store	-
+FollowerServiceMessage	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerProvision	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerServiceStart	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerNode	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerEntry	store-follower-service.hirsel	object_writer	object_writer	L9
+FollowerApplyStart	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_startup_reply_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_provision_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_request_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_control_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_service_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_task_bytes	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_service	store-follower-service.hirsel	store	store	-
+follower_owner	store-follower-service.hirsel	store	store	-
+close_follower_service	store-follower-service.hirsel	store	store	-
+follower_slot	store-follower-service.hirsel	store	store	-
+follower_response	store-follower-service.hirsel	object_writer	object_writer	L9
+follower_service_loop	store-follower-service.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+reap_followers	store-follower-service.hirsel	object_writer	object_writer	L9
+provision_follower	store-follower-service.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+follower_apply_task	store-follower-service.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+Authority	store-followers.hirsel	store	store	-
+log_authority	store-followers.hirsel	store	store	-
+Followers	store-followers.hirsel	store	store	-
+followers	store-followers.hirsel	store	store	-
+FollowCapture	store-followers.hirsel	object_writer	object_writer	L9
+Follower	store-followers.hirsel	store	store	-
+FollowerTransport	store-followers.hirsel	object_writer	object_writer	L9
+FollowerRequest	store-followers.hirsel	object_writer	object_writer	L9
+FollowerObservation	store-followers.hirsel	object_writer	object_writer	L9
+FollowerResponse	store-followers.hirsel	object_writer	object_writer	L9
+FollowerCommand	store-followers.hirsel	object_writer	object_writer	L9
+FollowerSource	store-followers.hirsel	object_writer	object_writer	L9
+request_follower	store-followers.hirsel	object_writer	object_writer	L9
+follow_capture	store-followers.hirsel	object_writer	object_writer	L9
+LogCaptureKey	store-followers.hirsel	object_writer	object_writer	L9
+LogCaptureAttempt	store-followers.hirsel	object_writer	object_writer	L9
+LogCaptureProgress	store-followers.hirsel	object_writer	object_writer	L9
+same_capture_key	store-followers.hirsel	object_writer	object_writer	L9
+behind_branch	store-followers.hirsel	object_writer	object_writer	L9
+log_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+initial_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+advancing_follow_capture	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+floor_follow_capture	store-followers.hirsel	object_writer	object_writer	L9
+follower_step	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+follower_apply	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+follower	store-followers.hirsel	store	store	-
+object_follow_transport	store-followers.hirsel	object_writer	object_writer	L9
+follower_branch	store-followers.hirsel	store	store	-
+capture_tip	store-followers.hirsel	object_writer	object_writer	L9
+follower_tip	store-followers.hirsel	object_writer	object_writer	L9
+follower_snapshot	store-followers.hirsel	object_writer	object_writer	L9
+snapshot_follower	store-followers.hirsel	store	store	-
+applied	store-followers.hirsel	store	store	-
+follower_main	store-followers.hirsel	object_writer	object_writer	L9
+catch_up	store-followers.hirsel	store	store	-
+follower_prepare_fresh	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+fresh	store-followers.hirsel	store	store	-
+follower_observe	store-followers.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+follower_deadline	store-followers.hirsel	object_writer	object_writer	L9
+at_least	store-followers.hirsel	store	store	-
+read_only_checkpoint	store-followers.hirsel	object_writer	object_writer	L9
+log_floor	store-followers.hirsel	object_writer	object_writer	L9
+follower_floor	store-followers.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
+ForkPlan	store-fork.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+fork	store-fork.hirsel	store	store	-
+plan_fork	store-fork.hirsel	store	store	-
+fork_live	store-fork.hirsel	store	store	-
+catalog_key_handle	store-handle-check.hirsel	catalog	catalog	L3
+catalog_page	store-handle-check.hirsel	catalog	catalog	L3
+index_readable	store-handle-check.hirsel	catalog	catalog	L3
+readable	store-handle-check.hirsel	catalog	catalog	L3
+Health	store-health-types.hirsel	status	status	L0
+StreamLatch	store-health-types.hirsel	status	status	L0
+ReclaimFailures	store-health.hirsel	object_writer	object_writer	L9
+ObjectHealthSignal	store-health.hirsel	object_writer	object_writer	L9
+health_failure	store-health.hirsel	object_writer	object_writer	L9
+health_is_working	store-health.hirsel	object_writer	object_writer	L9
+copy_health	store-health.hirsel	object_writer	object_writer	L9
+emit_health	store-health.hirsel	object_writer	object_writer	L9
+reclaim_state	store-health.hirsel	store	store	-
+health	store-health.hirsel	store	store	-
+HealthNotice	store-health.hirsel	object_writer	object_writer	L9
+wait_unhealthy	store-health.hirsel	object_writer	object_writer	L9
+on_unhealthy	store-health.hirsel	store	store	-
+health_result	store-health.hirsel	object_writer	object_writer	L9
+HistoryChunkKey	store-history-packs.hirsel	history	history	L7
+HistoryChunk	store-history-packs.hirsel	history	history	L7
+HistoryLocator	store-history-packs.hirsel	history	history	L7
+empty_history_locator	store-history-packs.hirsel	history	history	L7
+history_chunk_key	store-history-packs.hirsel	history	history	L7
+history_remember_chunk	store-history-packs.hirsel	history	history	L7
+history_locate_row	store-history-packs.hirsel	history	history	L7
+history_locator_rows	store-history-packs.hirsel	history	history	L7
+history_locator	store-history-packs.hirsel	history	history	L7
+ObjectPackRead	store-history-packs.hirsel	history	history	L7
+history_reader	store-history-packs.hirsel	history	history	L7
+history_list_page	store-history-packs.hirsel	history	history	L7
+HISTORY_LIST_WINDOW	store-history-packs.hirsel	history	history	L7
+HistoryPackStream	store-history-packs.hirsel	history	history	L7
+history_stream_refill	store-history-packs.hirsel	history	history	L7
+history_stream_copy	store-history-packs.hirsel	history	history	L7
+history_stream_hash	store-history-packs.hirsel	history	history	L7
+history_check_list_pack	store-history-packs.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+history_scan_list_pack	store-history-packs.hirsel	history	history	L7
+LocatedNeed	store-history-packs.hirsel	history	history	L7
+history_want	store-history-packs.hirsel	history	history	L7
+history_want_roots	store-history-packs.hirsel	history	history	L7
+history_load_data_pack	store-history-packs.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+history_resolve_page	store-history-packs.hirsel	history	history	L7
+history_resolve_pack	store-history-packs.hirsel	history	history	L7
+history_graph_order	store-history-packs.hirsel	history	history	L7
+history_validate_manifest	store-history-packs.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+validate_bucket_graph	store-history-packs.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+history_paged_capture	store-history-packs.hirsel	history	store	-	push-up history -> store (refs at layer 12)
+history_paged_load	store-history-packs.hirsel	history	store	-	push-up history -> store (refs at layer 12)
+history_open_checkpoint	store-history-packs.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+HistoryLink	store-history-read.hirsel	history	history	L7
+HistoryMark	store-history-read.hirsel	history	history	L7
+history_object_context	store-history-read.hirsel	history	history	L7
+history_object_digest	store-history-read.hirsel	history	history	L7
+history_entry_context	store-history-read.hirsel	history	history	L7
+history_length	store-history-read.hirsel	history	history	L7
+history_missing_object	store-history-read.hirsel	history	pager	L5	pull-down history -> pager (used by read_tiered_bucket_windows)
+history_range	store-history-read.hirsel	history	history	L7
+history_read_key	store-history-read.hirsel	history	history	L7
+history_link_slots	store-history-read.hirsel	history	history	L7
+history_suffix	store-history-read.hirsel	history	history	L7
+history_read_object	store-history-read.hirsel	history	history	L7
+history_read_mark	store-history-read.hirsel	history	history	L7
+history_checkpoint	store-history-read.hirsel	history	history	L7
+history_decode_manifest	store-history-read.hirsel	history	history	L7
+history_read_manifest	store-history-read.hirsel	history	history	L7
+history_check_claim	store-history-read.hirsel	history	history	L7
+history_apply_entry	store-history-read.hirsel	history	store	-	push-up history -> store (refs at layer 12)
+history_apply_suffix	store-history-read.hirsel	history	store	-	push-up history -> store (refs at layer 12)
+HistoryWitness	store-history-witness.hirsel	history	history	L7
+history_witness	store-history-witness.hirsel	history	history	L7
+HISTORY_HEAD_LIMIT	store-history.hirsel	history	history	L7
+HISTORY_ENTRY_READ_LIMIT	store-history.hirsel	history	history	L7
+HISTORY_OPEN_LIMIT	store-history.hirsel	history	history	L7
+HistoryRef	store-history.hirsel	history	pages	L2
+HistoryPair	store-history.hirsel	history	history	L7
+HistoryHead	store-history.hirsel	history	history	L7
+HistoryConfig	store-history.hirsel	history	history	L7
+HistoryCapture	store-history.hirsel	history	history	L7
+history_number	store-history.hirsel	history	format	L1	pull-down history -> format (used by stream_batch_key)
+history_fill_key	store-history.hirsel	history	pager	L5	pull-down history -> pager (used by tiered_window_cache_key)
+history_key	store-history.hirsel	history	history	L7
+history_pair_matches	store-history.hirsel	history	history	L7
+history_ref_matches	store-history.hirsel	history	history	L7
+history_entry_range	store-history.hirsel	history	history	L7
+history_frame	store-history.hirsel	history	manifest	L4	pull-down history -> format (used by stream_batch_check); push-up format -> manifest (refs at layer 3)
+history_text	store-history.hirsel	history	history	L7
+history_config	store-history.hirsel	history	history	L7
+history_head_frame	store-history.hirsel	history	history	L7
+history_frame_pair	store-history.hirsel	history	history	L7
+history_decode_head	store-history.hirsel	history	history	L7
+history_decode_head_attach	store-history.hirsel	history	history	L7
+history_next_id	store-history.hirsel	history	history	L7
+history_ref_encode	store-history.hirsel	history	history	L7
+history_seal	store-history.hirsel	history	format	L1	pull-down history -> format (used by stream_attach_append)
+history_append_header	store-history.hirsel	history	format	L1	pull-down history -> format (used by stream_header)
+AUTHORITY_LIMIT	store-history.hirsel	history	history	L7
+history_append_text	store-history.hirsel	history	history	L7
+history_config_bytes	store-history.hirsel	history	history	L7
+history_encode_head	store-history.hirsel	history	history	L7
+history_claim_head	store-history.hirsel	history	history	L7
+object_history_config	store-history.hirsel	history	history	L7
+INDEX_CHUNK	store-index-build.hirsel	maintenance	maintenance	L14
+resident_rows_after	store-index-build.hirsel	maintenance	maintenance	L14
+table_is_tiered	store-index-build.hirsel	maintenance	maintenance	L14
+tiered_rows_after	store-index-build.hirsel	store	store	-
+tiered_rows_after_mode	store-index-build.hirsel	store	store	-
+index_chunk	store-index-build.hirsel	maintenance	maintenance	L14
+build_declared_index	store-index-build.hirsel	maintenance	maintenance	L14
+chunked_declared_index	store-index-build.hirsel	maintenance	maintenance	L14
+copied_record	store-index-build.hirsel	maintenance	maintenance	L14
+building_index	store-index-build.hirsel	store	store	-
+unready_index	store-index-build.hirsel	maintenance	maintenance	L14
+bound_extractor	store-index-build.hirsel	maintenance	maintenance	L14
+index_build_step	store-index-build.hirsel	store	store	-
+put_index_record	store-index-build.hirsel	maintenance	maintenance	L14
+demote_index	store-index-build.hirsel	maintenance	maintenance	L14
+demote_drifted	store-index-build.hirsel	store	store	-
+rebuild_index	store-index-build.hirsel	store	store	-
+stage_index_build	store-index-build.hirsel	maintenance	maintenance	L14
+IndexStop	store-index-build.hirsel	maintenance	txn	L12	pull-down maintenance -> txn (used by Drafted)
+index_stop_error	store-index-build.hirsel	maintenance	maintenance	L14
+take_drift	store-index-build.hirsel	maintenance	txn	L12	pull-down maintenance -> txn (used by draft_body)
+key_word_at	store-index-build.hirsel	maintenance	maintenance	L14
+sort_bulk_rows	store-index-build.hirsel	maintenance	maintenance	L14
+IndexValue	store-index-registry.hirsel	indexes	indexes	L10
+RegisteredIndex	store-index-registry.hirsel	indexes	indexes	L10
+IndexRegistration	store-index-registry.hirsel	indexes	indexes	L10
+IndexRegistry	store-index-registry.hirsel	indexes	indexes	L10
+empty_index_registry	store-index-registry.hirsel	indexes	indexes	L10
+declared_index_registry	store-index-registry.hirsel	indexes	indexes	L10
+entry_key_end	store-index-registry.hirsel	indexes	indexes	L10
+IndexProjection	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by define_index)
+DeclaredExtractor	store-index-registry.hirsel	indexes	indexes	L10
+extract_declared	store-index-registry.hirsel	indexes	indexes	L10
+declare_binding	store-index-registry.hirsel	indexes	indexes	L10
+index_registration	store-index-registry.hirsel	indexes	indexes	L10
+register_index	store-index-registry.hirsel	indexes	indexes	L10
+registered_index	store-index-registry.hirsel	store	store	-
+unique_owner_end	store-index-registry.hirsel	indexes	indexes	L10
+plan_index_put	store-index-registry.hirsel	store	store	-
+probe_index_keys	store-index-registry.hirsel	store	store	-
+edit_stamp_cost	store-index-registry.hirsel	store	store	-
+write_stamp_cost	store-index-registry.hirsel	store	store	-
+preflight_index_edits	store-index-registry.hirsel	store	store	-
+find_index_name	store-index-registry.hirsel	indexes	indexes	L10
+ValueSchema	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by migrate_build)
+Catalog	store-index-registry.hirsel	indexes	indexes	L10
+CatalogRecord	store-index-registry.hirsel	indexes	indexes	L10
+IndexRecord	store-index-registry.hirsel	indexes	indexes	L10
+catalog_kind	store-index-registry.hirsel	indexes	indexes	L10
+catalog_index	store-index-registry.hirsel	indexes	indexes	L10
+set_index_state	store-index-registry.hirsel	indexes	indexes	L10
+IndexShape	store-index-registry.hirsel	indexes	indexes	L10
+shape_byte	store-index-registry.hirsel	indexes	indexes	L10
+entry_kind	store-index-registry.hirsel	indexes	indexes	L10
+index_claims	store-index-registry.hirsel	indexes	indexes	L10
+IndexState	store-index-registry.hirsel	store	store	-
+copied_state	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by settle_index_record)
+record_public	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by catalog_index_handle)
+malformed	store-index-registry.hirsel	indexes	pages	L2	pull-down indexes -> manifest (used by add_lineage_cell); pull-down manifest -> pages (used by next_page_range)
+take_le	store-index-registry.hirsel	indexes	indexes	L10
+take_blob	store-index-registry.hirsel	indexes	indexes	L10
+decode_catalog	store-index-registry.hirsel	indexes	indexes	L10
+decode_index_record	store-index-registry.hirsel	indexes	indexes	L10
+encode_catalog	store-index-registry.hirsel	indexes	indexes	L10
+DataEdit	store-index-registry.hirsel	indexes	indexes	L10
+IndexEdits	store-index-registry.hirsel	indexes	indexes	L10
+push_index_edit	store-index-registry.hirsel	indexes	indexes	L10
+append_index_remove	store-index-registry.hirsel	store	store	-
+stage_index_drift	store-index-registry.hirsel	indexes	indexes	L10
+drift_stop	store-index-registry.hirsel	store	store	-
+stage_drift	store-index-registry.hirsel	indexes	indexes	L10
+apply_edit	store-index-registry.hirsel	store	store	-
+apply_edits	store-index-registry.hirsel	store	store	-
+put_impl	store-index-registry.hirsel	store	store	-
+index_catalog_in	store-index-registry.hirsel	indexes	indexes	L10
+bound_indexes	store-index-registry.hirsel	store	store	-
+delete_impl	store-index-registry.hirsel	store	store	-
+DeletePlan	store-index-registry.hirsel	indexes	indexes	L10
+plan_delete	store-index-registry.hirsel	store	store	-
+apply_delete_plan	store-index-registry.hirsel	store	store	-
+EntryForm	store-inspect.hirsel	store	store	-
+CatalogEntry	store-inspect.hirsel	store	store	-
+snapshot_identity	store-inspect.hirsel	store	store	-
+catalog_entries	store-inspect.hirsel	store	store	-
+OPERATOR_ROWS	store-inspect.hirsel	maintenance	maintenance	L14
+OPERATOR_SCRUB_BYTES	store-inspect.hirsel	maintenance	maintenance	L14
+VerifyOutcome	store-inspect.hirsel	store	store	-
+verify_release	store-inspect.hirsel	store	store	-
+RepairOutcome	store-inspect.hirsel	store	store	-
+repair_indexes	store-inspect.hirsel	store	store	-
+accept_cutover	store-install.hirsel	store	store	-
+cutover_settled	store-install.hirsel	store	store	-
+install_prepared	store-install.hirsel	store	store	-
+perform_cutover	store-install.hirsel	store	store	-
+perform_bound_cutover	store-install.hirsel	store	store	-
+perform_cutover_with	store-install.hirsel	store	store	-
+forget_import	store-install.hirsel	store	store	-
+JournalInput	store-journal-recover.hirsel	journal	format	L1	pull-down journal -> manifest (used by ScrubInput); pull-down manifest -> format (used by disk_stream_payload)
+journal_input	store-journal-recover.hirsel	journal	journal	L6
+journal_chunk	store-journal-recover.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by scrub_payload)
+JournalRecovered	store-journal-recover.hirsel	journal	journal	L6
+journal_wait_shared	store-journal-recover.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by journal_header)
+journal_refresh_size	store-journal-recover.hirsel	journal	journal	L6
+journal_recover	store-journal-recover.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+journal_decode_fork	store-journal-recover.hirsel	journal	format	L1	pull-down journal -> format (used by journal_decode)
+journal_apply_fork	store-journal-recover.hirsel	journal	journal	L6
+CaptureSegment	store-journal-recover.hirsel	journal	journal	L6
+CaptureWalk	store-journal-recover.hirsel	journal	journal	L6
+capture_end_image	store-journal-recover.hirsel	journal	journal	L6
+capture_end	store-journal-recover.hirsel	journal	journal	L6
+capture_walk	store-journal-recover.hirsel	journal	journal	L6
+capture_lock_free	store-journal-recover.hirsel	journal	journal	L6
+capture_fence	store-journal-recover.hirsel	journal	journal	L6
+capture_scan	store-journal-recover.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+journal_apply_commit	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
+journal_apply	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
+journal_apply_ops	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
+journal_sorted_run	store-journal-recover.hirsel	journal	journal	L6
+journal_collection_batch	store-journal-recover.hirsel	journal	journal	L6
+journal_collection_bulk	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
+durable_latch_error	store-journal-status.hirsel	journal	journal	L6
+journal_receive	store-journal-status.hirsel	store	store	-
+journal_ack	store-journal-status.hirsel	store	store	-
+journal_poll	store-journal-status.hirsel	store	store	-
+journal_poll_groups	store-journal-status.hirsel	store	store	-
+close	store-journal-status.hirsel	store	store	-
+close_ack	store-journal-status.hirsel	store	store	-
+JournalMsg	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+WriteNotice	store-journal-worker.hirsel	journal	journal	L6
+JournalIdleTimer	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+journal_idle_timer	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+JournalWorker	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+JournalBuffers	store-journal-worker.hirsel	journal	journal	L6
+journal_set	store-journal-worker.hirsel	journal	journal	L6
+journal_fixed_check	store-journal-worker.hirsel	journal	journal	L6
+journal_buffers	store-journal-worker.hirsel	journal	journal	L6
+journal_write_end	store-journal-worker.hirsel	journal	journal	L6
+journal_window_target	store-journal-worker.hirsel	journal	journal	L6
+journal_align_up	store-journal-worker.hirsel	journal	journal	L6
+journal_group_room	store-journal-worker.hirsel	journal	journal	L6
+journal_window_step	store-journal-worker.hirsel	journal	journal	L6
+journal_write_aligned	store-journal-worker.hirsel	journal	journal	L6
+journal_write_oversized	store-journal-worker.hirsel	journal	journal	L6
+journal_loop	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+journal_worker	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+disk_creation_block	store-journal-worker.hirsel	journal	journal	L6
+disk_new_segment	store-journal-worker.hirsel	journal	journal	L6
+KEYED_OPS	store-keyed-claims.hirsel	txn	txn	L12
+CLAIMS	store-keyed-claims.hirsel	txn	format	L1	pull-down txn -> capture (used by check_keyed_ops); pull-down capture -> format (used by decode_keyed_edits)
+CLAIM_EXP	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_PEXP	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_COUNT	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_PCOUNT	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_OPEN	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_NEVER	store-keyed-claims.hirsel	txn	txn	L12
+CLAIM_DONE_MAX	store-keyed-claims.hirsel	store	format	L1	A-split body to capture (used by check_keyed_ops); A-split body capture -> format (used by decode_keyed_edits)
+KEYED_OP_RECORD_MAX	store-keyed-claims.hirsel	store	txn	L12	A-split body to txn (used by keyed_policy_bytes)
+ClaimKey	store-keyed-claims.hirsel	store	store	-
+KeyedPolicy	store-keyed-claims.hirsel	store	store	-
+ClaimAddress	store-keyed-claims.hirsel	txn	txn	L12
+ClaimRow	store-keyed-claims.hirsel	txn	txn	L12
+ClaimAdmission	store-keyed-claims.hirsel	store	store	-
+ClaimCompletion	store-keyed-claims.hirsel	store	store	-
+claim_ticket	store-keyed-claims.hirsel	store	store	-
+claim_key_bytes	store-keyed-claims.hirsel	store	store	-
+claim_reply_expiry	store-keyed-claims.hirsel	store	store	-
+op_claim_key	store-keyed-claims.hirsel	txn	txn	L12
+claim_address	store-keyed-claims.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+claim_op_end	store-keyed-claims.hirsel	txn	txn	L12
+claim_principal_end	store-keyed-claims.hirsel	txn	txn	L12
+claim_expired	store-keyed-claims.hirsel	txn	txn	L12
+claim_expiry	store-keyed-claims.hirsel	txn	txn	L12
+claim_parse	store-keyed-claims.hirsel	txn	txn	L12
+claim_value	store-keyed-claims.hirsel	txn	txn	L12
+keyed_policy_bytes	store-keyed-claims.hirsel	txn	txn	L12
+check_keyed_policy	store-keyed-claims.hirsel	store	store	-
+read_keyed_policy	store-keyed-claims.hirsel	txn	txn	L12
+keyed_policy	store-keyed-claims.hirsel	store	store	-
+terminal_frame_credit	store-keyed-claims.hirsel	txn	txn	L12
+keyed_page_height	store-keyed-claims.hirsel	txn	txn	L12
+claim_terminal_credit	store-keyed-claims.hirsel	txn	txn	L12
+add_keyed_credit	store-keyed-claims.hirsel	txn	txn	L12
+remove_keyed_credit	store-keyed-claims.hirsel	txn	txn	L12
+append_claim_edit	store-keyed-claims.hirsel	txn	txn	L12
+claim_index_key	store-keyed-claims.hirsel	txn	txn	L12
+claim_count_after	store-keyed-claims.hirsel	txn	txn	L12
+set_claim_count	store-keyed-claims.hirsel	txn	txn	L12
+forget_claim	store-keyed-claims.hirsel	txn	txn	L12
+claim_deletion_planned	store-keyed-claims.hirsel	txn	txn	L12
+reclaim_claim_scope	store-keyed-claims.hirsel	txn	txn	L12
+stage_claim_admit	store-keyed-claims.hirsel	txn	txn	L12
+admit_claim	store-keyed-claims.hirsel	store	store	-
+stage_claim_reply	store-keyed-claims.hirsel	txn	txn	L12
+validate_claim_completion	store-keyed-claims.hirsel	store	store	-
+conclude_claim	store-keyed-claims.hirsel	store	store	-
+rebuild_keyed_credit	store-keyed-claims.hirsel	store	store	-
+KeyedCallRecord	store-keyed-claims.hirsel	store	store	-
+KeyedRun	store-keyed-claims.hirsel	txn	txn	L12
+keyed_completion	store-keyed-claims.hirsel	store	store	-
+keyed_completion_credit	store-keyed-claims.hirsel	store	store	-
+check_keyed_completion	store-keyed-claims.hirsel	store	store	-
+KeyedEdit	store-keyed-journal.hirsel	format	format	L1
+KeyedCallSection	store-keyed-journal.hirsel	format	format	L1
+KeyedCredit	store-keyed-journal.hirsel	format	format	L1
+KeyedDraft	store-keyed-journal.hirsel	format	format	L1
+no_keyed_credit	store-keyed-journal.hirsel	format	format	L1
+keyed_frame_bytes	store-keyed-journal.hirsel	format	format	L1
+encode_keyed_edits	store-keyed-journal.hirsel	format	format	L1
+decode_keyed_edits	store-keyed-journal.hirsel	format	store	-	push-up format -> store (refs at layer 12)
+materialize_keyed_edits	store-keyed-journal.hirsel	pages	pages	L2
+keyed_lookup	store-keyed-journal.hirsel	pages	pages	L2
+keyed_drafted_charge	store-keyed-journal.hirsel	format	txn	L12	push-up format -> txn (refs at layer 10)
+keyed_draft_live	store-keyed-journal.hirsel	pages	txn	L12	push-up pages -> txn (refs at layer 10)
+resident_with_credit	store-keyed-journal.hirsel	txn	txn	L12
+available_resident	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+available_journal	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+draft_credit	store-keyed-journal.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+OpenClaimCursor	store-keyed-lifecycle.hirsel	store	store	-
+open_claim_cursor	store-keyed-lifecycle.hirsel	store	store	-
+next_open_claim	store-keyed-lifecycle.hirsel	store	store	-
+ClaimRecovery	store-keyed-lifecycle.hirsel	store	store	-
+recovery_policy	store-keyed-lifecycle.hirsel	store	store	-
+claim_clock	store-keyed-lifecycle.hirsel	store	store	-
+recover_claim	store-keyed-lifecycle.hirsel	store	store	-
+has_keyed_ops	store-keyed-lifecycle.hirsel	store	store	-
+ClaimExpiry	store-keyed-lifecycle.hirsel	store	store	-
+DroppedClaimOp	store-keyed-lifecycle.hirsel	store	store	-
+claim_op_high	store-keyed-lifecycle.hirsel	txn	txn	L12
+claim_op_latest	store-keyed-lifecycle.hirsel	txn	txn	L12
+check_keyed_open	store-keyed-lifecycle.hirsel	store	store	-
+commit_clock_floor	store-keyed-lifecycle.hirsel	store	store	-
+check_dropped_claim_ops	store-keyed-lifecycle.hirsel	store	store	-
+ClaimSweep	store-keyed-lifecycle.hirsel	store	store	-
+claim_sweep_start	store-keyed-lifecycle.hirsel	store	txn	L12	A-split body to txn (used by plan_claim_sweep)
+ClaimSweepWork	store-keyed-lifecycle.hirsel	store	store	-
+plan_claim_sweep	store-keyed-lifecycle.hirsel	txn	txn	L12
+sweep_claims	store-keyed-lifecycle.hirsel	store	store	-
+canonical_roots	store-layout.hirsel	pages	pages	L2
+canonical_tree	store-layout.hirsel	pages	pages	L2
+fixture_broken_handoff	store-layout.hirsel	store	store	-
+Level	store-levels.hirsel	store	store	-
+store_level_name	store-levels.hirsel	store	store	-
+levels	store-levels.hirsel	store	store	-
+level	store-levels.hirsel	store	store	-
+durable_at	store-levels.hirsel	store	store	-
+weak_covered	store-levels.hirsel	store	store	-
+durable_weak	store-levels.hirsel	store	store	-
+Position	store-levels.hirsel	store	store	-
+position	store-levels.hirsel	store	store	-
+FRAME_LIMIT	store-limits.hirsel	store	types	L1	A-split body to types (used by LIMIT_FRAME_ROOM)
+VALUE_LIMIT	store-limits.hirsel	store	types	L1	A-split body to manifest (used by BLOB_LIMIT); A-split body manifest -> types (used by LIMIT_FRAME_ROOM)
+FORMAT_VALUE_MAX	store-limits.hirsel	types	types	L1
+StoreLimits	store-limits.hirsel	store	store	-
+default_limits	store-limits.hirsel	store	types	L1	A-split body to txn (used by look_attempt); A-split body txn -> types (used by named_limits)
+LIMIT_VALUE_FLOOR	store-limits.hirsel	types	types	L1
+LIMIT_META_FLOOR	store-limits.hirsel	types	types	L1
+LIMIT_FRAME_ROOM	store-limits.hirsel	types	types	L1
+limits_valid	store-limits.hirsel	types	types	L1
+limits_fit	store-limits.hirsel	types	types	L1
+same_limits	store-limits.hirsel	types	types	L1
+named_limits	store-limits.hirsel	types	types	L1
+transaction_limit	store-limits.hirsel	types	types	L1
+store_limits	store-limits.hirsel	store	store	-
+check_limits	store-limits.hirsel	types	types	L1
+journal_floor	store-limits.hirsel	types	types	L1
+replay_within_limits	store-limits.hirsel	format	format	L1
+check_named_limits	store-limits.hirsel	types	types	L1
+ListKind	store-list-read.hirsel	manifest	manifest	L4
+ListedPages	store-list-read.hirsel	manifest	manifest	L4
+read_list_page	store-list-read.hirsel	manifest	manifest	L4
+decode_list_page	store-list-read.hirsel	manifest	manifest	L4
+check_page_pointer	store-list-read.hirsel	manifest	manifest	L4
+decode_located_page	store-list-read.hirsel	manifest	manifest	L4
+decode_manifest_page	store-list-read.hirsel	manifest	manifest	L4
+mark_reached	store-list-read.hirsel	manifest	manifest	L4
+page_edge_order	store-list-read.hirsel	manifest	format	L1	pull-down manifest -> format (used by read_tiered_frame)
+read_page_list	store-list-read.hirsel	manifest	manifest	L4
+list_lineage_row	store-list-read.hirsel	manifest	manifest	L4
+empty_listed_pages	store-list-read.hirsel	manifest	manifest	L4
+IncomingEdge	store-locations.hirsel	manifest	manifest	L4
+FrameLocation	store-locations.hirsel	manifest	manifest	L4
+PageLocations	store-locations.hirsel	manifest	manifest	L4
+new_page_locations	store-locations.hirsel	manifest	manifest	L4
+share_page_locations	store-locations.hirsel	manifest	manifest	L4
+frame_charge	store-locations.hirsel	manifest	manifest	L4
+image_width	store-locations.hirsel	manifest	manifest	L4
+resident_location_charge	store-locations.hirsel	manifest	manifest	L4
+location_storage_charge	store-locations.hirsel	manifest	manifest	L4
+frame_edge_charge	store-locations.hirsel	manifest	manifest	L4
+pack_edge_charge	store-locations.hirsel	manifest	manifest	L4
+member_charge	store-locations.hirsel	manifest	manifest	L4
+live_pack_sequences	store-locations.hirsel	manifest	manifest	L4
+published_page_pointer	store-locations.hirsel	manifest	manifest	L4
+published_tree_pointer	store-locations.hirsel	manifest	manifest	L4
+published_page_roots	store-locations.hirsel	manifest	manifest	L4
+add_page_source	store-locations.hirsel	manifest	manifest	L4
+add_location	store-locations.hirsel	manifest	manifest	L4
+add_location_holder	store-locations.hirsel	manifest	manifest	L4
+rebuild_page_locations	store-locations.hirsel	manifest	manifest	L4
+remove_page_source	store-locations.hirsel	manifest	manifest	L4
+relocation_ancestors	store-locations.hirsel	manifest	manifest	L4
+may_own_edges	store-locations.hirsel	manifest	manifest	L4
+record_fresh_tree	store-locations.hirsel	manifest	manifest	L4
+HeldPage	store-locations.hirsel	manifest	manifest	L4
+candidate_page_locations	store-locations.hirsel	manifest	manifest	L4
+change_list_root	store-locations.hirsel	manifest	manifest	L4
+map_has_location	store-locations.hirsel	manifest	manifest	L4
+PageWrite	store-locations.hirsel	manifest	manifest	L4
+BlobWrite	store-locations.hirsel	manifest	manifest	L4
+CutFrames	store-locations.hirsel	manifest	manifest	L4
+requires_emit	store-locations.hirsel	manifest	manifest	L4
+plan_tree_frames	store-locations.hirsel	manifest	manifest	L4
+DiskIndex	store-locations.hirsel	manifest	manifest	L4
+disk_index	store-locations.hirsel	manifest	manifest	L4
+disk_index_share	store-locations.hirsel	manifest	manifest	L4
+disk_index_get	store-locations.hirsel	manifest	manifest	L4
+disk_index_put	store-locations.hirsel	manifest	manifest	L4
+disk_index_update	store-locations.hirsel	manifest	manifest	L4
+disk_index_remove	store-locations.hirsel	manifest	manifest	L4
+Log	store-log.hirsel	store	store	-
+LogBounds	store-log.hirsel	store	store	-
+log_identity	store-log.hirsel	store	store	-
+log_schemas	store-log.hirsel	store	store	-
+Retain	store-log.hirsel	store	store	-
+LogRetention	store-log.hirsel	txn	catalog	L3	pull-down txn -> indexes (used by IndexRegistry); pull-down indexes -> catalog (used by SchemaPlan)
+declare_log	store-log.hirsel	store	store	-
+bind_retention	store-log.hirsel	store	store	-
+retain_step	store-log.hirsel	store	store	-
+log_key	store-log.hirsel	txn	pager	L5	pull-down txn -> read (used by page_change_log); pull-down read -> pager (used by replay_overlay_trim)
+descriptor_bounds	store-log.hirsel	txn	pager	L5	pull-down txn -> capture (used by describe_collection); pull-down capture -> pager (used by read_tiered_point_with)
+committed_log_bounds	store-log.hirsel	txn	txn	L12
+LogState	store-log.hirsel	txn	pages	L2	pull-down txn -> pages (used by DataOps)
+transaction_log_state	store-log.hirsel	txn	txn	L12
+staged_log_state	store-log.hirsel	txn	txn	L12
+transaction_log_bounds	store-log.hirsel	txn	txn	L12
+append	store-log.hirsel	store	store	-
+bounds	store-log.hirsel	store	store	-
+log_fetch	store-log.hirsel	store	store	-
+decode_log_row	store-log.hirsel	txn	txn	L12
+decode_log_last	store-log.hirsel	txn	txn	L12
+last	store-log.hirsel	store	store	-
+log_bounds	store-log.hirsel	store	store	-
+log_get	store-log.hirsel	store	store	-
+log_last	store-log.hirsel	store	store	-
+log_decoder	store-log.hirsel	txn	txn	L12
+log_scan	store-log.hirsel	store	store	-
+LogRangeTail	store-log.hirsel	txn	txn	L12
+log_endpoint	store-log.hirsel	txn	txn	L12
+log_range	store-log.hirsel	store	store	-
+next_log_range_tail	store-log.hirsel	txn	txn	L12
+apply_log_append	store-log.hirsel	txn	journal	L6	pull-down txn -> journal (used by journal_apply_ops)
+trim_before	store-log.hirsel	store	store	-
+trim_log_floor	store-log.hirsel	txn	txn	L12
+trim_log_page	store-log.hirsel	txn	txn	L12
+masked_log_append	store-log.hirsel	txn	txn	L12
+seal_log_trims	store-log.hirsel	txn	txn	L12
+published_log	store-log.hirsel	store	store	-
+tail_window	store-log.hirsel	store	store	-
+window_deletions	store-log.hirsel	txn	txn	L12
+window_insertions	store-log.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+shared_cold_window	store-log.hirsel	txn	txn	L12
+window_changes	store-log.hirsel	store	store	-
+LocatedRoots	store-manifest-wire.hirsel	manifest	pages	L2	pull-down manifest -> pages (used by attach_page_roots)
+KEYED_ROOT_RECORD_BYTES	store-manifest-wire.hirsel	manifest	manifest	L4
+keyed_root_record_bytes	store-manifest-wire.hirsel	manifest	manifest	L4
+LocatedBranch	store-manifest-wire.hirsel	manifest	manifest	L4
+LocatedPin	store-manifest-wire.hirsel	manifest	manifest	L4
+SweepCursor	store-manifest-wire.hirsel	manifest	manifest	L4
+PageManifest	store-manifest-wire.hirsel	manifest	manifest	L4
+page_manifest_empty	store-manifest-wire.hirsel	manifest	manifest	L4
+page_manifest_size	store-manifest-wire.hirsel	manifest	manifest	L4
+page_manifest_file_size	store-manifest-wire.hirsel	manifest	manifest	L4
+put_page_ptr	store-manifest-wire.hirsel	manifest	manifest	L4
+put_located_roots	store-manifest-wire.hirsel	manifest	manifest	L4
+append_page_manifest_fields	store-manifest-wire.hirsel	manifest	manifest	L4
+append_page_manifest_branch	store-manifest-wire.hirsel	manifest	manifest	L4
+append_page_manifest_pin	store-manifest-wire.hirsel	manifest	manifest	L4
+append_keyed_roots	store-manifest-wire.hirsel	manifest	manifest	L4
+append_page_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
+read_page_ptr	store-manifest-wire.hirsel	manifest	manifest	L4
+read_located_roots	store-manifest-wire.hirsel	manifest	manifest	L4
+read_keyed_roots	store-manifest-wire.hirsel	manifest	manifest	L4
+decode_page_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
+manifest_account	store-manifest-wire.hirsel	manifest	manifest	L4
+require_memory_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
+require_object_memory_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
+require_unarchived_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
+ArchiveRange	store-manifest-wire.hirsel	manifest	manifest	L4
+encode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
+decode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
+cut_manifest_size	store-manifest-wire.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+META_LIMIT	store-manifest.hirsel	manifest	types	L1	pull-down manifest -> types (used by limits_valid)
+MANIFEST_FIXED_BYTES	store-manifest.hirsel	manifest	manifest	L4
+MANIFEST_LIMIT	store-manifest.hirsel	manifest	manifest	L4
+manifest_limit	store-manifest.hirsel	manifest	manifest	L4
+PAGE_LIMIT	store-manifest.hirsel	manifest	manifest	L4
+BLOB_LIMIT	store-manifest.hirsel	manifest	manifest	L4
+UNKNOWN_ROOM	store-manifest.hirsel	manifest	manifest	L4
+disk_fault	store-manifest.hirsel	manifest	format	L1	pull-down manifest -> format (used by disk_count)
+disk_allocation	store-manifest.hirsel	manifest	manifest	L4
+paged_pack_path	store-manifest.hirsel	manifest	manifest	L4
+CLAIM_BYTES	store-manifest.hirsel	manifest	format	L1	pull-down manifest -> format (used by disk_kind_limit)
+PAGE_MANIFEST_FILE_LIMIT	store-manifest.hirsel	manifest	manifest	L4
+disk_page_kind	store-manifest.hirsel	manifest	manifest	L4
+disk_read_page_manifest	store-manifest.hirsel	manifest	manifest	L4
+disk_page_manifest_bytes	store-manifest.hirsel	manifest	manifest	L4
+fill_page_manifest_file	store-manifest.hirsel	manifest	manifest	L4
+begin_page_manifest_file	store-manifest.hirsel	manifest	manifest	L4
+seal_page_manifest_file	store-manifest.hirsel	manifest	manifest	L4
+PagePack	store-manifest.hirsel	manifest	pages	L2
+pack_record	store-manifest.hirsel	manifest	manifest	L4
+LoadedPack	store-manifest.hirsel	manifest	manifest	L4
+disk_read_paged_file	store-manifest.hirsel	manifest	manifest	L4
+disk_read_file	store-manifest.hirsel	manifest	manifest	L4
+disk_read_buffer	store-manifest.hirsel	manifest	manifest	L4
+read_disk_bytes	store-manifest.hirsel	manifest	manifest	L4
+check_page_manifest_header	store-manifest.hirsel	manifest	manifest	L4
+read_page_manifest_bytes	store-manifest.hirsel	manifest	manifest	L4
+read_page_manifest_file	store-manifest.hirsel	manifest	manifest	L4
+disk_check_stamp	store-manifest.hirsel	manifest	manifest	L4
+disk_load_page_pack	store-manifest.hirsel	manifest	manifest	L4
+PackScan	store-manifest.hirsel	manifest	manifest	L4
+pack_scan	store-manifest.hirsel	manifest	manifest	L4
+scan_pack_frame	store-manifest.hirsel	manifest	manifest	L4
+index_page_pack	store-manifest.hirsel	manifest	manifest	L4
+index_pack_frames	store-manifest.hirsel	manifest	manifest	L4
+check_list_pack	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+ReadFrame	store-manifest.hirsel	manifest	manifest	L4
+PageGraph	store-manifest.hirsel	manifest	manifest	L4
+graph_add	store-manifest.hirsel	manifest	manifest	L4
+resolve_blob	store-manifest.hirsel	manifest	manifest	L4
+resolve_blob_frame	store-manifest.hirsel	manifest	manifest	L4
+SettledPacks	store-manifest.hirsel	manifest	manifest	L4
+settled_frame	store-manifest.hirsel	manifest	manifest	L4
+RecoveryInventory	store-manifest.hirsel	manifest	manifest	L4
+validate_cold_root	store-manifest.hirsel	manifest	manifest	L4
+resolve_data_page	store-manifest.hirsel	manifest	manifest	L4
+resolve_data_roots	store-manifest.hirsel	manifest	manifest	L4
+ValidatedPageManifest	store-manifest.hirsel	manifest	manifest	L4
+validate_page_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_directory_graph	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+walk_directory_graph	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+parse_pack_filename	store-manifest.hirsel	manifest	manifest	L4
+cleanup_dead_packs	store-manifest.hirsel	manifest	manifest	L4
+cleanup_page_manifest	store-manifest.hirsel	manifest	manifest	L4
+validate_store_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+select_page_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_new_page_manifest	store-manifest.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 3)
+validate_leased_cut	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_cut_pages	store-manifest.hirsel	manifest	store	-	push-up manifest -> pager (refs at layer 4); push-up pager -> store (refs at layer 12)
+publish_page_manifest_bytes	store-manifest.hirsel	manifest	manifest	L4
+journal_path	store-manifest.hirsel	manifest	manifest	L4
+journal_header	store-manifest.hirsel	manifest	manifest	L4
+Migration	store-migration.hirsel	store	store	-
+CollectionKind	store-migration.hirsel	store	store	-
+CollectionInfo	store-migration.hirsel	store	store	-
+list_collections	store-migration.hirsel	store	store	-
+top_level_catalog	store-migration.hirsel	catalog	catalog	L3
+SchemaPlan	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+schema_plan	store-migration.hirsel	store	store	-
+keep_schema	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+MigrationJob	store-migration.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
+prepare_migration	store-migration.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
+stage_migration	store-migration.hirsel	store	store	-
+stage_migration_plan	store-migration.hirsel	store	store	-
+run_migration	store-migration.hirsel	store	store	-
+ConflictKeys	store-migration.hirsel	store	store	-
+BackfillOutcome	store-migration.hirsel	store	store	-
+MigrationBackfill	store-migration.hirsel	store	store	-
+MigrationChange	store-migration.hirsel	store	store	-
+MigrationPreview	store-migration.hirsel	store	store	-
+preview_migration	store-migration.hirsel	store	store	-
+catalog_collection_name	store-migration.hirsel	catalog	catalog	L3
+catalog_descriptions	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+catalog_positions	store-migration.hirsel	catalog	catalog	L3
+preview_catalog_changes	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+ParkEntry	store-mux.hirsel	pager	pager	L5
+ParkQueue	store-mux.hirsel	pager	pager	L5
+Parked	store-mux.hirsel	store	store	-
+CallRun	store-mux.hirsel	txn	txn	L12
+empty_park_queue	store-mux.hirsel	pager	pager	L5
+park_id	store-mux.hirsel	store	store	-
+park_notices	store-mux.hirsel	store	store	-
+attach_tiered_pager	store-mux.hirsel	store	store	-
+clear_parked	store-mux.hirsel	store	store	-
+park_slot	store-mux.hirsel	pager	pager	L5
+detach_answer	store-mux.hirsel	txn	pager	L5	pull-down txn -> pager (used by revoke_entry)
+revoke_entry	store-mux.hirsel	pager	pager	L5
+revoke_parked	store-mux.hirsel	store	store	-
+parked_in_flight	store-mux.hirsel	pager	pager	L5
+send_parked_demand	store-mux.hirsel	store	store	-
+first_unsent	store-mux.hirsel	pager	pager	L5
+install_parked	store-mux.hirsel	store	store	-
+poll_parked	store-mux.hirsel	store	store	-
+cancel_parked	store-mux.hirsel	store	store	-
+resume_parked	store-mux.hirsel	store	store	-
+call_page_source	store-mux.hirsel	store	store	-
+drive_served	store-mux.hirsel	store	store	-
+decide_served	store-mux.hirsel	store	store	-
+EndpointRefusal	store-object-authority.hirsel	store	store	-
+endpoint_refusal_text	store-object-authority.hirsel	store	store	-
+history_check_endpoint	store-object-authority.hirsel	history	history	L7
+history_check_namespace	store-object-authority.hirsel	history	history	L7
+history_probe_head	store-object-authority.hirsel	history	history	L7
+history_probe_head_attach	store-object-authority.hirsel	history	history	L7
+ObjectsCache	store-object-cache.hirsel	history	pager	L5	pull-down history -> pager (used by TieredPagerInput)
+objects_cache	store-object-cache.hirsel	store	store	-
+OBJECTS_CACHE_DIR	store-object-cache.hirsel	history	history	L7
+PACK_CACHE_INCOMING	store-object-cache.hirsel	history	history	L7
+pack_cache_directory	store-object-cache.hirsel	history	history	L7
+pack_cache_lock	store-object-cache.hirsel	history	history	L7
+pack_cache_scan	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+pack_cache_room	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+pack_cache_trim	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+pack_cache_read	store-object-cache.hirsel	history	history	L7
+pack_cache_write	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+pack_cache_stage	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+pack_cache_publish	store-object-cache.hirsel	history	history	L7
+pack_cache_open	store-object-cache.hirsel	history	history	L7
+pack_cache_span	store-object-cache.hirsel	history	history	L7
+pack_cache_write_payload	store-object-cache.hirsel	history	history	L7
+pack_cache_discard	store-object-cache.hirsel	history	history	L7
+history_read_pack	store-object-cache.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+HISTORY_LOCATE_ROWS	store-object-cut.hirsel	history	history	L7
+HISTORY_PART_TARGET	store-object-cut.hirsel	history	history	L7
+history_part_width	store-object-cut.hirsel	history	history	L7
+HISTORY_UPLOAD_ATTEMPTS	store-object-cut.hirsel	history	history	L7
+HistoryLocateRoot	store-object-cut.hirsel	history	history	L7
+HistoryActivation	store-object-cut.hirsel	history	history	L7
+history_mark_ref	store-object-cut.hirsel	history	history	L7
+history_checkpoint_packet	store-object-cut.hirsel	history	history	L7
+history_encode_locator	store-object-cut.hirsel	history	history	L7
+history_reusable_chunk	store-object-cut.hirsel	history	history	L7
+history_make_locator_reusing	store-object-cut.hirsel	history	history	L7
+history_make_locator	store-object-cut.hirsel	history	history	L7
+history_publish_checkpoint	store-object-cut.hirsel	history	history	L7
+history_create_manifest	store-object-cut.hirsel	history	history	L7
+history_copy_header	store-object-cut.hirsel	history	history	L7
+history_pack_parts	store-object-cut.hirsel	history	history	L7
+history_confirm_pack	store-object-cut.hirsel	history	history	L7
+history_upload_pack	store-object-cut.hirsel	history	history	L7
+history_write_pack_run	store-object-cut.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+history_write_page_cut	store-object-cut.hirsel	history	object_writer	L9	push-up history -> object_writer (refs at layer 8)
+ObjectExportLease	store-object-export.hirsel	transfer	object_writer	L9	pull-down transfer -> object_writer (used by ObjectJournalSession)
+ObjectExportCopy	store-object-export.hirsel	transfer	transfer	L13
+ObjectExportFetch	store-object-export.hirsel	transfer	journal	L6	pull-down transfer -> journal (used by JournalMsg)
+object_export_read	store-object-export.hirsel	transfer	object_writer	L9	pull-down transfer -> object_writer (used by object_journal_loop)
+object_export_fetch	store-object-export.hirsel	transfer	transfer	L13
+begin_object_export_copy	store-object-export.hirsel	store	store	-
+object_export_capture	store-object-export.hirsel	store	store	-
+export_write	store-object-export.hirsel	transfer	transfer	L13
+object_export_file	store-object-export.hirsel	transfer	transfer	L13
+object_export_copy	store-object-export.hirsel	transfer	transfer	L13
+ObjectAuthorityConfig	store-object-follower.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_rewrap)
+object_authority	store-object-follower.hirsel	store	store	-
+sim_authority	store-object-follower.hirsel	store	store	-
+ObjectFollowHead	store-object-follower.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_follow_make_capture)
+Claim	store-object-follower.hirsel	store	store	-
+HeadView	store-object-follower.hirsel	store	store	-
+follower_head	store-object-follower.hirsel	store	store	-
+copy_follow_state	store-object-follower.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_follow_capture)
+history_check_follower_path	store-object-follower.hirsel	object_writer	object_writer	L9
+object_follow_head	store-object-follower.hirsel	object_writer	object_writer	L9
+object_follow_replay	store-object-follower.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+object_follow_capture	store-object-follower.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+object_floor_loaded	store-object-follower.hirsel	object_writer	object_writer	L9
+check_floor_missing	store-object-follower.hirsel	object_writer	object_writer	L9
+object_follow_floor	store-object-follower.hirsel	object_writer	object_writer	L9
+import_authority	store-object-import.hirsel	store	store	-
+history_import_base	store-object-import.hirsel	store	store	-
+ObjectJournalStart	store-object-journal.hirsel	object_writer	object_writer	L9
+ObjectJournalTask	store-object-journal.hirsel	object_writer	object_writer	L9
+history_group_context	store-object-journal.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_settle)
+history_group_append	store-object-journal.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_settle_sealed_core)
+history_probe_writer	store-object-journal.hirsel	object_writer	object_writer	L9
+history_probe_writer_attach	store-object-journal.hirsel	object_writer	object_writer	L9
+ObjectJournalSession	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_begin	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_pause	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_advance	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_add	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_stream_send	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_stream_advance_batch	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_stream_trim_batches	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_loop	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_fresh_probe	store-object-journal.hirsel	object_writer	object_writer	L9
+object_journal_worker	store-object-journal.hirsel	object_writer	object_writer	L9
+HistoryOpenBase	store-object-open.hirsel	object_writer	history	L7	pull-down object_writer -> history (used by ObjectPackRead)
+history_load_admitted	store-object-open.hirsel	object_writer	store	-	pull-down object_writer -> host_stream (used by stream_load_settled); push-up host_stream -> store (refs at layer 12)
+history_check_open	store-object-open.hirsel	object_writer	object_writer	L9
+history_binding_equals	store-object-open.hirsel	object_writer	object_writer	L9
+history_genesis_debris	store-object-open.hirsel	object_writer	object_writer	L9
+history_check_empty	store-object-open.hirsel	object_writer	object_writer	L9
+history_open_genesis	store-object-open.hirsel	object_writer	object_writer	L9
+history_stream_genesis	store-object-open.hirsel	object_writer	object_writer	L9
+history_advance_claim	store-object-open.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_claim_attempt)
+history_claim_retry	store-object-open.hirsel	object_writer	object_writer	L9
+history_open_existing	store-object-open.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+history_rebase_suffix	store-object-open.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+history_open_register	store-object-open.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+history_open_with	store-object-open.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+ObjectWriterState	store-object-writer.hirsel	object_writer	object_writer	L9
+log_directory	store-object-writer.hirsel	store	store	-
+object_writer_healthy	store-object-writer.hirsel	store	store	-
+object_writer_open	store-object-writer.hirsel	store	store	-
+object_state	store-object-writer.hirsel	store	store	-
+object_cut_due	store-object-writer.hirsel	store	store	-
+Refusal	store-object-writer.hirsel	store	store	-
+open_authority	store-object-writer.hirsel	store	store	-
+object_open_checks	store-object-writer.hirsel	object_writer	object_writer	L9
+OBJECT_TIMER_GRANT	store-object-writer.hirsel	object_writer	object_writer	L9
+object_writer_entry_room	store-object-writer.hirsel	object_writer	object_writer	L9
+object_writer_journal_room	store-object-writer.hirsel	object_writer	object_writer	L9
+ObjectWriterOpen	store-object-writer.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+prepare_object_writer	store-object-writer.hirsel	object_writer	store	-	push-up object_writer -> store (refs at layer 12)
+wrap_object_authority	store-object-writer.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by stream_rewrap)
+open_object_writer	store-object-writer.hirsel	store	store	-
+claim_of	store-object-writer.hirsel	store	store	-
+object_stream_close	store-object-writer.hirsel	store	store	-
+object_cut_close	store-object-writer.hirsel	store	store	-
+take_object_journal	store-object-writer.hirsel	store	store	-
+take_object_journal_with	store-object-writer.hirsel	store	store	-
+return_object_journal	store-object-writer.hirsel	object_writer	object_writer	L9
+object_cut_state	store-object-writer.hirsel	store	store	-
+object_cut_work	store-object-writer.hirsel	store	store	-
+archive	store-object-writer.hirsel	store	store	-
+fresh_snapshot	store-object-writer.hirsel	store	store	-
+object_skip_fence	store-object-writer.hirsel	store	store	-
+PACK_INDEX_KIND	store-pack-index.hirsel	manifest	manifest	L4
+PACK_INDEX_LIMIT	store-pack-index.hirsel	manifest	format	L1	pull-down manifest -> format (used by disk_kind_limit)
+PACK_INDEX_PREFIX	store-pack-index.hirsel	manifest	manifest	L4
+PACK_INDEX_ROW	store-pack-index.hirsel	manifest	manifest	L4
+PackIndexRow	store-pack-index.hirsel	manifest	manifest	L4
+PackIndex	store-pack-index.hirsel	manifest	manifest	L4
+page_index_row	store-pack-index.hirsel	manifest	manifest	L4
+blob_index_row	store-pack-index.hirsel	manifest	manifest	L4
+pack_index_row_room	store-pack-index.hirsel	manifest	manifest	L4
+pack_index_frame_end	store-pack-index.hirsel	manifest	manifest	L4
+append_pack_index	store-pack-index.hirsel	manifest	manifest	L4
+append_pack_index_frame	store-pack-index.hirsel	manifest	manifest	L4
+PackIndexCursor	store-pack-index.hirsel	manifest	manifest	L4
+start_pack_index	store-pack-index.hirsel	manifest	manifest	L4
+next_pack_index	store-pack-index.hirsel	manifest	manifest	L4
+decode_pack_index	store-pack-index.hirsel	manifest	manifest	L4
+FrameBody	store-packs.hirsel	manifest	manifest	L4
+PackFrame	store-packs.hirsel	manifest	manifest	L4
+PlannedPack	store-packs.hirsel	manifest	manifest	L4
+PackRun	store-packs.hirsel	manifest	manifest	L4
+blob_frames	store-packs.hirsel	manifest	manifest	L4
+page_frames	store-packs.hirsel	manifest	manifest	L4
+layout_packs	store-packs.hirsel	manifest	manifest	L4
+apply_pack_layout	store-packs.hirsel	manifest	manifest	L4
+child_place	store-packs.hirsel	manifest	manifest	L4
+emit_located_frame	store-packs.hirsel	manifest	manifest	L4
+encode_pack	store-packs.hirsel	manifest	manifest	L4
+PackBuffers	store-packs.hirsel	manifest	manifest	L4
+cut_output_buffers	store-packs.hirsel	manifest	manifest	L4
+write_pack_run	store-packs.hirsel	manifest	manifest	L4
+sparse_pack	store-packs.hirsel	manifest	manifest	L4
+moved_frames	store-packs.hirsel	manifest	manifest	L4
+encode_pack_row	store-packs.hirsel	manifest	manifest	L4
+reserve_list_edit	store-packs.hirsel	manifest	manifest	L4
+edit_pack_list	store-packs.hirsel	manifest	manifest	L4
+PagedLists	store-packs.hirsel	manifest	manifest	L4
+empty_paged_lists	store-packs.hirsel	manifest	manifest	L4
+transfer_deferred_rows	store-packs.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 3)
+plan_lineage_root	store-packs.hirsel	manifest	manifest	L4
+ListLayout	store-packs.hirsel	manifest	manifest	L4
+empty_cut_frames	store-packs.hirsel	manifest	manifest	L4
+retiring_list_packs	store-packs.hirsel	manifest	manifest	L4
+plan_paged_lists	store-packs.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+PageRetryBase	store-packs.hirsel	manifest	manifest	L4
+page_retry_base	store-packs.hirsel	manifest	manifest	L4
+PagedCutLayout	store-packs.hirsel	manifest	manifest	L4
+plan_page_cut	store-packs.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+write_page_cut	store-packs.hirsel	manifest	manifest	L4
+prepare_page_cut	store-packs.hirsel	manifest	manifest	L4
+attach_page_graph	store-page-recovery.hirsel	manifest	manifest	L4
+LoadedPageStore	store-page-recovery.hirsel	manifest	manifest	L4
+attach_manifest_holders	store-page-recovery.hirsel	manifest	manifest	L4
+recovered_tiered_inventory	store-page-recovery.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
+rebuild_page_store	store-page-recovery.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
+PageTree	store-pages.hirsel	pages	pages	L2
+PageRoots	store-pages.hirsel	pages	pages	L2
+KEYED_TREE_COUNT	store-pages.hirsel	pages	pages	L2
+new_keyed_pages	store-pages.hirsel	pages	pages	L2
+share_keyed_pages	store-pages.hirsel	pages	pages	L2
+attach_page_tree	store-pages.hirsel	pages	pages	L2
+attach_page_roots	store-pages.hirsel	pages	pages	L2
+new_page_tree	store-pages.hirsel	pages	pages	L2
+share_page_tree	store-pages.hirsel	pages	pages	L2
+tree_domain	store-pages.hirsel	pages	pages	L2
+tree_stamp	store-pages.hirsel	pages	pages	L2
+install_page_tree	store-pages.hirsel	pages	pages	L2
+page_error	store-pages.hirsel	pages	pages	L2
+page_result	store-pages.hirsel	pages	pages	L2
+CollectionDescriptor	store-pages.hirsel	pages	pages	L2
+collection_descriptor	store-pages.hirsel	pages	pages	L2
+unwrap_collection_descriptor	store-pages.hirsel	pages	pages	L2
+collection_by_key	store-pages.hirsel	pages	pages	L2
+descriptor_kind_byte	store-pages.hirsel	pages	pages	L2
+collection_header	store-pages.hirsel	pages	pages	L2
+rooted_collection_record	store-pages.hirsel	pages	pages	L2
+cell_record	store-pages.hirsel	pages	pages	L2
+log_record	store-pages.hirsel	pages	pages	L2
+put_collection	store-pages.hirsel	pages	pages	L2
+define_collection	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+bulk_collection	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+count_page_rows	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+collection_rank	store-pages.hirsel	pages	pages	L2
+one_page_account	store-pages.hirsel	pages	pages	L2
+page_image_charge	store-pages.hirsel	pages	pages	L2
+resident_images	store-pages.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+account_frontier	store-pages.hirsel	pages	pages	L2
+compare_row_versions	store-pages.hirsel	pages	pages	L2
+count_row_versions	store-pages.hirsel	pages	pages	L2
+row_version_union	store-pages.hirsel	pages	pages	L2
+account_collection_key	store-pages.hirsel	pages	pages	L2
+page_row_account	store-pages.hirsel	pages	pages	L2
+get_page_row	store-pages.hirsel	pages	pages	L2
+collection_kind	store-pages.hirsel	pages	pages	L2
+put_page_row	store-pages.hirsel	pages	pages	L2
+put_shared_page_row	store-pages.hirsel	pages	pages	L2
+remove_page_row	store-pages.hirsel	pages	pages	L2
+drop_collection	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+CollectionCursor	store-pages.hirsel	pages	pages	L2
+collection_cursor	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+collection_row_key	store-pages.hirsel	pages	pages	L2
+PageRange	store-pages.hirsel	pages	pages	L2
+open_page_range	store-pages.hirsel	pages	pages	L2
+next_page_range	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+range_has_cell	store-pages.hirsel	pages	pages	L2
+open_page_collection	store-pages.hirsel	pages	pages	L2
+validate_catalog_key	store-prepared-check.hirsel	transfer	transfer	L13
+validate_delta	store-prepared-check.hirsel	transfer	transfer	L13
+Binding	store-projector.hirsel	store	store	-
+Generation	store-projector.hirsel	store	store	-
+Image	store-projector.hirsel	store	store	-
+Pass	store-projector.hirsel	store	store	-
+Merge	store-projector.hirsel	store	store	-
+Projection	store-projector.hirsel	store	store	-
+Live	store-projector.hirsel	store	store	-
+Cadence	store-projector.hirsel	store	store	-
+cadence	store-projector.hirsel	store	store	-
+Source	store-projector.hirsel	store	store	-
+ProjectionDecl	store-projector.hirsel	store	store	-
+Projector	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+Delta	store-projector.hirsel	store	store	-
+Fold	store-projector.hirsel	store	store	-
+Stepped	store-projector.hirsel	store	store	-
+ProjectError	store-projector.hirsel	store	store	-
+projection_empty	store-projector.hirsel	maintenance	maintenance	L14
+projector_pin_name	store-projector.hirsel	maintenance	pages	L2	pull-down maintenance -> pages (used by tail_base)
+projection	store-projector.hirsel	store	store	-
+ProjectorState	store-projector.hirsel	maintenance	maintenance	L14
+DeclaredProjector	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+PROJECTOR_READ_PINS	store-projector.hirsel	maintenance	maintenance	L14
+projector	store-projector.hirsel	store	store	-
+projector_run	store-projector.hirsel	store	store	-
+source_reader	store-projector.hirsel	store	store	-
+step_declared	store-projector.hirsel	store	store	-
+projector_slot	store-projector.hirsel	store	store	-
+main_commit_version	store-projector.hirsel	store	store	-
+projector_names	store-projector.hirsel	store	store	-
+project_step	store-projector.hirsel	store	store	-
+binding	store-projector.hirsel	store	store	-
+live	store-projector.hirsel	store	store	-
+projection_row	store-projector.hirsel	store	store	-
+read_projection	store-projector.hirsel	store	store	-
+project_target	store-projector.hirsel	store	store	-
+project_binding	store-projector.hirsel	store	store	-
+same_project_snapshot	store-projector.hirsel	maintenance	maintenance	L14
+borrowed_projection_base	store-projector.hirsel	store	store	-
+held_projection_target	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+exact_follower_checkpoint	store-projector.hirsel	maintenance	maintenance	L14
+projection_page	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+pin_projection_target	store-projector.hirsel	store	store	-
+generations_contiguous	store-projector.hirsel	maintenance	maintenance	L14
+merge_start	store-projector.hirsel	maintenance	maintenance	L14
+publish_merge	store-projector.hirsel	maintenance	maintenance	L14
+without_generation	store-projector.hirsel	maintenance	maintenance	L14
+ProjectionAction	store-projector.hirsel	maintenance	maintenance	L14
+ProjectionWork	store-projector.hirsel	maintenance	maintenance	L14
+ProjectionAbort	store-projector.hirsel	maintenance	maintenance	L14
+apply_projection_change	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+write_projection	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+project_commit	store-projector.hirsel	store	store	-
+forget_projector	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
+discard_projection_pass	store-projector.hirsel	store	store	-
+discard_merge	store-projector.hirsel	store	store	-
+retire_projection	store-projector.hirsel	store	store	-
+rebind_projection	store-projector.hirsel	store	store	-
+publish_projection_page	store-projector.hirsel	store	store	-
+continue_projection	store-projector.hirsel	store	store	-
+merge_projection	store-projector.hirsel	store	store	-
+tend_projection	store-projector.hirsel	store	store	-
+step_projector	store-projector.hirsel	store	store	-
+rebuild	store-projector.hirsel	store	store	-
+PinOwner	store-projector.hirsel	maintenance	pages	L2
+Pin	store-projector.hirsel	maintenance	pages	L2
+share_pin	store-projector.hirsel	maintenance	pages	L2	pull-down maintenance -> object_writer (used by copy_follow_state); pull-down object_writer -> pages (used by state_with_delta)
+pin_owner_tag	store-projector.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by append_page_manifest_pin)
+pin_order	store-projector.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by decode_page_manifest)
+pin_index	store-projector.hirsel	store	store	-
+pinned	store-projector.hirsel	store	store	-
+owned_pin	store-projector.hirsel	store	store	-
+pin	store-projector.hirsel	store	store	-
+replace_projector_pin	store-projector.hirsel	store	store	-
+capture_matches_head	store-projector.hirsel	maintenance	maintenance	L14
+roots_match_head	store-projector.hirsel	maintenance	maintenance	L14
+pin_shares_head	store-projector.hirsel	store	store	-
+change_pin	store-projector.hirsel	store	store	-
+pin_delta	store-projector.hirsel	store	store	-
+unpin	store-projector.hirsel	store	store	-
+remove_pin	store-projector.hirsel	store	store	-
+page_limits	store-read-pages.hirsel	read	read	L11
+scan_page	store-read-pages.hirsel	store	store	-
+find_page	store-read-pages.hirsel	store	store	-
+resume_here	store-read-pages.hirsel	read	read	L11
+scan_next	store-read-pages.hirsel	store	store	-
+find_next	store-read-pages.hirsel	store	store	-
+read_snapshot_collection_page	store-read-pages.hirsel	read	read	L11
+scan_page_start	store-read-pages.hirsel	read	read	L11
+scan_page_after	store-read-pages.hirsel	read	pager	L5	pull-down read -> pager (used by snapshot_collection_rows)
+SnapshotPageStep	store-read-pages.hirsel	read	read	L11
+snapshot_page_step	store-read-pages.hirsel	read	read	L11
+read_snapshot_page	store-read-pages.hirsel	read	read	L11
+table_identity	store-read.hirsel	store	store	-
+ReadAccess	store-read.hirsel	read	read	L11
+ReaderPool	store-read.hirsel	read	read	L11
+Reader	store-read.hirsel	store	store	-
+hot_read_access	store-read.hirsel	read	read	L11
+make_reader	store-read.hirsel	read	read	L11
+open_reader	store-read.hirsel	read	read	L11
+reader	store-read.hirsel	store	store	-
+follower_reader	store-read.hirsel	store	store	-
+read_only_reader	store-read.hirsel	store	store	-
+staged_reader	store-read.hirsel	store	store	-
+read_access	store-read.hirsel	read	read	L11
+copy_env	store-read.hirsel	store	store	-
+SpanRows	store-read.hirsel	store	store	-
+open_span_changes	store-read.hirsel	store	store	-
+next_span_change	store-read.hirsel	store	store	-
+memory_span_step	store-read.hirsel	read	read	L11
+span_changes	store-read.hirsel	store	store	-
+Rows	store-read.hirsel	store	store	-
+table_decoder	store-read.hirsel	read	read	L11
+snapshot_pager	store-read.hirsel	read	read	L11
+snapshot_point	store-read.hirsel	read	read	L11
+get	store-read.hirsel	store	store	-
+count_at	store-read.hirsel	store	store	-
+decode_row_key	store-read.hirsel	read	read	L11
+advance_rows	store-read.hirsel	read	read	L11
+finish_row	store-read.hirsel	read	pager	L5	pull-down read -> pager (used by tiered_snapshot_row)
+open_scan	store-read.hirsel	read	read	L11
+open_snapshot_rows	store-read.hirsel	read	read	L11
+collection_is_tiered	store-read.hirsel	read	read	L11
+scan	store-read.hirsel	store	store	-
+scan_reverse	store-read.hirsel	store	store	-
+find	store-read.hirsel	store	store	-
+resume_data	store-read.hirsel	read	read	L11
+snapshot_scan_step	store-read.hirsel	read	read	L11
+decode_snapshot_next	store-read.hirsel	read	read	L11
+next	store-read.hirsel	store	store	-
+next_memory_snapshot	store-read.hirsel	read	read	L11
+decode_table_row	store-read.hirsel	read	read	L11
+scan_raw	store-read.hirsel	read	read	L11
+range	store-read.hirsel	store	store	-
+range_reverse	store-read.hirsel	store	store	-
+check_table_read	store-read.hirsel	store	store	-
+open_range	store-read.hirsel	store	store	-
+range_prefix	store-read.hirsel	store	store	-
+count	store-read.hirsel	store	store	-
+open_range_bounds	store-read.hirsel	store	store	-
+TxRows	store-read.hirsel	store	store	-
+next_in	store-read.hirsel	store	store	-
+next_tx_page	store-read.hirsel	read	read	L11
+note_tx_row	store-read.hirsel	read	read	L11
+prefix_limits	store-read.hirsel	read	read	L11
+IndexRows	store-read.hirsel	store	store	-
+IndexEntries	store-read.hirsel	store	store	-
+primary_key	store-read.hirsel	store	store	-
+check_index_read	store-read.hirsel	store	store	-
+lookup	store-read.hirsel	store	store	-
+lookup_prefix	store-read.hirsel	store	store	-
+open_lookup	store-read.hirsel	store	store	-
+entries	store-read.hirsel	store	store	-
+note_index_step	store-read.hirsel	read	read	L11
+next_indexed	store-read.hirsel	store	store	-
+next_index_page	store-read.hirsel	read	txn	L12	push-up read -> txn (refs at layer 10)
+next_entry	store-read.hirsel	store	store	-
+ReadOnly	store-read.hirsel	store	store	-
+read_only_table	store-read.hirsel	store	store	-
+read_only_get	store-read.hirsel	store	store	-
+read_only_snapshot	store-read.hirsel	store	store	-
+HistoryRetention	store-reclaim.hirsel	object_writer	history	L7	pull-down object_writer -> history (used by history_checkpoint_packet)
+history_retain	store-reclaim.hirsel	object_writer	object_writer	L9
+HistoryName	store-reclaim.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by history_parse_archive_name)
+history_parse_name	store-reclaim.hirsel	object_writer	object_writer	L9
+ReclaimPass	store-reclaim.hirsel	object_writer	object_writer	L9
+history_dead_key	store-reclaim.hirsel	object_writer	object_writer	L9
+history_dead_upload	store-reclaim.hirsel	object_writer	object_writer	L9
+ObjectReclaimCapture	store-reclaim.hirsel	object_writer	object_writer	L9
+live_reclaim_name	store-reclaim.hirsel	object_writer	object_writer	L9
+live_reclaim_checkpoint	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_chain	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_capture	store-reclaim.hirsel	object_writer	object_writer	L9
+history_abort_reclaimed_uploads	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_page_bytes	store-reclaim.hirsel	object_writer	object_writer	L9
+sweep_start	store-reclaim.hirsel	object_writer	object_writer	L9
+history_entry_cursor	store-reclaim.hirsel	object_writer	object_writer	L9
+history_sweep_entries	store-reclaim.hirsel	object_writer	object_writer	L9
+history_reclaim_prefix	store-reclaim.hirsel	object_writer	object_writer	L9
+RECLAIM_FORMAT_VERSION	store-reclaim.hirsel	store	object_writer	L9	A-split body to object_writer (used by preview_on_lane)
+RECLAIM_TOOL_VERSION	store-reclaim.hirsel	store	object_writer	L9	A-split body to object_writer (used by preview_on_lane)
+ReclaimKind	store-reclaim.hirsel	store	store	-
+ReclaimItem	store-reclaim.hirsel	store	store	-
+ReclaimStatus	store-reclaim.hirsel	store	store	-
+ReclaimList	store-reclaim.hirsel	store	store	-
+PurgeReport	store-reclaim.hirsel	store	store	-
+ReclaimError	store-reclaim.hirsel	store	store	-
+reclaim_pass_for_lane	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_kind_for_prefix	store-reclaim.hirsel	object_writer	object_writer	L9
+history_execute_reclaim	store-reclaim.hirsel	object_writer	object_writer	L9
+PreviewAcc	store-reclaim.hirsel	object_writer	object_writer	L9
+preview_record	store-reclaim.hirsel	object_writer	object_writer	L9
+preview_sweep_entries	store-reclaim.hirsel	object_writer	object_writer	L9
+preview_reclaim_prefix	store-reclaim.hirsel	object_writer	object_writer	L9
+preview_reclaim_uploads	store-reclaim.hirsel	object_writer	object_writer	L9
+record_object_lane_failure	store-reclaim.hirsel	store	store	-
+preview_on_lane	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_preview	store-reclaim.hirsel	store	store	-
+purge_on_lane	store-reclaim.hirsel	object_writer	object_writer	L9
+reclaim_purge	store-reclaim.hirsel	store	store	-
+Difference	store-reexec.hirsel	store	store	-
+UnknownReason	store-reexec.hirsel	store	store	-
+Verdict	store-reexec.hirsel	store	store	-
+recorded_call	store-reexec.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+recorded_commit	store-reexec.hirsel	store	store	-
+BaseReplay	store-reexec.hirsel	txn	txn	L12
+base_roots	store-reexec.hirsel	store	store	-
+replay_base_state	store-reexec.hirsel	txn	txn	L12
+stop_kind	store-reexec.hirsel	txn	txn	L12
+Rerun	store-reexec.hirsel	txn	txn	L12
+rerun_attempt	store-reexec.hirsel	store	store	-
+rerun	store-reexec.hirsel	store	store	-
+recorded_reply	store-reexec.hirsel	txn	txn	L12
+same_writes	store-reexec.hirsel	txn	txn	L12
+ReplaySource	store-reexec.hirsel	store	store	-
+replay_source	store-reexec.hirsel	store	store	-
+replay_run	store-reexec.hirsel	store	store	-
+reexecute	store-reexec.hirsel	store	store	-
+prepare_reexecute	store-reexec.hirsel	store	store	-
+replay_declaration_base	store-reexec.hirsel	txn	txn	L12
+declare_replay	store-reexec.hirsel	store	store	-
+replay_record	store-reexec.hirsel	store	store	-
+reexecute_with	store-reexec.hirsel	store	store	-
+ReplayProjection	store-reexec.hirsel	store	store	-
+project_recorded	store-reexec.hirsel	store	store	-
+RecordedClaim	store-reexec.hirsel	store	store	-
+recorded_claim	store-reexec.hirsel	store	store	-
+HistoryWrite	store-register.hirsel	history	history	L7
+history_fetch_head	store-register.hirsel	history	history	L7
+history_write_head	store-register.hirsel	history	history	L7
+HistoryRegister	store-register.hirsel	history	history	L7
+history_encode_register_head	store-register.hirsel	history	history	L7
+history_authority_end	store-register.hirsel	history	history	L7
+HistoryTerminal	store-register.hirsel	history	history	L7
+HISTORY_BUFFER_KEY_BYTES	store-register.hirsel	history	history	L7
+HistoryBuffers	store-register.hirsel	history	history	L7
+history_buffers	store-register.hirsel	history	history	L7
+history_packet_header	store-register.hirsel	history	history	L7
+history_new_ref	store-register.hirsel	history	history	L7
+history_fetch	store-register.hirsel	history	history	L7
+history_create	store-register.hirsel	history	history	L7
+history_register_advance	store-register.hirsel	history	history	L7
+history_register_publish	store-register.hirsel	history	history	L7
+history_claim_packet	store-register.hirsel	history	history	L7
+history_manifest_packet	store-register.hirsel	history	history	L7
+history_genesis_packet	store-register.hirsel	history	history	L7
+HISTORY_PROBE_TAG	store-register.hirsel	history	history	L7
+history_probe_tag	store-register.hirsel	history	history	L7
+history_check_conditions	store-register.hirsel	history	history	L7
+history_publish_genesis	store-register.hirsel	history	history	L7
+history_publish_base	store-register.hirsel	history	history	L7
+HistoryClaimResult	store-register.hirsel	history	history	L7
+history_claim_saved	store-register.hirsel	history	history	L7
+history_claim_same	store-register.hirsel	history	history	L7
+history_claim_changed	store-register.hirsel	history	history	L7
+history_replace_claim	store-register.hirsel	history	history	L7
+KeptRange	store-rounds.hirsel	transfer	transfer	L13
+KeptImport	store-rounds.hirsel	store	store	-
+RoundMeta	store-rounds.hirsel	transfer	transfer	L13
+RangeTotal	store-rounds.hirsel	transfer	transfer	L13
+RoundOp	store-rounds.hirsel	transfer	transfer	L13
+ShippedImport	store-rounds.hirsel	transfer	transfer	L13
+ValidatedRound	store-rounds.hirsel	store	store	-
+ROUND_ROLE	store-rounds.hirsel	transfer	transfer	L13
+import_pin_slot	store-rounds.hirsel	store	store	-
+orphan_import_pin	store-rounds.hirsel	store	store	-
+same_stamp	store-rounds.hirsel	transfer	transfer	L13
+keep_import	store-rounds.hirsel	store	store	-
+hold_import	store-rounds.hirsel	store	store	-
+shipped_ranges	store-rounds.hirsel	transfer	transfer	L13
+rebase_kept_delta	store-rounds.hirsel	transfer	transfer	L13
+kept_ranges	store-rounds.hirsel	transfer	transfer	L13
+Touch	store-rounds.hirsel	transfer	transfer	L13
+note_touch	store-rounds.hirsel	transfer	transfer	L13
+round_ops	store-rounds.hirsel	transfer	transfer	L13
+bytes_order	store-rounds.hirsel	transfer	transfer	L13
+write_round	store-rounds.hirsel	transfer	transfer	L13
+FrameFile	store-rounds.hirsel	transfer	transfer	L13
+FRAME_BATCH	store-rounds.hirsel	transfer	transfer	L13
+open_frames	store-rounds.hirsel	transfer	transfer	L13
+write_prepared_frame	store-rounds.hirsel	transfer	transfer	L13
+write_prepared_payload	store-rounds.hirsel	transfer	transfer	L13
+flush_frames	store-rounds.hirsel	transfer	transfer	L13
+finish_frames	store-rounds.hirsel	transfer	transfer	L13
+validate_round	store-rounds.hirsel	store	store	-
+apply_round	store-rounds.hirsel	store	store	-
+is_present	store-rounds.hirsel	transfer	transfer	L13
+ships	store-rounds.hirsel	transfer	transfer	L13
+shipped_count	store-rounds.hirsel	transfer	transfer	L13
+range_totals	store-rounds.hirsel	transfer	transfer	L13
+range_rows	store-rounds.hirsel	transfer	transfer	L13
+removed_pin	store-rounds.hirsel	transfer	store	-	pull-down transfer -> manifest (used by fill_cut_manifest); pull-down manifest -> pages (used by state_with_delta); push-up pages -> store (refs at layer 12)
+install_account	store-rounds.hirsel	store	store	-
+SCRUB_HISTORY_ROLE	store-scrub-pace.hirsel	manifest	manifest	L4
+SCRUB_HISTORY_KIND	store-scrub-pace.hirsel	manifest	manifest	L4
+SCRUB_HISTORY_MAX_ROUNDS	store-scrub-pace.hirsel	manifest	manifest	L4
+SCRUB_HISTORY_FILE_LIMIT	store-scrub-pace.hirsel	manifest	manifest	L4
+ScrubRound	store-scrub-pace.hirsel	store	store	-
+ScrubHistory	store-scrub-pace.hirsel	store	store	-
+ScrubConfig	store-scrub-pace.hirsel	store	store	-
+ScrubStatus	store-scrub-pace.hirsel	store	store	-
+ScrubStepResult	store-scrub-pace.hirsel	store	store	-
+ScrubPacer	store-scrub-pace.hirsel	store	store	-
+empty_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
+read_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
+write_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
+scrub_history	store-scrub-pace.hirsel	store	store	-
+last_complete_scrub_round	store-scrub-pace.hirsel	store	capture	L7	A-split body to capture (used by describe_lines)
+record_scrub_round	store-scrub-pace.hirsel	store	store	-
+ceil_millis_ratio	store-scrub-pace.hirsel	manifest	manifest	L4
+scrub_estimated_bytes	store-scrub-pace.hirsel	manifest	manifest	L4
+scrub_pace_rate	store-scrub-pace.hirsel	manifest	manifest	L4
+begin_scrub_pacer	store-scrub-pace.hirsel	store	store	-
+scrub_pacer_status	store-scrub-pace.hirsel	store	store	-
+scrub_pacer_step	store-scrub-pace.hirsel	store	store	-
+scrub_pacer_stop	store-scrub-pace.hirsel	store	store	-
+ScrubLease	store-scrub.hirsel	manifest	manifest	L4
+ScrubPack	store-scrub.hirsel	manifest	manifest	L4
+ScrubInput	store-scrub.hirsel	manifest	manifest	L4
+Scrub	store-scrub.hirsel	store	store	-
+ScrubReport	store-scrub.hirsel	store	store	-
+begin_scrub	store-scrub.hirsel	store	store	-
+scrub_step	store-scrub.hirsel	store	store	-
+scrub_finish_pack	store-scrub.hirsel	manifest	manifest	L4
+scrub_pack_pointers	store-scrub.hirsel	manifest	manifest	L4
+scrub_next	store-scrub.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+scrub_prefix	store-scrub.hirsel	manifest	manifest	L4
+scrub_frame	store-scrub.hirsel	manifest	manifest	L4
+ScannedPackFrame	store-scrub.hirsel	manifest	manifest	L4
+read_pack_frame	store-scrub.hirsel	manifest	manifest	L4
+scrub_payload	store-scrub.hirsel	manifest	manifest	L4
+scrub_leased	store-scrub.hirsel	manifest	manifest	L4
+prune_scrubs	store-scrub.hirsel	manifest	manifest	L4
+SimLevels	store-sim-levels.hirsel	store	store	-
+LevelWorld	store-sim-levels.hirsel	store	store	-
+LevelSync	store-sim-levels.hirsel	store	store	-
+LevelUntil	store-sim-levels.hirsel	store	store	-
+LevelHold	store-sim-levels.hirsel	store	store	-
+LevelKind	store-sim-levels.hirsel	store	store	-
+LevelEvent	store-sim-levels.hirsel	store	store	-
+LevelProgress	store-sim-levels.hirsel	object_writer	object_writer	L9
+WeakFrontiers	store-sim-levels.hirsel	object_writer	object_writer	L9
+WeakNotice	store-sim-levels.hirsel	object_writer	object_writer	L9
+WeakWaiters	store-sim-levels.hirsel	object_writer	object_writer	L9
+WeakWriterOpen	store-sim-levels.hirsel	object_writer	object_writer	L9
+WeakPublisher	store-sim-levels.hirsel	object_writer	object_writer	L9
+LevelOpen	store-sim-levels.hirsel	object_writer	object_writer	L9
+LevelCommand	store-sim-levels.hirsel	object_writer	object_writer	L9
+LevelTimer	store-sim-levels.hirsel	object_writer	object_writer	L9
+LevelStart	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_world	store-sim-levels.hirsel	store	store	-
+level_sync	store-sim-levels.hirsel	store	store	-
+level_mark	store-sim-levels.hirsel	store	store	-
+level_log	store-sim-levels.hirsel	store	store	-
+wake_level_at	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_event	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_released	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_sample	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_sample_open	store-sim-levels.hirsel	object_writer	object_writer	L9
+level_world_loop	store-sim-levels.hirsel	object_writer	object_writer	L9
+weak_publisher	store-sim-levels.hirsel	object_writer	object_writer	L9
+weak_notice_senders	store-sim-levels.hirsel	object_writer	object_writer	L9
+weak_notify_strong	store-sim-levels.hirsel	object_writer	object_writer	L9
+weak_publish	store-sim-levels.hirsel	object_writer	object_writer	L9
+ROLE_ARCHIVE	store-stream-archive.hirsel	host_stream	host_stream	L8
+KIND_ARCHIVE_ROWS	store-stream-archive.hirsel	host_stream	host_stream	L8
+ARCHIVE_ROWS_PER_FRAME	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_sealed_publish	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_sealed_step_attach	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_sealed_tail_epoch	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_sealed_fetch_slice	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_settle_sealed_core	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_settle_sealed	store-stream-archive.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+history_write_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
+history_parse_archive_name	store-stream-archive.hirsel	host_stream	host_stream	L8
+history_decode_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
+TailBatch	store-stream-claim.hirsel	host_stream	host_stream	L8
+TailStop	store-stream-claim.hirsel	host_stream	host_stream	L8
+TailBuffers	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_tail_buffers	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_tail_range	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_resolve_404	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_tail_batch	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_tail_apply	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+TailScan	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_tail_scan	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_tail_prescan_xindex	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_no_hold_scan	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+ClaimStream	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_at_root	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_claim_abandon	store-stream-claim.hirsel	host_stream	host_stream	L8
+stream_open_attached	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
+stream_apply_sealed_tail	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_load_settled	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_claim_attempt	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
+stream_claim_hold_scope	store-stream-claim.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_claim_final_head	store-stream-claim.hirsel	host_stream	host_stream	L8
+FollowSlice	store-stream-follow.hirsel	host_stream	host_stream	L8
+stream_follow_fetch_head	store-stream-follow.hirsel	host_stream	host_stream	L8
+stream_follow_reg_has_row	store-stream-follow.hirsel	host_stream	host_stream	L8
+stream_follow_find_sealed	store-stream-follow.hirsel	host_stream	host_stream	L8
+stream_follow_scan_slices	store-stream-follow.hirsel	host_stream	host_stream	L8
+stream_follow_apply_sealed_range	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_follow_make_capture	store-stream-follow.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_follow_load_fresh	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+stream_follow_capture	store-stream-follow.hirsel	host_stream	store	-	push-up host_stream -> object_writer (refs at layer 8); push-up object_writer -> store (refs at layer 12)
+ATTACH_LIMIT	store-stream-frames.hirsel	format	format	L1
+ATTACH_SEALED_MAX	store-stream-frames.hirsel	format	format	L1
+STREAM_TERM_BYTES	store-stream-frames.hirsel	format	format	L1
+REG_LIMIT	store-stream-frames.hirsel	format	format	L1
+STREAM_XINDEX_LIMIT	store-stream-frames.hirsel	format	format	L1
+STREAM_FOOTER_BYTES	store-stream-frames.hirsel	format	format	L1
+REG_FIXED_BYTES	store-stream-frames.hirsel	format	format	L1
+REG_ROW_BYTES	store-stream-frames.hirsel	format	format	L1
+STREAM_MAX_SLOTS	store-stream-frames.hirsel	format	format	L1
+STREAM_INDEX_BODY_HEAD	store-stream-frames.hirsel	format	format	L1
+STREAM_INDEX_ROW_BYTES	store-stream-frames.hirsel	format	format	L1
+STREAM_INDEX_PREFIX	store-stream-frames.hirsel	format	format	L1
+STREAM_INDEX_LIMIT	store-stream-frames.hirsel	format	format	L1
+STREAM_FOOTER_WIRE_BYTES	store-stream-frames.hirsel	format	format	L1
+STREAM_INDEX_PROBE	store-stream-frames.hirsel	format	format	L1
+stream_kind_limit	store-stream-frames.hirsel	format	format	L1
+ROLE_REGISTER	store-stream-frames.hirsel	format	format	L1
+ROLE_BATCH	store-stream-frames.hirsel	format	format	L1
+StreamRef	store-stream-frames.hirsel	format	format	L1
+SealedTail	store-stream-frames.hirsel	format	format	L1
+Attach	store-stream-frames.hirsel	format	format	L1
+stream_attached_sid	store-stream-frames.hirsel	format	format	L1
+stream_ref_put	store-stream-frames.hirsel	format	format	L1
+stream_ref_read	store-stream-frames.hirsel	format	format	L1
+stream_attach_bytes	store-stream-frames.hirsel	format	format	L1
+stream_attach_append	store-stream-frames.hirsel	format	format	L1
+stream_attach_decode	store-stream-frames.hirsel	format	format	L1
+stream_header	store-stream-frames.hirsel	format	format	L1
+StreamObjectHead	store-stream-frames.hirsel	format	format	L1
+stream_read_header	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+RegIndex	store-stream-frames.hirsel	format	format	L1
+RegRow	store-stream-frames.hirsel	format	format	L1
+StreamRegister	store-stream-frames.hirsel	format	format	L1
+stream_register_bytes	store-stream-frames.hirsel	format	format	L1
+stream_register_encode	store-stream-frames.hirsel	format	format	L1
+stream_register_decode	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_pair_below	store-stream-frames.hirsel	format	format	L1
+stream_register_follows	store-stream-frames.hirsel	format	format	L1
+BatchSlice	store-stream-frames.hirsel	format	format	L1
+BatchRow	store-stream-frames.hirsel	format	format	L1
+BatchIndex	store-stream-frames.hirsel	format	format	L1
+BatchBody	store-stream-frames.hirsel	format	format	L1
+stream_batch_key	store-stream-frames.hirsel	format	format	L1
+stream_batch_overhead	store-stream-frames.hirsel	format	format	L1
+stream_batch_size	store-stream-frames.hirsel	format	format	L1
+stream_batch_encode	store-stream-frames.hirsel	format	format	L1
+stream_footer_append	store-stream-frames.hirsel	format	format	L1
+stream_term_encode	store-stream-frames.hirsel	format	format	L1
+stream_batch_head	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_identity	store-stream-frames.hirsel	format	format	L1
+stream_same	store-stream-frames.hirsel	format	format	L1
+stream_store_below	store-stream-frames.hirsel	format	format	L1
+stream_batch_check	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_slice_check	store-stream-frames.hirsel	format	format	L1
+ROLE_XINDEX	store-stream-gc.hirsel	host_stream	format	L1	pull-down host_stream -> format (used by stream_xindex_decode)
+HeadRanges	store-stream-gc.hirsel	host_stream	host_stream	L8
+empty_head_ranges	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_attach_head_ranges	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_head_ranges_contain	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_xindex_key	store-stream-gc.hirsel	host_stream	host_stream	L8
+XIndexEntry	store-stream-gc.hirsel	format	format	L1
+StreamPin	store-stream-gc.hirsel	host_stream	format	L1	pull-down host_stream -> format (used by XIndex)
+XIndex	store-stream-gc.hirsel	format	format	L1
+HeadSummary	store-stream-gc.hirsel	host_stream	host_stream	L8
+StreamGcState	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_new	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_xindex_encode	store-stream-gc.hirsel	format	format	L1
+stream_xindex_decode	store-stream-gc.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_xindex_fetch	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_batch_released	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_add_entry	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_ensure_pin	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_record_batch	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_refresh_pins	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_record_head	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_rebuild	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_compute_low	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_fence_of	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_prune_entries	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_checkpoint	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_delete_below	store-stream-gc.hirsel	host_stream	host_stream	L8
+stream_gc_poll_pins	store-stream-gc.hirsel	host_stream	host_stream	L8
+JanitorAsk	store-stream-janitor.hirsel	host_stream	host_stream	L8
+stream_janitor_close_place	store-stream-janitor.hirsel	host_stream	store	-	push-up host_stream -> store (refs at layer 12)
+ForeignStreamWatch	store-stream-janitor.hirsel	host_stream	host_stream	L8
+CollectingTrigger	store-stream-janitor.hirsel	host_stream	host_stream	L8
+stream_foreign_watch	store-stream-janitor.hirsel	host_stream	host_stream	L8
+stream_foreign_watch_poll	store-stream-janitor.hirsel	host_stream	host_stream	L8
+stream_collecting_elect	store-stream-janitor.hirsel	host_stream	host_stream	L8
+stream_collecting_sweep	store-stream-janitor.hirsel	host_stream	host_stream	L8
+StreamId	store-stream-key.hirsel	store	store	-
+StreamKey	store-stream-key.hirsel	store	store	-
+SUBJECT_MAX	store-stream-key.hirsel	store	format	L1	A-split body to txn (used by claim_principal_end); A-split body txn -> format (used by parse_stream_key)
+STREAM_RETENTION_MS	store-stream-key.hirsel	store	store	-
+STREAM_FUTURE_SLACK_MS	store-stream-key.hirsel	store	store	-
+caller_key	store-stream-key.hirsel	store	store	-
+stream_key_bytes	store-stream-key.hirsel	store	store	-
+parse_stream_key	store-stream-key.hirsel	format	format	L1
+stream_record_matches	store-stream-key.hirsel	store	format	L1	A-split body to txn (used by check_completion_record); A-split body txn -> capture (used by check_stream_ops); A-split body capture -> format (used by encode_frame)
+keyed_time	store-stream-key.hirsel	store	store	-
+stream_is_latched	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_service_reports	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_clear_place_tracking	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_sync_observed	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_first_seen	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_has_active_settle	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_has_stall_poll	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_mark_stalled	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_reap_closed_slots	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_process_reg	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_pair_in	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_push_janitor_ask	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_orphan_head_poll	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_service_arm_next	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_service_poll	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_service_unstall	store-stream-poll.hirsel	host_stream	host_stream	L8
+stream_service_latched	store-stream-poll.hirsel	host_stream	host_stream	L8
+ROLE_PROBE	store-stream-service.hirsel	host_stream	host_stream	L8
+STREAM_REG_ATTEMPTS	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_dir	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_key	store-stream-service.hirsel	host_stream	host_stream	L8
+PendingSlice	store-stream-service.hirsel	host_stream	host_stream	L8
+SliceDecision	store-stream-service.hirsel	host_stream	host_stream	L8
+StreamLane	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_lane	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_latch	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_latched	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_reg_fetch_once	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_stalled	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_reg_read	store-stream-service.hirsel	host_stream	host_stream	L8
+RegIntent	store-stream-service.hirsel	host_stream	host_stream	L8
+RegWrite	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_hold_rev	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_token_in	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_intent_present	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_intent_apply	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_intent_moved	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_reg_write	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_fence_incarnation	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_trigger_holds	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_elect_with_check	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_elect	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_start_fresh	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_batch_put	store-stream-service.hirsel	host_stream	host_stream	L8
+AckDecision	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_ack_rule	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_decide	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_decide_pending	store-stream-service.hirsel	host_stream	host_stream	L8
+stream_cycle	store-stream-service.hirsel	host_stream	host_stream	L8
+SettleOutcome	store-stream-settle.hirsel	host_stream	host_stream	L8
+stream_find_sealed_cutoff	store-stream-settle.hirsel	host_stream	host_stream	L8
+stream_poll_head	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_settle_publish	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+stream_settle_attach	store-stream-settle.hirsel	host_stream	host_stream	L8
+stream_settle	store-stream-settle.hirsel	host_stream	object_writer	L9	push-up host_stream -> object_writer (refs at layer 8)
+Batching	store-stream-slot.hirsel	store	store	-
+StreamLimits	store-stream-slot.hirsel	store	store	-
+StreamPlan	store-stream-slot.hirsel	store	store	-
+StreamRoot	store-stream-slot.hirsel	store	store	-
+SlotMsg	store-stream-slot.hirsel	host_stream	host_stream	L8
+SlotAck	store-stream-slot.hirsel	host_stream	journal	L6	pull-down host_stream -> journal (used by JournalMsg)
+SlotReport	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_CONTROL_RING	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_SLOT_CHUNKS	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_SLOT_ACKS	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_CONNECTION_BASE	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_MIN_SLOT_BYTES	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_slot_chunk	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_POLL_RING	store-stream-slot.hirsel	host_stream	host_stream	L8
+STREAM_TIMER_BYTES	store-stream-slot.hirsel	host_stream	host_stream	L8
+ServiceControl	store-stream-slot.hirsel	host_stream	host_stream	L8
+JournalSlot	store-stream-slot.hirsel	store	store	-
+JournalService	store-stream-slot.hirsel	store	store	-
+stream_service_bytes	store-stream-slot.hirsel	store	store	-
+STREAM_SERVICE_FIXED	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_plan_check	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_root_dir	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_overlaps	store-stream-slot.hirsel	host_stream	host_stream	L8
+stream_authority_parts	store-stream-slot.hirsel	host_stream	host_stream	L8
+journal_service	store-stream-slot.hirsel	store	store	-
+stream_rewrap	store-stream-slot.hirsel	host_stream	host_stream	L8
+journal_slot	store-stream-slot.hirsel	store	store	-
+journal_reserved_slot	store-stream-slot.hirsel	host_stream	host_stream	L8
+journal_slot_kind	store-stream-slot.hirsel	host_stream	host_stream	L8
+journal_janitor_asks	store-stream-slot.hirsel	host_stream	host_stream	L8
+streamed	store-stream-slot.hirsel	store	store	-
+stream_reader	store-stream-slot.hirsel	store	store	-
+close_journal_service	store-stream-slot.hirsel	store	store	-
+SlotLink	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_link	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_ring	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_report	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_report_head	store-stream-slot.hirsel	host_stream	host_stream	L8
+SlotRelayInput	store-stream-slot.hirsel	store	store	-
+slot_relay	store-stream-slot.hirsel	store	store	-
+slot_attach	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_send	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_wait	store-stream-slot.hirsel	host_stream	host_stream	L8
+slot_claim_frame	store-stream-slot.hirsel	host_stream	host_stream	L8
+StreamServiceInput	store-stream-task.hirsel	host_stream	host_stream	L8
+StreamServiceEnd	store-stream-task.hirsel	host_stream	host_stream	L8
+SlotPlace	store-stream-task.hirsel	host_stream	host_stream	L8
+ServiceSlot	store-stream-task.hirsel	host_stream	host_stream	L8
+StallTicket	store-stream-task.hirsel	host_stream	host_stream	L8
+ObservedRow	store-stream-task.hirsel	host_stream	host_stream	L8
+ActiveSettle	store-stream-task.hirsel	host_stream	host_stream	L8
+StallPoll	store-stream-task.hirsel	host_stream	host_stream	L8
+StreamTimer	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_timer	store-stream-task.hirsel	host_stream	host_stream	L8
+BatchEntry	store-stream-task.hirsel	host_stream	host_stream	L8
+StreamService	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_task	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_loop	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_wake	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_drain_rings	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_control	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_new_slot	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_slot_unused	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_slot_closed	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_answer	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_flush_acks	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_batch_room	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_entry_of	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_gather	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_store_in	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_take_frame	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_batch	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_service_decided	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_ticket_stall	store-stream-task.hirsel	host_stream	host_stream	L8
+stream_serving_slot	store-stream-task.hirsel	host_stream	host_stream	L8
+HostStreamId	store-stream-types.hirsel	store	store	-
+StreamField	store-stream-types.hirsel	store	store	-
+StreamRefusal	store-stream-types.hirsel	store	store	-
+stream_refusal_text	store-stream-types.hirsel	store	store	-
+stream_latch_text	store-stream-types.hirsel	store	store	-
+StreamControl	store-streams.hirsel	txn	txn	L12
+CallerStreams	store-streams.hirsel	txn	txn	L12
+stream_control	store-streams.hirsel	store	store	-
+check_stream_quota	store-streams.hirsel	txn	txn	L12
+decode_stream_control	store-streams.hirsel	txn	txn	L12
+write_stream_control	store-streams.hirsel	txn	txn	L12
+caller_streams	store-streams.hirsel	txn	txn	L12
+write_caller_streams	store-streams.hirsel	txn	txn	L12
+age_floor	store-streams.hirsel	txn	txn	L12
+stream_at_or_below	store-streams.hirsel	txn	txn	L12
+stream_before	store-streams.hirsel	txn	txn	L12
+raise_expiry	store-streams.hirsel	txn	txn	L12
+StreamChanges	store-streams.hirsel	txn	txn	L12
+write_stream_changes	store-streams.hirsel	txn	txn	L12
+admit_stream	store-streams.hirsel	store	store	-
+stream_changes	store-streams.hirsel	store	store	-
+remove_front	store-streams.hirsel	txn	txn	L12
+reclaim_front	store-streams.hirsel	store	store	-
+stream_prefix_end	store-streams.hirsel	txn	txn	L12
+reclaim_streams	store-streams.hirsel	store	store	-
+AnonymousCursor	store-streams.hirsel	store	store	-
+anonymous_cursor	store-streams.hirsel	store	store	-
+reclaim_startup_streams	store-streams.hirsel	store	store	-
+StreamSweepCursor	store-streams.hirsel	txn	txn	L12
+StreamSweepEdit	store-streams.hirsel	txn	txn	L12
+sweep_streams	store-streams.hirsel	store	store	-
+stream_bytes	store-streams.hirsel	txn	txn	L12
+word_be	store-streams.hirsel	txn	format	L1	pull-down txn -> capture (used by capture_next_op); pull-down capture -> format (used by decode_settlement)
+stored_reply	store-streams.hirsel	txn	txn	L12
+StreamState	store-streams.hirsel	txn	txn	L12
+stream_state	store-streams.hirsel	txn	txn	L12
+stream_write	store-streams.hirsel	txn	txn	L12
+stream_edit	store-streams.hirsel	txn	txn	L12
+reply_row	store-streams.hirsel	txn	txn	L12
+reply	store-streams.hirsel	txn	txn	L12
+Completion	store-streams.hirsel	store	store	-
+ticket	store-streams.hirsel	store	store	-
+Admission	store-streams.hirsel	store	store	-
+OpenAdmit	store-streams.hirsel	txn	txn	L12
+stream_admit_held	store-streams.hirsel	store	store	-
+release_stream_admit	store-streams.hirsel	store	store	-
+admit	store-streams.hirsel	store	store	-
+admit_while	store-streams.hirsel	store	store	-
+admit_existing	store-streams.hirsel	store	store	-
+admit_next	store-streams.hirsel	store	store	-
+admit_commit	store-streams.hirsel	store	store	-
+lower_bytes	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by open_scan)
+byte_cursor	store-streams.hirsel	txn	catalog	L3	pull-down txn -> indexes (used by find_index_name); pull-down indexes -> catalog (used by migrate_build)
+reverse_byte_cursor	store-streams.hirsel	txn	read	L11	pull-down txn -> read (used by resume_data)
+next_bytes	store-streams.hirsel	txn	catalog	L3	pull-down txn -> catalog (used by complete_declaration)
+stream_live	store-streams.hirsel	store	store	-
+TailBase	store-tail.hirsel	pages	pages	L2
+TailBases	store-tail.hirsel	pages	pages	L2
+no_tail_bases	store-tail.hirsel	pages	pages	L2
+share_tail_bases	store-tail.hirsel	pages	pages	L2
+tail_bases	store-tail.hirsel	pages	pages	L2
+capture_tail_bases	store-tail.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+key_codec	store-tail.hirsel	store	store	-
+Tail	store-tail.hirsel	store	store	-
+tail_base	store-tail.hirsel	pages	pages	L2
+tiered_source	store-tail.hirsel	pages	catalog	L3	push-up pages -> catalog (refs at layer 3)
+read_tail	store-tail.hirsel	store	store	-
+TieredAttemptStop	store-tiered-attempt.hirsel	pager	pager	L5
+TieredSeek	store-tiered-attempt.hirsel	pager	pager	L5
+TieredValues	store-tiered-attempt.hirsel	pager	pager	L5
+TieredIntent	store-tiered-attempt.hirsel	pager	pager	L5
+TieredTouch	store-tiered-attempt.hirsel	pager	pager	L5
+TieredPath	store-tiered-attempt.hirsel	pager	pager	L5
+TieredGather	store-tiered-attempt.hirsel	pager	pager	L5
+TieredTouchSet	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_touch_set	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_attempt	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_settle	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_finish	store-tiered-attempt.hirsel	pager	pager	L5
+call_attempt	store-tiered-attempt.hirsel	pager	pager	L5
+call_attempt_latched	store-tiered-attempt.hirsel	pager	pager	L5
+call_attempt_finish	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_touch_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_gather_touch	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_gather_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_gather	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_blocked_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_blocked	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_touch	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_stopped_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_stopped	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_latch_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_latch	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_seek_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_seek	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_values_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_reading	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_missed_page_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_missed_page	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_siblings_entry	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_set_siblings	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_resolve_cold	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_touch_hot_page	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_pinned_page	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_point_page	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_touch_hot_blob	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_pinned_blob	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_point_value	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_point_path	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_leaf_prior	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_plan_path	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_plan_prior	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_edit_page	store-tiered-attempt.hirsel	pager	pager	L5
+stage_tiered_row	store-tiered-attempt.hirsel	pager	pager	L5
+stage_tiered_trim	store-tiered-attempt.hirsel	pager	pager	L5
+TieredBorrowedRoot	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_point_bytes	store-tiered-attempt.hirsel	pager	pager	L5
+tiered_point_bytes_at	store-tiered-attempt.hirsel	pager	pager	L5
+TieredCacheKey	store-tiered-cache.hirsel	pager	pager	L5
+TieredFifo	store-tiered-cache.hirsel	pager	pager	L5
+tiered_fifo	store-tiered-cache.hirsel	pager	pager	L5
+tiered_fifo_len	store-tiered-cache.hirsel	pager	pager	L5
+tiered_fifo_space	store-tiered-cache.hirsel	pager	pager	L5
+tiered_fifo_front	store-tiered-cache.hirsel	pager	pager	L5
+tiered_fifo_remove	store-tiered-cache.hirsel	pager	pager	L5
+TieredCacheEntry	store-tiered-cache.hirsel	pager	pager	L5
+TieredReaderGrant	store-tiered-cache.hirsel	pager	pager	L5
+TieredCache	store-tiered-cache.hirsel	pager	pager	L5
+new_tiered_cache	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_key	store-tiered-cache.hirsel	pager	pager	L5
+tiered_frame_charge	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_lookup	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_refresh_overlap	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_refresh_grants	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_ghost	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_evict	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_room	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_admit	store-tiered-cache.hirsel	pager	pager	L5
+READER_PIN_MIN	store-tiered-cache.hirsel	store	pager	L5	A-split body to pager (used by check_reader_pin_bytes)
+check_reader_pin_bytes	store-tiered-cache.hirsel	pager	pager	L5
+tiered_cache_reserve_reader	store-tiered-cache.hirsel	pager	pager	L5
+TieredRowDiff	store-tiered-changes.hirsel	pager	pager	L5
+TIERED_DIFF_BATCH	store-tiered-changes.hirsel	pager	pager	L5
+snapshot_paged	store-tiered-changes.hirsel	pager	pager	L5
+snapshot_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_row_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_span_changes	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+TieredDiffEdge	store-tiered-changes.hirsel	pager	pager	L5
+TIERED_DIFF_UNREAD	store-tiered-changes.hirsel	pager	pager	L5
+TIERED_DIFF_EXPAND	store-tiered-changes.hirsel	pager	pager	L5
+tiered_slot_stamp	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_spans	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_diff_paged	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_root	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_drop_shared	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_deepen	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_diff_expand	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+tiered_diff_push	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_add_span	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_overlay_spans	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_window_span	store-tiered-changes.hirsel	pager	pager	L5
+TieredDiffSide	store-tiered-changes.hirsel	pager	pager	L5
+tiered_diff_fill	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+snapshot_collection_rows	store-tiered-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+TieredCompaction	store-tiered-compact.hirsel	pager	pager	L5
+no_tiered_compaction	store-tiered-compact.hirsel	pager	pager	L5
+prune_tiered_leases	store-tiered-compact.hirsel	pager	pager	L5
+tiered_leased	store-tiered-compact.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by cut_retirement)
+lease_cut_inventories	store-tiered-compact.hirsel	pager	pager	L5
+TieredQueueValue	store-tiered-compact.hirsel	pager	pager	L5
+TieredQueueMove	store-tiered-compact.hirsel	pager	pager	L5
+TieredCompactWork	store-tiered-compact.hirsel	pager	pager	L5
+TieredCompactStep	store-tiered-compact.hirsel	pager	pager	L5
+compact_load	store-tiered-compact.hirsel	pager	pager	L5
+compact_rebuild	store-tiered-compact.hirsel	pager	pager	L5
+compact_note_moved	store-tiered-compact.hirsel	pager	pager	L5
+compact_relocate	store-tiered-compact.hirsel	pager	pager	L5
+compact_queue_page	store-tiered-compact.hirsel	pager	pager	L5
+compact_queue_row	store-tiered-compact.hirsel	pager	pager	L5
+compact_row	store-tiered-compact.hirsel	pager	pager	L5
+compact_probes	store-tiered-compact.hirsel	pager	pager	L5
+select_compaction	store-tiered-compact.hirsel	pager	pager	L5
+compact_cut	store-tiered-compact.hirsel	store	store	-
+queue_moves_in_order	store-tiered-compact.hirsel	pager	pager	L5
+tiered_emit_queue	store-tiered-compact.hirsel	pager	pager	L5
+settle_queue_moves	store-tiered-compact.hirsel	pager	pager	L5
+tiered_page_rank	store-tiered-count.hirsel	pager	pager	L5
+tiered_count_overlay	store-tiered-count.hirsel	pager	pager	L5
+read_tiered_count	store-tiered-count.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+TieredEmitFrame	store-tiered-emission.hirsel	pager	pager	L5
+TieredCutFrames	store-tiered-emission.hirsel	pager	pager	L5
+tiered_emit_tree	store-tiered-emission.hirsel	pager	pager	L5
+tiered_emit_map	store-tiered-emission.hirsel	pager	pager	L5
+tiered_cut_frames	store-tiered-emission.hirsel	pager	pager	L5
+tiered_cut_frames_restamped	store-tiered-emission.hirsel	pager	pager	L5
+TieredPackRun	store-tiered-emission.hirsel	pager	pager	L5
+layout_tiered_packs	store-tiered-emission.hirsel	pager	pager	L5
+planned_tiered_pack	store-tiered-emission.hirsel	pager	pager	L5
+encode_tiered_cut_pack	store-tiered-emission.hirsel	pager	pager	L5
+seal_tiered_map_slot	store-tiered-emission.hirsel	pager	pager	L5
+seal_tiered_map	store-tiered-emission.hirsel	pager	pager	L5
+seal_holder_tiered	store-tiered-emission.hirsel	pager	pager	L5
+CUT_HEIGHT_MAX	store-tiered-fold.hirsel	pager	pager	L5
+CUT_PIN_BYTES	store-tiered-fold.hirsel	pager	pager	L5
+fold_frame	store-tiered-fold.hirsel	pager	pager	L5
+fold_frame_at	store-tiered-fold.hirsel	pager	pager	L5
+fold_cold_path	store-tiered-fold.hirsel	pager	pager	L5
+fold_page	store-tiered-fold.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by queue_page_children)
+fold_base_prior	store-tiered-fold.hirsel	pager	pager	L5
+fold_prefix_charge	store-tiered-fold.hirsel	pager	pager	L5
+visit_fold_records	store-tiered-fold.hirsel	pager	pager	L5
+verify_tiered_fold	store-tiered-fold.hirsel	pager	pager	L5
+retry_fold_edit	store-tiered-fold.hirsel	pager	pager	L5
+restore_fold_slots	store-tiered-fold.hirsel	pager	pager	L5
+TieredFoldEffect	store-tiered-fold.hirsel	pager	pager	L5
+fold_effect_frontier	store-tiered-fold.hirsel	pager	pager	L5
+fold_slot_stamp	store-tiered-fold.hirsel	pager	pager	L5
+fold_record_lost	store-tiered-fold.hirsel	pager	pager	L5
+folded_step_effects	store-tiered-fold.hirsel	pager	pager	L5
+append_fold_effects	store-tiered-fold.hirsel	pager	pager	L5
+fold_materialize_row	store-tiered-fold.hirsel	pager	pager	L5
+fold_materialize_trim	store-tiered-fold.hirsel	pager	pager	L5
+FoldCollection	store-tiered-fold.hirsel	pager	pager	L5
+fold_log_before	store-tiered-fold.hirsel	pager	pager	L5
+inherited_fold_value	store-tiered-fold.hirsel	pager	pager	L5
+fold_apply_overlay	store-tiered-fold.hirsel	pager	pager	L5
+fold_collection	store-tiered-fold.hirsel	pager	pager	L5
+FoldMap	store-tiered-fold.hirsel	pager	pager	L5
+fold_page_tree	store-tiered-fold.hirsel	pager	pager	L5
+fold_collection_in_map	store-tiered-fold.hirsel	pager	pager	L5
+TieredTarget	store-tiered-frames.hirsel	format	format	L1
+TieredFrameId	store-tiered-frames.hirsel	format	format	L1
+TieredPayload	store-tiered-frames.hirsel	format	format	L1
+TieredFrame	store-tiered-frames.hirsel	format	format	L1
+tiered_frame_id	store-tiered-frames.hirsel	format	format	L1
+verify_tiered_edge	store-tiered-frames.hirsel	format	format	L1
+read_tiered_frame	store-tiered-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+DeferredFree	store-tiered-frees.hirsel	manifest	manifest	L4
+deferred_free_value	store-tiered-frees.hirsel	manifest	manifest	L4
+deferred_free_entry	store-tiered-frees.hirsel	manifest	manifest	L4
+decode_deferred_free	store-tiered-frees.hirsel	manifest	manifest	L4
+validate_deferred_target	store-tiered-frees.hirsel	manifest	manifest	L4
+TieredDeferredQueue	store-tiered-frees.hirsel	manifest	manifest	L4
+enqueue_tiered_free	store-tiered-frees.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 3)
+TieredDrainKill	store-tiered-frees.hirsel	manifest	manifest	L4
+tiered_drain_page	store-tiered-frees.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+queue_page_children	store-tiered-frees.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
+drain_tiered_frees	store-tiered-frees.hirsel	manifest	store	-	push-up manifest -> pager (refs at layer 4); push-up pager -> store (refs at layer 12)
+CutQueue	store-tiered-frees.hirsel	manifest	manifest	L4
+no_cut_queue	store-tiered-frees.hirsel	manifest	manifest	L4
+queued_free	store-tiered-frees.hirsel	manifest	manifest	L4
+drain_queue_row	store-tiered-frees.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
+drain_cut_queue	store-tiered-frees.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
+tiered_initial_changes	store-tiered-initial-changes.hirsel	pager	pager	L5
+snapshot_tiered_initial_changes	store-tiered-initial-changes.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+LineageFork	store-tiered-lineage.hirsel	manifest	manifest	L4
+LineageCell	store-tiered-lineage.hirsel	manifest	manifest	L4
+LineageRow	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_row	store-tiered-lineage.hirsel	manifest	manifest	L4
+decode_lineage_row	store-tiered-lineage.hirsel	manifest	manifest	L4
+Lineage	store-tiered-lineage.hirsel	manifest	manifest	L4
+LineageHolders	store-tiered-lineage.hirsel	manifest	manifest	L4
+validate_lineage_forks	store-tiered-lineage.hirsel	manifest	manifest	L4
+note_fork_dependent	store-tiered-lineage.hirsel	manifest	manifest	L4
+prune_lineage_forks	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_chain	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_origin	store-tiered-lineage.hirsel	manifest	manifest	L4
+add_lineage_holder	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_holders	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_interval	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_cell_valid	store-tiered-lineage.hirsel	manifest	manifest	L4
+lineage_kill_cell	store-tiered-lineage.hirsel	manifest	manifest	L4
+drop_lineage_cell	store-tiered-lineage.hirsel	manifest	manifest	L4
+add_lineage_cell	store-tiered-lineage.hirsel	manifest	manifest	L4
+subtract_pack_live	store-tiered-lineage.hirsel	manifest	manifest	L4
+file_lineage_kill	store-tiered-lineage.hirsel	manifest	manifest	L4
+apply_lineage_drops	store-tiered-lineage.hirsel	manifest	manifest	L4
+adopt_lineage_cells	store-tiered-lineage.hirsel	manifest	manifest	L4
+empty_lineage	store-tiered-lineage.hirsel	manifest	manifest	L4
+same_lineage	store-tiered-lineage.hirsel	manifest	manifest	L4
+build_lineage_tree	store-tiered-lineage.hirsel	manifest	manifest	L4
+queued_branch_ids	store-tiered-lineage.hirsel	manifest	manifest	L4
+cut_lineage_rows	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+settle_lineage_kills	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+settle_compaction	store-tiered-lineage.hirsel	manifest	manifest	L4
+note_fork_row	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+ReplayValue	store-tiered-overlay.hirsel	pager	pages	L2
+ReplayRow	store-tiered-overlay.hirsel	pager	pages	L2
+ReplayTrimEvidence	store-tiered-overlay.hirsel	pager	pages	L2
+ReplayOverlay	store-tiered-overlay.hirsel	pager	pages	L2
+empty_replay_overlay	store-tiered-overlay.hirsel	pager	pager	L5
+replay_overlay_at	store-tiered-overlay.hirsel	pager	pager	L5
+replay_value_width	store-tiered-overlay.hirsel	pager	pager	L5
+replay_value_prior	store-tiered-overlay.hirsel	pager	pager	L5
+replay_overlay_edit	store-tiered-overlay.hirsel	pager	pager	L5
+ReplayLogHead	store-tiered-overlay.hirsel	pager	pager	L5
+replay_overlay_trim	store-tiered-overlay.hirsel	pager	txn	L12	push-up pager -> txn (refs at layer 10)
+replay_overlay_count	store-tiered-overlay.hirsel	pager	pager	L5
+TieredPackDraft	store-tiered-packs.hirsel	pager	pager	L5
+tiered_page_index_key	store-tiered-packs.hirsel	pager	pager	L5
+begin_tiered_pack	store-tiered-packs.hirsel	pager	pager	L5
+tiered_frame_extent	store-tiered-packs.hirsel	pager	pager	L5
+add_tiered_pack_frame	store-tiered-packs.hirsel	pager	pager	L5
+finish_tiered_pack	store-tiered-packs.hirsel	pager	pager	L5
+TIERED_GET_STREAMS	store-tiered-pager-batch.hirsel	pager	pager	L5
+TieredBucketTarget	store-tiered-pager-batch.hirsel	pager	pager	L5
+TieredBucketBatch	store-tiered-pager-batch.hirsel	pager	pager	L5
+tiered_pager_read_edges	store-tiered-pager-batch.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+tiered_pager_bucket_batch	store-tiered-pager-batch.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+plan_bucket_batch	store-tiered-pager-batch.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+fetch_bucket_batch	store-tiered-pager-batch.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+unpack_bucket_window	store-tiered-pager-batch.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+TieredPagerSource	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerInput	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerTarget	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerPack	store-tiered-pager.hirsel	pager	pages	L2
+TieredReadInventory	store-tiered-pager.hirsel	pager	pages	L2
+TieredPageSource	store-tiered-pager.hirsel	pager	pager	L5
+TieredPointDemand	store-tiered-pager.hirsel	pager	pager	L5
+TieredPointDelivery	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerMessage	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerStart	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerLink	store-tiered-pager.hirsel	pager	pager	L5
+TieredPagerFunding	store-tiered-pager.hirsel	pager	pager	L5
+TIERED_PAGER_QUEUE	store-tiered-pager.hirsel	pager	pager	L5
+start_tiered_pager	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+start_tiered_pager_link	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+run_tiered_pager	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+tiered_pager_handle	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+pager_reader_grant	store-tiered-pager.hirsel	pager	pager	L5
+tiered_point_delivery	store-tiered-pager.hirsel	pager	pager	L5
+tiered_point_continuation	store-tiered-pager.hirsel	pager	pager	L5
+TieredDescent	store-tiered-pager.hirsel	pager	pager	L5
+tiered_demand_key	store-tiered-pager.hirsel	pager	pager	L5
+tiered_demand_values	store-tiered-pager.hirsel	pager	pager	L5
+tiered_cold_value	store-tiered-pager.hirsel	pager	pager	L5
+tiered_delivered_leaf	store-tiered-pager.hirsel	pager	pager	L5
+tiered_later_values	store-tiered-pager.hirsel	pager	pager	L5
+tiered_pager_point	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+tiered_pager_demand_target	store-tiered-pager.hirsel	pager	pager	L5
+tiered_pager_target	store-tiered-pager.hirsel	pager	pager	L5
+tiered_pager_point_frame	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+checked_tiered_pager_target	store-tiered-pager.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+tiered_pager_frame	store-tiered-pager.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+TieredPinRoot	store-tiered-pins.hirsel	pager	pager	L5
+TieredPins	store-tiered-pins.hirsel	pager	pager	L5
+TIERED_SCAN_WINDOW	store-tiered-pins.hirsel	pager	pager	L5
+tiered_window	store-tiered-pins.hirsel	pager	pager	L5
+empty_tiered_pins	store-tiered-pins.hirsel	pager	pager	L5
+tiered_reset_pins	store-tiered-pins.hirsel	pager	pager	L5
+tiered_pin_eviction	store-tiered-pins.hirsel	pager	pager	L5
+tiered_install_pin	store-tiered-pins.hirsel	pager	pager	L5
+TieredDataDelta	store-tiered-plan.hirsel	pager	format	L1	pull-down pager -> format (used by encode_data_ops)
+TieredWritePlan	store-tiered-plan.hirsel	pager	pager	L5
+tiered_staged_value	store-tiered-plan.hirsel	pager	pager	L5
+tiered_stage_collection_edit	store-tiered-plan.hirsel	pager	pager	L5
+tiered_wait_for_fold	store-tiered-plan.hirsel	pager	pager	L5
+prepare_tiered_writes	store-tiered-plan.hirsel	pager	pager	L5
+restore_planned_root	store-tiered-plan.hirsel	pager	pager	L5
+PlannedCollection	store-tiered-plan.hirsel	pager	pager	L5
+note_planned_collection	store-tiered-plan.hirsel	pager	pager	L5
+planned_freed	store-tiered-plan.hirsel	pager	pager	L5
+plan_tiered_edits	store-tiered-plan.hirsel	pager	pager	L5
+tiered_replayed_row	store-tiered-point-read.hirsel	pager	pager	L5
+TieredPageBackend	store-tiered-point-read.hirsel	pager	pager	L5
+read_tiered_point	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+read_tiered_point_direct	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+read_tiered_point_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+retry_tiered_read	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+retry_tiered_read_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+serve_tiered_miss	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+serve_tiered_miss_with	store-tiered-point-read.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+tiered_miss_demand	store-tiered-point-read.hirsel	pager	pager	L5
+tiered_miss_demand_raw	store-tiered-point-read.hirsel	pager	pager	L5
+tiered_install_delivery	store-tiered-point-read.hirsel	pager	pager	L5
+tx_page_source	store-tiered-point-read.hirsel	pager	pager	L5
+TieredIndexRequest	store-tiered-probe-index.hirsel	pager	pager	L5
+read_tiered_index_frame	store-tiered-probe-index.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+checked_tiered_index	store-tiered-probe-index.hirsel	pager	pager	L5
+pin_tiered_index	store-tiered-probe-index.hirsel	pager	pager	L5
+TieredProbeCursor	store-tiered-probe-index.hirsel	pager	pager	L5
+start_tiered_probe	store-tiered-probe-index.hirsel	pager	pager	L5
+probe_tiered_index	store-tiered-probe-index.hirsel	pager	pager	L5
+TieredProbePath	store-tiered-probe.hirsel	pager	pager	L5
+probe_frame_matches	store-tiered-probe.hirsel	pager	pager	L5
+probe_routing_key	store-tiered-probe.hirsel	pager	pager	L5
+probe_tiered_path	store-tiered-probe.hirsel	pager	pager	L5
+probe_deferred_root	store-tiered-probe.hirsel	pager	pager	L5
+TieredPromotionRoot	store-tiered-promote.hirsel	pager	pager	L5
+TieredPromotion	store-tiered-promote.hirsel	pager	pager	L5
+TieredPromotionNeed	store-tiered-promote.hirsel	pager	pager	L5
+TieredPromotionHit	store-tiered-promote.hirsel	pager	pager	L5
+promotion_collection_root	store-tiered-promote.hirsel	pager	pager	L5
+promotion_page_stamp	store-tiered-promote.hirsel	pager	pager	L5
+promotion_load_page	store-tiered-promote.hirsel	pager	pager	L5
+promotion_find_path	store-tiered-promote.hirsel	pager	pager	L5
+promotion_find	store-tiered-promote.hirsel	pager	pager	L5
+promotion_can_keep	store-tiered-promote.hirsel	pager	pager	L5
+promotion_resolve_blob	store-tiered-promote.hirsel	pager	pager	L5
+promotion_ref	store-tiered-promote.hirsel	pager	pager	L5
+promotion_resolve_page	store-tiered-promote.hirsel	pager	pager	L5
+share_page_source	store-tiered-promote.hirsel	pager	pager	L5
+promotion_tiered_collections	store-tiered-promote.hirsel	pager	pager	L5
+promotion_queue_root	store-tiered-promote.hirsel	pager	pager	L5
+promote_cut_holder	store-tiered-promote.hirsel	store	store	-
+promotion_materialize	store-tiered-promote.hirsel	pager	pager	L5
+promotion_materialize_collection	store-tiered-promote.hirsel	pager	pager	L5
+TieredCutPack	store-tiered-publish.hirsel	pager	pager	L5
+TieredCutStage	store-tiered-publish.hirsel	pager	pager	L5
+tiered_cut_stage_empty	store-tiered-publish.hirsel	pager	pager	L5
+encode_tiered_run	store-tiered-publish.hirsel	pager	pager	L5
+fold_owners	store-tiered-publish.hirsel	pager	pager	L5
+fold_cut_roots	store-tiered-publish.hirsel	pager	pager	L5
+queue_live_dropped	store-tiered-publish.hirsel	pager	pager	L5
+stage_tiered_cut	store-tiered-publish.hirsel	store	store	-
+drain_cut	store-tiered-publish.hirsel	store	store	-
+sealed_cut_holders	store-tiered-publish.hirsel	pager	pager	L5
+list_tiered_cut	store-tiered-publish.hirsel	pager	pager	L5
+write_tiered_cut	store-tiered-publish.hirsel	pager	pager	L5
+tiered_map_account	store-tiered-publish.hirsel	pager	pager	L5
+cut_tiered_account	store-tiered-publish.hirsel	pager	pager	L5
+prepare_tiered_install	store-tiered-publish.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+take_sealed	store-tiered-publish.hirsel	pager	pager	L5
+install_tiered_holders	store-tiered-publish.hirsel	store	store	-
+TIERED_GET_MIN	store-tiered-ranges.hirsel	pager	pager	L5
+TIERED_GET_MAX	store-tiered-ranges.hirsel	pager	pager	L5
+TieredDirection	store-tiered-ranges.hirsel	pager	pager	L5
+TieredRange	store-tiered-ranges.hirsel	pager	pager	L5
+TieredDemand	store-tiered-ranges.hirsel	pager	pager	L5
+TieredBucketWindow	store-tiered-ranges.hirsel	pager	pager	L5
+tiered_bucket_range	store-tiered-ranges.hirsel	pager	pager	L5
+tiered_bucket_windows	store-tiered-ranges.hirsel	pager	pager	L5
+read_tiered_bucket_window	store-tiered-ranges.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+TieredBucketGet	store-tiered-ranges.hirsel	pager	pager	L5
+read_tiered_bucket_windows	store-tiered-ranges.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+tiered_window_cache_key	store-tiered-ranges.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+tiered_window_cached	store-tiered-ranges.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+tiered_window_cache_store	store-tiered-ranges.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+tiered_window_cache_discard	store-tiered-ranges.hirsel	pager	history	L7	push-up pager -> history (refs at layer 6)
+read_checked_bucket_window	store-tiered-ranges.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+TieredRefusal	store-tiered-refusals.hirsel	store	store	-
+tiered_refusal_text	store-tiered-refusals.hirsel	store	store	-
+tiered_collections	store-tiered-refusals.hirsel	types	pages	L2	push-up types -> pages (refs at layer 2)
+holders_tiered	store-tiered-refusals.hirsel	types	pages	L2	push-up types -> pages (refs at layer 2)
+store_has_tiered	store-tiered-refusals.hirsel	store	store	-
+require_memory_collections	store-tiered-refusals.hirsel	types	types	L1
+require_tiered_storage	store-tiered-refusals.hirsel	store	store	-
+require_archive_authority	store-tiered-refusals.hirsel	store	store	-
+ReplayBranch	store-tiered-replay.hirsel	pager	pages	L2
+ReplayTieredAccount	store-tiered-replay.hirsel	pager	pager	L5
+journal_replay_manifest	store-tiered-replay.hirsel	pager	pager	L5
+ReplayDescriptor	store-tiered-replay.hirsel	pager	pager	L5
+journal_collection_descriptor	store-tiered-replay.hirsel	pager	pager	L5
+tiered_replay_descriptor	store-tiered-replay.hirsel	pager	pager	L5
+prior_row_charge	store-tiered-replay.hirsel	pager	pager	L5
+replay_charge	store-tiered-replay.hirsel	pager	pager	L5
+replay_row_edit	store-tiered-replay.hirsel	pager	txn	L12	push-up pager -> txn (refs at layer 10)
+replay_trim_edit	store-tiered-replay.hirsel	pager	txn	L12	push-up pager -> txn (refs at layer 10)
+replay_tiered_op	store-tiered-replay.hirsel	pager	txn	L12	push-up pager -> txn (refs at layer 10)
+issue_residency_stamp	store-tiered-residency.hirsel	pager	pager	L5
+resident_blob_from_tiered	store-tiered-residency.hirsel	pager	pager	L5
+resident_page_from_tiered	store-tiered-residency.hirsel	pager	pager	L5
+residency_release	store-tiered-residency.hirsel	pager	pager	L5
+restamp_tiered_frames	store-tiered-residency.hirsel	pager	pager	L5
+restamp_tiered_emission	store-tiered-residency.hirsel	pager	pager	L5
+Residency	store-tiered-residency.hirsel	store	store	-
+set_residency	store-tiered-residency.hirsel	store	store	-
+admit_tiered_plan	store-tiered-residency.hirsel	store	store	-
+tiered_plan_reserve	store-tiered-residency.hirsel	pager	pager	L5
+tiered_memory_room	store-tiered-residency.hirsel	pager	pager	L5
+start_residency_pager	store-tiered-residency.hirsel	store	store	-
+stop_residency_pager	store-tiered-residency.hirsel	store	store	-
+residency_to_tiered	store-tiered-residency.hirsel	store	store	-
+publish_tiered_residency	store-tiered-residency.hirsel	store	store	-
+residency_to_memory	store-tiered-residency.hirsel	store	store	-
+load_memory_residency	store-tiered-residency.hirsel	pager	pager	L5
+TieredScanLeaf	store-tiered-scan.hirsel	pager	pager	L5
+tiered_scan_edge	store-tiered-scan.hirsel	pager	pager	L5
+tiered_scan_siblings	store-tiered-scan.hirsel	pager	pager	L5
+tiered_scan_overlay	store-tiered-scan.hirsel	pager	pager	L5
+tiered_scan_row	store-tiered-scan.hirsel	pager	pager	L5
+tiered_snapshot_primary	store-tiered-scan.hirsel	pager	pager	L5
+tiered_snapshot_row	store-tiered-scan.hirsel	pager	read	L11	push-up pager -> read (refs at layer 9)
+tiered_scan_bounds	store-tiered-scan.hirsel	pager	pager	L5
+read_tiered_scan	store-tiered-scan.hirsel	pager	read	L11	push-up pager -> read (refs at layer 9)
+tiered_span_row	store-tiered-span.hirsel	pager	pager	L5
+tiered_span_collection	store-tiered-span.hirsel	pager	pager	L5
+snapshot_tiered_span_step	store-tiered-span.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+snapshot_tiered_span_step_direct	store-tiered-span.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+snapshot_tiered_span_step_with	store-tiered-span.hirsel	pager	object_writer	L9	push-up pager -> history (refs at layer 6); push-up history -> object_writer (refs at layer 8)
+snapshot_tiered_span	store-tiered-span.hirsel	pager	store	-	push-up pager -> store (refs at layer 12)
+TxTieredRows	store-tiered-tx-read.hirsel	txn	txn	L12
+TxIndexTiered	store-tiered-tx-read.hirsel	store	store	-
+tx_tiered_descriptor	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_staged	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_stage_rows	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_rows	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_index_tiered	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_stopped	store-tiered-tx-read.hirsel	txn	txn	L12
+next_tiered_in	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_count	store-tiered-tx-read.hirsel	txn	txn	L12
+tx_tiered_index_row	store-tiered-tx-read.hirsel	txn	txn	L12
+fetch_many	store-tiered-tx-read.hirsel	store	store	-
+sealed_tiered_root	store-tiered.hirsel	pager	pager	L5
+ReplacedFrame	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by TieredDrainKill)
+BranchReplacements	store-tiered.hirsel	pager	pager	L5
+REPLACED_ROW	store-tiered.hirsel	pager	pager	L5
+DROPPED_ROW	store-tiered.hirsel	pager	pager	L5
+TieredDirty	store-tiered.hirsel	pager	pager	L5
+clean_tiered_cut	store-tiered.hirsel	pager	pager	L5
+replaced_page	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
+replaced_blob	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
+TieredFreed	store-tiered.hirsel	pager	pager	L5
+no_tiered_freed	store-tiered.hirsel	pager	pager	L5
+reserve_tiered_commit	store-tiered.hirsel	pager	pager	L5
+admit_tiered_commit	store-tiered.hirsel	pager	pager	L5
+tiered_data_key	store-tiered.hirsel	pager	pager	L5
+settled_tiered_bytes	store-tiered.hirsel	pager	txn	L12	push-up pager -> txn (refs at layer 10)
+TxView	store-tx.hirsel	txn	txn	L12
+TxViewDirty	store-tx.hirsel	txn	txn	L12
+share_tx_view	store-tx.hirsel	txn	txn	L12
+completed_tx_view	store-tx.hirsel	txn	txn	L12
+mark_tx_view_slot	store-tx.hirsel	txn	txn	L12
+add_tx_view_slot	store-tx.hirsel	txn	txn	L12
+transaction_collection_pages	store-tx.hirsel	txn	txn	L12
+current_tx_view	store-tx.hirsel	txn	txn	L12
+advance_tx_view	store-tx.hirsel	txn	txn	L12
+rollback_writes_on_error	store-tx.hirsel	store	store	-
+Drafted	store-tx.hirsel	txn	txn	L12
+drafted_tx	store-tx.hirsel	txn	txn	L12
+freeze	store-tx.hirsel	txn	txn	L12
+restore_frozen	store-tx.hirsel	txn	txn	L12
+fold_own	store-tx.hirsel	txn	txn	L12
+fold_ops	store-tx.hirsel	txn	txn	L12
+install	store-tx.hirsel	txn	txn	L12
+rollback_writes_on_overrun	store-tx.hirsel	store	store	-
+save_data_op	store-tx.hirsel	txn	txn	L12
+put_frame	store-tx.hirsel	txn	txn	L12
+edit_frame	store-tx.hirsel	txn	indexes	L10	pull-down txn -> indexes (used by plan_aggregate_edit)
+apply_put	store-tx.hirsel	txn	txn	L12
+TxCollection	store-tx.hirsel	txn	txn	L12
+cache_collection	store-tx.hirsel	txn	txn	L12
+cached_write_height	store-tx.hirsel	txn	txn	L12
+put_charge	store-tx.hirsel	txn	txn	L12
+DataRefund	store-tx.hirsel	txn	indexes	L10	pull-down txn -> indexes (used by DataEdit)
+row_refund	store-tx.hirsel	txn	txn	L12
+delete_refund	store-tx.hirsel	txn	txn	L12
+apply_delete	store-tx.hirsel	txn	txn	L12
+stage_delete	store-tx.hirsel	txn	txn	L12
+pop_first	store-tx.hirsel	store	store	-
+pop_last	store-tx.hirsel	store	store	-
+pop_table_edge	store-tx.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+pop_tx_view_edge	store-tx.hirsel	txn	txn	L12
+tree_height	store-tx.hirsel	txn	txn	L12
+collection_write_height	store-tx.hirsel	txn	txn	L12
+transaction_write_height	store-tx.hirsel	txn	txn	L12
+transaction_row	store-tx.hirsel	txn	txn	L12
+staged_row	store-tx.hirsel	txn	txn	L12
+staged_op	store-tx.hirsel	txn	txn	L12
+check_write_attempt	store-tx.hirsel	txn	txn	L12
+memory_data_charge	store-tx.hirsel	txn	txn	L12
+WalkFault	store-verify.hirsel	store	store	-
+WalkFinding	store-verify.hirsel	store	store	-
+WalkReport	store-verify.hirsel	store	store	-
+WalkMode	store-verify.hirsel	store	store	-
+WalkSums	store-verify.hirsel	maintenance	maintenance	L14
+IndexWalk	store-verify.hirsel	store	store	-
+begin_verify	store-verify.hirsel	store	store	-
+WalkCoverage	store-verify.hirsel	store	store	-
+IndexCoverage	store-verify.hirsel	store	store	-
+walk_coverage	store-verify.hirsel	store	store	-
+walk_index	store-verify.hirsel	store	store	-
+verify_step	store-verify.hirsel	store	store	-
+verify_step_read	store-verify.hirsel	store	store	-
+walk_past	store-verify.hirsel	maintenance	maintenance	L14
+walk_finding	store-verify.hirsel	maintenance	maintenance	L14
+walk_sums	store-verify.hirsel	store	store	-
+fold_sum_row	store-verify.hirsel	maintenance	maintenance	L14
+walk_sum_entries	store-verify.hirsel	store	store	-
+walk_rows	store-verify.hirsel	store	store	-
+walk_entries	store-verify.hirsel	store	store	-
+walk_check_entry_row	store-verify.hirsel	maintenance	maintenance	L14
+teardown_hook	store-verify.hirsel	store	store	-
+allow_unverified_teardown	store-verify.hirsel	store	store	-
+teardown_opted_out	store-verify.hirsel	maintenance	maintenance	L14
+teardown_fault_name	store-verify.hirsel	maintenance	maintenance	L14
+teardown_fail_corrupt	store-verify.hirsel	maintenance	maintenance	L14
+teardown_check_bucket	store-verify.hirsel	store	store	-
+teardown_validate_bucket_checkpoint	store-verify.hirsel	maintenance	maintenance	L14
+verify_teardown	store-verify.hirsel	store	store	-
+StoreId	store.hirsel	store	store	-
+StorageKind	store.hirsel	store	store	-
+Caller	store.hirsel	store	store	-
+Limit	store.hirsel	store	store	-
+Why	store.hirsel	store	store	-
+Fault	store.hirsel	store	store	-
+StoreCapacity	store.hirsel	store	store	-
+Error	store.hirsel	store	store	-
+Roots	store.hirsel	pages	pages	L2
+empty_roots	store.hirsel	pages	pages	L2
+share_roots	store.hirsel	pages	pages	L2
+Ack	store.hirsel	journal	journal	L6
+Db	store.hirsel	store	store	-
+Branch	store.hirsel	store	store	-
+Head	store.hirsel	pages	pages	L2
+main_head	store.hirsel	pages	pages	L2
+retaining	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+Tip	store.hirsel	pages	pages	L2
+State	store.hirsel	pages	pages	L2
+ProposedMain	store.hirsel	store	store	-
+HolderDelta	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+main_state	store.hirsel	pages	pages	L2
+tip_of	store.hirsel	pages	pages	L2
+state_with_delta	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+current_state	store.hirsel	store	store	-
+prepare_holder_slot	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+install_head	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+remove_head	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+install_holder_delta	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+state_roots	store.hirsel	pages	pages	L2
+state_account	store.hirsel	pages	pages	L2
+memory_cut_account	store.hirsel	store	store	-
+record_memory_cut	store.hirsel	store	store	-
+branch_slot	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+branch_index	store.hirsel	pages	store	-	push-up pages -> store (refs at layer 12)
+head_snapshot	store.hirsel	store	store	-
+snapshot_from	store.hirsel	store	store	-
+CallId	store.hirsel	store	store	-
+CallInfo	store.hirsel	store	store	-
+Mark	store.hirsel	store	store	-
+Ticket	store.hirsel	store	store	-
+Read	store.hirsel	store	store	-
+StoreFailure	store.hirsel	store	store	-
+Outcome	store.hirsel	store	store	-
+Undone	store.hirsel	store	store	-
+Done	store.hirsel	store	store	-
+Bound	store.hirsel	store	store	-
+Limits	store.hirsel	store	store	-
+Resume	store.hirsel	store	store	-
+Page	store.hirsel	store	store	-
+Resumed	store.hirsel	store	store	-
+DataOp	store.hirsel	pages	format	L1	pull-down pages -> format (used by encode_stream_op)
+StagedValue	store.hirsel	pages	format	L1	pull-down pages -> format (used by encode_data_op)
+stage_value	store.hirsel	pages	pages	L2
+staged_bytes	store.hirsel	pages	format	L1	pull-down pages -> format (used by encode_data_op)
+DataRows	store.hirsel	pages	pages	L2
+new_data_rows	store.hirsel	pages	pages	L2
+data_row	store.hirsel	pages	pages	L2
+push_data_row	store.hirsel	pages	pages	L2
+DataOps	store.hirsel	pages	pages	L2
+SCANNED_OPS	store.hirsel	pages	pages	L2
+NO_FRAME_TAIL	store.hirsel	pages	pages	L2
+OPEN_FRAME_TAIL	store.hirsel	pages	pages	L2
+empty_ops	store.hirsel	pages	pages	L2
+Staged	store.hirsel	pages	pages	L2
+op_slot	store.hirsel	pages	pages	L2
+Tx	store.hirsel	store	store	-
+Snapshot	store.hirsel	store	store	-
+splitmix64	store.hirsel	store	store	-
+call_info	store.hirsel	store	store	-
+same	store.hirsel	types	types	L1
+make_id	store.hirsel	types	types	L1
+memory	store.hirsel	store	store	-
+memory_at	store.hirsel	store	store	-
+empty_db	store.hirsel	store	store	-
+fence_level	store.hirsel	store	store	-
+is_disk	store.hirsel	store	store	-
+disk_state	store.hirsel	store	store	-
+edit_disk	store.hirsel	store	store	-
+write_disk	store.hirsel	store	store	-
+journal_poison	store.hirsel	store	store	-
+identity	store.hirsel	store	store	-
+main_branch	store.hirsel	store	store	-
+snapshot	store.hirsel	store	store	-
+snapshot_of	store.hirsel	store	store	-
+same_name	store.hirsel	store	pages	L2	pull-down root -> pages (used by tail_base)
+checked_name	store.hirsel	store	store	-
+branch	store.hirsel	store	store	-
+this_open	store.hirsel	store	store	-
+cut_install	store.hirsel	store	store	-
+branch_root_bytes	store.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+pin_root_bytes	store.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+check_manifest_addition	store.hirsel	store	store	-
+adopt	store.hirsel	store	store	-
+delete_branch	store.hirsel	store	store	-
+version	store.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
+follow	store.hirsel	store	store	-
+Publication	store.hirsel	store	txn	L12	pull-down root -> txn (used by AdmittedDraft)
+prepare_publication	store.hirsel	store	store	-
+publish	store.hirsel	store	store	-
+Receipt	store.hirsel	store	store	-
+Stop	store.hirsel	store	store	-
+append_be	store.hirsel	types	types	L1
+Plan	store.hirsel	store	store	-
+CallReserve	store.hirsel	store	store	-
+CALL_FIXED_STEPS	store.hirsel	transfer	transfer	L13
+call_reserves	store.hirsel	store	store	-
+ServeError	store.hirsel	store	store	-
+Reserve	store.hirsel	store	store	-
+Pending	store.hirsel	store	store	-
+Served	store.hirsel	store	store	-
+ServeReply	store.hirsel	txn	txn	L12
+next_call_info	store.hirsel	store	store	-
+stream_retention_ms	store.hirsel	store	store	-
+untried	store.hirsel	store	store	-
+registered_completion	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+serve_before	store.hirsel	txn	txn	L12
+serve_after	store.hirsel	txn	txn	L12
+cause_number	store.hirsel	txn	txn	L12
+save_reply	store.hirsel	txn	txn	L12
+stage_reply	store.hirsel	txn	txn	L12
+serve	store.hirsel	store	store	-
+finish_served	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+conclude	store.hirsel	store	store	-
+info	store.hirsel	store	store	-
+run	store.hirsel	store	store	-
+run_on	store.hirsel	store	store	-
+run_with_reply	store.hirsel	store	store	-
+run_on_with_reply	store.hirsel	store	store	-
+store_body_on	store.hirsel	store	store	-
+handoff	store.hirsel	store	store	-
+maybe_checkpoint	store.hirsel	store	store	-
+Ran	store.hirsel	txn	txn	L12
+Stage	store.hirsel	txn	txn	L12
+Finished	store.hirsel	txn	txn	L12
+Prepared	store.hirsel	txn	txn	L12
+stage	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+stage_with	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+stage_call	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+draft_body	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+finish_stage	store.hirsel	txn	txn	L12
+wait_for_frame_room	store.hirsel	store	store	-
+durable	store.hirsel	store	store	-
+sync_notices	store.hirsel	store	store	-
+durable_now	store.hirsel	store	store	-
+durable_groups	store.hirsel	store	store	-
+covered	store.hirsel	store	store	-
+capacity	store.hirsel	types	types	L1
+copied	store.hirsel	types	types	L1
+prefix	store.hirsel	catalog	catalog	L3
+prefixed	store.hirsel	catalog	catalog	L3
+logical_key	store.hirsel	catalog	catalog	L3
+body_capacity	store.hirsel	store	store	-
+reserve_ids	store.hirsel	txn	txn	L12
+note_read	store.hirsel	txn	txn	L12
+fetch_logical	store.hirsel	txn	txn	L12
+RequestDigest	store.hirsel	store	store	-
+request_digest	store.hirsel	store	store	-
+digest_part	store.hirsel	txn	txn	L12
+Stored	store.hirsel	store	store	-
+key_word	store.hirsel	types	types	L1
+test_db	store.hirsel	store	store	-
+transaction_stream	store.hirsel	txn	txn	L12
+newest_layer	store.hirsel	txn	txn	L12
+old_data_op_size	store.hirsel	format	pages	L2	push-up format -> pages (refs at layer 2)
+data_op_size	store.hirsel	format	format	L1
+le	store.hirsel	format	format	L1
+blob	store.hirsel	format	format	L1
+encode_data_op	store.hirsel	format	format	L1
+encode_log_trim	store.hirsel	format	format	L1
+encode_stream_op	store.hirsel	format	format	L1
+stream_control_slot	store.hirsel	format	pages	L2	push-up format -> pages (refs at layer 2)
+encode_stream_ops	store.hirsel	format	pager	L5	push-up format -> pager (refs at layer 4)
+RowSchemas	store.hirsel	store	store	-
+Readers	store.hirsel	store	store	-
+Table	store.hirsel	store	store	-
+IndexKind	store.hirsel	store	store	-
+Index	store.hirsel	store	store	-
+PageRows	store.hirsel	catalog	catalog	L3
+RowDecoder	store.hirsel	catalog	catalog	L3
+row_schemas	store.hirsel	store	store	-
+decoded	store.hirsel	catalog	catalog	L3
+read_le	store.hirsel	format	format	L1
+row_value	store.hirsel	catalog	catalog	L3
+encode_key	store.hirsel	catalog	catalog	L3
+typed_bound	store.hirsel	catalog	catalog	L3
+writable	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
+fetch_bytes	store.hirsel	store	store	-
+fetch	store.hirsel	store	store	-
+key_span	store.hirsel	store	store	-
+published_value	store.hirsel	store	store	-
+publish_row	store.hirsel	txn	txn	L12
+reads_key	store.hirsel	store	store	-
+index_decoder	store.hirsel	catalog	catalog	L3
+prefix_after	store.hirsel	catalog	catalog	L3
+index_bound	store.hirsel	catalog	catalog	L3
+table_key	store.hirsel	catalog	catalog	L3
+index_prefix	store.hirsel	catalog	catalog	L3
+catalog_index_key	store.hirsel	catalog	catalog	L3
+catalog_entry_in	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+stamp_after	store.hirsel	catalog	catalog	L3
+define_store_collection	store.hirsel	catalog	catalog	L3
+bulk_store_collection	store.hirsel	catalog	catalog	L3
+remove_store_row	store.hirsel	catalog	catalog	L3
+remove_store_collection	store.hirsel	catalog	catalog	L3
+system_table	store.hirsel	store	store	-
+stage_create_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+readers	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+table	store.hirsel	store	store	-
+stage_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+catalog_handle	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+catalog_index_handle	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+stage_drop_table_key	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+Built	store.hirsel	catalog	catalog	L3
+over_ceiling	store.hirsel	catalog	catalog	L3
+insert_row	store.hirsel	catalog	catalog	L3
+migrate_build	store.hirsel	catalog	maintenance	L14	push-up catalog -> maintenance (refs at layer 11)
+same_bytes	store.hirsel	catalog	catalog	L3
+catalog_insert	store.hirsel	catalog	catalog	L3
+stage_migrate	store.hirsel	catalog	maintenance	L14	push-up catalog -> maintenance (refs at layer 11)
+bucket	store.hirsel	tests	tests	-
+typed_put	store.hirsel	store	store	-
+check_table_write	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 11)
+put	store.hirsel	store	store	-
+delete	store.hirsel	store	store	-
+OldAccount	store.hirsel	tests	tests	-
+NewAccount	store.hirsel	tests	tests	-
+upgrade	store.hirsel	tests	tests	-
+Looked	store.hirsel	store	store	-
+Seen	store.hirsel	store	store	-
+Change	store.hirsel	store	store	-
+changes	store.hirsel	store	store	-
+catalog_recharge	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
+DISK_FORMAT	store.hirsel	format	format	L1
+DiskContext	store.hirsel	format	format	L1
+DiskFrame	store.hirsel	format	format	L1
+DiskHeader	store.hirsel	format	format	L1
+BINDING_BYTES	store.hirsel	format	format	L1
+put_binding	store.hirsel	format	format	L1
+disk_check_start	store.hirsel	format	format	L1
+seal_frame	store.hirsel	format	format	L1
+disk_check	store.hirsel	format	format	L1
+disk_seal	store.hirsel	format	format	L1
+disk_kind_limit	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+DiskFrameHead	store.hirsel	format	format	L1
+disk_read_frame_head	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_check_frame_kind	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_read_frame	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_frame_bytes	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_header_bytes	store.hirsel	format	format	L1
+disk_read_header	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_number	store.hirsel	format	format	L1
+disk_count	store.hirsel	format	format	L1
+disk_name	store.hirsel	format	format	L1
+disk_name_bytes	store.hirsel	format	format	L1
+disk_put_name	store.hirsel	format	format	L1
+encode_fork	store.hirsel	format	pages	L2	push-up format -> pages (refs at layer 2)
+disk_blob	store.hirsel	format	format	L1
+disk_io	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
+disk_path	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
+disk_write_synced	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by disk_publish_manifest)
+disk_remove_optional	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_dead_packs)
+DiskLoaded	store.hirsel	manifest	manifest	L4
+disk_loaded	store.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
+disk_publish_manifest	store.hirsel	manifest	manifest	L4
+stage_export_migration	store.hirsel	store	store	-
+export_system_get	store.hirsel	store	store	-
+staged_snapshot	store.hirsel	store	store	-
+PreparedTarget	store.hirsel	store	store	-
+PreparedMeta	store.hirsel	transfer	transfer	L13
+CatalogChange	store.hirsel	transfer	transfer	L13
+Inventory	store.hirsel	transfer	transfer	L13
+PreparedRow	store.hirsel	transfer	transfer	L13
+catalog_changes	store.hirsel	transfer	transfer	L13
+RangeChange	store.hirsel	transfer	transfer	L13
+changed_ranges	store.hirsel	transfer	transfer	L13
+entries_of	store.hirsel	transfer	transfer	L13
+checksum_row	store.hirsel	transfer	transfer	L13
+range_inventory	store.hirsel	transfer	transfer	L13
+validate_preparation	store.hirsel	store	store	-
+write_prepared	store.hirsel	store	store	-
+ValidatedRange	store.hirsel	transfer	transfer	L13
+ValidatedImport	store.hirsel	store	store	-
+read_valid_range	store.hirsel	transfer	transfer	L13
+validate_prepared	store.hirsel	store	store	-
+ImportedRange	store.hirsel	transfer	transfer	L13
+Imported	store.hirsel	store	store	-
+ImportWork	store.hirsel	store	store	-
+reserve_import	store.hirsel	store	store	-
+matches_export	store.hirsel	transfer	store	-	push-up transfer -> store (refs at layer 12)
+import_trees	store.hirsel	store	store	-
+imported_digest	store.hirsel	store	store	-
+prepared_matches	store.hirsel	store	store	-
+identity_words	store.hirsel	store	store	-
+Cutover	store.hirsel	store	store	-
+TargetLimits	store.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by validate_cut_pages)
+catalog_bytes_equal	store.hirsel	transfer	transfer	L13
+planned_catalog	store.hirsel	transfer	transfer	L13
+planned_ranges	store.hirsel	transfer	transfer	L13
+db_target	store.hirsel	store	store	-
+pack_leased	store.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
+SegmentSpan	store.hirsel	journal	journal	L6
+DiskRemovals	store.hirsel	journal	journal	L6
+removal_spans	store.hirsel	journal	journal	L6
+remove_numbered	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_page_manifest)
+remove_cut_files	store.hirsel	journal	journal	L6
+disk_identity	store.hirsel	types	types	L1
+disk_read_end	store.hirsel	journal	journal	L6
+disk_end	store.hirsel	journal	journal	L6
+disk_exists	store.hirsel	journal	journal	L6
+PageDisk	store.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
+DiskStartup	store.hirsel	journal	journal	L6
+remember_roots	store.hirsel	manifest	manifest	L4
+located_owners	store.hirsel	manifest	manifest	L4
+manifest_state	store.hirsel	manifest	manifest	L4
+check_expected_store	store.hirsel	manifest	manifest	L4
+disk_start	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+DiskSession	store.hirsel	journal	journal	L6
+disk_lock	store.hirsel	journal	journal	L6
+disk_session	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+DiskState	store.hirsel	store	store	-
+open_number	store.hirsel	store	store	-
+retained_main_after	store.hirsel	store	store	-
+healthy	store.hirsel	store	store	-
+open_heads	store.hirsel	store	store	-
+JournalChannels	store.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+journal_channels	store.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+open	store.hirsel	store	store	-
+open_read_only	store.hirsel	store	store	-
+read_only_manifest	store.hirsel	store	capture	L7	pull-down root -> capture (used by capture_measure)
+check_read_only_manifest	store.hirsel	store	object_writer	L9	pull-down root -> object_writer (used by log_floor)
+open_checks	store.hirsel	store	object_writer	L9	pull-down root -> object_writer (used by object_open_checks)
+open_started	store.hirsel	store	store	-
+disk_wait_cut	store.hirsel	store	store	-
+disk_rotate	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+cut_io_error	store.hirsel	store	store	-
+PreparedDiskCut	store.hirsel	store	store	-
+CutTiming	store.hirsel	store	store	-
+disk_cut_timed	store.hirsel	store	store	-
+disk_cut_with_limit	store.hirsel	store	store	-
+checkpoint	store.hirsel	store	store	-
+CallRecord	store.hirsel	store	store	-
+StopKind	store.hirsel	store	store	-
+Settlement	store.hirsel	format	format	L1
+CallSection	store.hirsel	format	format	L1
+Recorded	store.hirsel	store	store	-
+call_checked	store.hirsel	txn	txn	L12
+check_completion_record	store.hirsel	txn	txn	L12
+call_code_size	store.hirsel	format	format	L1
+JournalTrim	store.hirsel	format	format	L1
+JournalOp	store.hirsel	format	format	L1
+JournalCommit	store.hirsel	format	format	L1
+JournalFork	store.hirsel	format	format	L1
+JournalEvent	store.hirsel	format	format	L1
+journal_event_kind	store.hirsel	format	format	L1
+journal_ops	store.hirsel	format	format	L1
+decode_settlement	store.hirsel	format	format	L1
+journal_decode_commit	store.hirsel	format	store	-	push-up format -> store (refs at layer 12)
+journal_decode	store.hirsel	format	store	-	push-up format -> store (refs at layer 12)
+journal_torn	store.hirsel	format	format	L1
+journal_prefix	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+journal_read_prefix	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+JournalFrame	store.hirsel	format	format	L1
+journal_read_frame	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_stream_payload	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_stream_payload_counted	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+journal_scan	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
+JournalReplay	store.hirsel	journal	pager	L5	pull-down journal -> pager (used by journal_replay_manifest)
+journal_replay	store.hirsel	journal	pager	L5	pull-down journal -> pager (used by journal_replay_manifest)
+journal_account	store.hirsel	journal	journal	L6
+journal_following	store.hirsel	journal	journal	L6
+recorded	store.hirsel	store	store	-
+reserve_tx	store.hirsel	store	store	-
+law_call_reserve	store.hirsel	store	store	-
+reserve_pinned_data	store.hirsel	store	store	-
+reserve_settles_pin	store.hirsel	store	store	-

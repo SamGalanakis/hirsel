@@ -57,6 +57,8 @@ ENTRIES = {
     'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
     'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
+    'stream_q': (b'\x01wire@1/admission/stream_q(store@1/store/Tx,wire@1/admission/H,take store@1/store/StreamId)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x206fba08206543bf, READ_RESULT_FP),
+    'stamps_q': (b'\x01wire@1/admission/stamps_q(store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take core@1/core/List[store@1/store/ExportStamp])->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]', 0x84237020b835b8d7, READ_RESULT_FP),
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }
@@ -192,6 +194,15 @@ def done(s, expected, version):
     answer = receive(s)
     stream, p, outcome = expected
     assert answer == ('batch', version, [], [], [((TEST_BIRTH, stream), p, outcome)]), answer
+
+
+def store_identity_placement():
+    names = ('put', 'read', 'stream_q', 'stamps_q')
+    with upgraded(frame(2, hello(names))) as s:
+        assert receive(s)[:1] == ('welcome',)
+        for slot, name in enumerate(names):
+            placed = receive(s)
+            assert placed == ('placed', 0, slot), (name, placed)
 
 
 def hello_order():
@@ -546,7 +557,7 @@ def cli_dev_restores_subscription():
                 print(log.read(), end='')
 
 
-CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
+CASES = {f.__name__: f for f in (store_identity_placement, hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
          history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget, welcome_samples_store_stream_time,
          cli_call_exact_value, cli_call_fingerprint_mismatch, supplied_id_never_rotates)}

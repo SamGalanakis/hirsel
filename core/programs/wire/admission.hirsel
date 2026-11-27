@@ -11,6 +11,14 @@ fn schema(mut d: store.Declare) -> Result[H, store.Error] {
     Ok(H(table: table))
 }
 
+fn schema_descriptor() -> StaticFn[fn(mut store.Declare) -> Result[H, store.Error]] {
+    let descriptor = code.describe(schema)
+    if code.identity(descriptor) != b"\x01wire@1/admission/schema(mut store@1/store/Declare)->core@1/core/Result[wire@1/admission/H,store@1/store/Error]" {
+        fail("wire admission: schema descriptor changed")
+    }
+    descriptor
+}
+
 fn put(mut tx: store.Tx, h: H, author: runner.Caller, take value: u32) -> Result[u64, u32] {
     if let Error(_) = store.put(mut tx, h.table, 0u64, value) {
         return Error(1u32)
@@ -59,10 +67,22 @@ fn query_table(h: H) -> store.Table[u64, u32] {
 }
 
 fn query_slots() -> Result[runner.Slots[H], runner.RegisterError] {
-    runner.table_slot("data", code.describe(query_table))
+    let selector = code.describe(query_table)
+    if code.identity(selector) != b"\x01wire@1/admission/query_table(wire@1/admission/H)->store@1/store/Table[u64,u32]" {
+        fail("wire admission: table selector descriptor changed")
+    }
+    runner.table_slot("data", selector)
 }
 
 fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.table, Included(0u64), Included(0u64))
+}
+
+fn stream_q(tx: store.Tx, h: H, take _arg: store.StreamId) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("data", h.table, Included(0u64), Included(0u64))
+}
+
+fn stamps_q(tx: store.Tx, h: H, caller: runner.Caller, take _arg: List[store.ExportStamp]) -> Result[runner.Answer[()], Capacity] {
     runner.table_answer("data", h.table, Included(0u64), Included(0u64))
 }
 
@@ -79,6 +99,8 @@ fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(large), 65536u64, runner.DEFAULT_STEPS)?
     runner.compute(mut r, code.describe(big), 65536u64, runner.DEFAULT_STEPS)?
     runner.query(mut r, code.describe(read), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    runner.query(mut r, code.describe(stream_q), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(stamps_q), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
     runner.compute(mut r, code.describe(shape), 65536u64, runner.DEFAULT_STEPS)?
     runner.retain_gone(mut r, retired())
 }
@@ -193,7 +215,7 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, out: Stdout, reject: bool) -> 
 // launch_server answers --hirsel-describe before any grant is used, so hirsel call
 // can read this place's entries from the executable.
 pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, out: Stdout) -> Result[(), Exit] waits {
-    runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits {
+    runner.launch_server(a, c, code.describe(place), schema_descriptor(), scoped fn() -> Result[(), Exit] waits {
         serve_place(n, c, random, tasks, a, out)
     })
 }
@@ -234,7 +256,7 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, out: Std
     let mail = result.unwrap(runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, out: out, head: take head, post: runner.post(mail))
     let h = task.spawn(tasks, bytes 1073741824u64, take seed, server)
-    let _ = runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 8388608u64)
+    let _ = runner.place_head(take db, code.describe(place), 1048576u64, None, schema_descriptor(), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)
     Ok(())
 }

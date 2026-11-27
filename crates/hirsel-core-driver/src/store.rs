@@ -351,6 +351,19 @@ impl Scratch {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// The descriptor of its lock, which a resident compiler's next image
+    /// inherits with the path ([`Self::inherited`]).
+    pub(crate) fn lock_fd(&self) -> std::os::fd::RawFd {
+        self._lock.as_raw_fd()
+    }
+    /// The scratch directory a previous image of this process held at
+    /// `path` under the lock descriptor `lock` it left open.
+    pub(crate) fn inherited(path: PathBuf, lock: std::os::fd::OwnedFd) -> Self {
+        Self {
+            path,
+            _lock: File::from(lock),
+        }
+    }
 }
 impl Drop for Scratch {
     fn drop(&mut self) {

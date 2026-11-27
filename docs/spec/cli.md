@@ -182,6 +182,25 @@ memory to the system after a second without requests, and exits after ten
 minutes without requests or launched clients. `hirsel serve --stop` stops
 the toolchain's server.
 
+No request holds the server. The server serves one request at a time, and
+a client that has waited two seconds behind a running request is refused
+and compiles in its own process, so a long request never queues a short
+one longer than that; `hirsel serve --stop` is answered at once and stops
+the server once the running request ends. Each request has a CPU budget:
+the process CPU time the server spends on it, every thread's, 300 seconds
+unless the client sets `HIRSEL_RESIDENT_CPU_SECONDS` to another positive
+whole number of seconds (any other value fails the request with status 2).
+Time a request spends waiting, on its client, a test launch or a linker,
+does not count. A request that passes its budget before it is answered is
+stopped: its client reports the budget on its standard error and exits
+with status 71, the memory limit's status, and is not retried. The server
+then refuses the clients it holds, which compile in their own processes,
+and restarts in place: it executes its own compiler again in the same
+process, which keeps its socket, its lock and its launched clients and
+drops every remembered derivation, as after a panic. Clients still waiting
+to be accepted are served by the restarted server. A one-shot compile has
+no CPU budget: it runs in the client's own process, under its terminal.
+
 ## Dev loop
 
 *`hirsel dev` (`--listen`, `--store`, `--fresh`, `--n-place`, `--json`) is built; `--sdk`<!-- doc-ref: planned -->,

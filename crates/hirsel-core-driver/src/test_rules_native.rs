@@ -352,7 +352,8 @@ fn program_build_warns_for_each_ungranted_parameter_in_order() {
 #[test]
 #[ignore = "explicit native integration target"]
 fn resident_child() {
-    if std::env::var_os("RESIDENT_CHILD").is_none() {
+    // A server that stopped a request over its budget executes this again.
+    if std::env::var_os("RESIDENT_CHILD").is_none() && std::env::var_os("HIRSEL_RESIDENT_INHERIT").is_none() {
         return;
     }
     // SAFETY: no other thread of this child reads or writes the environment yet.
@@ -589,6 +590,85 @@ fn resident_server_answers_every_directory_and_contains_a_panic() {
     let (answer, stderr) = build("one", false);
     assert!(stderr.contains("hirsel-request-phases"), "one was not served after the panic: {stderr}");
     assert_eq!(answer, one_shot[0].0, "{stderr}");
+    stop_resident(&runtime, &elsewhere, server);
+}
+
+/// Bug law (3204): one request cannot hold the resident compiler. A request
+/// that computes past its CPU budget (its client sets
+/// `HIRSEL_RESIDENT_CPU_SECONDS=10`; the law's request spins for 120 s before
+/// it builds) is stopped, and its client exits 71 naming the budget. A small
+/// build sent while it runs finishes, with the program it builds running,
+/// before the slow request is stopped: it waits at most two seconds behind
+/// that request, then compiles in its own process. The server that stopped
+/// the request keeps its socket and process and serves the next request
+/// (that answer carries the phase trace only a serving server adds). Red
+/// without a budget (the slow request builds after 120 s and exits 0, and the
+/// small one waits behind it), and where stopping a request ends the server.
+#[test]
+fn resident_server_stops_a_request_over_its_budget_and_serves_the_others() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    law.write(
+        "app/main.hirsel",
+        "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    result.unwrap(stdout.write(out, \"small\\n\"))\n    Ok(())\n}\n",
+    );
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let path = |path: PathBuf| path.canonicalize().unwrap().to_str().unwrap().to_owned();
+    let args: Vec<String> = vec![
+        "build".into(),
+        "app".into(),
+        "--output".into(),
+        "program".into(),
+        "--libraries".into(),
+        law.libraries.to_str().unwrap().into(),
+        "--runtime".into(),
+        path(options.runtime),
+        "--cc".into(),
+        path(cc),
+    ];
+    let runtime = law.path("runtime");
+    let shared = |command: &mut std::process::Command| {
+        command.env("XDG_CACHE_HOME", law.path("cache")).env("XDG_RUNTIME_DIR", &runtime);
+    };
+    let request = |output: &str, env: &[(&str, &str)]| {
+        let mut request = process::tape_request_command(&[&args[..3], &[output.to_owned()], &args[4..]].concat(), law.dir.path());
+        shared(&mut request);
+        request.env("PWD", law.dir.path()).env("HIRSEL_TRACE_REQUEST_PHASES", "1").envs(env.iter().copied());
+        request
+    };
+    let ran = |program: &str| {
+        let run = std::process::Command::new(law.path(program)).output().unwrap();
+        (run.status.code(), run.stdout)
+    };
+    let elsewhere = law.path("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let mut server = start_resident(&runtime, &elsewhere, shared);
+
+    let mut slow = request("slow", &[("HIRSEL_RESIDENT_LAW_SPIN", "120"), ("HIRSEL_RESIDENT_CPU_SECONDS", "10")])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let (status, stdout, stderr) = process::tape_request_output(request("small", &[]));
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert_eq!(ran("small"), (Some(0), b"small\n".to_vec()));
+    assert!(slow.try_wait().unwrap().is_none(), "the small build waited until the slow request ended");
+
+    let slow = slow.wait_with_output().unwrap();
+    let slow_stderr = String::from_utf8_lossy(&slow.stderr);
+    assert_eq!(slow.status.code(), Some(hirsel_guard::EXIT_STATUS), "{slow_stderr}");
+    assert!(slow_stderr.contains("passed its budget of 10 CPU seconds"), "{slow_stderr}");
+    assert!(!law.path("slow").exists(), "the stopped request built its program");
+
+    assert!(server.try_wait().unwrap().is_none(), "stopping the request ended the server");
+    let (status, stdout, stderr) = process::tape_request_output(request("after", &[]));
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert!(stderr.contains("hirsel-request-phases"), "the server did not serve after it stopped a request: {stderr}");
+    assert_eq!(ran("after"), (Some(0), b"small\n".to_vec()));
     stop_resident(&runtime, &elsewhere, server);
 }
 

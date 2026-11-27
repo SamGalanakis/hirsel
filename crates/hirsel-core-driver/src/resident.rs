@@ -35,6 +35,11 @@
 //! directory and environment, which write the pass cache), and the server
 //! folds coverage and the law lock when the client finishes. Hanging up drops
 //! the session.
+//!
+//! No request holds the server: [`budget`] refuses a client that waited
+//! behind a running request for [`budget::PATIENCE`] (it compiles itself),
+//! and stops a request that passes its CPU budget, answering its client and
+//! restarting the server in place on the same socket.
 use crate::request::Outcome;
 use hirsel_core_ids::ContentHash;
 use serde::{Deserialize, Serialize};
@@ -48,13 +53,16 @@ use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod budget;
 mod memo;
+mod wire;
 pub(crate) use memo::{
     CONSTANTS, DEBUG_POSITIONS, MATERIALISED, Memo, OBJECT_RECORDS, RECIPE_GROUPS, RECIPE_REACH,
     REFERENCED, RESOLVED, RUNTIME_SOURCES, WorkingMemo, parse_file, source_hash, symbol_suffix,
 };
+use wire::{read_message, write_message};
 
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
 /// How long a server without requests or launched clients stays: sccache's.
 const IDLE_EXIT: Duration = Duration::from_secs(600);
 /// How long a server waits without requests before returning free pages.
@@ -168,6 +176,8 @@ enum Answer {
         env: Vec<(Vec<u8>, Vec<u8>)>,
     },
     Refused(String),
+    /// The request passed its CPU budget: why, for the client to report.
+    Exceeded(String),
     /// A `test` request's session: how its units' launches may overlap.
     Session(crate::test_run::Plan),
     /// A unit's next launch, or None once it ended.
@@ -184,84 +194,6 @@ enum Step {
     },
     /// Every unit ended: fold and answer the exit status.
     Finish,
-}
-
-fn write_message(stream: &mut UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
-    let mut framed = (bytes.len() as u32).to_le_bytes().to_vec();
-    framed.extend_from_slice(bytes);
-    if fds.is_empty() {
-        return stream.write_all(&framed);
-    }
-    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(fds) as u32) } as usize;
-    let mut control = vec![0u8; space];
-    let mut iov = libc::iovec {
-        iov_base: framed.as_mut_ptr().cast(),
-        iov_len: framed.len(),
-    };
-    // SAFETY: the header points at `iov` and `control`, which outlive the
-    // call; the control buffer has CMSG_SPACE for the descriptors written.
-    let sent = unsafe {
-        let mut header: libc::msghdr = std::mem::zeroed();
-        header.msg_iov = &mut iov;
-        header.msg_iovlen = 1;
-        header.msg_control = control.as_mut_ptr().cast();
-        header.msg_controllen = space as _;
-        let cmsg = libc::CMSG_FIRSTHDR(&header);
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
-        std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(cmsg).cast(), fds.len());
-        libc::sendmsg(stream.as_raw_fd(), &header, libc::MSG_NOSIGNAL)
-    };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    stream.write_all(&framed[sent as usize..])
-}
-
-/// One message, with the descriptors that came with its first bytes.
-fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
-    let mut length = [0u8; 4];
-    let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(4 * 8) } as usize];
-    let mut iov = libc::iovec {
-        iov_base: length.as_mut_ptr().cast(),
-        iov_len: length.len(),
-    };
-    let mut fds = Vec::new();
-    // SAFETY: as in write_message; each descriptor received is owned once.
-    let got = unsafe {
-        let mut header: libc::msghdr = std::mem::zeroed();
-        header.msg_iov = &mut iov;
-        header.msg_iovlen = 1;
-        header.msg_control = control.as_mut_ptr().cast();
-        header.msg_controllen = control.len() as _;
-        let got = crate::host::receive(stream.as_raw_fd(), &mut header);
-        if got > 0 {
-            let mut cmsg = libc::CMSG_FIRSTHDR(&header);
-            while !cmsg.is_null() {
-                if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                    let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
-                    let n = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
-                        / std::mem::size_of::<RawFd>();
-                    for i in 0..n {
-                        fds.push(OwnedFd::from_raw_fd(data.add(i).read_unaligned()));
-                    }
-                }
-                cmsg = libc::CMSG_NXTHDR(&header, cmsg);
-            }
-        }
-        got
-    };
-    if got < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if got == 0 {
-        return Err(io::ErrorKind::UnexpectedEof.into());
-    }
-    stream.read_exact(&mut length[got as usize..])?;
-    let mut bytes = vec![0; u32::from_le_bytes(length) as usize];
-    stream.read_exact(&mut bytes)?;
-    Ok((bytes, fds))
 }
 
 /// Linux reaches the directory through its descriptor to keep the address
@@ -334,6 +266,11 @@ fn route(args: &[String]) -> Option<Route> {
 /// status when a server answered it; None when the caller runs it itself.
 pub fn submit(args: &[String]) -> Option<i32> {
     let route = route(args)?;
+    let budget = std::env::var_os(budget::CPU_VARIABLE);
+    if let Err(error) = budget::cpu_seconds(budget.as_ref().map(|v| v.as_bytes())) {
+        eprintln!("hirsel: {error}");
+        return Some(2);
+    }
     match try_submit(&route, args) {
         Ok(answer) => answer,
         Err(error) => {
@@ -398,7 +335,7 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             }
         };
         let answer = serde_json::from_slice::<Answer>(&answer)?;
-        if !matches!(answer, Answer::Refused(_))
+        if !matches!(answer, Answer::Refused(_) | Answer::Exceeded(_))
             && let Some(output) = &mut output
         {
             output.rewind()?;
@@ -421,6 +358,7 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             }
             // The server serves other clients; this one compiles itself.
             Answer::Refused(_) => Ok(None),
+            Answer::Exceeded(why) => Ok(Some(exceeded(&why))),
             // A test request is not retryable, so its output is not held.
             Answer::Session(plan) => drive_session(&mut stream, &plan).map(Some),
             Answer::Test(_) => Err(io::Error::other("the server answered out of turn")),
@@ -455,6 +393,10 @@ fn drive_session(stream: &mut UnixStream, plan: &crate::test_run::Plan) -> io::R
                     self.ended = Some(code);
                     Err(io::Error::other("the server ended the session"))
                 }
+                Answer::Exceeded(why) => {
+                    self.ended = Some(exceeded(&why));
+                    Err(io::Error::other("the server ended the session"))
+                }
                 _ => Err(io::Error::other("the server answered out of turn")),
             }
         }
@@ -470,8 +412,15 @@ fn drive_session(stream: &mut UnixStream, plan: &crate::test_run::Plan) -> io::R
     }
     match remote.send(&Step::Finish).map_err(lost)? {
         Answer::Exit(code) => Ok(code),
+        Answer::Exceeded(why) => Ok(exceeded(&why)),
         _ => Err(io::Error::other("the server answered out of turn")),
     }
+}
+
+/// Report a request that passed its CPU budget: its exit status.
+fn exceeded(why: &str) -> i32 {
+    eprintln!("hirsel: resident compiler: {why}");
+    hirsel_guard::EXIT_STATUS
 }
 
 fn connection_lost(error: &io::Error) -> bool {
@@ -579,7 +528,7 @@ pub(crate) fn answer(outcome: &Outcome) {
         },
     };
     let bytes = serde_json::to_vec(&answer).expect("an answer encodes");
-    let _ = write_message(&mut stream, &bytes, &[]);
+    let _ = budget::send(&mut stream, &bytes, true);
 }
 
 /// Options of `hirsel serve`.
@@ -637,18 +586,27 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
     }
     let limit = hirsel_guard::limit().unwrap_or(hirsel_guard::DEFAULT_LIMIT);
     let budget = memo::Budget::of(limit, serve.max_memory)?;
-    let Some(_lock) = lock(toolchain)? else {
-        // Another server serves the toolchain.
-        return Ok(0);
-    };
     let (socket, _held) = socket_path(toolchain)?;
-    match std::fs::remove_file(&socket) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
-    let listener = UnixListener::bind(&socket)?;
+    let (lock, listener, launched) = if let Some(inherited) = budget::inherited() {
+        // This image succeeds one that stopped a request over its budget.
+        if inherited.toolchain != toolchain {
+            let _ = std::fs::remove_file(&socket);
+            return Ok(0);
+        }
+        (inherited.lock, inherited.listener, inherited.launched)
+    } else {
+        let Some(lock) = lock(toolchain)? else {
+            // Another server serves the toolchain.
+            return Ok(0);
+        };
+        match std::fs::remove_file(&socket) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        (lock, UnixListener::bind(&socket)?, Vec::new())
+    };
     SERVING.store(true, Ordering::Relaxed);
-    let served = serve_requests(&listener, toolchain, budget);
+    let served = serve_requests(&listener, &lock, launched, toolchain, budget);
     SERVING.store(false, Ordering::Relaxed);
     let _ = std::fs::remove_file(&socket);
     served
@@ -727,6 +685,8 @@ fn set_environment(env: &[(Vec<u8>, Vec<u8>)]) {
 
 fn serve_requests(
     listener: &UnixListener,
+    lock: &std::fs::File,
+    mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)>,
     toolchain: Toolchain,
     budget: memo::Budget,
 ) -> Result<i32, Box<dyn std::error::Error>> {
@@ -735,12 +695,24 @@ fn serve_requests(
     // SAFETY: SIG_IGN installs no handler.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     let own = Own::save()?;
-    // Launched programs' scratch directories, until their clients hang up.
-    let mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)> = Vec::new();
+    // `launched`: programs' scratch directories, until their clients hang up.
+    // `held`: connections that arrived during the previous request.
+    let mut held = std::collections::VecDeque::new();
     memo::serve_under(budget.pressure);
-    while let Some(mut stream) = accept(listener, &mut launched)? {
-        let Ok((bytes, fds)) = read_message(&mut stream) else {
-            continue;
+    loop {
+        let (mut stream, bytes, fds) = match held.pop_front() {
+            Some(budget::Held {
+                stream, bytes, fds, ..
+            }) => (stream, bytes, fds),
+            None => {
+                let Some(mut stream) = accept(listener, &mut launched)? else {
+                    break;
+                };
+                let Ok((bytes, fds)) = read_message(&mut stream) else {
+                    continue;
+                };
+                (stream, bytes, fds)
+            }
         };
         let Ok(request) = serde_json::from_slice::<Request>(&bytes) else {
             let _ = refuse(&mut stream, "the request does not decode");
@@ -763,10 +735,29 @@ fn serve_requests(
             let reason = refusal.unwrap_or("the request is not one a resident compiler serves");
             let _ = refuse(&mut stream, reason);
             if request.stop || replaced {
+                for mut waiting in held {
+                    let _ = refuse(&mut waiting.stream, reason);
+                }
                 return Ok(0);
             }
             continue;
         };
+        let seconds = budget::request_cpu_seconds(&request.env);
+        let recycle = budget::Recycle::prepare(
+            &own,
+            toolchain,
+            listener.as_raw_fd(),
+            lock.as_raw_fd(),
+            &launched,
+            seconds,
+        )?;
+        let watch = budget::Watch::start(
+            listener.as_raw_fd(),
+            std::mem::take(&mut held),
+            stream.try_clone().ok(),
+            seconds,
+            recycle,
+        )?;
         Own::take(&fds, &request.env, request.umask);
         drop(fds);
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
@@ -787,6 +778,15 @@ fn serve_requests(
                 #[cfg(test)]
                 if std::env::var_os("HIRSEL_RESIDENT_LAW_PANIC").is_some() {
                     panic!("the law's request panics");
+                }
+                #[cfg(test)]
+                if let Some(seconds) = std::env::var_os("HIRSEL_RESIDENT_LAW_SPIN") {
+                    // A request that computes for this long before it builds.
+                    let seconds = seconds.to_str().unwrap().parse().unwrap();
+                    let until = Instant::now() + Duration::from_secs(seconds);
+                    while Instant::now() < until {
+                        std::hint::black_box(0u64);
+                    }
                 }
                 crate::request::serve(args)
             })
@@ -814,6 +814,15 @@ fn serve_requests(
             sets.settle();
         }
         sets.fit(budget.retain);
+        drop(sets);
+        let watched = watch.end();
+        held = watched.held;
+        if watched.stopped {
+            for mut waiting in held {
+                let _ = refuse(&mut waiting.stream, "stopped");
+            }
+            return Ok(0);
+        }
     }
     Ok(0)
 }
@@ -831,7 +840,7 @@ fn serve_session(mut session: crate::TestSession) -> bool {
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
         let bytes = serde_json::to_vec(answer).expect("an answer encodes");
-        write_message(stream, &bytes, &[])
+        budget::send(stream, &bytes, matches!(answer, Answer::Exit(_)))
     };
     if send(&mut stream, &Answer::Session(session.plan().clone())).is_err() {
         return true;

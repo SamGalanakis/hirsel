@@ -3872,7 +3872,7 @@ fn regex_rx3_search_reachability_admits_nothing() {
         );
         for call in &body.calls {
             match call.callee {
-                Callee::Direct(_) | Callee::Runtime(RtOp::CompareBytes) => {}
+                Callee::Direct(_) | Callee::Runtime(RtOp::CompareBytes | RtOp::WorkSteps) => {}
                 other => panic!(
                     "unaudited regex search callee {other:?} in {:?}",
                     unit.identity

@@ -290,25 +290,25 @@ pub fn stage_claim_reply[Event: inert + shareable + send](mut tx: TxState[Event]
 
 pub fn stage_claim_admit[Event: inert + shareable + send](mut tx: TxState[Event], address: ClaimAddress, d: Inline[u8, 32], args: Bytes, at: u64, op_max: u64, principal_max: u64, encode_policy: scoped[view] fn() -> Result[Bytes, types.Failure], credit: format.KeyedCredit) -> Result[(), types.Failure] {
     let mut edits: List[format.KeyedEdit] = list.new()
-    if let Some(raw) = pages.keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
+    if let Some(raw) = pages.keyed_lookup(tx_roots(tx).keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
-        forget_claim(tx.roots, mut edits, address.full, row.expiry)?
+        forget_claim(tx_roots(tx), mut edits, address.full, row.expiry)?
     }
-    if claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal) >= principal_max {
-        reclaim_claim_scope(tx.roots, mut edits, CLAIM_PEXP, address.principal, at)?
+    if claim_count_after(tx_roots(tx), edits, CLAIM_PCOUNT, address.principal) >= principal_max {
+        reclaim_claim_scope(tx_roots(tx), mut edits, CLAIM_PEXP, address.principal, at)?
     }
-    if claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op) >= op_max {
-        reclaim_claim_scope(tx.roots, mut edits, CLAIM_EXP, address.op, at)?
+    if claim_count_after(tx_roots(tx), edits, CLAIM_COUNT, address.op) >= op_max {
+        reclaim_claim_scope(tx_roots(tx), mut edits, CLAIM_EXP, address.op, at)?
     }
-    let op_count = claim_count_after(tx.roots, edits, CLAIM_COUNT, address.op)
-    let principal_count = claim_count_after(tx.roots, edits, CLAIM_PCOUNT, address.principal)
+    let op_count = claim_count_after(tx_roots(tx), edits, CLAIM_COUNT, address.op)
+    let principal_count = claim_count_after(tx_roots(tx), edits, CLAIM_PCOUNT, address.principal)
     if principal_count >= principal_max {
         return Error(Full(Resident(Capacity(requested: principal_count + 1, available: principal_max))))
     }
     if op_count >= op_max {
         return Error(Full(Resident(Capacity(requested: op_count + 1, available: op_max))))
     }
-    if let None = pages.keyed_lookup(tx.roots.keyed, KEYED_OPS, address.op) {
+    if let None = pages.keyed_lookup(tx_roots(tx).keyed, KEYED_OPS, address.op) {
         append_claim_edit(mut edits, KEYED_OPS, address.op, Some(encode_policy()?))?
     }
     append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args)))?

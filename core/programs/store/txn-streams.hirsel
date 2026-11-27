@@ -82,7 +82,7 @@ fn transaction_stream[Event: inert + shareable + send](tx: TxState[Event], key: 
             }
         }
     }
-    pages.get_page_row(tx.roots.streams, key)
+    pages.get_page_row(tx_roots(tx).streams, key)
 }
 
 // One write to the streams tree, charged and sized like a data write.
@@ -136,10 +136,10 @@ pub fn stream_edit[Event: inert + shareable + send](mut tx: TxState[Event], take
     } else {
         previous
     }
-    let height = tree_height(tx.roots.streams)
+    let height = tree_height(tx_roots(tx).streams)
     let _ = reserve_ids(mut tx, height)?
     let raw = match take value {
-        Some(take encoded) => Some(pages.stage_value(take encoded, tx.roots.streams.inline)),
+        Some(take encoded) => Some(pages.stage_value(take encoded, tx_roots(tx).streams.inline)),
         None => None,
     }
     let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw, None)

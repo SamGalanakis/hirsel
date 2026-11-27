@@ -1,0 +1,150 @@
+fn u16_at(raw: Bytes, at: u64) -> u64 {
+    let n: u16 = list.word_le(raw, at)
+    int.widen(n)
+}
+
+fn u32_at(raw: Bytes, at: u64) -> u64 {
+    let n: u32 = list.word_le(raw, at)
+    int.widen(n)
+}
+
+fn put16(mut raw: Bytes, at: u64, n: u64) {
+    let word: u16 = int.truncate(n)
+    list.set_word_le(mut raw, at, word)
+}
+
+fn put32(mut raw: Bytes, at: u64, n: u64) {
+    let word: u32 = int.truncate(n)
+    list.set_word_le(mut raw, at, word)
+}
+
+// What an inline write needs from its leaf. None sends the write to the
+// copying path; rewrite marks a same-width value written over in place.
+pub type Fit {
+    slot: u64,
+    hit: bool,
+    rewrite: bool,
+    old_size: u64,
+    old_rows: u64,
+    old_charge: u64,
+    charge: u64,
+    needed: u64
+}
+
+pub fn leaf_fit(image: page.Image, key: Bytes, data: Bytes, slot: u64, hit: bool, previous_at: u64, has_sibling: bool, target: u64, private_max: u64) -> Option[Fit] {
+    let raw = page.payload(image)
+    let p = u16_at(raw, 4)
+    let key_width = list.len(key)
+    let value_width = list.len(data)
+    let charge = page.row_charge(key_width + (if page.key_domain(image) == Collection {
+        4u64
+    } else {
+        0u64
+    }), value_width)
+    let (old_size, old_rows, old_charge) = if hit {
+        let at = previous_at
+        let value = at + 2 + u16_at(raw, at)
+        if raw[value] != 0 {
+            return None
+        }
+        let previous = u16_at(raw, value + 1)
+        if previous == value_width {
+            return Some(Fit(slot: slot, hit: true, rewrite: true, old_size: 0, old_rows: 0, old_charge: 0, charge: charge, needed: value + 3))
+        }
+        if has_sibling && value_width < previous && list.len(raw) - previous + value_width < target / 4 {
+            return None
+        }
+        (value - at + 3 + previous, 1u64, page.row_charge(key_width + (if page.key_domain(image) == Collection {
+            4u64
+        } else {
+            0u64
+        }), previous))
+    } else {
+        (0u64, 0u64, 0u64)
+    }
+    // An empty leaf's first key takes the whole key as its prefix.
+    if key_width < p || page.count(image) == 0 {
+        return None
+    }
+    if list.compare_bytes(list.slice(raw, page.HEADER, page.HEADER + p), list.slice(key, 0, p)) != Equal {
+        return None
+    }
+    let total = page.count(image) + (if hit {
+        0u64
+    } else {
+        1u64
+    })
+    // The leaf is canonical, so its size after the write is its length with
+    // the entry's new width in place of its old one.
+    let suffix = key_width - p
+    let needed = u32_at(raw, 16) + 5 + suffix + value_width + 2 * total - old_size
+    if needed > private_max || !page.legal(0, total, needed) {
+        return None
+    }
+    Some(Fit(slot: slot, hit: hit, rewrite: false, old_size: old_size, old_rows: old_rows, old_charge: old_charge, charge: charge, needed: needed))
+}
+
+// Open `size` bytes for slot's entry in a canonical leaf, in slot order, and
+// keep the leaf canonical: the entries after it and the slot array move, and
+// the image ends at `needed`, within the room its fit reserved. The prefix
+// stays the longest common one, since the key shares it and adding a key
+// between or beyond the first and last cannot lengthen it.
+pub fn canonical_space(mut raw: Bytes, slot: u64, hit: bool, old_size: u64, size: u64, needed: u64) -> u64 {
+    let n = u16_at(raw, 2)
+    let old_len = list.len(raw)
+    let heap = old_len - 2 * n
+    let at = if slot < n {
+        u16_at(raw, heap + 2 * slot)
+    } else {
+        heap
+    }
+    let tail = at + old_size
+    let new_heap = heap + size - old_size
+    if needed >= old_len {
+        list.fill(mut raw, needed - old_len, 0)
+        if hit {
+            list.copy_within(mut raw, heap, new_heap, 2 * n)
+        } else {
+            list.copy_within(mut raw, heap + 2 * slot, new_heap + 2 * slot + 2, 2 * (n - slot))
+            list.copy_within(mut raw, heap, new_heap, 2 * slot)
+        }
+        list.copy_within(mut raw, tail, at + size, heap - tail)
+    } else {
+        list.copy_within(mut raw, tail, at + size, heap - tail)
+        list.copy_within(mut raw, heap, new_heap, 2 * n)
+        list.truncate(mut raw, needed)
+    }
+    let total = if hit {
+        n
+    } else {
+        n + 1
+    }
+    // Entries sit in slot order, so exactly the slots after this one move.
+    for i in slot + 1 .. total {
+        let field = new_heap + 2 * i
+        let offset = u16_at(raw, field)
+        put16(mut raw, field, offset + size - old_size)
+    }
+    put16(mut raw, new_heap + 2 * slot, at)
+    put16(mut raw, 2, total)
+    put32(mut raw, 16, new_heap)
+    at
+}
+
+pub fn write(mut raw: Bytes, key: Bytes, data: Bytes, fit: Fit) {
+    if fit.rewrite {
+        list.copy_from_slice(mut raw, fit.needed, data)
+        return ()
+    }
+    let p = u16_at(raw, 4)
+    let key_width = list.len(key)
+    let value_width = list.len(data)
+    let size = 5 + key_width - p + value_width
+    let at = canonical_space(mut raw, fit.slot, fit.hit, fit.old_size, size, fit.needed)
+    put16(mut raw, at, key_width - p)
+    list.copy_from_slice(mut raw, at + 2, list.slice(key, p, key_width))
+    let value = at + 2 + key_width - p
+    raw[value] = 0
+    put16(mut raw, value + 1, value_width)
+    list.copy_from_slice(mut raw, value + 3, data)
+}

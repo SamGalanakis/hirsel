@@ -1,96 +1,34 @@
 // The admission bound, then the commit on branch `i` (section 1.11, run step 4).
 type AdmittedDraft[R, A] = Ready(Ran[R, A], Publication) | OverLimit(Ran[R, A], StoreCapacity)
 
-fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[(), Error] {
-    if ran.prepared_roots {
+// A follower publication or a retained-root settle needs the proposed roots
+// before admission. Apply the same plan to a private holder for that case.
+fn candidate_for_admission[R, A](mut db: Db, i: u64, mut draft: Ran[R, A]) -> Result[(), Error] {
+    if let Some(_) = draft.roots {
         return Ok(())
     }
-    if let None = ran.keyed {
-        if pages.data_row_count(ran.edits) == 0 && pages.data_row_count(ran.replies) == 0 {
-            return Ok(())
-        }
-    }
-    let (take candidate, after) = disk_allocation(scoped fn() -> Result[(pages.Roots, u64), Error] {
-        let Some(base) = view ran.roots else {
-            fail("store: draft has no base roots")
-        }
-        let mut first = ran.first_stamp
-        if pages.tree_stamp(base.collections) != pages.tree_stamp(pages.holder_heads(db.holders)[i].roots.collections) {
-            let Some(fresh_start) = int.checked_add(pages.holder_next_node(db.holders), 1) else {
-                return Error(Limit(Ids))
-            }
-            first = fresh_start
-        }
-        let mut roots = pages.share_roots(base)
-        let mut stamp_out = first
-        failure_result_from_rep(txn.materialize_ordered_rows(mut roots.collections, ran.edits, ran.order, false, first, mut stamp_out))?
-        failure_result_from_rep(txn.materialize_rows(mut roots.streams, ran.replies, false, first, mut stamp_out))?
-        if let Some(keyed) = ran.keyed {
-            failure_result_from_rep(pages.materialize_keyed_edits(mut roots, keyed.edits, first, mut stamp_out))?
-        }
-        failure_result_from_rep(pages.canonical_roots(mut roots))?
-        Ok((take roots, stamp_out))
+    let mut roots = disk_allocation(scoped fn() -> Result[pages.Roots, Error] {
+        Ok(pages.share_roots(pages.holder_heads(db.holders)[i].roots))
     })?
-    let next_node = order.max(pages.holder_next_node(db.holders), after - 1)
-    pages.set_next_node(mut db.holders, next_node)
-    ran.roots = Some(take candidate)
-    ran.prepared_roots = true
+    let Some(take inline_plan) = replace(mut draft.inline_plan, None) else {
+        draft.roots = Some(take roots)
+        return Ok(())
+    }
+    let mut plan = take inline_plan
+    failure_result_from_rep(types.capacity(txn.reserve_inline_tree(mut roots.collections, mut plan.data)))?
+    failure_result_from_rep(types.capacity(txn.reserve_inline_tree(mut roots.streams, mut plan.streams)))?
+    txn.install_inline_tree(mut roots.collections, mut plan.data, draft.edits, draft.order)
+    txn.install_inline_tree(mut roots.streams, mut plan.streams, draft.replies, InOrder)
+    draft.roots = Some(take roots)
     Ok(())
 }
 
-fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[bool, Capacity] {
-    if ran.prepared_roots {
-        return Ok(false)
-    }
-    if let Some(_) = ran.keyed {
-        return Ok(false)
-    }
-    if let Some(_) = branch_follower_slot(db.followers, pages.holder_heads(db.holders)[i].id) {
-        return Ok(false)
-    }
-    let data_count = pages.data_row_count(ran.edits)
-    let reply_count = pages.data_row_count(ran.replies)
-    if data_count + reply_count == 0 || (reply_count != 0 && data_count + reply_count != 1) {
-        return Ok(false)
-    }
-    let Some(take base) = replace(mut ran.roots, None) else {
-        fail("store: draft has no base roots")
-    }
-    if pages.tree_stamp(base.collections) != pages.tree_stamp(pages.holder_heads(db.holders)[i].roots.collections) {
-        ran.roots = Some(take base)
-        return Ok(false)
-    }
-    let _ = take base
-    let changed_roots = if data_count != 0 {
-        direct_data_edits(mut db, i, ran)?
-    } else {
-        let op = pages.data_row(ran.replies, 0u64)
-        match view op.value {
-            None => false,
-            Some(raw) => {
-                let empty_key: Bytes = list.new()
-                pages.edit_head_streams(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[bool, Capacity] {
-                    let inline = tree.inline
-                    let mut stamps = ran.first_stamp
-                    std.page.put_inline_unique(mut tree.root, empty_key, op.key, format.staged_bytes(raw), inline, mut stamps)
-                })?
-            },
-        }
-    }
-    if !changed_roots {
-        ran.roots = Some(pages.share_roots(pages.holder_heads(db.holders)[i].roots))
-    }
-    Ok(changed_roots)
-}
-
-// Writes each row in place when every row is an inline put into a collection
-// no other row of the commit touches. All rows are checked, with their leaf
-// room reserved, before any is written, so a false or a refusal leaves the
-// head's rows as they were. The paths take stamps in turn from first_stamp,
-// inside the interval the body reserved for them.
-fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, Capacity] {
-    pages.edit_head_collection(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[bool, Capacity] {
-        txn.direct_collection_edits(mut tree, ran.edits, ran.first_stamp)
+fn reserve_head_plan(mut db: Db, i: u64, mut plan: txn.InlineDraft) -> Result[(), Capacity] {
+    pages.edit_head_collection(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[(), Capacity] {
+        txn.reserve_inline_tree(mut tree, mut plan.data)
+    })?
+    pages.edit_head_streams(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[(), Capacity] {
+        txn.reserve_inline_tree(mut tree, mut plan.streams)
     })
 }
 
@@ -101,26 +39,29 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         return Ok(OverLimit(take ran, Resident(Capacity(requested: needed, available: available))))
     }
     let mut draft = take ran
-    match prepare_direct_edit(mut db, i, mut draft) {
-        Ok(true) => return Ok(Ready(take draft, Publication(followed: None))),
-        Ok(false) => (),
-        Error(c) => return Ok(OverLimit(take draft, Allocation(c))),
+    let branch_id = pages.holder_heads(db.holders)[i].id
+    if let Some(_) = branch_follower_slot(db.followers, branch_id) {
+        match candidate_for_admission(mut db, i, mut draft) {
+            Ok(()) => (),
+            Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+            Error(take problem) => return Error(take problem),
+        }
     }
-    match prepare_edited_roots(mut db, i, mut draft) {
-        Ok(()) => (),
-        Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
-        Error(take problem) => return Error(take problem),
+    let reserved = match draft.inline_plan {
+        Some(mut plan) => reserve_head_plan(mut db, i, mut plan),
+        None => Ok(()),
+    }
+    if let Error(problem) = reserved {
+        return Ok(OverLimit(take draft, Allocation(problem)))
     }
     if let Some(roots) = draft.roots {
         let extra = int.saturating_sub(manifest.keyed_root_record_bytes(roots.keyed), manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed))
         check_manifest_addition(db, extra)?
     }
     if let Some(_) = draft.tiered {
-        let total = {
-            let Some(roots) = view draft.roots else {
-                fail("store: Tiered draft has no candidate")
-            }
-            failure_result_from_rep(txn.settled_tiered_bytes(db.accounting.tiered, retaining(db), pages.holder_heads(db.holders)[i].roots.collections, roots.collections, draft.edits))
+        let total = match draft.roots {
+            Some(roots) => failure_result_from_rep(txn.settled_tiered_bytes(db.accounting.tiered, retaining(db), pages.holder_heads(db.holders)[i].roots.collections, roots.collections, draft.edits)),
+            None => Ok(db.accounting.tiered),
         }
         match total {
             Ok(n) => {
@@ -183,7 +124,17 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
             }
         }
     }
-    let txn.Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, freed: take freed, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    let mut ready = take ran
+    if let Some(take inline_plan) = replace(mut ready.inline_plan, None) {
+        let mut plan = take inline_plan
+        pages.edit_head_collection(mut db.holders, i, scoped fn(mut tree: pages.PageTree) {
+            txn.install_inline_tree(mut tree, mut plan.data, ready.edits, ready.order)
+        })
+        pages.edit_head_streams(mut db.holders, i, scoped fn(mut tree: pages.PageTree) {
+            txn.install_inline_tree(mut tree, mut plan.streams, ready.replies, InOrder)
+        })
+    }
+    let txn.Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, freed: take freed, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ready
     let branch_id = pages.holder_heads(db.holders)[i].id
     match db.disk {
         Some(mut state) => {
@@ -312,7 +263,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[(Admitt
         return Ok((prepare_run_commit(mut db, i, take ran)?, None))
     }
     let mut settled = take ran
-    match prepare_edited_roots(mut db, i, mut settled) {
+    match candidate_for_admission(mut db, i, mut settled) {
         Ok(()) => (),
         Error(Full(problem)) => return Ok((OverLimit(take settled, problem), None)),
         Error(take problem) => return Error(take problem),
@@ -450,6 +401,6 @@ fn append_transaction_at_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option
     take outcome
 }
 
-fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
-    failure_result_from_rep(txn.prepare_metered_pages(issued, attempt, pins, take finished))
+fn prepare_metered_pages[R, A](base: pages.Roots, issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+    failure_result_from_rep(txn.prepare_metered_pages(base, issued, attempt, pins, take finished))
 }

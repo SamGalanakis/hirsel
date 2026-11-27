@@ -19,7 +19,8 @@ fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -> Op
 pub opaque scoped type TxState[Event: inert + shareable + send] {
     store: types.StoreKey,
     indexes: View[indexes.IndexRegistry],
-    roots: pages.Roots,
+    base: View[pages.Roots],
+    roots: Option[pages.Roots],
     base_collection: Option[TxCollection],
     fetched: Option[core.Cell[Map[Bytes, FetchedRow]]],
     bases: pages.TailBases,
@@ -159,7 +160,7 @@ pub fn current_tx_view[Event: inert + shareable + send](tx: TxState[Event]) -> R
             let Some(first) = int.checked_add(tx.ids, 1) else {
                 return Error(Limit(Ids))
             }
-            TxView(tree: pages.share_page_tree(tx.roots.collections), first: first, draw: first, layer: 0, row: 0, dirty: None, popped: None)
+            TxView(tree: pages.share_page_tree(tx_roots(tx).collections), first: first, draw: first, layer: 0, row: 0, dirty: None, popped: None)
         },
     }
     let memory_only = match tx.attempt {
@@ -196,7 +197,7 @@ fn advance_tx_view(mut v: TxView, rows: pages.DataRows, memory_only: bool) -> Re
 }
 
 pub type Drafted[R, E] {
-    roots: pages.Roots,
+    roots: Option[pages.Roots],
     ids: u64,
     resident: u64,
     frame_tail: u64,
@@ -334,7 +335,9 @@ pub fn install[Event: inert + shareable + send, R, E](mut tx: TxState[Event], ta
         tx.call = Some(take section)
     }
     if let Ok(_) = result {
-        tx.roots = take roots
+        if let Some(take revised) = take roots {
+            tx.roots = Some(take revised)
+        }
         let layers = list.len(tx.below)
         let complete = completed_tx_view(cell.into_inner(take cached), layers + 1, pages.data_row_count(ops.rows))
         if let Some(take ready) = take complete {
@@ -429,7 +432,7 @@ pub fn apply_put[Event: inert + shareable + send](mut tx: TxState[Event], take p
     let charge = memory_data_charge(tx, p, val)
     let (old_charge, height, prior) = put_charge(mut tx, p)?
     let _ = reserve_ids(mut tx, height)?
-    let value = pages.stage_value(take val, tx.roots.collections.inline)
+    let value = pages.stage_value(take val, tx_roots(tx).collections.inline)
     let (slot_order, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value), prior)
     mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
     if tail {
@@ -449,14 +452,14 @@ pub type TxCollection {
 
 fn cache_collection[Event: inert + shareable + send](mut tx: TxState[Event], key: Bytes) -> Result[(), types.Failure] {
     let id: u32 = list.word_be(key, 0)
-    let stamp = pages.tree_stamp(tx.roots.collections)
+    let stamp = pages.tree_stamp(tx_roots(tx).collections)
     if let Some(held) = view tx.base_collection {
         if held.id == id && held.map_stamp == stamp {
             return Ok(())
         }
     }
     let collection = {
-        let Some((root, descriptor)) = std.page.collection_entry(tx.roots.collections.root, list.slice(key, 0, 4)) else {
+        let Some((root, descriptor)) = std.page.collection_entry(tx_roots(tx).collections.root, list.slice(key, 0, 4)) else {
             return Error(Stale(id))
         }
         TxCollection(id: id, map_stamp: stamp, root: arc.share(root), kind: pages.collection_descriptor(descriptor).kind)
@@ -467,7 +470,7 @@ fn cache_collection[Event: inert + shareable + send](mut tx: TxState[Event], key
 
 fn cached_write_height[Event: inert + shareable + send](tx: TxState[Event], held: TxCollection) -> u64 {
     let child_depth: u64 = int.widen(std.page.level(std.page.image_of(held.root)))
-    tree_height(tx.roots.collections) + child_depth + 1
+    tree_height(tx_roots(tx).collections) + child_depth + 1
 }
 
 fn put_charge[Event: inert + shareable + send](mut tx: TxState[Event], key: Bytes) -> Result[(u64, u64, Option[u32]), types.Failure] {
@@ -489,7 +492,7 @@ fn put_charge[Event: inert + shareable + send](mut tx: TxState[Event], key: Byte
         let fetched = map.remove(mut entries, key)
         cell.set(cache, take entries)
         if let Some(row) = fetched {
-            if row.stamp == pages.tree_stamp(tx.roots.collections) {
+            if row.stamp == pages.tree_stamp(tx_roots(tx).collections) {
                 let (charge, prior) = match staged_op(tx, key) {
                     Some(op) => (match op.value {
                         Some(value) => entry(key, format.staged_bytes(value)),
@@ -622,7 +625,8 @@ fn collection_write_height(tree: pages.PageTree, key: Bytes) -> u64 {
 }
 
 fn transaction_write_height[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[u64, types.Failure] {
-    let tree = view tx.roots.collections
+    let held = tx_roots(tx)
+    let tree = view held.collections
     let Some(attempt) = tx.attempt else {
         return Ok(collection_write_height(tree, key))
     }
@@ -651,7 +655,7 @@ pub fn transaction_row[Event: inert + shareable + send](tx: TxState[Event], key:
         Some(staged) => Ok(staged),
         None => match tx.attempt {
             Some(_) => tx_page_row(tx, key),
-            None => Ok(pages.get_page_row(tx.roots.collections, key)),
+            None => Ok(pages.get_page_row(tx_roots(tx).collections, key)),
         },
     }
 }
@@ -691,7 +695,7 @@ pub fn check_write_attempt[Event: inert + shareable + send](tx: TxState[Event]) 
 
 fn memory_data_charge[Event: inert + shareable + send](tx: TxState[Event], key: Bytes, raw: Bytes) -> u64 {
     if let Some(_) = tx.attempt {
-        if pager.tiered_data_key(tx.roots.collections, key) {
+        if pager.tiered_data_key(tx_roots(tx).collections, key) {
             return 0
         }
     }
@@ -731,6 +735,7 @@ pub fn fetch_logical[Event: inert + shareable + send](tx: TxState[Event], take k
 }
 
 pub scoped type TxViews[Event: inert + shareable + send] {
+    base: View[pages.Roots],
     indexes: View[indexes.IndexRegistry],
     reads: View[core.Log[Event]],
     issued: View[core.Cell[u64]],
@@ -748,7 +753,7 @@ pub type TxStart {
     limits: types.LimitsRep,
 }
 
-pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], base: pages.Roots, bases: pages.TailBases, start: TxStart, writable: bool) -> TxState[Event] in scope {
+pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], bases: pages.TailBases, start: TxStart, writable: bool) -> TxState[Event] in scope {
     let (frame_bytes, frame_tail) = if start.journaled {
         (Some(42u64), pages.OPEN_FRAME_TAIL)
     } else {
@@ -759,15 +764,24 @@ pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], base: pa
     } else {
         None
     }
-    TxState(store: start.store, indexes: scope.indexes, roots: pages.share_roots(base), base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    TxState(store: start.store, indexes: scope.indexes, base: scope.base, roots: None, base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
 }
 
 pub fn fork_tx[Event: inert + shareable + send](tx: TxState[Event]) -> TxState[Event] in tx {
-    TxState(store: tx.store, indexes: tx.indexes, roots: pages.share_roots(tx.roots), base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+    TxState(store: tx.store, indexes: tx.indexes, base: tx_roots(tx), roots: None, base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
 }
 
 pub fn tx_roots[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.Roots] in tx {
-    view tx.roots
+    match view tx.roots {
+        Some(held) => held,
+        None => tx.base
+    }
+}
+
+fn own_tx_roots[Event: inert + shareable + send](mut tx: TxState[Event]) {
+    if let None = tx.roots {
+        tx.roots = Some(pages.share_roots(tx.base))
+    }
 }
 
 pub fn tx_bases[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.TailBases] in tx {

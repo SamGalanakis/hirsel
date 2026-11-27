@@ -10,7 +10,8 @@ fn fetch_base[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -
     if let Some(_) = tx.attempt {
         return tx_page_row(tx, key)
     }
-    let tree = view tx.roots.collections
+    let held = tx_roots(tx)
+    let tree = view held.collections
     if list.len(key) < 4 {
         return Ok(None)
     }
@@ -37,7 +38,8 @@ fn fetch_base[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -
 }
 
 fn tx_page_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
-    let tree = view tx.roots.collections
+    let held = tx_roots(tx)
+    let tree = view held.collections
     if list.len(key) < 4 {
         return Ok(None)
     }
@@ -96,7 +98,7 @@ pub fn tx_tiered_descriptor[Event: inert + shareable + send](tx: TxState[Event],
     if let None = tx.attempt {
         return Ok(false)
     }
-    let Some(descriptor) = std.page.lookup(tx.roots.collections.root, catalog.prefix(collection)?) else {
+    let Some(descriptor) = std.page.lookup(tx_roots(tx).collections.root, catalog.prefix(collection)?) else {
         return Ok(false)
     }
     Ok(pages.collection_descriptor(descriptor).residency == ResidentTiered)
@@ -107,7 +109,7 @@ pub fn tx_tiered_rows[Event: inert + shareable + send](tx: TxState[Event], colle
         return Ok(None)
     }
     let rows = if staged {
-        read.tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
+        read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, Some(collection))?
     } else {
         std.omap.new()
     }
@@ -117,7 +119,8 @@ pub fn tx_tiered_rows[Event: inert + shareable + send](tx: TxState[Event], colle
 // The rows of a Tiered table in [low, high): the committed count by rank
 // difference over the replay overlay, then each staged op's change.
 pub fn tx_tiered_count[Event: inert + shareable + send](tx: TxState[Event], collection: u32, low: Bytes, high: Bytes) -> Result[u64, types.Failure] {
-    let tree = view tx.roots.collections
+    let held = tx_roots(tx)
+    let tree = view held.collections
     let id = catalog.prefix(collection)?
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) else {
         return Error(Stale(collection))
@@ -161,7 +164,7 @@ pub fn tx_tiered_count[Event: inert + shareable + send](tx: TxState[Event], coll
         }
         pager.tiered_count_overlay(overlay, low, high, base_count)?
     }
-    let staged = read.tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, Some(collection))?
+    let staged = read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, Some(collection))?
     let mut total = committed
     let mut cursor = std.omap.range(staged, Included(types.copied(low)?), Excluded(types.copied(high)?))
     while let Some((key, value)) = std.omap.next(mut cursor) {
@@ -192,7 +195,7 @@ fn tx_index_tiered[Event: inert + shareable + send](tx: TxState[Event]) -> Resul
     if let None = tx.attempt {
         return Ok(None)
     }
-    Ok(Some(IndexTiered(attempt: tx.attempt, pins: tx.pins, staged: read.tx_tiered_staged(tx.roots.collections, tx.below, tx.ops, None)?)))
+    Ok(Some(IndexTiered(attempt: tx.attempt, pins: tx.pins, staged: read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, None)?)))
 }
 
 pub fn next_index_tiered_row(tree: pages.PageTree, context: IndexTiered, id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {

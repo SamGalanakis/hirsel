@@ -62,7 +62,7 @@ fn probe_index_keys[Event: inert + shareable + send](tx: TxState[Event], table_i
     for (index_id, key) in probes {
         if let Some(prior) = transaction_row(tx, key)? {
             if list.slice(prior, 4, indexes.unique_owner_end(prior)?) != primary {
-                return Error(Conflict(indexes.find_index_name(tx.roots.catalog, table_id, index_id)?))
+                return Error(Conflict(indexes.find_index_name(tx_roots(tx).catalog, table_id, index_id)?))
             }
         }
     }
@@ -77,7 +77,7 @@ fn edit_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], edit: in
 }
 
 fn write_stamp_cost[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[u64, types.Failure] {
-    if let None = std.page.collection_slot(tx.roots.collections.root, list.slice(key, 0, 4)) {
+    if let None = std.page.collection_slot(tx_roots(tx).collections.root, list.slice(key, 0, 4)) {
         return Error(Stale(list.word_be(key, 0)))
     }
     Ok(6 * transaction_write_height(tx, key)? + 2)
@@ -117,7 +117,7 @@ fn append_index_remove[Event: inert + shareable + send](tx: TxState[Event], mut 
 // driver counts and demotes by.
 pub fn drift_stop[Event: inert + shareable + send](mut tx: TxState[Event], take seen: List[(u32, u32)]) -> types.Failure {
     let (owner, id) = seen[0u64]
-    let name = match indexes.find_index_name(tx.roots.catalog, owner, id) {
+    let name = match indexes.find_index_name(tx_roots(tx).catalog, owner, id) {
         Ok(take name) => take name,
         Error(take problem) => return take problem,
     }
@@ -222,7 +222,7 @@ pub fn put_impl[Event: inert + shareable + send, V](mut tx: TxState[Event], id: 
 // Every index on table `table_id`, with the extractors bound for value
 // schema `schema`, in declaration order.
 pub fn bound_indexes[Event: inert + shareable + send](tx: TxState[Event], table_id: u32, schema: u16) -> Result[List[(u64, indexes.Catalog)], types.Failure] {
-    let records = indexes.index_catalog_in(tx.roots.catalog, table_id)?
+    let records = indexes.index_catalog_in(tx_roots(tx).catalog, table_id)?
     let mut bound_records: List[(u64, indexes.Catalog)] = list.new()
     for take record in take records {
         let bound_index = registered_index(tx, table_id, schema, record)?

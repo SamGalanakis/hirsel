@@ -109,7 +109,7 @@ pub fn cell_current[Event: inert + shareable + send](tx: TxState[Event], id: u32
     match cell_edit(tx, id) {
         Some(CellPut(value)) => Some(format.staged_bytes(value)),
         Some(CellDelete) => None,
-        _ => cell_page_row(tx.roots.collections, key),
+        _ => cell_page_row(tx_roots(tx).collections, key),
     }
 }
 
@@ -129,7 +129,7 @@ pub fn stage_cell[Event: inert + shareable + send](mut tx: TxState[Event], id: u
         } else {
             cell_charge(current)
         }
-        (cell_matches(pages.get_page_row(tx.roots.collections, key), wanted), cell_wire_size(previous), was)
+        (cell_matches(pages.get_page_row(tx_roots(tx).collections, key), wanted), cell_wire_size(previous), was)
     }
     let (new_width, new_charge) = match view wanted {
         Some(raw) => (17 + list.len(raw), 70 + format.round8(list.len(raw))),
@@ -169,10 +169,10 @@ pub fn stage_cell[Event: inert + shareable + send](mut tx: TxState[Event], id: u
     if reverts {
         remove_cell_edit(mut tx.ops.cells, tx.below, id)
     } else {
-        let height = collection_write_height(tx.roots.collections, key)
+        let height = collection_write_height(tx_roots(tx).collections, key)
         let _ = reserve_ids(mut tx, height)?
         let edit: pages.CellEdit = match take wanted {
-            Some(take raw) => CellPut(pages.stage_value(take raw, tx.roots.collections.inline)),
+            Some(take raw) => CellPut(pages.stage_value(take raw, tx_roots(tx).collections.inline)),
             None => CellDelete,
         }
         map.insert(mut tx.ops.cells, id, take edit)

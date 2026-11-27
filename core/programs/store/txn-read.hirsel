@@ -2,14 +2,14 @@ pub fn check_table_read[Event: inert + shareable + send](tx: TxState[Event], sto
     if tx.store != store_key {
         return Error(Foreign)
     }
-    catalog.readable(tx.roots, key, page, id)
+    catalog.readable(tx_roots(tx), key, page, id)
 }
 
 pub fn check_index_read[Event: inert + shareable + send](tx: TxState[Event], store_key: types.StoreKey, key: Bytes, page: Bytes, id: u32, visible: bool) -> Result[(), types.Failure] {
     if tx.store != store_key {
         return Error(Foreign)
     }
-    catalog.index_readable(tx.roots, key, page, id, visible)
+    catalog.index_readable(tx_roots(tx), key, page, id, visible)
 }
 
 pub fn open_range_bounds[Event: inert + shareable + send](tx: TxState[Event], id: u32, low: Bytes, high: Bytes, reverse: bool) -> Result[(Option[pages.CollectionCursor], Option[TxTieredRows]), types.Failure] {

@@ -1,0 +1,124 @@
+fn inline_transfer(db: Db, complete: Completion, n: u64, s: u64) -> DraftedCall {
+    draft_call(db, complete, next_call_info(db), Plan(n_e: n, s_e: s, reply_max: 64), None, None, map.new(), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        match put_bytes(mut tx, 1, types.key_word(1), types.key_word(49)) {
+            Ok(()) => (),
+            Error(_) => return Error(types.key_word(1)),
+        }
+        match put_bytes(mut tx, 1, types.key_word(2), types.key_word(51)) {
+            Ok(()) => Ok(types.key_word(0)),
+            Error(_) => Error(types.key_word(2)),
+        }
+    })
+}
+
+fn inline_admitted(draft: DraftedCall) -> bool {
+    match draft.stage {
+        Ran(tx) => match tx.value {
+            Ok(_) => true,
+            _ => false
+        },
+        _ => false,
+    }
+}
+
+fn inline_boundary(db: Db, complete: Completion, byte_limit: bool) -> u64 {
+    let mut lo = 0u64
+    let mut hi = 131072u64
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let n = if byte_limit {
+            mid
+        } else {
+            131072u64
+        }
+        let s = if byte_limit {
+            131072u64
+        } else {
+            mid
+        }
+        if inline_admitted(inline_transfer(db, complete, n, s)) {
+            hi = mid
+        } else {
+            lo = mid + 1
+        }
+    }
+    lo
+}
+
+fn inline_meter_arm(c: Clock, held: bool, neighbours: u64) -> Result[(u64, u64), Error] waits {
+    let mut db = raw_test_db(c, 1048576)
+    if !put_one(mut db, 1, 50) || !put_one(mut db, 2, 50) {
+        return Error(Missing("seed transfer"))
+    }
+    // The neighbouring commits leave the transfer's base rows and tree shape intact.
+    for i in 0u64 .. neighbours {
+        if !put_one(mut db, 1, 50) {
+            return Error(Missing("neighbour"))
+        }
+    }
+    let stream = law_stream_name(types.key_word(7), keyed_time(db))
+    let Admitted(take complete) = admit(mut db, stream, 0, request_digest(b"meter", b"transfer"))? else {
+        return Error(Missing("admit transfer"))
+    }
+    let prior: Option[Snapshot] = if held {
+        Some(snapshot(db))
+    } else {
+        None
+    }
+    let n = inline_boundary(db, complete, true)
+    let s = inline_boundary(db, complete, false)
+    if n == 0 || s == 0 {
+        return Error(Missing("positive grant"))
+    }
+    let below = inline_transfer(db, complete, n - 1, 131072)
+    match below.stage {
+        Over(Refused(Allocation(_))) => (),
+        Over(Aborted(Undone(value: BodyStop(OutOfBytes(_)), ..))) => (),
+        _ => return Error(Missing("byte boundary")),
+    }
+    if let Over(Stopped(_)) = inline_transfer(db, complete, 131072, s - 1).stage {} else {
+        return Error(Missing("step boundary"))
+    }
+    let DraftedCall(stage: take decided, next_id: high) = inline_transfer(db, complete, n, s)
+    let Ran(take ran) = take decided else {
+        return Error(Missing("admit at both boundaries"))
+    }
+    pages.set_next_node(mut db.holders, high)
+    let Ready(take accepted, take publication) = prepare_run_commit(mut db, 0, take ran)? else {
+        return Error(Missing("ready transfer"))
+    }
+    let copies = match accepted.inline_plan {
+        Some(plan) => std.page.inline_shadow_pages(plan.data) + std.page.inline_shadow_pages(plan.streams),
+        None => return Error(Missing("transfer materialized replacement trees")),
+    }
+    // One collection-map leaf, one two-account leaf, and one stream leaf.
+    if copies != (if held {
+        3u64
+    } else {
+        0u64
+    }) {
+        return Error(Missing("transfer page copies"))
+    }
+    let Committed(_) = commit_prepared(mut db, 0, take accepted, take publication) else {
+        return Error(Missing("commit transfer"))
+    }
+    if let Some(old) = prior {
+        if value_at(old, 1) != 50 || value_at(old, 2) != 50 {
+            return Error(Missing("snapshot changed"))
+        }
+    }
+    let now = snapshot(db)
+    if value_at(now, 1) != 49 || value_at(now, 2) != 51 {
+        return Error(Missing("transferred balances"))
+    }
+    Ok((n, s))
+}
+
+@test
+fn test_as_if_alone_page_edits(c: Clock) -> Result[(), Error] waits {
+    let alone = inline_meter_arm(c, false, 0)?
+    if inline_meter_arm(c, true, 0)? != alone || inline_meter_arm(c, false, 63)? != alone || inline_meter_arm(c, true, 63)? != alone {
+        return Error(Missing("snapshot or neighbours changed the byte or step boundary"))
+    }
+    Ok(())
+}

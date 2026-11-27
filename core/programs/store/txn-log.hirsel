@@ -99,7 +99,8 @@ fn transaction_log_state[Event: inert + shareable + send](tx: TxState[Event], id
     if let Some(existing) = staged_log_state(tx, id) {
         return Ok(existing)
     }
-    let tree = view tx.roots.collections
+    let held = tx_roots(tx)
+    let tree = view held.collections
     let key = catalog.prefix(id)?
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
@@ -183,10 +184,14 @@ fn seal_log_trims[Event: inert + shareable + send](mut tx: TxState[Event], mut d
         let key = catalog.prefix(id)?
         // A Tiered Log's floor is staged by the Tiered write plan, whose
         // `TieredDropped` figure the frame carries (§13.3).
-        let dropped = if pager.tiered_data_key(tx.roots.collections, key) {
+        let dropped = if pager.tiered_data_key(tx_roots(tx).collections, key) {
             0u64
         } else {
-            let removed = trim_log_page(mut tx.roots.collections, key, state.limits.first, None, first, mut draw)?
+            own_tx_roots(mut tx)
+            let removed = match tx.roots {
+                Some(mut roots) => trim_log_page(mut roots.collections, key, state.limits.first, None, first, mut draw)?,
+                None => fail("store: private trim roots"),
+            }
             if !tx.retain_old {
                 tx.resident = int.saturating_sub(tx.resident, removed)
             }
@@ -232,7 +237,7 @@ pub fn append_log[Event: inert + shareable + send, V](mut tx: TxState[Event], id
     let key = pager.log_key(id, seq)?
     let _ = reserve_ids(mut tx, current.height)?
     let charge = memory_data_charge(tx, key, raw)
-    let staged = pages.stage_value(take raw, tx.roots.collections.inline)
+    let staged = pages.stage_value(take raw, tx_roots(tx).collections.inline)
     let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged), None)
     current.limits.next = following
     map.insert(mut tx.ops.logs, id, current)
@@ -255,7 +260,7 @@ pub fn transaction_log_bounds[Event: inert + shareable + send](tx: TxState[Event
     if let Some(existing) = staged_log_state(tx, id) {
         return Ok(pages.LogBoundsRep(first: existing.limits.first, next: existing.limits.next))
     }
-    committed_log_bounds(tx.roots.collections, id)
+    committed_log_bounds(tx_roots(tx).collections, id)
 }
 
 pub fn window_deletions[Row, Trim](mut out: read.ChangeOutput[Row, Trim], id: u32, lo: u64, hi: u64, change: fn(take Bytes, take Option[Arc[Bytes]]) -> Row) -> Result[(), types.Failure] {

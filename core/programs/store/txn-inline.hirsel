@@ -1,0 +1,91 @@
+// Same-width table and index batches preserve the batch reducer's shape.
+// A single inline row may also grow or shrink when it fits the same leaf.
+pub type InlineDraft {
+    data: std.page.InlinePlan,
+    streams: std.page.InlinePlan
+}
+
+fn inline_rows(tree: pages.PageTree, rows: pages.DataRows, order: format.DataOrder, mut node: std.page.InlinePlan, mut charge_bytes: u64) -> bool {
+    let collection_map = pages.tree_domain(tree) == CollectionMap
+    let count = pages.data_row_count(rows)
+    let mut end = 0u64
+    let mut batch = false
+    for i in 0u64 .. count {
+        let row = pager.ordered_row(rows, order, i)
+        let Some(raw) = view row.value else {
+            return false
+        }
+        let prefix = if collection_map {
+            4u64
+        } else {
+            0u64
+        }
+        let collection = list.slice(row.key, 0, prefix)
+        if i == end {
+            end = i + 1
+            if collection_map {
+                let kind = pages.collection_kind(tree, collection)
+                if kind != Some(TableCollection) && kind != Some(IndexCollection) {
+                    return false
+                }
+                while end < count {
+                    if list.slice(pager.ordered_row(rows, order, end).key, 0, 4) != collection {
+                        break
+                    }
+                    end += 1
+                }
+            } else if count > 1 {
+                // Several resizing stream edits may shift one another's slots.
+                return false
+            }
+            batch = end > i + 1
+        }
+        if !std.page.plan_inline_row(mut node, tree.root, collection, list.slice(row.key, prefix, list.len(row.key)), format.staged_bytes(raw), tree.inline, i, batch, false, mut charge_bytes) {
+            return false
+        }
+    }
+    true
+}
+
+fn plan_inline_draft[R, A](prepared: Prepared[R, A], base: pages.Roots, mut next: u64) -> Result[Option[InlineDraft], types.Failure] {
+    if let Some(_) = prepared.roots {
+        return Ok(None)
+    }
+    if let Some(_) = prepared.keyed {
+        return Ok(None)
+    }
+    let mut data = std.page.inline_plan(0)
+    let mut streams = std.page.inline_plan(0)
+    let mut charge_bytes = 0u64
+    if !inline_rows(base.collections, prepared.ops, prepared.order, mut data, mut charge_bytes) {
+        return Ok(None)
+    }
+    if !inline_rows(base.streams, prepared.stream_ops, InOrder, mut streams, mut charge_bytes) {
+        return Ok(None)
+    }
+    pages.page_result(std.page.stamp_inline_plan(mut data, mut next))?
+    pages.page_result(std.page.stamp_inline_plan(mut streams, mut next))?
+    types.capacity(bound bytes charge_bytes {
+        ()
+    })?
+    Ok(Some(InlineDraft(data: take data, streams: take streams)))
+}
+
+pub fn reserve_inline_tree(mut tree: pages.PageTree, mut node: std.page.InlinePlan) -> Result[(), Capacity] {
+    std.page.reserve_inline_plan(mut tree.root, mut node)
+}
+
+pub fn install_inline_tree(mut tree: pages.PageTree, mut node: std.page.InlinePlan, rows: pages.DataRows, order: format.DataOrder) {
+    let prefix = if pages.tree_domain(tree) == CollectionMap {
+        4u64
+    } else {
+        0u64
+    }
+    std.page.apply_inline_plan(mut tree.root, mut node, scoped fn(slot: u64, visit: scoped fn(Bytes, Bytes)) {
+        let row = pager.ordered_row(rows, order, slot)
+        let Some(raw) = view row.value else {
+            fail("store: planned inline put has a value")
+        }
+        visit(list.slice(row.key, prefix, list.len(row.key)), format.staged_bytes(raw))
+    })
+}

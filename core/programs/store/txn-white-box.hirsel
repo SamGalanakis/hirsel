@@ -1,6 +1,10 @@
 // Mutate the empty raw fixture collections under the same stamps as body writes.
 pub fn define_test_collection[Event: inert + shareable + send](mut tx: TxState[Event], id: u32, mut draw: u64) -> Result[(), types.Failure] {
-    catalog.define_collection(mut tx.roots.collections, id, 1, tx.private_from, mut draw)?
+    own_tx_roots(mut tx)
+    if let Some(mut roots) = tx.roots {
+        catalog.define_collection(mut roots.collections, id, 1, tx.private_from, mut draw)?
+    }
+    tx.private_from = draw
     tx.resident += 126
     Ok(())
 }

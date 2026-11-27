@@ -46,14 +46,14 @@ impl Mode {
 }
 
 #[derive(Eq, PartialEq)]
-struct Row {
+pub(crate) struct Row {
     /// None on a toolchain row.
-    version: Option<String>,
-    root: Option<Root>,
-    source: String,
+    pub(crate) version: Option<String>,
+    pub(crate) root: Option<Root>,
+    pub(crate) source: String,
     edges: Vec<Id>,
     /// `<name@major> <tested root>` for each edge whose recorded root is not the resolved one.
-    tested: Vec<String>,
+    pub(crate) tested: Vec<String>,
 }
 
 type Rows = BTreeMap<Id, Row>;
@@ -77,7 +77,7 @@ fn std_row(rows: &mut Rows) {
     }
 }
 
-fn make_rows(resolution: &Resolution) -> Rows {
+pub(crate) fn make_rows(resolution: &Resolution) -> Rows {
     let mut rows = BTreeMap::new();
     let exact: BTreeSet<_> = resolution
         .workspace
@@ -258,7 +258,7 @@ fn id(text: &str) -> Option<Id> {
     })
 }
 
-fn old_rows(bytes: &[u8]) -> Option<Rows> {
+pub(crate) fn old_rows(bytes: &[u8]) -> Option<Rows> {
     let old = toml::from_str::<OldLock>(std::str::from_utf8(bytes).ok()?).ok()?;
     if old.version != 2 {
         return None;

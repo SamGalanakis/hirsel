@@ -5,7 +5,7 @@ use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 type Fields = [(&'static str, Option<Value>); 11];
 
 /// What a binding names beside its major.
-pub(super) enum Form<'a> {
+pub(crate) enum Form<'a> {
     Published(Root, Option<&'a SourceLocation>),
     Toolchain,
     Member(&'a str),
@@ -117,7 +117,7 @@ fn place(dependencies: &mut dyn TableLike, name: &str, fields: Fields) {
 }
 
 /// Binds `id` under `alias` in the manifest's own `[dependencies]`.
-pub(super) fn binding(
+pub(crate) fn binding(
     input: &[u8],
     alias: &str,
     id: &Id,
@@ -131,7 +131,7 @@ pub(super) fn binding(
 /// Declares `id` in the root's `[workspace.dependencies]`, any path spelled
 /// relative to the root, and with `inherit` also binds it in the root
 /// package's own `[dependencies]` as `{ workspace = true }`.
-pub(super) fn shared(
+pub(crate) fn shared(
     input: &[u8],
     alias: &str,
     id: &Id,
@@ -155,7 +155,7 @@ pub(super) fn shared(
         .ok_or("workspace.dependencies is not a table")?;
     place(declared, alias, published(id, form));
     if inherit {
-        place(dependencies(&mut document)?, alias, inherited());
+        inherit_binding(&mut document, alias)?;
     }
     Ok(document.to_string())
 }
@@ -163,8 +163,20 @@ pub(super) fn shared(
 /// Binds `alias` in the manifest's `[dependencies]` as `{ workspace = true }`.
 pub(super) fn inherit(input: &[u8], alias: &str) -> Result<String, super::Failure> {
     let mut document = document(input)?;
-    place(dependencies(&mut document)?, alias, inherited());
+    inherit_binding(&mut document, alias)?;
     Ok(document.to_string())
+}
+
+fn inherit_binding(document: &mut DocumentMut, alias: &str) -> Result<(), super::Failure> {
+    let dependencies = dependencies(document)?;
+    if let Some(binding) = dependencies
+        .get_mut(alias)
+        .and_then(Item::as_table_like_mut)
+    {
+        binding.remove("authority");
+    }
+    place(dependencies, alias, inherited());
+    Ok(())
 }
 
 fn set_fields(table: &mut dyn TableLike, fields: Fields) {
@@ -195,4 +207,40 @@ fn set_fields(table: &mut dyn TableLike, fields: Fields) {
             table.remove(key);
         }
     }
+}
+
+pub(crate) fn selections(
+    input: &[u8],
+    before: &crate::package_manifest::Selections,
+    after: &crate::package_manifest::Selections,
+) -> Result<String, super::Failure> {
+    let mut document = document(input)?;
+    if before == after {
+        return Ok(document.to_string());
+    }
+    let table = document.as_table_mut();
+    if !table.contains_key("selections") {
+        let mut selections = Table::new();
+        selections.decor_mut().set_prefix("\n");
+        table.insert("selections", Item::Table(selections));
+    }
+    let selections = table
+        .get_mut("selections")
+        .and_then(Item::as_table_like_mut)
+        .ok_or("selections is not a table")?;
+    for id in before.keys().filter(|id| !after.contains_key(*id)) {
+        selections.remove(&id.to_string());
+    }
+    for (id, (root, locator)) in after {
+        if before.get(id) != after.get(id) {
+            let mut fields = published(id, &Form::Published(*root, locator.as_ref()));
+            fields[0].1 = None;
+            fields[1].1 = None;
+            place(selections, &id.to_string(), fields);
+        }
+    }
+    if selections.is_empty() {
+        table.remove("selections");
+    }
+    Ok(document.to_string())
 }

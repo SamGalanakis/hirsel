@@ -16,10 +16,10 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-mod edit;
-mod git;
-mod options;
-mod paths;
+pub(crate) mod edit;
+pub(crate) mod git;
+pub(crate) mod options;
+pub(crate) mod paths;
 
 use options::{Options, Source};
 use paths::{find_member, relative_to, root_relative};
@@ -36,6 +36,7 @@ struct ClosureRow {
 #[derive(Serialize)]
 struct Report {
     result: &'static str,
+    alias: String,
     id: String,
     root: Option<String>,
     source: String,
@@ -86,7 +87,12 @@ impl Report {
             Some(old) if self.result == "updated" => format!("{old} -> {bound}"),
             _ => bound,
         };
-        println!("hirsel: {verb} {} {root} in {}", self.id, target.display());
+        let id = if options.alias.is_some() {
+            format!("{} = {}", self.alias, self.id)
+        } else {
+            self.id.clone()
+        };
+        println!("hirsel: {verb} {id} {root} in {}", target.display());
         if let Some(chose) = &self.chose {
             println!("hirsel: {chose}");
         }
@@ -124,7 +130,7 @@ fn fd_path(directory: &File) -> io::Result<PathBuf> {
     crate::host::fd_path(directory)
 }
 
-fn lock_scope(cwd: &Path) -> Result<File, Failure> {
+pub(crate) fn lock_scope(cwd: &Path) -> Result<File, Failure> {
     let scope = open_directory(&fd_path(&Workspace::scope(cwd)?)?)?;
     loop {
         // SAFETY: scope is a live, readable descriptor for the workspace root.
@@ -149,7 +155,8 @@ struct Capture {
 }
 
 fn acquire(options: &Options, workspace: &Workspace, cwd: &Path) -> Result<Capture, Failure> {
-    let (archive, locator, len, fetched, chose) = acquire_any(options, workspace, cwd)?;
+    let (archive, locator, len, fetched, chose) =
+        acquire_any(&options.source, &options.store, workspace, cwd)?;
     if let (Some(expected), Some(locator)) = (options.expected, &locator)
         && expected != archive.head
     {
@@ -170,7 +177,7 @@ fn acquire(options: &Options, workspace: &Workspace, cwd: &Path) -> Result<Captu
     })
 }
 
-type Acquisition = (
+pub(crate) type Acquisition = (
     PackageArchive,
     Option<SourceLocation>,
     usize,
@@ -178,14 +185,15 @@ type Acquisition = (
     Option<String>,
 );
 
-fn acquire_any(
-    options: &Options,
+pub(crate) fn acquire_any(
+    source: &Source,
+    store: &PackageStore,
     workspace: &Workspace,
     cwd: &Path,
 ) -> Result<Acquisition, Failure> {
-    let (archive, len, locator) = match &options.source {
+    let (archive, len, locator) = match source {
         Source::Store(root) => {
-            let library = match options.store.read(*root)? {
+            let library = match store.read(*root)? {
                 Entry::Present(library) => library,
                 Entry::Missing => {
                     return Err(format!("root is not in the package store\n  {root}").into());
@@ -206,15 +214,15 @@ fn acquire_any(
             ));
         }
         Source::Url(url) => {
-            let (archive, len) = fetch_https(&options.store.transport, url, &mut |_| Ok(()), "")?;
+            let (archive, len) = fetch_https(&store.transport, url, &mut |_| Ok(()), "")?;
             (archive, len, SourceLocation::Url(url.clone()))
         }
         Source::Git(request) => {
             let mut budget = Budget::new(String::new());
-            let (git, remote, chose) = request.resolve(&options.store.transport, &mut budget)?;
+            let (git, remote, chose) = request.resolve(&store.transport, &mut budget)?;
             let (_, acquired) = pack_listed(
-                &options.store,
-                &options.store.session,
+                store,
+                &store.session,
                 &mut budget,
                 None,
                 None,
@@ -313,7 +321,11 @@ fn check_source(
     Ok(())
 }
 
-fn stage(directory: &File, name: &str, contents: &[u8]) -> io::Result<tempfile::NamedTempFile> {
+pub(crate) fn stage(
+    directory: &File,
+    name: &str,
+    contents: &[u8],
+) -> io::Result<tempfile::NamedTempFile> {
     let parent = fd_path(directory)?;
     let mut temp = tempfile::NamedTempFile::new_in(&parent)?;
     match fs::symlink_metadata(parent.join(name)) {
@@ -351,11 +363,11 @@ fn publish(
     Ok(file)
 }
 
-fn current_scope(cwd: &Path, scope: &File) -> Result<Workspace, Failure> {
-    let workspace =
-        Workspace::discover_for(cwd, false)?.ok_or("the workspace changed while hirsel add ran")?;
+pub(crate) fn current_scope(cwd: &Path, scope: &File, command: &str) -> Result<Workspace, Failure> {
+    let workspace = Workspace::discover_for(cwd, false)?
+        .ok_or_else(|| format!("the workspace changed while hirsel {command} ran"))?;
     if identity(&workspace.root)? != identity(scope)? {
-        return Err("the workspace changed while hirsel add ran".into());
+        return Err(format!("the workspace changed while hirsel {command} ran").into());
     }
     Ok(workspace)
 }
@@ -404,7 +416,7 @@ fn settle(
     libraries: BTreeMap<Root, Library>,
     report: &mut Report,
 ) -> Result<(PackageStore, BTreeMap<Root, Library>, Option<String>), Failure> {
-    let actual = current_scope(cwd, scope)?;
+    let actual = current_scope(cwd, scope, "add")?;
     if let Some((target, published, path)) = published
         && actual.captured_manifest(target)? != Some(published)
     {
@@ -516,6 +528,19 @@ fn spelling(id: &crate::package_content::Id, edge: &Edge) -> String {
     }
 }
 
+fn alias_taken(
+    manifest: &Path,
+    field: &str,
+    alias: &str,
+    existing: &crate::package_content::Id,
+) -> Failure {
+    format!(
+        "{}: {field}.{alias} already binds {existing}; pass --as to choose another alias",
+        manifest.display()
+    )
+    .into()
+}
+
 pub(crate) fn run(invocation: Request<AddOption>) -> Result<i32, Failure> {
     run_at(invocation, &std::env::current_dir()?, |_| {})
 }
@@ -527,7 +552,7 @@ pub(crate) fn run_at(
 ) -> Result<i32, Failure> {
     let options = Options::read(invocation)?;
     let scope = lock_scope(cwd)?;
-    let workspace = current_scope(cwd, &scope)?;
+    let workspace = current_scope(cwd, &scope, "add")?;
     let root_manifest = workspace.directory.join(MANIFEST);
     let root_captured = workspace
         .captured_manifest(&scope)?
@@ -597,9 +622,7 @@ pub(crate) fn run_at(
         (None, Some((id, _))) => id.clone(),
         (None, None) => unreachable!("every source names an archive or a local package"),
     };
-    if !options.update
-        && let (Some(source), Some(root)) = (&locator, root)
-    {
+    if let (Some(source), Some(root)) = (&locator, root) {
         check_source(&workspace, source, root)?;
     }
 
@@ -607,13 +630,29 @@ pub(crate) fn run_at(
     if local.is_none() && crate::package_manifest::name::local(&id.name) {
         return Err(format!("{id} has a local name; only a workspace member can have one").into());
     }
-    // The alias is the last component of the package name (packages.md section 7).
-    let alias = hirsel_core_resolve::short_name(&id.name);
+    let alias = options
+        .alias
+        .as_deref()
+        .unwrap_or_else(|| hirsel_core_resolve::short_name(&id.name));
+    if matches!(options.source, Source::Toolchain(_)) && alias != id.name {
+        return Err(format!("a toolchain package must use its bare name {id}").into());
+    }
     let prior = member.and_then(|member| member.package.dependencies.get(alias));
     let bound = member.and_then(|member| {
         let bound = member.aliases.get(alias)?;
         member.edges.get_key_value(bound)
     });
+    if let Some((name, _)) = bound
+        && let Some(member) = member
+        && *name != id
+    {
+        return Err(alias_taken(
+            &member.manifest_path,
+            "dependencies",
+            alias,
+            name,
+        ));
+    }
     let bound_root = bound.and_then(|(_, edge)| match edge {
         Edge::Published(root, _) => Some(*root),
         _ => None,
@@ -643,12 +682,34 @@ pub(crate) fn run_at(
             | (Some(Dependency::Member(declared, ..)), Edge::Member) => *declared == id,
             _ => false,
         };
+        if let Some(entry) = entry {
+            let existing = match entry {
+                Dependency::Toolchain(id)
+                | Dependency::Member(id, ..)
+                | Dependency::Published(id, ..) => id,
+                Dependency::Inherited => unreachable!("workspace rows cannot inherit"),
+            };
+            if *existing != id {
+                return Err(alias_taken(
+                    &root_manifest,
+                    "workspace.dependencies",
+                    alias,
+                    existing,
+                ));
+            }
+        }
+        let authority = |dependency: &Dependency| match dependency {
+            Dependency::Published(_, _, _, mask) | Dependency::Member(_, _, mask) => *mask,
+            _ => 0,
+        };
         let own = prior.filter(|dependency| !matches!(dependency, Dependency::Inherited));
-        if let (Some(_), Some(member), Some((name, old))) = (own, member, bound)
-            && !options.update
+        if let (Some(dependency), Some(member), Some((name, old))) = (own, member, bound)
+            && (old != &edge || authority(dependency) != entry.map_or(0, authority))
         {
             return Err(format!(
-                "{}: dependencies.{} is bound here and in the workspace; pass --update to replace the local binding with {{ workspace = true }}\n  {} = {}\n  {} = {}",
+                "{}: dependencies.{} differs from the workspace binding; edit the local binding before inheriting it
+  {} = {}
+  {} = {}",
                 member.manifest_path.display(),
                 alias,
                 member.manifest_path.display(),
@@ -657,36 +718,6 @@ pub(crate) fn run_at(
                 spelling(&id, &edge),
             )
             .into());
-        }
-        if let Some(entry) = entry
-            && !same
-            && !options.update
-        {
-            let consumers: Vec<String> = workspace
-                .members
-                .iter()
-                .filter(|(other, sibling)| {
-                    Some(*other) != selected.as_ref()
-                        && matches!(
-                            sibling.package.dependencies.get(alias),
-                            Some(Dependency::Inherited)
-                        )
-                })
-                .map(|(other, _)| other.to_string())
-                .collect();
-            if !consumers.is_empty() {
-                let declared = match entry {
-                    Dependency::Toolchain(declared)
-                    | Dependency::Member(declared, ..)
-                    | Dependency::Published(declared, ..) => declared.to_string(),
-                    Dependency::Inherited => alias.to_owned(),
-                };
-                return Err(format!(
-                    "the workspace binds {declared} for {}; pass --update to change it",
-                    consumers.join(", ")
-                )
-                .into());
-            }
         }
         let root_package = member.is_some_and(|member| member.directory.as_os_str().is_empty());
         let path = directory.map(|directory| relative_to(Path::new(""), directory));
@@ -760,10 +791,10 @@ pub(crate) fn run_at(
                 | (Some(Dependency::Published(..)), Edge::Published(..))
                 | (Some(Dependency::Toolchain(_)), Edge::Toolchain)
                 | (Some(Dependency::Member(..)), Edge::Member)
-        ) && member.edges.get(&id) == Some(&edge);
-        if inherited && !unchanged && !options.update {
+        ) && bound.is_some_and(|(_, existing)| *existing == edge);
+        if inherited && !unchanged {
             return Err(format!(
-                "{}: dependencies.{} inherits the workspace binding; pass --workspace to change it for the workspace, or --update to bind it here",
+                "{}: dependencies.{} inherits the workspace binding; pass --workspace to change its declaration or run hirsel update {alias}",
                 member.manifest_path.display(),
                 alias
             )
@@ -808,6 +839,7 @@ pub(crate) fn run_at(
         } else {
             "added"
         },
+        alias: alias.to_owned(),
         id: id.to_string(),
         root: root.map(|root| root.to_string()),
         source: match (&locator, &local) {

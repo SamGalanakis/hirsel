@@ -99,7 +99,7 @@ struct WorkspacePackage {
     charge: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SourceLocation {
     Archive(String),
     Url(String),
@@ -107,8 +107,8 @@ pub(crate) enum SourceLocation {
 }
 
 /// A commit and the package's directory in it (GIT-1). `reference` is the full ref name
-/// `hirsel add` resolved; nothing but `add` reads it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// `hirsel add` resolved and `hirsel update` refreshes.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct GitSource {
     pub(crate) url: String,
     pub(crate) rev: String,

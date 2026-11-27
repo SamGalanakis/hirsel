@@ -8,7 +8,7 @@ use crate::package_workspace::{Member, Workspace, archive_path, identity};
 use std::path::{Path, PathBuf};
 
 /// `to` spelled relative to `from`; both are workspace-relative directories.
-pub(super) fn relative_to(from: &Path, to: &Path) -> String {
+pub(crate) fn relative_to(from: &Path, to: &Path) -> String {
     let common = from
         .components()
         .zip(to.components())

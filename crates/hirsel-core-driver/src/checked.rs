@@ -1,4 +1,7 @@
-use crate::{CheckProduct, ContentHash, request_record};
+use crate::{
+    CheckProduct, CheckRequest, ContentHash, CorpusManifest, Driver, Meter, reachability,
+    request_record,
+};
 use std::io;
 use std::sync::Arc;
 
@@ -53,4 +56,65 @@ impl std::error::Error for RejectedCheck {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
+}
+
+impl Driver {
+    pub fn check(
+        &mut self,
+        request: CheckRequest,
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        self.check_recorded(request, meter, None)?.product()
+    }
+    /// Check `request`, answered from its request record when `record` names
+    /// one that holds its answer.
+    pub(crate) fn check_recorded(
+        &mut self,
+        request: CheckRequest,
+        meter: &mut Meter,
+        record: Option<&request_record::Request>,
+    ) -> io::Result<Checked> {
+        if meter.enabled() {
+            hirsel_core_ids::published::catch_io(|| {
+                self.check_inner::<true>(request, meter, record, false)
+            })
+        } else {
+            hirsel_core_ids::published::catch_io(|| {
+                self.check_inner::<false>(request, meter, record, false)
+            })
+        }
+    }
+    pub(crate) fn check_for_authority(
+        &mut self,
+        request: CheckRequest,
+    ) -> io::Result<Arc<CheckProduct>> {
+        hirsel_core_ids::published::catch_io(|| {
+            self.check_inner::<false>(request, &mut Meter::new(false), None, true)?
+                .product()
+        })
+    }
+}
+
+pub(super) fn finish_authority(
+    mut result: CheckProduct,
+    resolution_inputs: &CorpusManifest,
+    report_authority: bool,
+) -> io::Result<CheckProduct> {
+    let mut cards = std::mem::take(&mut result.authority_cards);
+    match reachability::authority::collect(
+        &result,
+        resolution_inputs,
+        report_authority.then_some(&mut cards),
+    ) {
+        Ok(facts) => result.authority = facts,
+        Err(error) => return Err(RejectedCheck::with_product(result, error)),
+    }
+    result.authority_cards = cards;
+    if let Err(error) = reachability::authority::enforce(&result.authority, resolution_inputs) {
+        if !report_authority {
+            return Err(RejectedCheck::with_product(result, error));
+        }
+        result.authority_refusal = Some(error.to_string());
+    }
+    Ok(result)
 }

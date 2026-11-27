@@ -25,6 +25,10 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
         Invocation::Coverage(request) => conclude(crate::coverage::cli::run(request)?),
         Invocation::Lean(request) => conclude(lean::run(request).map(|()| Outcome::Exit(0))?),
         Invocation::Add(request) => conclude(Outcome::Exit(crate::package_add::run(request)?)),
+        Invocation::Update(request) => {
+            conclude(Outcome::Exit(crate::package_update::run(request)?))
+        }
+        Invocation::Audit(request) => conclude(Outcome::Exit(crate::package_audit::run(request)?)),
         Invocation::Launcher(request) => match crate::launcher::run(request)? {},
         Invocation::Serve(request) => {
             if crate::resident::serving() {

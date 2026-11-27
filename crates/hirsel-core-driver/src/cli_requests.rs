@@ -4,11 +4,26 @@
 pub enum AddOption {
     AddDryRun,
     AddRoot(String),
-    AddUpdate,
+    AddAs(String),
     AddWorkspace,
     Frozen,
     Json,
     Locked,
+    PackageStore(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateOption {
+    AddDryRun,
+    Frozen,
+    Json,
+    Locked,
+    PackageStore(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuditOption {
+    Json,
     PackageStore(String),
 }
 

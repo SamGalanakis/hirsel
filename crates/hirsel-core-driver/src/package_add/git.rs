@@ -10,11 +10,11 @@ use crate::package_manifest::{GitSource, git_dir_rule, git_rev_rule, git_url_rul
 const FORMS: &str = "git+https://HOST/PATH[?dir=DIR][#REF] or github:OWNER/REPO[/DIR][@REF]";
 
 /// A git source as typed: the repository, the package's directory and the reference.
-pub(super) struct Request {
-    pub(super) url: String,
-    pub(super) dir: Option<String>,
+pub(crate) struct Request {
+    pub(crate) url: String,
+    pub(crate) dir: Option<String>,
     /// `REF` as typed, `None` for the default branch.
-    pub(super) reference: Option<String>,
+    pub(crate) reference: Option<String>,
 }
 
 fn refuse(text: &str, part: impl std::fmt::Display) -> Failure {
@@ -179,7 +179,7 @@ impl Request {
 }
 
 /// GIT-11: `fetched` against a binding of the same source, the pair (`git`, `dir`). A bound
-/// reference that now names another commit refuses without `--update`; another reference or a
+/// reference that now names another commit refuses in `add`; another reference or a
 /// commit id is a named update.
 pub(super) fn check_moved(
     alias: &str,

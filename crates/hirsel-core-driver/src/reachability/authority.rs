@@ -1,6 +1,9 @@
 //! Package authority follows checked instance identities before target specialization.
 use super::*;
-use hirsel_core_ir::{Callee, FuncId, Inst, Module, RtOp, release_recipe::GrantKind};
+use hirsel_core_ir::{Callee, FuncId, HostOp, Inst, Module, RtOp, release_recipe::GrantKind};
+
+mod card;
+pub(crate) use card::{Card, Cards, Verdict, carried, names};
 use hirsel_core_materialize::Resolver;
 use std::collections::VecDeque;
 
@@ -9,6 +12,8 @@ pub(crate) struct Node {
     pub(crate) children: BTreeSet<Identity>,
     operations: BTreeMap<u8, String>,
     unresolved: Option<String>,
+    provided: u16,
+    contained: Option<String>,
 }
 
 impl Node {
@@ -16,6 +21,20 @@ impl Node {
         let kinds: &[GrantKind] = match op {
             RtOp::Host(host) => {
                 for kind in host.authority() {
+                    if matches!(
+                        host,
+                        HostOp::ProvideClock
+                            | HostOp::ProvideRandom
+                            | HostOp::ProvideRandomTape
+                            | HostOp::ProvideProcess
+                            | HostOp::ProvideStdout
+                            | HostOp::ProvideStderr
+                            | HostOp::ProvideDir
+                            | HostOp::ProvideNet
+                            | HostOp::ProvideExec
+                    ) {
+                        self.provided |= 1 << *kind as u8;
+                    }
                     self.operation(*kind, format!("{host:?}"));
                 }
                 return;
@@ -132,6 +151,7 @@ fn reached(
     graph: &Graph,
     closure: &BTreeSet<PackageId>,
     roots: &BTreeSet<Identity>,
+    mut detail: Option<&mut card::Reached>,
 ) -> Result<BTreeMap<u8, String>, String> {
     let mut witnesses = BTreeMap::new();
     let mut parent = BTreeMap::new();
@@ -152,6 +172,14 @@ fn reached(
                 "what {} reaches cannot be resolved: {cause}",
                 id.definition
             ));
+        }
+        if let Some(detail) = detail.as_deref_mut() {
+            detail.kinds |= node
+                .operations
+                .keys()
+                .fold(0, |mask, kind| mask | (1 << kind));
+            detail.provided |= node.provided;
+            detail.contained.extend(node.contained.iter().cloned());
         }
         for (&kind, operation) in &node.operations {
             witnesses.entry(kind).or_insert_with(|| {
@@ -245,7 +273,7 @@ pub(crate) fn test_check(
     root: Identity,
     mask: u16,
 ) -> io::Result<()> {
-    let facts = reached(graph, &[package.clone()].into(), &[root].into());
+    let facts = reached(graph, &[package.clone()].into(), &[root].into(), None);
     check_row(&facts, package, "row", mask)
 }
 
@@ -348,7 +376,11 @@ impl Walk<'_> {
     }
 }
 
-pub(crate) fn collect(product: &CheckProduct, inputs: &CorpusManifest) -> io::Result<Facts> {
+pub(crate) fn collect(
+    product: &CheckProduct,
+    inputs: &CorpusManifest,
+    mut cards: Option<&mut Cards>,
+) -> io::Result<Facts> {
     if !inputs.packages.iter().any(|p| p.namespace.is_some()) {
         return Ok(Facts::new());
     }
@@ -386,6 +418,14 @@ pub(crate) fn collect(product: &CheckProduct, inputs: &CorpusManifest) -> io::Re
             let mut node = Node::default();
             if how == hirsel_core_resolve::Containment::Native {
                 node.operation(GrantKind::Foreign, "Foreign".into());
+            } else if cards.is_some() {
+                let module = &id.definition.0.modules;
+                node.contained = Some(format!(
+                    "{}@{}/{}",
+                    package.name,
+                    package.version,
+                    module.join("/")
+                ));
             }
             walk.graph.insert(id.clone(), node);
         } else if package.name_is("core") || package.name_is("std") {
@@ -469,11 +509,12 @@ pub(crate) fn collect(product: &CheckProduct, inputs: &CorpusManifest) -> io::Re
                 );
             }
         }
-        result.insert(
-            bound.package.clone(),
-            reached(&walk.graph, &closure, &roots),
-        );
+        let facts = reached(&walk.graph, &closure, &roots, None);
+        if let Some(cards) = cards.as_deref_mut() {
+            let card = cards.entry(bound.package.clone()).or_default();
+            card.set_reach(&walk.graph, &closure, &roots, &exports, &facts);
+        }
+        result.insert(bound.package.clone(), facts);
     }
-    enforce(&result, inputs)?;
     Ok(result)
 }

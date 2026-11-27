@@ -628,6 +628,10 @@ impl Workspace {
                 .any(|manifest| manifest.identity == identity)
     }
 
+    pub(crate) fn same_manifests(&self, other: &Self) -> bool {
+        self.manifests == other.manifests
+    }
+
     pub(crate) fn captured_manifest(&self, directory: &File) -> io::Result<Option<&Captured>> {
         Ok(self
             .manifests

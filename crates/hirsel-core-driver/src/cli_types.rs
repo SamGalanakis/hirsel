@@ -24,6 +24,8 @@ pub enum Invocation {
     Compiler(Request<CompilerOption>),
     Simple(Request<NoOption>),
     Add(Request<AddOption>),
+    Update(Request<UpdateOption>),
+    Audit(Request<AuditOption>),
     Attach(Request<AttachOption>),
     ProfileQuery(Request<ProfileQueryOption>),
     ProfileExport(Request<ProfileExportOption>),

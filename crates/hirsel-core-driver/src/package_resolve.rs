@@ -376,42 +376,9 @@ fn settle(
         )
         .into());
     }
-    let mut edges = BTreeMap::<Id, Vec<Requirement>>::new();
-    for (node, path) in &paths {
-        let bindings: BTreeMap<_, _> = match node {
-            Node::Member(id) => members[id]
-                .edges
-                .iter()
-                .filter_map(|(id, edge)| match edge {
-                    Edge::Published(root, _) => Some((id, Binding::Exact(*root))),
-                    _ => None,
-                })
-                .collect(),
-            Node::Published(_, root) => libraries[root]
-                .content
-                .bindings
-                .values()
-                .map(|(id, binding)| (id, *binding))
-                .collect(),
-        };
-        for (id, binding) in bindings {
-            if let Some(root) = binding.root() {
-                let mut path = path.clone();
-                path.push(id.clone());
-                edges.entry(id.clone()).or_default().push(Requirement {
-                    path,
-                    binding,
-                    root,
-                    packed: packed
-                        .as_ref()
-                        .is_some_and(|closure| closure.contains(node)),
-                });
-            }
-        }
-    }
+    let edges = requirements(members, libraries, &paths, packed.as_ref());
     let mut published = BTreeMap::new();
-    for (id, mut requirements) in edges {
-        requirements.sort_by(|a, b| path_order(&a.path, &b.path));
+    for (id, requirements) in edges {
         let chosen = if let Some(member) = members.get(&id) {
             let dir = member.directory.to_str().unwrap();
             Some(Choice {
@@ -445,6 +412,52 @@ fn settle(
     }
     Ok((toolchain, published))
 }
+
+fn requirements(
+    members: &Members,
+    libraries: &Libraries,
+    paths: &Paths,
+    packed: Option<&BTreeSet<Node>>,
+) -> BTreeMap<Id, Vec<Requirement>> {
+    let mut edges = BTreeMap::<Id, Vec<Requirement>>::new();
+    for (node, path) in paths {
+        let bindings: BTreeMap<_, _> = match node {
+            Node::Member(id) => members[id]
+                .edges
+                .iter()
+                .filter_map(|(id, edge)| match edge {
+                    Edge::Published(root, _) => Some((id, Binding::Exact(*root))),
+                    _ => None,
+                })
+                .collect(),
+            Node::Published(_, root) => libraries[root]
+                .content
+                .bindings
+                .values()
+                .map(|(id, binding)| (id, *binding))
+                .collect(),
+        };
+        for (id, binding) in bindings {
+            if let Some(root) = binding.root() {
+                let mut path = path.clone();
+                path.push(id.clone());
+                edges.entry(id.clone()).or_default().push(Requirement {
+                    path,
+                    binding,
+                    root,
+                    packed: packed.is_some_and(|closure| closure.contains(node)),
+                });
+            }
+        }
+    }
+    for requirements in edges.values_mut() {
+        requirements.sort_by(|a, b| path_order(&a.path, &b.path));
+    }
+    edges
+}
+
+mod selection;
+pub(crate) use selection::select;
 
 struct Requirement {
     path: Vec<Id>,

@@ -126,56 +126,29 @@ fn members_share_one_binding() {
     );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
 
-    // Changing the shared declaration a sibling consumes needs --update.
-    PackageLaw::refuse(
-        invoke(
-            &law,
-            "work/apps/ui",
-            &["../../vendor/jy.hpkg", "--workspace"],
-        ),
-        "the workspace binds fixture.test/json@1 for local/api@1; pass --update to change it",
-    );
-    assert_eq!(
-        text(&law, "work/hirsel.toml"),
-        declared(PACKAGE_X, "vendor/pkg.hpkg")
-    );
-    PackageLaw::pass(invoke(
-        &law,
-        "work/apps/ui",
-        &["../../vendor/jy.hpkg", "--workspace", "--update"],
+    // Refresh an inherited archive in the workspace declaration.
+    copy(&law, "vendor/jy.hpkg", "work/vendor/pkg.hpkg");
+    PackageLaw::pass(result(
+        invocation_command(&law, "work/apps/ui", "update", &["json"])
+            .output()
+            .unwrap(),
     ));
     assert_eq!(
         text(&law, "work/hirsel.toml"),
-        declared(PACKAGE_Y, "vendor/jy.hpkg")
+        declared(PACKAGE_Y, "vendor/pkg.hpkg")
     );
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
     assert_eq!(text(&law, "work/apps/api/hirsel.toml"), inherits(&api));
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
 
-    // A local binding and a workspace one for the same name refuse together.
+    // The same local binding can become a shared declaration.
     let law = PackageLaw::new();
     two_members(&law);
     PackageLaw::pass(invoke(&law, "work/apps/ui", &["../../vendor/pkg.hpkg"]));
-    let local = text(&law, "work/apps/ui/hirsel.toml");
-    let (status, _, stderr) = invoke(
-        &law,
-        "work/apps/ui",
-        &["../../vendor/pkg.hpkg", "--workspace"],
-    );
-    assert_eq!(status, Some(2), "{stderr}");
-    assert!(
-        stderr.contains("dependencies.json is bound here and in the workspace"),
-        "{stderr}"
-    );
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), local);
-    assert_eq!(
-        text(&law, "work/hirsel.toml"),
-        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n"
-    );
     PackageLaw::pass(invoke(
         &law,
         "work/apps/ui",
-        &["../../vendor/pkg.hpkg", "--workspace", "--update"],
+        &["../../vendor/pkg.hpkg", "--workspace"],
     ));
     assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
@@ -186,7 +159,13 @@ fn virtual_root_declares_only() {
     let law = PackageLaw::new();
     law.fixture_json();
     law.write("v/hirsel.toml", "[workspace]\nmembers = [\"m\"]\n");
-    law.library("v/m", "local/m", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
+    law.library(
+        "v/m",
+        "local/m",
+        "1.0.0",
+        "pub fn one() -> u64 { 1u64 }\n",
+        "",
+    );
     copy(&law, "vendor/jx.hpkg", "v/vendor/pkg.hpkg");
     PackageLaw::pass(law.run(&["lock", "v/m"]));
     let lock = fs::read(law.path("v/hirsel.lock")).unwrap();

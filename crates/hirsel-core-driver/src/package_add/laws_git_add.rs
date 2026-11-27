@@ -135,8 +135,11 @@ to take it, run: hirsel update wrap",
     assert_eq!(stored(&law, "packages"), roots(&[PACKAGE_X, PACKAGE_W]));
 
     let updated = format!("hirsel: updated fixture.test/wrap@1 {PACKAGE_W} -> {PACKAGE_W2} in ");
-    let stdout = PackageLaw::pass(server.add(&law, "app", &[tagged, "--update"]));
-    assert!(stdout.starts_with(&updated), "{stdout}");
+    let mut command = invocation_command(&law, "app", "update", &["wrap"]);
+    server.route(&mut command);
+    let stdout = PackageLaw::pass(result(command.output().unwrap()));
+    assert!(stdout.contains(&format!("{PACKAGE_W} -> ")), "{stdout}");
+    assert!(stdout.contains(PACKAGE_W2), "{stdout}");
     let binding = wrap_binding("https://alpha.test/r1", C2, PACKAGE_W2, Some("refs/tags/v1"));
     assert!(manifest_text(&law, "app").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "app"));
     point(&server, "alpha.test/r1", "refs/tags/v1", C1);

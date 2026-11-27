@@ -6,7 +6,7 @@ use crate::package_content::{Id, Root};
 use crate::package_store::PackageStore;
 use std::path::PathBuf;
 
-pub(super) enum Source {
+pub(crate) enum Source {
     Archive(String),
     Url(String),
     Git(git::Request),
@@ -56,7 +56,7 @@ pub(super) struct Options {
     pub(super) source: Source,
     pub(super) expected: Option<Root>,
     pub(super) store: PackageStore,
-    pub(super) update: bool,
+    pub(super) alias: Option<String>,
     pub(super) workspace: bool,
     pub(super) dry_run: bool,
     pub(super) json: bool,
@@ -66,7 +66,7 @@ impl Options {
     pub(super) fn read(invocation: Request<Opt>) -> Result<Self, Failure> {
         let mut expected = None;
         let mut store = None;
-        let mut update = false;
+        let mut alias = None;
         let mut workspace = false;
         let mut dry_run = false;
         let mut json = false;
@@ -88,7 +88,12 @@ impl Options {
                             .ok_or("--root requires sha256: followed by 64 lowercase hex digits")?,
                     );
                 }
-                Opt::AddUpdate => update = true,
+                Opt::AddAs(value) => {
+                    if !crate::package_manifest::name::alias(&value) {
+                        return Err(format!("{value:?} is not a dependency alias").into());
+                    }
+                    alias = Some(value);
+                }
                 Opt::AddWorkspace => workspace = true,
                 Opt::AddDryRun => dry_run = true,
                 Opt::Json => json = true,
@@ -111,7 +116,7 @@ impl Options {
                 store,
                 crate::package_lock::Mode::Update.transport(),
             ),
-            update,
+            alias,
             workspace,
             dry_run,
             json,

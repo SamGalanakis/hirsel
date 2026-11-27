@@ -12,7 +12,11 @@ use std::thread;
 use std::time::Duration;
 
 fn add(law: &PackageLaw, dir: &str, args: &[&str]) -> Command {
-    let mut arguments = vec!["add".to_owned()];
+    invocation_command(law, dir, "add", args)
+}
+
+fn invocation_command(law: &PackageLaw, dir: &str, command: &str, args: &[&str]) -> Command {
+    let mut arguments = vec![command.to_owned()];
     arguments.extend(args.iter().map(|arg| (*arg).to_owned()));
     arguments.extend([
         "--package-store".into(),
@@ -350,9 +354,7 @@ fn https(
     });
     let url = "https://alpha.test/package.hpkg";
     commands(url, &|args| {
-        let mut arguments = vec![url, "--json"];
-        arguments.extend_from_slice(args);
-        let mut command = add(law, "app", &arguments);
+        let mut command = invocation_command(law, "app", args[0], &args[1..]);
         command
             .env("ALL_PROXY", &proxy)
             .env("NO_PROXY", "")
@@ -383,7 +385,12 @@ fn url_capture_pins_and_caps() {
             Response::Oversize,
         ],
         |url, command| {
-            let call = |args: &[&str]| result(command(args).output().unwrap());
+            let call = |args: &[&str]| {
+                let mut add = vec!["add", url, "--json"];
+                add.extend_from_slice(args);
+                result(command(&add).output().unwrap())
+            };
+            let update = || result(command(&["update", "json", "--json"]).output().unwrap());
             let (status, _, stderr) = call(&["--root", PACKAGE_X]);
             assert_eq!(status, Some(2), "{stderr}");
             assert!(
@@ -410,11 +417,11 @@ fn url_capture_pins_and_caps() {
                 assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
                 assert_eq!(fs::read_dir(law.path("packages")).unwrap().count(), 1);
             }
-            PackageLaw::pass(call(&["--update"]));
+            PackageLaw::pass(update());
             let after = fs::read(law.path("app/hirsel.toml")).unwrap();
             assert!(String::from_utf8_lossy(&after).contains(PACKAGE_Y));
             let entries = fs::read_dir(law.path("packages")).unwrap().count();
-            let (status, _, stderr) = call(&["--update"]);
+            let (status, _, stderr) = update();
             assert_eq!(status, Some(2), "{stderr}");
             assert!(stderr.contains("over the limit"), "{stderr}");
             assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), after);

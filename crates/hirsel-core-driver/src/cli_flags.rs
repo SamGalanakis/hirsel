@@ -3,7 +3,7 @@ use super::{Flag, Switch, Value};
 
 flags! {
     AddRoot ["--root"] "sha256:HEX" => "Require this archive head root.";
-    AddUpdate ["--update"] => "Accept a changed root at the same source.";
+    AddAs ["--as"] "ALIAS" => "Bind the dependency under this alias.";
     AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's [workspace.dependencies].";
     AddDryRun ["--dry-run"] => "Resolve the change without writing the manifest or lock.";
     PackageStore ["--package-store"] "DIR" => "Select the verified library store.";

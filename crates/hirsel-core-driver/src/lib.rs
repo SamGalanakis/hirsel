@@ -57,6 +57,7 @@ mod native_facts;
 mod native_object;
 mod native_sources;
 mod package_add;
+mod package_audit;
 mod package_content;
 mod package_dir;
 mod package_files;
@@ -65,6 +66,7 @@ mod package_lock;
 mod package_manifest;
 mod package_resolve;
 mod package_store;
+mod package_update;
 mod package_workspace;
 mod prebuild;
 mod prof_command;
@@ -267,6 +269,8 @@ mod body;
 #[derive(Clone)]
 pub struct CheckProduct {
     authority: reachability::authority::Facts,
+    authority_cards: reachability::authority::Cards,
+    authority_refusal: Option<String>,
     pub index: Arc<NameIndex>,
     pub files: Vec<Arc<FileProduct>>,
     unparsed_sources: Vec<(SourceId, Arc<[u8]>)>,
@@ -296,6 +300,8 @@ impl CheckProduct {
         Self {
             index,
             authority: BTreeMap::new(),
+            authority_cards: BTreeMap::new(),
+            authority_refusal: None,
             files: vec![],
             unparsed_sources: vec![],
             definitions: BTreeMap::new(),
@@ -463,36 +469,12 @@ struct DiskCheck {
     constructor_candidates: bool,
 }
 impl Driver {
-    pub fn check(
-        &mut self,
-        request: CheckRequest,
-        meter: &mut Meter,
-    ) -> io::Result<Arc<CheckProduct>> {
-        self.check_recorded(request, meter, None)?.product()
-    }
-    /// Check `request`, answered from its request record when `record` names
-    /// one that holds its answer.
-    pub(crate) fn check_recorded(
-        &mut self,
-        request: CheckRequest,
-        meter: &mut Meter,
-        record: Option<&request_record::Request>,
-    ) -> io::Result<Checked> {
-        if meter.enabled() {
-            hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<true>(request, meter, record)
-            })
-        } else {
-            hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<false>(request, meter, record)
-            })
-        }
-    }
     fn check_inner<const MEASURE: bool>(
         &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
         record: Option<&request_record::Request>,
+        report_authority: bool,
     ) -> io::Result<Checked> {
         request.inputs.normalise(request.manifest.as_deref());
         #[cfg(test)]
@@ -877,6 +859,15 @@ impl Driver {
                 )
             });
             p.entry = request.entry.clone();
+            if report_authority {
+                let test_sources = modules
+                    .iter()
+                    .zip(&sources)
+                    .filter_map(|(m, s)| s.5.then_some(m.source))
+                    .collect();
+                result.authority_cards =
+                    reachability::authority::carried(&p, &resolution_inputs, &test_sources);
+            }
             #[cfg(test)]
             if self.fresh_rows {
                 p.build_rows_fresh();
@@ -1153,10 +1144,7 @@ impl Driver {
             layer.finish(&store, layer_record.as_deref())?;
         }
         meter.finish("publish/declared layer");
-        match reachability::authority::collect(&result, &resolution_inputs) {
-            Ok(facts) => result.authority = facts,
-            Err(error) => return Err(RejectedCheck::with_product(result, error)),
-        }
+        let result = checked::finish_authority(result, &resolution_inputs, report_authority)?;
         let result = Arc::new(result);
         meter.finish("publish/commit and Arc move");
         drop(index);

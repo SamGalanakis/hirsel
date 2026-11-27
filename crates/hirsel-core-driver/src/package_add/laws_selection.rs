@@ -134,7 +134,6 @@ fn l1b_selected_floor_and_version_collision() {
     PackageLaw::pass(out);
 }
 
-#[test]
 fn l39_selection_rechecks_the_reader() {
     let law = PackageLaw::new();
     let num =
@@ -183,9 +182,39 @@ fn l39_selection_rechecks_the_reader() {
                 "fixture.test/num@0 is bound to more than one root:\n  local/app@1 -> fixture.test/num@0 = {root} exact\n  local/app@1 -> fixture.test/reader@1 -> fixture.test/num@0 = {tested} floor 0.3.1\n{ending}"
             ),
         );
+        if candidate == &outside {
+            PackageLaw::refuse(
+                result(
+                    invocation_command(&law, "app", "update", &["fixture.test/num@0"])
+                        .output()
+                        .unwrap(),
+                ),
+                &format!(
+                    "fixture.test/num@0 is bound to more than one root:\n  local/app@1 -> fixture.test/num@0 = {root} exact\n  local/app@1 -> fixture.test/reader@1 -> fixture.test/num@0 = {tested} floor 0.3.1\n{ending}"
+                ),
+            );
+        }
     }
-    configure(&good, true, true);
-    PackageLaw::pass(law.run(&["check", "app"]));
+    let root = configure(&good, true, false);
+    let update = || {
+        result(
+            invocation_command(&law, "app", "update", &["fixture.test/num@0"])
+                .output()
+                .unwrap(),
+        )
+    };
+    let stdout = PackageLaw::pass(update());
+    assert!(
+        stdout.contains(&format!("selected fixture.test/num@0 {root}")),
+        "{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(law.path("app/hirsel.toml"))
+            .unwrap()
+            .matches("\"fixture.test/num@0\" =")
+            .count(),
+        1,
+    );
     let lock = fs::read_to_string(law.path("app/hirsel.lock")).unwrap();
     assert!(
         lock.contains(&format!("tested = [\"fixture.test/num@0 {tested}\"]")),
@@ -222,12 +251,11 @@ fn l39_selection_rechecks_the_reader() {
         );
     }
     let broken = num(3, 9, "", "pub fn missing() -> u64 { 39u64 }\n");
-    configure(&broken, true, true);
-    PackageLaw::pass(law.run(&["lock", "app"]));
+    configure(&broken, true, false);
     let lock = fs::read(law.path("app/hirsel.lock")).unwrap();
     let manifest = fs::read(law.path("app/hirsel.toml")).unwrap();
-    let (status, stdout, stderr) = law.run(&["check", "app", "--frozen"]);
-    assert_ne!(status, Some(0));
+    let (status, stdout, stderr) = update();
+    assert_eq!(status, Some(2), "{stderr}");
     assert!(
         format!("{stdout}{stderr}").contains("num.n"),
         "{stdout}{stderr}"

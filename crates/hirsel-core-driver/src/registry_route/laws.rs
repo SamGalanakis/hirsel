@@ -263,6 +263,10 @@ pub(crate) fn merkle(rows: &[Vec<u8>]) -> Hash {
 }
 
 fn route_checks() {
+    let missing = Routes::default().for_name(TARGET).err().unwrap();
+    assert!(missing.contains("https://pkg.hirsel.ai") && missing.contains("[[registry.route]]"));
+    assert!(Routes::parse(&route("*", "PKG.HIRSEL.AI:443", true, 3)).is_err());
+
     let text = route("*", "default.test", false, 3)
         + &route("fixture.test/*", BETA, false, 3)
         + &route("fixture.test/tenant/*", ALPHA, true, 3);

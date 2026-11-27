@@ -8,9 +8,20 @@ type Call: send {
     reply: Sender[static.StaticResponse]
 }
 
-type Front: send {
-    tx: Sender[Call]
+type Upload: send {
+    chunks: Receiver[Bytes],
+    deadline: u64,
+    reply: Sender[static.StaticResponse]
 }
+
+type Front: send {
+    tx: Sender[Call],
+    uploads: Sender[Upload]
+}
+
+// The HTTP budget covers one full submission decoder and twelve independent
+// readers. Each production reader can hold a maximum-size compressed frame.
+const HTTP_SLOTS: u64 = 12
 
 const MAX_BODY: u64 = 537935876
 
@@ -28,23 +39,22 @@ fn refusal(e: submit.Error) -> static.StaticResponse {
     }
 }
 
-fn forward(req: std.http.Request, front: Front, take q: Query) -> Result[std.http.Outcome, std.http.HandlerError] waits {
-    let (tx, rx): (Sender[static.StaticResponse], Receiver[static.StaticResponse]) = channel.new(1)
-    let response = match channel.try_send(front.tx, Call(query: take q, deadline: std.http.handler_deadline(req), reply: take tx)) {
+fn dispatch(tx: Sender[Call], deadline: u64, take q: Query) -> static.StaticResponse waits {
+    let (reply, rx): (Sender[static.StaticResponse], Receiver[static.StaticResponse]) = channel.new(1)
+    match channel.try_send(tx, Call(query: take q, deadline: deadline, reply: take reply)) {
         Ok(()) => match channel.receive(rx) {
             Ok(r) => take r,
             Error(_) => refusal(Unavailable),
         },
         Error(_) => refusal(Unavailable),
     }
-    Ok(Reply(static.to_http_response(take response)?))
 }
 
 fn read_route(req: std.http.Request, r: Region, mut body: std.http.Responder, front: Front) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let Ok(path) = string.from_utf8(clone(std.http.path(req))) else {
         return Ok(Reply(static.to_http_response(refusal(Invalid))?))
     }
-    forward(req, front, Get(take path))
+    Ok(Reply(static.to_http_response(dispatch(front.tx, std.http.handler_deadline(req), Get(take path)))?))
 }
 
 type Buffer {
@@ -52,22 +62,22 @@ type Buffer {
     at: u64
 }
 
-fn refill(mut body: std.http.Responder, mut buf: Buffer) -> Result[bool, submit.Error] waits {
+fn refill(rx: Receiver[Bytes], mut buf: Buffer) -> Result[bool, submit.Error] waits {
     if buf.at < list.len(buf.data) {
         return Ok(true)
     }
-    list.clear(mut buf.data)
-    buf.at = 0
-    let Ok(n) = std.http.read(mut body, mut buf.data) else {
+    let Ok(chunk) = channel.receive(rx) else {
         return Error(Invalid)
     }
-    Ok(n != 0)
+    buf.data = take chunk
+    buf.at = 0
+    Ok(list.len(buf.data) != 0)
 }
 
-fn exact(mut body: std.http.Responder, mut buf: Buffer, n: u64) -> Result[Bytes, submit.Error] waits {
-    let mut out: Bytes = list.new()
+fn exact(rx: Receiver[Bytes], mut buf: Buffer, n: u64) -> Result[Bytes, submit.Error] waits {
+    let mut out: Bytes = list.with_capacity(n)
     while list.len(out) < n {
-        if !refill(mut body, mut buf)? {
+        if !refill(rx, mut buf)? {
             return Error(Invalid)
         }
         let count = order.min(n - list.len(out), list.len(buf.data) - buf.at)
@@ -77,32 +87,66 @@ fn exact(mut body: std.http.Responder, mut buf: Buffer, n: u64) -> Result[Bytes,
     Ok(take out)
 }
 
-fn streamed(mut body: std.http.Responder) -> Result[submit.Submission, submit.Error] waits {
-    let mut buf = Buffer(data: list.with_capacity(65536), at: 0)
+fn streamed(take rx: Receiver[Bytes]) -> Result[submit.Submission, submit.Error] waits {
+    let mut buf = Buffer(data: list.new(), at: 0)
     let s = submit.read_submission(scoped fn(max: u64) -> Result[Bytes, submit.Error] waits {
-        let prefix = exact(mut body, mut buf, 4)?
+        let prefix = exact(rx, mut buf, 4)?
         let count: u32 = list.word_be(prefix, 0)
         let n: u64 = int.widen(count)
         if n > max {
             return Error(Size)
         }
-        exact(mut body, mut buf, n)
+        exact(rx, mut buf, n)
     })?
-    if refill(mut body, mut buf)? {
+    if refill(rx, mut buf)? {
         return Error(Invalid)
     }
     Ok(take s)
 }
 
+type Decoder: send {
+    jobs: Receiver[Upload],
+    tx: Sender[Call]
+}
+
+fn decode_uploads(take decoder: Decoder) waits {
+    let Decoder(jobs: take jobs, tx: take tx) = take decoder
+    while let Ok(job) = channel.receive(jobs) {
+        let Upload(chunks: take rx, deadline, reply: take reply) = take job
+        let response = match streamed(take rx) {
+            Ok(s) => dispatch(tx, deadline, Submit(take s)),
+            Error(e) => refusal(e),
+        }
+        let _ = channel.try_send(reply, take response)
+    }
+}
+
 fn upload(req: std.http.Request, r: Region, mut body: std.http.Responder, front: Front) -> Result[std.http.Outcome, std.http.HandlerError] waits {
-    let decoded = match std.http.inline_body(req) {
-        Some(inline) => submit.decode(inline),
-        None => streamed(mut body),
+    let (chunks, rx): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
+    let (reply, result_rx): (Sender[static.StaticResponse], Receiver[static.StaticResponse]) = channel.new(1)
+    let job = Upload(chunks: take rx, deadline: std.http.handler_deadline(req), reply: take reply)
+    if let Error(_) = channel.try_send(front.uploads, take job) {
+        return Ok(Reply(static.to_http_response(refusal(Unavailable))?))
     }
-    match take decoded {
-        Ok(s) => forward(req, front, Submit(take s)),
-        Error(e) => Ok(Reply(static.to_http_response(refusal(e))?)),
+    loop {
+        let mut chunk: Bytes = list.with_capacity(65536)
+        let Ok(n) = std.http.read(mut body, mut chunk) else {
+            break
+        }
+        if let Error(_) = channel.send(chunks, take chunk) {
+            break
+        }
+        if n == 0 {
+            break
+        }
     }
+    // An empty chunk is EOF. Closing without it refuses an interrupted body.
+    let _ = take chunks
+    let response = match channel.receive(result_rx) {
+        Ok(response) => take response,
+        Error(_) => refusal(Unavailable),
+    }
+    Ok(Reply(static.to_http_response(take response)?))
 }
 
 type Server: send {
@@ -122,12 +166,17 @@ fn http_server(take job: Server) -> Result[(), std.http.ServeError] waits {
     result.unwrap(std.router.add(mut routes, "POST", "/v1/submit", std.router.raw(upload)))
     let mut cfg = std.http.defaults()
     cfg.body_max = MAX_BODY
-    cfg.handler_bytes = handler_bytes
-    cfg.conns_max = 2
-    cfg.http_max = 2
-    std.http.serve_with_factory(take sites, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 256, scoped fn() -> Front {
-        Front(tx: channel.sender(tx))
+    cfg.handler_bytes = handler_bytes / HTTP_SLOTS
+    cfg.conns_max = HTTP_SLOTS
+    cfg.http_max = HTTP_SLOTS
+    let (uploads, jobs): (Sender[Upload], Receiver[Upload]) = channel.new(1)
+    let decoder = task.spawn(tasks, bytes handler_bytes, Decoder(jobs: take jobs, tx: channel.sender(tx)), decode_uploads)
+    let result = std.http.serve_with_factory(take sites, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 256, scoped fn() -> Front {
+        Front(tx: channel.sender(tx), uploads: channel.sender(uploads))
     }, None)
+    let _ = take uploads
+    let _ = task.join(take decoder)
+    take result
 }
 
 pub fn restart(mut seq: commit.Sequencer, mut client: std.object.Client, random: Random, deadline: u64, now: scoped fn() -> u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[(), commit.Error] waits {
@@ -309,7 +358,7 @@ pub fn main(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, con
 pub fn serve(take site: Listener, mut seq: commit.Sequencer, mut client: std.object.Client, cfg: submit.Config, take initial_lookup: registry_auth.Lookup, c: Compiler, clock: Clock, random: Random, tasks: Tasks, handler_bytes: u64, post: scoped fn(checkpoint.LogKind, u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[(), Exit] waits {
     let down = Exit(status: 1)
     let mut lookup = take initial_lookup
-    let (tx, rx): (Sender[Call], Receiver[Call]) = channel.new(2)
+    let (tx, rx): (Sender[Call], Receiver[Call]) = channel.new(HTTP_SLOTS)
     let http = task.spawn(tasks, bytes (2 * handler_bytes + 16777216), Server(listener: take site, clock: clock, tasks: tasks, tx: take tx, handler_bytes: handler_bytes), http_server)
     let mut next_refresh = host.mono_ns(clock)
     loop {

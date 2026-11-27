@@ -1,6 +1,8 @@
 //! G2: the package-layer spans of 50 warm `hirsel build --locked` requests.
 //! Build this executable and the driver before timing. Set up outside the hold:
 //!   package_layer prepare WORK HIRSEL RUNTIME CC
+//! For the G3/G4 producer used by bench/wire/registry_fetch.py:
+//!   package_layer registry-fixture WORK CORE_STD
 //! Then measure the same fixture and compiler on a shielded CPU:
 //!   HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=1 python3 core/tools/timing_shield.py run -- \
 //!     taskset -c 16 tools/capped package_layer measure WORK HIRSEL RUNTIME CC
@@ -42,6 +44,78 @@ fn manifest(name: &str) -> String {
     )
 }
 
+fn producer(root: &Path, corpus: Option<&[u8]>) {
+    fs::create_dir(root.join("producer")).unwrap();
+    let names: Vec<_> = (0..PACKAGES)
+        .map(|i| match (corpus, i) {
+            (Some(_), 0..4) => ["root", "left", "right", "base"][i].into(),
+            _ => format!("p{i:02}"),
+        })
+        .collect();
+    fs::write(
+        root.join("producer/hirsel.toml"),
+        format!("[workspace]\nmembers = {names:?}\n"),
+    )
+    .unwrap();
+    for (i, name) in names.iter().enumerate() {
+        let dir = root.join("producer").join(name);
+        fs::create_dir(&dir).unwrap();
+        let mut config = manifest(&format!("fixture.test/{name}"));
+        let deps: Vec<_> = match (corpus, i) {
+            (Some(_), 0) => names[1..].iter().filter(|n| *n != "base").collect(),
+            (Some(_), 1 | 2) => vec![&names[3]],
+            (None, 0) => names[1..].iter().collect(),
+            _ => vec![],
+        };
+        if !deps.is_empty() {
+            config.push_str("\n[dependencies]\n");
+            for dep in deps {
+                writeln!(
+                    config,
+                    "{dep} = {{ package = \"fixture.test/{dep}\", major = 1, path = \"../{dep}\" }}"
+                )
+                .unwrap();
+            }
+        }
+        fs::write(dir.join("hirsel.toml"), config).unwrap();
+        let mut source = format!("pub fn value() -> u64 {{ {i}u64 }}\n").into_bytes();
+        for j in 0..32 {
+            writeln!(source, "pub fn value_{j}(x: u64) -> u64 {{ x + {j}u64 }}").unwrap();
+        }
+        let size = SOURCE_BYTES / PACKAGES + usize::from(i < SOURCE_BYTES % PACKAGES);
+        source.extend_from_slice(b"// ");
+        if let Some(text) = corpus {
+            // Use real standard-library text as comment payload with varied compression.
+            let offset = i * (SOURCE_BYTES / PACKAGES);
+            source.extend((offset..offset + size - 1 - source.len()).map(|j| text[j % text.len()]));
+        } else {
+            source.resize(size - 1, b'x');
+        }
+        source.push(b'\n');
+        fs::write(dir.join("main.hirsel"), source).unwrap();
+    }
+}
+
+fn registry_fixture(root: &Path, std: &Path) {
+    let mut files: Vec<_> = fs::read_dir(std)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "hirsel"))
+        .collect();
+    files.sort();
+    let mut text = Vec::new();
+    for path in files {
+        text.extend(
+            fs::read(path)
+                .unwrap()
+                .into_iter()
+                .map(|b| if b.is_ascii_graphic() { b } else { b' ' }),
+        );
+    }
+    assert!(!text.is_empty());
+    producer(root, Some(&text));
+}
+
 impl Fixture {
     fn hirsel(&self) -> Command {
         let mut command = Command::new(&self.driver);
@@ -54,38 +128,7 @@ impl Fixture {
     }
 
     fn prepare(&self) {
-        fs::create_dir(self.root.join("producer")).unwrap();
-        let names: Vec<_> = (0..PACKAGES).map(|i| format!("p{i:02}")).collect();
-        fs::write(
-            self.root.join("producer/hirsel.toml"),
-            format!("[workspace]\nmembers = {names:?}\n"),
-        )
-        .unwrap();
-        for (i, name) in names.iter().enumerate() {
-            let dir = self.root.join("producer").join(name);
-            fs::create_dir(&dir).unwrap();
-            let mut config = manifest(&format!("fixture.test/{name}"));
-            if i == 0 {
-                config.push_str("\n[dependencies]\n");
-                for dep in &names[1..] {
-                    writeln!(
-                        config,
-                        "{dep} = {{ package = \"fixture.test/{dep}\", major = 1, path = \"../{dep}\" }}"
-                    )
-                    .unwrap();
-                }
-            }
-            fs::write(dir.join("hirsel.toml"), config).unwrap();
-            let mut source = format!("pub fn value() -> u64 {{ {i}u64 }}\n").into_bytes();
-            for j in 0..32 {
-                writeln!(source, "pub fn value_{j}(x: u64) -> u64 {{ x + {j}u64 }}").unwrap();
-            }
-            let size = SOURCE_BYTES / PACKAGES + usize::from(i < SOURCE_BYTES % PACKAGES);
-            source.extend_from_slice(b"// ");
-            source.resize(size - 1, b'x');
-            source.push(b'\n');
-            fs::write(dir.join("main.hirsel"), source).unwrap();
-        }
+        producer(&self.root, None);
 
         fs::create_dir(self.root.join("app")).unwrap();
         let packed = succeeded(
@@ -224,6 +267,12 @@ fn print_percentiles(label: &str, samples: &mut [u64]) {
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let usage = "usage: package_layer prepare|measure WORK HIRSEL RUNTIME CC";
+    if let [action, root, std] = args.as_slice()
+        && action == "registry-fixture"
+    {
+        registry_fixture(Path::new(root), Path::new(std));
+        return;
+    }
     if args.is_empty() {
         eprintln!("{usage}");
         return;

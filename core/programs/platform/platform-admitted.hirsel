@@ -53,7 +53,11 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
         None => false,
     }
     let needs_consent = !approved && (!launcher.grants_empty(summary.grants) || stops_at_plan(row) || !is_none(row.admission_plan) || display != "")
-    let baseline: Option[operator.Decision] = if !approved && !needs_consent && why == "" { Some(clone(facts)) } else { None }
+    let baseline: Option[operator.Decision] = if !approved && !needs_consent && why == "" {
+        Some(clone(facts))
+    } else {
+        None
+    }
     if !is_none(baseline) || !is_none(summary.gate) {
         if let Error(e) = record_admission(mut h, request, summary.gate, baseline) {
             vol_put(mut h, name, take v)

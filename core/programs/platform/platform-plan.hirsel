@@ -9,6 +9,7 @@ fn subject_of(h: Host, name: String) -> Result[operator.Precondition, Refused] w
     }
     let mut subject = operator.Precondition(name: string.from(name), generation: generation, predecessor: None, assembly: list.new(), store_id: None, policy_digest: list.new())
     if let Some(g) = st(store.get(rd, snap, h.t.groups, name))? {
+        subject.generation = g.incarnation
         subject.predecessor = Some(g.activation)
         subject.assembly = clone(g.assembly)
         subject.store_id = match g.store_id {
@@ -67,13 +68,48 @@ fn deploy_plan(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> 
         _ => fail("invalid stored deploy intent"),
     }
     let catalog = store.identity(h.db)
-    operator.DeployPlan(domain: "hirsel.host.deploy.plan.v1", authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 { None } else { Some(row.group.incarnation) }, create: take create, input_digest: digest_of(plan_bytes(row.input)), facts: clone(facts), entries: clone(row.entries))
+    operator.DeployPlan(domain: "hirsel.host.deploy.plan.v1", authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 {
+        None
+    } else {
+        Some(row.group.incarnation)
+    }, create: take create, input_digest: digest_of(plan_bytes(row.input)), facts: clone(facts), entries: clone(row.entries))
 }
 
 fn plan_answer(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> operator.Answer {
     let plan = deploy_plan(h, d, row, facts)
     let hash = digest_of(plan_bytes(plan))
     PlanAnswer(take plan, take hash)
+}
+
+// Fails the active request of a registering group when it is Open, unowned, has no
+// admission or deploy, and is past its admission deadline. Never touches a Held request.
+fn expire_registering(mut h: Host, name: String, now: Now) waits {
+    if !h.binds_sent {
+        return
+    }
+    let Ok(Some(_)) = group_row(h, name) else {
+        return
+    }
+    if !registering(h, name) {
+        return
+    }
+    let Ok(Some(other)) = store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.active, name) else {
+        return
+    }
+    let Ok(Some(r)) = request_row(h, other) else {
+        return
+    }
+    match r.status {
+        Open => (),
+        _ => return,
+    }
+    if !is_none(admission_of(h, name, other)) || !is_none(deploy_of(h, name, other)) || !is_none(owner_of(h, other)) {
+        return
+    }
+    if now.wall_ms < r.deadline_ms {
+        return
+    }
+    fail_request(mut h, other, InvalidClass, "the admission deadline passed before its input arrived")
 }
 
 // A new creation proposal records the observed absence. The name, listener and
@@ -99,6 +135,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
         reattach(mut h, conn, d, r, now, mut out)
         return
     }
+    expire_registering(mut h, spec.name, now)
     if expected.name != spec.name || !is_none(expected.predecessor) || !matches_subject(h, expected) {
         refuse(mut h, conn, ConflictClass, "the expected absence changed")
         return
@@ -110,14 +147,6 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     if let Some((class, why)) = admission_refusal(h, spec.name, registered_row(spec, 0u64), d, requested, foreign, exec) {
         refuse(mut h, conn, class, why)
         return
-    }
-    // An earlier registration of this name that lost its input past its deadline fails
-    // here and removes its group; one still running holds the name.
-    if let Ok(Some(_)) = group_row(h, spec.name) {
-        if registering(h, spec.name) && active_holds(mut h, spec.name, d, now) {
-            refuse(mut h, conn, BusyClass, "the group is still registering")
-            return
-        }
     }
     if store_owned(h, spec.store) {
         refuse(mut h, conn, ConflictClass, "another group owns this store")

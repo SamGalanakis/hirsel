@@ -395,7 +395,10 @@ class StoreNoSync(unittest.TestCase):
             Path(os.environ["HIRSEL_CORE_RT_DEFAULT_ARCHIVES"]).resolve()
             / "x86_64-unknown-linux-gnu/libhirsel_core_rt.a"
         )
-        with tempfile.TemporaryDirectory(prefix="hirsel-no-sync-") as scratch:
+        with tempfile.TemporaryDirectory(
+            prefix="hirsel-no-sync-",
+            dir=os.environ.get("HIRSEL_OPERATOR_TEST_ROOT"),
+        ) as scratch:
             scratch = Path(scratch).resolve()
             shim = scratch / "shim.so"
             shim_source = scratch / "shim.c"

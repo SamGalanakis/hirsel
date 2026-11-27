@@ -70,6 +70,8 @@ OPENAT2_TEST_CASES = {
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
         "operator_cli::laws::slice1_resolve_identify_read",
+        "native::tests::foreign_deploy_and_recording_registration_refuse_before_payloads",
+        "native::tests::exec_test_and_deploy_require_the_exact_profile_approval",
         "native::tests::profiler_replay_memory_peaks_match_the_runtime_metrics",
         "native::tests::profiler_replays_an_explicit_inputs_entry_and_checks_its_identity",
         "native::tests::two_dir_grants_pass_relative_and_inherited_directories",

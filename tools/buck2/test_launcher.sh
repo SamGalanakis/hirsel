@@ -23,15 +23,22 @@ only_lo() {
   [ "$(awk 'NR > 2 { sub(":", "", $1); print $1 }' /proc/self/net/dev)" = lo ]
 }
 # A bubblewrap user namespace maps the operator UID but shows all other owners
-# (including root) as the same overflow UID. Give the catalog trust law a real
-# operator-owned ancestor for its pins while preserving loopback isolation.
-if [ "${HIRSEL_TEST_DEDICATED_CASE:-}" = operator_cli::laws::slice1_resolve_identify_read ] && [ -z "${HIRSEL_OPERATOR_TEST_ROOT:-}" ]; then
-  set -- sh "$0" "$@"
-  for entry in /*; do
-    set -- --dev-bind "$entry" "$entry" "$@"
-  done
-  HIRSEL_OPERATOR_TEST_ROOT=/ HIRSEL_TEST_NETNS_ENTERED=1 exec bwrap --unshare-net --die-with-parent --tmpfs / "$@"
-fi
+# (including root) as the same overflow UID. Give operator-pin tests a real
+# operator-owned ancestor for their pins while preserving loopback isolation.
+case "${HIRSEL_TEST_DEDICATED_CASE:-}|${1:-}" in
+  operator_cli::laws::slice1_resolve_identify_read\|* | \
+  native::tests::foreign_deploy_and_recording_registration_refuse_before_payloads\|* | \
+  native::tests::exec_test_and_deploy_require_the_exact_profile_approval\|* | \
+  *\|*/core_store_no_sync.py | *\|core_store_no_sync.py | \
+  *\|*/runner_tests.py | *\|runner_tests.py)
+    if [ -z "${HIRSEL_OPERATOR_TEST_ROOT:-}" ]; then
+      set -- sh "$0" "$@"
+      for entry in /*; do
+        set -- --dev-bind "$entry" "$entry" "$@"
+      done
+      HIRSEL_OPERATOR_TEST_ROOT=/ HIRSEL_TEST_NETNS_ENTERED=1 exec bwrap --unshare-net --die-with-parent --tmpfs / "$@"
+    fi ;;
+esac
 # HIRSEL_TEST_SMALL_TMPFS=BYTES asks for a tmpfs of that size, mounted in the same
 # bwrap namespace at HIRSEL_TEST_SMALL_TMPFS_DIR, for laws that need a nearly full
 # filesystem. bwrap cannot nest, so such a test runs on the host, never the pool.

@@ -272,7 +272,7 @@ request at the same time; there is no process-wide offline switch.
 ## Dev loop
 
 *`hirsel dev` (`--listen`, `--store`, `--fresh`, `--n-place`, `--json`) is built; `--sdk`<!-- doc-ref: planned -->,
-`--wait`<!-- doc-ref: planned -->, `--status` and `--stop` remain planned. [launch](launch.md#the-dev-loop) is the full
+`--wait`<!-- doc-ref: planned -->, `--status`<!-- doc-ref: planned --> and `--stop` remain planned. [launch](launch.md#the-dev-loop) is the full
 text.* `hirsel dev`
 rebuilds a local place as its sources change, keeps its store across sessions, and activates
 each edit by the ordinary install and reopen. Its catalogue row reads "Rebuild a local place and restore its open subscriptions."
@@ -295,7 +295,7 @@ fixed for the session.
 |---|---|---|---|---|
 | the loop | stopped by a signal or `--stop` | an I/O failure it cannot continue past | refused before serving | — |
 | `--wait`<!-- doc-ref: planned --> | the edit serves | the edit failed | usage | no loop, or `--timeout` passed |
-| `--status` | a loop answered | — | usage | no loop |
+| `--status`<!-- doc-ref: planned --> | a loop answered | — | usage | no loop |
 | `--stop` | the loop stopped | — | usage | no loop |
 
 ## Store commands

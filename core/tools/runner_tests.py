@@ -1131,7 +1131,7 @@ def main():
     if args.part == 'host':
         if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
             p.error('host requires an installed --compiler, one native --backend, and --host-law')
-        with tempfile.TemporaryDirectory(prefix='hirsel-host-law-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='hirsel-host-law-', dir=os.environ.get('HIRSEL_OPERATOR_TEST_ROOT')) as tmp:
             host_law(args, args.root.resolve(), Path(tmp), args.backend[0], args.host_law)
         print(f'{args.backend[0]} host {args.host_law}: passed', flush=True)
         return 0
@@ -1159,7 +1159,7 @@ def main():
         rows.append(r)
         print(' '.join(f'{k}={v}' for k, v in r.items() if k != 'result' or r.get('law') == 'l4_peak_retained'), flush=True)
 
-    with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-', dir=os.environ.get('HIRSEL_OPERATOR_TEST_ROOT')) as tmp:
         work = Path(tmp)
         if r0 or args.part == 'shared-views':
             inputs = manifest(root, work, 'shared-views')

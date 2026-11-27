@@ -819,7 +819,7 @@ list's digest) as the identity.
 | Path | Content |
 |---|---|
 | `dev.lock` | `flock` held by the running loop for this package |
-| `dev.sock` | control socket for `--wait`<!-- doc-ref: planned -->, `--status` and `--stop` |
+| `dev.sock` | control socket for `--wait`<!-- doc-ref: planned -->, `--status`<!-- doc-ref: planned --> and `--stop` |
 | `stores/<G>/` | dev-owned store generations. `<G>` is a decimal dev creates with `mkdir` and never reuses; each holds a `.hirsel-dev-owned` marker written at creation |
 | `stores/current` | a regular file naming the current `<G>`, written by temp file, rename and parent sync |
 | `gen/<N>/place` | immutable executables. Dev keeps the serving one, the candidate, and both OLD and NEW of any unresolved install |
@@ -1018,7 +1018,7 @@ proof, or `null`).
 | `recovery_pending` | `old`, `new` (identity digests), `detail` |
 | `building`, `stopped` | none |
 
-`--status --json` prints the latest object, and `--wait --json`<!-- doc-ref: planned --> the observation it settled on.
+`--status --json`<!-- doc-ref: planned --> prints the latest object, and `--wait --json`<!-- doc-ref: planned --> the observation it settled on.
 
 **`--wait`<!-- doc-ref: planned -->.** A waiter's request makes the loop take a fresh capture C after the request
 arrives. The **success observation** is the first point where the loop is `Serving` a
@@ -1034,7 +1034,7 @@ than its own capture, and later edits can supersede what it reported.
 |---|---|---|---|---|
 | `hirsel dev` | stopped by a signal or `--stop` | an I/O failure the loop cannot continue past | refused before serving | — |
 | `--wait`<!-- doc-ref: planned --> | success observation | failure observation | usage | no loop, or `--timeout` passed |
-| `--status` | a loop answered | — | usage | no loop |
+| `--status`<!-- doc-ref: planned --> | a loop answered | — | usage | no loop |
 | `--stop` | the loop stopped | — | usage | no loop |
 
 **Refusals** are one block on stderr with exit 2:

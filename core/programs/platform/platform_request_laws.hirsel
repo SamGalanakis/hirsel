@@ -357,3 +357,98 @@ fn slice2_observed_absence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     unplug(mut r)
     Ok(())
 }
+
+fn observe_group(mut r: Rig, name: String) -> operator.Precondition waits {
+    r.conns += 1u64
+    let conn = r.conns
+    send(mut r, conn, ObserveGroupAsk(string.from(name)))
+    for ans in got_on(r, conn) {
+        if let PreconditionAnswer(p) = ans {
+            return clone(p)
+        }
+    }
+    fail("expected PreconditionAnswer")
+}
+
+// An abandoned post-approval creation expires once unowned past its admission deadline
+// and frees its name, tenant quota slot, listener and store. Observation never fails a
+// Held creation, and a carried-over group without a name_generations row still reports
+// its incarnation.
+@test
+fn slice2_abandoned_creation(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // 1. ObserveGroupAsk reclaims an abandoned post-approval creation after restart past deadline.
+    let mut r = rig(c, rnd, 4u64)
+    let cap = must(set_quota(mut r.h, "t", Quota(groups: 1u64, live: 1u64), r.now), "quota")
+    pump(mut r, take cap)
+    let d1 = request_id(101u64)
+    let c1 = register_as(mut r, d1, registration("abandoned", "s-shared"))
+    let inc1 = option.unwrap(must(group_row(r.h, "abandoned"), "reserved group")).incarnation
+    hang_up(mut r, c1)
+    let mut b = restart(take r, 4u64)
+    // Before deadline: reservation still holds.
+    let before = observe_group(mut b, "abandoned")
+    expect(before.predecessor == Some(0u64) && before.generation == inc1 && !closed(b, "abandoned"), "abandoned creation expired before deadline")
+    // Past deadline: ObserveGroupAsk expires d1 and frees name, quota, listener and store.
+    b.now = Now(wall_ms: b.now.wall_ms + ADMISSION_MS, mono_ns: b.now.mono_ns)
+    let after = observe_group(mut b, "abandoned")
+    expect(is_none(after.predecessor) && after.generation == inc1, "expired creation did not return absence at retained generation")
+    expect(is_failed(status_of(mut b, d1), InvalidClass), "expired creation request was not marked Failed(Invalid)")
+    expect(is_none(must(group_row(b.h, "abandoned"), "group")) && closed(b, "abandoned") && !store_owned(b.h, "s-shared"), "expired creation leaked group, listener or store")
+    // Re-registering the same name, tenant (quota=1), listener and store under a new D succeeds.
+    let d2 = request_id(102u64)
+    let _ = register_as(mut b, d2, registration("abandoned", "s-shared"))
+    expect(admits(b) == 1u64, "re-registration after expiry failed to reclaim quota/name/store")
+    // Old D with a different intent is still a Conflict.
+    let conflict = register_as(mut b, d1, registration("abandoned", "s-other"))
+    expect(errored(b, conflict, ConflictClass), "expired D accepted a different intent")
+    unplug(mut b)
+    // 2. RegisterAsk directly also reclaims an abandoned past-deadline creation.
+    let mut r2 = rig(c, rnd, 4u64)
+    let cap2 = must(set_quota(mut r2.h, "t", Quota(groups: 1u64, live: 1u64), r2.now), "quota")
+    pump(mut r2, take cap2)
+    let d3 = request_id(103u64)
+    let stale_absence = observe_group(mut r2, "direct")
+    let c3 = register_as(mut r2, d3, registration("direct", "s-direct"))
+    hang_up(mut r2, c3)
+    r2.now = Now(wall_ms: r2.now.wall_ms + ADMISSION_MS, mono_ns: r2.now.mono_ns)
+    r2.conns += 1u64
+    let stale_conn = r2.conns
+    send(mut r2, stale_conn, RegisterAsk(request_id(104u64), registration("direct", "s-direct"), AttestedInput(image_two()), list.new(), list.new(), take stale_absence, false))
+    expect(errored(r2, stale_conn, ConflictClass), "register with pre-incarnation absence did not conflict")
+    expect(is_failed(status_of(mut r2, d3), InvalidClass) && is_none(must(group_row(r2.h, "direct"), "group")) && closed(r2, "direct") && !store_owned(r2.h, "s-direct"), "register did not reclaim abandoned creation")
+    let _ = register_as(mut r2, request_id(105u64), registration("direct", "s-direct"))
+    expect(admits(r2) == 2u64, "re-register after direct expiry did not succeed")
+    unplug(mut r2)
+    // 3. ObserveGroupAsk does not fail a Held registering request past deadline.
+    let mut r3 = rig(c, rnd, 4u64)
+    let d_held = request_id(106u64)
+    let c_held = register_as(mut r3, d_held, registration("held-reg", "s-held"))
+    let mut ev: List[launcher.Event] = list.new()
+    list.push(mut ev, Admitted(r3.a, image_two(), summary_of(1u64, 0u64, grants_of("Net=tcp:example.org:443", "")), ""))
+    feed(mut r3, take ev)
+    hang_up(mut r3, c_held)
+    r3.now = Now(wall_ms: r3.now.wall_ms + ADMISSION_MS + 1000u64, mono_ns: r3.now.mono_ns)
+    let still = observe_group(mut r3, "held-reg")
+    expect(still.predecessor == Some(0u64) && awaits(status_of(mut r3, d_held), "Net=tcp:example.org:443", ""), "ObserveGroupAsk failed a Held registering request")
+    unplug(mut r3)
+    // 4. Carried-over catalog without name_generations still reports the group's incarnation.
+    let mut r4 = rig(c, rnd, 4u64)
+    add(mut r4, "legacy", "t")
+    let legacy_inc = option.unwrap(must(group_row(r4.h, "legacy"), "legacy")).incarnation
+    let cleared = {
+        let t = view r4.h.t
+        store.run(mut r4.h.db, None, store.copy_env(t), fn(mut tx, tables) -> Result[(), Refused] {
+            let _ = st(store.delete(mut tx, tables.name_generations, "legacy"))?
+            Ok(())
+        })
+    }
+    let _ = must(decided(mut r4.h, take cleared), "clear name_generations")
+    let legacy_subject = observe_group(mut r4, "legacy")
+    expect(legacy_subject.generation == legacy_inc && legacy_subject.predecessor == Some(1u64), "carried-over group lost its incarnation in subject_of")
+    r4.conns += 1u64
+    let legacy_conn = r4.conns
+    send(mut r4, legacy_conn, BeginAsk(request_id(107u64), take legacy_subject, AttestedBegin(image_two()), list.new(), list.new(), false))
+    expect(is_none(error_on(r4, legacy_conn)) && admits(r4) == 1u64, "BeginAsk against carried-over group was refused")
+    unplug(mut r4)
+    Ok(())
+}

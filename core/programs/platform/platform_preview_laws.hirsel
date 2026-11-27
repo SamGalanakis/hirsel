@@ -122,20 +122,34 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
         _ => false,
     }
     expect(report_ok && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: the held decision does not carry the trigger report, or OLD stopped serving")
-    let mut release_all = runner.fate.none()
-    release_all.all = Some(Release)
-    let _ = decide_with(mut u, held_d, clone(shown), Approve(take release_all))
-    let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Admitted(u.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
-    feed(mut u, take events)
-    assembled_new(mut u)
-    let a = u.a
-    helper_answers(mut u, helper_child(old, DescribeMode(a)), describe_answer())
-    helper_answers(mut u, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
-    old_says(mut u, old, PlaceExported(1u64, "export-2"))
-    helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), trigger_answer())
+    let mut decision = take shown
+    for round in 0u64 .. 2u64 {
+        let mut release_all = runner.fate.none()
+        release_all.all = Some(Release)
+        let _ = decide_with(mut u, held_d, clone(decision), Approve(take release_all))
+        source_admitted(mut u, launcher.no_grants())
+        assembled_new(mut u)
+        let a = u.a
+        helper_answers(mut u, helper_child(old, DescribeMode(a)), describe_answer())
+        helper_answers(mut u, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
+        old_says(mut u, old, PlaceExported(1u64, "export-2"))
+        let offered = if round == 0u64 {
+            trigger_report_of(Some(Cancel))
+        } else {
+            trigger_answer()
+        }
+        helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), take offered)
+        if round == 0u64 {
+            old_says(mut u, old, PlaceAborted)
+            let Some(AwaitDecision(next)) = status_of(mut u, held_d) else {
+                fail("a different held fate did not return a current plan")
+            }
+            expect(next.triggers.rows[0u64].fate == Some(Cancel) && imports_of(u) == 0u64 && asked_of(u, 2u64) == 0u64, "a changed held fate reached OLD")
+            decision = clone(next)
+        }
+    }
     let fates = prepare_fates(u)
-    expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the repeated prepare did not get the decision's fates")
+    expect(list.len(fates) == 3u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000" && fates[2u64] == fates[1u64], "L54: the repeated prepare did not get the decision's fates")
     let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))))
     pump(mut u, take cut)
     answer(mut u, old, PlaceInstalled(2u64, true))

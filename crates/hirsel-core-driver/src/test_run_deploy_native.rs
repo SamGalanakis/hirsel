@@ -1,14 +1,26 @@
 impl PackageLaw {
-    fn state_with_admission(&self) -> PathBuf {
+    fn operator_state(&self) -> (tempfile::TempDir, PathBuf, PathBuf) {
         use crate::launcher::{admit, private_dir};
+        use std::os::unix::fs::PermissionsExt;
 
-        let state = private_dir(self.path("state")).unwrap();
+        let parent = std::env::var_os("HIRSEL_OPERATOR_TEST_ROOT").unwrap_or_else(|| "/tmp".into());
+        let root = tempfile::tempdir_in(parent).unwrap();
+        let base = root.path().canonicalize().unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = private_dir(base.join("state")).unwrap();
         admit::write_envelope(&state, &admit::limits()).unwrap();
-        state
-    }
-    fn operator_pin(&self, state: &std::path::Path) -> PathBuf {
-        self.write("context.toml",&format!("kind = \"host\"\nstate = {:?}\nauthority = \"00000000000000000000000000000001\"\nuid = {}\n",state,crate::operator::operator_uid()));
-        self.path("context.toml")
+        let pin = base.join("context.toml");
+        std::fs::write(
+            &pin,
+            format!(
+                "kind = \"host\"\nstate = {:?}\nauthority = \"00000000000000000000000000000001\"\nuid = {}\n",
+                state,
+                crate::operator::operator_uid()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (root, state, pin)
     }
     fn group_spec(&self, grants: &str, recording: bool) -> PathBuf {
         let recording = if recording {
@@ -55,7 +67,7 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
     );
     let source = law.path("code-store");
     // The host has published bounds, but each refusal must come before connecting.
-    let state = law.state_with_admission();
+    let (_operator_root, state, pin) = law.operator_state();
     let envelope = fs::read(state.join("admission")).unwrap();
     let request = |args: &[&str]| {
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -71,7 +83,6 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
             GRANT,
         ]));
         let root = root.trim();
-        let pin = law.operator_pin(&state);
         for (grants, record, reason) in [
             ("", false, format!("the recipe grants {GRANT}")),
             (
@@ -192,8 +203,7 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let source = law.path("code-store");
     let source = source.to_str().unwrap();
     let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Exec=profiles.toml git"]));
-    let state = law.state_with_admission();
-    let pin = law.operator_pin(&state);
+    let (_operator_root, _state, pin) = law.operator_state();
     let spec = law.group_spec(
         "Exec(policy: \"./profiles.toml\", profiles: [\"git\"])",
         false,

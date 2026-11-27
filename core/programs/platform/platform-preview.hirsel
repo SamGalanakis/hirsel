@@ -18,7 +18,10 @@ fn decision_of(input: operator.Input, gate: Option[launcher.Green], stage: opera
         SourceInput(b) => Some(digest_of(b)),
         _ => None,
     }
-    let toolchain: Option[Bytes] = match gate { Some(green) => Some(clone(green.toolchain)), None => None }
+    let toolchain: Option[Bytes] = match gate {
+        Some(green) => Some(clone(green.toolchain)),
+        None => None
+    }
     operator.Decision(gate_toolchain: toolchain, tree: tree, root: root, stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
 }
 

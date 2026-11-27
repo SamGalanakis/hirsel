@@ -29,6 +29,7 @@ def pin_host(state, path):
                 raise ValueError("expected catalog identity")
     authority = f"{hi:016x}{lo:016x}"
     path.write_text(f'kind = "host"\nstate = {json.dumps(str(state))}\nauthority = "{authority}"\nuid = {os.geteuid()}\n')
+    os.chmod(path, 0o600)
     return authority
 
 

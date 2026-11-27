@@ -1,3 +1,91 @@
+/// A program printing the revisions of `f` (body `f`), `g`, `main` and the
+/// intrinsic `float.widen`, 32 bytes each.
+fn described(f: &str) -> String {
+    format!(
+        "fn f() -> u64 {{ {f} }}\nfn g() -> u64 {{ 9 }}\n\
+         fn put[F](out: Stdout, s: StaticFn[F]) -> bool waits {{\n\
+         let Some(r) = code.revision(s) else {{ return false }}\n\
+         result.unwrap(stdout.write_bytes(out, r));\n\
+         true\n}}\n\
+         pub fn main(out: Stdout) -> Result[(), Exit] waits {{\n\
+         if put(out, code.describe(f)) && put(out, code.describe(g)) && put(out, code.describe(main)) && put(out, code.describe(float.widen)) \
+         {{ Ok(()) }} else {{ Error(Exit(status: 2u8)) }}\n}}\n"
+    )
+}
+/// The printed revisions of f, g, main and float.widen, and the build's
+/// entry revision.
+type Printed = ([Vec<u8>; 4], ContentHash);
+/// Build `app` over a source core (and std when given) in `dir` and run it.
+fn described_build(app: &str, std: Option<&Path>, dir: &Path, (backend, optimize, root_limit): Config) -> Printed {
+    let entry = DefPath::from_full("local/app@1/main/main").unwrap();
+    let mut request = revision_request(app, std, dir);
+    request.inputs.packages[0].package = entry.0.package.clone();
+    request.entry = Some(entry.clone());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let options = NativeOptions { optimize, root_limit, grant_mask: 1 << 4, ..native_options(backend, dir) };
+    let built = product
+        .build(&entry, &options)
+        .unwrap();
+    (described_run(&built.executable), built.revision)
+}
+fn described_run(executable: &Path) -> [Vec<u8>; 4] {
+    let output = Command::new(executable).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout.len(), 128, "four revisions");
+    std::array::from_fn(|k| output.stdout[32 * k..32 * (k + 1)].to_vec())
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn revision_described() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (described("7"), described("8"));
+    let at = |name: &str| {
+        let at = dir.path().join(name);
+        std::fs::create_dir_all(&at).unwrap();
+        at
+    };
+    let fresh_a = described_build(&a, None, &at("a"), CRANELIFT);
+    let fresh_b = described_build(&b, None, &at("b"), CRANELIFT);
+    let ([f, g, main, _], entry) = &fresh_a;
+    assert_ne!(f, g, "f and g have their own rows");
+    assert_eq!(&main[..], &entry.0[..], "main's printed revision is the build's");
+    assert_ne!(fresh_a.0[0], fresh_b.0[0], "an edit to f changes f's revision");
+    assert_eq!(fresh_a.0[1], fresh_b.0[1], "and leaves g's equal");
+    assert_eq!(fresh_a.0[3], fresh_b.0[3], "and the intrinsic's");
+    let intrinsic = Identity::plain(DefPath::core("float.widen"));
+    let expected = hirsel_core_ir::code_revision(hirsel_core_ir::builtin_address(&intrinsic).unwrap());
+    assert_eq!(fresh_a.0[3], expected.0);
+    // B into A's store, then A again (a link hit), then A under another root
+    // limit (a reach hit and a link miss: the rows come from the record).
+    assert_eq!(described_build(&b, None, &at("a"), CRANELIFT), fresh_b, "B in a primed store");
+    assert_eq!(described_build(&a, None, &at("a"), CRANELIFT), fresh_a, "A again in a primed store");
+    assert_eq!(described_build(&a, None, &at("a"), (Backend::Cranelift, false, 2_097_152)).0, fresh_a.0, "A from its reach record");
+    // L3: the engines.
+    for (n, config) in [(Backend::Llvm, false, 1_048_576), (Backend::Llvm, true, 1_048_576)].into_iter().enumerate() {
+        assert_eq!(described_build(&a, None, &at(&format!("e{n}")), config).0, fresh_a.0, "{config:?}: Cranelift's bytes");
+    }
+    // L5: an imaged core and std against their sources (the package set is
+    // the same: std's codec makers are selected from types).
+    let std = revision_std(Std::Tree, dir.path(), "a");
+    let source = described_build(&a, std.as_deref(), &at("source"), CRANELIFT);
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let project = at("imaged");
+    std::fs::write(project.join("main.hirsel"), &a).unwrap();
+    let request = CheckRequest::program(&project, &libraries, &project.join("store")).unwrap();
+    let product = Driver::default()
+        .check_reachable_with_product(request, &at("cache"), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let options = NativeOptions { grant_mask: 1 << 4, ..native_options(Backend::Cranelift, &project) };
+    let built = product.build(&DefPath::from_full("local/app@1/main/main").unwrap(), &options).unwrap();
+    assert_eq!((described_run(&built.executable), built.revision), source, "A8: an imaged core's revisions");
+    assert_eq!(hirsel_core_ir::code_revision(built.address), built.revision);
+}
+
 #[test]
 #[ignore = "explicit native integration target"]
 fn revision_described_generic_instance() {

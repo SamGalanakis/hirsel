@@ -598,7 +598,7 @@ fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &
     options.cas = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
     options.debug_lines = true;
-    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    let built = product.build(&DefPath::from_full("local/app@1/main/main").unwrap(), &options).unwrap();
     let output = Command::new(&built.executable).output().unwrap();
     (std::fs::read(&built.executable).unwrap(), (output.status.code(), output.stderr))
 }
@@ -630,7 +630,7 @@ fn reach_source_places_are_the_current_sources() {
         &[("aaa.hirsel", SPARE), ("main.hirsel", MAIN), ("other.hirsel", &shifted), ("spare.hirsel", SPARE)],
         &[("aaa.hirsel", SPARE), ("main.hirsel", moved_main), ("other.hirsel", SPARE), ("spare.hirsel", SPARE)],
     ];
-    let lines = ["app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/other.hirsel:2", "app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/main.hirsel:5"];
+    let lines = ["local/app@1/other.hirsel:2", "local/app@1/other.hirsel:5", "local/app@1/other.hirsel:2", "local/app@1/other.hirsel:2", "local/app@1/other.hirsel:5", "local/app@1/main.hirsel:5"];
     let dir = tempfile::tempdir().unwrap();
     for (n, files) in steps.iter().enumerate() {
         let (primed, ran) = reach_files_build(dir.path(), "app", files, "primed", Backend::Cranelift);
@@ -836,7 +836,7 @@ fn descriptor_build(dir: &Path, files: &[(&str, &str)], store: &str, backend: Ba
     options.optimize = optimize;
     options.cas = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
-    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    let built = product.build(&DefPath::from_full("local/app@1/main/main").unwrap(), &options).unwrap();
     let output = Command::new(&built.executable).output().unwrap();
     (std::fs::read(&built.executable).unwrap(), (output.status.code(), output.stderr))
 }

@@ -446,15 +446,15 @@ fn rl8_take_positions_natively() {
                     .arg(&object),
             )
             .unwrap();
-            let wraps = ["conn_send", "conn_receive", "check_cancel"]
-                .map(|s| format!(" -Wl,--wrap=hirsel_core_{s}"))
-                .concat();
-            options.link = Link::Driver(appending_driver(
+            let (runtime, linker) = with_link_wrappers(
                 dir.path(),
                 &format!("cc-rl8-{backend:?}"),
-                &format!("'{}'{wraps}", object.display()),
-            ));
-            options.runtime = runtime.clone();
+                &runtime,
+                &object,
+                &["hirsel_core_conn_send", "hirsel_core_conn_receive", "hirsel_core_check_cancel"],
+            );
+            options.link = Link::Driver(linker);
+            options.runtime = runtime;
             options.recording = true;
             options.grant_mask = ["Tasks", "Stdout"]
                 .iter()
@@ -463,11 +463,11 @@ fn rl8_take_positions_natively() {
             let program = product.build(&entry, &options).unwrap().executable;
             let path = dir.path().join(format!("rl8-{backend:?}.tape"));
             // A run that waits on a held arrival never ends: bound it.
-            let run = Command::new("timeout")
-                .args(["60", program.to_str().unwrap()])
-                .env("HIRSEL_RECORD", &path)
-                .output()
-                .unwrap();
+            let (run, expired) = crate::test_run::capture(
+                Command::new(&program).env("HIRSEL_RECORD", &path),
+                Some(std::time::Duration::from_secs(60)),
+            ).unwrap();
+            assert!(!expired, "{at}: held arrival did not complete");
             let (code, out, err) = (
                 run.status.code(),
                 String::from_utf8(run.stdout).unwrap(),

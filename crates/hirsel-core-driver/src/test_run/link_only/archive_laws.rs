@@ -19,8 +19,6 @@ struct Fixture {
     runtime: PathBuf,
     llvm: PathBuf,
     kit: PathBuf,
-    rust: PathBuf,
-    qemu: PathBuf,
     work: PathBuf,
     program: PathBuf,
     libraries: PathBuf,
@@ -60,6 +58,14 @@ fn copy_package(from: &Path, to: &Path) {
 }
 
 impl Fixture {
+    fn input(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(std::env::var_os(name).unwrap_or_else(|| panic!("missing {name}")))
+            .canonicalize()
+            .unwrap()
+    }
+
     fn new(work: &Path) -> Self {
         let data = work.join("data");
         let cache_dir = work.join("place-cache");
@@ -88,11 +94,6 @@ impl Fixture {
             .join("../..")
             .canonicalize()
             .unwrap();
-        let input = |name: &str| {
-            root.join(std::env::var_os(name).unwrap())
-                .canonicalize()
-                .unwrap()
-        };
         let workspace = work.join("workspace");
         let libraries = workspace.join("libraries");
         let program = workspace.join(name);
@@ -117,8 +118,8 @@ impl Fixture {
         let file = format!("{name}.hirsel");
         fs::copy(source.join(&file), program.join(&file)).unwrap();
 
-        let llvm = input("LLVM_SYS_231_PREFIX");
-        let kit = input("HIRSEL_LINK_KIT");
+        let llvm = Self::input("LLVM_SYS_231_PREFIX");
+        let kit = Self::input("HIRSEL_LINK_KIT");
         let store = work.join("store");
         let mut args = Vec::new();
         let mut text = String::new();
@@ -138,12 +139,10 @@ impl Fixture {
         let run_dir = work.join("run");
         fs::DirBuilder::new().mode(0o700).create(&run_dir).unwrap();
         Self {
-            compiler: input("HIRSEL_DEV_TEST_DRIVER"),
-            runtime: input("HIRSEL_CORE_RT_ARCHIVE"),
+            compiler: Self::input("HIRSEL_DEV_TEST_DRIVER"),
+            runtime: Self::input("HIRSEL_CORE_RT_ARCHIVE"),
             llvm,
             kit,
-            rust: input("HIRSEL_ARCHIVE_RUST").join("bin/rustc"),
-            qemu: input("HIRSEL_TOOLCHAIN_QEMU").join("qemu-x86_64"),
             work: work.into(),
             program,
             libraries,
@@ -253,7 +252,7 @@ pub extern "C" fn adjacent_value() -> u64 { 71 }
         .unwrap();
         let archive = self.work.join("libadjacent.a");
         passed(
-            Command::new(&self.rust)
+            Command::new(Self::input("HIRSEL_ARCHIVE_RUST").join("bin/rustc"))
                 .args([
                     "--crate-type=staticlib",
                     "--edition=2024",
@@ -414,6 +413,14 @@ fn duplicate_exports(fixture: &Fixture, a: &Path, b: &Path) {
 #[test]
 #[ignore = "uses pinned native tools and QEMU"]
 fn embedded_archive_laws() {
+    // This fixture links a GNU ELF host and runs its x86-64 CPU refusal under QEMU.
+    match crate::host::HOST_TARGET {
+        hirsel_core_layout::Target::X86_64Linux => (),
+        hirsel_core_layout::Target::Aarch64Linux
+        | hirsel_core_layout::Target::Aarch64Darwin
+        | hirsel_core_layout::Target::Aarch64Ios
+        | hirsel_core_layout::Target::Aarch64IosSim => return,
+    }
     let work = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(work.path());
     let limit = 1 << 30;
@@ -470,7 +477,7 @@ fn embedded_archive_laws() {
     fs::write(&fp, manifest_fingerprint(&embedded).unwrap()).unwrap();
     let run_args = [path(&fp), path(&fixture.store), &fixture.grants];
     passed(
-        Command::new(&fixture.qemu)
+        Command::new(Fixture::input("HIRSEL_TOOLCHAIN_QEMU").join("qemu-x86_64"))
             .args(["-cpu", "qemu64"])
             .arg(&host)
             .args(run_args)
@@ -521,6 +528,11 @@ fn embedded_archive_laws() {
 #[test]
 #[ignore = "uses pinned native tools"]
 fn embedded_exec_laws() {
+    // The fixture asserts Linux subreaper and dumpable process properties.
+    match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => (),
+        hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => return,
+    }
     let work = tempfile::tempdir().unwrap();
     let work = work.path();
     let prefix = Path::new(env!("CARGO_MANIFEST_DIR"))

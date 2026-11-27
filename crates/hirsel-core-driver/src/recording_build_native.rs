@@ -2207,7 +2207,7 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
     assert_eq!(code, Some(0), "test --replay --coverage: {out}\n{err}");
     let coverage = &serde_json::from_str::<serde_json::Value>(&out).unwrap()["coverage"];
     assert_eq!((&coverage["runs"], &coverage["unobserved_runs"]), (&1.into(), &0.into()), "{coverage}");
-    let entered = coverage["functions"].as_array().unwrap().iter().find(|f| f["definition"] == "app@1/main/writes_and_replays");
+    let entered = coverage["functions"].as_array().unwrap().iter().find(|f| f["definition"] == "local/app@1/main/writes_and_replays");
     assert_eq!(entered.map(|f| &f["entered_runs"]), Some(&1.into()), "{coverage}");
 
     let mut wrong_verdict = base;

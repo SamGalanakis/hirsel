@@ -1,5 +1,6 @@
 //! Versioned toolchain-owned data schemas and their generated Rust projections.
-use hirsel_data::{DataError, Descriptor, Limits};
+pub use hirsel_data::Limits;
+use hirsel_data::{DataError, Descriptor};
 use serde_json::Value;
 #[cfg(test)]
 hirsel_guard::install!();

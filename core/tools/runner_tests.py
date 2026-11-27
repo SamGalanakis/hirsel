@@ -30,10 +30,11 @@ import subprocess
 import tempfile
 import time
 
+from operator_fixture import check_creation_plan, group_spec, listening, pin_host, submit_fixture
 from case_progress import run_case
 from std_native import ROOT, simulation_support
 from runner_rest import crash_part, no_jwt_at_rest, no_secret_at_rest
-from runner_host import BUCKET_HOST_LAWS, cold_wake_trigger, cutover_survives_host_loss, runner_idle_stop, unpinned, wait_ready
+from runner_host import BUCKET_HOST_LAWS, cold_wake_trigger, cutover_survives_host_loss, runner_idle_stop, unpinned, wait_ready, welcome_n_place
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
 
@@ -388,60 +389,34 @@ def host_law(args, root, work, engine, name):
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         address = f'127.0.0.1:{probe.getsockname()[1]}'
-    register = [compiler, 'register', old_recipe, '--state', str(state), '--group', 'app',
-                '--listen', address, '--store', str(work / 'group-store'), '--trusted',
-                '--workdir', str(launch_store), '--code-store', str(publish_store)]
-    deploy = [compiler, 'deploy', new_recipe, '--state', str(state), '--group', 'app',
-              '--code-store', str(publish_store)]
+    context = work / 'operator-context.toml'
+    spec = work / 'group.hcfg'
+    def create(store=work / 'group-store', recording=None):
+        group_spec(spec, 'app', address, store, launch_store, recording)
+        return [compiler, 'deploy', '--recipe', old_recipe, '--context', str(context), '--create',
+                str(spec), '--code-store', str(publish_store), '--wait', '--json']
+    register = create()
+    deploy = [compiler, 'deploy', '--recipe', new_recipe, '--context', str(context),
+              '--group', 'app', '--code-store', str(publish_store), '--wait', '--json']
 
     def ready():
         return wait_ready(address)
 
-    def welcome_n_place():
-        with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
-            with peer.makefile('rb') as stream:
-                peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
-                              'Upgrade: websocket\r\nConnection: Upgrade\r\n'
-                              'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.4\r\n'
-                              'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
-                assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
-                for line in stream:
-                    if line == b'\r\n':
-                        break
-                # Hello(Some(credential), []) binds the fixture's application Caller.
-                hello = b'\0' * 4 + b'\x01\0\0\0\x10\0\0\0' + os.urandom(16) + b'\0' * 4
-                mask = os.urandom(4)
-                masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
-                peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
-                opcode, length = stream.read(2)
-                length = int.from_bytes(stream.read(2), 'big') if length == 126 else length
-                assert opcode == 0x82 and length >= 28, f'unexpected Welcome frame header {opcode:#x} {length}'
-                frame = stream.read(length)
-                assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
-                return int.from_bytes(frame[-24:-16], 'little')
-
-    def listening():
-        with socket.socket(socket.AF_UNIX) as peer:
-            try:
-                peer.connect(str(operator))
-                return True
-            except OSError:
-                return False
-
     @contextmanager
     def running_host(idle_ms=None):
         with tempfile.TemporaryFile(mode='w+') as log:
-            command = [compiler, 'host', '--state', str(state), '--max-places', '1', '--lifecycle', 'leader', '--admission', str(root / 'tools/tests/fixtures/host-admission.conf')]
+            command = [compiler, 'host', '--state', str(state), '--max-places', '1', '--lifecycle', 'leader', '--admission', str(root / 'tools/tests/fixtures/host-admission.hcfg')]
             if idle_ms is not None:
                 command += ['--idle-ms', str(idle_ms)]
             host = subprocess.Popen(command, stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 120
-                while time.monotonic() < deadline and host.poll() is None and not listening():
+                while time.monotonic() < deadline and host.poll() is None and not listening(operator):
                     time.sleep(0.025)
-                if not listening():
+                if not listening(operator):
                     log.seek(0)
                     raise RuntimeError(f'the host did not listen on {operator}: {log.read()}')
+                pin_host(state, context)
                 yield host, log
             except Exception as error:
                 log.seek(0)
@@ -457,17 +432,15 @@ def host_law(args, root, work, engine, name):
                 host.wait(timeout=15)
 
     def outcome(command, case):
-        result = checked(command, engine=engine, case=case)
-        request = re.search(r'^request ([0-9a-f]{32})$', result.stderr, re.M)
-        assert request, f'{case} did not name its request first: {result.stderr}'
-        return request.group(1), json.loads(result.stdout.strip().splitlines()[-1])
+        env = submit_fixture(command, run=lambda cmd, **opts: run_case(case, engine, cmd, **opts))
+        return env['operation']['request_id'], env['result']
 
     if name == 'cold_wake_trigger':
         return cold_wake_trigger(compiler, engine, state, address, old_n_place, register, running_host, outcome, ready)
 
     if recovery_law:
         return cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register,
-                                          deploy, running_host, outcome, ready, welcome_n_place)
+                                          deploy, running_host, outcome, ready, lambda: welcome_n_place(address))
 
     if name in ('install_child', 'install_child_crash'):
         with running_host():
@@ -481,7 +454,7 @@ def host_law(args, root, work, engine, name):
 
     if name == 'missing_store_mount':
         live = launch_store / 'live'
-        register[register.index('--store') + 1] = str(live)
+        register = create(store=live)
 
         def store_id(directory):
             # STORE-SPEC §2.2 puts the two little-endian words at bytes 32 and 40.
@@ -549,12 +522,12 @@ def host_law(args, root, work, engine, name):
         foreign = framed_hash('hirsel.release-recipe.v3', frame)
         (publish_store / 'recipes' / foreign.hex()).write_bytes(frame)
         with running_host():
-            outcome([*register, '--record', str(work / 'recordings')], f'{name}:register')
+            outcome(create(recording=work / 'recordings'), f'{name}:register')
             old = ready()
             foreign_deploy = deploy.copy()
-            foreign_deploy[2] = foreign.hex()
+            foreign_deploy[foreign_deploy.index('--recipe') + 1] = foreign.hex()
             refused = run_case(f'{name}:deploy', engine, foreign_deploy, capture_output=True, text=True)
-            assert refused.returncode == 2 and f'deploy: denied: {reason}' in refused.stderr, refused
+            assert refused.returncode == 1 and reason in refused.stdout, refused
             assert ready()['digest'] == old['digest'], 'the refused deploy changed the serving image'
         assert not (state / 'code' / 'recipes' / foreign.hex()).exists(), 'the refused recipe was published'
         return
@@ -563,7 +536,7 @@ def host_law(args, root, work, engine, name):
         recordings = work / 'recordings'
         replay_only = work / 'replay-only'
         with running_host():
-            outcome([*register, '--record', str(recordings)], f'{name}:register')
+            outcome(create(recording=recordings), f'{name}:register')
             ready()
             tapes = list(recordings.glob('*.tape'))
             assert len(tapes) == 1, 'the first activation did not start a recording'
@@ -604,16 +577,17 @@ def host_law(args, root, work, engine, name):
         return
 
     with running_host():
+        check_creation_plan(register)
         _, registered = outcome(register, f'{name}:register')
         assert registered['phase'] == 'installed', registered
         old = ready()
         assert old['n_place'] == old_n_place, 'OLD started with the wrong allowance'
-        assert welcome_n_place() == old_n_place, 'OLD Welcome used the wrong allowance'
+        assert welcome_n_place(address) == old_n_place, 'OLD Welcome used the wrong allowance'
         request, deployed = outcome(deploy, f'{name}:deploy')
         assert deployed['phase'] == 'installed', deployed
         # launch.md "Registering a group": the first release is activation 0.
-        assert registered['activation'] == 0, registered
-        assert deployed['activation'] > 0, ('the deploy did not publish a later activation', deployed)
+        assert registered['activation'] == '0', registered
+        assert int(deployed['activation']) > 0, ('the deploy did not publish a later activation', deployed)
         assert ready()['n_place'] == new_n_place, 'NEW started with the wrong allowance'
         assert (launch_store / 'live' / 'MANIFEST').is_file(), 'place opened outside --workdir'
         # The same request again reports its one outcome and starts nothing new.
@@ -623,11 +597,12 @@ def host_law(args, root, work, engine, name):
     with running_host():
         new = ready()
         assert new['n_place'] == new_n_place, 'restart did not recover the installed assembly'
-        assert welcome_n_place() == new_n_place, 'recovered Welcome used the wrong allowance'
+        assert welcome_n_place(address) == new_n_place, 'recovered Welcome used the wrong allowance'
         assert new['digest'] == old['digest'], 'varying only n_place changed the image digest'
         assert len(list((state / 'objects' / 'images').iterdir())) == 1, 'the shared image was duplicated or removed'
-        status = json.loads(checked([compiler, 'deploy', '--state', str(state), '--status', request],
-                                    engine=engine, case=f'{name}:status').stdout)
+        op = f"host/{pin_host(state, context)}/{request}"
+        status = json.loads(checked([compiler, 'op', 'get', op, '--context', str(context), '--json'],
+                                    engine=engine, case=f'{name}:status').stdout)['result']
         assert status == deployed, 'the recovered host forgot the request outcome'
 
 

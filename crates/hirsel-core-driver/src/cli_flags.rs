@@ -2,6 +2,9 @@
 use super::{Flag, Switch, Value};
 
 flags! {
+    Create ["--create"] "SPEC" => "Create a group from a host_v1.Group document if its observed name is absent.";
+    Plan ["--plan"] => "Stop at a reviewable plan before activating the release.";
+    DecisionFile ["--decision"] "FILE|-" => "Read a host_v1.Decision document from a file or standard input.";
     Context ["--context"] "NAME|/FILE" => "Select a trusted workstation context or absolute job pin file.";
     PublishWorkspace ["--workspace"] => "Publish all workspace members, dependency-first.";
     PublishKey ["--signing-key"] "FILE" => "Sign release intents with this Ed25519 PKCS#8 DER key.";
@@ -51,12 +54,9 @@ flags! {
     ObservedRuntime ["--observed-runtime"] "ARCHIVE" => "Install the runtime archive for logical charge reports.";
     ObservedRecordingRuntime ["--observed-recording-runtime"] "ARCHIVE" => "Install the combined charge observation and recording runtime archive.";
     Record ["--record"] "TAPE" => "Build with recording enabled. Run writes TAPE. Register writes owner-only recordings in TAPE as a directory.";
+    Wait ["--wait"] "[=DURATION]" => "Wait for completion, a decision, or an unresolved outcome. Optional duration in ms, s, m or h.";
     GroupName ["--group"] "NAME" => "The group to register, deploy to, or back up.";
-    Tenant ["--tenant"] "NAME" => "The tenant that owns the group. Default operator.";
-    GroupStore ["--store"] "DIR" => "The group's durable store directory.";
-    Trusted ["--trusted"] => "Let the group's recipes use grants that need operator trust.";
     RequestId ["--request-id"] "HEX" => "Resend this request instead of starting a new one; for decide, the request to decide.";
-    RequestStatus ["--status"] "HEX" => "Print where a request stands.";
     Tape ["--tape"] "TAPE" => "Replay this tape without host grants.";
     ReplayOutputs ["--outputs"] "DIR" => "Export committed standard streams and plaintext socket sends after a sealed replay.";
     ReplayUnit ["--unit"] "NAME" => "Replay this unit's stream alone (root) and read no other stream.";
@@ -146,18 +146,8 @@ flags! {
     MaxPlaces ["--max-places"] "N" => "Groups the platform host keeps live at once.";
     IdleMs ["--idle-ms"] "MS" => "Idle time after which a serving group is stopped.";
     Lifecycle ["--lifecycle"] "managed|leader" => "Child lifecycle on Linux: managed (delegated cgroup v2, fail if unavailable) or leader (pidfd direct-child tracking only).";
-    TapeRetention ["--tape-retention"] "DAYS" => "Retain a recording's pinned image for this many days. Default 30.";
-    Workdir ["--workdir"] "DIR" => "Working directory for the group's children. Default: the current directory.";
     Listen ["--listen"] "ADDR" => "TCP address of the group's inherited listener.";
-    FrontHttp ["--front-http"] "NAME" => "Route this TLS SNI name to the group's HTTP listener. Repeat for more names.";
-    FrontStream ["--front-stream"] "NAME" => "Route this TLS SNI name to the group's stream listener. Repeat for more names.";
-    ApproveGrant ["--approve-grant"] "+LINE|-LINE" => "Approve one line of the grant diff a request awaits a decision on: +LINE for an authority the release gains, -LINE for one it loses.";
-    Refuse ["--refuse"] => "Refuse the decision the request awaits; the request fails Denied.";
-    HeldAll ["--held"] "release|cancel" => "The fate of every run the deploy holds that no --held-entry names.";
-    HeldEntry ["--held-entry"] "PATH=release|cancel" => "The fate of the held runs of one entry path, as the trigger report prints it. Repeat for more paths.";
     SourceDir ["--source"] "DIR" => "Deploy the source tree under DIR, sent by content: the host compiles it. The positional names the package within DIR. Default \".\".";
-    PackageRoot ["--package-root"] "ROOT" => "A package root the group's source may link from the host's package store. Repeat for more roots.";
-    HostMemory ["--memory"] "BYTES" => "Memory allowance for a group's release.";
     Coverage ["--coverage"] => "Report the function entries and source arms the selected tests reached.";
     CoverageOut ["--coverage-out"] "FILE" => "With --coverage (implied), also write the merged coverage profile to FILE.";
     CoverageBase ["--coverage-base"] "FILE" => "With --coverage (implied), add a diff against the coverage profile in FILE.";

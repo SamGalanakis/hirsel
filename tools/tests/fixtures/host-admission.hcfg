@@ -1,0 +1,8 @@
+host_v1.Admission(
+    recipe_bytes: 16777216,
+    closure_objects: 196608,
+    object_bytes: 536870912,
+    decoded_bytes: 2147483648,
+    members: 65536,
+    edges: 4194304,
+)

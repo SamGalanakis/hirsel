@@ -27,7 +27,7 @@ fn awaits(p: Option[operator.Phase], added: String, removed: String) -> bool {
 fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, take verdict: operator.Verdict) -> u64 waits {
     let mut shown = match status_of(mut r, d) {
         Some(AwaitDecision(x)) => x,
-        _ => operator.Decision(tree: None, root: None, stage: AdmissionStage, grants: launcher.no_grants(), approvals: None, migration: None, triggers: operator.no_triggers()),
+        _ => operator.Decision(gate_toolchain: None, tree: None, root: None, stage: AdmissionStage, grants: launcher.no_grants(), approvals: None, migration: None, triggers: operator.no_triggers()),
     }
     shown.grants = take diff
     decide_with(mut r, d, take shown, take verdict)
@@ -38,7 +38,11 @@ fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, take verdict: ope
 fn decide_with(mut r: Rig, d: Bytes, take decision: operator.Decision, take verdict: operator.Verdict) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
-    send(mut r, conn, DecideAsk(clone(d), take decision, take verdict))
+    let hash = match request_row(r.h, d) {
+        Ok(Some(row)) => digest_of(plan_bytes(deploy_plan(r.h, d, row, decision))),
+        _ => list.new(),
+    }
+    send(mut r, conn, DecideAsk(clone(d), take hash, take verdict))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -115,7 +119,7 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
     }
     let report_ok = match shown.stage {
         PreparedStage => list.len(shown.triggers.rows) == 1u64 && shown.triggers.rows[0u64].fate == None && operator.shows_held(shown),
-        AdmissionStage => false,
+        _ => false,
     }
     expect(report_ok && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: the held decision does not carry the trigger report, or OLD stopped serving")
     let mut release_all = runner.fate.none()
@@ -132,7 +136,7 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
     helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), trigger_answer())
     let fates = prepare_fates(u)
     expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the repeated prepare did not get the decision's fates")
-    let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
+    let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))))
     pump(mut u, take cut)
     answer(mut u, old, PlaceInstalled(2u64, true))
     expect(is_installed(status_of(mut u, held_d)), "L54: the decided deploy was not Installed")
@@ -175,7 +179,7 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let dc: std.codec.Codec[runner.Describe] = std.codec.of()
     let mut described: Bytes = list.new()
     let _ = std.codec.encode(dc, describing(image(), take was), mut described)
-    helper_answers(mut r, helper_child(old, DescribeMode(a)), take described)
+    helper_answers(mut r, helper_child(old, DescribeMode(a)), clone(described))
     let mut now: List[runner.Exported] = list.new()
     list.push(mut now, entry_of(3u8, 1u8))
     list.push(mut now, entry_of(2u8, 2u8))
@@ -187,10 +191,22 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let pc: std.codec.Codec[runner.Preview] = std.codec.of()
     let mut preview_bytes: Bytes = list.new()
     let _ = std.codec.encode(pc, runner.Preview(describe: describing(image_two(), take now), release: release_two(), answers: take answers), mut preview_bytes)
-    helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), take preview_bytes)
+    helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), clone(preview_bytes))
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
     helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
-    let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
+    expect(imports_of(r) == 0u64, "a prepare child selected a fate without consent")
+    old_says(mut r, old, PlaceAborted)
+    let mut choices = runner.fate.none()
+    choices.all = Some(Release)
+    let _ = decide_on(mut r, publication, launcher.no_grants(), Approve(take choices))
+    source_admitted(mut r, launcher.no_grants())
+    assembled_new(mut r)
+    let repeated = r.a
+    helper_answers(mut r, helper_child(old, DescribeMode(repeated)), take described)
+    helper_answers(mut r, helper_child(old, PreviewMode(repeated, list.new())), take preview_bytes)
+    old_says(mut r, old, PlaceExported(1u64, "export-2"))
+    helper_answers(mut r, helper_child(old, PrepareMode(repeated, "export-2", list.new())), trigger_answer())
+    let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))))
     pump(mut r, take cut)
     answer(mut r, old, PlaceInstalled(2u64, true))
     expect(committed_once(r), "L54: the proposed source did not install NEW once")
@@ -309,4 +325,105 @@ fn source_refusals(c: Clock, rnd: Random) waits {
         _ => false,
     }
     expect(refused_status, "L54: the refused decision did not reopen as a terminal Denied request")
+}
+
+// A held path needs an actual choice before readmission, including after host restart.
+@test
+fn slice2_missing_fate(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    to_export(mut r, old, preview_answer(image_two(), release_two()))
+    old_says(mut r, old, PlaceExported(1u64, "export-1"))
+    let a = r.a
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_report_of(None))
+    old_says(mut r, old, PlaceAborted)
+    let d: Bytes = clone(r.req)
+    let mut b = restart(take r, 4u64)
+    let Some(AwaitDecision(plan)) = status_of(mut b, d) else {
+        expect(false, "the durable decision disappeared")
+        unplug(mut b)
+        return Error(())
+    }
+    let count = admits(b)
+    let _ = decide_with(mut b, d, take plan, Approve(runner.fate.none()))
+    expect(admits(b) == count, "an incomplete decision reopened admission")
+    expect(match status_of(mut b, d) {
+        Some(AwaitDecision(_)) => true,
+        _ => false
+    }, "an incomplete decision cleared the hold")
+    unplug(mut b)
+    Ok(())
+}
+
+// A fresh attempt cannot inherit approval for a different display or migration row.
+@test
+fn slice2_recheck_at_commit(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let d = request_id(80u64)
+    let _ = begin_input(mut r, d, AttestedBegin(image_two()), true)
+    let mut reopened = restart(take r, 4u64)
+    let _ = begin_input(mut reopened, d, AttestedBegin(image_two()), true)
+    let a = reopened.a
+    let initial_conn = reopened.conn
+    send(mut reopened, initial_conn, DataAsk(clone(d), a, image()))
+    let mut resumed = restart(take reopened, 4u64)
+    let _ = begin_input(mut resumed, d, AttestedBegin(image_two()), true)
+    expect(!same_attempt(a, resumed.a), "restart reused an interrupted resumed attempt")
+    let mut displayed: List[launcher.Event] = list.new()
+    list.push(mut displayed, Admitted(resumed.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: a"))
+    feed(mut resumed, take displayed)
+    let _ = decide_on(mut resumed, d, launcher.no_grants(), Approve(runner.fate.none()))
+    let mut after = restart(take resumed, 4u64)
+    let _ = begin_input(mut after, d, AttestedBegin(image_two()), true)
+    let mut changed: List[launcher.Event] = list.new()
+    list.push(mut changed, Admitted(after.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: b"))
+    feed(mut after, take changed)
+    let Some(AwaitDecision(fresh)) = status_of(mut after, d) else {
+        fail("changed display did not hold after restart")
+    }
+    let Some(content) = view fresh.approvals else {
+        fail("changed display absent")
+    }
+    expect(content.text == "foreign: b" && asked_of(after, 4u64) == 0u64, "changed display passed a recovered approval")
+    unplug(mut after)
+    let mut migration = rig(c, rnd, 4u64)
+    add(mut migration, "g", "t")
+    op_wake(mut migration, "g")
+    let old = last(migration, "g")
+    to_export(mut migration, old, preview_answer(image_two(), release_two()))
+    let id: Bytes = clone(migration.req)
+    let mut inventory: List[Bytes] = list.new()
+    list.push(mut inventory, image())
+    for round in 0u64 .. 2u64 {
+        if round != 0u64 {
+            let _ = decide_on(mut migration, id, launcher.no_grants(), Approve(runner.fate.none()))
+            source_admitted(mut migration, launcher.no_grants())
+            assembled_new(mut migration)
+            let next_attempt = migration.a
+            helper_answers(mut migration, helper_child(old, DescribeMode(next_attempt)), describe_answer())
+            helper_answers(mut migration, helper_child(old, PreviewMode(next_attempt, list.new())), preview_answer(image_two(), release_two()))
+            inventory[0u64] = image_two()
+        }
+        old_says(mut migration, old, PlaceExported(1u64, "export-1"))
+        let importing = migration.a
+        helper_answers(mut migration, helper_child(old, PrepareMode(importing, "export-1", list.new())), plan_bytes(operator.no_triggers()))
+        old_says(mut migration, old, PlaceImported(image_two(), runner.ImportedMigration(digest: image_two(), changes: clone(inventory))))
+        old_says(mut migration, old, PlaceAborted)
+        expect(asked_of(migration, 2u64) == 0u64, "unapproved migration reached cutover")
+        let Some(AwaitDecision(plan)) = status_of(mut migration, id) else {
+            if round == 0u64 {
+                fail("first import did not hold")
+            } else {
+                fail("second import did not hold")
+            }
+        }
+        let Some(review) = view plan.migration else {
+            fail("missing migration on hold")
+        }
+        expect(list.len(review.changes) == 1u64, "missing migration inventory")
+    }
+    unplug(mut migration)
+    Ok(())
 }

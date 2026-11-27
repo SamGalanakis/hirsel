@@ -85,6 +85,25 @@ fn trusted_path(path: &Path, uid: u32) -> Result<(), Failure> {
 }
 
 impl Target {
+    pub fn authority(&self) -> Result<u128, Failure> {
+        catalog_id(&self.pin.authority).ok_or_else(|| Failure::context("invalid catalog identity"))
+    }
+    pub fn state(&self) -> Result<&Path, Failure> {
+        let uid = operator::operator_uid();
+        let state = &self.pin.state;
+        trusted_path(state, uid)?;
+        let meta = fs::symlink_metadata(state).map_err(Failure::io)?;
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o777 != 0o700 {
+            return Err(Failure::context(
+                "host state must be an operator-owned directory with mode 0700",
+            ));
+        }
+        Ok(state)
+    }
+    pub fn name(&self) -> Option<&str> {
+        self.pin.group.as_deref()
+    }
+
     pub fn resolve(selected: Option<&str>) -> Result<Self, Failure> {
         let uid = operator::operator_uid();
         let file = selected.map(Path::new).filter(|p| p.is_absolute());
@@ -143,6 +162,43 @@ impl Target {
     }
 
     pub fn exchange(&self, authority: u128, request: &Ask) -> Result<Answer, Failure> {
+        self.query(authority, request, None)
+    }
+    pub fn query(
+        &self,
+        authority: u128,
+        request: &Ask,
+        wait: Option<&super::wait::Wait>,
+    ) -> Result<Answer, Failure> {
+        if let Some(w) = wait {
+            w.remaining()?;
+        }
+        let mut conn = self.open(authority, wait.map(|w| w.observer))?;
+        self.send(&mut conn, authority, request)?;
+        conn.recv()
+            .map_err(Failure::io)?
+            .ok_or_else(Failure::disconnected)
+    }
+
+    pub fn send(
+        &self,
+        conn: &mut operator::Connection,
+        authority: u128,
+        request: &Ask,
+    ) -> Result<(), Failure> {
+        conn.send(&Ask::Pinned(
+            (authority >> 64) as u64,
+            authority as u64,
+            request.encode(),
+        ))
+        .map_err(Failure::io)
+    }
+
+    pub fn open(
+        &self,
+        authority: u128,
+        observer: Option<super::Observer>,
+    ) -> Result<operator::Connection, Failure> {
         let uid = operator::operator_uid();
         if self.pin.uid != uid || catalog_id(&self.pin.authority) != Some(authority) {
             return Err(Failure::context(
@@ -156,14 +212,7 @@ impl Target {
                 "incarnation requires a group and a decimal u64",
             ));
         }
-        let state = &self.pin.state;
-        trusted_path(state, uid)?;
-        let meta = fs::symlink_metadata(state).map_err(Failure::io)?;
-        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o777 != 0o700 {
-            return Err(Failure::context(
-                "host state must be an operator-owned directory with mode 0700",
-            ));
-        }
+        let state = self.state()?;
         let socket = state.join(crate::product::bundled::OPERATOR_SOCKET);
         let meta = fs::symlink_metadata(&socket).map_err(Failure::io)?;
         if !meta.file_type().is_socket() || meta.uid() != uid || meta.mode() & 0o777 != 0o600 {
@@ -172,18 +221,18 @@ impl Target {
             ));
         }
         let mut conn = operator::connect(state).map_err(Failure::io)?;
-        conn.set_read_timeout(Some(super::PIN_WAIT))
-            .map_err(Failure::io)?;
+        if let Some(observer) = observer {
+            conn.observe(observer).map_err(Failure::io)?;
+        } else {
+            conn.set_read_timeout(Some(super::PIN_WAIT))
+                .map_err(Failure::io)?;
+        }
         conn.send(&Ask::Identify).map_err(Failure::io)?;
         match conn.recv().map_err(Failure::io)? {
             Some(Answer::Catalog(hi, lo))
                 if (u128::from(hi) << 64 | u128::from(lo)) == authority =>
             {
-                conn.send(&Ask::Pinned(hi, lo, request.encode()))
-                    .map_err(Failure::io)?;
-                conn.recv()
-                    .map_err(Failure::io)?
-                    .ok_or_else(Failure::disconnected)
+                Ok(conn)
             }
             Some(Answer::Catalog(..)) => Err(Failure::context("catalog identity changed")),
             Some(Answer::Error(class, detail)) => Err(Failure::authority(class, detail)),

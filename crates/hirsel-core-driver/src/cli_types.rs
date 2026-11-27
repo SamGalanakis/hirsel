@@ -3,6 +3,8 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReadContract {
     Help,
+    Deploy,
+    Decision,
     Operation,
 }
 
@@ -44,7 +46,6 @@ pub enum Invocation {
     Lean(Request<LeanOption>),
     Host(Request<HostOption>),
     Launcher(Request<LauncherOption>),
-    Register(Request<RegisterOption>),
     Deploy(Request<DeployOption>),
     Decide(Request<DecideOption>),
     Call(Request<CallOption>),
@@ -96,6 +97,7 @@ pub(super) enum Kind<T> {
     Switch(T),
     Value(&'static str, fn(String) -> T),
     Help,
+    OptionalWait(fn(Option<std::time::Duration>) -> T),
     OptionalMem(&'static str, fn(hirsel_prof::MemMode) -> T),
     RefuseMem,
 }

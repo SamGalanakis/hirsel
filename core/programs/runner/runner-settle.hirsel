@@ -9,12 +9,23 @@ pub type ImportedMigration: codec + send {
     changes: List[Bytes]
 }
 
+// Rows the operator saw and the choices made for them. OLD checks these keys
+// against its exported pending rows before reserving the import.
+pub type Settlement: codec + send {
+    choices: fate.Fates,
+    rows: List[TriggerScanRow],
+}
+
 fn host_import(head: Sender[HeadInput], exported: store.Exported, description: Bytes, release: Bytes, digest: Bytes, fates: Bytes) -> Result[(Bytes, ImportedMigration), store.DeployError] waits {
     let checked = store.validate_prepared(exported.dir)?
     if !store.prepared_matches(checked, description, release, digest) {
         return Error(ImportMalformed)
     }
-    let Some(approved) = fate.decode(fates) else {
+    let codec: std.codec.Codec[Settlement] = std.codec.of()
+    let Ok(approved) = std.codec.decode(codec, fates) else {
+        return Error(ImportMalformed)
+    }
+    if !fate.well_formed(approved.choices) {
         return Error(ImportMalformed)
     }
     let image = import_image(description)?
@@ -68,9 +79,30 @@ fn import_image(description: Bytes) -> Result[Bytes, store.DeployError] {
 // refuses the import `Unsettled` unless PREPARED applies exactly those values: as its
 // 0x0085 rewrites, or folded into the range it ships for the pending table. With no fate
 // for a held row there is no settlement, so a PREPARED that settles it is refused.
-fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes, f: fate.Fates) -> Result[(), store.DeployError] waits {
+fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes, approval: Settlement) -> Result[(), store.DeployError] waits {
     let applied = store.import_settlement(db, imported, "store.triggers.pending")?
-    let Some(expected) = fate.expected_settlement(applied.base, image, f) else {
+    let mut shown: Map[(bool, Bytes, Bytes, fate.HeldBy), (fate.HeldFate, u64, u64)] = map.new()
+    for row in approval.rows {
+        if let Held = row.class {
+            let Some(hold) = row.hold else {
+                return Error(Unsettled)
+            }
+            let Some(chosen) = fate.resolve(approval.choices, row.path) else {
+                return Error(Unsettled)
+            }
+            let is_grant = match row.kind {
+                Granted => true,
+                Transact => false,
+                _ => return Error(Unsettled),
+            }
+            let key: (bool, Bytes, Bytes, fate.HeldBy) = (is_grant, clone(row.path), clone(row.schema), hold)
+            if map.contains(shown, key) {
+                return Error(Unsettled)
+            }
+            map.insert(mut shown, take key, (chosen, row.count, row.earliest_due))
+        }
+    }
+    let Some(expected) = fate.expected_settlement(applied.base, image, shown) else {
         return Error(Unsettled)
     }
     let mut matched = 0u64

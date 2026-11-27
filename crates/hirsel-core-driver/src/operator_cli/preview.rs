@@ -1,181 +1,12 @@
-//! The operator client's part of the deploy preview (launch.md "Deploy preview"): the
-//! operator's decision on a held request (`hirsel decide`), and the preview's JSON.
-
-use super::{
-    Approvals, Conversation, Error, class_name, one, or_unavailable, sort_grants, state_json,
-    unexpected,
-};
-use crate::cli::{DecideOption, Request};
+//! Semantic facts projected from the operator protocol.
 use crate::launcher::session::Grants;
-use crate::operator::{
-    Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Migration, Phase,
-    Preview, Verdict,
-};
+use crate::operator::{Decision, DecisionStage, EntryChange, HeldBy, HeldFate, Migration, Preview};
 use hirsel_core_ids::hex;
-use std::path::PathBuf;
 
-/// One `--held` or `--held-entry` value into the deploy's fates (launch.md "The operator
-/// socket"): entries stay sorted by path, and a path never holds '=', so the fate follows
-/// the last one.
-pub(super) fn held_fate(held: &mut Fates, all: bool, value: &str) -> Result<(), Error> {
-    let (name, path, fate) = if all {
-        ("--held", None, value)
-    } else {
-        let (path, fate) = value
-            .rsplit_once('=')
-            .filter(|(path, _)| !path.is_empty())
-            .ok_or("--held-entry takes PATH=release|cancel")?;
-        ("--held-entry", Some(path), fate)
-    };
-    let fate = match fate {
-        "release" => HeldFate::Release,
-        "cancel" => HeldFate::Cancel,
-        _ => return Err(format!("{name} takes release or cancel").into()),
-    };
-    match path {
-        None if held.all.is_some() => Err("--held is given twice".into()),
-        None => {
-            held.all = Some(fate);
-            Ok(())
-        }
-        Some(path) => match held
-            .entries
-            .binary_search_by(|(p, _)| p.as_slice().cmp(path.as_bytes()))
-        {
-            Ok(_) => Err(format!("--held-entry names {path} twice").into()),
-            Err(at) => {
-                held.entries.insert(at, (path.as_bytes().to_vec(), fate));
-                Ok(())
-            }
-        },
-    }
-}
-
-/// One `--approve-grant` line: `+LINE` for an authority the release gains, `-LINE` for one
-/// it loses.
-pub(super) fn approve_grant(diff: &mut Grants, value: &str) -> Result<(), Error> {
-    match value.split_at_checked(1) {
-        Some(("+", line)) if !line.is_empty() => diff.added.push(line.into()),
-        Some(("-", line)) if !line.is_empty() => diff.removed.push(line.into()),
-        _ => return Err("--approve-grant takes +LINE or -LINE".into()),
-    }
-    Ok(())
-}
-
-/// `hirsel decide --state S --request-id HEX [--approve-grant +LINE|-LINE ...]
-/// [--held release|cancel] [--held-entry PATH=release|cancel ...] [--refuse]`: the
-/// operator's decision on a request that awaits one (launch.md "Self-editing" "Holds and
-/// decisions"). The client reads the decision the host shows; an approval must name each
-/// line of its grant diff, and give fates exactly when it shows a held group or an unmatched
-/// path. The Decide carries the shown decision back, so a host that moved on refuses it; an
-/// approval follows the repeated admission to its outcome.
-pub(crate) fn decide(invocation: Request<DecideOption>) -> Result<i32, Error> {
-    or_unavailable("decide", decide_on(invocation))
-}
-
-enum DecisionRequest {
-    Refuse,
-    Approve {
-        grants: Grants,
-        fates: Option<Fates>,
-    },
-}
-
-impl DecisionRequest {
-    fn read(invocation: Request<DecideOption>) -> Result<(PathBuf, Vec<u8>, Self), Error> {
-        let (mut state, mut d) = (None, None);
-        let mut approved = Grants::default();
-        let mut refuse = false;
-        let mut fates = Fates::default();
-        let mut fated = false;
-        use DecideOption as O;
-        for option in invocation.options {
-            match option {
-                O::HostState(text) => state = Some(PathBuf::from(text)),
-                O::RequestId(text) => d = Some(text),
-                O::ApproveGrant(text) => approve_grant(&mut approved, &text)?,
-                O::Refuse => refuse = true,
-                O::HeldAll(ref text) | O::HeldEntry(ref text) => {
-                    held_fate(&mut fates, matches!(option, O::HeldAll(_)), text)?;
-                    fated = true;
-                }
-            }
-        }
-        if invocation.positional.is_some() || !invocation.arguments.is_empty() {
-            return Err("decide takes no recipe and no program arguments".into());
-        }
-        let state = state.ok_or("decide requires --state DIR")?;
-        let d = hex::decode(&d.ok_or("decide requires --request-id HEX")?)
-            .filter(|d| d.len() == 16)
-            .ok_or("--request-id takes 32 hex digits")?;
-        sort_grants(&mut approved);
-        let decision = if refuse {
-            if fated || approved != Grants::default() {
-                return Err("--refuse takes no --approve-grant, --held or --held-entry".into());
-            }
-            Self::Refuse
-        } else {
-            Self::Approve {
-                grants: approved,
-                fates: fated.then_some(fates),
-            }
-        };
-        Ok((state, d, decision))
-    }
-
-    fn verdict(self, held: &Decision) -> Result<Verdict, &'static str> {
-        let Self::Approve { grants, fates } = self else {
-            return Ok(Verdict::Refuse);
-        };
-        if grants != held.grants {
-            return Err("the --approve-grant lines are not the grant diff the request awaits");
-        }
-        match (held.shows_held(), fates) {
-            (true, None) => {
-                Err("the decision shows held runs; give their fates with --held or --held-entry")
-            }
-            (false, Some(_)) => {
-                Err("the decision shows no held run, so it takes no --held or --held-entry")
-            }
-            (_, fates) => Ok(Verdict::Approve(fates.unwrap_or_default())),
-        }
-    }
-}
-
-fn decide_on(invocation: Request<DecideOption>) -> Result<i32, Error> {
-    let (state, d, request) = DecisionRequest::read(invocation)?;
-    let held = match one(&state, &Ask::Status(d.clone()))? {
-        Some(Answer::State(_, _, _, Phase::AwaitDecision(held))) => held,
-        Some(Answer::State(d, group, _, phase)) => {
-            eprintln!("decide: the request awaits no decision");
-            println!("{}", state_json(&d, &group, &phase));
-            return Ok(1);
-        }
-        Some(Answer::Error(class, detail)) => {
-            eprintln!("decide: {}: {detail}", class_name(class));
-            return Ok(1);
-        }
-        other => return Ok(unexpected("decide", &d, other)),
-    };
-    let verdict = match request.verdict(&held) {
-        Ok(verdict) => verdict,
-        Err(why) => {
-            eprintln!("decide: refused: {why}");
-            println!("{}", decision_json(&held));
-            return Ok(2);
-        }
-    };
-    let none = Approvals {
-        foreign: Vec::new(),
-        exec: Vec::new(),
-    };
-    let ask = Ask::Decide(d.clone(), held, verdict);
-    Conversation::new(&state, d, "decide", None, none).run(ask)
-}
-
-/// The decision a held request awaits, as `hirsel decide` and State print it.
+/// The decision a held request awaits, as `hirsel op decide` and State print it.
 pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     let stage = match decision.stage {
+        DecisionStage::Creation => "creation",
         DecisionStage::Admission => "admission",
         DecisionStage::Prepared => "prepared",
     };
@@ -189,6 +20,7 @@ pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     })["triggers"]
         .clone();
     serde_json::json!({
+        "gate_toolchain": decision.gate_toolchain.as_deref().map(hex::encode),
         "tree": decision.tree.as_deref().map(hex::encode),
         "root": decision.root.as_deref().map(hex::encode),
         "stage": stage,
@@ -216,7 +48,7 @@ pub(super) fn preview_json(preview: &Preview) -> serde_json::Value {
                 EntryChange::Changed => "changed",
                 EntryChange::Unchanged => "unchanged",
             };
-            serde_json::json!({"identity": hex::encode(&e.identity), "change": change})
+            serde_json::json!({"identity": hex::encode(&e.identity), "change": change, "previous_revision":e.previous_revision.as_deref().map(hex::encode),"revision":e.revision.as_deref().map(hex::encode)})
         })
         .collect();
     let rows: Vec<_> = preview

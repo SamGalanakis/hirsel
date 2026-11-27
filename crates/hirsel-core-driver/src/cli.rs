@@ -42,6 +42,12 @@ macro_rules! argument {
             kind: Kind::RefuseMem,
         }
     };
+    ($ty:ident, Wait) => {
+        Argument {
+            flag: flags::Wait.0,
+            kind: Kind::OptionalWait($ty::Wait),
+        }
+    };
     ($ty:ident, ProfMem) => {
         Argument {
             flag: flags::ProfMem.0,
@@ -80,10 +86,10 @@ macro_rules! commands {
 commands! {
     "help", "help [COMMAND PATH] [--json]", "Show commands or help for one command.";
         [Help] Help(HelpOption), Many: HELP, Json;
-    "op", "op <get>", "Inspect an operator request.";
+    "op", "op <get|decide>", "Inspect an operator request.";
         Simple(NoOption), None: HELP;
-    "op get", "op get host/CATALOG/REQUEST [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
-        [Operation] OpGet(OpGetOption), Operation: HELP, Context, Json;
+    "op get", "op get host/CATALOG/REQUEST [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
+        [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HELP, Json, SourceCore, SourceStd, CoreProduct, Entry, Libraries,
@@ -139,16 +145,10 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR --lifecycle managed|leader [--operator-listen SOCKET --admission FILE --max-places N [--platform-host FILE] [--idle-ms MS]]", "Hold the groups' listeners and start their children for the platform host.";
         Launcher(LauncherOption), One:
             Control, HostState, OperatorListen, PlatformHost, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
-    "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
-        Register(RegisterOption), Tail:
-            CodeStore, HostState, Record, GroupName, Tenant, GroupStore, Trusted, RequestId, HELP, Grant,
-            TapeRetention, Workdir, Listen, FrontHttp, FrontStream, SourceDir, PackageRoot, HostMemory;
-    "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
-        Deploy(DeployOption), One:
-            CodeStore, HostState, GroupName, RequestId, RequestStatus, HELP, Grant, ApproveGrant, HeldAll,
-            HeldEntry, SourceDir;
-    "decide", "decide --state DIR --request-id HEX [--approve-grant +LINE|-LINE ...] [--held release|cancel] [--held-entry PATH=release|cancel ...] [--refuse]", "Approve or refuse the decision a held request awaits.";
-        Decide(DecideOption), One: HostState, RequestId, HELP, ApproveGrant, Refuse, HeldAll, HeldEntry;
+    "deploy", "deploy [DIR [--source ROOT] | --recipe R] [--create SPEC] [--plan] [--wait[=DURATION]] [--request-id D]", "Submit a release to a pinned group, or propose its creation.";
+        [Deploy] Deploy(DeployOption), One: HELP, Recipe, SourceDir, CodeStore, Create, Plan, Wait, RequestId, Context, GroupName, Json;
+    "op decide", "op decide OP [--decision FILE] [--wait[=DURATION]] [--context NAME|/FILE] [--json]", "Approve or refuse the exact plan held by the host.";
+        [Decision] Decide(DecideOption), Operation: HELP, DecisionFile, Wait, Context, Json;
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
         Dev(DevOption), Tail:
             NPlace, HELP, SourceCore, SourceStd, Dir, Grant, Backend, Runtime, Limit, Libraries, Fresh,

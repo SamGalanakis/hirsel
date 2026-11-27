@@ -197,8 +197,9 @@ pub fn settle_read(read_handle: store.Reader, snap: store.Snapshot, mut staged: 
 /// for each stored row of OLD's pending table at the exported base, in key order, its key,
 /// the value it must hold after the import, and whether `settle` changes it. None when a row
 /// does not decode, or a held row has no fate in `f`.
-pub fn expected_settlement(base: List[(Bytes, Bytes)], image: Bytes, f: Fates) -> Option[List[(Bytes, Bytes, bool)]] {
+pub fn expected_settlement(base: List[(Bytes, Bytes)], image: Bytes, shown: Map[(bool, Bytes, Bytes, HeldBy), (HeldFate, u64, u64)]) -> Option[List[(Bytes, Bytes, bool)]] {
     let mut out: List[(Bytes, Bytes, bool)] = list.new()
+    let mut actual: Map[(bool, Bytes, Bytes, HeldBy), (u64, u64)] = map.new()
     for (key, value) in base {
         let Some(p) = triggers.stored_pending(key, value) else {
             return None
@@ -207,15 +208,27 @@ pub fn expected_settlement(base: List[(Bytes, Bytes)], image: Bytes, f: Fates) -
             list.push(mut out, (clone(key), clone(value), false))
             continue
         }
-        let release = match resolve(f, triggers.entry_path(p)) {
-            Some(Release) => true,
-            Some(Cancel) => false,
-            None => return None,
+        let group_key: (bool, Bytes, Bytes, HeldBy) = (triggers.is_granted(p), clone(triggers.entry_path(p)), clone(triggers.argument_schema(p)), held_by(p, image))
+        let Some((chosen, _, _)) = map.get(shown, group_key) else {
+            return None
         }
+        let release = chosen == Release
+        let due = triggers.due_time(p)
+        map.update_or_insert(mut actual, take group_key, (0u64, due), scoped fn(mut totals: (u64, u64)) {
+            totals = (totals.0 + 1u64, std.order.min(totals.1, due))
+        })
         let Some(settled) = triggers.settled_value(p, value, release, image) else {
             return None
         }
         list.push(mut out, (clone(key), take settled, true))
+    }
+    for (group_key, (_, count, earliest)) in shown {
+        let Some((n, due)) = map.get(actual, group_key) else {
+            return None
+        }
+        if n != count || due != earliest {
+            return None
+        }
     }
     Some(take out)
 }

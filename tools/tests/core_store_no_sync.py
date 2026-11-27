@@ -29,6 +29,8 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
+sys.path.insert(0, str(ROOT / 'core/tools'))
+from operator_fixture import group_spec, pin_host, submit_fixture
 from loopback_peer import log_stray, owned_by
 
 SHIM = r"""
@@ -481,27 +483,14 @@ class StoreNoSync(unittest.TestCase):
             operator = state / "operator.sock"
             host_log = scratch / "host.log"
             env = dict(os.environ, LD_PRELOAD=str(shim), SYNC_LOG=str(host_log))
-            register = [
-                installed,
-                "register",
-                recipe,
-                "--state",
-                state,
-                "--group",
-                "app",
-                "--code-store",
-                code,
-                "--listen",
-                "127.0.0.1:0",
-                "--store",
-                scratch / "group-store",
-                "--workdir",
-                scratch,
-                "--trusted",
-            ]
+            spec = scratch / "group.hcfg"
+            pin = scratch / "host.toml"
+            group_spec(spec, "app", "127.0.0.1:0", scratch / "group-store", scratch)
+            command = [installed, "deploy", "--recipe", recipe, "--create", spec, "--context", pin,
+                       "--code-store", code, "--json", "--wait"]
             with tempfile.TemporaryFile(mode="w+") as output, subprocess.Popen(
                 [installed, "host", "--state", state, "--max-places", "1", "--lifecycle", "leader",
-                 "--admission", ROOT / "tools/tests/fixtures/host-admission.conf"],
+                 "--admission", ROOT / "tools/tests/fixtures/host-admission.hcfg"],
                 stdout=output, stderr=output, env=env,
             ) as host:
                 try:
@@ -510,9 +499,9 @@ class StoreNoSync(unittest.TestCase):
                            and time.monotonic() < deadline):
                         time.sleep(0.025)
                     self.assertTrue(operator.is_socket(), "host did not open its operator socket")
-                    run = subprocess.run(register, capture_output=True, text=True, check=False)
-                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-                    self.assertEqual(json.loads(run.stdout.splitlines()[-1])["phase"], "installed")
+                    pin_host(state, pin)
+                    output_row = submit_fixture(command)
+                    self.assertEqual(output_row["result"]["phase"], "installed")
                 except Exception as error:
                     output.seek(0)
                     error.add_note(output.read())

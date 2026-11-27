@@ -94,13 +94,39 @@ pub fn begin_parts(input: BeginInput) -> (Input, bool) {
 // decision shows, or a refusal.
 pub type Verdict: codec + send = Approve(runner.fate.Fates) | Refuse
 
+pub type CatalogStore: codec + send {
+    hi: u64,
+    lo: u64
+}
+
+pub type Precondition: codec + send {
+    name: String,
+    generation: u64,
+    predecessor: Option[u64],
+    assembly: Bytes,
+    store_id: Option[CatalogStore],
+    policy_digest: Bytes,
+}
+
+pub type DeployPlan: codec + send {
+    domain: String,
+    authority: CatalogStore,
+    request: Bytes,
+    intent_digest: Bytes,
+    subject: Precondition,
+    incarnation: Option[u64],
+    create: Option[Registration],
+    input_digest: Bytes,
+    facts: Decision,
+    entries: Option[List[EntryLine]],
+}
+
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
 // 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide, 9 Backup (operator.sock only).
 pub type Ask: codec + send =
-// Begin(D, group, input, foreign, exec, held): deploy `input` to the group's current
-// incarnation, approving exactly these sorted Foreign and Exec lines, with `held` the fate of
-// each run the deploy holds (RUNNER-SPEC §14.6). Unsorted or repeated entries are Invalid.
-BeginAsk(Bytes, launcher.Group, BeginInput, List[String], List[String], runner.fate.Fates)
+// Begin pins the observed group and input. Foreign and Exec lines name the requested
+// bindings. A nonempty display still needs a decision and byte-exact confirmation.
+BeginAsk(Bytes, Precondition, BeginInput, List[String], List[String], bool)
 // One nonempty chunk of an attested input's admission bytes, on the connection that owns A.
     | DataAsk(Bytes, launcher.Attempt, Bytes)
 // The attested input is complete.
@@ -113,23 +139,21 @@ BeginAsk(Bytes, launcher.Group, BeginInput, List[String], List[String], runner.f
     | ResolveAsk(Bytes)
 // The registered incarnation of a group name.
     | LookupAsk(String)
-// Register(D, group, input, foreign, exec): add the group under a new incarnation and run
-// `input` as its first release, ungated, approving exactly these sorted Foreign and Exec
-// lines. Its upload and confirmation are a Begin's; it ends Installed at activation 0, its
-// genesis.
-    | RegisterAsk(Bytes, Registration, Input, List[String], List[String])
-// Decide(D, decision, verdict): the operator's verdict on request D, which awaits one on
+// Propose a first release against an observed absence. Approval reserves the
+// incarnation and opens admission against an empty authority baseline.
+    | RegisterAsk(Bytes, Registration, Input, List[String], List[String], Precondition, bool)
+// Decide(D, plan_digest, verdict): the operator's verdict on request D, which awaits one on
 // exactly `decision` (launch.md "Self-editing"). An approval repeats D's admission under the
 // approved set; when the decision shows a held group or an unmatched path its fates replace
 // D's, and otherwise they are `fate.none()`. A refusal fails D Denied.
-    | DecideAsk(Bytes, Decision, Verdict)
+    | DecideAsk(Bytes, Bytes, Verdict)
 // Backup(group): back up the named group's store through its running serving place, or
 // return its store path when the group is cold (STORE-SPEC §15.4).
     | BackupAsk(String)
 // Read the catalog StoreId. The connection remains open for the pinned exchange.
     | IdentifyAsk
 // Compare the StoreId on the host that executes the enclosed request.
-    | PinnedAsk(u64, u64, Bytes)
+    | PinnedAsk(u64, u64, Bytes) | ObserveGroupAsk(String) | PlanAsk(Bytes)
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.
@@ -144,7 +168,9 @@ pub type EntryChange: codec + send = EntryAdded | EntryRemoved | EntryChanged | 
 
 pub type EntryLine: codec + send {
     identity: Bytes,
-    change: EntryChange
+    change: EntryChange,
+    previous_revision: Option[Bytes],
+    revision: Option[Bytes]
 }
 
 // A deploy's preview (launch.md "Deploy preview"): the grant diff against OLD's recipe,
@@ -184,7 +210,7 @@ pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass
 
 // Which facts a decision has computed: the admission facts only (grants, approvals), or
 // every fact after prepare.
-pub type DecisionStage: codec + send = AdmissionStage | PreparedStage
+pub type DecisionStage: codec + send = AdmissionStage | PreparedStage | CreationStage
 
 // R's Foreign and Exec lines and the exact display text, held only for an editor's request.
 pub type Approvals: codec + send {
@@ -205,6 +231,7 @@ pub type Migration: codec + send {
 // source tree's digest (None for an attested or publication input), the H its law gate ran
 // against (None when ungated), the stage, and each fact, where an empty part is clear.
 pub type Decision: codec + send {
+    gate_toolchain: Option[Bytes],
     tree: Option[Bytes],
     root: Option[Bytes],
     stage: DecisionStage,
@@ -257,7 +284,7 @@ StateAnswer(Bytes, launcher.Group, Input, Phase)
     | BackupAnswer(launcher.Group, u64, u64, u64, String)
 // BackupOffline(store_path): the registered group has no running serving place; the CLI backs
 // up `store_path` offline.
-    | BackupOfflineAnswer(String) | CatalogAnswer(u64, u64)
+    | BackupOfflineAnswer(String) | CatalogAnswer(u64, u64) | PreconditionAnswer(Precondition) | PlanAnswer(DeployPlan, Bytes)
 
 pub fn terminal(p: Phase) -> bool {
     match p {

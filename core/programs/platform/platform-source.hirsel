@@ -408,7 +408,7 @@ fn admission_ask(body: Bytes) -> Option[(operator.Input, bool, List[String], Lis
             let (requested, gate) = operator.begin_parts(input)
             Some((requested, gate, clone(foreign), clone(exec)))
         },
-        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), false, clone(foreign), clone(exec))),
+        Some(RegisterAsk(_, _, input, foreign, exec, _, _)) => Some((clone(input), false, clone(foreign), clone(exec))),
         _ => None,
     }
 }

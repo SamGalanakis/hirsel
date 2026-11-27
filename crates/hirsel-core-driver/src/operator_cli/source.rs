@@ -32,7 +32,10 @@ impl Source {
             .iter()
             .map(|(_, bytes)| (Sha256::digest(bytes).into(), bytes.clone()))
             .collect();
+        let (dirs, grants): (Vec<_>, Vec<_>) =
+            grants.into_iter().partition(|g| g.starts_with("Dir="));
         let tree = crate::launcher::admit::Tree {
+            dirs: dirs.into_iter().map(|v| v[4..].to_owned()).collect(),
             package: package.to_owned(),
             grants,
             files,

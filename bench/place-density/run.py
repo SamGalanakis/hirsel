@@ -23,6 +23,7 @@ import time
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "core/tools"))
+from operator_fixture import group_spec, pin_host, submit_fixture
 from bench_cpus import busy_percent, cpu_list, cpu_ticks, sibling_cpus
 from timing_shield import BOARD, REGIMES, RESERVED, hold, in_timing_slice, local_host, scoped_command
 
@@ -138,7 +139,7 @@ def stop_places(launcher):
 def host(compiler, state, log_path, *, measured=False, places=PLACES, idle_ms=HOST_IDLE_MS):
     command = [compiler, "host", "--state", state, "--max-places", str(places),
                "--idle-ms", str(idle_ms), "--lifecycle", "leader",
-               "--admission", ROOT / "tools/tests/fixtures/host-admission.conf"]
+               "--admission", ROOT / "tools/tests/fixtures/host-admission.hcfg"]
     names = ("hirsel",)
     if measured and in_timing_slice():
         command = scoped_command(command, memory_bytes=2 << 30)
@@ -207,12 +208,15 @@ def register_places(compiler, scratch, state, recipe, launcher, places=PLACES):
         for port in sockets:
             port.close()
 
+    pin = scratch / "operator-context.toml"
+    pin_host(state, pin)
     def register(work):
-        answer = json.loads(checked([
-            compiler, "register", recipe, "--state", state, "--group", work.name,
-            "--listen", f"127.0.0.1:{addresses[work]}", "--store", work / "live",
-            "--trusted", "--workdir", work, "--code-store", scratch / "code",
-        ], timeout=120))
+        spec = work / "group.hcfg"
+        group_spec(spec, work.name, f"127.0.0.1:{addresses[work]}", work / "live", work)
+        answer = submit_fixture([
+            compiler, "deploy", "--recipe", recipe, "--create", spec, "--context", pin,
+            "--code-store", scratch / "code", "--json", "--wait",
+        ], timeout=120)["result"]
         if answer["phase"] != "installed":
             raise RuntimeError(f"{work.name} registration failed: {answer}")
         return ready(addresses[work])[2]

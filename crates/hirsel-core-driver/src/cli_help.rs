@@ -49,12 +49,34 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
     spec["description"] = json!(command.description);
     if let Some(contract) = command.contract {
         let (target, authority, predicate, receipt) = match contract {
+            ReadContract::Deploy | ReadContract::Decision => (
+                "host",
+                "operator_uid",
+                "input owned, decision required, or terminal outcome",
+                true,
+            ),
             ReadContract::Help => ("none", "local", "command schema read", false),
             ReadContract::Operation => ("host", "operator_uid", "catalog row read", true),
         };
-        spec["result"] = json!({"type":"finite", "v":1, "contract":"read",
+        let mode = match contract {
+            ReadContract::Deploy | ReadContract::Decision => "submit",
+            _ => "read",
+        };
+        let excludes: &[&[&str]] = if matches!(contract, ReadContract::Deploy) {
+            &[&["DIR", "--recipe"], &["--source", "--recipe"]]
+        } else {
+            &[]
+        };
+        spec["result"] = json!({"type":"finite", "v":1, "contract":mode,
             "target_kind":target, "authority":authority, "completion":predicate,
-            "receipt":receipt, "credential_bearing":false, "mutually_exclusive":[]});
+            "receipt":receipt, "credential_bearing":false, "mutually_exclusive":excludes});
+        if !matches!(contract, ReadContract::Help) {
+            spec["result"]["--wait"] = json!({"contract":"wait","completion":"installed, failed, undecided, decision required, deadline or interrupt"});
+        }
+        if matches!(contract, ReadContract::Deploy) {
+            spec["result"]["--plan"] =
+                json!({"contract":"plan","completion":"held plan","effect":"none"});
+        }
     }
     spec
 }

@@ -45,15 +45,28 @@ fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     // F2 (RUNNER-SPEC §14.3 "Preparing"): OLD settles its own rows at the base under the
     // approved fates and accepts only a PREPARED that applies exactly those values.
-    if let Error(_) = settlement_check(db, validated, r2, fate_crash_flags()) {
+    if let Error(_) = settlement_check(db, validated, r2, Settlement(choices: fate_crash_flags(), rows: clone(report.rows))) {
         fail("L70 (e): OLD refuses the PREPARED of the approved fates")
     }
+    let mut overstated: List[TriggerScanRow] = clone(report.rows)
+    for i in 0u64 .. list.len(overstated) {
+        if let Held = overstated[i].class {
+            overstated[i].count += 1u64
+        }
+    }
+    if !settle_refused(settlement_check(db, validated, r2, Settlement(choices: fate_crash_flags(), rows: take overstated))) {
+        fail("OLD accepted a different held count from the operator's inventory")
+    }
+    // A wildcard fate covers only the groups that were shown at decision time.
+    if !settle_refused(settlement_check(db, validated, r2, Settlement(choices: fate_crash_flags(), rows: list.new()))) {
+        fail("OLD applied fates to groups absent from the approved report")
+    }
     // The operator approved Release for C; PREPARED cancels it.
-    if !settle_refused(settlement_check(db, validated, r2, fate.Fates(all: Some(Release), entries: list.new()))) {
+    if !settle_refused(settlement_check(db, validated, r2, Settlement(choices: fate.Fates(all: Some(Release), entries: list.new()), rows: clone(report.rows)))) {
         fail("L70 (e): OLD accepts Cancel where Release was approved")
     }
     // No fates were approved, yet PREPARED's 0x0085 frame releases held runs.
-    if !settle_refused(settlement_check(db, validated, r2, fate.none())) {
+    if !settle_refused(settlement_check(db, validated, r2, Settlement(choices: fate.none(), rows: list.new()))) {
         fail("L70 (e): OLD accepts a release no fate approved")
     }
     // A forged TRIGGERS beside the honest PREPARED shows nothing held, so the host sends no
@@ -66,7 +79,7 @@ fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     if trigger_report_unsettled(trigger_scan_report(exported.dir)) {
         fail("L70 (e): the forged report holds")
     }
-    if !settle_refused(settlement_check(db, validated, r2, fate.none())) {
+    if !settle_refused(settlement_check(db, validated, r2, Settlement(choices: fate.none(), rows: list.new()))) {
         fail("L70 (e): OLD accepts a settlement beside a forged report")
     }
     let work = result.unwrap(store.reserve_import(mut db, take validated))

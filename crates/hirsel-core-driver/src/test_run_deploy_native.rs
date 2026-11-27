@@ -6,6 +6,19 @@ impl PackageLaw {
         admit::write_envelope(&state, &admit::limits()).unwrap();
         state
     }
+    fn operator_pin(&self, state: &std::path::Path) -> PathBuf {
+        self.write("context.toml",&format!("kind = \"host\"\nstate = {:?}\nauthority = \"00000000000000000000000000000001\"\nuid = {}\n",state,crate::operator::operator_uid()));
+        self.path("context.toml")
+    }
+    fn group_spec(&self, grants: &str, recording: bool) -> PathBuf {
+        let recording = if recording {
+            ", recording: Some(Recording(dir: \"recordings\", retention_days: 30))"
+        } else {
+            ""
+        };
+        self.write("group.hcfg",&format!("host_v1.Group(name: \"app\", tenant: \"operator\", listen: \"127.0.0.1:0\", store: \"store\", workdir: \".\", trusted: true, grants: [{grants}], package_roots: [], args: []{recording})"));
+        self.path("group.hcfg")
+    }
 }
 
 #[test]
@@ -58,41 +71,32 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
             GRANT,
         ]));
         let root = root.trim();
-        let (status, _, error) = request(&[
-            "deploy",
-            root,
-            "--state",
-            state.to_str().unwrap(),
-            "--group",
-            "app",
-            "--code-store",
-            source.to_str().unwrap(),
-        ]);
-        assert_eq!(status, Some(2), "{error}");
-        assert_eq!(
-            error,
-            format!("deploy: refused: the recipe grants {GRANT}; pass --grant {GRANT}\n")
-        );
-        let (status, _, error) = request(&[
-            "register",
-            root,
-            "--state",
-            state.to_str().unwrap(),
-            "--group",
-            "app",
-            "--listen",
-            "127.0.0.1:0",
-            "--store",
-            "store",
-            "--code-store",
-            source.to_str().unwrap(),
-            "--grant",
-            GRANT,
-            "--record",
-            "recordings",
-        ]);
-        assert_eq!(status, Some(2), "{error}");
-        assert_eq!(error, format!("register: refused: {REFUSAL}\n"));
+        let pin = law.operator_pin(&state);
+        for (grants, record, reason) in [
+            ("", false, format!("the recipe grants {GRANT}")),
+            (
+                "Foreign(\"hirsel.ai/ffi_laws@1/laws/Laws\")",
+                true,
+                REFUSAL.to_owned(),
+            ),
+        ] {
+            let spec = law.group_spec(grants, record);
+            let (status, out, error) = request(&[
+                "deploy",
+                "--recipe",
+                root,
+                "--context",
+                pin.to_str().unwrap(),
+                "--create",
+                spec.to_str().unwrap(),
+                "--code-store",
+                source.to_str().unwrap(),
+                "--json",
+            ]);
+            assert_eq!(status, Some(2), "{out}\n{error}");
+            let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(payload["error"]["detail"], reason);
+        }
         assert_eq!(fs::read(state.join("admission")).unwrap(), envelope);
         assert_eq!(fs::read_dir(&state).unwrap().count(), 1);
         assert!(!law.path("recordings").exists());
@@ -189,24 +193,29 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let source = source.to_str().unwrap();
     let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Exec=profiles.toml git"]));
     let state = law.state_with_admission();
+    let pin = law.operator_pin(&state);
+    let spec = law.group_spec(
+        "Exec(policy: \"./profiles.toml\", profiles: [\"git\"])",
+        false,
+    );
     let args = [
         "deploy",
+        "--recipe",
         root.trim(),
         "--code-store",
         source,
-        "--state",
-        state.to_str().unwrap(),
-        "--group",
-        "app",
-        "--grant",
-        "Exec=./profiles.toml git",
+        "--context",
+        pin.to_str().unwrap(),
+        "--create",
+        spec.to_str().unwrap(),
+        "--json",
     ]
     .map(str::to_owned);
     let (status, stdout, stderr) = process::tape_request(&args, law.dir.path());
     assert_eq!(status, Some(2), "{stdout}\n{stderr}");
-    assert!(stdout.is_empty(), "{stdout}");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(
-        stderr,
-        "deploy: refused: the recipe grants Exec=profiles.toml git; pass --grant 'Exec=profiles.toml git'\n",
+        envelope["error"]["detail"],
+        "the recipe grants Exec=profiles.toml git"
     );
 }

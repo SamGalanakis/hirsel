@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import struct
 import tempfile
 import time
@@ -146,7 +147,7 @@ def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store
         _, deployed = outcome(deploy, 'T1:publish-shared-release')
         new = ready()
         assert registered['assembly'] != deployed['assembly']
-        assert deployed['activation'] == 2, deployed
+        assert deployed['activation'] == '2', deployed
 
     executable = launch_store / 'place'
     images = state / 'objects' / 'images'
@@ -654,3 +655,26 @@ def runner_idle_stop(args, work, engines, row, base, native_run, dir_for):
             row(engine=engine, law=f'wake_report_{mode}',
                 passed=(actual, output, diagnostic) == (exit_code, expected, line),
                 result={'status': actual, 'bytes': output.hex(), 'stderr': diagnostic})
+
+def welcome_n_place(address):
+    with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
+        with peer.makefile('rb') as stream:
+            peer.sendall((f'GET /hirsel HTTP/1.1\r\nHost: {address}\r\n'
+                          'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+                          'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: hirsel.4\r\n'
+                          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
+            assert stream.readline().startswith(b'HTTP/1.1 101 '), 'place refused the test session'
+            for line in stream:
+                if line == b'\r\n':
+                    break
+            # Hello(Some(credential), []) binds the fixture's application Caller.
+            hello = b'\0' * 4 + b'\x01\0\0\0\x10\0\0\0' + os.urandom(16) + b'\0' * 4
+            mask = os.urandom(4)
+            masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(hello))
+            peer.sendall(bytes([0x82, 0x80 | len(hello)]) + mask + masked)
+            opcode, length = stream.read(2)
+            length = int.from_bytes(stream.read(2), 'big') if length == 126 else length
+            assert opcode == 0x82 and length >= 28, f'unexpected Welcome frame header {opcode:#x} {length}'
+            frame = stream.read(length)
+            assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
+            return int.from_bytes(frame[-24:-16], 'little')

@@ -417,7 +417,7 @@ says which.
 when the executable starts, against the launch's working directory, which is an input of the
 launch and never of the recipe. `hirsel run` and `hirsel build --manifest` launch in the
 caller's working directory. The launcher starts every child of a group (describe, preview,
-prepare and serving) in that group's working directory, set by `hirsel register --workdir DIR`
+prepare and serving) in that group's working directory, set by the group specification’s `workdir`
 when the group is added to the host. A recipe that moves to another host therefore resolves its relative paths
 against that host's place directory.
 
@@ -551,14 +551,14 @@ intent never does (RUNNER-SPEC §14.3 "What serves"), and a recording pin names 
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
-`hirsel register ... --record DIRECTORY` registers a recording group ("Recording a group"
+A `host_v1.Group` with a recording directory registers a recording group ("Recording a group"
 below): every admission for it assembles with the recording runtime and refuses any recipe
 with a foreign leaf
 ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)),
 and the CLI refuses such a recipe itself before it creates DIRECTORY or sends anything. The host
 assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
-default retention period is 30 days, set by `register --tape-retention DAYS`.
+retention period is the recording specification’s `retention_days`.
 `hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
 the pin. It asks a running host with `ResolvePin` on `HOST_STATE/operator.sock`. When no host
 listens there, it takes `HOST_STATE/launcher.lock` and then the catalog's `LOCK`, both without
@@ -1092,7 +1092,7 @@ This section specifies how many programs from many authors are run on one machin
 ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). The launcher is built as
 `hirsel launcher` ("The launcher" below says which of its parts), and the platform host
 and its catalog as the store package's `platform` and `platform_main` modules. `hirsel host`
-starts the pair, and `hirsel register`, `hirsel deploy` and `hirsel replay --state` are its
+starts the pair, and `hirsel deploy --create SPEC`, `hirsel deploy` and `hirsel replay --state` are its
 operator clients ("The operator CLI" below). The cold-place wake contract they rely on is
 RUNNER-SPEC §14.
 
@@ -1206,7 +1206,7 @@ with status 74.
 
 **The admission envelope.** FILE declares the published-release admission bounds as
 `recipe_bytes`, `closure_objects`, `object_bytes`, `decoded_bytes`, `members` and `edges`,
-one positive decimal `key=value` per line. `closure_objects` also fixes the redundant
+as positive integer fields of a `host_v1.Admission` document. `closure_objects` also fixes the redundant
 object-count reservation, while the decoder keeps its own hard nesting ceiling. The
 launcher refuses a missing, repeated or unknown key. Before it opens the operator socket
 it writes the effective envelope to `S/admission`, so an attested publisher reads the
@@ -1271,20 +1271,22 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec, held) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest, gate), with `manifest` a `launcher.Manifest`'s codec bytes: a source named by content, whose blobs follow as Data ("Source by content" below). A manifest over 1 MiB, or one that breaks its rules, is `Invalid`. `gate`, a bool, asks for the law gate ("Self-editing"); only a source carries one. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, precondition, input, foreign, exec, stopAtPlan) | Bind the observed group, incarnation, predecessor, assembly, store identity and policy digest. An attested or publication input names R. Source names a manifest and gate setting. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. For a source it is the needed blobs' bytes ("Self-editing"). |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
-| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record, front, packages), with `memory` an `Option[u64]` in bytes, `record` an `Option` of (dir, retentionSeconds) and `packages` the group's package roots, each 32 bytes ("Package roots per group" below). Registers a new group and deploys its first release, below. `foreign` and `exec` are Begin's. `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), Begin's input without the gate: a Register is never gated. |
-| 8 Decide(D, decision, verdict) | The operator's verdict on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. `verdict` is 0 Approve(fates) or 1 Refuse. An approval's `fates` settle the held runs the decision shows and are `Fates(all: None, entries: [])` when it shows none; it repeats D's admission under a fresh A, this connection owning it. A refusal fails D `Denied`. |
-| 9 SetEditor(G, editor) | Planned ("Self-editing"). `editor` is `Option[EditorGrant]`, with `EditorGrant { uid: u32, named: List[String] }`: the editor's UID and the sorted, duplicate-free `Secret`, `Cred` and `Env` binding lines of G's approved recipe that the operator lets an editor's code use. It sets or clears G's editor in one transaction and answers `GroupInfo(G)`. It is refused `Denied` unless G passes "What editing delegates"; a UID equal to the operator's or the launcher's is `Invalid`; the platform host's group is `Denied`. Only this socket accepts it. |
+| 7 Register(D, registration, input, foreign, exec, precondition, stopAtPlan) | Propose creation against observed absence. The first decision covers the initial group bindings. |
+| 8 Decide(D, planDigest, verdict) | Refuse or approve with exact fates for the held plan. A digest mismatch returns the current plan. |
+| 9 Backup(group) | Request backup work for this group. |
+| 10 Identify, 11 Pinned(hi, lo, request) | Identify the catalog and check its identity on the exchange. |
+| 12 ObserveGroup(name), 13 Plan(D) | Return the observed precondition or the operation’s current plan and digest. |
 
 | Host → operator | Payload and rule |
 |---|---|
-| 0 State(D, G, input, phase) | A committed snapshot. `input` is Register's input type: a Begin's source appears as Source(manifest), without its gate. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
+| 0 State(D, G, input, phase) | A committed snapshot. `input` is Register's input type: a Begin's source appears as Source(manifest), without its gate. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A creation proposal reports incarnation 0 until approval reserves its incarnation. The input remains bound to D. |
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 5 BlobKey(H), after the four object kinds' tags 0 to 4). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
@@ -1325,8 +1327,8 @@ outlives its connection and the host's restart, and ends at a Decide or when a l
 its group supersedes it (`Failed(Denied)`).
 
 **Registering a group.** A Register is a Begin for a group that does not exist yet, under
-the same durable identity: a known D attaches or is a Conflict exactly as a Begin's. For a new
-D, one transaction records the group's catalog row under a new incarnation, with no assembly
+the same durable identity: a known D attaches or is a Conflict exactly as a Begin's. For a new D, the host saves a creation plan against the observed absence and name generation.
+Approval rechecks both and records the group's catalog row under a new incarnation, with no assembly
 and **no wake row**, charges the tenant's group quota, and writes D's request and active rows
 with a fresh A. The host then sends `Bind` for the group's listener and only after it the
 `Admit` of the first release, whose approvals have no OLD (the summary's old root limit is 0
@@ -1373,42 +1375,11 @@ can be run again with the same D and reads the recorded outcome. A terminal outc
 one JSON object on stdout: the request, group, incarnation, phase and, when installed, the
 activation, assembly and report.
 
-- `hirsel register RECIPE --state S --group NAME --listen ADDR --store DIR --code-store DIR
-  [--tenant T] [--workdir DIR] [--trusted]
-  [--memory BYTES] [--grant G]... [--record DIR
-  [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
-  code store.
-- `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...
-  [--approve-grant +LINE|-LINE]... [--held release|cancel]
-  [--held-entry PATH=release|cancel]... [--request-id HEX]` resolves G with LookupGroup, or with
-  `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
-  the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
-  sends Decide approving it, with the fates its `--held` and `--held-entry` options name, and goes on; otherwise it prints the state, with the decision and its trigger report, and
-  exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --status D` sends only Status.
-- `hirsel decide --state S --request-id D`, with the options
-  `--approve-grant +LINE|-LINE`, `--approve-migration DIGEST`<!-- doc-ref: planned --> (planned),
-  `--approve-display SHA256`<!-- doc-ref: planned --> (planned), `--held release|cancel`, `--held-entry PATH=release|cancel`
-  and `--refuse`, decides a held request of either
-  principal. It sends Status and prints the whole `Decision` ("Self-editing"), with its
-  tree, H and trigger report. With `--refuse` it sends `Decide(D, decision, Refuse)`. Otherwise
-  it sends Decide approving that exact decision only when
-  its options name every part the decision holds and nothing else: the grant diff line by
-  line, the migration digest, the SHA-256 of the approval text, and fates for the held
-  groups (`--held`, `--held-entry`, as for deploy); any other set of options prints the
-  decision and exits 2 with nothing sent. It never sends Begin. After an approval it
-  follows D to a terminal phase or the next hold, as deploy does. This is the only client
-  that decides another client's request; `hirsel deploy`'s own `--approve-grant`, `--held`
-  and `--held-entry` decide only the request it began.
-- `hirsel editor --state S --group NAME (--uid UID [--named LINE]... | --none)`<!-- doc-ref: planned --> (planned)
-  sends SetEditor for the registered incarnation and prints the group's JSON object.
+The CLI submits with `hirsel deploy [DIR [--source ROOT] | --recipe R] [--create SPEC]`. For creation the host records the observed absence and name generation before the first decision. Approval reserves the name, incarnation and tenant quota in one catalog transaction. A definitive genesis failure releases the reservation. The name retains its last generation after removal.
 
-Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,
-and on Display check that the text is the one their own approvals produce, print it, and
-send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
-Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a
-local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or an AwaitDecision its options do not decide, which prints the decision and its trigger report so that the operator can choose the grants and fates and decide it with `--request-id`, 1 for any other
-`Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
-terminal phase, which prints `outcome unknown: request D`.
+The operator reads `hirsel op get OP` and decides with `hirsel op decide OP [--decision FILE]`. Both require the pinned catalog identity. Each plan uses SHA-256 of the canonical value-codec encoding of `DeployPlan`, including its versioned domain, authority, original intent, subject, input and computed stage facts. A fresh attempt preserves the digest when those facts match. An approval covers only that stage. The host compares the exact Foreign/Exec display bytes again at admission and the client flushes them to stderr before Confirm. At prepare the host compares the observed entries, trigger inventory and OLD's validated migration. OLD verifies held identities and fates against its exported pending table before reserving the import.
+
+The finite envelope, caller receipt, plan and wait contracts are specified in [the CLI specification](cli.md).
 
 ### Deploy preview
 
@@ -1437,8 +1408,8 @@ builds it; the agent or person who proposed the release holds no deploy authorit
 
 The report of every terminal phase carries the preview as far as it was computed.
 
-**Activation.** An operator's deploy whose grant diff is empty and whose trigger report is
-settled assembles and cuts over with no further step; an editor's deploy cuts over alone
+**Activation.** An operator's ordinary deploy with unchanged authority, no confirmation display, settled triggers
+and an empty migration can assemble and cut over automatically; an editor's deploy cuts over alone
 only under the settler's rule ("Self-editing" below). A nonempty diff waits for a person's decision, before `Assemble`, because every
 child's authority, the preview child's included, comes from the group's approved bindings
 ("Child modes"). The host releases the attempt and records the diff in the request's row,
@@ -1449,7 +1420,7 @@ name exactly the held diff: an approval records it as the request's approved dif
 repeats the admission under a fresh attempt and deadline, owned by the deciding connection,
 and that admission passes the gate only when it finds the same diff; a refusal fails the
 request `Denied`. Approval comes only from the operator, through the operator client
-(`--approve-grant`, `--held`, `--held-entry`) on `operator.sock`. No entry of any group
+(`op decide`) on `operator.sock`. No entry of any group
 decides, because NEW's code could rewrite that entry's Caller check. "Self-editing" below
 widens the hold and the Decide from the grant diff to every fact of the settler.
 
@@ -1464,7 +1435,7 @@ is separate from publishing.
 after review self-edit-gate-review-2801 (self-edit-build-1c-2808, RUNNER-SPEC v2.82). Not built:
 every socket, ask field, phase, class and law in this section is planned. Only the building
 blocks are to be built now (Sam, 2026-11-26: "not building self editing into lash, just the
-building blocks"): the law gate (built: a Begin source's `gate`, self-edit-begin-source-2849), operator-decided holds with `hirsel decide`, the migration
+building blocks"): the law gate (built: a Begin source's `gate`, self-edit-begin-source-2849), operator-decided holds with `hirsel op decide`, the migration
 and runs facts from OLD's report of the bound PREPARED with its settlement check, and source
 by content with per-group package roots. The editor principal (its UID, socket, SetEditor and
 revocation), automatic cutover and the editor allow list stay unbuilt.*
@@ -1878,14 +1849,14 @@ What the host does where the rules above leave a choice, and why:
   SetEditor does not exist yet and will carry its own list.
 - **Green names the manifest.** `Admitted.gate`'s `tree` is SHA-256 of the manifest's codec
   bytes, the bytes the operator signed off on sending, not of the assembled tree.
-- **The CLI.** `hirsel register|deploy --source DIR [PACKAGE]` walks DIR: every regular
+- **The CLI.** `hirsel deploy PACKAGE --source DIR` walks DIR: every regular
   file by its `/`-joined UTF-8 path, skipping any component that starts with `.`, and
   refusing a symbolic link or any other kind of file. PACKAGE is the package directory
-  within DIR, `.` by default. Every `--grant` becomes a tree grant, and its Foreign and
+  within DIR, `.` by default. Each configured grant becomes a tree grant, and its Foreign and
   Exec ones are also the request's approvals. The CLI sends the manifest, then exactly the
   blobs the host's Need names, in its order, in 256 KiB Data frames, and EndInput; nothing
   when Need names none. A source's display is shown unchecked, since only the host knows
-  its H. `register --package-root sha256:HEX` adds one of the group's package roots.
+  its H. The group document names its authorized package roots.
 
 **Laws** (planned, platform host suite unless noted). Each names the bug it catches:
 
@@ -1932,7 +1903,7 @@ What the host does where the rules above leave a choice, and why:
   approved `Release` fates, a PREPARED that applies `Cancel` to that run is refused. Bug:
   the activation commit applies a fate the operator did not give.
 - `decide_fates_only_shown_groups`. A decision showing one held group, approved with
-  `--held release`, holds again when the repeated admission finds a second held group.
+  `all: Some(Release)`, holds again when the repeated admission finds a second held group.
   Bug: an approval's `all` fates a run nobody saw.
 - `editor_revoked`. Clearing a group's `editor` fails its preparing editor request
   `Denied`, and it does not cut over. Bug: a revoked editor's request still installs.
@@ -2154,7 +2125,7 @@ answers with no child. The host binds the groups' addresses again and probes eve
 authority boundary, as the control socket of "Authority" is. Its filesystem permission
 admits only the host's OS user. Operators and tenants reach the platform through the host,
 which decides and records each request before it asks the launcher. `hirsel host` is this
-pair: the launcher, plus the platform host it starts as its first group. `hirsel register`
+pair: the launcher, plus the platform host it starts as its first group. `hirsel deploy --create SPEC`
 and `hirsel deploy` send their requests to the host.
 
 **The launcher is the parent, not an `Exec` child.** The host does not start groups

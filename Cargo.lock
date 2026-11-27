@@ -982,6 +982,7 @@ dependencies = [
  "cranelift-object",
  "gimli",
  "hirsel-compiler",
+ "hirsel-config-schema",
  "hirsel-core-contained",
  "hirsel-core-diag",
  "hirsel-core-eval",

@@ -5,7 +5,7 @@ the options accepted by a command.
 
 ## Operator reads
 
-`hirsel op get host/CATALOG/REQUEST [--context NAME|/ABSOLUTE/FILE] [--json]`
+`hirsel op get host/CATALOG/REQUEST [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]`
 reads the host's committed Status row. CATALOG is the 32 hex digits of the
 catalog Directory StoreId (high word first). REQUEST is the 16-byte caller ID
 in hex. Both survive a host restart. The row names the group and incarnation
@@ -48,6 +48,18 @@ A failed read carries a code, detail, retry disposition and optional field.
 `hirsel help --json` lists the declared grammar. `hirsel help op get --json`
 returns that command's declaration, including its read contract, target,
 authority, completion, receipt and output properties. Both work offline.
+
+### Submitting a release
+
+`hirsel deploy [DIR [--source ROOT] | --recipe R] [--create SPEC] [--plan] [--wait[=DURATION]] [--request-id D]`
+uses the selected host context. Select a group with the context or `--group NAME`. For an attested recipe, `--code-store DIR` selects its local object store.
+`--create` reads a `host_v1.Group` document. Creation requires a decision on the proposed name, listener, store and group policy. The first release shows its grants against empty authority.
+An ordinary deployment can proceed as soon as policy clears its effects. A hold returns 75. An explicit plan returns 0 at the hold with effect `none`.
+
+Before submission the client saves the request identity, original precondition, input digest and local input coordinates in a private file under `$XDG_STATE_HOME/hirsel/operations` (default `~/.local/state/hirsel/operations`). It flushes the qualified operation ID on stderr. Resubmission takes the original bytes and request ID.
+
+`hirsel op decide OP [--decision FILE] [--wait[=DURATION]]` reads a `host_v1.Decision`. Use `--decision -` for standard input. Without a file the command reads an explicit verdict and any held fates from the controlling terminal. The digest identifies the exact plan returned by the host. For example, a decision with no held entries supplies `verdict: Approve, entries: []` and the plan's `plan_digest`. A refusal has no fates. An approval covers every held path or supplies a single `all: Some(Release)` or `all: Some(Cancel)`.
+A wait ends on install, failure, decision, ambiguity, deadline or local interruption. Duration suffixes are `ms`, `s`, `m` and `h`. Interruption leaves the host operation running.
 
 ## Output paths
 

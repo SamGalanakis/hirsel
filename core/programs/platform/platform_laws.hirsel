@@ -189,18 +189,15 @@ fn error_on(r: Rig, conn: u64) -> Option[operator.Class] {
 // Begins request `d` deploying `input` to group g on a new connection; the rig's attempt
 // becomes the one the host assigned. Gives the connection.
 fn begin_with(mut r: Rig, d: Bytes, input: operator.Input) -> u64 waits {
-    begin_held(mut r, d, ungated(input), runner.fate.none())
+    begin_input(mut r, d, ungated(input), false)
 }
 
 // begin_with of a Begin input, under the deploy fates `held`.
-fn begin_held(mut r: Rig, d: Bytes, input: operator.BeginInput, take held: runner.fate.Fates) -> u64 waits {
+fn begin_input(mut r: Rig, d: Bytes, input: operator.BeginInput, planned: bool) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
-    let incarnation = match group_row(r.h, "g") {
-        Ok(Some(g)) => g.incarnation,
-        _ => 0u64,
-    }
-    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), list.new(), list.new(), take held))
+    let target = original_subject(r, d, "g")
+    send(mut r, conn, BeginAsk(clone(d), take target, clone(input), list.new(), list.new(), planned))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -897,8 +894,8 @@ fn prepared(mut r: Rig, old: launcher.Child) -> List[launcher.Request] waits {
     to_export(mut r, old, preview_answer(image_two(), release_two()))
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
     let a = r.a
-    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
-    apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), plan_bytes(operator.no_triggers()))
+    apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))))
 }
 
 // What the launcher was asked: OLD 1 an export, 2 a cutover, 3 an abort; 4 an Assemble,
@@ -1124,8 +1121,8 @@ fn deploy_drift_retry(c: Clock, rnd: Random) -> Result[(), ()] waits {
         _ => fail("L52: OLD was not asked to export again as a retry")
     }
     old_says(mut r, old, PlaceExported(1u64, "export-2"))
-    helper_answers(mut r, helper_child(old, PrepareMode(retry, "export-2", list.new())), trigger_answer())
-    old_says(mut r, old, PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))
+    helper_answers(mut r, helper_child(old, PrepareMode(retry, "export-2", list.new())), plan_bytes(operator.no_triggers()))
+    old_says(mut r, old, PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))
     expect(still_preparing(r) && gens(r, "g") == two(1u64, 2u64), "L52: the retry's candidate started while the discarded one was live")
     finish(mut r, discarded, Code(0i32), Some(None))
     expect(is_dirty(r, "g", 1u64), "L52: the discarded candidate's end moved the row")
@@ -1454,197 +1451,6 @@ fn helpers_started(r: Rig) -> u64 {
     n
 }
 
-// A group g serving at gen 1 whose release memory allowance is `memory`, by `author`.
-fn admission_case(c: Clock, rnd: Random, memory: Option[u64], author: Author) -> Rig waits {
-    let mut r = rig(c, rnd, 4u64)
-    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, listen: "127.0.0.1:0", front: None, store: string.new(), memory: memory, assembly: image(), activation: 1u64, args: list.new(), record: None)
-    let reqs = must(add_group(mut r.h, spec), "add_group")
-    pump(mut r, take reqs)
-    op_wake(mut r, "g")
-    r
-}
-
-// L48 `deploy_admission_policy` (launch.md "Publish and assemble"): the host relays a
-// deploy's admission and decides its approvals from the verified summary before the image
-// is assembled. OLD and NEW serve side by side through the cutover, so their root limits
-// together must fit the group's memory; a nonempty grant diff holds the request until a
-// person decides on exactly that diff; nonempty approval text needs the operator's confirmation of exactly that text;
-// an untrusted author publishes source only. A refused admission is released and leaves no
-// Preparing row, no helper child and no Assemble. A slow upload waits while another group's
-// child end and a collection go through the host.
-@test
-fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
-    // Overlap memory: 60 + 50 > 100 is refused; 50 + 50 fits.
-    let mut r = admission_case(c, rnd, Some(100u64), Trusted)
-    admit_new(mut r, summary_of(60u64, 50u64, launcher.no_grants()), "")
-    expect(rejected_with(r, "Refused(Memory)"), "memory: OLD and NEW together exceed the group's memory")
-    expect(asked_of(r, 4u64) == 0u64 && asked_of(r, 5u64) == 1u64, "memory: the refused admission is released, not assembled")
-    expect(is_none(deploy_outcome(r.h, "g")) && helpers_started(r) == 0u64, "memory: a refused admission prepares nothing")
-    let refused_id: Bytes = clone(r.req)
-    let seen = is_failed(phase_on(r, r.conn), DeniedClass)
-    expect(seen && is_failed(status_of(mut r, refused_id), DeniedClass), "memory: the refusal is not the request's durable Failed(Denied)")
-    admit_new(mut r, summary_of(50u64, 50u64, launcher.no_grants()), "")
-    expect(asked_of(r, 4u64) == 1u64, "memory: an admission that fits is assembled")
-    // A grant diff against OLD's recipe (one Net rule gained): the request releases its
-    // attempt and waits for a person's decision on exactly that diff, naming the authority,
-    // and nothing is assembled until then. The owner may leave; a decision on another diff
-    // is refused; the exact approval, on any connection, repeats the admission, which the
-    // same diff then passes.
-    let mut r2 = admission_case(c, rnd, None, Trusted)
-    let net = grants_of("Net=tcp:example.org:443", "")
-    let owner = begin_new(mut r2)
-    let held_d: Bytes = clone(r2.req)
-    let held_a = r2.a
-    let mut first2: List[launcher.Event] = list.new()
-    list.push(mut first2, Admitted(held_a, image_two(), summary_of(1u64, 1u64, clone(net)), ""))
-    feed(mut r2, take first2)
-    expect(asked_of(r2, 4u64) == 0u64 && released(r2, held_a), "grant: an undecided grant diff was assembled or kept its attempt")
-    expect(awaits(phase_on(r2, owner), "Net=tcp:example.org:443", ""), "grant: the owner was not shown the diff it awaits a decision on")
-    hang_up(mut r2, owner)
-    expect(awaits(status_of(mut r2, held_d), "Net=tcp:example.org:443", ""), "grant: the hold did not outlive its owner")
-    let wrong = decide_on(mut r2, held_d, grants_of("Net=tcp:example.org:443", "Dir=a"), Approve(runner.fate.none()))
-    expect(errored(r2, wrong, DeniedClass) && admits(r2) == 1u64, "grant: a decision on another diff was taken")
-    let _ = decide_on(mut r2, held_d, clone(net), Approve(runner.fate.none()))
-    expect(admits(r2) == 2u64 && !same_attempt(held_a, r2.a), "grant: the approval did not repeat the admission under a fresh attempt")
-    let mut second2: List[launcher.Event] = list.new()
-    list.push(mut second2, Admitted(r2.a, image_two(), summary_of(1u64, 1u64, clone(net)), ""))
-    feed(mut r2, take second2)
-    expect(asked_of(r2, 4u64) == 1u64, "grant: the approved diff was not assembled")
-    // A refusal fails the request; a later Begin supersedes one still waiting.
-    let mut r7 = admission_case(c, rnd, None, Trusted)
-    let _ = begin_new(mut r7)
-    let no_d: Bytes = clone(r7.req)
-    let mut lost: List[launcher.Event] = list.new()
-    list.push(mut lost, Admitted(r7.a, image_two(), summary_of(1u64, 1u64, grants_of("", "Dir=a")), ""))
-    feed(mut r7, take lost)
-    let _ = decide_on(mut r7, no_d, grants_of("", "Dir=a"), Refuse)
-    expect(is_failed(status_of(mut r7, no_d), DeniedClass) && asked_of(r7, 4u64) == 0u64, "grant: a refused diff did not fail the request")
-    let _ = begin_new(mut r7)
-    let sup_d: Bytes = clone(r7.req)
-    let mut lost2: List[launcher.Event] = list.new()
-    list.push(mut lost2, Admitted(r7.a, image_two(), summary_of(1u64, 1u64, grants_of("", "Dir=a")), ""))
-    feed(mut r7, take lost2)
-    let _ = begin_new(mut r7)
-    expect(is_failed(status_of(mut r7, sup_d), DeniedClass) && admits(r7) == 3u64, "grant: a later Begin did not supersede the request awaiting a decision")
-    // Approval text: no Assemble until the operator confirms exactly that text; then the
-    // assembled deploy is Preparing, its reservation released and OLD's describe started.
-    let mut r3 = admission_case(c, rnd, None, Trusted)
-    admit_new(mut r3, summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib")
-    expect(asked_of(r3, 4u64) == 0u64, "confirm: assembled before the confirmation")
-    let mut shown = false
-    for x in got_on(r3, r3.conn) {
-        if let DisplayAnswer(_, _, root, text) = x {
-            shown = root == image_two() && text == "foreign: lib"
-        }
-    }
-    expect(shown, "confirm: the operator was not sent the display for verified R")
-    // A hash of other text is refused and ends the exchange, which releases the attempt.
-    let first = r3.conn
-    let d3: Bytes = clone(r3.req)
-    let a3 = r3.a
-    send(mut r3, first, ConfirmAsk(d3, a3, digest_bytes("foreign: other")))
-    expect(asked_of(r3, 4u64) == 0u64 && errored(r3, first, DeniedClass) && asked_of(r3, 5u64) == 1u64, "confirm: a different text confirmed, or its closed exchange kept the attempt")
-    // The same Begin again repeats the admission under a fresh attempt.
-    let before = r3.a
-    let again: Bytes = clone(r3.req)
-    let _ = begin_with(mut r3, again, AttestedInput(image_two()))
-    expect(!same_attempt(before, r3.a) && admits(r3) == 2u64, "confirm: the repeated Begin did not admit again under a fresh attempt")
-    let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Admitted(r3.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
-    feed(mut r3, take events)
-    let c3 = r3.conn
-    let d4: Bytes = clone(r3.req)
-    let a4 = r3.a
-    send(mut r3, c3, ConfirmAsk(d4, a4, digest_bytes("foreign: lib")))
-    expect(asked_of(r3, 4u64) == 1u64, "confirm: the hash of the exact text assembles")
-    // A complete input whose owner left before the display: nobody can confirm it, so the
-    // attempt is released, and the same Begin is shown the display under a fresh attempt.
-    let mut r6 = admission_case(c, rnd, None, Trusted)
-    let gone = begin_new(mut r6)
-    let d6: Bytes = clone(r6.req)
-    let a6 = r6.a
-    send(mut r6, gone, EndAsk(clone(d6), a6))
-    hang_up(mut r6, gone)
-    let mut late: List[launcher.Event] = list.new()
-    list.push(mut late, Admitted(a6, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
-    feed(mut r6, take late)
-    expect(released(r6, a6), "confirm: an unowned confirmation kept its attempt")
-    let back = begin_with(mut r6, d6, AttestedInput(image_two()))
-    let a7 = r6.a
-    let mut again6: List[launcher.Event] = list.new()
-    list.push(mut again6, Admitted(a7, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), "foreign: lib"))
-    feed(mut r6, take again6)
-    let mut shown6 = false
-    for x in got_on(r6, back) {
-        if let DisplayAnswer(_, _, _, text) = x {
-            shown6 = text == "foreign: lib"
-        }
-    }
-    expect(!same_attempt(a6, a7) && shown6, "confirm: the reattached Begin was not shown the display")
-    unplug(mut r6)
-    assembled_new(mut r3)
-    expect(still_preparing(r3) && asked_of(r3, 5u64) == 2u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
-    // A slow upload: the verifier asked for objects in two parts and half are sent; another
-    // group's child ends and a collection runs while the attempt waits for the rest. The
-    // admission keeps its Need parts and still relays the remaining bytes.
-    let mut r5 = admission_case(c, rnd, None, Trusted)
-    add(mut r5, "k", "t")
-    op_wake(mut r5, "k")
-    let other = last(r5, "k")
-    let up = begin_new(mut r5)
-    let mut parts: List[launcher.Event] = list.new()
-    let mut first_part: List[launcher.Wanted] = list.new()
-    list.push(mut first_part, BodyKey(bytes_of(32u64, 1u8)))
-    let mut second_part: List[launcher.Wanted] = list.new()
-    list.push(mut second_part, AnnexKey(bytes_of(32u64, 2u8)))
-    list.push(mut parts, Need(r5.a, take first_part, false))
-    list.push(mut parts, Need(r5.a, take second_part, true))
-    feed(mut r5, take parts)
-    let d5: Bytes = clone(r5.req)
-    let a5 = r5.a
-    send(mut r5, up, DataAsk(clone(d5), a5, bytes_of(8u64, 1u8)))
-    finish(mut r5, other, Code(0i32), Some(None))
-    expect(is_clean(r5, "k"), "slow upload: the other group's clean end was not applied while the upload waits")
-    expect(collection_keeps(mut r5, false, true), "slow upload: a collection during the upload did not run or rooted the unassembled NEW")
-    send(mut r5, up, DataAsk(clone(d5), a5, bytes_of(8u64, 2u8)))
-    send(mut r5, up, EndAsk(clone(d5), a5))
-    let mut needs = 0u64
-    for x in got_on(r5, up) {
-        if let NeedAnswer(_, _, _, _) = x {
-            needs += 1u64
-        }
-    }
-    expect(needs == 2u64 && is_none(error_on(r5, up)), "slow upload: the operator was not relayed both Need parts")
-    let waiting = match deploy_admission(r5.h, "g") {
-        Some(Uploading(keys, done)) => done && keys == 2u64,
-        _ => false
-    }
-    expect(waiting, "slow upload: the admission lost its Need parts across the end and the collection")
-    let mut sent = 0u64
-    for q in r5.asked {
-        match q {
-            AdmitData(_, _) => {
-                sent += 1u64
-            },
-            AdmitEnd(_) => {
-                sent += 10u64
-            },
-            _ => (),
-        }
-    }
-    expect(sent == 12u64, "slow upload: the host did not relay both chunks and the end")
-    unplug(mut r5)
-    // An untrusted author attests nothing.
-    let mut r4 = admission_case(c, rnd, None, Untrusted)
-    let denied = begin_new(mut r4)
-    expect(errored(r4, denied, DeniedClass) && admits(r4) == 0u64 && is_none(deploy_admission(r4.h, "g")), "untrusted: an attested recipe is refused")
-    unplug(mut r)
-    unplug(mut r2)
-    unplug(mut r3)
-    unplug(mut r4)
-    Ok(())
-}
-
 fn released(r: Rig, a: launcher.Attempt) -> bool {
     for q in r.asked {
         if let Release(x) = q {
@@ -1658,22 +1464,6 @@ fn released(r: Rig, a: launcher.Attempt) -> bool {
 
 fn registration(name: String, store_dir: String) -> operator.Registration {
     operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, listen: "127.0.0.1:0", store: string.from(store_dir), memory: None, args: list.new(), record: None, front: None, packages: list.new())
-}
-
-// Registers `spec` under request `d` with NEW attested, on a new connection; the rig's
-// attempt becomes the one the host assigned. Gives the connection.
-fn register_as(mut r: Rig, d: Bytes, take spec: operator.Registration) -> u64 waits {
-    r.conns += 1u64
-    let conn = r.conns
-    send(mut r, conn, RegisterAsk(clone(d), take spec, AttestedInput(image_two()), list.new(), list.new()))
-    if let Some(p) = phase_on(r, conn) {
-        if let Some(a) = attempt_of(p) {
-            r.a = a
-        }
-    }
-    r.req = clone(d)
-    r.conn = conn
-    conn
 }
 
 // Where in the rig's requests group `name` was first bound and first admitted, and whether
@@ -1814,7 +1604,14 @@ fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(released(r, a6) && !same_attempt(a6, r.a) && no_old == 2u64 && !serving_at(r, "p", 0u64, image_two()), "L51: a cut-off registration did not admit again under a fresh attempt with no OLD")
     // The listener cannot be bound: the registration fails the same way.
     let failed_id = request_id(5u64)
-    let reqs = asked(mut r.h, r.conns + 1u64, operator.ask_bytes(RegisterAsk(clone(failed_id), registration("m", "s5"), AttestedInput(image_two()), list.new(), list.new())), r.now)
+    let target = original_subject(r, failed_id, "m")
+    send(mut r, r.conns + 1u64, RegisterAsk(clone(failed_id), registration("m", "s5"), AttestedInput(image_two()), list.new(), list.new(), take target, false))
+    let proposal = option.unwrap(must(request_row(r.h, failed_id), "creation proposal"))
+    let Held(facts) = view proposal.status else {
+        return Error(())
+    }
+    let hash = digest_of(plan_bytes(deploy_plan(r.h, failed_id, proposal, facts)))
+    let reqs = asked(mut r.h, r.conns + 2u64, operator.ask_bytes(DecideAsk(clone(failed_id), take hash, Approve(runner.fate.none()))), r.now)
     expect(list.len(reqs) > 0u64, "L51: the registration did not ask for a listener")
     let mut failures: List[launcher.Event] = list.new()
     match reqs[0u64] {

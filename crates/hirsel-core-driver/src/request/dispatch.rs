@@ -85,9 +85,8 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             conclude(Outcome::Exit(crate::resident::run(serve)?))
         }
         Invocation::Host(request) => match operator_cli::host(request)? {},
-        Invocation::Register(request) => conclude(Outcome::Exit(operator_cli::register(request)?)),
-        Invocation::Deploy(request) => conclude(Outcome::Exit(operator_cli::deploy(request)?)),
-        Invocation::Decide(request) => conclude(Outcome::Exit(operator_cli::decide(request)?)),
+        Invocation::Deploy(request) => conclude(Outcome::Exit(operator_cli::deploy(request))),
+        Invocation::Decide(request) => conclude(Outcome::Exit(operator_cli::decide(request))),
         Invocation::Call(request) => conclude(Outcome::Exit(crate::call::run(
             crate::call::Options::read(request)?,
         )?)),

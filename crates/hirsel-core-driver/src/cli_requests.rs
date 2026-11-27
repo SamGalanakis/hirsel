@@ -7,6 +7,7 @@ pub enum HelpOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpGetOption {
+    Wait(Option<std::time::Duration>),
     Context(String),
     Json,
 }
@@ -122,48 +123,25 @@ pub enum LauncherOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RegisterOption {
-    CodeStore(String),
-    FrontHttp(String),
-    FrontStream(String),
-    Grant(String),
-    GroupName(String),
-    GroupStore(String),
-    HostMemory(String),
-    HostState(String),
-    Listen(String),
-    PackageRoot(String),
-    Record(String),
-    RequestId(String),
-    SourceDir(String),
-    TapeRetention(String),
-    Tenant(String),
-    Trusted,
-    Workdir(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeployOption {
-    ApproveGrant(String),
-    CodeStore(String),
-    Grant(String),
-    GroupName(String),
-    HeldAll(String),
-    HeldEntry(String),
-    HostState(String),
-    RequestId(String),
-    RequestStatus(String),
+    Recipe(String),
     SourceDir(String),
+    CodeStore(String),
+    Create(String),
+    Plan,
+    Wait(Option<std::time::Duration>),
+    RequestId(String),
+    Context(String),
+    GroupName(String),
+    Json,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecideOption {
-    ApproveGrant(String),
-    HeldAll(String),
-    HeldEntry(String),
-    HostState(String),
-    Refuse,
-    RequestId(String),
+    DecisionFile(String),
+    Wait(Option<std::time::Duration>),
+    Context(String),
+    Json,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

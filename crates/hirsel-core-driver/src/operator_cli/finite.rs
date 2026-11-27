@@ -26,7 +26,7 @@ pub(super) struct Failure {
 }
 
 impl Failure {
-    fn input(field: &'static str, detail: impl Display) -> Self {
+    pub(super) fn input(field: &'static str, detail: impl Display) -> Self {
         Self {
             exit: Exit::Invalid,
             code: "InvalidInput",
@@ -47,6 +47,13 @@ impl Failure {
             retry: "none",
         }
     }
+    pub(super) fn blocked(code: &'static str, detail: &str) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+            ..Self::disconnected()
+        }
+    }
     pub fn disconnected() -> Self {
         Self {
             exit: Exit::Blocked,
@@ -59,6 +66,8 @@ impl Failure {
     pub fn io(error: std::io::Error) -> Self {
         use std::io::ErrorKind;
         match error.kind() {
+            ErrorKind::Interrupted => Self::blocked("Interrupted", "observer detached"),
+            ErrorKind::TimedOut => Self::blocked("Deadline", "observation timed out"),
             ErrorKind::PermissionDenied => Self::authority(Class::Denied, error.to_string()),
             ErrorKind::InvalidData => Self::damaged(error),
             _ => Self {
@@ -88,21 +97,21 @@ impl Failure {
 }
 
 #[derive(Serialize)]
-struct Envelope<'a> {
-    v: u8,
-    command: &'a str,
-    contract: &'static str,
-    exit: i32,
-    target: Value,
-    operation: Value,
-    outcome: Value,
-    result: Value,
-    error: Option<Failure>,
-    next: Vec<Value>,
+pub(super) struct Envelope<'a> {
+    pub(super) v: u8,
+    pub(super) command: &'a str,
+    pub(super) contract: &'static str,
+    pub(super) exit: i32,
+    pub(super) target: Value,
+    pub(super) operation: Value,
+    pub(super) outcome: Value,
+    pub(super) result: Value,
+    pub(super) error: Option<Failure>,
+    pub(super) next: Vec<Value>,
 }
 
 impl<'a> Envelope<'a> {
-    fn read(command: &'a str) -> Self {
+    pub(super) fn read(command: &'a str) -> Self {
         Self {
             v: 1,
             command,
@@ -116,14 +125,14 @@ impl<'a> Envelope<'a> {
             next: vec![],
         }
     }
-    fn fail(&mut self, failure: Failure) {
+    pub(super) fn fail(&mut self, failure: Failure) {
         self.exit = failure.exit as i32;
         self.outcome = json!({"kind":match failure.exit {
             Exit::Blocked=>"Blocked",Exit::Negative=>"Refused",Exit::Invalid=>"Invalid"
-        }, "effect":if self.operation.is_null() {"none"} else {"possible"}});
+        }, "effect":self.outcome["effect"]});
         self.error = Some(failure);
     }
-    fn render(&self, machine: bool) -> i32 {
+    pub(super) fn render(&self, machine: bool) -> i32 {
         if machine {
             println!("{}", serde_json::to_string(self).unwrap());
         } else if let Some(error) = &self.error {
@@ -137,6 +146,9 @@ impl<'a> Envelope<'a> {
             );
             if !self.target.is_null() {
                 eprintln!("target {}", self.target);
+            }
+            if !self.result.is_null() {
+                eprintln!("{}", serde_json::to_string_pretty(&self.result).unwrap());
             }
             if !self.operation.is_null() {
                 eprintln!("operation {}", self.operation);
@@ -196,6 +208,13 @@ pub(crate) fn schema_help(target: Option<&cli::CommandSpec>, machine: bool) -> i
 pub(crate) fn get(request: Request<OpGetOption>) -> i32 {
     let machine = request.options.contains(&OpGetOption::Json);
     let mut envelope = Envelope::read("op get");
+    if request
+        .options
+        .iter()
+        .any(|o| matches!(o, OpGetOption::Wait(_)))
+    {
+        envelope.contract = "wait";
+    }
     if let Err(failure) = observe(request, &mut envelope) {
         envelope.fail(failure);
     }
@@ -213,39 +232,84 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
             return Err(Failure::context("--context given twice"));
         }
     }
+    let mut waits = request.options.iter().filter_map(|o| match o {
+        OpGetOption::Wait(limit) => Some(*limit),
+        _ => None,
+    });
+    let wait = waits.next().map(super::wait::Wait::start).transpose()?;
+    if waits.next().is_some() {
+        return Err(Failure::input("wait", "--wait given twice"));
+    }
     let target = Target::resolve(context)?;
     envelope.target = json!(target);
     let qualified = format!("host/{authority:032x}/{}", hex::encode(&id));
     envelope.operation = json!({"kind":"host","authority":format!("{authority:032x}"),"request_id":hex::encode(&id),"id":qualified,"evidence":"authority_catalog"});
-    let answer = target.exchange(authority, &Ask::Status(id.to_vec()))?;
-    match answer {
-        Answer::State(d, group, _, phase) if d == id => {
-            target.check_group(&group)?;
-            envelope.target["group"] = json!(group.name);
-            envelope.target["incarnation"] = json!(group.incarnation.to_string());
-            let effect = match &phase {
-                Phase::Installed(..) => "committed",
-                Phase::Undecided(..) | Phase::Pending(..) => "possible",
-                _ => "none",
-            };
-            envelope.result = state_json(&d, &group, &phase);
-            decimal_counters(&mut envelope.result);
-            envelope.outcome =
-                json!({"kind":"Observed","phase":envelope.result["phase"],"effect":effect});
-            if !matches!(phase, Phase::Installed(..) | Phase::Failed(..)) {
-                envelope
-                    .next
-                    .push(json!({"method":"op get","operation":qualified}));
+    loop {
+        let query = Ask::Status(id.to_vec());
+        let answer = target.query(authority, &query, wait.as_ref())?;
+        let (d, group, phase) = match answer {
+            Answer::State(d, group, _, phase) if d == id => (d, group, phase),
+            Answer::Error(class, detail) => return Err(Failure::authority(class, detail)),
+            _ => return Err(Failure::damaged("host did not return the requested row")),
+        };
+        target.check_group(&group)?;
+        envelope.target["group"] = json!(group.name);
+        envelope.target["incarnation"] = json!(group.incarnation.to_string());
+        let effect = match &phase {
+            Phase::Installed(..) => "committed",
+            Phase::Undecided(..) | Phase::Pending(..) => "possible",
+            _ => "none",
+        };
+        envelope.result = state_json(&d, &group, &phase);
+        decimal_counters(&mut envelope.result);
+        if matches!(phase, Phase::AwaitDecision(_)) {
+            match target.query(authority, &Ask::Plan(id.to_vec()), wait.as_ref())? {
+                Answer::Plan(plan, hash) => {
+                    super::conversation::validate(&plan, &hash, authority, &id)?;
+                    envelope.result["plan"] = super::conversation::plan_json(&plan, &hash);
+                }
+                Answer::State(..) => continue,
+                Answer::Error(class, detail) => return Err(Failure::authority(class, detail)),
+                _ => return Err(Failure::damaged("expected the held plan")),
             }
-            Ok(())
         }
-        Answer::Error(class, detail) => Err(Failure::authority(class, detail)),
-        _ => Err(Failure::damaged("host did not return the requested row")),
+        envelope.outcome =
+            json!({"kind":"Observed","phase":envelope.result["phase"],"effect":effect});
+        envelope.next.clear();
+        if !matches!(phase, Phase::Installed(..) | Phase::Failed(..)) {
+            let method = if matches!(phase, Phase::AwaitDecision(..)) {
+                "op decide"
+            } else {
+                "op get"
+            };
+            envelope
+                .next
+                .push(json!({"method":method,"operation":qualified}));
+        }
+        let Some(wait) = &wait else { return Ok(()) };
+        let (kind, code) = match phase {
+            Phase::Installed(_, _, report)
+                if matches!(report.pause, crate::operator::Pause::StartFailed(_)) =>
+            {
+                ("Failed", 1)
+            }
+            Phase::Installed(..) => ("Completed", 0),
+            Phase::Failed(..) => ("Failed", 1),
+            Phase::Undecided(..) => ("Undecided", 75),
+            Phase::AwaitDecision(..) => ("AwaitDecision", 75),
+            _ => {
+                wait.poll()?;
+                continue;
+            }
+        };
+        envelope.exit = code;
+        envelope.outcome["kind"] = json!(kind);
+        return Ok(());
     }
 }
 
 // The legacy Status projection contains only unsigned counters as JSON numbers.
-fn decimal_counters(value: &mut Value) {
+pub(super) fn decimal_counters(value: &mut Value) {
     match value {
         Value::Number(n) => *value = json!(n.to_string()),
         Value::Array(items) => items.iter_mut().for_each(decimal_counters),

@@ -42,7 +42,7 @@ fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let SourceInput(m) = source_of("Stderr") else {
         return Error(())
     }
-    let _ = begin_held(mut r, request_id(47u64), SourceBegin(take m, true), runner.fate.none())
+    let _ = begin_input(mut r, request_id(47u64), SourceBegin(take m, true), false)
     let mut gated = false
     for q in r.asked {
         if let Admit(_, _, Source(_, true), _, _) = q {
@@ -184,8 +184,8 @@ fn install_admitted(mut r: Rig, old: launcher.Child) waits {
     helper_answers(mut r, helper_child(old, DescribeMode(a)), describe_answer())
     helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
-    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
-    let go = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), plan_bytes(operator.no_triggers()))
+    let go = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: digest_of(list.new()), changes: list.new())))))
     pump(mut r, take go)
     answer(mut r, old, PlaceInstalled(2u64, true))
 }

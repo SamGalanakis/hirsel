@@ -9,4 +9,6 @@ host_v1.Group(
     grants: [Clock],
     package_roots: [],
     args: [],
+    front: Some(Http(["orders.example"])),
+    recording: Some(Recording(dir: "/srv/orders/recordings", retention_days: 30)),
 )

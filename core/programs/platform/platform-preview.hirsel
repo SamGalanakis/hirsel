@@ -18,15 +18,16 @@ fn decision_of(input: operator.Input, gate: Option[launcher.Green], stage: opera
         SourceInput(b) => Some(digest_of(b)),
         _ => None,
     }
-    operator.Decision(tree: tree, root: root, stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
+    let toolchain: Option[Bytes] = match gate { Some(green) => Some(clone(green.toolchain)), None => None }
+    operator.Decision(gate_toolchain: toolchain, tree: tree, root: root, stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
 }
 
 // Request d waits for the operator's decision on grant diff `diff`, durably and with no
 // attempt, so a restart or a lost connection keeps the hold (launch.md "Deploy preview").
-fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
+fn hold(mut h: Host, d: Bytes, facts: operator.Decision) waits {
     let made = {
         let t = view h.t
-        let shown = view diff
+        let shown = view facts
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(shown)), fn(mut tx, call_env) -> Result[(), Refused] {
             let Some(found) = st(store.fetch(tx, call_env.1 .requests, call_env.0))? else {
                 return Ok(())
@@ -35,7 +36,8 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
             if let Done(_) = row.status {
                 return Ok(())
             }
-            row.status = Held(decision_of(row.input, row.gate, AdmissionStage, call_env.2, operator.no_triggers()))
+            row.status = Held(clone(call_env.2))
+            row.entries = None
             st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
@@ -56,7 +58,14 @@ fn hold_prepared(mut tx: store.Tx, t: Tables, d: Bytes, preview: operator.Previe
     if let Done(_) = row.status {
         return Ok(())
     }
-    row.status = Held(decision_of(row.input, row.gate, PreparedStage, preview.grants, preview.triggers))
+    let mut facts = decision_of(row.input, row.gate, PreparedStage, preview.grants, preview.triggers)
+    if let Some(admission) = row.admission_plan {
+        facts.root = clone(admission.root)
+        facts.approvals = clone(admission.approvals)
+    }
+    facts.migration = clone(preview.migration)
+    row.entries = Some(clone(preview.entries))
+    row.status = Held(take facts)
     st(store.put(mut tx, t.requests, d, row))
 }
 
@@ -73,24 +82,76 @@ fn needs_decision(h: Host, name: String, report: runner.TriggerReport) -> bool w
     let Ok(Some(r)) = request_row(h, row.request) else {
         return true
     }
-    if is_none(r.fates) {
-        return false
-    }
-    for scanned in report.rows {
-        if let Held = scanned.class {
-            let mut shown = false
-            for s in r.shown {
-                if s.path == scanned.path && s.schema == scanned.schema && s.hold == scanned.hold {
-                    shown = true
-                    break
-                }
-            }
-            if !shown {
+    let Some(prior) = view r.prepared_plan else {
+        for item in report.rows {
+            if let Held = item.class {
                 return true
             }
         }
+        return false
     }
-    false
+    let mut observed: runner.TriggerReport = clone(report)
+    // Fates were selected after the approved report. All other inventory fields
+    // are compared in canonical order, including rows that disappeared.
+    for index in 0u64 .. list.len(observed.rows) {
+        if let Held = observed.rows[index].class {
+            let expected = match r.fates {
+                Some(choices) => runner.fate.resolve(choices, observed.rows[index].path),
+                None => None,
+            }
+            if observed.rows[index].fate != expected {
+                return true
+            }
+        }
+        if index < list.len(prior.triggers.rows) {
+            observed.rows[index].fate = prior.triggers.rows[index].fate
+        }
+    }
+    plan_bytes(observed) != plan_bytes(prior.triggers)
+}
+
+// OLD attested the migration in the actual import. A later execution must also
+// preserve the entry revisions shown in any earlier Prepared decision.
+fn prepared_needs_decision(request: RequestRow, preview: operator.Preview) -> bool {
+    if let Some(entries) = request.approved_entries {
+        if plan_bytes(entries) != plan_bytes(preview.entries) {
+            return true
+        }
+    }
+    if let Some(prior) = request.prepared_plan {
+        if !is_none(prior.migration) {
+            return plan_bytes(prior.migration) != plan_bytes(preview.migration)
+        }
+    }
+    if let Some(m) = preview.migration {
+        return stops_at_plan(request) || m.digest != digest_of(list.new()) || list.len(m.changes) != 0u64
+    }
+    true
+}
+
+// Each held path has one choice. A single all choice covers this exact report.
+fn exact_fates(report: runner.TriggerReport, choices: runner.fate.Fates) -> bool {
+    if !runner.fate.well_formed(choices) {
+        return false
+    }
+    let mut paths: Map[Bytes, ()] = map.new()
+    for row in report.rows {
+        if let Held = row.class {
+            map.insert(mut paths, clone(row.path), ())
+        }
+    }
+    if let Some(_) = choices.all {
+        return map.len(paths) > 0u64 && list.len(choices.entries) == 0u64
+    }
+    if list.len(choices.entries) != map.len(paths) {
+        return false
+    }
+    for choice in choices.entries {
+        if !map.contains(paths, choice.path) {
+            return false
+        }
+    }
+    true
 }
 
 // A Decide (launch.md "Self-editing" "Holds and decisions"): request d must await exactly
@@ -99,7 +160,7 @@ fn needs_decision(h: Host, name: String, report: runner.TriggerReport) -> bool w
 // otherwise they must be `fate.none()`), then repeats d's admission under them, with a
 // fresh attempt and deadline and `conn` as its owner; an admission or prepare that then
 // needs another decision waits again.
-fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict: operator.Verdict, now: Now, mut out: List[launcher.Request]) waits {
+fn decide(mut h: Host, conn: u64, d: Bytes, submitted_digest: Bytes, verdict: operator.Verdict, now: Now, mut out: List[launcher.Request]) waits {
     let r = match request_row(h, d) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -111,12 +172,14 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict
             return
         },
     }
-    let waiting = match r.status {
-        Held(x) => operator.decision_bytes(x) == operator.decision_bytes(decision),
-        _ => false,
+    let Held(decision) = view r.status else {
+        refuse(mut h, conn, DeniedClass, "the request is not awaiting a decision")
+        return
     }
-    if !waiting {
-        refuse(mut h, conn, DeniedClass, "the request awaits no decision on exactly these facts")
+    let current_plan = deploy_plan(h, d, r, decision)
+    let hash = digest_of(plan_bytes(current_plan))
+    if submitted_digest != hash {
+        say(mut h, conn, PlanAnswer(take current_plan, take hash), true)
         return
     }
     let fates: runner.fate.Fates = match verdict {
@@ -129,8 +192,12 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict
         },
     }
     let fated = operator.shows_held(decision)
-    if !fated && (!is_none(fates.all) || list.len(fates.entries) > 0u64) {
-        refuse(mut h, conn, InvalidClass, "the decision shows no held run, so it takes no fates")
+    if !exact_fates(decision.triggers, fates) {
+        refuse(mut h, conn, InvalidClass, "the fates must cover exactly the held entries")
+        return
+    }
+    if let CreationStage = decision.stage {
+        create_approved(mut h, conn, d, r, now, mut out)
         return
     }
     let _ = map.remove(mut h.shown, d)
@@ -168,7 +235,7 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict
         let approved = view diff
         let gave = view given
         let saw = view shown
-        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved), store.copy_env(gave), store.copy_env(saw)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved), store.copy_env(gave), store.copy_env(saw), store.copy_env(decision)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
             let Some(found) = st(store.fetch(tx, call_env.2 .requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
@@ -183,9 +250,20 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict
             row.deadline_ms = call_env.1 .wall_ms + ADMISSION_MS
             row.status = Open
             row.approved = clone(call_env.3)
-            if let Some(f) = call_env.4 {
-                row.fates = Some(clone(f))
+            if let AdmissionStage = call_env.6 .stage {
+                row.admission_plan = Some(clone(call_env.6))
+                row.prepared_plan = None
+                row.approved_entries = None
+            } else {
+                row.prepared_plan = Some(clone(call_env.6))
+                row.approved_entries = clone(row.entries)
+            }
+            if let PreparedStage = call_env.6 .stage {
+                row.fates = clone(call_env.4)
                 row.shown = clone(call_env.5)
+            } else {
+                row.fates = None
+                row.shown = list.new()
             }
             st(store.put(mut tx, call_env.2 .requests, call_env.0, row))?
             Ok(a)
@@ -254,9 +332,11 @@ fn open_phase(h: Host, name: String, d: Bytes, attempt: launcher.Attempt) -> ope
 fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[operator.EntryLine] {
     let mut lines: List[operator.EntryLine] = list.new()
     for o in old {
+        let mut revision: Option[Bytes] = None
         let mut change: operator.EntryChange = EntryRemoved
         for n in new {
             if n.described.identity == o.described.identity {
+                revision = Some(clone(n.revision))
                 change = if n.revision == o.revision {
                     EntryUnchanged
                 } else {
@@ -265,7 +345,7 @@ fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[op
                 break
             }
         }
-        list.push(mut lines, operator.EntryLine(identity: clone(o.described.identity), change: change))
+        list.push(mut lines, operator.EntryLine(identity: clone(o.described.identity), change: change, previous_revision: Some(clone(o.revision)), revision: take revision))
     }
     for n in new {
         let mut known = false
@@ -276,7 +356,7 @@ fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[op
             }
         }
         if !known {
-            list.push(mut lines, operator.EntryLine(identity: clone(n.described.identity), change: EntryAdded))
+            list.push(mut lines, operator.EntryLine(identity: clone(n.described.identity), change: EntryAdded, previous_revision: None, revision: Some(clone(n.revision))))
         }
     }
     list.sort(mut lines, fn(a: operator.EntryLine, b: operator.EntryLine) -> Order {
@@ -295,8 +375,7 @@ fn trigger_report(b: Bytes) -> Option[runner.TriggerReport] {
     }
 }
 
-// The deploy's fates: those an approved decision gave, else the `held` field of its
-// recorded Begin.
+// Only an approved Prepared decision supplies fates.
 fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
     let Some(row) = request_row(h, d)? else {
         return Error(Missing("deploy request"))
@@ -304,10 +383,7 @@ fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
     if let Some(f) = row.fates {
         return Ok(clone(f))
     }
-    let Some(BeginAsk(_, _, _, _, _, held)) = operator.decode_ask(row.begin) else {
-        return Error(Missing("deploy Begin"))
-    }
-    Ok(clone(held))
+    Ok(runner.fate.none())
 }
 
 // Read the contract from the original Begin, including after a grant decision or reconnect.
@@ -393,11 +469,11 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner
 
 // The fates OLD's settlement check settles held rows by (RUNNER-SPEC §14.3 "Preparing"). A
 // Fates that does not encode is sent empty, which OLD refuses.
-fn fates_bytes(f: runner.fate.Fates) -> Bytes {
-    match runner.fate.encode(f) {
-        Some(take raw) => take raw,
-        None => list.new(),
-    }
+fn settlement_bytes(f: runner.fate.Fates, shown: List[runner.TriggerScanRow]) -> Bytes {
+    let codec: std.codec.Codec[runner.Settlement] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, runner.Settlement(choices: clone(f), rows: clone(shown)), mut raw))
+    raw
 }
 
 // The migration fact OLD reported for the PREPARED it bound, with each changed catalog key

@@ -28,7 +28,7 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
         // A deploy waits for the session's inventory to be reconciled, so it can neither
         // race the adoption of a pending deploy nor bind a group twice.
         BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        BeginAsk(d, g, input, foreign, exec, held) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, now, mut out),
+        BeginAsk(d, target, input, foreign, exec, _) => begin(mut h, conn, ask, d, target, input, foreign, exec, now, mut out),
         DecideAsk(_, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         DecideAsk(d, decision, verdict) => decide(mut h, conn, d, decision, verdict, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
@@ -73,8 +73,26 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
             Ok(None) => refuse(mut h, conn, UnknownGroupClass, "no group has this name"),
             Error(_) => refuse(mut h, conn, StoreClass, "the catalog could not be read"),
         },
-        RegisterAsk(_, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        RegisterAsk(d, spec, input, foreign, exec) => register(mut h, conn, ask, d, spec, input, foreign, exec, now, mut out),
+        RegisterAsk(_, _, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        RegisterAsk(d, spec, input, foreign, exec, target, _) => register(mut h, conn, ask, d, spec, input, foreign, exec, target, now, mut out),
+        ObserveGroupAsk(name) => match subject_of(h, name) {
+            Ok(take target) => say(mut h, conn, PreconditionAnswer(take target), true),
+            Error(e) => refuse(mut h, conn, class_of(e), refused_text(e)),
+        },
+        PlanAsk(d) => match request_row(h, d) {
+            Ok(Some(row)) => match row.status {
+                Held(facts) => {
+                    let reply = plan_answer(h, d, row, facts)
+                    say(mut h, conn, take reply, true)
+                },
+                _ => {
+                    let p = phase_of(h, d, row)
+                    say(mut h, conn, state_answer(d, row, p), true)
+                },
+            },
+            Ok(None) => refuse(mut h, conn, UnknownRequestClass, "no request has this ID"),
+            Error(e) => refuse(mut h, conn, class_of(e), refused_text(e)),
+        },
         BackupAsk(_) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         BackupAsk(name) => backup_ask(mut h, conn, name, mut out),
     }

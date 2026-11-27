@@ -17,9 +17,6 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
     }
     let mut d = take adm
     let request: Bytes = clone(d.request)
-    if let Some(green) = summary.gate {
-        record_gate(mut h, request, green)
-    }
     let mut why = string.new()
     // OLD and NEW run side by side through the cutover, so the group's memory bounds both.
     if let Some(m) = g.memory {
@@ -31,22 +28,49 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
     // that diff (launch.md "Deploy preview"): without one the attempt is released and the
     // request waits durably for a Decide, so an approval given for another diff approves
     // nothing.
-    if why == "" && !launcher.grants_empty(summary.grants) && !same_grants(summary.grants, d.approved) {
+    let Ok(Some(row)) = request_row(h, request) else {
+        list.push(mut out, Release(a))
+        return
+    }
+    if !subject_still_current(h, row) {
         vol_put(mut h, name, take v)
         list.push(mut out, Release(a))
-        hold(mut h, request, summary.grants)
+        fail_request(mut h, request, ConflictClass, "the approved group predecessor changed")
+        return
+    }
+    let Some((_, _, foreign, exec)) = admission_ask(row.begin) else {
+        list.push(mut out, Release(a))
+        fail_request(mut h, request, StoreClass, "invalid stored submission")
+        return
+    }
+    let mut facts = decision_of(row.input, summary.gate, AdmissionStage, summary.grants, operator.no_triggers())
+    facts.root = Some(clone(root))
+    if display != "" {
+        facts.approvals = Some(operator.Approvals(r: clone(root), foreign: take foreign, exec: take exec, text: string.from(display)))
+    }
+    let approved = match row.admission_plan {
+        Some(previous) => operator.decision_bytes(previous) == operator.decision_bytes(facts),
+        None => false,
+    }
+    let needs_consent = !approved && (!launcher.grants_empty(summary.grants) || stops_at_plan(row) || !is_none(row.admission_plan) || display != "")
+    let baseline: Option[operator.Decision] = if !approved && !needs_consent && why == "" { Some(clone(facts)) } else { None }
+    if !is_none(baseline) || !is_none(summary.gate) {
+        if let Error(e) = record_admission(mut h, request, summary.gate, baseline) {
+            vol_put(mut h, name, take v)
+            list.push(mut out, Release(a))
+            fail_request(mut h, request, class_of(e), refused_text(e))
+            return
+        }
+    }
+    if why == "" && (needs_consent || (display != "" && is_none(owner_of(h, request)))) {
+        vol_put(mut h, name, take v)
+        list.push(mut out, Release(a))
+        hold(mut h, request, facts)
         return
     }
     let denied = why != ""
-    let confirming = !denied && display != ""
+    let confirming = !denied && display != "" && !is_none(owner_of(h, request))
     let owner = owner_of(h, request)
-    if confirming && is_none(owner) {
-        // Nobody is attached to confirm the text: the attempt is released, and an identical
-        // Begin repeats admission and is shown the display.
-        vol_put(mut h, name, take v)
-        list.push(mut out, Release(a))
-        return
-    }
     if denied {
         d.stage = Rejected(string.from(why))
         list.push(mut out, Release(a))
@@ -70,11 +94,12 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
 
 // Request d's gated source admitted green: its row records the tree, H and toolchain the
 // tests ran against (launch.md "The law gate" step 5), before any hold or assembly.
-fn record_gate(mut h: Host, d: Bytes, green: launcher.Green) waits {
+fn record_admission(mut h: Host, d: Bytes, green: Option[launcher.Green], baseline: Option[operator.Decision]) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
         let g = view green
-        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(g)), fn(mut tx, call_env) -> Result[(), Refused] {
+        let approved = view baseline
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(g), store.copy_env(approved)), fn(mut tx, call_env) -> Result[(), Refused] {
             let Some(found) = st(store.fetch(tx, call_env.1 .requests, call_env.0))? else {
                 return Ok(())
             }
@@ -82,14 +107,15 @@ fn record_gate(mut h: Host, d: Bytes, green: launcher.Green) waits {
             if let Done(_) = row.status {
                 return Ok(())
             }
-            row.gate = Some(clone(call_env.2))
+            row.gate = clone(call_env.2)
+            if let Some(facts) = call_env.3 {
+                row.admission_plan = Some(clone(facts))
+            }
             st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
     }
-    if let Error(e) = decided(mut h, take made) {
-        fail_request(mut h, d, class_of(e), refused_text(e))
-    }
+    decided(mut h, take made)
 }
 
 fn failure_class(why: launcher.Failure) -> operator.Class {

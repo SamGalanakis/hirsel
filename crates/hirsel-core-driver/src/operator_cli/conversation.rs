@@ -1,179 +1,253 @@
-//! Interpret the generated operator replies for one submission.
+//! A pinned operator exchange owns uploads and exact display confirmation until the host
+//! can continue without its client. A deadline only detaches this observer.
 use super::{
-    Approvals, CHUNK, Error, Pump, Source, UNAVAILABLE, Upload, class_name, connect, state_json,
+    CHUNK, Pump, Source, Upload,
+    context::Target,
+    finite::{Envelope, Failure, decimal_counters},
+    receipt, state_json,
+    wait::Wait,
 };
-use crate::code_admission::ObjectKey;
-use crate::launcher::session::{Attempt, Grants, Group};
-use crate::operator::{Answer, Ask, Class, DecisionStage, Fates, Needed, Pause, Phase, Verdict};
+use crate::launcher::session::Wire;
+use crate::operator::{Answer, Ask, DeployPlan, Forward, Needed, Pause, Phase};
 use hirsel_core_ids::hex;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::io::{self, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
-const BUSY_WAIT: Duration = Duration::from_secs(60);
-
-/// A Foreign or Exec policy refusal, which exits 2 like a refusal the CLI finds itself.
-fn policy_refusal(detail: &str) -> bool {
-    detail.starts_with("FFI-8: ")
-        || detail.starts_with("Exec[")
-        || detail.starts_with("Exec grants")
+pub(super) struct Exchange<'a> {
+    pub target: &'a Target,
+    pub authority: u128,
+    pub d: &'a [u8],
+    pub upload: Option<&'a Upload>,
+    pub source: Option<&'a Source>,
+    pub location: &'a receipt::Location,
+    pub wait: Option<&'a Wait>,
+    pub plan: bool,
 }
 
-/// One deploy or registration: its request, the upload, the display and the outcome.
-pub(super) struct Conversation<'a> {
-    state: &'a Path,
-    d: Vec<u8>,
-    command: &'static str,
-    upload: Option<Upload>,
-    approvals: Approvals,
-    /// The grant diff the operator approves, sent as a Decide when the request awaits an
-    /// Admission-stage decision on exactly it.
-    pub(super) decision: Option<Grants>,
-    /// The source tree whose blobs the host's `Need` asks for, when the input is a manifest.
-    pub(super) source: Option<Source>,
+pub(super) fn plan_json(p: &DeployPlan, hash: &[u8]) -> Value {
+    let create=p.create.as_ref().map(|g| json!({
+        "name":g.name,"tenant":g.tenant,"listen":g.listen,"workdir":g.workdir,"store":g.store,
+        "trusted":g.trusted,"memory_bytes":g.memory.map(|v|v.to_string()),"args":g.args,
+        "package_roots":g.packages.iter().map(|v|hex::encode(v)).collect::<Vec<_>>(),
+        "recording":g.record.as_ref().map(|r|json!({"dir":r.dir,"retention_seconds":r.retention_s.to_string()})),
+        "front":g.front.as_ref().map(|f|json!({"names":f.names,"forward":match f.forward{Forward::Http=>"http",Forward::Stream=>"stream"}})),
+    }));
+    let mut facts = super::decision_json(&p.facts);
+    decimal_counters(&mut facts);
+    let entries = p
+        .entries
+        .as_ref()
+        .map(|v| {
+            super::preview_json(&crate::operator::Preview {
+                entries: v.clone(),
+                ..Default::default()
+            })["entries"]
+                .clone()
+        })
+        .unwrap_or(json!("uncomputed"));
+    if p.facts.migration.is_none() {
+        facts["migration"] = json!("uncomputed");
+    }
+    if p.entries.is_none() {
+        facts["triggers"] = json!("uncomputed");
+    }
+    json!({"domain":p.domain,"authority":format!("{:016x}{:016x}",p.authority.hi,p.authority.lo),"request":hex::encode(&p.request),"plan_digest":hex::encode(hash),"intent_digest":hex::encode(&p.intent_digest),"input_digest":hex::encode(&p.input_digest),
+        "subject":{"name":p.subject.name,"generation":p.subject.generation.to_string(),"predecessor":p.subject.predecessor.map(|v|v.to_string()),"assembly":hex::encode(&p.subject.assembly),"store_id":p.subject.store_id.as_ref().map(|v|format!("{:016x}{:016x}",v.hi,v.lo)),"policy_digest":hex::encode(&p.subject.policy_digest)},
+        "incarnation":p.incarnation.map(|i|i.to_string()),"create":create,"facts":facts,"entries":entries})
 }
 
-impl<'a> Conversation<'a> {
-    pub(super) fn new(
-        state: &'a Path,
-        d: Vec<u8>,
-        command: &'static str,
-        upload: Option<Upload>,
-        approvals: Approvals,
-    ) -> Self {
-        Self {
-            state,
-            d,
-            command,
-            upload,
-            approvals,
-            decision: None,
-            source: None,
-        }
+pub(super) fn validate(
+    plan: &DeployPlan,
+    hash: &[u8],
+    authority: u128,
+    d: &[u8],
+) -> Result<(), Failure> {
+    if plan.request != d
+        || plan.domain != "hirsel.host.deploy.plan.v1"
+        || (u128::from(plan.authority.hi) << 64 | u128::from(plan.authority.lo)) != authority
+        || Sha256::digest(plan.encode()).as_slice() != hash
+    {
+        return Err(Failure::damaged("invalid plan identity or digest"));
     }
-
-    pub(super) fn run(self, ask: Ask) -> Result<i32, Error> {
-        let started = std::time::Instant::now();
-        loop {
-            match self.attach(&ask)? {
-                Some(code) => return Ok(code),
-                None if started.elapsed() < BUSY_WAIT => {
-                    std::thread::sleep(Duration::from_millis(250))
-                }
-                None => {
-                    eprintln!(
-                        "{}: the host stayed busy; resend request {}",
-                        self.command,
-                        hex::encode(&self.d)
-                    );
-                    return Ok(UNAVAILABLE);
-                }
-            }
+    Ok(())
+}
+pub(super) fn current(
+    target: &Target,
+    authority: u128,
+    d: &[u8],
+    wait: Option<&Wait>,
+) -> Result<(DeployPlan, Vec<u8>), Failure> {
+    match target.query(authority, &Ask::Plan(d.to_vec()), wait)? {
+        Answer::Plan(plan, hash) => {
+            validate(&plan, &hash, authority, d)?;
+            Ok((plan, hash))
         }
+        Answer::Error(c, v) => Err(Failure::authority(c, v)),
+        Answer::State(..) => Err(Failure::input(
+            "operation",
+            "operation has no outstanding decision",
+        )),
+        _ => Err(Failure::damaged("expected a held plan")),
     }
-
-    /// One attachment to the request: its exit status, or None when the host is busy and
-    /// the same request should be sent again.
-    fn attach(&self, ask: &Ask) -> Result<Option<i32>, Error> {
-        let mut reader = connect(self.state)?;
-        let out = Arc::new(Mutex::new(reader.try_clone()?));
-        out.lock().unwrap().send(ask)?;
-        let mut input = self
-            .source
-            .as_ref()
-            .map_or(Input::Recipe, |source| Input::Source {
-                source,
-                needed: Vec::new(),
-            });
-        let mut pump = None;
-        let mut approval = if matches!(ask, Ask::Decide(..)) {
-            None
-        } else {
-            self.decision.as_ref()
-        };
+}
+impl Exchange<'_> {
+    pub fn run(&self, ask: &Ask, env: &mut Envelope<'_>) -> Result<(), Failure> {
+        if let Some(w) = self.wait {
+            w.remaining()?;
+        }
+        let mut reader = self
+            .target
+            .open(self.authority, self.wait.map(|w| w.observer))?;
+        if self.wait.is_none() {
+            reader.set_read_timeout(None).map_err(Failure::io)?;
+        }
+        let out = Arc::new(Mutex::new(reader.try_clone().map_err(Failure::io)?));
+        if !self.plan {
+            env.outcome["effect"] = json!("possible");
+        }
+        self.target.send(&mut reader, self.authority, ask)?;
+        env.operation["evidence"] = json!("local_only");
+        let mut pump: Option<Pump> = None;
+        let mut blobs = Vec::new();
         let result = (|| loop {
-            let answer = match reader.recv() {
-                Ok(Some(answer)) => answer,
-                Ok(None) | Err(_) => break Ok(Some(self.lost())),
-            };
-            match input.reply(answer, &mut approval, &self.d)? {
-                Reply::Continue => {}
-                Reply::StartUpload(attempt) => {
-                    if pump.is_none() {
-                        let upload = self.upload.as_ref().ok_or_else(|| format!(
-                            "request {} uploads its input; resend it with `hirsel deploy R --request-id HEX`",
-                            hex::encode(&self.d)
-                        ))?;
-                        pump = Some(Pump::start(upload, &self.d, attempt, out.clone())?);
-                    }
+            let ans = reader
+                .recv()
+                .map_err(Failure::io)?
+                .ok_or_else(Failure::disconnected)?;
+            match ans {
+                Answer::Error(c, v) => {
+                    env.outcome["effect"] = json!("none");
+                    return Err(Failure::authority(c, v));
                 }
-                Reply::Blobs(source, attempt, wanted) => {
-                    let stream = source.stream(&wanted)?;
-                    if stream.is_empty() {
-                        continue;
-                    }
-                    let mut connection = out.lock().unwrap();
-                    let sent = stream
-                        .chunks(CHUNK)
-                        .try_for_each(|chunk| {
-                            connection.send(&Ask::Data(self.d.clone(), attempt, chunk.to_vec()))
-                        })
-                        .and_then(|()| connection.send(&Ask::End(self.d.clone(), attempt)));
-                    if sent.is_err() {
-                        break Ok(Some(self.lost()));
-                    }
+                Answer::Plan(p, h) => {
+                    validate(&p, &h, self.authority, self.d)?;
+                    env.result = plan_json(&p, &h);
+                    env.fail(Failure::input(
+                        "plan_digest",
+                        "the host returned a changed plan",
+                    ));
+                    env.outcome = json!({"kind":"PlanChanged","effect":"none"});
+                    return Ok(());
                 }
-                Reply::Objects(keys, last) => {
-                    if let Some(pump) = &mut pump
-                        && pump.need(keys, last).is_err()
+                Answer::Display(id, a, root, text) if id == self.d => {
+                    if !self.location.display_approved(&root, &text)? {
+                        return Err(Failure::damaged("display differs from the approved plan"));
+                    }
+                    let mut err = std::io::stderr().lock();
+                    err.write_all(text.as_bytes())
+                        .and_then(|()| err.flush())
+                        .map_err(Failure::io)?;
+                    out.lock()
+                        .unwrap()
+                        .send(&Ask::Confirm(
+                            id,
+                            a,
+                            Sha256::digest(text.as_bytes()).to_vec(),
+                        ))
+                        .map_err(Failure::io)?;
+                }
+                Answer::Need(id, a, keys, last) if id == self.d => {
+                    if self.source.is_some()
+                        || keys.first().is_some_and(|k| matches!(k, Needed::Blob(_)))
+                        || pump.is_none() && keys.is_empty()
                     {
-                        break Err("the local upload ended before the host's Need".into());
-                    }
-                }
-                Reply::Display(attempt, root, text) => {
-                    self.check_display(&root, &text)?;
-                    let mut stdout = io::stdout().lock();
-                    stdout.write_all(text.as_bytes())?;
-                    stdout.flush()?;
-                    let hash = Sha256::digest(text.as_bytes()).to_vec();
-                    let ask = Ask::Confirm(self.d.clone(), attempt, hash);
-                    if out.lock().unwrap().send(&ask).is_err() {
-                        break Ok(Some(self.lost()));
-                    }
-                }
-                Reply::Decide(ask) => {
-                    if out.lock().unwrap().send(&ask).is_err() {
-                        break Ok(Some(self.lost()));
-                    }
-                }
-                Reply::Report {
-                    d,
-                    group,
-                    phase,
-                    status,
-                } => {
-                    match &*phase {
-                        Phase::AwaitDecision(_) => eprintln!(
-                            "{}: request {} awaits the operator's decision; decide it with `hirsel decide --state DIR --request-id {}`",
-                            self.command,
-                            hex::encode(&self.d),
-                            hex::encode(&self.d)
-                        ),
-                        Phase::Failed(class, detail, _) => {
-                            eprintln!("{}: {}: {detail}", self.command, class_name(*class));
+                        for k in keys {
+                            let Needed::Blob(h) = k else {
+                                return Err(Failure::damaged("expected source blobs"));
+                            };
+                            blobs.push(h);
                         }
-                        _ => {}
+                        if last && !blobs.is_empty() {
+                            let src = self.source.ok_or_else(|| {
+                                Failure::blocked(
+                                    "InputRequired",
+                                    "resume the original source upload",
+                                )
+                            })?;
+                            let bytes = src.stream(&blobs).map_err(Failure::damaged)?;
+                            blobs.clear();
+                            let mut conn = out.lock().unwrap();
+                            for chunk in bytes.chunks(CHUNK) {
+                                conn.send(&Ask::Data(id.clone(), a, chunk.to_vec()))
+                                    .map_err(Failure::io)?;
+                            }
+                            conn.send(&Ask::End(id, a)).map_err(Failure::io)?;
+                        }
+                    } else {
+                        let keys = keys
+                            .into_iter()
+                            .map(|k| match k {
+                                Needed::Object(k) => Ok(k),
+                                _ => Err(Failure::damaged("expected code objects")),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        pump.as_mut()
+                            .ok_or_else(|| Failure::damaged("no upload for Need"))?
+                            .need(keys, last)
+                            .map_err(Failure::io)?;
                     }
-                    println!("{}", state_json(&d, &group, &phase));
-                    break Ok(Some(status));
                 }
-                Reply::Failed(class, detail) => {
-                    eprintln!("{}: {}: {detail}", self.command, class_name(class));
-                    break Ok(Some(1));
+                Answer::State(id, g, input, phase) if id == self.d => {
+                    self.target.check_group(&g)?;
+                    env.target["group"] = json!(g.name);
+                    env.target["incarnation"] = json!(g.incarnation.to_string());
+                    env.operation["evidence"] = json!("authority_catalog");
+                    env.result = state_json(&id, &g, &phase);
+                    decimal_counters(&mut env.result);
+                    let (kind, exit, effect) = match phase {
+                        Phase::AwaitInput(a)
+                            if matches!(input, crate::operator::Input::Attested(_)) =>
+                        {
+                            if pump.is_none() {
+                                let upload = self.upload.ok_or_else(|| {
+                                    Failure::blocked(
+                                        "InputRequired",
+                                        "resume the original recipe upload",
+                                    )
+                                })?;
+                                pump = Some(
+                                    Pump::start(upload, &id, a, out.clone())
+                                        .map_err(Failure::io)?,
+                                );
+                            }
+                            continue;
+                        }
+                        Phase::AwaitDecision(_) => {
+                            let (p, h) = current(self.target, self.authority, &id, self.wait)?;
+                            env.result = plan_json(&p, &h);
+                            env.next.push(
+                                json!({"method":"op decide","operation":env.operation["id"]}),
+                            );
+                            if self.plan {
+                                ("Planned", 0, "none")
+                            } else {
+                                ("AwaitDecision", 75, "none")
+                            }
+                        }
+                        Phase::Installed(_, _, r) if matches!(r.pause, Pause::StartFailed(_)) => {
+                            ("Failed", 1, "committed")
+                        }
+                        Phase::Installed(..) => ("Completed", 0, "committed"),
+                        Phase::Failed(..) => ("Failed", 1, "none"),
+                        Phase::Undecided(..) => ("Undecided", 75, "possible"),
+                        Phase::Assembling(_) | Phase::Preparing(_) | Phase::Pending(..)
+                            if self.wait.is_none() && !self.plan =>
+                        {
+                            env.next
+                                .push(json!({"method":"op get","operation":env.operation["id"]}));
+                            ("Accepted", 0, "possible")
+                        }
+                        _ => continue,
+                    };
+                    env.exit = exit;
+                    env.outcome = json!({"kind":kind,"effect":effect,"phase":env.result["phase"]});
+                    return Ok(());
                 }
-                Reply::Busy => break Ok(None),
+                _ => return Err(Failure::damaged("unexpected reply or different operation")),
             }
         })();
         reader.shutdown();
@@ -182,139 +256,14 @@ impl<'a> Conversation<'a> {
         }
         result
     }
-
-    fn lost(&self) -> i32 {
-        eprintln!(
-            "{}: outcome unknown: request {}",
-            self.command,
-            hex::encode(&self.d)
-        );
-        UNAVAILABLE
-    }
-
-    /// The display must name exactly the submitted recipe's Foreign bindings, and Exec
-    /// lines only when the operator approved Exec requests.
-    /// A source's H is compiled by the host, which the CLI cannot recompute, so a source's
-    /// display is shown unchecked; the host still admits only the approvals sent.
-    fn check_display(&self, root: &[u8], text: &str) -> Result<(), Error> {
-        let Some(upload) = &self.upload else {
-            return Ok(());
-        };
-        if root != upload.root.0 {
-            return Err("the host displayed approvals for another recipe".into());
-        }
-        let foreign = crate::launcher::deploy_foreign_lines(&upload.recipe, upload.root);
-        let exec = text
-            .strip_prefix(&foreign)
-            .ok_or("the host reported different Foreign bindings")?;
-        if !exec.is_empty() && self.approvals.exec.is_empty() {
-            return Err("the host displayed Exec approvals the operator did not request".into());
-        }
-        Ok(())
-    }
 }
-
-/// The request determines which kind of Need the host may send.
-enum Input<'a> {
-    Recipe,
-    Source {
-        source: &'a Source,
-        needed: Vec<[u8; 32]>,
-    },
-}
-
-enum Reply<'a> {
-    Continue,
-    StartUpload(Attempt),
-    Blobs(&'a Source, Attempt, Vec<[u8; 32]>),
-    Objects(Vec<ObjectKey>, bool),
-    Display(Attempt, Vec<u8>, String),
-    Decide(Ask),
-    Report {
-        d: Vec<u8>,
-        group: Group,
-        phase: Box<Phase>,
-        status: i32,
-    },
-    Failed(Class, String),
-    Busy,
-}
-
-impl<'a> Input<'a> {
-    fn reply(
-        &mut self,
-        answer: Answer,
-        approval: &mut Option<&Grants>,
-        request: &[u8],
-    ) -> Result<Reply<'a>, Error> {
-        match answer {
-            Answer::State(d, group, _, phase) => {
-                let status = match &phase {
-                    Phase::AwaitInput(_) if matches!(self, Self::Source { .. }) => {
-                        return Ok(Reply::Continue);
-                    }
-                    Phase::AwaitInput(attempt) => return Ok(Reply::StartUpload(*attempt)),
-                    Phase::AwaitDecision(held) => {
-                        if held.stage == DecisionStage::Admission
-                            && !held.shows_held()
-                            && *approval == Some(&held.grants)
-                        {
-                            approval.take();
-                            return Ok(Reply::Decide(Ask::Decide(
-                                request.to_vec(),
-                                held.clone(),
-                                Verdict::Approve(Fates::default()),
-                            )));
-                        }
-                        2
-                    }
-                    Phase::Undecided(..) => UNAVAILABLE,
-                    Phase::Installed(_, _, report) => match report.pause {
-                        Pause::StartFailed(_) => 1,
-                        _ => 0,
-                    },
-                    Phase::Failed(Class::Denied, detail, _) if policy_refusal(detail) => 2,
-                    Phase::Failed(..) => 1,
-                    _ => return Ok(Reply::Continue),
-                };
-                Ok(Reply::Report {
-                    d,
-                    group,
-                    phase: Box::new(phase),
-                    status,
-                })
-            }
-            Answer::Need(_, attempt, keys, last) => match self {
-                Self::Source { source, needed } => {
-                    for key in keys {
-                        let Needed::Blob(digest) = key else {
-                            return Err("the host asked a source upload for code objects".into());
-                        };
-                        needed.push(digest);
-                    }
-                    if last {
-                        Ok(Reply::Blobs(source, attempt, std::mem::take(needed)))
-                    } else {
-                        Ok(Reply::Continue)
-                    }
-                }
-                Self::Recipe => {
-                    let objects = keys
-                        .into_iter()
-                        .map(|key| match key {
-                            Needed::Object(key) => Ok(key),
-                            Needed::Blob(_) => {
-                                Err("the host asked a recipe upload for source blobs")
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Reply::Objects(objects, last))
-                }
-            },
-            Answer::Display(_, attempt, root, text) => Ok(Reply::Display(attempt, root, text)),
-            Answer::Error(Class::Busy, _) => Ok(Reply::Busy),
-            Answer::Error(class, detail) => Ok(Reply::Failed(class, detail)),
-            other => Err(format!("unexpected reply {other:?}").into()),
-        }
-    }
+pub(super) fn locate(
+    env: &mut Envelope<'_>,
+    target: &Target,
+    loc: &receipt::Location,
+    authority: u128,
+    d: &[u8],
+) {
+    env.target = json!(target);
+    env.operation = json!({"kind":"host","authority":format!("{authority:032x}"),"request_id":hex::encode(d),"id":loc.id,"evidence":"local_only"});
 }

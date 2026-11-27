@@ -1552,7 +1552,7 @@ pub type ExportCommand: send {
 pub type ReserveImport: send {
     checked: store.ValidatedImport,
     image: Bytes,
-    fates: fate.Fates,
+    fates: Settlement,
     answer: Sender[Result[store.ImportWork, store.DeployError]]
 }
 

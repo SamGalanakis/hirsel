@@ -233,6 +233,7 @@ impl Wire for Vec<Needed> {
 /// One operator connection.
 pub(crate) struct Connection {
     stream: UnixStream,
+    observer: Option<crate::operator_cli::Observer>,
 }
 
 /// The operator UID: this process's effective UID.
@@ -265,18 +266,51 @@ pub(crate) fn connect(state: &Path) -> io::Result<Connection> {
             "the operator socket's listener is another user",
         ));
     }
-    Ok(Connection { stream })
+    Ok(Connection {
+        stream,
+        observer: None,
+    })
 }
 
 impl Connection {
     pub(crate) fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,
+            observer: self.observer,
         })
     }
 
     pub(crate) fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         crate::host::socket_option(self.stream.set_read_timeout(timeout))
+    }
+
+    pub(crate) fn observe(&mut self, observer: crate::operator_cli::Observer) -> io::Result<()> {
+        let interval = Some(std::time::Duration::from_millis(100));
+        self.stream.set_read_timeout(interval)?;
+        self.stream.set_write_timeout(interval)?;
+        self.observer = Some(observer);
+        Ok(())
+    }
+
+    fn io<T>(&mut self, mut action: impl FnMut(&mut UnixStream) -> io::Result<T>) -> io::Result<T> {
+        loop {
+            if let Some(observer) = self.observer {
+                observer.check()?;
+            }
+            match action(&mut self.stream) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e)
+                    if self.observer.is_some()
+                        && matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                {
+                    continue;
+                }
+                result => return result,
+            }
+        }
     }
 
     pub(crate) fn send(&mut self, ask: &Ask) -> io::Result<()> {
@@ -290,7 +324,15 @@ impl Connection {
         let mut frame = Vec::with_capacity(4 + body.len());
         frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
         frame.extend_from_slice(&body);
-        self.stream.write_all(&frame)
+        let mut rest = frame.as_slice();
+        while !rest.is_empty() {
+            let count = self.io(|stream| stream.write(rest))?;
+            if count == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            rest = &rest[count..];
+        }
+        Ok(())
     }
 
     /// The next answer, reassembled from its `Part`s; None at a clean end between frames.
@@ -340,11 +382,10 @@ impl Connection {
         let mut size = [0; 4];
         let mut got = 0;
         while got < 4 {
-            match self.stream.read(&mut size[got..]) {
+            match self.io(|stream| stream.read(&mut size[got..])) {
                 Ok(0) if got == 0 => return Ok(None),
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(n) => got += n,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => (),
                 Err(error) => return Err(error),
             }
         }
@@ -353,7 +394,14 @@ impl Connection {
             return Err(malformed("operator frame too large"));
         }
         let mut body = vec![0; size];
-        self.stream.read_exact(&mut body)?;
+        let mut rest = body.as_mut_slice();
+        while !rest.is_empty() {
+            let count = self.io(|stream| stream.read(rest))?;
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            rest = &mut rest[count..];
+        }
         Answer::decode(&body).map(Some)
     }
 

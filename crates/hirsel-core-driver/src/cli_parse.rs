@@ -38,10 +38,12 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                     .iter()
                     .find(|option| {
                         option.flag.names.contains(&argument.as_str())
-                            || matches!(option.kind, Kind::OptionalMem(..) | Kind::RefuseMem)
-                                && argument
-                                    .split_once('=')
-                                    .is_some_and(|(name, _)| option.flag.names.contains(&name))
+                            || matches!(
+                                option.kind,
+                                Kind::OptionalWait(_) | Kind::OptionalMem(..) | Kind::RefuseMem
+                            ) && argument
+                                .split_once('=')
+                                .is_some_and(|(name, _)| option.flag.names.contains(&name))
                     })
                     .ok_or_else(|| {
                         format!("unknown option `{argument}` for {name}; use help {name}")
@@ -51,9 +53,22 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                     Kind::Value(metavar, parse) => parse(
                         arguments
                             .next()
-                            .filter(|value| command.contract.is_none() || !value.starts_with('-'))
+                            .filter(|value| {
+                                command.contract.is_none()
+                                    || !value.starts_with('-')
+                                    || (command.name == "op decide"
+                                        && argument == "--decision"
+                                        && value == "-")
+                            })
                             .ok_or_else(|| format!("{argument} requires {metavar}"))?,
                     ),
+                    Kind::OptionalWait(parse) => {
+                        let limit = argument
+                            .split_once('=')
+                            .map(|(_, value)| crate::operator_cli::wait_duration(value))
+                            .transpose()?;
+                        parse(limit)
+                    }
                     Kind::Help => return Ok(Action::Help(Some(command))),
                     Kind::RefuseMem => {
                         return Err(
@@ -105,6 +120,7 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             .iter()
             .filter_map(|a| {
                 let value = match a.kind {
+                    Kind::OptionalWait(_) => Some("[=DURATION]"),
                     Kind::RefuseMem => return None,
                     Kind::Value(m, _) | Kind::OptionalMem(m, _) => Some(m),
                     _ => None,
@@ -127,6 +143,7 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
     fn write_help(&self, out: &mut String) {
         for Argument { flag, kind } in self.options {
             let metavar = match kind {
+                Kind::OptionalWait(_) => "[=DURATION]".to_owned(),
                 Kind::RefuseMem => continue,
                 Kind::Value(metavar, _) | Kind::OptionalMem(metavar, _) => format!(" {metavar}"),
                 Kind::Switch(_) | Kind::Help => String::new(),

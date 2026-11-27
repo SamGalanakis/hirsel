@@ -19,16 +19,23 @@ pub type Group {
     package_roots: List[String],
     args: List[String],
     front: Option[Front],
-    recording: Option[bool],
-    retention: Option[u64],
+    recording: Option[Recording],
 }
 
-pub type Front = Http | Stream
+pub type Front = Http(List[String]) | Stream(List[String])
+
+pub type Recording {
+    dir: String,
+    retention_days: u64,
+}
 
 pub type Decision {
-    plan: String,
+    plan_digest: String,
+    verdict: Verdict,
     all: Option[Fate],
     entries: Map[String, Fate],
 }
+
+pub type Verdict = Approve | Refuse
 
 pub type Fate = Release | Cancel

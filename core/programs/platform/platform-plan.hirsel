@@ -1,0 +1,203 @@
+// A name retains its last allocated incarnation after removal. Both ordinary
+// registration and restore adoption allocate in the same catalog transaction.
+fn subject_of(h: Host, name: String) -> Result[operator.Precondition, Refused] waits {
+    let snap = store.snapshot(h.db)
+    let rd = result.unwrap(store.reader(h.db, 0u64))
+    let generation = match st(store.get(rd, snap, h.t.name_generations, name))? {
+        Some(v) => v,
+        None => 0u64,
+    }
+    let mut subject = operator.Precondition(name: string.from(name), generation: generation, predecessor: None, assembly: list.new(), store_id: None, policy_digest: list.new())
+    if let Some(g) = st(store.get(rd, snap, h.t.groups, name))? {
+        subject.predecessor = Some(g.activation)
+        subject.assembly = clone(g.assembly)
+        subject.store_id = match g.store_id {
+            Some((hi, lo)) => Some(operator.CatalogStore(hi: hi, lo: lo)),
+            None => None,
+        }
+        let trusted = match g.author {
+            Trusted => true,
+            Untrusted => false
+        }
+        let policy = operator.Registration(name: string.from(name), tenant: string.from(g.tenant), workdir: string.from(g.workdir), trusted: trusted, listen: string.from(g.listen), store: string.from(g.store), memory: g.memory, args: clone(g.args), record: clone(g.record), front: clone(g.front), packages: clone(g.packages))
+        subject.policy_digest = digest_of(plan_bytes(policy))
+    }
+    Ok(take subject)
+}
+
+fn plan_bytes[T: codec](value: T) -> Bytes {
+    let codec: std.codec.Codec[T] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, value, mut raw))
+    raw
+}
+
+fn matches_subject(h: Host, expected: operator.Precondition) -> bool waits {
+    match subject_of(h, expected.name) {
+        Ok(current_subject) => plan_bytes(expected) == plan_bytes(current_subject),
+        _ => false,
+    }
+}
+
+// Recheck the original predecessor at admission and at install. A creation now
+// owns the reserved, still-empty incarnation described by its original spec.
+fn subject_still_current(h: Host, row: RequestRow) -> bool waits {
+    match operator.decode_ask(row.begin) {
+        Some(BeginAsk(_, expected, _, _, _, _)) => matches_subject(h, expected),
+        Some(RegisterAsk(_, spec, _, _, _, _, _)) => {
+            let expected = operator.Precondition(name: string.from(spec.name), generation: row.group.incarnation, predecessor: Some(0u64), assembly: list.new(), store_id: None, policy_digest: digest_of(plan_bytes(spec)))
+            matches_subject(h, expected)
+        },
+        _ => false,
+    }
+}
+
+fn stops_at_plan(row: RequestRow) -> bool {
+    match operator.decode_ask(row.begin) {
+        Some(BeginAsk(_, _, _, _, _, planned)) => planned,
+        Some(RegisterAsk(_, _, _, _, _, _, planned)) => planned,
+        _ => false,
+    }
+}
+
+fn deploy_plan(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> operator.DeployPlan {
+    let (subject, create): (operator.Precondition, Option[operator.Registration]) = match option.unwrap(operator.decode_ask(row.begin)) {
+        BeginAsk(_, target, _, _, _, _) => (clone(target), None),
+        RegisterAsk(_, spec, _, _, _, target, _) => (clone(target), Some(clone(spec))),
+        _ => fail("invalid stored deploy intent"),
+    }
+    let catalog = store.identity(h.db)
+    operator.DeployPlan(domain: "hirsel.host.deploy.plan.v1", authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 { None } else { Some(row.group.incarnation) }, create: take create, input_digest: digest_of(plan_bytes(row.input)), facts: clone(facts), entries: clone(row.entries))
+}
+
+fn plan_answer(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> operator.Answer {
+    let plan = deploy_plan(h, d, row, facts)
+    let hash = digest_of(plan_bytes(plan))
+    PlanAnswer(take plan, take hash)
+}
+
+// A new creation proposal records the observed absence. The name, listener and
+// quota are reserved only after the operator approves this stage.
+fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.Registration, requested: operator.Input, foreign: List[String], exec: List[String], expected: operator.Precondition, now: Now, mut out: List[launcher.Request]) waits {
+    if list.len(d) != 16u64 {
+        refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
+        return
+    }
+    let canonical = operator.ask_bytes(ask)
+    let found = match request_row(h, d) {
+        Ok(f) => f,
+        Error(_) => {
+            refuse(mut h, conn, StoreClass, "the catalog could not be read")
+            return
+        },
+    }
+    if let Some(r) = found {
+        if r.begin != canonical {
+            refuse(mut h, conn, ConflictClass, "this request ID names another request")
+            return
+        }
+        reattach(mut h, conn, d, r, now, mut out)
+        return
+    }
+    if expected.name != spec.name || !is_none(expected.predecessor) || !matches_subject(h, expected) {
+        refuse(mut h, conn, ConflictClass, "the expected absence changed")
+        return
+    }
+    if spec.name == "" || spec.tenant == "" || spec.listen == "" || spec.store == "" {
+        refuse(mut h, conn, InvalidClass, "a registration names its group, tenant, listener and store")
+        return
+    }
+    if let Some((class, why)) = admission_refusal(h, spec.name, registered_row(spec, 0u64), d, requested, foreign, exec) {
+        refuse(mut h, conn, class, why)
+        return
+    }
+    // An earlier registration of this name that lost its input past its deadline fails
+    // here and removes its group; one still running holds the name.
+    if let Ok(Some(_)) = group_row(h, spec.name) {
+        if registering(h, spec.name) && active_holds(mut h, spec.name, d, now) {
+            refuse(mut h, conn, BusyClass, "the group is still registering")
+            return
+        }
+    }
+    if store_owned(h, spec.store) {
+        refuse(mut h, conn, ConflictClass, "another group owns this store")
+        return
+    }
+    let facts = decision_of(requested, None, CreationStage, launcher.no_grants(), operator.no_triggers())
+    let proposal = RequestRow(begin: take canonical, group: group_of(spec.name, 0u64), input: clone(requested), attempt: launcher.Attempt(hi: 0u64, lo: 0u64), deadline_ms: 0u64, status: Held(take facts), approved: launcher.no_grants(), admission_plan: None, prepared_plan: None, entries: None, approved_entries: None, fates: None, shown: list.new(), gate: None)
+    let saved = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(t), store.copy_env(d), store.copy_env(proposal)), fn(mut tx, env) -> Result[(), Refused] {
+            st(store.put(mut tx, env.0 .requests, env.1, env.2))
+        })
+    }
+    if let Error(e) = decided(mut h, take saved) {
+        refuse(mut h, conn, class_of(e), refused_text(e))
+        return
+    }
+    let p = phase_of(h, d, proposal)
+    say(mut h, conn, state_answer(d, proposal, p), true)
+}
+
+// Creation consent consumes the observed absence in the same transaction that
+// reserves the name, incarnation, tenant quota and original request.
+fn create_approved(mut h: Host, conn: u64, d: Bytes, proposal: RequestRow, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(RegisterAsk(_, spec, requested, foreign, exec, expected, _)) = operator.decode_ask(proposal.begin) else {
+        refuse(mut h, conn, ProtocolClass, "expected a creation proposal")
+        return
+    }
+    if store_owned(h, spec.store) || !matches_subject(h, expected) {
+        map.insert(mut h.owners, clone(d), conn)
+        fail_request(mut h, d, ConflictClass, "the observed absence or store reservation changed")
+        return
+    }
+    let canonical = view proposal.begin
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(requested), store.copy_env(now), store.copy_env(spec), store.copy_env(canonical), store.copy_env(t)), fn(mut tx, call_env) -> Result[(GroupRow, launcher.Attempt), Refused] {
+            if let Some(_) = st(store.fetch(tx, call_env.5 .groups, call_env.3 .name))? {
+                return Error(Exists)
+            }
+            let generation = match st(store.fetch(tx, call_env.5 .name_generations, call_env.3 .name))? {
+                Some(n) => n,
+                None => 0u64,
+            }
+            let Some(RegisterAsk(_, _, _, _, _, target, _)) = operator.decode_ask(call_env.4) else {
+                return Error(Missing("creation intent"))
+            }
+            if generation != target.generation {
+                return Error(Exists)
+            }
+            check_front_registration(tx, call_env.5, call_env.3 .listen, call_env.3 .front)?
+            let mut u = usage_of(tx, call_env.5, call_env.3 .tenant)?
+            if let Some(q) = quota_of(tx, call_env.5, call_env.3 .tenant)? {
+                if u.groups >= q.groups {
+                    return Error(Full(Groups(string.from(call_env.3 .tenant), q.groups)))
+                }
+            }
+            let mut meta = meta_of(tx, call_env.5)?
+            let g = registered_row(call_env.3, meta.next_incarnation)
+            meta.next_incarnation += 1u64
+            st(store.put(mut tx, call_env.5 .meta, 0u64, meta))?
+            st(store.put(mut tx, call_env.5 .name_generations, call_env.3 .name, g.incarnation))?
+            st(store.put(mut tx, call_env.5 .groups, call_env.3 .name, g))?
+            u.groups += 1u64
+            st(store.put(mut tx, call_env.5 .usage, call_env.3 .tenant, u))?
+            let a = fresh_attempt(mut tx, call_env.5)?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, status: Open, approved: launcher.no_grants(), admission_plan: None, prepared_plan: None, entries: None, approved_entries: None, fates: None, shown: list.new(), gate: None)))?
+            st(store.put(mut tx, call_env.5 .active, call_env.3 .name, call_env.0))?
+            Ok((g, a))
+        })
+    }
+    let (g, a) = match decided(mut h, take made) {
+        Ok(pair) => pair,
+        Error(e) => {
+            map.insert(mut h.owners, clone(d), conn)
+            fail_request(mut h, d, class_of(e), refused_text(e))
+            return
+        },
+    }
+    map.insert(mut h.owners, clone(d), conn)
+    list.push(mut out, bind_request(spec.name, g))
+    open_input(mut h, spec.name, g, d, a, requested, false, foreign, exec, launcher.no_grants(), now.wall_ms + ADMISSION_MS, now, mut out)
+}

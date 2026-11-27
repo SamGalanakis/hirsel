@@ -9,66 +9,26 @@ use std::path::{Path, PathBuf};
 /// attested publishers.
 pub(super) const ENVELOPE_FILE: &str = "admission";
 
-fn envelope_value(
-    lines: &std::collections::BTreeMap<String, String>,
-    key: &str,
-) -> Result<String, String> {
-    lines
-        .get(key)
-        .cloned()
-        .ok_or_else(|| format!("missing {key}"))
-}
-
-/// Parse the host's declared admission envelope. `outstanding` derives from the closure
-/// bound because both count objects; the decoder nesting ceiling is independent of host
-/// sizing. The wire deadline is not part of the envelope: one admission deadline governs it.
-pub(super) fn parse_envelope(text: &str) -> Result<AdmissionLimits, String> {
-    let mut lines = std::collections::BTreeMap::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(format!("line {} is not key=value", n + 1));
-        };
-        if lines
-            .insert(key.trim().to_owned(), value.trim().to_owned())
-            .is_some()
-        {
-            return Err(format!("{key} repeats"));
-        }
-    }
-    let usize_value = |key: &str| -> Result<usize, String> {
-        envelope_value(&lines, key)?
-            .parse::<usize>()
+fn parse_envelope(text: &str) -> Result<AdmissionLimits, String> {
+    use hirsel_config_schema::{Config, host_v1::Admission};
+    let v = Admission::read(text.as_bytes(), Default::default()).map_err(|e| e.to_string())?;
+    let positive = |value: u64, field: &str| {
+        usize::try_from(value)
             .ok()
-            .filter(|&n| n != 0)
-            .ok_or_else(|| format!("{key} is not a positive decimal"))
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("{field} must be a positive addressable size"))
     };
-    let object_bytes = envelope_value(&lines, "object_bytes")?
-        .parse::<u64>()
-        .ok()
-        .filter(|&n| n != 0)
-        .ok_or_else(|| "object_bytes is not a positive decimal".to_owned())?;
-    let closure_objects = usize_value("closure_objects")?;
-    let known = [
-        "recipe_bytes",
-        "closure_objects",
-        "object_bytes",
-        "decoded_bytes",
-        "members",
-        "edges",
-    ];
-    if let Some(key) = lines.keys().find(|key| !known.contains(&key.as_str())) {
-        return Err(format!("unknown key {key}"));
+    let closure_objects = positive(v.closure_objects, "closure_objects")?;
+    if v.object_bytes == 0 {
+        return Err("object_bytes must be positive".into());
     }
     Ok(AdmissionLimits {
-        recipe_bytes: usize_value("recipe_bytes")?,
+        recipe_bytes: positive(v.recipe_bytes, "recipe_bytes")?,
         closure_objects,
-        object_bytes,
-        decoded_bytes: usize_value("decoded_bytes")?,
-        members: usize_value("members")?,
-        edges: usize_value("edges")?,
+        object_bytes: v.object_bytes,
+        decoded_bytes: positive(v.decoded_bytes, "decoded_bytes")?,
+        members: positive(v.members, "members")?,
+        edges: positive(v.edges, "edges")?,
         nesting: DECODER_NESTING,
         outstanding: closure_objects,
         timeout: None,
@@ -77,7 +37,7 @@ pub(super) fn parse_envelope(text: &str) -> Result<AdmissionLimits, String> {
 
 pub(crate) fn envelope_text(limits: &AdmissionLimits) -> String {
     format!(
-        "recipe_bytes={}\nclosure_objects={}\nobject_bytes={}\ndecoded_bytes={}\nmembers={}\nedges={}\n",
+        "host_v1.Admission(recipe_bytes: {}, closure_objects: {}, object_bytes: {}, decoded_bytes: {}, members: {}, edges: {})\n",
         limits.recipe_bytes,
         limits.closure_objects,
         limits.object_bytes,

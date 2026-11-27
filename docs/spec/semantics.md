@@ -416,8 +416,9 @@ all of that. A codec has one of two forms, and its fingerprint says which:
 - **Structural.** The built-in codecs that `of` and `key_of` resolve to, the std codecs of
   `List`, `Bytes`, `Option`, `Map`, `Result`, tuples, `Desc` and the scalars, and every
   codec the checker generates from a declaration without `via`. Their fingerprint is a hash of
-  a **canonical descriptor** (below), which holds no code revision. So a conforming change to
-  how a rule is lowered, or to what it charges, leaves every structural fingerprint equal.
+  a **canonical descriptor** (below), whose structural nodes hold no code revision. So a
+  conforming change to how a rule is lowered, or to what it charges, leaves the fingerprint
+  of a codec that reaches no opaque part and no `via` node equal.
 - **Opaque.** Every codec whose bytes come from code that no std rule describes: a codec
   returned by the public `codec.make`, `codec.make_derived` or `codec.key_make`, whatever its
   parts are, and the part of a `via` codec that `to` and `from` decide. Its fingerprint is a
@@ -439,18 +440,20 @@ a text, and the family's **rule version**, a `u32`, then gives the family's inpu
 | family | inputs after the family and version |
 |---|---|
 | `unit`, `never`, `bool`, `char`, `u8` … `u64`, `i8` … `i64`, `f32`, `f64`, `string` | none |
-| `list` (`Bytes` is `list` over `u8`), `option` | the element's reference |
+| `list` (`Bytes` is `list` over `u8`), `option`, `desc` | the element's reference |
 | `map` | the key's reference, then the value's |
 | `result` | the `Ok` type's reference, then the `Error` type's |
 | `tuple` | the component count `n`, then `n` references in order |
-| `record` | the definition path (PROG-1) as a text, the entry count, then each entry in declared order, tombstones included: `0` for a field or `1` for a tombstone, its name as a text, its type's reference, then `0`, or `1` and the default's bytes as a text: the literal encoded by the field type's codec |
+| `record` | the definition path (PROG-1) as a text, the entry count, then each entry in declared order, tombstones included: `0` for a field or `1` for a tombstone, its name as a text, its type's reference, then `0`, or `1`, a `u32` byte count and the default's bytes: the literal encoded by the field type's codec |
 | `sum` | the definition path, the variant count, then each variant in declared order, so its tag is its position: `0` or `1` for removed, its name, the payload count and the payload references |
 | `via` | the definition path, then the reference of `R`, then the code revisions of `to` and of `from`, 32 bytes each |
 
-A key codec's node uses the same items under key families, which name the key byte rules:
-`key.unit`, `key.bool`, `key.u8` … `key.i64`, `key.bytes`, `key.string`, `key.desc` with its
-element's reference, `key.tuple` with its count and references, and the `key.record` and
-`key.sum` nodes of a generated key codec, laid out as `record` and `sum` are. A family's
+`Desc` is the one `via` type std declares, and it takes the `desc` family, not a `via` node:
+its `to` and `from` are part of std's rule. A key codec's node uses the same items under key
+families, which name the key byte rules: `key.unit`, `key.bool`, `key.u8` … `key.i64`,
+`key.bytes`, `key.string`, `key.desc` with its element's reference, and `key.tuple` with its
+count and references, the forms `key_of` selects. A key form std adds later gets a key family
+of its own. A family's
 inputs are exactly what changes its stored behaviour beyond its rule: its children, its
 declaration and every parameter a value depends on. Nothing else enters. The `least` hint,
 the `empty` flag, the order in which parts are called, steps, charges and allocation do not.

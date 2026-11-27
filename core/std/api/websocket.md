@@ -6,8 +6,9 @@ The module is pure RFC 6455 protocol logic over bytes. It performs no I/O,
 chooses no deadline, and generates no entropy. The socket owner supplies
 random client nonces and a fresh four-byte mask for each encoded client frame.
 
-`server` parses a bounded upgrade and returns the response and consumed byte
-offset. It selects `hirsel.4` wherever it appears in the offer. A missing
+`accept_head` checks a parsed opening head and returns the key span. A route
+can pass a required subprotocol. `server` parses a bounded upgrade and returns
+the response and consumed byte offset. It selects `hirsel.4` wherever it appears in the offer. A missing
 header or an offer without `hirsel.4` gives HTTP 400. `client` checks the 101 challenge and
 requires the selected `hirsel.4` protocol. A 4xx or 5xx answer fails with the
 server's status, so a full place's refusal reads as 503; any other answer that

@@ -539,7 +539,9 @@ type AssetServer: send {
     listener: Listener,
     c: Clock,
     tasks: Tasks,
-    entries: assets.Manifest
+    entries: assets.Manifest,
+    cfg: http.Config,
+    routes: router.Router[assets.Manifest]
 }
 
 fn asset_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: assets.Manifest) -> Result[http.Outcome, http.HandlerError] {
@@ -547,14 +549,16 @@ fn asset_reply(req: http.Request, scratch: Region, mut out: http.Responder, stat
 }
 
 fn serve_asset_law(take job: AssetServer) waits {
-    let AssetServer(listener: take listener, c: clock, tasks, entries: take state) = take job
+    let AssetServer(listener: take l, c, tasks, entries: take state, cfg: take cfg, routes: take routes) = take job
     let mut listeners: List[Listener] = list.with_capacity(1)
-    list.push(mut listeners, take listener)
-    let mut routes: router.Builder[assets.Manifest] = router.builder()
-    result.unwrap(router.add(mut routes, "GET", "/{path...}", router.raw(asset_reply)))
-    let mut cfg = test_config()
-    cfg.out_cap = 512
-    result.unwrap(http.serve(take listeners, clock, tasks, take cfg, result.unwrap(router.build(take routes)), take state))
+    list.push(mut listeners, take l)
+    result.unwrap(http.serve(take listeners, c, tasks, take cfg, take routes, take state))
+}
+
+fn listen_for_assets(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, take routes: router.Router[assets.Manifest]) -> (Task[()], Addr) waits {
+    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let job = AssetServer(listener: take listener, c, tasks, entries: asset_manifest(), cfg: take cfg, routes: take routes)
+    (task.spawn(tasks, bytes 262144, take job, serve_asset_law), addr)
 }
 
 fn gzip_hello() -> Bytes {
@@ -607,9 +611,11 @@ fn asset_wire(n: Net, c: Clock, addr: Addr, request: String, status: u16, tag: S
 // the representation body and Range does not change GET's status or bytes.
 // expect: run http_asset_validators(network) = true
 fn http_asset_validators(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
-    let job = AssetServer(listener: take listener, c, tasks, entries: asset_manifest())
-    let server = task.spawn(tasks, bytes 262144, take job, serve_asset_law)
+    let mut routes: router.Builder[assets.Manifest] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/{path...}", router.raw(asset_reply)))
+    let mut cfg = test_config()
+    cfg.out_cap = 512
+    let (server, addr) = listen_for_assets(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
     asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nRange: bytes=0-1\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes("hello")) && asset_wire(n, c, addr, "GET /index-2cf24dba.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"\r\n\r\n", 200, GZIP_TAG, "public, max-age=31536000, immutable", "gzip", "25", gzip_hello()) && asset_wire(n, c, addr, "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip\r\nIf-None-Match: W/\"3223ab15154bd181c783e5b434b108c68f5798bf10be7eb681faba9b6668bc65\"\r\n\r\n", 304, GZIP_TAG, "no-cache", "gzip", "", string.as_bytes("")) && asset_wire(n, c, addr, "HEAD /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\nAccept-Encoding: gzip;q=0\r\n\r\n", 200, IDENTITY_TAG, "no-cache", "", "5", string.as_bytes(""))
 }
 
@@ -1744,4 +1750,131 @@ fn http_fetch_pool_parked_handler(n: Net, c: Clock, tasks: Tasks) -> bool waits 
     let stop = take signal
     result.unwrap(channel.send(stop, ()))
     result.unwrap(task.join(take peer)) && before > pooled && first == pooled && second == pooled && after == before
+}
+
+fn single_listener_ws_echo(take handover: upgrade.Taken) waits {
+    let started: Result[upgrade.Started[()], upgrade.StartError] = upgrade.start(take handover)
+    let mut session = match take started {
+        Ok(take session) => take session,
+        Error(_) => return,
+    }
+    if !upgrade.established(mut session.socket) {
+        return
+    }
+    let until = At(session.clock, after_ms(host.mono_ns(session.clock), 90))
+    let mut decoder = websocket.decoder(Server, 256)
+    let mut encoder = websocket.encoder(Server, 256)
+    let mut input: Bytes = list.with_capacity(64)
+    let mut at: u64 = 0
+    loop {
+        match websocket.next(mut decoder, input, mut at) {
+            Need => {
+                list.drop_prefix(mut input, at)
+                at = 0
+                match upgrade.read(mut session.socket, mut input, until) {
+                    Ok(0) => return,
+                    Ok(_) => {},
+                    Error(_) => return,
+                }
+            },
+            Message(payload) => {
+                let mut frame: Bytes = list.with_capacity(list.len(payload) + 14)
+                let mask: Inline[u8, 4] =[0; 4]
+                if let Error(_) = websocket.encode(mut encoder, true, 2, payload, mask, mut frame) {
+                    return
+                }
+                let mut sent: u64 = 0
+                while sent < list.len(frame) {
+                    match upgrade.write(mut session.socket, list.slice(frame, sent, list.len(frame)), until) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            sent += n
+                        },
+                        Error(_) => return,
+                    }
+                }
+                return
+            },
+            _ => return,
+        }
+    }
+}
+
+fn single_listener_ws_route(req: http.Request, scratch: Region, mut out: http.Responder, state: assets.Manifest) -> Result[http.Outcome, http.HandlerError] {
+    http.websocket_upgrade(req, Some("hirsel.4"), 4096, (), single_listener_ws_echo)
+}
+
+fn single_listener_mcp(req: http.Request, scratch: Region, mut body: http.Body, state: assets.Manifest) -> Result[http.Outcome, http.HandlerError] waits {
+    let mut input: Bytes = list.with_capacity(512)
+    if let Some(inline) = http.inline_body(req) {
+        let _ = list.append(mut input, inline)
+    } else {
+        loop {
+            match http.read(mut body, mut input) {
+                Ok(0) => break,
+                Ok(_) => {},
+                Error(_) => break,
+            }
+        }
+    }
+    let expected = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"law\",\"version\":\"1\"}}}"
+    if input != expected {
+        return Ok(Reply(http.response(400, list.new(), true)?))
+    }
+    let mut reply = http.response(200, b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}", false)?
+    http.content_type(mut reply, ApplicationJson)?
+    Ok(Reply(take reply))
+}
+
+// HTTP-10 and RFC 6455 section 4.2. One std.http listener answers a static
+// GET, upgrades /hirsel and echoes one binary frame, and answers an MCP
+// initialize POST through a fixture handler. The accept value is RFC 6455 section 1.3's worked example.
+// expect: run http_single_listener_websocket_mcp(network) = true
+fn http_single_listener_websocket_mcp(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.out_cap = 512
+    cfg.state_max = 64
+    cfg.upgrades_max = 1
+    let mut routes: router.Builder[assets.Manifest] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/index.html", router.raw(asset_reply)))
+    result.unwrap(router.add(mut routes, "GET", "/hirsel", router.Route(handler: single_listener_ws_route, body_max: None, upgrade_bytes: Some(4096), stream_bytes: None, steps: None)))
+    result.unwrap(router.add(mut routes, "POST", "/mcp", router.Route(handler: single_listener_mcp, body_max: Some(4096), upgrade_bytes: None, stream_bytes: None, steps: None)))
+    let (_server, addr) = listen_for_assets(n, c, tasks, take cfg, result.unwrap(router.build(take routes)))
+    if !route_wire(n, c, addr, b"GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 200, "5", "", b"hello") {
+        fail("static GET did not return its body")
+    }
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let deadline = after_ms(host.mono_ns(c), 90)
+    let until = At(c, deadline)
+    let upgrade_request = string.as_bytes("GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n")
+    if !client_send(mut output, upgrade_request, until) {
+        return false
+    }
+    let mut received: Bytes = list.with_capacity(512)
+    if client_head(mut input, mut received, c, deadline) != 101 {
+        fail("WebSocket route did not return 101")
+    }
+    let mut head = http1.head()
+    if http1.response(received, mut head) != Complete || !asset_field(received, head, "Upgrade", "websocket") || !asset_field(received, head, "Connection", "Upgrade") || !asset_field(received, head, "Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") || !asset_field(received, head, "Sec-WebSocket-Protocol", "hirsel.4") {
+        fail("WebSocket response fields did not match RFC 6455")
+    }
+    let masked = b"\x82\x82\x01\x02\x03\x04ik"
+    if !client_send(mut output, masked, until) {
+        return false
+    }
+    while list.len(received) - head.end < 4 {
+        let max = list.capacity(received)
+        match host.recv_bounded(mut input, mut received, max, until) {
+            Ok(0) => return false,
+            Ok(_) => {},
+            Error(_) => return false,
+        }
+    }
+    if list.slice(received, head.end, head.end + 4) != b"\x82\x02hi" {
+        return false
+    }
+    let post = b"POST /mcp HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 148\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"law\",\"version\":\"1\"}}}"
+    route_wire(n, c, addr, post, 200, "130", "", b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}")
 }

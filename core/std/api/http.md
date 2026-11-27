@@ -49,6 +49,12 @@ Copy data into owned values to keep it in a reply. The handler returns
 `Reply(Response)`, `Stream(Spec)`, `Upgrade(Spec)` or an error.
 Streams and upgrades transfer the socket to a task admitted by the
 supervisor. [Streams](stream.md) · [Upgrade](upgrade.md)
+`websocket_upgrade` adapts an already routed RFC 6455 opening request to that
+handover. It checks the method, version, key, and upgrade tokens, plus the
+client's offer when the route requires a subprotocol. It returns a refusal as
+an ordinary reply (426 carries `Sec-WebSocket-Version: 13`) or adds the accept
+field and any selected subprotocol to the upgrade spec. The promoted task still calls `upgrade.start`; read-ahead bytes
+remain its first frame input.
 One task parses, routes, handles and writes each request in turn.
 
 `method`, `target`, `path`, `query` and `field` borrow request bytes.

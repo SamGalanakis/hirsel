@@ -43,22 +43,41 @@ fn connection(b: Bytes, h: http1.Head) -> bool {
     false
 }
 
-fn offers_current(b: Bytes) -> bool {
+fn offers_protocol(b: Bytes, wanted: Bytes) -> bool {
     let n = list.len(b)
     let mut at = 0u64
     while at < n {
-        while at < n && (b[at] == 44 || b[at] == 32 || b[at] == 9) {
-            at += 1u64
+        while at < n && (b[at] == b' ' || b[at] == b'\t') {
+            at += 1
         }
         let start = at
-        while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 {
-            at += 1u64
+        while at < n && http1.token(b[at]) {
+            at += 1
         }
-        if list.slice(b, start, at) == b"hirsel.4" {
+        let matches = list.slice(b, start, at) == wanted
+        while at < n && (b[at] == b' ' || b[at] == b'\t') {
+            at += 1
+        }
+        if at != n && b[at] != b',' {
+            return false
+        }
+        if matches {
             return true
+        }
+        if at < n {
+            at += 1
         }
     }
     false
+}
+
+fn require_protocol(b: Bytes, h: http1.Head, protocol: String) -> Result[(), u16] {
+    if let Some(span) = field(b, h, "sec-websocket-protocol")? {
+        if list.len(string.as_bytes(protocol)) != 0 && offers_protocol(part(b, span), string.as_bytes(protocol)) {
+            return Ok(())
+        }
+    }
+    Error(400)
 }
 
 /// RFC 6455 section 1.3 accept value. O(key bytes), Capacity on allocation.
@@ -73,34 +92,43 @@ pub fn accept(key: Bytes) -> Bytes {
     take out
 }
 
-fn server_checks(b: Bytes, h: http1.Head) -> Result[http1.Span, u16] {
+fn server_key(b: Bytes, h: http1.Head) -> Result[http1.Span, u16] {
     if part(b, h.method) != string.as_bytes("GET") || h.version != 1 {
         return Error(400)
     }
     if !connection(b, h) || !is_field(b, h, "upgrade", "websocket") {
         return Error(400)
     }
-    if !is_field(b, h, "sec-websocket-version", "13") {
+    let Some(version) = field(b, h, "sec-websocket-version")? else {
+        return Error(400)
+    }
+    if part(b, version) != b"13" {
         return Error(426)
     }
-    let key = match field(b, h, "sec-websocket-key")? {
-        Some(s) => s,
+    let Some(key) = field(b, h, "sec-websocket-key")? else {
+        return Error(400)
+    }
+    match base64.decode(part(b, key)) {
+        Some(decoded) => if list.len(decoded) != 16 {
+            return Error(400)
+        },
         None => return Error(400)
     }
     Ok(key)
 }
 
+/// Checks a parsed RFC 6455 request head and returns the challenge key span.
+/// The HTTP route owns the path and body-framing checks. Pass Some(protocol)
+/// to require an exact, case-sensitive subprotocol offer.
+pub fn accept_head(b: Bytes, h: http1.Head, subprotocol: Option[String]) -> Result[http1.Span, u16] {
+    let key = server_key(b, h)?
+    if let Some(protocol) = subprotocol {
+        require_protocol(b, h, protocol)?
+    }
+    Ok(key)
+}
+
 fn route_checks(b: Bytes, h: http1.Head) -> Result[(), u16] {
-    if part(b, h.target) != string.as_bytes("/hirsel") {
-        return Error(404)
-    }
-    let offered = match field(b, h, "sec-websocket-protocol")? {
-        Some(span) => offers_current(part(b, span)),
-        None => false,
-    }
-    if !offered {
-        return Error(400)
-    }
     // No HTTP body is consumed by an upgrade, so its framing cannot create
     // a second interpretation of the read-ahead as body bytes.
     if field(b, h, "transfer-encoding")? != None {
@@ -132,23 +160,23 @@ pub fn server(b: Bytes) -> Upgrade {
 
 /// Upgrade a request whose complete head has already been parsed.
 pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
-    let key = match server_checks(b, h) {
+    let key = match server_key(b, h) {
         Ok(x) => x,
         Error(status) => return Refused(status)
     }
-    match base64.decode(part(b, key)) {
-        Some(decoded) => if list.len(decoded) != 16 {
-            return Refused(400)
-        },
-        None => return Refused(400)
+    if part(b, h.target) != b"/hirsel" {
+        return Refused(404)
+    }
+    if let Error(code) = require_protocol(b, h, "hirsel.4") {
+        return Refused(code)
     }
     if let Error(code) = route_checks(b, h) {
         return Refused(code)
     }
-    let accepted = accept(part(b, key))
+    let challenge = accept(part(b, key))
     let mut out: Bytes = list.new()
     list.append(mut out, string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "))
-    list.append(mut out, accepted)
+    list.append(mut out, challenge)
     list.append(mut out, b"\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n")
     Upgraded(h.end, take out)
 }

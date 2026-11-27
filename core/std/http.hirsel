@@ -850,6 +850,31 @@ pub fn handover_limits(r: Request) -> (u64, u64) {
     (r.out_cap, r.state_max)
 }
 
+/// Adapts RFC 6455 onto the generic upgrade handover. The connection's already
+/// parsed head is checked once; the returned outcome is either the upgrade spec
+/// or the RFC refusal (426 carries `Sec-WebSocket-Version: 13`). The protocol
+/// task starts with `upgrade.start`, which writes the 101 and preserves
+/// the exact tail as initial frame input. A selected subprotocol must be offered.
+pub fn websocket_upgrade[A: codec + send](req: Request, subprotocol: Option[String], reserve: u64, arg: A, run: fn(take upgrade.Taken) waits) -> Result[Outcome, HandlerError] {
+    let key = match websocket.accept_head(req.input, req.head, subprotocol) {
+        Ok(x) => x,
+        Error(status) => {
+            let mut reply = response(status, list.new(), true)?
+            if status == 426 {
+                header(mut reply, b"Sec-WebSocket-Version", b"13")?
+            }
+            return Ok(Reply(take reply))
+        },
+    }
+    let mut spec = upgrade.spec(req, "websocket", reserve, arg, run)?
+    let challenge = websocket.accept(part(req.input, key))
+    list.push(mut spec.fields, (copy_bytes(b"Sec-WebSocket-Accept"), take challenge))
+    if let Some(protocol) = subprotocol {
+        list.push(mut spec.fields, (copy_bytes(b"Sec-WebSocket-Protocol"), copy_bytes(string.as_bytes(protocol))))
+    }
+    Ok(Upgrade(take spec))
+}
+
 /// Copies a borrowed field or body into the current handler's allowance.
 pub fn copy_bytes(b: Bytes) -> Bytes {
     let mut copied: Bytes = list.with_capacity(list.len(b))

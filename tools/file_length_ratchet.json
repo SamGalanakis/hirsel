@@ -43,9 +43,9 @@
     "reason": "comptime-phase3-std-2830: keep float table initializers private"
   },
   "core/std/http.hirsel": {
-    "lines": 3326,
-    "raise_revision": 7,
-    "reason": "http-server-https-2884"
+    "lines": 3351,
+    "raise_revision": 8,
+    "reason": "ws-single-listener-3201 adds the RFC 6455 upgrade adapter at the HTTP upgrade seam"
   },
   "core/std/json.hirsel": {
     "lines": 3602,
@@ -91,9 +91,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/tests/http_connection.hirsel": {
-    "lines": 1747,
-    "raise_revision": 2,
-    "reason": "std2-fetch-2129 places the pool admission and client identity laws with the HTTP connection laws"
+    "lines": 1880,
+    "raise_revision": 3,
+    "reason": "ws-single-listener-3201 adds the mixed-route law beside the HTTP connection fixtures"
   },
   "core/std/tests/json.hirsel": {
     "lines": 1240

@@ -13,12 +13,16 @@ import json
 from pathlib import Path
 
 # Bumped whenever any production changes, so an old seed never replays through another generator.
-VERSION = 1
+VERSION = 2
 MASK = (1 << 64) - 1
 ENTRIES = 32
 LARGE_ENTRIES = 8
 # Above every scope's needs and below the 2 GiB measured-process cap (the design's closed world).
 ROOT_LIMIT = 1 << 30
+# Every run's work sits inside one outer `bound steps ROOT_STEPS`: both engines' metering
+# injects its step limit into the first bound a run enters, and check_metering expects
+# that bound to cover the whole run (O5). It is far above any scope's n.
+ROOT_STEPS = 1 << 62
 
 # Record kinds of the tag stream; each record is three words: scope id, kind, payload.
 OK, OUT_OF_TIME, CAPACITY, CAUSED, ISOLATE_CAPACITY, O3A_FAIL = 1, 2, 3, 4, 5, 9
@@ -27,6 +31,7 @@ KIND_NAMES = {OK: 'ok', OUT_OF_TIME: 'out_of_time', CAPACITY: 'capacity', CAUSED
 CAUSE_BITS = ('Overflow', 'Bounds', 'Division', 'Unwrap', 'Fail', 'Cancelled', 'Capacity',
               'OutOfTime', 'Stack')
 STACK_BIT = 1 << CAUSE_BITS.index('Stack')
+CAPACITY_BIT = 1 << CAUSE_BITS.index('Capacity')
 
 
 class Stream:
@@ -103,7 +108,9 @@ class Floor:
 #   chain of more than n links;
 # - derived `==` on a list: min length times (element bytes plus one), quantum 32; the
 #   floor takes 8 per element (ceil(s / 4)), below the row's 9;
-# - `==` on String, and string.push: bytes (both operands for a comparison), quantum 4096.
+# - `==` on String, and string.push: bytes (both operands for a comparison), quantum 4096;
+# - a map fill: one loop step per inserted key (the insert's own core-source path is a
+#   named gap and adds nothing to L).
 PRODUCTIONS = (
     ('loop_static', (), False),
     ('loop_list', ('xs',), False),
@@ -115,9 +122,17 @@ PRODUCTIONS = (
     ('clone_chain', ('c',), False),
     ('eq_chain', ('c', 'c2'), False),
     ('walk_chain', ('c',), True),
+    ('map_fill', ('xs',), False),
     ('nested', (), False),
 )
 NAMES = [p[0] for p in PRODUCTIONS]
+# O4a (design, "O4: bytes ≤ bound"): productions whose MEM-24 logical charge the generator
+# knows exactly. Only `clone_list` allocates: a clone charges capacity equal to its length,
+# so s u64 elements charge 8·s bytes (already a multiple of 8). The others allocate nothing.
+# A scope built only from these may take a `bound bytes b` form, charged CLONE_BYTES per
+# element per `clone_list`.
+BYTES_KNOWN = ('loop_static', 'loop_list', 'sum', 'clone_list', 'eq_string', 'eq_list', 'eq_chain', 'walk_chain')
+CLONE_BYTES = 8
 
 
 def statement(name, stream, floor, k):
@@ -153,19 +168,26 @@ def statement(name, stream, floor, k):
     if name == 'walk_chain':
         floor.terms.append((1, 1))
         return 'h = mix(h, walk(c))'
+    if name == 'map_fill':
+        floor.terms.append((1, 1))
+        return (f'let mut m{k}: Map[u64, u64] = map.new()\nfor x in xs {{ map.insert(mut m{k}, x, x) }}\n'
+                f'h = mix(h, map.len(m{k}))')
     raise ValueError(name)
 
 
 @dataclass
 class Scope:
     id: int
-    form: str           # 'isolate_steps': isolate { bound steps n { body } }; 'steps_isolate': the reverse
+    # 'isolate_steps': isolate { bound steps n { body } }; 'steps_isolate': the reverse;
+    # 'isolate_bytes': isolate { bound bytes n { body } }, charged `charge`·size bytes (O4a).
+    form: str
     bound: int
     floor: Floor
     recursive: bool
     body: list
     children: list
     productions: list
+    charge: int = 0
 
 
 @dataclass
@@ -190,7 +212,7 @@ class Program:
         """Per scope: its bound, floor terms, recursion and nesting, for the driver's oracles."""
         return {s.id: dict(bound=s.bound, constant=s.floor.constant, terms=s.floor.terms,
                            recursive=s.recursive, children=[c.id for c in s.children],
-                           form=s.form, productions=s.productions)
+                           form=s.form, productions=s.productions, charge=s.charge)
                 for s in self.scopes.values()}
 
 
@@ -215,6 +237,7 @@ class Generator:
 
     def scope(self, policy, depth, size):
         scope_id = len(self.scopes)
+        self.scopes[scope_id] = None   # claim the id before the children take theirs
         form = ('isolate_steps', 'steps_isolate')[self.stream.below(2)]
         floor = Floor()
         body, children, productions = [], [], []
@@ -234,8 +257,19 @@ class Generator:
             body.append(statement(name, self.stream, floor, len(body)))
         result = Scope(scope_id, form, 0, floor, recursive, body, children, productions)
         self.scopes[scope_id] = result
-        result.bound = self.bound_for(floor, size)
+        if depth == 0 and set(productions) <= set(BYTES_KNOWN) and self.stream.below(3) == 0:
+            result.form = 'isolate_bytes'
+            result.charge = CLONE_BYTES * productions.count('clone_list')
+            result.bound = self.bytes_for(result.charge * size)
+        else:
+            result.bound = self.bound_for(floor, size)
         return result
+
+    def bytes_for(self, charge):
+        """b on either side of the predicted charge about equally often (O4a judges b ≥ charge)."""
+        if charge and self.stream.below(2) == 0:
+            return charge - 1 - self.stream.below(charge // 2 + 1)
+        return charge + self.stream.log_uniform(0, 12)
 
     def program(self, seed):
         policy = self.policy()
@@ -349,6 +383,15 @@ def render_scope(scope):
                 f'    Error(_) => rec(mut out, {i}, {ISOLATE_CAPACITY}, 0),\n')
         timed = 'Ok(Ok(Error(_))) => true'
         stack = 'Ok(Error(causes)) => (cause_mask(causes) & 256) != 0'
+    elif scope.form == 'isolate_bytes':
+        head = (f'  let r = isolate(fn() -> Result[(u64, List[u64]), Capacity] {{\n'
+                f'    bound bytes {n} {{\n{body}\n    }}\n  }})\n')
+        arms = (f'    Ok(Ok(Ok((v, nested)))) => {{ rec(mut out, {i}, {OK}, v); list.append(mut out, nested) }},\n'
+                f'    Ok(Ok(Error(_))) => rec(mut out, {i}, {CAPACITY}, {n}),\n'
+                f'    Ok(Error(causes)) => rec(mut out, {i}, {CAUSED}, cause_mask(causes)),\n'
+                f'    Error(_) => rec(mut out, {i}, {ISOLATE_CAPACITY}, 0),\n')
+        return (f'fn scope_{i}({PARAMS}) -> List[u64] {{\n{head}'
+                f'  let mut out: List[u64] = list.new()\n  match r {{\n{arms}  }}\n  out\n}}\n')
     else:
         head = (f'  let r = bound steps {n} {{\n    isolate(fn() -> (u64, List[u64]) {{\n{body}\n    }})\n  }}\n')
         arms = (f'    Ok(Ok(Ok((v, nested)))) => {{ rec(mut out, {i}, {OK}, v); list.append(mut out, nested) }},\n'
@@ -366,6 +409,18 @@ def render_scope(scope):
             f'  let accepted = ({accepted})\n'
             f'  if least > {n} && !accepted {{ rec(mut out, {i}, {O3A_FAIL}, least) }}\n'
             f'  out\n}}\n')
+
+
+# O5 exclusions (design, "O5: the R4 floor"): a map's path depends on the process's hash key,
+# and a spawning entry's on its schedule, so such entries stay out of `check_metering`.
+# The generator has no spawning production, so only maps are excluded today.
+UNMETERED = ('map_fill',)
+
+
+def metered(entry):
+    def walk(scope):
+        return not set(scope.productions) & set(UNMETERED) and all(walk(c) for c in scope.children)
+    return all(walk(scope) for scope in entry.scopes)
 
 
 def needed(entry):
@@ -392,7 +447,8 @@ def render_entry(entry):
         lines.append(f'  if !emit(out, scope_{scope.id}(c, c2, xs, ys, s1, s2, size)) {{ good = false }}\n')
     lines.append('  good\n}\n')
     lines.append(f'\npub fn ev_{entry.index}(out: Stdout) -> Result[(), ()] waits {{\n'
-                 f'  if case_{entry.index}(out, {entry.small_size}u64) {{ Ok(()) }} else {{ Error(()) }}\n}}\n')
+                 f'  let run = bound steps {ROOT_STEPS}u64 {{ case_{entry.index}(out, {entry.small_size}u64) }}\n'
+                 f'  match run {{ Ok(true) => Ok(()), _ => Error(()) }}\n}}\n')
     return ''.join(lines)
 
 
@@ -401,16 +457,19 @@ def render(program):
     parts += [render_scope(program.scopes[i]) for i in sorted(program.scopes)]
     parts += [render_entry(entry) for entry in program.entries]
     dispatch = '\n'.join(f'  if which == {e.index}u64 {{ good = case_{e.index}(out, size) }}' for e in program.entries)
+    dispatch = dispatch.replace('\n  ', '\n    ').replace('  if', '    if', 1)
     parts.append('pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {\n'
-                 '  let a0 = option.unwrap(args.get(argv, 0))\n'
-                 '  let a1 = option.unwrap(args.get(argv, 1))\n'
-                 '  let p0: Result[u64, ParseError] = int.parse(a0)\n'
-                 '  let p1: Result[u64, ParseError] = int.parse(a1)\n'
-                 '  let which = result.unwrap(p0)\n'
-                 '  let size = result.unwrap(p1)\n'
-                 '  let mut good = false\n'
+                 f'  let run = bound steps {ROOT_STEPS}u64 {{\n'
+                 '    let a0 = option.unwrap(args.get(argv, 0))\n'
+                 '    let a1 = option.unwrap(args.get(argv, 1))\n'
+                 '    let p0: Result[u64, ParseError] = int.parse(a0)\n'
+                 '    let p1: Result[u64, ParseError] = int.parse(a1)\n'
+                 '    let which = result.unwrap(p0)\n'
+                 '    let size = result.unwrap(p1)\n'
+                 '    let mut good = false\n'
                  f'{dispatch}\n'
-                 '  if good { Ok(()) } else { Error(Exit(status: 3)) }\n}\n')
+                 '    good\n  }\n'
+                 '  match run { Ok(true) => Ok(()), Ok(false) => Error(Exit(status: 3)), Error(_) => Error(Exit(status: 4)) }\n}\n')
     return '\n'.join(parts)
 
 
@@ -431,7 +490,7 @@ def write_package(program, directory):
     (directory / 'main.hirsel').write_text(program.source)
     meta = dict(version=VERSION, seed=program.seed, policy=program.policy, root_limit=ROOT_LIMIT,
                 entries=[dict(index=e.index, large=e.large, small_size=e.small_size, large_size=e.large_size,
-                              scopes=[s.id for s in e.scopes]) for e in program.entries],
+                              metered=metered(e), scopes=[s.id for s in e.scopes]) for e in program.entries],
                 scopes=program.predictions())
     (directory / 'program.json').write_text(json.dumps(meta, indent=1) + '\n')
     return directory

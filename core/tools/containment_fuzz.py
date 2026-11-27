@@ -3,7 +3,9 @@
 
 Design: docs/internal/containment-generator.md. Oracles: O1 (no run stop inside a contained
 scope), O2 (outcomes agree across engines, up to the spec's tolerances) and O3a (the
-predicted step floor forces OutOfTime).
+predicted step floor forces OutOfTime), O4a (a predicted byte fit admits no capacity), and with
+--meter-runtime O5 through check_metering, O4b (native bytes ≤ evaluator's) and O4c (0 bytes
+left admitted).
 Example: containment_fuzz.py once --seed 7 --builds evaluator,cranelift-dev \\
     --compiler hirsel --runtime libhirsel_core_rt.a --evaluator hirsel-core-contract-eval --out /tmp/c
          containment_fuzz.py range --seeds 0..200 --jobs 8 ... --out /tmp/c
@@ -18,9 +20,11 @@ import shutil
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import containment_gen as gen
 from contract_exec import Evaluator, library_sources, native_build
+from std_contracts import evaluator_meter, native_meter
 
 ROOT = Path(__file__).resolve().parents[2]
 # Each program run is capped, as SEED_TIMEOUT_SECONDS is in tools/sim-campaign; a run that
@@ -61,14 +65,30 @@ DEEP = ('clone_chain', 'eq_chain', 'walk_chain')
 
 
 def stop_form(program, scope_id):
-    productions = set(program['scopes'][str(scope_id)]['productions'])
+    productions, todo = set(), [scope_id]
+    while todo:   # a stop in a nested scope surfaces at its top-level ancestor
+        scope = program['scopes'][str(todo.pop())]
+        productions.update(scope['productions'])
+        todo.extend(scope['children'])
     return '+'.join(sorted(productions & set(DEEP))) or form(program, scope_id)
 
 
 def forced(scope, size):
     """O3a: L > n, so every build must report out_of_time."""
+    if scope['form'] == 'isolate_bytes':
+        return False
     least = scope['constant'] + sum(-(-a * size // q) for a, q in scope['terms'])
     return least > scope['bound']
+
+
+def fits(scope, size):
+    """O4a: the predicted MEM-24 charge is at most b, so no build may report capacity."""
+    return scope['form'] == 'isolate_bytes' and scope['charge'] * size <= scope['bound']
+
+
+def refused(record):
+    kind, payload = record
+    return kind == gen.CAPACITY or (kind == gen.CAUSED and payload & gen.CAPACITY_BIT)
 
 
 def accepted_forced(scope, record):
@@ -101,6 +121,10 @@ def judge_run(program, build, entry, size, outcome, reds):
         if record[0] == gen.O3A_FAIL or (forced(scope, size) and not accepted_forced(scope, record)):
             reds.append(red(f'containment:work-floor:{form(program, scope_id)}', build, entry, size,
                             f'scope {scope_id}: n {scope["bound"]}, record {gen.KIND_NAMES.get(record[0])} {record[1]}'))
+        if fits(scope, size) and refused(record):
+            reds.append(red(f'containment:o4a:{form(program, scope_id)}', build, entry, size,
+                            f'scope {scope_id}: charge {scope["charge"] * size} ≤ b {scope["bound"]}, '
+                            f'record {gen.KIND_NAMES.get(record[0])} {record[1]}'))
     if status == 3 and not any(r[0] == gen.O3A_FAIL for r in found.values()):
         reds.append(red(f'containment:escaped:{last}', build, entry, size, 'entry false without an O3a record'))
     return found
@@ -127,6 +151,8 @@ def tolerated(scope, size, a, b):
         return True   # FAIL-17: each build fixes its own stack allowance
     if gen.OUT_OF_TIME in kinds and kinds <= {gen.OK, gen.CAUSED, gen.OUT_OF_TIME}:
         return not forced(scope, size)   # MEM-30 Determinism, unless O3a forces out_of_time
+    if scope['form'] == 'isolate_bytes' and not fits(scope, size) and all(r[0] == gen.OK or refused(r) for r in (a, b)):
+        return True   # MEM-28: a build charges at most the logical charge, so it may fit where another refuses
     return False
 
 
@@ -194,6 +220,45 @@ def run_evaluator(resident, inputs, entry):
     return 'harness', stdout, json.dumps(outcome).encode()
 
 
+# check_metering's errors, by the check that raised them (core/tools/std_contracts.py).
+METER_CHECKS = (('differs within', 'o5-repeat'), ('below the MEM-30 floor', 'o5-floor'),
+                ('native bytes exceed', 'o4b'), ('was exceeded', 'o5-refusal'),
+                ('did not consistently refuse', 'o5-refusal-site'))
+
+
+def meter_red(error, build, entry, size):
+    text = str(error)
+    check = next((name for words, name in METER_CHECKS if words in text), 'metering')
+    return red(f'containment:{check}', build, entry, size, text)
+
+
+def meter_evaluator(resident, inputs, entry):
+    """O5 on the evaluator through check_metering; the reference for O4b and the native floor."""
+    case = SimpleNamespace(evaluator_instructions=None, root_limit=gen.ROOT_LIMIT)
+    return evaluator_meter(resident, inputs, f'gen@1/main/ev_{entry}', case, Quiet(), lambda case, result: (None, None))
+
+
+def meter_native(binary, entry, size, report, reference):
+    """O5 and O4b on one native build, run under the testing runtime's step report."""
+    command = [str(binary), str(entry), str(size)]
+    environment = {**os.environb, b'HIRSEL_TEST_METER_OUT': os.fsencode(report)}
+    environment.pop(b'HIRSEL_TEST_METER_LIMIT', None)
+    invoke = lambda env: subprocess.run(command, capture_output=True, env=env, timeout=RUN_SECONDS)
+    validate = lambda result: None if result.returncode in (0, 3) else f'status {result.returncode}: {result.stderr[-300:]!r}'
+    report.unlink(missing_ok=True)
+    if cause := validate(invoke(environment)):
+        raise ValueError(cause)
+    if not report.exists():
+        raise ValueError('native runtime produced no step report (use the testing runtime archive)')
+    return native_meter(invoke, validate, environment, report, report.read_text(), reference)
+
+
+def check_leak(metering, build, entry, size, reds):
+    """O4c: an entry ends with 0 bytes admitted (MEM-19, MEM-23)."""
+    if metering['used']:
+        reds.append(red('containment:o4c', build, entry, size, f"{metering['used']} bytes admitted after the run"))
+
+
 def once(args, seed):
     """One batch: one package of gen.ENTRIES entries, compiled once per build."""
     started = time.monotonic()
@@ -204,7 +269,7 @@ def once(args, seed):
     inputs = work / 'inputs.json'
     inputs.write_text(json.dumps(manifest(args.root, (package / 'main.hirsel').resolve())))
     reds, tally, costs = [], dict(compared=0, exact=0), {}
-    small = {}
+    small, references = {}, {}
     if 'evaluator' in args.builds:
         clock = time.monotonic()
         with Evaluator(args.evaluator) as resident:
@@ -215,6 +280,13 @@ def once(args, seed):
                                     entry['small_size'], outcome[2].decode(errors='replace')[:600]))
                     break
                 small[entry['index']] = judge_run(program, 'evaluator', entry['index'], entry['small_size'], outcome, reds)
+            for entry in program['entries'] if args.meter_runtime else ():
+                if entry['metered']:
+                    try:
+                        references[entry['index']] = meter_evaluator(resident, inputs, entry['index'])
+                        check_leak(references[entry['index']], 'evaluator', entry['index'], entry['small_size'], reds)
+                    except (ValueError, KeyError) as error:
+                        reds.append(meter_red(error, 'evaluator', entry['index'], entry['small_size']))
         costs['evaluator'] = round(time.monotonic() - clock, 2)
     for build in [b for b in args.builds if b in NATIVE]:
         backend, release = NATIVE[build]
@@ -239,6 +311,24 @@ def once(args, seed):
                 agree(program, entry, size, small[entry], found, build, reds, tally)
         costs[f'{build}-runs'] = round(time.monotonic() - clock, 2)
         binary.unlink(missing_ok=True)
+        if references:
+            clock = time.monotonic()
+            meter_binary = work / f'{build}.meter'
+            built = native_build(args.compiler, args.meter_runtime, inputs, 'gen@1/main/main', backend, work / 'store',
+                                 meter_binary, limit=gen.ROOT_LIMIT, release=release, grants=['Stdout'], cc=args.cc)
+            if built.returncode or not meter_binary.exists():
+                reds.append(red(f'containment:build:{build}-meter', build, None, None,
+                                (built.stdout + built.stderr).decode(errors='replace')[-1500:]))
+                continue
+            for index, reference in sorted(references.items()):
+                size = program['entries'][index]['small_size']
+                try:
+                    metering = meter_native(meter_binary, index, size, work / f'meter-{index}.json', reference)
+                    check_leak(metering, build, index, size, reds)
+                except (ValueError, KeyError, subprocess.TimeoutExpired) as error:
+                    reds.append(meter_red(error, build, index, size))
+            costs[f'{build}-metering'] = round(time.monotonic() - clock, 2)
+            meter_binary.unlink(missing_ok=True)
     shutil.rmtree(work / 'store', ignore_errors=True)
     result = dict(seed=seed, version=gen.VERSION, builds=args.builds, reds=reds, records=tally, costs=costs,
                   seconds=round(time.monotonic() - started, 2),
@@ -282,6 +372,8 @@ def main():
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--evaluator', type=Path)
+    parser.add_argument('--meter-runtime', type=Path,
+                        help='testing runtime archive: run O5, O4b and O4c on entries outside the Map and task exclusions')
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
                                                     if 'LLVM_SYS_231_PREFIX' in os.environ else None))
     parser.add_argument('--root', type=Path, default=ROOT)
@@ -297,6 +389,8 @@ def main():
         parser.error('the evaluator build needs --evaluator')
     if any(b in NATIVE for b in args.builds) and (args.compiler is None or args.runtime is None):
         parser.error('native builds need --compiler and --runtime')
+    if args.meter_runtime and 'evaluator' not in args.builds:
+        parser.error('--meter-runtime needs the evaluator build, the reference for O4b and the floor')
     args.out.mkdir(parents=True, exist_ok=True)
     args.root = args.root.resolve()
     if args.mode == 'once':

@@ -456,9 +456,22 @@ mean over the 200 batches):
 | Cranelift dev runs: 32 small-class entries and 8 large-class entries | 0.18 s (max 1.24 s) |
 | whole batch, evaluator and Cranelift dev | 1.87 CPU-s |
 
-The 200 batches took 374 CPU-s, and 9906 of 9906 compared records agreed exactly. The LLVM
-dev and release builds come in with C2 and their cost is added there. At this rate the
-night's budget covers far more batches than the earlier estimate of about 30.
+The 200 batches took 374 CPU-s, and 9906 of 9906 compared records agreed exactly.
+
+Measured in slice C2 over seeds 0..200 with every build and metering (`--meter-runtime`, the
+testing runtime), eight batches at a time and so slower per part than C1 (wall seconds per
+part, mean over the 200 batches):
+
+| part | measured |
+|---|---|
+| evaluator: judged runs plus O5 metering of the metered entries (6 runs each) | 7.02 s |
+| compile: Cranelift dev, LLVM dev, LLVM release | 1.18 s, 1.27 s, 3.35 s |
+| judged runs, per native build | 0.17–0.23 s |
+| metering: testing-runtime link and 6 runs per metered entry, per native build | 1.52 s, 1.73 s, 3.59 s |
+| whole batch | 25.2 CPU-s |
+
+The 200 batches took 5044 CPU-s, and 33156 of 33156 compared records agreed exactly, so
+45 CPU-minutes cover about 107 batches, about 3400 programs.
 
 **Hook.** In `tools/nightly-board.sh`, a `run_containment` step follows the
 `core/tools/law_board.py nightly` call in the laws stage. It runs only when the toolchain

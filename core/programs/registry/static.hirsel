@@ -1,0 +1,351 @@
+// Registry §§3-4 static origin read plane:
+// Serves /log/..., /status/..., /c/<P>.zst, /e/<digest>, and /versions/<name> with
+// C2SP content types, no redirects, full-tile prefix fallback for historical partials,
+// strict denial of private keys (s/, l/, pending/, zero-byte deletion markers), and
+// committed takedown HTTP 410 enforcement even before/during frame cleanup.
+pub const CT_CHECKPOINT: String = "text/plain; charset=utf-8"
+
+pub const CT_TILE: String = "application/octet-stream"
+
+pub const CT_FRAME: String = "application/zstd"
+
+pub const CT_EVIDENCE: String = "application/octet-stream"
+
+pub const CT_JSON: String = "application/json"
+
+pub const CC_IMMUTABLE: String = "public, max-age=31536000, immutable"
+
+pub const CC_CHECKPOINT: String = "public, max-age=5, must-revalidate"
+
+pub const CC_NO_STORE: String = "no-store"
+
+pub type Target: send = Checkpoint(checkpoint.LogKind) | HistoricalHead(checkpoint.LogKind, u64) | HashTile(checkpoint.LogKind, u32, u64, u64) | EntryBundle(checkpoint.LogKind, u64, u64) | Frame(String) | Evidence(String) | VersionHint(String) | PrivateDenied | NotFound
+
+pub type StaticResponse: send {
+    status: u16,
+    content_type: String,
+    cache_control: String,
+    etag: Option[String],
+    body: Bytes,
+}
+
+fn parse_grouped_index(raw: String) -> Option[u64] {
+    if raw == "" {
+        return None
+    }
+    let mut acc: u64 = 0
+    let mut at: u64 = 0
+    let n = string.byte_len(raw)
+    let mut groups: u64 = 0
+    while at < n {
+        let end = match std.string.find(raw, at, "/") {
+            Some(pos) => pos,
+            None => n,
+        }
+        let seg = string.slice(raw, at, end)
+        let is_last = end == n
+        let digits = if is_last {
+            if string.byte_len(seg) != 3 {
+                return None
+            }
+            seg
+        } else {
+            let Some(rest) = std.string.strip_prefix(seg, "x") else {
+                return None
+            }
+            if string.byte_len(rest) != 3 {
+                return None
+            }
+            rest
+        }
+        let mut val: u64 = 0
+        for b in string.as_bytes(digits) {
+            if !int.is_ascii_digit(b) {
+                return None
+            }
+            val = val * 10 + int.widen(b - b'0')
+        }
+        if groups == 0 && !is_last && val == 0 {
+            return None
+        }
+        if acc > 18446744073709551u64 {
+            return None
+        }
+        acc = acc * 1000 + val
+        groups += 1
+        if is_last {
+            break
+        }
+        at = end + 1
+    }
+    Some(acc)
+}
+
+fn parse_tile_suffix(kind: checkpoint.LogKind, rel: String) -> Target {
+    let Some(after_tile) = std.string.strip_prefix(rel, "tile/") else {
+        return NotFound
+    }
+    let (tile_kind, rest): (tlog.tiles.Kind, View[String]) = match std.string.strip_prefix(after_tile, "entries/") {
+        Some(r) => (Entries, r),
+        None => {
+            let Some((lvl_str, r)) = std.string.split_once(after_tile, "/") else {
+                return NotFound
+            }
+            let Some(lvl_u64) = tlog.note.parse_size(lvl_str) else {
+                return NotFound
+            }
+            if lvl_u64 >= 8 {
+                return NotFound
+            }
+            (Hashes(int.narrow(lvl_u64)), r)
+        },
+    }
+    let (idx_str, width) = match std.string.split_once(rest, ".p/") {
+        Some((idx_part, w_part)) => {
+            let Some(w) = tlog.note.parse_size(w_part) else {
+                return NotFound
+            }
+            if w == 0 || w >= 256 {
+                return NotFound
+            }
+            (idx_part, w)
+        },
+        None => (rest, 256u64),
+    }
+    let Some(index) = parse_grouped_index(idx_str) else {
+        return NotFound
+    }
+    let Some(canonical) = tlog.tiles.path(tile_kind, index, width) else {
+        return NotFound
+    }
+    if canonical != rel {
+        return NotFound
+    }
+    match tile_kind {
+        Entries => EntryBundle(kind, index, width),
+        Hashes(level) => HashTile(kind, level, index, width),
+    }
+}
+
+fn parse_log_subpath(kind: checkpoint.LogKind, rest: String) -> Target {
+    if rest == "checkpoint" {
+        return Checkpoint(kind)
+    }
+    if rest == "pending" || std.string.starts_with(rest, "pending/") {
+        return PrivateDenied
+    }
+    if let Some(size_str) = std.string.strip_prefix(rest, "heads/") {
+        if let Some(size) = tlog.note.parse_size(size_str) {
+            return HistoricalHead(kind, size)
+        }
+        return NotFound
+    }
+    if std.string.starts_with(rest, "tile/") {
+        return parse_tile_suffix(kind, rest)
+    }
+    NotFound
+}
+
+fn valid_hint_name(name: String) -> bool {
+    if name == "" || string.byte_len(name) > 255 || std.string.starts_with(name, "/") || std.string.ends_with(name, "/") || std.string.find(name, 0, "..") != None || std.string.find(name, 0, "//") != None {
+        return false
+    }
+    for b in string.as_bytes(name) {
+        let ok = (b >= b'a' && b <= b'z') || int.is_ascii_digit(b) || b == b'.' || b == b'-' || b == b'_' || b == b'/'
+        if !ok {
+            return false
+        }
+    }
+    true
+}
+
+/// Parses and classifies an origin GET request path strictly without redirects.
+pub fn parse_path(raw_path: String) -> Target {
+    let Some(trimmed) = std.string.strip_prefix(raw_path, "/") else {
+        return NotFound
+    }
+    if trimmed == "" || std.string.find(trimmed, 0, "?") != None || std.string.find(trimmed, 0, "#") != None || std.string.find(trimmed, 0, "..") != None {
+        return NotFound
+    }
+    if trimmed == "s" || std.string.starts_with(trimmed, "s/") || trimmed == "l" || std.string.starts_with(trimmed, "l/") {
+        return PrivateDenied
+    }
+    if let Some(rest) = std.string.strip_prefix(trimmed, "log/") {
+        return parse_log_subpath(Release, rest)
+    }
+    if let Some(rest) = std.string.strip_prefix(trimmed, "status/") {
+        return parse_log_subpath(Status, rest)
+    }
+    if let Some(rest) = std.string.strip_prefix(trimmed, "c/") {
+        if let Some(root) = std.string.strip_suffix(rest, ".zst") {
+            if pending.lower_hex(root, 64) {
+                return Frame(string.from(root))
+            }
+        }
+        return NotFound
+    }
+    if let Some(digest) = std.string.strip_prefix(trimmed, "e/") {
+        if pending.lower_hex(digest, 64) {
+            return Evidence(string.from(digest))
+        }
+        return NotFound
+    }
+    if let Some(name) = std.string.strip_prefix(trimmed, "versions/") {
+        if valid_hint_name(name) {
+            return VersionHint(string.from(name))
+        }
+        return NotFound
+    }
+    NotFound
+}
+
+fn takedown_response(reason: String, message: String) -> StaticResponse {
+    let mut out = string.from("[\"takedown\",")
+    string.push(mut out, pending.quoted(reason))
+    string.push(mut out, ",")
+    string.push(mut out, pending.quoted(message))
+    string.push(mut out, "]")
+    StaticResponse(status: 410, content_type: string.from(CT_JSON), cache_control: string.from(CC_NO_STORE), etag: None, body: string.into_bytes(take out))
+}
+
+fn empty_status(status: u16) -> StaticResponse {
+    StaticResponse(status: status, content_type: string.from(CT_CHECKPOINT), cache_control: string.from(CC_NO_STORE), etag: None, body: list.new())
+}
+
+fn etag_option(tag: std.object.ETag) -> Option[String] {
+    if tag.len == 0 {
+        return None
+    }
+    match string.from_utf8(std.object.tag_value(tag)) {
+        Ok(take s) => Some(take s),
+        Error(_) => None,
+    }
+}
+
+fn storage_error_status(e: std.object.Error) -> StaticResponse {
+    match e {
+        NotFound => empty_status(404),
+        Fatal(Deadline) => empty_status(504),
+        Retriable(Deadline) => empty_status(504),
+        Uncertain(Deadline) => empty_status(504),
+        _ => empty_status(502),
+    }
+}
+
+/// Serves one static origin GET against the bucket and committed status log.
+pub fn serve_get(mut seq: commit.Sequencer, mut client: std.object.Client, path: String, deadline_ns: u64) -> StaticResponse waits {
+    match parse_path(path) {
+        PrivateDenied => empty_status(403),
+        NotFound => empty_status(404),
+        Checkpoint(kind) => {
+            let key = checkpoint.checkpoint_key(kind)
+            match checkpoint.fetch_object(mut client, key, 4096, tlog.note.MAX_NOTE_BYTES, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_CHECKPOINT), cache_control: string.from(CC_CHECKPOINT), etag: etag_option(meta.etag), body: take body),
+                Error(e) => storage_error_status(e),
+            }
+        },
+        HistoricalHead(kind, size) => {
+            let key = checkpoint.head_key(kind, size)
+            match checkpoint.fetch_object(mut client, key, 4096, tlog.note.MAX_NOTE_BYTES, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_CHECKPOINT), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body),
+                Error(e) => storage_error_status(e),
+            }
+        },
+        HashTile(kind, level, index, width) => {
+            let rel = option.unwrap(tlog.tiles.path(Hashes(level), index, width))
+            let key = checkpoint.tile_key(kind, rel)
+            match checkpoint.fetch_object(mut client, key, 8192, 8192, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_TILE), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body),
+                Error(NotFound) if width < 256 => {
+                    let full_rel = option.unwrap(tlog.tiles.path(Hashes(level), index, 256))
+                    let full_key = checkpoint.tile_key(kind, full_rel)
+                    match checkpoint.fetch_object(mut client, full_key, 8192, 8192, deadline_ns) {
+                        Ok((meta, full_body)) => {
+                            let need = width * 32
+                            if list.len(full_body) < need {
+                                return empty_status(502)
+                            }
+                            StaticResponse(status: 200, content_type: string.from(CT_TILE), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: clone(list.slice(full_body, 0, need)))
+                        },
+                        Error(e) => storage_error_status(e),
+                    }
+                },
+                Error(e) => storage_error_status(e),
+            }
+        },
+        EntryBundle(kind, index, width) => {
+            let rel = option.unwrap(tlog.tiles.path(Entries, index, width))
+            let key = checkpoint.tile_key(kind, rel)
+            match checkpoint.fetch_object(mut client, key, 65536, 16777728, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_TILE), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body),
+                Error(NotFound) if width < 256 => {
+                    let full_rel = option.unwrap(tlog.tiles.path(Entries, index, 256))
+                    let full_key = checkpoint.tile_key(kind, full_rel)
+                    match checkpoint.fetch_object(mut client, full_key, 65536, 16777728, deadline_ns) {
+                        Ok((meta, full_body)) => {
+                            let Some(prefix_len) = pending.entry_bundle_prefix_len(full_body, width) else {
+                                return empty_status(502)
+                            }
+                            StaticResponse(status: 200, content_type: string.from(CT_TILE), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: clone(list.slice(full_body, 0, prefix_len)))
+                        },
+                        Error(e) => storage_error_status(e),
+                    }
+                },
+                Error(e) => storage_error_status(e),
+            }
+        },
+        Frame(root) => {
+            if let Error(_) = commit.sync_status(mut seq, mut client, deadline_ns) {
+                return empty_status(503)
+            }
+            if let Some((reason, message)) = commit.lookup_takedown(seq, root) {
+                return takedown_response(reason, message)
+            }
+            let mut key = string.from("c/")
+            string.push(mut key, root)
+            string.push(mut key, ".zst")
+            match checkpoint.fetch_object(mut client, key, 65536, pending.MAX_COMPRESSED_FRAME, deadline_ns) {
+                Ok((meta, take body)) => {
+                    if list.len(body) == 0 {
+                        if let Ok(_) = commit.sync_status(mut seq, mut client, deadline_ns) {
+                            if let Some((reason, message)) = commit.lookup_takedown(seq, root) {
+                                return takedown_response(reason, message)
+                            }
+                        }
+                        return takedown_response(string.from("removed"), string.from("content removed"))
+                    }
+                    StaticResponse(status: 200, content_type: string.from(CT_FRAME), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body)
+                },
+                Error(e) => storage_error_status(e),
+            }
+        },
+        Evidence(digest) => {
+            let mut key = string.from("e/")
+            string.push(mut key, digest)
+            match checkpoint.fetch_object(mut client, key, 65536, 67108864, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_EVIDENCE), cache_control: string.from(CC_IMMUTABLE), etag: etag_option(meta.etag), body: take body),
+                Error(e) => storage_error_status(e),
+            }
+        },
+        VersionHint(name) => {
+            let mut key = string.from("versions/")
+            string.push(mut key, name)
+            match checkpoint.fetch_object(mut client, key, 16384, 16777216, deadline_ns) {
+                Ok((meta, take body)) => StaticResponse(status: 200, content_type: string.from(CT_JSON), cache_control: string.from(CC_CHECKPOINT), etag: etag_option(meta.etag), body: take body),
+                Error(e) => storage_error_status(e),
+            }
+        },
+    }
+}
+
+/// Converts a StaticResponse into a std.http.Response for Slice G's HTTP server.
+pub fn to_http_response(take resp: StaticResponse) -> Result[std.http.Response, std.http.ResponseError] {
+    let StaticResponse(status, content_type: take ct, cache_control: take cc, etag: take et, body: take body) = take resp
+    let mut reply = std.http.response(status, take body, false)?
+    std.http.header(mut reply, string.into_bytes(string.from("content-type")), string.into_bytes(take ct))?
+    std.http.header(mut reply, string.into_bytes(string.from("cache-control")), string.into_bytes(take cc))?
+    if let Some(take tag) = take et {
+        std.http.header(mut reply, string.into_bytes(string.from("etag")), string.into_bytes(take tag))?
+    }
+    Ok(take reply)
+}

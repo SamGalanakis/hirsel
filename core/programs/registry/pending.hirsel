@@ -1,0 +1,727 @@
+// Registry §§1-4 canonical wire helpers: pending proposals, log entry decoding,
+// folded release/status state types, Phase 0 library root hashing, bounded single-frame
+// Zstd verification, and C2SP entry bundle decoding.
+pub const MAX_ENTRY_BYTES: u64 = 65535
+
+pub const MAX_COMPRESSED_FRAME: u64 = 68157440
+
+pub const MAX_EXPANDED_FRAME: u64 = 67108864
+
+pub const MAX_ZSTD_WINDOW: u64 = 8388608
+
+pub type PendingError: key + send = Malformed | NonCanonical | EmptyBatch | EntryTooLong | InvalidHash | InvalidBase64 | FrameInvalid | FrameTooLarge | RootMismatch | DeletionMarker
+
+pub type Proposal: send {
+    origin: String,
+    parent_size: u64,
+    parent_hash: String,
+    entries: List[Bytes],
+}
+
+pub type AuthFields: send {
+    subject: String,
+    intent_digest: String,
+    token_sha256: Option[String],
+    signature: Option[String],
+}
+
+pub type ReleaseFields: send {
+    identity: String,
+    version: String,
+    root: String,
+    description: String,
+    source_commit: Option[String],
+    time: u64,
+    generation: u64,
+    compiler_id: String,
+    facts_digest: String,
+    auth: AuthFields,
+}
+
+pub type ReleaseEntry: send = ScopeBind(String, String, List[String], String, u64, AuthFields) | ScopeRebind(String, u64, String, List[String], u64, AuthFields) | Release(ReleaseFields)
+
+pub type StatusEntry: send = Retire(String, Option[String], String, String, u64, AuthFields) | Reinstate(String, Option[String], String, u64, AuthFields) | Advise(String, Option[String], String, String, u64, AuthFields) | Takedown(String, Option[String], String, String, u64, AuthFields)
+
+pub type LifecycleState: key + send = Active | Retired(String, String) | TakenDown(String, String)
+
+pub type ScopeRecord: send {
+    generation: u64,
+    subjects_json: String,
+    subjects: List[String],
+}
+
+pub type ReleaseRecord: send {
+    identity: String,
+    version: String,
+    root: String,
+    scope: String,
+    leaf_index: u64,
+    head_size: u64,
+}
+
+pub type RootStatus: send {
+    last_leaf_hash: String,
+    state: LifecycleState,
+    advisories: Map[String, String],
+}
+
+pub fn decimal(n: u64) -> String {
+    let mut out = string.new()
+    string.push_u64(mut out, n)
+    take out
+}
+
+pub fn quoted(s: String) -> String {
+    let mut out = string.new()
+    std.json.push_quoted(mut out, s)
+    take out
+}
+
+pub fn lower_hex(s: String, n: u64) -> bool {
+    if string.byte_len(s) != n {
+        return false
+    }
+    for b in string.as_bytes(s) {
+        if !int.is_ascii_digit(b) && !(b >= b'a' && b <= b'f') {
+            return false
+        }
+    }
+    true
+}
+
+pub fn hash_to_hex(hash: tlog.Hash) -> String {
+    std.hex.encode(tlog.hash_bytes(hash))
+}
+
+pub fn hex_to_hash(hex: String) -> Option[tlog.Hash] {
+    if !lower_hex(hex, 64) {
+        return None
+    }
+    let Some(raw) = std.hex.decode(string.as_bytes(hex)) else {
+        return None
+    }
+    if list.len(raw) != 32 {
+        return None
+    }
+    let mut out: tlog.Hash =[0; 32]
+    for i in 0u64 .. 32 {
+        out[i] = raw[i]
+    }
+    Some(out)
+}
+
+pub fn sha256_hex(data: Bytes) -> String {
+    hash_to_hex(std.sha256.hash(data))
+}
+
+/// Phase 0 Root::of: SHA-256 over length-framed "hirsel.library-root.v1" and length-framed C.
+pub fn library_root(expanded: Bytes) -> String {
+    let domain = string.as_bytes("hirsel.library-root.v1")
+    let mut h = std.sha256.start()
+    let mut len_buf: Bytes = list.with_capacity(8)
+    list.put_word_le(mut len_buf, list.len(domain))
+    std.sha256.add(mut h, len_buf, 0, 8)
+    std.sha256.add(mut h, domain, 0, list.len(domain))
+    list.clear(mut len_buf)
+    list.put_word_le(mut len_buf, list.len(expanded))
+    std.sha256.add(mut h, len_buf, 0, 8)
+    std.sha256.add(mut h, expanded, 0, list.len(expanded))
+    hash_to_hex(std.sha256.finish(h))
+}
+
+/// Extracts scope from canonical package identity ("github.com/acme/json@1" -> "github.com/acme").
+pub fn scope_of_identity(identity: String) -> Option[String] {
+    let Some((name, major)) = std.string.split_once(identity, "@") else {
+        return None
+    }
+    let Some(_) = tlog.note.parse_size(major) else {
+        return None
+    }
+    let raw_bytes = string.as_bytes(name)
+    let mut last_slash: Option[u64] = None
+    for i in 0u64 .. list.len(raw_bytes) {
+        if raw_bytes[i] == b'/' {
+            last_slash = Some(i)
+        }
+    }
+    let Some(slash) = last_slash else {
+        return None
+    }
+    if slash == 0 || slash + 1 >= list.len(raw_bytes) {
+        return None
+    }
+    Some(string.from(string.slice(name, 0, slash)))
+}
+
+fn declared_zstd_size(compressed: Bytes) -> Result[u64, PendingError] {
+    let n = list.len(compressed)
+    if n == 0 {
+        return Error(DeletionMarker)
+    }
+    if n < 5 {
+        return Error(FrameInvalid)
+    }
+    if compressed[0] != 0x28 || compressed[1] != 0xb5 || compressed[2] != 0x2f || compressed[3] != 0xfd {
+        return Error(FrameInvalid)
+    }
+    let desc = compressed[4]
+    if (desc & 0x08) != 0 || (desc & 0x03) != 0 {
+        return Error(FrameInvalid)
+    }
+    let single = (desc >> 5) & 1
+    let fcs_flag = (desc >> 6) & 3
+    if fcs_flag == 0 && single == 0 {
+        return Error(FrameInvalid)
+    }
+    let mut at: u64 = 5
+    if single == 0 {
+        if at >= n {
+            return Error(FrameInvalid)
+        }
+        at += 1
+    }
+    if fcs_flag == 0 {
+        if at + 1 > n {
+            return Error(FrameInvalid)
+        }
+        let v0: u64 = int.widen(compressed[at])
+        return Ok(v0)
+    }
+    if fcs_flag == 1 {
+        if at + 2 > n {
+            return Error(FrameInvalid)
+        }
+        let w: u16 = list.word_le(compressed, at)
+        let v1: u64 = int.widen(w)
+        return Ok(v1 + 256u64)
+    }
+    if fcs_flag == 2 {
+        if at + 4 > n {
+            return Error(FrameInvalid)
+        }
+        let w: u32 = list.word_le(compressed, at)
+        let v2: u64 = int.widen(w)
+        return Ok(v2)
+    }
+    if at + 8 > n {
+        return Error(FrameInvalid)
+    }
+    let v3: u64 = list.word_le(compressed, at)
+    Ok(v3)
+}
+
+/// Validates one Zstd frame against registry §2 limits (single frame, declared size,
+/// 8 MiB window, no dictionary, checksum if present) and checks expanded Root::of(C) == expected_root.
+pub fn verify_zstd_frame(compressed: Bytes, expected_root: String, max_compressed: u64, max_expanded: u64) -> Result[u64, PendingError] {
+    if !lower_hex(expected_root, 64) {
+        return Error(InvalidHash)
+    }
+    let n = list.len(compressed)
+    if n == 0 {
+        return Error(DeletionMarker)
+    }
+    if n > max_compressed {
+        return Error(FrameTooLarge)
+    }
+    let declared = declared_zstd_size(compressed)?
+    if declared > max_expanded {
+        return Error(FrameTooLarge)
+    }
+    let mut dec = std.zstd.decoder_bounded(MAX_ZSTD_WINDOW, declared)
+    let mut out: Bytes = list.with_capacity(declared)
+    let mut at: u64 = 0
+    let mut ended = false
+    while !ended {
+        if list.len(out) == list.capacity(out) && list.len(out) < max_expanded {
+            let next_cap = order.min(max_expanded, order.max(list.capacity(out) * 2, 4096u64))
+            list.reserve(mut out, next_cap - list.len(out))
+        }
+        let Ok(step) = std.zstd.decode_step(mut dec, compressed, at, n, mut out) else {
+            return Error(FrameInvalid)
+        }
+        at += step.consumed
+        if list.len(out) > max_expanded {
+            return Error(FrameTooLarge)
+        }
+        if step.ended {
+            ended = true
+        } else if step.consumed == 0 && step.produced == 0 {
+            if list.len(out) == list.capacity(out) && list.len(out) < max_expanded {
+                let extra = order.min(max_expanded - list.len(out), 65536u64)
+                list.reserve(mut out, extra)
+            } else {
+                return Error(FrameInvalid)
+            }
+        }
+    }
+    if at != n || list.len(out) != declared {
+        return Error(FrameInvalid)
+    }
+    if library_root(out) != expected_root {
+        return Error(RootMismatch)
+    }
+    Ok(declared)
+}
+
+/// Encodes ["hirsel-pending-v1",checkpoint_origin,N,parent_tree_hash,[base64(E),...]].
+pub fn encode_proposal(origin: String, parent_size: u64, parent_hash: String, entries: List[Bytes]) -> Result[Bytes, PendingError] {
+    if origin == "" || !lower_hex(parent_hash, 64) {
+        return Error(InvalidHash)
+    }
+    if list.len(entries) == 0 {
+        return Error(EmptyBatch)
+    }
+    let mut out = string.from("[\"hirsel-pending-v1\",")
+    string.push(mut out, quoted(origin))
+    string.push(mut out, ",")
+    string.push(mut out, quoted(decimal(parent_size)))
+    string.push(mut out, ",")
+    string.push(mut out, quoted(parent_hash))
+    string.push(mut out, ",[")
+    for i in 0u64 .. list.len(entries) {
+        if list.len(entries[i]) > MAX_ENTRY_BYTES {
+            return Error(EntryTooLong)
+        }
+        if i > 0 {
+            string.push(mut out, ",")
+        }
+        string.push(mut out, quoted(std.base64.encode_string(entries[i])))
+    }
+    string.push(mut out, "]]")
+    Ok(string.into_bytes(take out))
+}
+
+fn read_raw_array(s: String) -> Result[List[String], PendingError] {
+    let Ok(items) = std.json.decode(s, fn(text: String, mut c: std.json.Cursor) -> Result[List[String], std.json.Error] {
+        std.json.list_of(text, mut c, fn(t: String, mut ic: std.json.Cursor) -> Result[String, std.json.Error] {
+            let raw = std.json.read_raw(t, mut ic)?
+            Ok(string.from(raw))
+        })
+    }) else {
+        return Error(Malformed)
+    }
+    Ok(take items)
+}
+
+fn decode_json_string(raw: String) -> Result[String, PendingError] {
+    let Ok(s) = std.json.decode(raw, fn(text: String, mut c: std.json.Cursor) -> Result[String, std.json.Error] {
+        std.json.read_string(text, mut c)
+    }) else {
+        return Error(Malformed)
+    }
+    Ok(take s)
+}
+
+fn decode_json_opt_string(raw: String) -> Result[Option[String], PendingError] {
+    if raw == "null" {
+        return Ok(None)
+    }
+    Ok(Some(decode_json_string(raw)?))
+}
+
+fn decode_json_u64_string(raw: String) -> Result[u64, PendingError] {
+    let s = decode_json_string(raw)?
+    let Some(n) = tlog.note.parse_size(s) else {
+        return Error(Malformed)
+    }
+    Ok(n)
+}
+
+fn decode_auth(raw: String) -> Result[AuthFields, PendingError] {
+    let fields = read_raw_array(raw)?
+    if list.len(fields) != 4 {
+        return Error(Malformed)
+    }
+    let subject = string.from(fields[0])
+    let intent_digest = decode_json_string(fields[1])?
+    let token_sha256 = decode_json_opt_string(fields[2])?
+    let signature = decode_json_opt_string(fields[3])?
+    if !lower_hex(intent_digest, 64) {
+        return Error(InvalidHash)
+    }
+    match (view token_sha256, view signature) {
+        (Some(tok), None) => {
+            if !lower_hex(tok, 64) {
+                return Error(InvalidHash)
+            }
+        },
+        (None, Some(sig)) => {
+            let Some(raw_sig) = std.base64.decode(string.as_bytes(sig)) else {
+                return Error(InvalidBase64)
+            }
+            if list.len(raw_sig) != 64 {
+                return Error(Malformed)
+            }
+        },
+        _ => return Error(Malformed),
+    }
+    Ok(AuthFields(subject: take subject, intent_digest: take intent_digest, token_sha256: take token_sha256, signature: take signature))
+}
+
+fn decode_subject_list(raw: String) -> Result[List[String], PendingError] {
+    let items = read_raw_array(raw)?
+    if list.len(items) == 0 {
+        return Error(Malformed)
+    }
+    for i in 1u64 .. list.len(items) {
+        if items[i - 1] >= items[i] {
+            return Error(NonCanonical)
+        }
+    }
+    Ok(take items)
+}
+
+/// Strictly decodes and verifies RFC 8785 canonicality of a pending proposal.
+pub fn decode_proposal(raw: Bytes) -> Result[Proposal, PendingError] {
+    let Ok(text) = string.from_utf8(clone(raw)) else {
+        return Error(Malformed)
+    }
+    let items = read_raw_array(text)?
+    if list.len(items) != 5 {
+        return Error(Malformed)
+    }
+    let tag = decode_json_string(items[0])?
+    if tag != "hirsel-pending-v1" {
+        return Error(Malformed)
+    }
+    let origin = decode_json_string(items[1])?
+    let parent_size = decode_json_u64_string(items[2])?
+    let parent_hash = decode_json_string(items[3])?
+    if !lower_hex(parent_hash, 64) {
+        return Error(InvalidHash)
+    }
+    let encoded_entries = read_raw_array(items[4])?
+    if list.len(encoded_entries) == 0 {
+        return Error(EmptyBatch)
+    }
+    let mut entries: List[Bytes] = list.with_capacity(list.len(encoded_entries))
+    for encoded in encoded_entries {
+        let b64 = decode_json_string(encoded)?
+        let Some(entry) = std.base64.decode(string.as_bytes(b64)) else {
+            return Error(InvalidBase64)
+        }
+        if list.len(entry) > MAX_ENTRY_BYTES {
+            return Error(EntryTooLong)
+        }
+        list.push(mut entries, take entry)
+    }
+    let reencoded = encode_proposal(origin, parent_size, parent_hash, entries)?
+    if reencoded != raw {
+        return Error(NonCanonical)
+    }
+    Ok(Proposal(origin: take origin, parent_size: parent_size, parent_hash: take parent_hash, entries: take entries))
+}
+
+/// Decodes one release log entry: scope-bind, scope-rebind, or release.
+pub fn decode_release_entry(raw: Bytes) -> Result[ReleaseEntry, PendingError] {
+    if list.len(raw) > MAX_ENTRY_BYTES {
+        return Error(EntryTooLong)
+    }
+    let Ok(text) = string.from_utf8(clone(raw)) else {
+        return Error(Malformed)
+    }
+    let items = read_raw_array(text)?
+    if list.len(items) == 0 {
+        return Error(Malformed)
+    }
+    let tag = decode_json_string(items[0])?
+    if tag == "scope-bind" {
+        if list.len(items) != 6 {
+            return Error(Malformed)
+        }
+        let scope = decode_json_string(items[1])?
+        let subjects_json = string.from(items[2])
+        let subjects = decode_subject_list(items[2])?
+        let enroll_digest = decode_json_string(items[3])?
+        if !lower_hex(enroll_digest, 64) {
+            return Error(InvalidHash)
+        }
+        let time = decode_json_u64_string(items[4])?
+        let auth = decode_auth(items[5])?
+        return Ok(ScopeBind(take scope, take subjects_json, take subjects, take enroll_digest, time, take auth))
+    }
+    if tag == "scope-rebind" {
+        if list.len(items) != 6 {
+            return Error(Malformed)
+        }
+        let scope = decode_json_string(items[1])?
+        let old_gen = decode_json_u64_string(items[2])?
+        let subjects_json = string.from(items[3])
+        let subjects = decode_subject_list(items[3])?
+        let time = decode_json_u64_string(items[4])?
+        let auth = decode_auth(items[5])?
+        return Ok(ScopeRebind(take scope, old_gen, take subjects_json, take subjects, time, take auth))
+    }
+    if tag == "release" {
+        if list.len(items) != 11 {
+            return Error(Malformed)
+        }
+        let identity = decode_json_string(items[1])?
+        let version = decode_json_string(items[2])?
+        let root = decode_json_string(items[3])?
+        let description = decode_json_string(items[4])?
+        let source_commit = decode_json_opt_string(items[5])?
+        let time = decode_json_u64_string(items[6])?
+        let generation = decode_json_u64_string(items[7])?
+        let compiler_id = decode_json_string(items[8])?
+        let facts_digest = decode_json_string(items[9])?
+        let auth = decode_auth(items[10])?
+        if !lower_hex(root, 64) || !lower_hex(compiler_id, 64) || !lower_hex(facts_digest, 64) {
+            return Error(InvalidHash)
+        }
+        return Ok(Release(ReleaseFields(identity: take identity, version: take version, root: take root, description: take description, source_commit: take source_commit, time: time, generation: generation, compiler_id: take compiler_id, facts_digest: take facts_digest, auth: take auth)))
+    }
+    Error(Malformed)
+}
+
+/// Decodes one status log entry: retire, reinstate, advise, or takedown.
+pub fn decode_status_entry(raw: Bytes) -> Result[StatusEntry, PendingError] {
+    if list.len(raw) > MAX_ENTRY_BYTES {
+        return Error(EntryTooLong)
+    }
+    let Ok(text) = string.from_utf8(clone(raw)) else {
+        return Error(Malformed)
+    }
+    let items = read_raw_array(text)?
+    if list.len(items) == 0 {
+        return Error(Malformed)
+    }
+    let tag = decode_json_string(items[0])?
+    if tag == "retire" {
+        if list.len(items) != 7 {
+            return Error(Malformed)
+        }
+        let root = decode_json_string(items[1])?
+        let prev = decode_json_opt_string(items[2])?
+        let reason = decode_json_string(items[3])?
+        let message = decode_json_string(items[4])?
+        let time = decode_json_u64_string(items[5])?
+        let auth = decode_auth(items[6])?
+        if !lower_hex(root, 64) {
+            return Error(InvalidHash)
+        }
+        if let Some(p) = view prev {
+            if !lower_hex(p, 64) {
+                return Error(InvalidHash)
+            }
+        }
+        if reason != "security" && reason != "deprecated" && reason != "invalid" && reason != "renamed" && reason != "other" {
+            return Error(Malformed)
+        }
+        return Ok(Retire(take root, take prev, take reason, take message, time, take auth))
+    }
+    if tag == "reinstate" {
+        if list.len(items) != 6 {
+            return Error(Malformed)
+        }
+        let root = decode_json_string(items[1])?
+        let prev = decode_json_opt_string(items[2])?
+        let message = decode_json_string(items[3])?
+        let time = decode_json_u64_string(items[4])?
+        let auth = decode_auth(items[5])?
+        if !lower_hex(root, 64) {
+            return Error(InvalidHash)
+        }
+        if let Some(p) = view prev {
+            if !lower_hex(p, 64) {
+                return Error(InvalidHash)
+            }
+        }
+        return Ok(Reinstate(take root, take prev, take message, time, take auth))
+    }
+    if tag == "advise" {
+        if list.len(items) != 7 {
+            return Error(Malformed)
+        }
+        let root = decode_json_string(items[1])?
+        let prev = decode_json_opt_string(items[2])?
+        let osv_id = decode_json_string(items[3])?
+        let osv_digest = decode_json_string(items[4])?
+        let time = decode_json_u64_string(items[5])?
+        let auth = decode_auth(items[6])?
+        if !lower_hex(root, 64) || !lower_hex(osv_digest, 64) || osv_id == "" {
+            return Error(InvalidHash)
+        }
+        if let Some(p) = view prev {
+            if !lower_hex(p, 64) {
+                return Error(InvalidHash)
+            }
+        }
+        return Ok(Advise(take root, take prev, take osv_id, take osv_digest, time, take auth))
+    }
+    if tag == "takedown" {
+        if list.len(items) != 7 {
+            return Error(Malformed)
+        }
+        let root = decode_json_string(items[1])?
+        let prev = decode_json_opt_string(items[2])?
+        let reason = decode_json_string(items[3])?
+        let message = decode_json_string(items[4])?
+        let time = decode_json_u64_string(items[5])?
+        let auth = decode_auth(items[6])?
+        if !lower_hex(root, 64) {
+            return Error(InvalidHash)
+        }
+        if let Some(p) = view prev {
+            if !lower_hex(p, 64) {
+                return Error(InvalidHash)
+            }
+        }
+        return Ok(Takedown(take root, take prev, take reason, take message, time, take auth))
+    }
+    Error(Malformed)
+}
+
+/// Decodes a C2SP u16-length-framed entry bundle into individual entry byte slices.
+pub fn decode_entry_bundle(body: Bytes, expected_count: u64) -> Result[List[Bytes], PendingError] {
+    let n = list.len(body)
+    let mut at: u64 = 0
+    let mut out: List[Bytes] = list.with_capacity(expected_count)
+    for _ in 0u64 .. expected_count {
+        if at + 2 > n {
+            return Error(Malformed)
+        }
+        let len_u16: u16 = list.word_be(body, at)
+        let len: u64 = int.widen(len_u16)
+        at += 2
+        if at + len > n {
+            return Error(Malformed)
+        }
+        list.push(mut out, clone(list.slice(body, at, at + len)))
+        at += len
+    }
+    if at != n {
+        return Error(Malformed)
+    }
+    Ok(take out)
+}
+
+/// Returns the byte length of the first `count` u16-framed entries inside a full entry bundle.
+pub fn entry_bundle_prefix_len(body: Bytes, count: u64) -> Option[u64] {
+    let n = list.len(body)
+    let mut at: u64 = 0
+    for _ in 0u64 .. count {
+        if at + 2 > n {
+            return None
+        }
+        let len_u16: u16 = list.word_be(body, at)
+        let len: u64 = int.widen(len_u16)
+        at += 2
+        if at + len > n {
+            return None
+        }
+        at += len
+    }
+    Some(at)
+}
+
+pub fn label_key_str(identity: String, version: String) -> String {
+    let mut out = string.from(identity)
+    string.push(mut out, "/")
+    string.push(mut out, version)
+    take out
+}
+
+pub fn status_intent_key(intent_digest: String, prev: Option[String]) -> String {
+    let mut out = string.from(intent_digest)
+    string.push(mut out, "|")
+    if let Some(p) = prev {
+        string.push(mut out, p)
+    }
+    take out
+}
+
+pub fn fold_release(mut scopes: Map[String, ScopeRecord], mut labels: Map[String, ReleaseRecord], mut releases_by_root: Map[String, ReleaseRecord], mut release_by_intent: Map[String, (u64, u64, Option[String])], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
+    let entry = decode_release_entry(raw)?
+    match take entry {
+        ScopeBind(scope, subjects_json, subjects, _, _, auth) => {
+            if map.contains(scopes, scope) {
+                return Error(Malformed)
+            }
+            map.insert(mut scopes, string.from(scope), ScopeRecord(generation: 1, subjects_json: take subjects_json, subjects: take subjects))
+            map.insert(mut release_by_intent, string.from(auth.intent_digest), (index, head_size, None))
+            Ok(())
+        },
+        ScopeRebind(scope, old_gen, subjects_json, subjects, _, auth) => {
+            let cur_gen = {
+                let Some(current) = map.get(scopes, scope) else {
+                    return Error(Malformed)
+                }
+                current.generation
+            }
+            if cur_gen != old_gen {
+                return Error(Malformed)
+            }
+            map.insert(mut scopes, string.from(scope), ScopeRecord(generation: old_gen + 1, subjects_json: take subjects_json, subjects: take subjects))
+            map.insert(mut release_by_intent, string.from(auth.intent_digest), (index, head_size, None))
+            Ok(())
+        },
+        Release(f) => {
+            let Some(scope) = scope_of_identity(f.identity) else {
+                return Error(Malformed)
+            }
+            let lkey = label_key_str(f.identity, f.version)
+            if map.contains(labels, lkey) {
+                return Error(Malformed)
+            }
+            let rec = ReleaseRecord(identity: string.from(f.identity), version: string.from(f.version), root: string.from(f.root), scope: take scope, leaf_index: index, head_size: head_size)
+            map.insert(mut labels, take lkey, clone(rec))
+            if !map.contains(releases_by_root, f.root) {
+                map.insert(mut releases_by_root, string.from(f.root), take rec)
+            }
+            map.insert(mut release_by_intent, string.from(f.auth.intent_digest), (index, head_size, Some(string.from(f.root))))
+            Ok(())
+        },
+    }
+}
+
+pub fn fold_status(mut statuses: Map[String, RootStatus], mut status_by_intent: Map[String, (u64, u64, String)], index: u64, head_size: u64, raw: Bytes) -> Result[(), PendingError] {
+    let leaf_hex = hash_to_hex(tlog.leaf_hash(raw))
+    let entry = decode_status_entry(raw)?
+    match take entry {
+        Retire(root, prev, reason, message, _, auth) => {
+            let mut st = match map.remove(mut statuses, root) {
+                Some(take s) => take s,
+                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+            }
+            st.last_leaf_hash = string.from(leaf_hex)
+            st.state = Retired(take reason, take message)
+            map.insert(mut statuses, string.from(root), take st)
+            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
+            Ok(())
+        },
+        Reinstate(root, prev, _, _, auth) => {
+            let mut st = match map.remove(mut statuses, root) {
+                Some(take s) => take s,
+                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+            }
+            st.last_leaf_hash = string.from(leaf_hex)
+            st.state = Active
+            map.insert(mut statuses, string.from(root), take st)
+            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
+            Ok(())
+        },
+        Advise(root, prev, osv_id, osv_digest, _, auth) => {
+            let mut st = match map.remove(mut statuses, root) {
+                Some(take s) => take s,
+                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+            }
+            st.last_leaf_hash = string.from(leaf_hex)
+            map.insert(mut st.advisories, take osv_id, take osv_digest)
+            map.insert(mut statuses, string.from(root), take st)
+            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
+            Ok(())
+        },
+        Takedown(root, prev, reason, message, _, auth) => {
+            let mut st = match map.remove(mut statuses, root) {
+                Some(take s) => take s,
+                None => RootStatus(last_leaf_hash: string.new(), state: Active, advisories: map.new()),
+            }
+            st.last_leaf_hash = string.from(leaf_hex)
+            st.state = TakenDown(take reason, take message)
+            map.insert(mut statuses, string.from(root), take st)
+            map.insert(mut status_by_intent, status_intent_key(auth.intent_digest, prev), (index, head_size, string.from(root)))
+            Ok(())
+        },
+    }
+}

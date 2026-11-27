@@ -104,6 +104,12 @@ source = "member:postgres"
 edges = ["std@1"]
 
 [[package]]
+id = "hirsel.ai/registry@1"
+version = "1.0.0"
+source = "member:registry"
+edges = ["hirsel.ai/tlog@1", "std@1"]
+
+[[package]]
 id = "hirsel.ai/replay_receive_laws@1"
 version = "1.0.0"
 source = "member:replay_receive_laws"

@@ -1,0 +1,505 @@
+// Registry §§3-4 checkpoint, witnessing, genesis, historical heads, tile materialization,
+// entry bundle fetch, and conditional PUT uncertain readback helpers.
+pub type LogKind: key + send = Release | Status
+
+pub type WitnessConfig: send {
+    name: String,
+    key: tlog.note.VerifierKey,
+}
+
+pub type LogConfig: send {
+    kind: LogKind,
+    origin: String,
+    log_key: tlog.note.VerifierKey,
+    signing_key: Secret,
+    witnesses: List[WitnessConfig],
+    quorum: u64,
+}
+
+pub type CurrentCheckpoint: send {
+    head: tlog.note.SignedHead,
+    etag: std.object.ETag,
+    wire: String,
+}
+
+pub type CheckpointError: send = InvalidConfig | Malformed | IntegrityFailure | WitnessAhead(u64) | WitnessFailed | NoteFailed | Interrupted | Uncertain | Storage(std.object.Error)
+
+pub type NoClobberOutcome = CreatedNew | ExistedBytes(Bytes)
+
+pub fn log_prefix(kind: LogKind) -> String {
+    match kind {
+        Release => string.from("log"),
+        Status => string.from("status"),
+    }
+}
+
+pub fn checkpoint_key(kind: LogKind) -> String {
+    let mut out = log_prefix(kind)
+    string.push(mut out, "/checkpoint")
+    take out
+}
+
+pub fn pending_key(kind: LogKind, parent_size: u64) -> String {
+    let mut out = log_prefix(kind)
+    string.push(mut out, "/pending/")
+    string.push_u64(mut out, parent_size)
+    take out
+}
+
+pub fn head_key(kind: LogKind, size: u64) -> String {
+    let mut out = log_prefix(kind)
+    string.push(mut out, "/heads/")
+    string.push_u64(mut out, size)
+    take out
+}
+
+pub fn tile_key(kind: LogKind, rel_path: String) -> String {
+    let mut out = log_prefix(kind)
+    string.push(mut out, "/")
+    string.push(mut out, rel_path)
+    take out
+}
+
+pub fn is_uncertain_object_err(e: std.object.Error) -> bool {
+    match e {
+        Uncertain(_) => true,
+        Retriable(_) => true,
+        _ => false,
+    }
+}
+
+/// Fetches an object into a bounded buffer, resizing once via HEAD if initial_cap is too small.
+pub fn fetch_object(mut client: std.object.Client, key: String, initial_cap: u64, max_cap: u64, deadline_ns: u64) -> Result[(std.object.Meta, Bytes), std.object.Error] waits {
+    let cap = order.min(initial_cap, max_cap)
+    let (res, take data) = std.object.fetch(mut client, key, list.with_capacity(cap), deadline_ns)
+    match take res {
+        Ok(meta) => Ok((meta, take data)),
+        Error(TooLarge) => {
+            let meta = std.object.stat(std.object.opener(client), key, deadline_ns)?
+            if meta.size > max_cap {
+                return Error(TooLarge)
+            }
+            let (res2, take data2) = std.object.fetch(mut client, key, list.with_capacity(meta.size), deadline_ns)
+            match take res2 {
+                Ok(m2) => Ok((m2, take data2)),
+                Error(e) => Error(e),
+            }
+        },
+        Error(e) => Error(e),
+    }
+}
+
+/// Conditional no-clobber PUT with strict uncertain-PUT readback from origin.
+pub fn put_no_clobber_readback(mut client: std.object.Client, key: String, body: Bytes, max_read_cap: u64, deadline_ns: u64) -> Result[NoClobberOutcome, CheckpointError] waits {
+    let mut tries: u64 = 0
+    while tries < 8 {
+        tries += 1
+        let (res, _) = std.object.store_no_clobber(mut client, key, clone(body), deadline_ns)
+        match take res {
+            Ok(Created(_)) => return Ok(CreatedNew),
+            Ok(Exists) => {
+                match fetch_object(mut client, key, order.max(list.len(body), 4096u64), max_read_cap, deadline_ns) {
+                    Ok((_, take existing)) => return Ok(ExistedBytes(take existing)),
+                    Error(_) => return Error(Uncertain),
+                }
+            },
+            Error(e) => {
+                if is_uncertain_object_err(e) {
+                    match fetch_object(mut client, key, order.max(list.len(body), 4096u64), max_read_cap, deadline_ns) {
+                        Ok((_, take existing)) => return Ok(ExistedBytes(take existing)),
+                        Error(NotFound) => (),
+                        Error(_) => return Error(Uncertain),
+                    }
+                } else {
+                    return Error(Storage(e))
+                }
+            },
+        }
+    }
+    Error(Uncertain)
+}
+
+pub fn clone_log(log: tlog.Log) -> tlog.Log {
+    let mut out = tlog.empty()
+    let n = tlog.size(log)
+    for i in 0u64 .. n {
+        let entry = option.unwrap(tlog.entry_at(log, i))
+        let _ = result.unwrap(tlog.append(mut out, clone(entry)))
+    }
+    take out
+}
+
+pub fn fetch_missing_entries(mut client: std.object.Client, kind: LogKind, from_size: u64, target_size: u64, deadline_ns: u64) -> Result[List[Bytes], CheckpointError] waits {
+    let mut added: List[Bytes] = list.with_capacity(target_size - from_size)
+    let start_bundle = from_size / 256
+    let end_bundle = (target_size - 1) / 256
+    for b in start_bundle .. end_bundle + 1 {
+        let base = b * 256
+        let width = order.min(256u64, target_size - base)
+        let key = tile_key(kind, option.unwrap(tlog.tiles.path(Entries, b, width)))
+        let bundle_bytes = match fetch_object(mut client, key, 65536, 16777728, deadline_ns) {
+            Ok((_, take data)) => take data,
+            Error(NotFound) if width < 256 => {
+                let full_key = tile_key(kind, option.unwrap(tlog.tiles.path(Entries, b, 256)))
+                let Ok((_, take full_data)) = fetch_object(mut client, full_key, 65536, 16777728, deadline_ns) else {
+                    return Error(IntegrityFailure)
+                }
+                let Some(prefix_len) = pending.entry_bundle_prefix_len(full_data, width) else {
+                    return Error(IntegrityFailure)
+                }
+                clone(list.slice(full_data, 0, prefix_len))
+            },
+            Error(e) => return Error(Storage(e)),
+        }
+        let Ok(entries) = pending.decode_entry_bundle(bundle_bytes, width) else {
+            return Error(IntegrityFailure)
+        }
+        let skip = if from_size > base {
+            from_size - base
+        } else {
+            0u64
+        }
+        for i in skip .. width {
+            list.push(mut added, clone(entries[i]))
+        }
+    }
+    Ok(take added)
+}
+
+/// Step 4: materialize all new entry bundles and hash tiles from old_size to new_size.
+pub fn materialize_tiles(mut client: std.object.Client, kind: LogKind, cand: tlog.Log, old_size: u64, new_size: u64, deadline_ns: u64, on_tile: scoped fn() -> Result[(), CheckpointError]) -> Result[(), CheckpointError] waits {
+    let start_b = old_size / 256
+    let end_b = (new_size - 1) / 256
+    for b in start_b .. end_b + 1 {
+        let Some(tile) = tlog.tiles.entry_bundle(cand, new_size, b) else {
+            return Error(IntegrityFailure)
+        }
+        let key = tile_key(kind, tile.path)
+        match put_no_clobber_readback(mut client, key, tile.body, order.max(list.len(tile.body), 16777728u64), deadline_ns)? {
+            CreatedNew => (),
+            ExistedBytes(existing) => {
+                if existing != tile.body {
+                    return Error(IntegrityFailure)
+                }
+            },
+        }
+        on_tile()?
+    }
+    for level in 0u32 .. 8u32 {
+        let shift: u64 = int.widen(level * 8)
+        let old_nodes = old_size >> shift
+        let new_nodes = new_size >> shift
+        if new_nodes > old_nodes {
+            let start_t = old_nodes / 256
+            let end_t = (new_nodes - 1) / 256
+            for idx in start_t .. end_t + 1 {
+                let Some(tile) = tlog.tiles.hash_tile(cand, new_size, level, idx) else {
+                    return Error(IntegrityFailure)
+                }
+                let key = tile_key(kind, tile.path)
+                match put_no_clobber_readback(mut client, key, tile.body, 8192, deadline_ns)? {
+                    CreatedNew => (),
+                    ExistedBytes(existing) => {
+                        if existing != tile.body {
+                            return Error(IntegrityFailure)
+                        }
+                    },
+                }
+                on_tile()?
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn valid_config(cfg: LogConfig) -> bool {
+    if cfg.quorum != list.len(cfg.witnesses) {
+        return false
+    }
+    for i in 0u64 .. list.len(cfg.witnesses) {
+        for j in (i + 1) .. list.len(cfg.witnesses) {
+            if cfg.witnesses[i].name == cfg.witnesses[j].name {
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn witness_signature_timestamp(wire: String, witness_name: String) -> Option[u64] {
+    let Some((_, lines)) = std.string.split_once(wire, "\n\n") else {
+        return None
+    }
+    let mut at: u64 = 0
+    let end = string.byte_len(lines)
+    while at < end {
+        let Some(nl) = std.string.find(lines, at, "\n") else {
+            return None
+        }
+        let line = string.slice(lines, at, nl)
+        if let Some(rest) = std.string.strip_prefix(line, "— ") {
+            if let Some((name, encoded)) = std.string.split_once(rest, " ") {
+                if name == witness_name {
+                    let Some(body) = std.base64.decode(string.as_bytes(encoded)) else {
+                        return None
+                    }
+                    if list.len(body) == 76 {
+                        let ts: u64 = list.word_be(body, 4)
+                        return Some(ts)
+                    }
+                }
+            }
+        }
+        at = nl + 1
+    }
+    None
+}
+
+/// Verifies log signature and witness quorum. If `now_opt` is Some(now), enforces
+/// [now - 86400, now]; if None, verifies cryptographic validity at each cosignature's
+/// own timestamp (for historical heads and pre-heartbeat checkpoints).
+pub fn verify_envelope(cfg: LogConfig, wire: String, now_opt: Option[u64]) -> Result[tlog.note.SignedHead, CheckpointError] {
+    if !valid_config(cfg) {
+        return Error(InvalidConfig)
+    }
+    let head = match tlog.note.verify(cfg.origin, cfg.log_key, wire) {
+        Ok(take h) => take h,
+        Error(_) => return Error(NoteFailed),
+    }
+    for w in cfg.witnesses {
+        let check_now = match now_opt {
+            Some(now) => now,
+            None => {
+                let Some(ts) = witness_signature_timestamp(wire, w.name) else {
+                    return Error(NoteFailed)
+                }
+                ts
+            },
+        }
+        if let Error(_) = tlog.note.attached_cosignature(head, w.key, check_now) {
+            return Error(NoteFailed)
+        }
+    }
+    Ok(take head)
+}
+
+fn is_strong_etag(tag: std.object.ETag) -> bool {
+    tag.len >= 2 && tag.octets[0] == b'"' && tag.octets[tag.len - 1] == b'"'
+}
+
+/// Reads the signed parent checkpoint and its strong ETag together from the origin.
+pub fn read_checkpoint(mut client: std.object.Client, cfg: LogConfig, deadline_ns: u64) -> Result[Option[CurrentCheckpoint], CheckpointError] waits {
+    let key = checkpoint_key(cfg.kind)
+    let buf: Bytes = list.with_capacity(tlog.note.MAX_NOTE_BYTES + 1)
+    let (res, take data) = std.object.fetch(mut client, key, take buf, deadline_ns)
+    match take res {
+        Ok(meta) => {
+            if !is_strong_etag(meta.etag) {
+                return Error(IntegrityFailure)
+            }
+            let Ok(wire) = string.from_utf8(take data) else {
+                return Error(IntegrityFailure)
+            }
+            let head = match verify_envelope(cfg, wire, None) {
+                Ok(take h) => take h,
+                Error(_) => return Error(IntegrityFailure),
+            }
+            Ok(Some(CurrentCheckpoint(head: take head, etag: meta.etag, wire: take wire)))
+        },
+        Error(NotFound) => Ok(None),
+        Error(e) => Error(Storage(e)),
+    }
+}
+
+/// Signs the candidate checkpoint with the log's deterministic Ed25519 key and collects
+/// verified cosignatures from every configured witness.
+pub fn witness_candidate(cfg: LogConfig, log: tlog.Log, size: u64, root: tlog.Hash, mut known_sizes: List[u64], random: Random, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits, on_witness_reply: scoped fn(u64) -> Result[(), CheckpointError]) -> Result[tlog.note.SignedHead, CheckpointError] waits {
+    if !valid_config(cfg) {
+        return Error(InvalidConfig)
+    }
+    while list.len(known_sizes) < list.len(cfg.witnesses) {
+        list.push(mut known_sizes, 0)
+    }
+    let signed = match tlog.note.sign(cfg.origin, size, root, cfg.log_key, cfg.signing_key, random) {
+        Ok(take h) => take h,
+        Error(_) => return Error(NoteFailed),
+    }
+    let mut envelope = match tlog.note.verify(cfg.origin, cfg.log_key, string.from(tlog.note.envelope(signed))) {
+        Ok(take h) => take h,
+        Error(_) => return Error(NoteFailed),
+    }
+    for i in 0u64 .. list.len(cfg.witnesses) {
+        let mut attempt: u64 = 0
+        let mut cosig_opt: Option[tlog.note.Cosignature] = None
+        while attempt < 3 {
+            let known = known_sizes[i]
+            match tlog.witness.submit(log, signed, cfg.witnesses[i].key, known, now_seconds, scoped fn(path: String, body: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+                post_witness(i, path, body)
+            }) {
+                Ok(take cosig) => {
+                    known_sizes[i] = size
+                    cosig_opt = Some(take cosig)
+                    break
+                },
+                Error(WitnessAhead(disclosed)) => return Error(WitnessAhead(disclosed)),
+                Error(SizeChanged(disclosed)) => {
+                    if disclosed > size {
+                        return Error(WitnessAhead(disclosed))
+                    }
+                    known_sizes[i] = disclosed
+                    attempt += 1
+                },
+                Error(_) => return Error(WitnessFailed),
+            }
+        }
+        let Some(take cosig) = take cosig_opt else {
+            return Error(WitnessFailed)
+        }
+        on_witness_reply(i)?
+        envelope = match tlog.note.attach(envelope, cosig) {
+            Ok(take next) => take next,
+            Error(_) => return Error(NoteFailed),
+        }
+    }
+    Ok(take envelope)
+}
+
+/// Checks whether an already-witnessed checkpoint still satisfies 24-hour witness freshness at `now`.
+pub fn cosignatures_fresh(cfg: LogConfig, head: tlog.note.SignedHead, now: u64) -> bool {
+    for w in cfg.witnesses {
+        if let Error(_) = tlog.note.attached_cosignature(head, w.key, now) {
+            return false
+        }
+    }
+    true
+}
+
+fn verify_existing_head_bytes(cfg: LogConfig, take data: Bytes, size: u64, root: tlog.Hash) -> Result[(), CheckpointError] {
+    let Ok(existing_wire) = string.from_utf8(take data) else {
+        return Error(IntegrityFailure)
+    }
+    let Ok(existing) = verify_envelope(cfg, existing_wire, None) else {
+        return Error(IntegrityFailure)
+    }
+    if tlog.note.tree_size(existing) != size || tlog.note.tree_root(existing) != root {
+        return Error(IntegrityFailure)
+    }
+    Ok(())
+}
+
+/// Writes immutable <prefix>/heads/<size> by no-clobber with uncertain-PUT readback.
+pub fn write_historical_head(mut client: std.object.Client, cfg: LogConfig, head: tlog.note.SignedHead, deadline_ns: u64) -> Result[(), CheckpointError] waits {
+    let size = tlog.note.tree_size(head)
+    let root = tlog.note.tree_root(head)
+    let key = head_key(cfg.kind, size)
+    let wire = string.from(tlog.note.envelope(head))
+    match put_no_clobber_readback(mut client, key, string.into_bytes(take wire), tlog.note.MAX_NOTE_BYTES, deadline_ns)? {
+        CreatedNew => Ok(()),
+        ExistedBytes(take existing) => verify_existing_head_bytes(cfg, take existing, size, root),
+    }
+}
+
+/// Conditionally initializes genesis (signed empty head at size 0) at <prefix>/checkpoint.
+pub fn init_genesis(mut client: std.object.Client, cfg: LogConfig, mut known_sizes: List[u64], random: Random, deadline_ns: u64, now_seconds: scoped fn() -> u64, post_witness: scoped fn(u64, String, String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits) -> Result[CurrentCheckpoint, CheckpointError] waits {
+    if !valid_config(cfg) {
+        return Error(InvalidConfig)
+    }
+    if let Some(take existing) = read_checkpoint(mut client, cfg, deadline_ns)? {
+        return Ok(take existing)
+    }
+    let empty_log = tlog.empty()
+    let root = tlog.empty_root()
+    let witnessed = match witness_candidate(cfg, empty_log, 0, root, mut known_sizes, random, now_seconds, post_witness, scoped fn(_idx: u64) -> Result[(), CheckpointError] {
+        Ok(())
+    }) {
+        Ok(take h) => take h,
+        Error(WitnessAhead(_)) => {
+            if let Some(take existing) = read_checkpoint(mut client, cfg, deadline_ns)? {
+                return Ok(take existing)
+            }
+            return Error(IntegrityFailure)
+        },
+        Error(e) => return Error(e),
+    }
+    write_historical_head(mut client, cfg, witnessed, deadline_ns)?
+    let wire = string.from(tlog.note.envelope(witnessed))
+    let key = checkpoint_key(cfg.kind)
+    let mut tries: u64 = 0
+    while tries < 8 {
+        tries += 1
+        let (res, _) = std.object.store_if(mut client, key, Absent, string.into_bytes(clone(wire)), deadline_ns)
+        match take res {
+            Ok(Applied(meta)) => {
+                if !is_strong_etag(meta.etag) {
+                    return Error(IntegrityFailure)
+                }
+                return Ok(CurrentCheckpoint(head: take witnessed, etag: meta.etag, wire: take wire))
+            },
+            Ok(Mismatch) => {
+                if let Some(take existing) = read_checkpoint(mut client, cfg, deadline_ns)? {
+                    return Ok(take existing)
+                }
+                return Error(Uncertain)
+            },
+            Error(e) => {
+                if is_uncertain_object_err(e) {
+                    match read_checkpoint(mut client, cfg, deadline_ns) {
+                        Ok(Some(take existing)) => return Ok(take existing),
+                        Ok(None) => (),
+                        Error(_) => return Error(Uncertain),
+                    }
+                } else {
+                    return Error(Storage(e))
+                }
+            },
+        }
+    }
+    Error(Uncertain)
+}
+
+/// Replaces c/<P>.zst with a permanent zero-byte deletion marker using its strong ETag,
+/// or creates the zero-byte marker with Absent if the frame was not yet uploaded.
+pub fn install_deletion_marker(mut client: std.object.Client, root: String, deadline_ns: u64) -> Result[(), CheckpointError] waits {
+    let mut key = string.from("c/")
+    string.push(mut key, root)
+    string.push(mut key, ".zst")
+    let mut tries: u64 = 0
+    while tries < 16 {
+        tries += 1
+        match std.object.stat(std.object.opener(client), key, deadline_ns) {
+            Ok(meta) => {
+                if meta.size == 0 {
+                    return Ok(())
+                }
+                let (res, _) = std.object.store_if(mut client, key, Match(meta.etag), list.new(), deadline_ns)
+                match take res {
+                    Ok(Applied(_)) => return Ok(()),
+                    Ok(Mismatch) => (),
+                    Error(e) => {
+                        if !is_uncertain_object_err(e) {
+                            return Error(Storage(e))
+                        }
+                    },
+                }
+            },
+            Error(NotFound) => {
+                let (res, _) = std.object.store_if(mut client, key, Absent, list.new(), deadline_ns)
+                match take res {
+                    Ok(Applied(_)) => return Ok(()),
+                    Ok(Mismatch) => (),
+                    Error(e) => {
+                        if !is_uncertain_object_err(e) {
+                            return Error(Storage(e))
+                        }
+                    },
+                }
+            },
+            Error(e) => {
+                if !is_uncertain_object_err(e) {
+                    return Error(Storage(e))
+                }
+            },
+        }
+    }
+    Error(Uncertain)
+}

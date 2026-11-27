@@ -1,0 +1,972 @@
+// Registry §4 G14 fault matrix and static read plane laws.
+// Independent RFC 6962 oracle, two stateful Ed25519 C2SP witnesses, and std.sim.s3 holds/drops.
+const RELEASE_ORIGIN: String = "pkg.example/log"
+
+const STATUS_ORIGIN: String = "pkg.example/status"
+
+const RELEASE_VKEY: String = "pkg.example/log+b2c65ed3+AddamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+
+const RELEASE_PKCS8: String = "302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+
+const STATUS_VKEY: String = "pkg.example/status+a5737f52+AT1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+
+const STATUS_PKCS8: String = "302e020100300506032b6570042204204ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+
+const WITNESS_A_VKEY: String = "witness.example/a+eb13508b+BPxRzY5iGKGjjaR+0AIw8FgIFu0TujMDrF3rkRVIkIAl"
+
+const WITNESS_A_PKCS8: String = "302e020100300506032b657004220420c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7"
+
+const WITNESS_B_VKEY: String = "witness.example/b+d14c395a+BCeBF/wUTHI0D2fQ8jFug4bO/78rJCjJxR/vfFl/HUJu"
+
+const WITNESS_B_PKCS8: String = "302e020100300506032b657004220420f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5"
+
+const DEADLINE: u64 = 1000000000000
+
+const SUB_A: String = "[\"ed25519\",\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"]"
+
+const SUB_B: String = "[\"ed25519\",\"PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=\"]"
+
+const SUB_C: String = "[\"ed25519\",\"/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU=\"]"
+
+fn live_clock(take input: std.sim.world.World) waits {
+    let mut world = take input
+    std.sim.world.run(mut world)
+}
+
+fn s3_signing_key() -> Secret {
+    let raw: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut owned: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut owned, raw[i])
+    }
+    result.unwrap(secret.seal(take owned, "mac"))
+}
+
+fn ed25519_secret(pkcs8_hex: String) -> Secret {
+    let raw = option.unwrap(std.hex.decode(string.as_bytes(pkcs8_hex)))
+    result.unwrap(secret.seal(take raw, "sign(ed25519)"))
+}
+
+fn make_log_config(kind: checkpoint.LogKind) -> checkpoint.LogConfig {
+    let (origin, vkey, pkcs8) = match kind {
+        Release => (RELEASE_ORIGIN, RELEASE_VKEY, RELEASE_PKCS8),
+        Status => (STATUS_ORIGIN, STATUS_VKEY, STATUS_PKCS8),
+    }
+    let mut ws: List[checkpoint.WitnessConfig] = list.new()
+    list.push(mut ws, checkpoint.WitnessConfig(name: string.from("witness.example/a"), key: result.unwrap(tlog.note.verifier_key(WITNESS_A_VKEY))))
+    list.push(mut ws, checkpoint.WitnessConfig(name: string.from("witness.example/b"), key: result.unwrap(tlog.note.verifier_key(WITNESS_B_VKEY))))
+    checkpoint.LogConfig(kind: kind, origin: string.from(origin), log_key: result.unwrap(tlog.note.verifier_key(vkey)), signing_key: ed25519_secret(pkcs8), witnesses: take ws, quorum: 2)
+}
+
+fn new_sequencer() -> commit.Sequencer {
+    commit.new(make_log_config(Release), make_log_config(Status))
+}
+
+fn oracle_leaf(entry: Bytes) -> tlog.Hash {
+    let mut h = std.sha256.start()
+    std.sha256.add_byte(mut h, 0)
+    std.sha256.add(mut h, entry, 0, list.len(entry))
+    std.sha256.finish(h)
+}
+
+fn oracle_branch(left: tlog.Hash, right: tlog.Hash) -> tlog.Hash {
+    let mut h = std.sha256.start()
+    std.sha256.add_byte(mut h, 1)
+    for i in 0u64 .. 32 {
+        std.sha256.add_byte(mut h, left[i])
+    }
+    for i in 0u64 .. 32 {
+        std.sha256.add_byte(mut h, right[i])
+    }
+    std.sha256.finish(h)
+}
+
+fn oracle_mth(entries: List[Bytes], lo: u64, hi: u64) -> tlog.Hash {
+    let n = hi - lo
+    if n == 0 {
+        return std.sha256.finish(std.sha256.start())
+    }
+    if n == 1 {
+        return oracle_leaf(entries[lo])
+    }
+    let mut k: u64 = 1
+    while k * 2 < n {
+        k *= 2
+    }
+    oracle_branch(oracle_mth(entries, lo, lo + k), oracle_mth(entries, lo + k, hi))
+}
+
+fn oracle_verify_consistency(old_size: u64, old_root: tlog.Hash, new_size: u64, new_root: tlog.Hash, proof: List[tlog.Hash]) -> bool {
+    if old_size == 0 {
+        return list.len(proof) == 0
+    }
+    if old_size == new_size {
+        return list.len(proof) == 0 && old_root == new_root
+    }
+    if old_size > new_size || list.len(proof) == 0 {
+        return false
+    }
+    let mut fn_idx = old_size - 1
+    let mut sn_idx = new_size - 1
+    while (fn_idx & 1) == 1 {
+        fn_idx >>= 1
+        sn_idx >>= 1
+    }
+    let mut fr = old_root
+    let mut sr = old_root
+    let mut start: u64 = 0
+    if fn_idx != 0 {
+        fr = proof[0]
+        sr = proof[0]
+        start = 1
+    }
+    for i in start .. list.len(proof) {
+        let c = proof[i]
+        if sn_idx == 0 {
+            return false
+        }
+        if (fn_idx & 1) == 1 || fn_idx == sn_idx {
+            fr = oracle_branch(c, fr)
+            sr = oracle_branch(c, sr)
+            while fn_idx != 0 && (fn_idx & 1) == 0 {
+                fn_idx >>= 1
+                sn_idx >>= 1
+            }
+        } else {
+            sr = oracle_branch(sr, c)
+        }
+        fn_idx >>= 1
+        sn_idx >>= 1
+    }
+    sn_idx == 0 && fr == old_root && sr == new_root
+}
+
+type WitnessLogState: send {
+    initialized: bool,
+    size: u64,
+    root: tlog.Hash,
+}
+
+type SimWitness: send {
+    name: String,
+    id: u32,
+    signing_key: Secret,
+    clock_s: u64,
+    release_state: WitnessLogState,
+    status_state: WitnessLogState,
+    equal_409_hits: u64,
+}
+
+type WitnessPair: send {
+    a: SimWitness,
+    b: SimWitness,
+    release_key: tlog.note.VerifierKey,
+    status_key: tlog.note.VerifierKey,
+}
+
+fn new_witness_pair(start_ts: u64) -> WitnessPair {
+    let empty = WitnessLogState(initialized: false, size: 0, root: tlog.empty_root())
+    let a = SimWitness(name: string.from("witness.example/a"), id: 0xeb13508b, signing_key: ed25519_secret(WITNESS_A_PKCS8), clock_s: start_ts, release_state: clone(empty), status_state: clone(empty), equal_409_hits: 0)
+    let b = SimWitness(name: string.from("witness.example/b"), id: 0xd14c395a, signing_key: ed25519_secret(WITNESS_B_PKCS8), clock_s: start_ts, release_state: clone(empty), status_state: clone(empty), equal_409_hits: 0)
+    WitnessPair(a: take a, b: take b, release_key: result.unwrap(tlog.note.verifier_key(RELEASE_VKEY)), status_key: result.unwrap(tlog.note.verifier_key(STATUS_VKEY)))
+}
+
+fn witness_sign_line(w: SimWitness, checkpoint_text: String, ts: u64, random: Random) -> String {
+    let mut msg = string.from("cosignature/v1\ntime ")
+    string.push_u64(mut msg, ts)
+    string.push(mut msg, "\n")
+    string.push(mut msg, checkpoint_text)
+    let mut sig: Bytes = list.with_capacity(64)
+    result.unwrap(secret.sign(w.signing_key, Ed25519, random, string.as_bytes(msg), mut sig))
+    let mut body: Bytes = list.with_capacity(76)
+    list.put_word_be(mut body, w.id)
+    list.put_word_be(mut body, ts)
+    list.append(mut body, sig)
+    let mut line = string.from("— ")
+    string.push(mut line, w.name)
+    string.push(mut line, " ")
+    string.push(mut line, std.base64.encode_string(body))
+    string.push(mut line, "\n")
+    take line
+}
+
+fn plain_resp(status: u16, take body: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+    Ok(tlog.witness.HttpResponse(status: status, content_type: string.from("text/plain"), body: string.into_bytes(take body)))
+}
+
+fn size_409(size: u64) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+    let mut body = pending.decimal(size)
+    string.push(mut body, "\n")
+    Ok(tlog.witness.HttpResponse(status: 409, content_type: string.from("text/x.tlog.size"), body: string.into_bytes(take body)))
+}
+
+fn handle_one_witness(mut w: SimWitness, origin: String, log_key: tlog.note.VerifierKey, is_release: bool, path: String, request: String, random: Random) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+    if path != "/add-checkpoint" {
+        return plain_resp(404, string.new())
+    }
+    let Some((header_part, note_wire)) = std.string.split_once(request, "\n\n") else {
+        return plain_resp(400, string.new())
+    }
+    let Ok(head) = tlog.note.verify(origin, log_key, string.from(note_wire)) else {
+        return plain_resp(403, string.new())
+    }
+    let (old_line, proof_lines) = match std.string.split_once(header_part, "\n") {
+        Some((first, rest)) => (string.from(first), string.from(rest)),
+        None => (string.from(header_part), string.new()),
+    }
+    let Some(old_str) = std.string.strip_prefix(old_line, "old ") else {
+        return plain_resp(400, string.new())
+    }
+    let Some(old_size) = tlog.note.parse_size(old_str) else {
+        return plain_resp(400, string.new())
+    }
+    let mut proof: List[tlog.Hash] = list.new()
+    let mut at: u64 = 0
+    let end = string.byte_len(proof_lines)
+    while at < end {
+        let nl = match std.string.find(proof_lines, at, "\n") {
+            Some(p) => p,
+            None => end,
+        }
+        let Some(raw) = std.base64.decode(string.as_bytes(string.slice(proof_lines, at, nl))) else {
+            return plain_resp(400, string.new())
+        }
+        if list.len(raw) != 32 {
+            return plain_resp(400, string.new())
+        }
+        let mut h: tlog.Hash =[0; 32]
+        for j in 0u64 .. 32 {
+            h[j] = raw[j]
+        }
+        list.push(mut proof, h)
+        at = order.min(nl + 1, end)
+    }
+    let state: WitnessLogState = clone(if is_release {
+        w.release_state
+    } else {
+        w.status_state
+    })
+    let new_size = tlog.note.tree_size(head)
+    let new_root = tlog.note.tree_root(head)
+    if state.initialized && old_size != state.size {
+        if state.size == new_size {
+            w.equal_409_hits += 1
+        }
+        return size_409(state.size)
+    }
+    if state.initialized {
+        if !oracle_verify_consistency(state.size, state.root, new_size, new_root, proof) {
+            return plain_resp(422, string.new())
+        }
+    } else if old_size != 0 || list.len(proof) != 0 {
+        return size_409(0)
+    }
+    if is_release {
+        w.release_state = WitnessLogState(initialized: true, size: new_size, root: new_root)
+    } else {
+        w.status_state = WitnessLogState(initialized: true, size: new_size, root: new_root)
+    }
+    let cp_text = result.unwrap(tlog.note.checkpoint_text(origin, new_size, new_root))
+    plain_resp(200, witness_sign_line(w, cp_text, w.clock_s, random))
+}
+
+fn post_pair(mut pair: WitnessPair, kind: checkpoint.LogKind, idx: u64, path: String, body: String, random: Random) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+    match kind {
+        Release => if idx == 0 {
+            handle_one_witness(mut pair.a, RELEASE_ORIGIN, pair.release_key, true, path, body, random)
+        } else {
+            handle_one_witness(mut pair.b, RELEASE_ORIGIN, pair.release_key, true, path, body, random)
+        },
+        Status => if idx == 0 {
+            handle_one_witness(mut pair.a, STATUS_ORIGIN, pair.status_key, false, path, body, random)
+        } else {
+            handle_one_witness(mut pair.b, STATUS_ORIGIN, pair.status_key, false, path, body, random)
+        },
+    }
+}
+
+type SimBucket {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    server: Task[std.sim.s3.Report],
+    driver: Task[()],
+}
+
+fn start_bucket(tasks: Tasks, seed: u64, take holds: List[std.sim.s3.Hold]) -> SimBucket {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut net_model = std.sim.net.new(std.sim.net.defaults())
+    let mut ips: List[Ip] = list.with_capacity(1)
+    list.push(mut ips, address.ip)
+    std.sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take ips)
+    let verify = result.unwrap(secret.narrow(s3_signing_key(), "verify"))
+    let mut faults: List[std.sim.s3.Fault] = list.new()
+    list.push(mut faults, Clean)
+    let plan = std.sim.world.plan_from(std.sim.world.Script(tail_seed: seed, streams: list.new()), 0)
+    let cfg = std.sim.s3.Config(address: address, cut: None, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 262144)
+    let (world, clock) = std.sim.world.new(seed, 0, 1369353600000)
+    let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
+    let (endpoint, server) = std.sim.s3.start_service(tasks, take cfg, take plan, clock, 262144, 16777216)
+    SimBucket(endpoint: endpoint, clock: clock, server: take server, driver: take driver)
+}
+
+fn connect_client(endpoint: std.sim.s3.Endpoint, tasks: Tasks, clock: Clock, seed: u64) -> std.object.Client waits {
+    let root = result.unwrap(secret.seal(string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")), "kdf"))
+    let bucket = std.object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    let creds = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    result.unwrap(std.object.start_simulated(endpoint, tasks, take bucket, take creds, clock, provide.random(seed), std.object.LaneConfig(requested_lanes: 2, lane_bytes: 524288), DEADLINE))
+}
+
+fn finish_bucket(take b: SimBucket) -> std.sim.s3.Report waits {
+    let SimBucket(server: take server, driver: take driver, ..) = take b
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    take report
+}
+
+fn make_zstd_raw_alt(data: Bytes) -> Bytes {
+    let n = list.len(data)
+    let mut out: Bytes = list.with_capacity(n + 16)
+    list.put_word_le(mut out, 0xfd2fb528u32)
+    list.push(mut out, 32u8)
+    list.push(mut out, int.narrow(n))
+    let header = (n << 3) | 1u64
+    let lo: u16 = int.truncate(header)
+    let hi: u8 = int.narrow(header >> 16)
+    list.put_word_le(mut out, lo)
+    list.push(mut out, hi)
+    list.append(mut out, data)
+    take out
+}
+
+fn make_auth_json(signer: String, intent_digest: String) -> String {
+    cat3(cat3("[", signer, ","), pending.quoted(intent_digest), ",null,\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\"]")
+}
+
+fn make_scope_bind_entry(scope: String, subjects_json: String, enroll_digest: String, time: u64, signer: String, intent_digest: String) -> Bytes {
+    let p1 = cat3("[\"scope-bind\",", pending.quoted(scope), cat3(",", subjects_json, ","))
+    let p2 = cat3(pending.quoted(enroll_digest), ",", pending.quoted(pending.decimal(time)))
+    string.into_bytes(cat3(p1, p2, cat3(",", make_auth_json(signer, intent_digest), "]")))
+}
+
+fn make_rebind_entry(scope: String, old_gen: u64, subjects_json: String, time: u64, signer: String, intent_digest: String) -> Bytes {
+    let p1 = cat3("[\"scope-rebind\",", pending.quoted(scope), cat3(",", pending.quoted(pending.decimal(old_gen)), ","))
+    let p2 = cat3(subjects_json, ",", pending.quoted(pending.decimal(time)))
+    string.into_bytes(cat3(p1, p2, cat3(",", make_auth_json(signer, intent_digest), "]")))
+}
+
+fn make_release_entry(identity: String, version: String, root: String, gen: u64, facts_digest: String, time: u64, signer: String, intent_digest: String) -> Bytes {
+    let p1 = cat3("[\"release\",", pending.quoted(identity), cat3(",", pending.quoted(version), cat3(",", pending.quoted(root), ",\"fixture\",null,")))
+    let p2 = cat3(pending.quoted(pending.decimal(time)), ",", cat3(pending.quoted(pending.decimal(gen)), ",\"0000000000000000000000000000000000000000000000000000000000000001\",", pending.quoted(facts_digest)))
+    string.into_bytes(cat3(p1, p2, cat3(",", make_auth_json(signer, intent_digest), "]")))
+}
+
+fn make_status_entry(tag: String, root: String, prev: Option[String], field1: String, field2: Option[String], time: u64, signer: String, intent_digest: String) -> Bytes {
+    let prev_j = match prev {
+        Some(p) => pending.quoted(p),
+        None => string.from("null"),
+    }
+    let f2_j = match field2 {
+        Some(f2) => cat2(",", pending.quoted(f2)),
+        None => string.new(),
+    }
+    let p1 = cat3("[", pending.quoted(tag), cat3(",", pending.quoted(root), cat3(",", prev_j, ",")))
+    let p2 = cat3(pending.quoted(field1), f2_j, cat3(",", pending.quoted(pending.decimal(time)), ","))
+    string.into_bytes(cat3(p1, p2, cat2(make_auth_json(signer, intent_digest), "]")))
+}
+
+fn build_publish_req(scope: String, identity: String, version: String, payload_text: String, gen: u64, subjects_opt: Option[String], signer: String, alt_zstd: bool) -> commit.PublishRequest {
+    let raw = string.into_bytes(string.from(payload_text))
+    let root = pending.library_root(raw)
+    let compressed = if alt_zstd {
+        make_zstd_raw_alt(raw)
+    } else {
+        std.zstd.encode(raw, 1)
+    }
+    let facts = string.into_bytes(string.from("{\"facts\":1}"))
+    let facts_digest = pending.sha256_hex(facts)
+    let intent_bytes = string.into_bytes(cat3(cat3(identity, "@", version), "|", cat3(root, "|", pending.decimal(gen))))
+    let intent_digest = pending.sha256_hex(intent_bytes)
+    let mut sb_entry: Option[Bytes] = None
+    let mut sb_ev: List[commit.EvidenceInput] = list.new()
+    if let Some(subjects_json) = subjects_opt {
+        let enroll_bytes = string.into_bytes(cat3("[\"domain\",\"https://acme.dev/.well-known/hirsel-registry.json\",", subjects_json, "]"))
+        let enroll_digest = pending.sha256_hex(enroll_bytes)
+        let sb_intent = pending.sha256_hex(string.into_bytes(cat3("enroll|", scope, cat2("|", subjects_json))))
+        sb_entry = Some(make_scope_bind_entry(scope, subjects_json, enroll_digest, 1730000000, signer, sb_intent))
+        list.push(mut sb_ev, commit.EvidenceInput(digest: take enroll_digest, data: take enroll_bytes))
+    }
+    let rel_gen = if gen == 0 {
+        1u64
+    } else {
+        gen
+    }
+    let rel_entry = make_release_entry(identity, version, root, rel_gen, facts_digest, 1730000000, signer, intent_digest)
+    let mut frames: List[commit.FrameInput] = list.new()
+    list.push(mut frames, commit.FrameInput(root: string.from(root), compressed: take compressed))
+    let mut evs: List[commit.EvidenceInput] = list.new()
+    list.push(mut evs, commit.EvidenceInput(digest: string.from(facts_digest), data: take facts))
+    list.push(mut evs, commit.EvidenceInput(digest: string.from(intent_digest), data: take intent_bytes))
+    commit.PublishRequest(scope: string.from(scope), identity: string.from(identity), version: string.from(version), root: take root, generation: gen, signer: string.from(signer), intent_digest: take intent_digest, scope_bind_entry: take sb_entry, scope_bind_evidence: take sb_ev, release_entry: take rel_entry, frames: take frames, evidence: take evs)
+}
+
+fn require(cond: bool, msg: String) -> Result[(), String] {
+    if !cond {
+        return Error(string.from(msg))
+    }
+    Ok(())
+}
+
+fn cat2(a: String, b: String) -> String {
+    let mut out = string.from(a)
+    string.push(mut out, b)
+    take out
+}
+
+fn cat3(a: String, b: String, c: String) -> String {
+    cat2(cat2(a, b), c)
+}
+
+fn subjects_one(s: String) -> String {
+    cat3("[", s, "]")
+}
+
+fn subjects_two(a: String, b: String) -> String {
+    let (first, second) = if a < b {
+        (string.from(a), string.from(b))
+    } else {
+        (string.from(b), string.from(a))
+    }
+    cat3("[", cat3(first, ",", second), "]")
+}
+
+fn do_init_pair(mut seq: commit.Sequencer, mut c: std.object.Client, mut w: WitnessPair, random: Random) waits {
+    let now = w.a.clock_s
+    result.unwrap(commit.init_genesis(mut seq, mut c, random, DEADLINE, scoped fn() -> u64 {
+        now
+    }, scoped fn(k: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, k, i, p, b, random)
+    }))
+}
+
+fn do_pub(mut seq: commit.Sequencer, mut c: std.object.Client, mut w: WitnessPair, req: commit.PublishRequest, stop_at: Option[commit.StepPoint], random: Random) -> Result[commit.Receipt, commit.Error] waits {
+    let now = w.a.clock_s
+    commit.commit_publish_with_hook(mut seq, mut c, req, random, DEADLINE, scoped fn() -> u64 {
+        now
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, Release, i, p, b, random)
+    }, scoped fn(_n: u64) -> Result[(), commit.Error] {
+        Ok(())
+    }, scoped fn(pt: commit.StepPoint) -> Result[(), commit.Error] {
+        if stop_at == Some(pt) {
+            return Error(Interrupted)
+        }
+        Ok(())
+    })
+}
+
+fn do_status(mut seq: commit.Sequencer, mut c: std.object.Client, mut w: WitnessPair, req: commit.StatusRequest, stop_at: Option[commit.StepPoint], random: Random) -> Result[commit.Receipt, commit.Error] waits {
+    let now = w.a.clock_s
+    commit.commit_status_with_hook(mut seq, mut c, req, random, DEADLINE, scoped fn() -> u64 {
+        now
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, Status, i, p, b, random)
+    }, scoped fn(pt: commit.StepPoint) -> Result[(), commit.Error] {
+        if stop_at == Some(pt) {
+            return Error(Interrupted)
+        }
+        Ok(())
+    })
+}
+
+fn is_exists(r: Result[std.object.Created, std.object.Error]) -> bool {
+    match r {
+        Ok(Exists) => true,
+        _ => false,
+    }
+}
+
+fn err_tag(r: Result[commit.Receipt, commit.Error]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(EnrollmentConflict) => 1,
+        Error(LabelConflict) => 2,
+        Error(Uncertain) => 3,
+        Error(StaleGeneration) => 4,
+        Error(Unauthorized) => 5,
+        Error(TakenDown) => 6,
+        Error(TerminalStatus) => 7,
+        Error(Interrupted) => 8,
+        Error(_) => 99,
+    }
+}
+
+fn verify_oracle_log(objects: Map[String, std.sim.s3.Object], cfg: checkpoint.LogConfig, w_a: WitnessLogState, w_b: WitnessLogState, acked: List[commit.Receipt]) -> Result[(), String] {
+    let Some(cp_obj) = map.get(objects, checkpoint.checkpoint_key(cfg.kind)) else {
+        return Error("oracle: missing checkpoint")
+    }
+    let Ok(cp_wire) = string.from_utf8(clone(cp_obj.data)) else {
+        return Error("oracle: checkpoint utf8")
+    }
+    let Ok(head) = checkpoint.verify_envelope(cfg, cp_wire, None) else {
+        return Error("oracle: checkpoint signature/quorum")
+    }
+    let size = tlog.note.tree_size(head)
+    let root = tlog.note.tree_root(head)
+    require(w_a.initialized && w_a.size == size && w_a.root == root, "oracle: witness A mismatch")?
+    require(w_b.initialized && w_b.size == size && w_b.root == root, "oracle: witness B mismatch")?
+    let mut entries: List[Bytes] = list.with_capacity(size)
+    if size > 0 {
+        let bundles = (size - 1) / 256 + 1
+        for b in 0u64 .. bundles {
+            let width = order.min(256u64, size - b * 256)
+            let key = checkpoint.tile_key(cfg.kind, option.unwrap(tlog.tiles.path(Entries, b, width)))
+            let Some(obj) = map.get(objects, key) else {
+                return Error("oracle: missing entry bundle")
+            }
+            let Ok(chunk) = pending.decode_entry_bundle(obj.data, width) else {
+                return Error("oracle: corrupt entry bundle")
+            }
+            for e in chunk {
+                list.push(mut entries, clone(e))
+            }
+        }
+    }
+    require(list.len(entries) == size && oracle_mth(entries, 0, size) == root, "oracle: RFC 6962 root mismatch")?
+    if size > 0 {
+        let tiles_n = (size - 1) / 256 + 1
+        for t in 0u64 .. tiles_n {
+            let width = order.min(256u64, size - t * 256)
+            let key = checkpoint.tile_key(cfg.kind, option.unwrap(tlog.tiles.path(Hashes(0), t, width)))
+            let Some(obj) = map.get(objects, key) else {
+                return Error("oracle: missing hash tile")
+            }
+            require(list.len(obj.data) == width * 32, "oracle: hash tile size")?
+            for j in 0u64 .. width {
+                let expected = tlog.hash_bytes(oracle_leaf(entries[t * 256 + j]))
+                require(list.slice(obj.data, j * 32, (j + 1) * 32) == expected, "oracle: hash tile byte mismatch")?
+            }
+        }
+    }
+    let mut seen: std.set.Set[String] = std.set.new()
+    for e in entries {
+        require(std.set.insert(mut seen, pending.sha256_hex(e)), "oracle: duplicate leaf")?
+    }
+    for r in acked {
+        require(r.origin == cfg.origin && r.leaf_index < size, "oracle: ack out of range")?
+        if let Some(root_hex) = view r.root {
+            let Ok(text) = string.from_utf8(clone(entries[r.leaf_index])) else {
+                return Error("oracle: ack entry utf8")
+            }
+            require(std.string.find(text, 0, root_hex) != None, "oracle: ack root missing")?
+        }
+    }
+    Ok(())
+}
+
+// --- G14 Rows 1, 2, 3: Death after EVERY step 0..6, helper recovery, equal-size 409, idempotence ---
+fn case_step_deaths_and_helpers(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 101, list.new())
+    let mut w = new_witness_pair(1730000000)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 102)
+    let mut seq = new_sequencer()
+    let mut acked_rel: List[commit.Receipt] = list.new()
+    let mut acked_st: List[commit.Receipt] = list.new()
+    do_init_pair(mut seq, mut c, mut w, random)
+    let sub_ab = subjects_two(SUB_A, SUB_B)
+    let req0 = build_publish_req("acme.dev", "acme.dev/a@1", "1.0.0", "pkg-a-v1", 0, Some(string.from(sub_ab)), SUB_A, false)
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterAdmit), random)) == 8, "step 0 death")?
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterScopeEvidence), random)) == 8, "step 1a death")?
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req0), Some(AfterScopeReserve), random)) == 8, "step 1b death")?
+    let losing = build_publish_req("acme.dev", "acme.dev/other@1", "1.0.0", "other", 0, Some(subjects_one(SUB_C)), SUB_C, false)
+    require(err_tag(do_pub(mut seq, mut c, mut w, take losing, None, random)) == 1, "losing enrollment must refuse")?
+    let mut seq2 = new_sequencer()
+    let rec_b0 = result.unwrap(do_pub(mut seq2, mut c, mut w, build_publish_req("acme.dev", "acme.dev/b@1", "1.0.0", "pkg-b-v1", 0, Some(string.from(sub_ab)), SUB_B, false), None, random))
+    require(rec_b0.leaf_index == 1 && rec_b0.head_size == 2, "first publish batched [scope-bind, release]")?
+    list.push(mut acked_rel, take rec_b0)
+    let req1 = build_publish_req("acme.dev", "acme.dev/a@1", "1.0.0", "pkg-a-v1", 1, None, SUB_A, false)
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req1), Some(AfterLabelReserve), random)) == 8, "step 1c death")?
+    require(err_tag(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/a@1", "1.0.0", "DIFF", 1, None, SUB_A, false), None, random)) == 2, "different P on reserved label")?
+    list.push(mut acked_rel, result.unwrap(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/c@1", "1.0.0", "pkg-c-v1", 1, None, SUB_A, false), None, random)))
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req1), Some(AfterBlobPut), random)) == 8, "step 2 death")?
+    list.push(mut acked_rel, result.unwrap(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/a@1", "1.0.0", "pkg-a-v1", 1, None, SUB_A, true), None, random)))
+    let pts: Inline[commit.StepPoint, 6] =[AfterPending, AfterTilePut, AfterWitnessReply(0), AfterWitnessReply(1), AfterHistoricalHead, BeforeCheckpointCas]
+    for idx in 0u64 .. 6 {
+        let ver = cat2("1.0.", pending.decimal(idx + 1))
+        let dead_req = build_publish_req("acme.dev", "acme.dev/d@1", ver, cat2("dead-", pending.decimal(idx)), 1, None, SUB_A, false)
+        let mut dead_seq = new_sequencer()
+        require(err_tag(do_pub(mut dead_seq, mut c, mut w, clone(dead_req), Some(pts[idx]), random)) == 8, "step 3-6a death")?
+        w.a.clock_s += 1
+        w.b.clock_s += 1
+        let mut helper_seq = new_sequencer()
+        list.push(mut acked_rel, result.unwrap(do_pub(mut helper_seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/h@1", ver, cat2("helper-", pending.decimal(idx)), 1, None, SUB_A, false), None, random)))
+        let mut retry_seq = new_sequencer()
+        list.push(mut acked_rel, result.unwrap(do_pub(mut retry_seq, mut c, mut w, take dead_req, None, random)))
+    }
+    require(w.a.equal_409_hits >= 3 && w.b.equal_409_hits >= 2, "equal-size 409 must fire on helper recovery")?
+    let req_6b = build_publish_req("acme.dev", "acme.dev/e@1", "1.0.0", "pkg-e-v1", 1, None, SUB_A, false)
+    require(err_tag(do_pub(mut seq, mut c, mut w, clone(req_6b), Some(AfterCheckpointCasBeforeReply), random)) == 8, "step 6b death")?
+    let rec_e = result.unwrap(do_pub(mut seq, mut c, mut w, take req_6b, None, random))
+    let root_e: String = option.unwrap(clone(rec_e.root))
+    list.push(mut acked_rel, take rec_e)
+    let st_cp0 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let ret_id = pending.sha256_hex(string.into_bytes(string.from("retire-e-1")))
+    let ret_entry = make_status_entry("retire", root_e, None, "deprecated", Some(string.from("use v2")), 1730000100, SUB_A, ret_id)
+    let ret_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_e), previous_event: None, generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: take ret_id, captured_status_parent: tlog.note.tree_size(st_cp0.head), captured_status_root: tlog.note.tree_root(st_cp0.head), status_entry: clone(ret_entry), evidence: list.new())
+    require(err_tag(do_status(mut seq, mut c, mut w, clone(ret_req), Some(AfterPending), random)) == 8, "status pending death")?
+    let mut rec_seq = new_sequencer()
+    let now_rec = w.a.clock_s
+    require(result.unwrap(commit.recover_pending(mut rec_seq, mut c, Status, random, DEADLINE, scoped fn() -> u64 {
+        now_rec
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] {
+        post_pair(mut w, Status, i, p, b, random)
+    })), "status recover_pending")?
+    let st_cp1 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let ret_leaf = pending.hash_to_hex(tlog.leaf_hash(ret_entry))
+    let rein_id = pending.sha256_hex(string.into_bytes(string.from("reinstate-e-1")))
+    let rein_entry = make_status_entry("reinstate", root_e, Some(string.from(ret_leaf)), "fixed", None, 1730000101, SUB_A, rein_id)
+    let rein_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_e), previous_event: Some(take ret_leaf), generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: take rein_id, captured_status_parent: tlog.note.tree_size(st_cp1.head), captured_status_root: tlog.note.tree_root(st_cp1.head), status_entry: take rein_entry, evidence: list.new())
+    let rein_rec = result.unwrap(do_status(mut seq, mut c, mut w, take rein_req, None, random))
+    require(rein_rec.leaf_index == 1, "reinstate at leaf 1")?
+    list.push(mut acked_st, take rein_rec)
+    let ret_replay = result.unwrap(do_status(mut seq, mut c, mut w, take ret_req, None, random))
+    require(ret_replay.leaf_index == 0, "status idempotence after intervening transition")?
+    list.push(mut acked_st, take ret_replay)
+    let _ = take c
+    let report = finish_bucket(take bucket)
+    verify_oracle_log(report.objects, make_log_config(Release), w.a.release_state, w.b.release_state, acked_rel)?
+    verify_oracle_log(report.objects, make_log_config(Status), w.a.status_state, w.b.status_state, acked_st)
+}
+
+// --- G14 Row 4: Lost response (Uncertain) on EACH conditional PUT (applied & absent) ---
+fn run_uncertain_put_case(tasks: Tasks, random: Random, key_spec: String, apply_write: bool, seed: u64) -> Result[(), String] waits {
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    let then_act: std.sim.s3.Then = if apply_write {
+        ApplyLoseReply
+    } else {
+        Drop
+    }
+    let (put_from, actual_key) = if key_spec == "log/checkpoint:cas" {
+        (2u64, string.from("log/checkpoint"))
+    } else {
+        (1u64, string.from(key_spec))
+    }
+    list.push(mut holds, std.sim.s3.Hold(method: string.from("PUT"), key: string.from(actual_key), from: put_from, count: 1, until: At(0), then: then_act))
+    if actual_key != "log/checkpoint" {
+        list.push(mut holds, std.sim.s3.Hold(method: string.from("HEAD"), key: string.from(actual_key), from: 1, count: 5, until: At(0), then: Drop))
+    }
+    let bucket = start_bucket(tasks, seed, take holds)
+    let mut w = new_witness_pair(1730001000)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, seed + 1)
+    let mut seq = new_sequencer()
+    do_init_pair(mut seq, mut c, mut w, random)
+    let req = build_publish_req("acme.dev", "acme.dev/u@1", "1.0.0", "uncertain-payload", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let rec = result.unwrap(do_pub(mut seq, mut c, mut w, take req, None, random))
+    let mut acked: List[commit.Receipt] = list.new()
+    list.push(mut acked, take rec)
+    let _ = take c
+    let report = finish_bucket(take bucket)
+    verify_oracle_log(report.objects, make_log_config(Release), w.a.release_state, w.b.release_state, acked)
+}
+
+fn case_uncertain_puts(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let sample = build_publish_req("acme.dev", "acme.dev/u@1", "1.0.0", "uncertain-payload", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let keys: Inline[String, 10] =[string.from("log/checkpoint"), string.from("s/acme.dev"), string.from("l/acme.dev/u@1/1.0.0"), cat2("e/", sample.evidence[0].digest), cat3("c/", sample.root, ".zst"), string.from("log/pending/0"), string.from("log/tile/entries/000.p/2"), string.from("log/tile/0/000.p/2"), string.from("log/heads/2"), string.from("log/checkpoint:cas")]
+    let mut seed: u64 = 200
+    for k in keys {
+        run_uncertain_put_case(tasks, random, k, true, seed)?
+        seed += 10
+        run_uncertain_put_case(tasks, random, k, false, seed)?
+        seed += 10
+    }
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    list.push(mut holds, std.sim.s3.Hold(method: string.from("PUT"), key: string.from("log/checkpoint"), from: 2, count: 1, until: At(0), then: ApplyLoseReply))
+    list.push(mut holds, std.sim.s3.Hold(method: string.from("GET"), key: string.from("log/checkpoint"), from: 5, count: 20, until: At(0), then: Drop))
+    let bucket = start_bucket(tasks, 450, take holds)
+    let mut w = new_witness_pair(1730001500)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 451)
+    let mut seq = new_sequencer()
+    do_init_pair(mut seq, mut c, mut w, random)
+    require(err_tag(do_pub(mut seq, mut c, mut w, take sample, None, random)) == 3, "readback unavailability must return Uncertain")?
+    let _ = take c
+    let _ = finish_bucket(take bucket)
+    Ok(())
+}
+
+// --- Shared async witness actor for concurrent writer laws ---
+type WitnessMsg: send = Call(checkpoint.LogKind, u64, String, String, Sender[Option[tlog.witness.HttpResponse]]) | Tick(u64) | Stop
+
+type WitnessServerArg: send {
+    rx: Receiver[WitnessMsg],
+    pair: WitnessPair,
+    random: Random,
+}
+
+fn witness_server(take arg: WitnessServerArg) -> WitnessPair waits {
+    let WitnessServerArg(rx: take rx, pair: take initial, random) = take arg
+    let mut pair = take initial
+    while let Ok(take msg) = channel.receive(rx) {
+        match take msg {
+            Call(kind, idx, path, body, reply) => {
+                let res = match post_pair(mut pair, kind, idx, path, body, random) {
+                    Ok(take r) => Some(take r),
+                    Error(_) => None,
+                }
+                let _ = channel.try_send(reply, take res)
+            },
+            Tick(delta) => {
+                pair.a.clock_s += delta
+                pair.b.clock_s += delta
+            },
+            Stop => break,
+        }
+    }
+    take pair
+}
+
+fn rpc_witness(tx: Sender[WitnessMsg], kind: checkpoint.LogKind, idx: u64, path: String, body: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+    let (rtx, rrx): (Sender[Option[tlog.witness.HttpResponse]], Receiver[Option[tlog.witness.HttpResponse]]) = channel.new(1)
+    let _ = channel.send(tx, Call(kind, idx, string.from(path), string.from(body), take rtx))
+    match channel.receive(rrx) {
+        Ok(Some(take res)) => Ok(take res),
+        _ => Error(Transport),
+    }
+}
+
+type PublishTaskArg: send {
+    endpoint: std.sim.s3.Endpoint,
+    tasks: Tasks,
+    clock: Clock,
+    seed: u64,
+    req: commit.PublishRequest,
+    w_tx: Sender[WitnessMsg],
+    now_s: u64,
+}
+
+fn run_publish_task(take arg: PublishTaskArg) -> Result[commit.Receipt, commit.Error] waits {
+    let PublishTaskArg(endpoint, tasks, clock, seed, req: take req, w_tx: take w_tx, now_s) = take arg
+    let mut c = connect_client(endpoint, tasks, clock, seed)
+    let mut seq = new_sequencer()
+    let res = commit.commit_publish(mut seq, mut c, take req, provide.random(seed + 1000), DEADLINE, scoped fn() -> u64 {
+        now_s
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        rpc_witness(w_tx, Release, i, p, b)
+    })
+    let _ = take c
+    take res
+}
+
+fn do_init_rpc(mut seq: commit.Sequencer, mut c: std.object.Client, w_tx: Sender[WitnessMsg], now_s: u64, random: Random) waits {
+    result.unwrap(commit.init_genesis(mut seq, mut c, random, DEADLINE, scoped fn() -> u64 {
+        now_s
+    }, scoped fn(k: checkpoint.LogKind, i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        rpc_witness(w_tx, k, i, p, b)
+    }))
+}
+
+fn do_pub_rpc(mut seq: commit.Sequencer, mut c: std.object.Client, w_tx: Sender[WitnessMsg], req: commit.PublishRequest, now_s: u64, stop_at: Option[commit.StepPoint], random: Random) -> Result[commit.Receipt, commit.Error] waits {
+    commit.commit_publish_with_hook(mut seq, mut c, req, random, DEADLINE, scoped fn() -> u64 {
+        now_s
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        rpc_witness(w_tx, Release, i, p, b)
+    }, scoped fn(_n: u64) -> Result[(), commit.Error] {
+        Ok(())
+    }, scoped fn(pt: commit.StepPoint) -> Result[(), commit.Error] {
+        if stop_at == Some(pt) {
+            return Error(Interrupted)
+        }
+        Ok(())
+    })
+}
+
+// --- G14 Row 5: Two writers (one full commit behind) + concurrent heartbeat ETag race ---
+fn case_two_writers_and_heartbeat(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    // Hold Writer A's PUT log/pending/2 (#1) until Writer B applies PUT log/checkpoint (#3).
+    // Hold Writer C's PUT log/pending/4 (#1) (after Writer C already captured parent ETag at size 4)
+    // until heartbeat applies PUT log/checkpoint (updating ETag at unchanged size 4), forcing
+    // Writer C's Step 6 CAS to hit Mismatch on the heartbeat ETag and retry cleanly!
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    list.push(mut holds, std.sim.s3.Hold(method: string.from("PUT"), key: string.from("log/pending/2"), from: 1, count: 1, until: Applied(string.from("PUT"), string.from("log/checkpoint"), 3), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: string.from("PUT"), key: string.from("log/pending/4"), from: 1, count: 1, until: Applied(string.from("PUT"), string.from("log/checkpoint"), 6), then: Apply))
+    let bucket = start_bucket(tasks, 501, take holds)
+    let (w_tx, w_rx): (Sender[WitnessMsg], Receiver[WitnessMsg]) = channel.new(64)
+    let w_task = task.spawn(tasks, bytes 2097152, WitnessServerArg(rx: take w_rx, pair: new_witness_pair(1730002000), random: provide.random(502)), witness_server)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 503)
+    let mut seq = new_sequencer()
+    let mut acked: List[commit.Receipt] = list.new()
+    do_init_rpc(mut seq, mut c, w_tx, 1730002000, random)
+    list.push(mut acked, result.unwrap(do_pub_rpc(mut seq, mut c, w_tx, build_publish_req("acme.dev", "acme.dev/init@1", "1.0.0", "init", 0, Some(subjects_one(SUB_A)), SUB_A, false), 1730002000, None, random)))
+    let t_a = task.spawn(tasks, bytes 4194304, PublishTaskArg(endpoint: bucket.endpoint, tasks: tasks, clock: bucket.clock, seed: 510, req: build_publish_req("acme.dev", "acme.dev/wa@1", "1.0.0", "writer-a", 1, None, SUB_A, false), w_tx: channel.sender(w_tx), now_s: 1730002000), run_publish_task)
+    result.unwrap(std.sim.s3.requested(bucket.endpoint, "PUT", "log/pending/2", 1))
+    list.push(mut acked, result.unwrap(do_pub_rpc(mut seq, mut c, w_tx, build_publish_req("acme.dev", "acme.dev/wb@1", "1.0.0", "writer-b", 1, None, SUB_A, false), 1730002000, None, random)))
+    list.push(mut acked, result.unwrap(result.unwrap(task.join(take t_a))))
+    let cp_before_hb = option.unwrap(result.unwrap(commit.sync_release(mut seq, mut c, DEADLINE)))
+    require(tlog.note.tree_size(cp_before_hb.head) == 4, "two writers must reach size 4")?
+    let t_c = task.spawn(tasks, bytes 4194304, PublishTaskArg(endpoint: bucket.endpoint, tasks: tasks, clock: bucket.clock, seed: 520, req: build_publish_req("acme.dev", "acme.dev/wc@1", "1.0.0", "writer-c", 1, None, SUB_A, false), w_tx: channel.sender(w_tx), now_s: 1730002005), run_publish_task)
+    result.unwrap(std.sim.s3.requested(bucket.endpoint, "PUT", "log/pending/4", 1))
+    let _ = channel.send(w_tx, Tick(5))
+    let hb_cp = result.unwrap(commit.heartbeat(mut seq, mut c, Release, random, DEADLINE, scoped fn() -> u64 {
+        1730002005
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        rpc_witness(w_tx, Release, i, p, b)
+    }))
+    require(tlog.note.tree_size(hb_cp.head) == 4 && hb_cp.etag != cp_before_hb.etag, "heartbeat changes ETag at unchanged size 4")?
+    let r_c = result.unwrap(result.unwrap(task.join(take t_c)))
+    require(r_c.head_size == 5, "writer C recovered from heartbeat ETag race")?
+    list.push(mut acked, take r_c)
+    let _ = channel.send(w_tx, Stop)
+    let final_w = result.unwrap(task.join(take w_task))
+    let _ = take c
+    let report = finish_bucket(take bucket)
+    verify_oracle_log(report.objects, make_log_config(Release), final_w.a.release_state, final_w.b.release_state, acked)
+}
+
+// --- G14 Row 6: 100 contenders for one label + concurrent enrollment/rebind ---
+fn case_100_contenders_and_rebind(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 601, list.new())
+    let (w_tx, w_rx): (Sender[WitnessMsg], Receiver[WitnessMsg]) = channel.new(128)
+    let w_task = task.spawn(tasks, bytes 2097152, WitnessServerArg(rx: take w_rx, pair: new_witness_pair(1730003000), random: provide.random(602)), witness_server)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 603)
+    let mut seq = new_sequencer()
+    let mut acked: List[commit.Receipt] = list.new()
+    do_init_rpc(mut seq, mut c, w_tx, 1730003000, random)
+    list.push(mut acked, result.unwrap(do_pub_rpc(mut seq, mut c, w_tx, build_publish_req("acme.dev", "acme.dev/seed@1", "1.0.0", "seed", 0, Some(subjects_two(SUB_A, SUB_B)), SUB_A, false), 1730003000, None, random)))
+    let mut wins: u64 = 0
+    let mut conflicts: u64 = 0
+    let mut winning_root = string.new()
+    for wave in 0u64 .. 5 {
+        let mut handles: List[Task[Result[commit.Receipt, commit.Error]]] = list.with_capacity(20)
+        for j in 0u64 .. 20 {
+            let idx = wave * 20 + j
+            let req = build_publish_req("acme.dev", "acme.dev/race@1", "1.0.0", cat2("contender-root-", pending.decimal(idx)), 1, None, SUB_A, false)
+            list.push(mut handles, task.spawn(tasks, bytes 4194304, PublishTaskArg(endpoint: bucket.endpoint, tasks: tasks, clock: bucket.clock, seed: 700 + idx, req: take req, w_tx: channel.sender(w_tx), now_s: 1730003000), run_publish_task))
+        }
+        for take h in take handles {
+            match result.unwrap(task.join(take h)) {
+                Ok(take rec) => {
+                    wins += 1
+                    winning_root = option.unwrap(clone(rec.root))
+                    list.push(mut acked, take rec)
+                },
+                Error(LabelConflict) => {
+                    conflicts += 1
+                },
+                Error(_) => return Error("contender unexpected error"),
+            }
+        }
+    }
+    require(wins == 1 && conflicts == 99, "100 contenders must yield 1 win and 99 conflicts")?
+    let sub_b_req = build_publish_req("acme.dev", "acme.dev/stale@1", "1.0.0", "from-removed-sub-b", 1, None, SUB_B, false)
+    require(err_tag(do_pub_rpc(mut seq, mut c, w_tx, clone(sub_b_req), 1730003000, Some(AfterBlobPut), random)) == 8, "sub_b paused before pending")?
+    let rb_id = pending.sha256_hex(string.into_bytes(string.from("rebind-1-to-2")))
+    let rb_req = commit.RebindRequest(scope: string.from("acme.dev"), old_generation: 1, signer: string.from(SUB_A), intent_digest: string.from(rb_id), rebind_entry: make_rebind_entry("acme.dev", 1, subjects_one(SUB_A), 1730003010, SUB_A, rb_id), evidence: list.new())
+    list.push(mut acked, result.unwrap(commit.commit_rebind(mut seq, mut c, take rb_req, random, DEADLINE, scoped fn() -> u64 {
+        1730003010
+    }, scoped fn(i: u64, p: String, b: String) -> Result[tlog.witness.HttpResponse, tlog.witness.Error] waits {
+        rpc_witness(w_tx, Release, i, p, b)
+    })))
+    let late_tag = err_tag(do_pub_rpc(mut seq, mut c, w_tx, take sub_b_req, 1730003010, None, random))
+    require(late_tag == 4 || late_tag == 5, "removed subject cannot win at later parent")?
+    require(err_tag(do_pub_rpc(mut seq, mut c, w_tx, build_publish_req("acme.dev", "acme.dev/stale2@1", "1.0.0", "removed-gen2", 2, None, SUB_B, false), 1730003010, None, random)) == 5, "removed subject unauthorized at gen 2")?
+    let _ = channel.send(w_tx, Stop)
+    let final_w = result.unwrap(task.join(take w_task))
+    let _ = take c
+    let report = finish_bucket(take bucket)
+    let Some(lbl_obj) = map.get(report.objects, "l/acme.dev/race@1/1.0.0") else {
+        return Error("missing immutable label")
+    }
+    require(lbl_obj.data == string.as_bytes(winning_root), "label must match winner root")?
+    verify_oracle_log(report.objects, make_log_config(Release), final_w.a.release_state, final_w.b.release_state, acked)
+}
+
+// --- G14 Row 7: Takedown vs delayed step-2 PUT + crash before cleanup + Static Read Plane ---
+fn case_takedown_and_static_plane(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 801, list.new())
+    let mut w = new_witness_pair(1730004000)
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 802)
+    let mut seq = new_sequencer()
+    let mut acked_rel: List[commit.Receipt] = list.new()
+    let mut acked_st: List[commit.Receipt] = list.new()
+    do_init_pair(mut seq, mut c, mut w, random)
+    let req_td = build_publish_req("acme.dev", "acme.dev/td@1", "1.0.0", "taken-down-pkg", 0, Some(subjects_one(SUB_A)), SUB_A, false)
+    let root_td = string.from(req_td.root)
+    let ev_digest = string.from(req_td.evidence[0].digest)
+    list.push(mut acked_rel, result.unwrap(do_pub(mut seq, mut c, mut w, clone(req_td), None, random)))
+    let frame_url = cat3("/c/", root_td, ".zst")
+    let mut reader = new_sequencer()
+    let before_td = static.serve_get(mut reader, mut c, frame_url, DEADLINE)
+    require(before_td.status == 200 && before_td.content_type == static.CT_FRAME && list.len(before_td.body) > 0, "static frame before takedown")?
+    require(static.serve_get(mut reader, mut c, "/log/checkpoint", DEADLINE).content_type == static.CT_CHECKPOINT, "static checkpoint CT")?
+    let t_resp = static.serve_get(mut reader, mut c, "/log/tile/0/000.p/2", DEADLINE)
+    require(t_resp.status == 200 && t_resp.content_type == static.CT_TILE && list.len(t_resp.body) == 64, "static hash tile")?
+    require(static.serve_get(mut reader, mut c, "/log/tile/entries/000.p/2", DEADLINE).status == 200, "static entry bundle")?
+    require(static.serve_get(mut reader, mut c, cat2("/e/", ev_digest), DEADLINE).status == 200, "static evidence")?
+    let priv_paths: Inline[String, 4] =[string.from("/s/acme.dev"), string.from("/l/acme.dev/td@1/1.0.0"), string.from("/log/pending/0"), string.from("/status/pending/0")]
+    for pp in priv_paths {
+        require(static.serve_get(mut reader, mut c, pp, DEADLINE).status == 403, "deny private path")?
+    }
+    let mut full_hashes: Bytes = list.with_capacity(8192)
+    for i in 0u64 .. 8192 {
+        list.push(mut full_hashes, int.truncate(i % 251))
+    }
+    let (hp, _) = std.object.store(mut c, "log/tile/0/001", clone(full_hashes), DEADLINE)
+    let _ = result.unwrap(take hp)
+    let pf_h = static.serve_get(mut reader, mut c, "/log/tile/0/001.p/3", DEADLINE)
+    require(pf_h.status == 200 && pf_h.content_type == static.CT_TILE && pf_h.body == list.slice(full_hashes, 0, 96), "full hash tile supplies partial")?
+    let mut full_bundle: Bytes = list.new()
+    for i in 0u64 .. 256 {
+        let mut s = string.from("entry-")
+        string.push_u64(mut s, i)
+        let b = string.into_bytes(take s)
+        list.put_word_be(mut full_bundle, (int.truncate(list.len(b)) : u16))
+        list.append(mut full_bundle, b)
+    }
+    let (bp, _) = std.object.store(mut c, "log/tile/entries/001", clone(full_bundle), DEADLINE)
+    let _ = result.unwrap(take bp)
+    let pf_b = static.serve_get(mut reader, mut c, "/log/tile/entries/001.p/3", DEADLINE)
+    require(pf_b.status == 200 && pf_b.body == list.slice(full_bundle, 0, option.unwrap(pending.entry_bundle_prefix_len(full_bundle, 3))), "full entry bundle supplies partial")?
+    let st_cp = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let td_id = pending.sha256_hex(string.into_bytes(string.from("takedown-td-1")))
+    let td_req = commit.StatusRequest(scope: string.from(""), root: string.from(root_td), previous_event: None, generation: 0, is_legal_takedown: true, signer: string.from(SUB_C), intent_digest: string.from(td_id), captured_status_parent: tlog.note.tree_size(st_cp.head), captured_status_root: tlog.note.tree_root(st_cp.head), status_entry: make_status_entry("takedown", root_td, None, "dmca", Some(string.from("court order 42")), 1730004010, SUB_C, td_id), evidence: list.new())
+    require(err_tag(do_status(mut seq, mut c, mut w, clone(td_req), Some(AfterTakedownStatusBeforeMarker), random)) == 8, "crash before takedown cleanup")?
+    let during = static.serve_get(mut reader, mut c, frame_url, DEADLINE)
+    let during_body = result.unwrap(string.from_utf8(clone(during.body)))
+    require(during.status == 410 && std.string.find(during_body, 0, "dmca") != None && std.string.find(during_body, 0, "court order 42") != None, "static 410 before cleanup")?
+    let _ = result.unwrap(static.to_http_response(take during))
+    let mut cleanup_seq = new_sequencer()
+    require(result.unwrap(commit.reconcile_takedowns(mut cleanup_seq, mut c, DEADLINE)) == 1, "reconcile_takedowns")?
+    list.push(mut acked_st, result.unwrap(do_status(mut seq, mut c, mut w, take td_req, None, random)))
+    require(err_tag(do_pub(mut seq, mut c, mut w, build_publish_req("acme.dev", "acme.dev/td@1", "1.0.1", "taken-down-pkg", 1, None, SUB_A, false), None, random)) == 6, "delayed step-2 PUT fenced")?
+    let fkey = cat3("c/", root_td, ".zst")
+    let (raw_delayed, _) = std.object.store_no_clobber(mut c, fkey, clone(req_td.frames[0].compressed), DEADLINE)
+    require(is_exists(raw_delayed), "zero-byte marker fences raw PUT")?
+    let after = static.serve_get(mut reader, mut c, frame_url, DEADLINE)
+    let after_body = result.unwrap(string.from_utf8(clone(after.body)))
+    require(after.status == 410 && std.string.find(after_body, 0, "dmca") != None, "static 410 after cleanup")?
+    let st_cp2 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let st_cur = option.unwrap(commit.root_status(seq, root_td))
+    let aft_id = pending.sha256_hex(string.into_bytes(string.from("retire-after-td")))
+    let aft_req = commit.StatusRequest(scope: string.from("acme.dev"), root: string.from(root_td), previous_event: Some(string.from(st_cur.last_leaf_hash)), generation: 1, is_legal_takedown: false, signer: string.from(SUB_A), intent_digest: string.from(aft_id), captured_status_parent: tlog.note.tree_size(st_cp2.head), captured_status_root: tlog.note.tree_root(st_cp2.head), status_entry: make_status_entry("retire", root_td, Some(string.from(st_cur.last_leaf_hash)), "other", Some(string.from("nope")), 1730004020, SUB_A, aft_id), evidence: list.new())
+    require(err_tag(do_status(mut seq, mut c, mut w, take aft_req, None, random)) == 7, "takedown terminal")?
+    let absent_root = pending.sha256_hex(string.into_bytes(string.from("never-uploaded")))
+    result.unwrap(commit.install_deletion_marker(mut c, absent_root, DEADLINE))
+    let (res_abs, _) = std.object.store_no_clobber(mut c, cat3("c/", absent_root, ".zst"), clone(req_td.frames[0].compressed), DEADLINE)
+    require(is_exists(res_abs), "absent deletion marker fences delayed PUT")?
+    let _ = take c
+    let report = finish_bucket(take bucket)
+    let Some(m_obj) = map.get(report.objects, fkey) else {
+        return Error("marker missing")
+    }
+    require(list.len(m_obj.data) == 0, "marker must be 0 bytes")?
+    verify_oracle_log(report.objects, make_log_config(Release), w.a.release_state, w.b.release_state, acked_rel)?
+    verify_oracle_log(report.objects, make_log_config(Status), w.a.status_state, w.b.status_state, acked_st)
+}
+
+@test
+fn g14_fault_matrix(tasks: Tasks, random: Random) -> Result[(), String] waits {
+    case_step_deaths_and_helpers(tasks, random)?
+    case_uncertain_puts(tasks, random)?
+    case_two_writers_and_heartbeat(tasks, random)?
+    case_100_contenders_and_rebind(tasks, random)?
+    case_takedown_and_static_plane(tasks, random)?
+    Ok(())
+}

@@ -900,6 +900,9 @@ limit = 536870912
 [tests.runs."store@1/store/describe_suffix_free"]
 limit = 536870912
 
+[tests.runs."store@1/store/inspect_catalog_reads_cold_tiered_roots"]
+limit = 268435456
+
 [tests.runs."store@1/store/disk_test_scrub_paced_and_history"]
 limit = 536870912
 

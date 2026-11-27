@@ -168,6 +168,7 @@ store@1/store/follower_cancelled_slot src=6ee0d8e288b2ee5a sig=a18e5dac440d9e17 
 store@1/store/follower_retained_bytes src=9a12a728cc2efdac sig=1ad9774838a144c6 run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/follower_slot_admission src=3613c30445455b33 sig=8e64ebfb429afea9 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/follower_starter_admission src=e0ac3cf1342db6f9 sig=efc2c20a9be94a83 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/inspect_catalog_reads_cold_tiered_roots src=91614bdc5c76f243 sig=db2fc0b2a2750010 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/journal_cadence_failed_writes src=09f821cb17cdfc39 sig=3c8a60768dfb3ad3 run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/journal_coalesce_and_end_cadence src=ba6c8641d495c32d sig=dd490013de5b610a run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/journal_frame_oversize src=a92c4703cf340373 sig=efdb3d1cd64711bd run=d1f2f4c5c8fda441 bug=- oracle=- rows=pending

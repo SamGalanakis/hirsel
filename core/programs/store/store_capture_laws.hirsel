@@ -295,3 +295,74 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     }
     Ok(())
 }
+
+const INSPECT_COLD_ROWS: u64 = 1000
+
+fn inspect_cold_index_keys(_key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, value)
+    Ok(take keys)
+}
+
+// The inspector reads catalog descriptors, not collection rows, so a Cold
+// Tiered root needs no pager. The row oracle is the fixture's own key/value
+// sequence: one table row and one distinct Many entry for each written row.
+@test
+fn inspect_catalog_reads_cold_tiered_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(182375272u64)
+    let options = sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("tiered inspect sizing")
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut schema = declare(db, Migrate)?
+    let mut declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let by_value = index(mut schema, mut declared, "by_value", Many, code.describe(inspect_cold_index_keys), std.codec.key_u64())?
+    let rows = finish(mut schema, take declared)?
+    let _ = seal(mut db, take schema)?
+    let written = run(mut db, Some(10000000), copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        for key in 0u64 .. INSPECT_COLD_ROWS {
+            put(mut tx, t, key, key)?
+        }
+        Ok(())
+    })?
+    if let Committed(done) = written {
+        durable(mut db, done.ticket)?
+    } else {
+        fail("inspect cold fixture rows did not commit")
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    set_residency(mut db, by_value.id, Tiered)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    let at = snapshot(db)
+    for id in[rows.id, by_value.id] {
+        let Some((ColdPage(_), raw)) = std.page.collection_slot(at.roots.collections.root, failure_result_from_rep(catalog.prefix(id))?) else {
+            fail("inspect cold fixture did not seal a Cold Tiered root")
+        }
+        let descriptor = pages.collection_descriptor(raw)
+        if descriptor.residency != ResidentTiered || descriptor.rows != INSPECT_COLD_ROWS {
+            fail("inspect cold fixture descriptor differs from the written rows")
+        }
+    }
+    let catalog_rows = catalog_entries(at)?
+    let mut saw_table = false
+    let mut saw_index = false
+    for item in catalog_rows {
+        if item.name == "rows" && item.table == "rows" {
+            saw_table = true
+            if item.id != rows.id || item.rows != INSPECT_COLD_ROWS || !item.tiered {
+                fail("inspect cold catalog table entry differs from the written rows")
+            }
+        }
+        if item.name == "by_value" && item.table == "rows" {
+            saw_index = true
+            if item.id != by_value.id || item.rows != INSPECT_COLD_ROWS || !item.tiered {
+                fail("inspect cold catalog index entry differs from the written rows")
+            }
+        }
+    }
+    if !saw_table || !saw_index {
+        fail("inspect cold catalog missed the fixture table or index")
+    }
+    close(take db)
+}

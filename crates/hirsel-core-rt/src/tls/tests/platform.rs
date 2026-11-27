@@ -10,7 +10,7 @@ use std::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const APPLE_CA: &[u8] = include_bytes!("../../../testdata/tls/platform-ca.pem");
@@ -264,11 +264,20 @@ fn held_evaluation(reason: u8, expected: u8) {
                 break;
             }
             let mut ready = false;
-            run.files
-                .sockets
-                .poll(2_000, |id| ready |= id == token)
-                .unwrap();
-            assert!(ready);
+            let poll_until = Instant::now() + Duration::from_secs(2);
+            while !ready {
+                let remaining = poll_until.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "TLS socket did not ready before SecTrust"
+                );
+                run.files
+                    .sockets
+                    .poll(remaining.as_millis().max(1) as i32, |id| {
+                        ready |= id == token
+                    })
+                    .unwrap();
+            }
             step = unsafe { operations(&mut request, token, false) };
         }
         wait_for_entry.recv().unwrap();

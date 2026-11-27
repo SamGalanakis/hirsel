@@ -1,7 +1,9 @@
-// T7 frozen-format corpus: freezes one Format-10 Directory store and one
+// T7 frozen-format corpus: freezes one current-format Directory store and one
 // Bucket prefix with a canonical logical dump, and verifies that the current
 // build opens both cleanly (walker + verify + exact dump match + post-open
-// write and checkpoint).
+// write and checkpoint). The Directory store holds the Many index `by_tag` as
+// Tiered (Format 12, §13.10a): its checkpointed root is Cold and the tail commit
+// replays index edits over it on reopen.
 type CorpusSchema {
     items: Table[u64, Bytes],
     by_tag: Index[u64, u64, Bytes, ()],
@@ -55,14 +57,18 @@ fn corpus_pattern(len: u64, seed: u8) -> Bytes {
     take out
 }
 
+// `by_tag` is Tiered, so the store runs the pager: the Tiered open floor keeps
+// its plan inside the freeze and test runs' 256 MiB.
 fn corpus_dir_options(create: bool) -> Options {
-    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(182375272u64)
+    let mut options = result.unwrap(sized_with(Directory, 2147483648u64, overrides))
     options.pack_bytes = 4096u64
     options.create = create
     options
 }
 
-fn corpus_populate(mut db: Db) -> Result[CorpusSchema, Error] waits {
+fn corpus_populate(mut db: Db, tiered_index: bool) -> Result[CorpusSchema, Error] waits {
     let schema = corpus_schema(mut db, Migrate)?
     let big_blob = corpus_pattern(1500u64, 17u8)
     let big_cell = corpus_pattern(300u64, 41u8)
@@ -99,9 +105,12 @@ fn corpus_populate(mut db: Db) -> Result[CorpusSchema, Error] waits {
     durable(mut db, done_alt.ticket)?
     let cut_ticket = checkpoint(mut db)?
     durable(mut db, cut_ticket)?
+    if tiered_index {
+        set_residency(mut db, schema.by_tag.id, Tiered)?
+    }
     // Follow the checkpoint with a durable journal commit so reopen exercises
     // both pack/MANIFEST decoding and live journal replay.
-    let tail_tx = run(mut db, None, (copy_env(schema.items), copy_env(schema.counter), copy_env(schema.events)), fn(mut tx, env) -> Result[(), Error] {
+    let tail_tx = run(mut db, Some(1000000u64), (copy_env(schema.items), copy_env(schema.counter), copy_env(schema.events)), fn(mut tx, env) -> Result[(), Error] {
         put(mut tx, env.0, 3u64, b"delta-2")?
         let _ = delete(mut tx, env.0, 4u64)?
         put(mut tx, env.0, 5u64, b"zeta")?
@@ -129,7 +138,7 @@ fn corpus_canonical_dump(mut db: Db, schema: CorpusSchema) -> Result[String, Err
     let main_snap = snapshot(db)
     string.push_u64(mut out, version(main_snap))
     string.push(mut out, "\n")
-    let rd = result.unwrap(reader(db, 0u64))
+    let rd = result.unwrap(reader(db, READER_PIN_MIN))
     if let Some(p) = pinned(db, "v_early") {
         string.push(mut out, "pin v_early ")
         string.push_u64(mut out, version(p))
@@ -164,7 +173,7 @@ fn corpus_canonical_dump(mut db: Db, schema: CorpusSchema) -> Result[String, Err
     }
     string.push(mut out, "index by_tag\n")
     let mut tag_rows = find(rd, main_snap, schema.by_tag, Unbounded, Unbounded)?
-    while let Some((k, v)) = next(law_reader(tag_rows.capture), mut tag_rows)? {
+    while let Some((k, v)) = next(rd, mut tag_rows)? {
         string.push(mut out, "  ")
         string.push_u64(mut out, k)
         string.push(mut out, "=")
@@ -182,7 +191,7 @@ fn corpus_canonical_dump(mut db: Db, schema: CorpusSchema) -> Result[String, Err
     }
     string.push(mut out, "aggregate by_bucket\n")
     for g in 0u64 .. 2u64 {
-        let Seen(Seen(value: take res, ..)) = look(rd, main_snap, None, (copy_env(schema.by_bucket), g), fn(tx, env) -> Result[Totals, Error] {
+        let Seen(Seen(value: take res, ..)) = look(rd, main_snap, Some(1000000u64), (copy_env(schema.by_bucket), g), fn(tx, env) -> Result[Totals, Error] {
             totals(tx, env.0, env.1)
         })? else {
             return Error(MigrationFault)
@@ -243,7 +252,7 @@ fn corpus_sort_strings(mut items: List[String]) {
 
 fn corpus_freeze_directory(dir_out: Dir, meta_out: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, dir_out, c, r, corpus_dir_options(true))?
-    let schema = corpus_populate(mut db)?
+    let schema = corpus_populate(mut db, true)?
     trust_store(mut db)?
     let dump = corpus_canonical_dump(mut db, schema)?
     close(take db)?
@@ -258,7 +267,7 @@ fn corpus_freeze_bucket(bucket_out: Dir, meta_out: Dir, c: Clock, r: Random, tas
         Ok(take opened) => take opened,
         Error(Refusal(error: take e, ..)) => return Error(take e),
     }
-    let schema = corpus_populate(mut db)?
+    let schema = corpus_populate(mut db, false)?
     trust_store(mut db)?
     let dump = corpus_canonical_dump(mut db, schema)?
     close(take db)?
@@ -307,7 +316,7 @@ fn corpus_decode_b64(encoded: Bytes) -> Bytes {
 }
 
 fn corpus_advance_and_recheck(mut db: Db, schema: CorpusSchema) -> Result[(), Error] waits {
-    let added = run(mut db, None, copy_env(schema.items), fn(mut tx, items) -> Result[(), Error] {
+    let added = run(mut db, Some(1000000u64), copy_env(schema.items), fn(mut tx, items) -> Result[(), Error] {
         put(mut tx, items, 99u64, b"post-freeze")
     })?
     let Committed(done) = take added else {
@@ -317,7 +326,7 @@ fn corpus_advance_and_recheck(mut db: Db, schema: CorpusSchema) -> Result[(), Er
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
     trust_store(mut db)?;
-    let rd = result.unwrap(reader(db, 0u64))
+    let rd = result.unwrap(reader(db, READER_PIN_MIN))
     let s = snapshot(db)
     if get(rd, s, schema.items, 1u64)? != Some(corpus_pattern(1500u64, 17u8)) {
         fail("frozen corpus lost BlobRef row after post-open checkpoint")
@@ -385,6 +394,9 @@ fn test_frozen_format_corpus(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut dir_db = open(tasks, dir_copy, c, r, corpus_dir_options(false))?
     let dir_schema = corpus_schema(mut dir_db, Open)?
     trust_store(mut dir_db)?
+    if residency_mode(dir_db, dir_schema.by_tag.id)? != (IndexCollection, ResidentTiered) {
+        fail("frozen Directory corpus must hold `by_tag` as a Tiered index")
+    }
     let dir_dump = corpus_canonical_dump(mut dir_db, dir_schema)?
     if dir_dump != corpus_directory_dump() {
         fail("frozen Directory corpus logical dump mismatch")
@@ -394,7 +406,7 @@ fn test_frozen_format_corpus(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut dir_reopened = open(tasks, dir_copy, c, r, corpus_dir_options(false))?
     let dir_re_schema = corpus_schema(mut dir_reopened, Open)?
     trust_store(mut dir_reopened)?
-    if get(result.unwrap(reader(dir_reopened, 0u64)), snapshot(dir_reopened), dir_re_schema.items, 99u64)? != Some(b"post-freeze") {
+    if get(result.unwrap(reader(dir_reopened, READER_PIN_MIN)), snapshot(dir_reopened), dir_re_schema.items, 99u64)? != Some(b"post-freeze") {
         fail("frozen Directory corpus lost post-open write across reopen")
     }
     close(take dir_reopened)?

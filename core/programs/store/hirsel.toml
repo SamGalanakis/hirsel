@@ -208,7 +208,7 @@ dirs = ["."]
 "store_journal_laws_5.hirsel" = "store"
 "store_backup_laws.hirsel" = "store"
 "store_corpus_laws.hirsel" = "store"
-"store_corpus_format11.hirsel" = "store"
+"store_corpus_format12.hirsel" = "store"
 "store_ace_crash_laws.hirsel" = "store"
 "store_journal_laws_6.hirsel" = "store"
 "store_journal_laws_7.hirsel" = "store"
@@ -241,7 +241,7 @@ dirs = ["."]
 "store_tiered_backup_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
-"store_format11_laws.hirsel" = "store"
+"store_format12_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "store"
@@ -597,7 +597,7 @@ limit = 536870912
 [tests.runs."store@1/store/test_l69_pin_after_its_pack_retires"]
 limit = 268435456
 
-[tests.runs."store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows"]
+[tests.runs."store@1/store/test_l98_index_residency_pairs_read_the_model"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_set_residency_moves_a_table_to_tiered"]
@@ -806,6 +806,9 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_l98_memory_index_cost"]
 limit = 134217728
+
+[tests.runs."store@1/store/test_l98_tiered_index_round_trip_keeps_account_and_refusal"]
+limit = 268435456
 
 [tests.runs."store@1/store/test_l68_demote_prior_one"]
 limit = 134217728

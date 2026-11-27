@@ -69,6 +69,32 @@ fn l96_same_bytes_table(left: Db, at_left: Snapshot, right: Db, at_right: Snapsh
     }
 }
 
+fn l96_len_keys(_k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, list.len(v) % 7)
+    Ok(take keys)
+}
+
+// Every entry of the index, with its primary row, read from each side.
+fn l96_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, Bytes, ()]) -> Result[u64, Error] waits {
+    let left_reader = reader(left, READER_PIN_MIN)?
+    let right_reader = reader(right, READER_PIN_MIN)?
+    let mut expected = find(left_reader, at_left, ix, Unbounded, Unbounded)?
+    let mut actual = find(right_reader, at_right, ix, Unbounded, Unbounded)?
+    let mut matched = 0u64
+    loop {
+        let want = next(left_reader, mut expected)?
+        let got = next(right_reader, mut actual)?
+        if want != got {
+            fail("L96: restored Tiered index differs from source Snapshot at H")
+        }
+        if want == None {
+            return Ok(matched)
+        }
+        matched += 1
+    }
+}
+
 fn l96_full_scrub_clean(mut db: Db) -> Result[(), Error] waits {
     let mut tour = begin_scrub(mut db)?
     loop {
@@ -83,9 +109,9 @@ fn l96_full_scrub_clean(mut db: Db) -> Result[(), Error] waits {
 }
 
 // L96 (a): backup + restore (live, offline, deploy open_export, check_capture,
-// describe_capture) of a store with a Tiered table (both class-3 page packs and
-// class-4 BLOB packs) reads equal to Snapshot at H and keeps every leased
-// class-3/4 pack byte-identical.
+// describe_capture) of a store with a Tiered table and a Tiered index on it
+// (class-3 page packs and class-4 BLOB packs) reads equal to Snapshot at H and
+// keeps every leased class-3/4 pack byte-identical.
 @test
 fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
@@ -97,7 +123,8 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
     let options = l96_tiered_options(floor, 65536, 500)?
     let mut db = open(tasks, source, c, r, clone(options))?
     let mut schema = declare(db, Migrate)?
-    let d_rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let mut d_rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let by_len = index(mut schema, mut d_rows, "by_len", Many, code.describe(l96_len_keys), std.codec.key_u64())?
     let rows = finish(mut schema, take d_rows)?
     let d_meta = declare_table(mut schema, "meta", std.codec.key_u64(), std.codec.of_u64())?
     let meta = finish(mut schema, take d_meta)?
@@ -114,6 +141,7 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
         }
     }
     set_residency(mut db, rows.id, Tiered)?
+    set_residency(mut db, by_len.id, Tiered)?
     // Write a post-cut journaled update before the lease so the backup also
     // replays a Tiered journal tail on top of Cold packs.
     l96_put_bytes(mut db, rows, 3, l96_blob_value(99, 1800))?
@@ -170,6 +198,12 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
     }
     if l96_same_bytes_table(db, leased, twin, now, rows)? != 15 {
         fail("L96 (a): restored Tiered table row count mismatch")
+    }
+    if l96_same_index(db, leased, twin, now, by_len)? != 15 {
+        fail("L96 (a): restored Tiered index entry count mismatch")
+    }
+    if residency_mode(twin, by_len.id)? != (IndexCollection, ResidentTiered) {
+        fail("L96 (a): the restored index is Tiered")
     }
     let left_r = reader(db, VALUE_LIMIT + 1048576)?
     let right_r = reader(twin, VALUE_LIMIT + 1048576)?

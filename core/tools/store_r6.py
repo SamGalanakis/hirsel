@@ -9,7 +9,7 @@ PAGE = 0x0021
 TARGET = 4096
 COMMITS = 64
 # Format 11: the MANIFEST holds one pack-list root and no retirement root.
-DISK_FORMAT = 11
+DISK_FORMAT = 12
 
 
 @dataclass

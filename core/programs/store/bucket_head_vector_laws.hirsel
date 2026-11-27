@@ -1,6 +1,6 @@
 // STORE L60. Little-endian fields and XXH3 frame checks were derived
 // independently of the store encoder.
-// L60 wire vectors use §2.1, the current-format (11) §2.3 HEADER, §12.2 and libxxhash.
+// L60 wire vectors use §2.1, the current-format (12) §2.3 HEADER, §12.2 and libxxhash.
 @test
 fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
@@ -28,7 +28,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         None => false,
     }
     if !history_pair_matches(dec1.head.pair, first.pair) || genesis_has_origin {
-        fail("genesis Format 11 head did not round-trip with no ORIGIN")
+        fail("genesis current-format head did not round-trip with no ORIGIN")
     }
     let second = history_claim_head(first, StoreId(hi: 13, lo: 14), ClaimAuth(expect: Some(claim_from_pair(first.pair)?), attempt: clone(attempt2), class: Permit))?
     history_encode_head(mut raw, second, payload)?
@@ -73,7 +73,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         Error(Unsupported(10)) => (),
         _ => fail("Format 10 head was not refused with Unsupported(10)"),
     }
-    // Format 11 malformed heads: entry from future epoch, equal positions with
+    // Current-format malformed heads: entry from future epoch, equal positions with
     // different refs, unknown authority style, and retired AUTHORITY kind 0x0050.
     let mut bad_future = first
     bad_future.entry = HistoryRef(seq: 2, epoch: 2, len: 130, digest: 0x2702)
@@ -96,7 +96,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         Error(Corrupt(Fault(file: f, offset: 224, why: Malformed))) if f == "head" => (),
         _ => fail("unknown authority style"),
     }
-    // Unknown MUST=1 frame kind 0x0050 in Format 11 head is refused Unsupported(0x0050).
+    // Unknown MUST=1 frame kind 0x0050 in a current-format head is refused Unsupported(0x0050).
     let ctx1 = DiskContext(store: first.store, role: 7, seq: first.entry.seq)
     history_encode_base_head(mut raw, first, payload)?
     let unknown_at = list.len(raw)

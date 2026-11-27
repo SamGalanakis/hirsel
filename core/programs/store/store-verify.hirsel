@@ -300,7 +300,7 @@ fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkP
             return Error(Io(Closed))
         }
     }
-    Ok(WalkReader(reader(db, db.writer_pin_bytes)?))
+    Ok(WalkReader(reader(db, READER_PIN_MIN)?))
 }
 
 fn walk_point[R](db: Db, s: Snapshot, source: WalkPoint, key: Bytes, visit: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
@@ -419,8 +419,11 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: 
 // point read, through the pager when the table is Tiered.
 fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let s = snapshot(db)
-    let source = walk_point_source(db, s, record.owner, direct)?
+    // A Tiered index's entries come back as a list, so its scan Reader is
+    // returned before the owner's point Reader is reserved: both take the one
+    // Reader partition the derived plan funds.
     let mut indexed = open_verify_entries(db, record.id, clone(walk.cursor), limit, direct)?
+    let source = walk_point_source(db, s, record.owner, direct)?
     let Some(extractor) = bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }

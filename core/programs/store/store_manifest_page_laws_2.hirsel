@@ -2,8 +2,8 @@ fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
     // page_manifest_vector with its pack root, data root and counters reset to
-    // page_manifest_empty's, re-encoded and re-checked with libxxhash (Format 11).
-    if list.len(encoded) != 515 || std.check.xxh3(encoded, 0, 515) != 0x3dcdc9b445028933u64 {
+    // page_manifest_empty's, re-encoded and re-checked with libxxhash (Format 12).
+    if list.len(encoded) != 515 || std.check.xxh3(encoded, 0, 515) != 0x37200a6d9d18f257u64 {
         return Error(Foreign)
     }
     Ok(())
@@ -97,24 +97,28 @@ fn disk_test_paged_inventory(d: Dir) -> Result[(), Error] waits {
     check_paged_inventory(d)
 }
 
-fn format9_header(ctx: DiskContext, raw: Bytes) -> Result[Bytes, Error] {
+// The HEADER of `raw` resealed with another format word.
+fn format_header(ctx: DiskContext, raw: Bytes, word: u32) -> Result[Bytes, Error] {
     let mut payload = copied(list.slice(raw, 16, 72))?
-    list.set_word_le(mut payload, 8, 9u32)
+    list.set_word_le(mut payload, 8, word)
     capacity(disk_seal(ctx, 0, 0x0001, 1, payload))
 }
 
-fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreId) -> Result[(), Error] waits {
+// L99 (§11.1 rule 6): a directory whose MANIFEST names another format word is
+// `Unsupported(word)` at the HEADER read and is left byte-unchanged.
+fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreId, word: u32) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let ctx = DiskContext(store: id, role: 1, seq: 1)
     let current = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
-    let mut manifest = format9_header(ctx, current)?
+    let mut manifest = format_header(ctx, current, word)?
     list.append(mut manifest, list.slice(current, 72, list.len(current)))
     let scratch = string.as_bytes("unselected")
     disk_write_synced(directory, "MANIFEST", manifest)?
     disk_write_synced(directory, "MANIFEST.tmp", scratch)?
     let lock = disk_lock(directory, c, 0)?
+    let observed: u64 = int.widen(word)
     match open(tasks, directory, c, r, journal_crash_options()) {
-        Error(Unsupported(9)) => (),
+        Error(Unsupported(found)) if found == observed => (),
         _ => return Error(Missing("directory format refusal")),
     }
     disk_io(host.close(take lock))?
@@ -134,14 +138,14 @@ fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
     let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
     let head = DiskContext(store: id, role: 7, seq: 1)
     capacity(history_append_header(mut raw, head, 2, 1))?
-    match history_head_frame(format9_header(head, raw)?) {
+    match history_head_frame(format_header(head, raw, 9u32)?) {
         Error(Unsupported(9)) => (),
         _ => return Error(Missing("bucket head format refusal")),
     }
     list.clear(mut raw)
     let manifest = DiskContext(store: id, role: 1, seq: 1)
     capacity(history_append_header(mut raw, manifest, 2, 1))?
-    let old = format9_header(manifest, raw)?
+    let old = format_header(manifest, raw, 9u32)?
     let reference = HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
     match history_object_context("m-1", id, 1, reference, old) {
         Error(Unsupported(9)) => Ok(()),
@@ -153,7 +157,7 @@ fn refuse_stream_format() -> Result[(), Error] {
     let sid = HostStreamId(hi: 3, lo: 4)
     let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
     let ctx = stream_header(mut raw, sid, 11, 1, 2, 1)?
-    match stream_read_header("reg", format9_header(ctx, raw)?, sid, 11) {
+    match stream_read_header("reg", format_header(ctx, raw, 9u32)?, sid, 11) {
         Error(Unsupported(9)) => Ok(()),
         _ => Error(Missing("stream format refusal")),
     }
@@ -162,7 +166,12 @@ fn refuse_stream_format() -> Result[(), Error] {
 @test
 fn disk_test_format_cutover(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let id = StoreId(hi: 1, lo: 2)
-    refuse_directory_format(d, c, r, tasks, id)?
+    // Format 9, the previous word 11 (a Format-11 store at this reader) and
+    // the next word 13 (as a Format-11 reader sees a Format-12 image: it
+    // accepts only its own word).
+    for word in[9u32, 11u32, 13u32] {
+        refuse_directory_format(d, c, r, tasks, id, word)?
+    }
     refuse_frozen_bucket(id)?
     refuse_stream_format()
 }

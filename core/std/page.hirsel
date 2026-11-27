@@ -396,6 +396,29 @@ pub fn collection_slot(root: Arc[Page], key: Bytes) -> Option[(View[Slot], View[
     None
 }
 
+/// Find a collection's root slot and its descriptor's residency byte (offset 53)
+/// in one map search, without building a descriptor view.
+pub fn collection_residency(root: Arc[Page], key: Bytes) -> Option[(View[Slot], u8)] in root {
+    if let Some(slot) = descend(root.image, key) {
+        return collection_residency(hot_child(root.kids[slot]), key)
+    }
+    let (slot, hit) = search(root.image, key)
+    if !hit || root.image.domain != CollectionMap {
+        return None
+    }
+    // Each u16 is read as the top quarter of the u64 ending at it: every offset is at least HEADER.
+    let head: u64 = list.word_le(root.image.raw, 0)
+    let slot_word: u64 = list.word_le(root.image.raw, list.len(root.image.raw) - 2 * ((head >> 16) & 65535) + 2 * slot - 6)
+    let width: u64 = list.word_le(root.image.raw, (slot_word >> 48) - 6)
+    let value = (slot_word >> 48) + 2 + (width >> 48)
+    let residency = if root.image.raw[value] == 0 {
+        root.image.raw[value + 3 + 53]
+    } else {
+        hot_bytes(root.blobs[ref_at(root.image.raw, value + 1).body])[53]
+    }
+    Some((view root.kids[slot], residency))
+}
+
 pub fn collection_entry(root: Arc[Page], key: Bytes) -> Option[(View[Arc[Page]], View[Bytes])] in root {
     let Some((edge, descriptor)) = collection_slot(root, key) else {
         return None

@@ -102,7 +102,7 @@ fn tiered_rows_after_mode(db: Db, table_id: u32, cursor: Option[Bytes], limit: u
             return Error(Io(Closed))
         }
     }
-    let r = reader(db, db.writer_pin_bytes)?
+    let r = reader(db, READER_PIN_MIN)?
     while list.len(out) <= limit {
         let Some((take key, value, take resume)) = snapshot_tiered_span_step(r, s, inventory, low, high, previous)? else {
             return Ok((take out, true))

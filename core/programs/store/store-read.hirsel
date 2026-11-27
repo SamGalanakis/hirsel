@@ -660,14 +660,13 @@ fn open_index_cursor(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result
     if low >= high {
         return Ok((None, false))
     }
+    // Below `high`, `low` starts with the index's prefix: `prefix_after` only
+    // leaves it at or past the next id, and `high` never passes that id.
     let leading = prefix(id)?
-    if list.len(low) < 4 || list.slice(low, 0, 4) != leading {
+    let Some((edge, residency)) = std.page.collection_residency(tree.root, leading) else {
         return Ok((None, false))
     }
-    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, leading) else {
-        return Ok((None, false))
-    }
-    if descriptor[53] != 0 {
+    if residency != 0 {
         return Ok((None, true))
     }
     let HotPage(root) = edge else {

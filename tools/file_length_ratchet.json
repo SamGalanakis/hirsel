@@ -66,9 +66,9 @@
     "reason": "std-omap-nth-2975"
   },
   "core/std/page.hirsel": {
-    "lines": 4222,
-    "raise_revision": 22,
-    "reason": "store-batch-leaf-design-3156"
+    "lines": 4245,
+    "raise_revision": 23,
+    "reason": "store-d7-s4-residency-3193"
   },
   "core/std/prop.hirsel": {
     "lines": 1748,

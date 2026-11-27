@@ -2445,7 +2445,7 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-const DISK_FORMAT: u64 = 11
+const DISK_FORMAT: u64 = 12
 
 type DiskContext {
     store: StoreId,

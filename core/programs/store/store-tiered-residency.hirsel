@@ -118,8 +118,8 @@ fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp:
 pub type Residency: send = Memory | Tiered
 
 // §13.8 "Residency changes": a schema commit on main, published by its own
-// cut. Tables and Logs only; a Cell is `Missing("residency")`, and an index
-// follows its table's Memory tree (open_lookup and entries read it there).
+// cut. Tables, Logs and indexes (D7, §13.10a; aggregates are indexes); a
+// Cell is `Missing("residency")`. Each join side reads by its own descriptor.
 pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
     if !is_disk(db) {
         return Error(Tiered(Memory))
@@ -132,7 +132,7 @@ pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] wai
     let Some(std.page_descriptor.CollectionDescriptor(kind, residency, ..)) = collection_by_key(db.heads[0u64].roots.collections, key) else {
         return Error(Stale(id))
     }
-    if kind != TableCollection && kind != LogCollection {
+    if kind == CellCollection {
         return Error(Missing("residency"))
     }
     match r {

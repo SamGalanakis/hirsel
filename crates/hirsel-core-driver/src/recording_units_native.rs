@@ -221,8 +221,11 @@ fn rl9_sent_items_match_their_takes() {
     let word = |v: u8| [vec![8, v], vec![0; 7], vec![0]].concat();
     // A client value: its zeroed handle word, one part, a tag 1 handle
     // snapshot of kind 0 (its ordinal left out), the inbox stream, the
-    // connection ordinal there, `cap` and room `b`.
-    let client = |stream: u32, conn: u8, cap: u8| {
+    // connection ordinal there, `cap`, room `b`, then its item's logical
+    // size 8 and flat bytes 8 (a `u64` or a client word) and its owner rows
+    // (format 17): none for a `u64`, one `CLIENT` row `[0, 1, 0, 0]` for a
+    // client word (hirsel-core-layout cross.rs).
+    let client = |stream: u32, conn: u8, cap: u8, owners: &[u8]| {
         [
             vec![8],
             vec![0; 8],
@@ -231,6 +234,11 @@ fn rl9_sent_items_match_their_takes() {
             vec![conn, cap],
             vec![0; 7],
             vec![0; 8],
+            vec![8],
+            vec![0; 7],
+            vec![8],
+            vec![0; 7],
+            owners.to_vec(),
         ]
         .concat()
     };
@@ -287,8 +295,8 @@ fn rl9_sent_items_match_their_takes() {
         // and `back`'s client g+4 at its take. The helper (stream 1): `hello`
         // 1 from its entry, then `back` 2 and its client 3.
         let (hello, back_at_root) = (grants + 1, grants + 4);
-        let hello_client = client(0, hello as u8, 1);
-        let back_client = client(1, 2, 2);
+        let hello_client = client(0, hello as u8, 1, &[1, 0, 1, 0, 0]);
+        let back_client = client(1, 2, 2, &[0]);
         // The hand-written sends: (sending stream, client ordinal there,
         // item), then (receiving stream, inbox ordinal there).
         let expected: [((usize, u64, Vec<u8>), (usize, u64)); 3] = [

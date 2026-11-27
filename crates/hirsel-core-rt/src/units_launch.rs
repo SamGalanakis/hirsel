@@ -64,6 +64,10 @@ pub(super) fn launch_planned(
         .memory
         .start(p.plan.memory_stack_bytes)
         .map_err(|error| format!("untied memory thread: {error}"))?;
+    // The run's one generation: every worker enters it on its own thread, so
+    // a stop recorded by a unit on any worker ends the whole pool.
+    let generation = crate::run_stop::GenerationEnd::standalone();
+    let generation = &generation;
     let start = (std::sync::Mutex::new(None), std::sync::Condvar::new());
     std::thread::scope(|scope| {
         let (ready, changed) = &start;
@@ -77,6 +81,8 @@ pub(super) fn launch_planned(
                         .unwrap()
                         .unwrap();
                     if go {
+                        // SAFETY: the scope joins this worker before `generation` drops.
+                        let _scope = unsafe { crate::run_stop::GenerationScope::enter(generation) };
                         worker_main(p, ix);
                     }
                 })
@@ -95,6 +101,10 @@ pub(super) fn launch_planned(
     })
     .map_err(|error| format!("untied workers ({w} requested): {error}"))?;
     drop(memory_thread);
+    // A stop recorded after the root unit returned still ends the run.
+    if let Some(stop) = generation.stop() {
+        crate::process::uncontained_stop(stop);
+    }
     // Every recording block is in its file before the run reports.
     #[cfg(feature = "record")]
     crate::tape::writer::flush();

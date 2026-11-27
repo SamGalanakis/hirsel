@@ -411,7 +411,10 @@ unsafe fn run_config(
     ) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>>,
 ) -> u8 {
     let standalone_gen = crate::run_stop::GenerationEnd::standalone();
-    let _scope = if crate::run_stop::is_contained() {
+    // An untied pool attaches its run's generation to every worker thread
+    // before any unit runs; a scope entered here would be bound to whichever
+    // worker the root unit started on, not to the unit.
+    let _scope = if crate::run_stop::current_generation().is_some() {
         None
     } else {
         // SAFETY: `standalone_gen` lives for the entire duration of `run_config`.

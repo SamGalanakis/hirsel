@@ -459,21 +459,57 @@ declaration and every parameter a value depends on. Nothing else enters. The `le
 the `empty` flag, the order in which parts are called, steps, charges and allocation do not.
 
 A **reference** is `0` and the child's fingerprint, or `1` and a `u32` `k` for member `k` of
-the node's own group. A group is how a recursive declaration gets a canonical form. The closed
-nominal instances (PROG-5) that one fingerprint reaches through their fields, variants and
-`via` representations are partitioned into the strongly connected components of that graph,
-as PROG-10 partitions functions. Each component is a group, so a type that refers to itself,
-directly or through others, is in a group with them, and every other type is a group of one.
-A group lists its members in ascending order of their type text, the definition path and
-type arguments as PROG-9's identity text writes them, which never ties. A member's node refers
-to a member of its own group by `1` and `k`, and to anything else by `0` and its fingerprint,
-so groups are hashed dependency-first. With `H` as in PROG-10, a built-in node's fingerprint is
-`H("hirsel.codec-storage.v1", 0 ‖ node)`. A group's hash is `H("hirsel.codec-group.v1", n ‖
-nodes)` with `n` its member count, and member `k`'s fingerprint is
-`H("hirsel.codec-storage.v1", 1 ‖ group hash ‖ k)`. A key codec's are the same under
-`hirsel.key-storage.v1` and `hirsel.key-group.v1`. Neither order nor the numbering depends on
-how the instances were found, so the same declarations give the same fingerprints in every
-program, on every engine and at every optimisation level.
+the node's own group; a node of any family may hold either form. A group is how a recursive
+codec gets a canonical form. The **descriptor graph** of one fingerprint has a vertex for each
+concrete node it reaches, one per closed instance (PROG-5), built-in constructor instances
+such as `List[DTree]` included, and an edge from a node to each child it references. Its
+strongly connected components are found as PROG-10 partitions functions. A built-in node's
+children are its type arguments (for `Bytes`, `u8`), whose type texts are shorter than its
+own, so every cycle passes through a nominal instance (a record, a sum or a `via` type). Each
+component that holds
+a nominal instance is a group: a type that refers to itself, directly or through other types
+or built-in constructors, is in a group with every node on those cycles, and a nominal type on
+no cycle is a group of one. Every other component is a single built-in node on no cycle, which
+belongs to no group. A group lists its members, built-in nodes included, in ascending byte
+order of their type text, the definition path and type arguments as PROG-9's identity text
+writes them, which never ties. A member's node refers to a member of its own group by `1` and
+`k`, and to anything else by `0` and its fingerprint, so groups are hashed dependency-first.
+With `H` as in PROG-10, a node in no group has fingerprint `H("hirsel.codec-storage.v1", 0 ‖
+node)`. A group's hash is `H("hirsel.codec-group.v1", n ‖ nodes)` with `n` its member count as
+a `u32` and the members' nodes in order, and member `k`'s fingerprint is
+`H("hirsel.codec-storage.v1", 1 ‖ group hash ‖ k)`, `k` a `u32`. A key codec's are the same
+under `hirsel.key-storage.v1` and `hirsel.key-group.v1`. A node's component is fixed by the
+nodes it reaches, so its fingerprint is the same whichever codec reached it, and neither the
+order nor the numbering depends on how the instances were found: the same declarations give
+the same fingerprints in every program, on every engine and at every optimisation level. A
+codec that reaches no cycle has the fingerprint it would have if groups held only nominal
+instances.
+
+For example, in a package `app@1` whose module `main` declares
+
+```hirsel
+type DTree: codec { label: u64, kids: List[DTree] }
+
+type DExpr: codec = Lit(i64) | Call(String, List[DArg])
+type DArg: codec = Pos(DExpr) | Named(String, Option[DExpr])
+```
+
+`DTree` and `List[DTree]` reach each other, so they are one group. Ordered by type text,
+member 0 is `app@1/main/DTree` and member 1 is `core@1/core/List[app@1/main/DTree]`. Member
+0's node is the `record` family and version, the path, the entry count 2, then `0`, `label`,
+`0 ‖ fingerprint(u64)`, `0` (no default), then `0`, `kids`, `1 ‖ 1`, `0`. Member 1's node is
+the `list` family and version, then `1 ‖ 0`. With `G = H("hirsel.codec-group.v1", 2 ‖ node0 ‖
+node1)`, `fingerprint(DTree)` is `H("hirsel.codec-storage.v1", 1 ‖ G ‖ 0)`, and a table whose
+values are `List[DTree]` stores under member 1's, `H("hirsel.codec-storage.v1", 1 ‖ G ‖ 1)`.
+`u64` is on no cycle and is referenced by its fingerprint. `DExpr` reaches `DArg` through
+`List[DArg]`, and `DArg` reaches `DExpr` directly and through `Option[DExpr]`, so the group has
+four members: 0 `app@1/main/DArg`, 1 `app@1/main/DExpr`, 2
+`core@1/core/List[app@1/main/DArg]` and 3 `core@1/core/Option[app@1/main/DExpr]`. `DArg`'s
+`Pos` payload is `1 ‖ 1` and its `Named` payloads are `0 ‖ fingerprint(String)` and `1 ‖ 3`;
+`DExpr`'s `Call` payloads are `0 ‖ fingerprint(String)` and `1 ‖ 2`; `List[DArg]` holds `1 ‖ 0`
+and `Option[DExpr]` holds `1 ‖ 1`. `i64` and `String` are on no cycle. A record `Forest {
+trees: List[DTree] }` is a group of one whose `trees` entry is `0 ‖` member 1's fingerprint
+above.
 
 An opaque codec's fingerprint is `H("hirsel.codec-opaque.v1", e ‖ d ‖ w ‖ least ‖ empty)`:
 its three parts' code revisions, `least` as a `u64` and `empty` as a `u8`. An opaque key
@@ -499,6 +535,10 @@ Version note (2026-11-27, storage fingerprint; not yet built): stores keyed inde
 `codec.revision` and `codec.key_revision`, so every toolchain change to a reached std body
 forced a rebuild although no stored byte changed (STORE-SPEC v2.172). The revisions stay, with
 their 96 bytes, for consumers that name code; `fingerprint` and `key_fingerprint` are added.
+The same day, before any build, groups were corrected from components over nominal instances
+alone to components over every descriptor node: a recursion through `List` or another
+built-in constructor had no canonical form, since the constructor's node needed the group's
+hash. Fingerprints of codecs that reach no cycle are unchanged by the correction.
 
 **Old data.** Bytes are decoded against the **writer's schema**, the schema of the
 declaration that encoded them, which the library keeps with them. Decoding resolves the

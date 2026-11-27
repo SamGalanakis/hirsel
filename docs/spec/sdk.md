@@ -351,14 +351,17 @@ time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
-Locks. Node storage uses durable file replacement and exclusive filesystem
-claims for its leases. Memory storage keeps the same mutual exclusion in the
-owning process and commits state snapshots atomically with no disk I/O. A
+Locks. Node storage commits mutations by syncing checksummed WAL frames and
+uses exclusive filesystem claims for its leases. It replays complete frames
+after the checkpoint and ignores an incomplete tail. Compaction syncs the
+new checkpoint, atomically renames it over the WAL, and syncs the directory
+before appending more mutations. Memory storage keeps the same mutual exclusion
+in the owning process and commits state snapshots atomically with no disk I/O. A
 NodeStorage claim records the owner's PID and a unique token.
 After the PID exits, contenders advance to a new claim without deleting the
 old one. A PID that has been reused can delay recovery until it exits.
-Stop all clients using the old `flock` adapter before opening the same
-directory with the new adapter.
+To upgrade from JSON snapshots, finish pending calls with the old clients and
+open the new adapter in a fresh directory.
 Recovery format 4 stores a random installation ID and random fencing generation.
 Generation validation and each work send share the installation lock. Missing
 stream records fence the generation. Pending requests keep their original Caller.

@@ -1243,8 +1243,6 @@ export async function laws(codec, only, mutant, entries, http) {
     const start=mode=>{
       const child=spawn(process.execPath,['--input-type=module','-e',`
         import {once} from 'node:events';
-        import fs from 'node:fs/promises';
-        import {syncBuiltinESMExports} from 'node:module';
         import {NodeStorage} from ${JSON.stringify(pathToFileURL(join(runtime.dir,'node.js')).href)};
         const [dir,mode]=process.argv.slice(1);
         process.on('disconnect',()=>process.exit(0));
@@ -1254,14 +1252,10 @@ export async function laws(codec, only, mutant, entries, http) {
           await storage.lock('install',true);
           const state={version:4,installation:2n,generation:1n,directory:[],streams:{}};
           await storage.write(state);
-          fs.rename=async()=>{
-            const stop=proceed();
-            process.send('staged');
-            await stop;
-            process.exit(77);
-          };
-          syncBuiltinESMExports();
-          await storage.write({...state,generation:99n});
+          const stop=proceed();
+          process.send('committed');
+          await stop;
+          process.exit(77);
         } else {
           const race=proceed();
           process.send('ready');
@@ -1287,7 +1281,7 @@ export async function laws(codec, only, mutant, entries, http) {
     try {
       const storage=new runtime.NodeStorage(dir);
       const owner=start('crash');
-      assert.equal(await owner.message(),'staged');
+      assert.equal(await owner.message(),'committed');
       assert.equal(await storage.lock('install',false),null);
       assert.deepEqual(await storage.read(),initial());
       owner.child.send('crash');
@@ -1311,7 +1305,7 @@ export async function laws(codec, only, mutant, entries, http) {
       assert.equal(await new runtime.NodeStorage(dir).lock('stream-1-0',false),null);
       await a.release();await a.lost;
       const b=await storage.lock('stream-1-0',false);assert(b);await b.release();
-      await writeFile(join(dir,'state.json'),'broken');await assert.rejects(storage.read(),runtime.CorruptState);
+      await writeFile(join(dir,'state.wal'),'broken');await assert.rejects(storage.read(),runtime.CorruptState);
     }finally{
       for(const {child} of children)if(child.connected)child.disconnect();
       await Promise.allSettled(children.map(({done})=>done));

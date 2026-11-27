@@ -1,14 +1,4 @@
-import type {Installation, Lease, Storage, StreamRecord} from './persistence.js';
-
-function copyInstallation(state: Installation): Installation {
-  const streams: Installation['streams'] = {};
-  for (const [name, record] of Object.entries(state.streams)) {
-    const copy: StreamRecord = {...record};
-    if (record.pending) copy.pending = {...record.pending};
-    streams[name] = copy;
-  }
-  return {...state, directory: state.directory.slice(), streams};
-}
+import {copyInstallation, type Installation, type Lease, type Storage} from './persistence.js';
 
 interface LockCell { held: boolean; queue: Array<() => void> }
 

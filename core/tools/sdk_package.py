@@ -38,7 +38,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         # use only local tarballs, including the compiler and ambient types.
         install = [*npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', '--no-save']
         subprocess.run([*install, *tool_tarballs], cwd=publisher, env=npm_env, check=True)
-        subprocess.run([*npm, 'run', 'build'], cwd=publisher, env=npm_env, check=True)
+        subprocess.run([*npm, 'test'], cwd=publisher, env=npm_env, check=True)
         packed = subprocess.check_output([*npm, 'pack', '--ignore-scripts', '--json', '--pack-destination', work],
                                          cwd=publisher, env=npm_env, text=True)
         package = work / json.loads(packed)[0]['filename']

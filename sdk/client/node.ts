@@ -1,14 +1,37 @@
-import {open, mkdir, readFile, readlink, rename, symlink, unlink} from 'node:fs/promises';
+import {hash} from 'node:crypto';
+import {constants, type BigIntStats} from 'node:fs';
+import {open, mkdir, readlink, rename, stat, symlink, unlink} from 'node:fs/promises';
 import {basename, join, resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {CorruptState, type Storage, type Installation, type Lease} from './client.js';
-import {encodeState, decodeState} from './persistence.js';
+import {
+  applyPatch, copyInstallation, CorruptState, decodeState, encodePatch, encodeState,
+  type Installation, type Lease, type Storage,
+} from './persistence.js';
+
+const magic = 0x48535731; // HSW1
+const headerBytes = 16;
+const compactAfterRecords = 128;
+const compactAfterBytes = 1024 * 1024;
+
+interface Journal {
+  readonly state: Installation;
+  readonly stamp: BigIntStats;
+  readonly end: number;
+  readonly records: number;
+  readonly deltaBytes: number;
+  readonly published: boolean;
+}
 
 export class NodeStorage implements Storage {
-  private directory: string;
+  private readonly directory: string;
+  private readonly walPath: string;
   private leaseGenerations = new Map<string, number>();
+  private cached?: Journal;
 
-  constructor(directory: string) { this.directory = resolve(directory); }
+  constructor(directory: string) {
+    this.directory = resolve(directory);
+    this.walPath = join(this.directory, 'state.wal');
+  }
 
   async lock(name: string, wait: boolean): Promise<Lease | null> {
     const base = join(this.directory, name === 'install' ? 'install.lease' : name + '.stream.lease');
@@ -44,15 +67,59 @@ export class NodeStorage implements Storage {
       return {lost, release: () => release ??= unlink(path).then(end)};
     }
   }
+
   async read(): Promise<Installation | null> {
-    try { return decodeState(await readFile(join(this.directory, 'state.json'), 'utf8')); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      if (error instanceof CorruptState) throw error;
-      throw new CorruptState(`unreadable client state: ${String(error)}`);
-    }
+    const journal = await this.load();
+    return journal && copyInstallation(journal.state);
   }
+
+  private async load(): Promise<Journal | null> {
+    const stamp = await stat(this.walPath, {bigint: true}).catch(missing);
+    const cached = this.cached;
+    if (stamp && cached && sameFile(stamp, cached.stamp)) return cached;
+    this.cached = undefined;
+    if (!stamp) return null;
+    const file = await open(this.walPath, 'r');
+    try {
+      const opened = await file.stat({bigint: true});
+      const journal = replay(await file.readFile(), opened);
+      if (BigInt(journal.end) === opened.size) this.cached = journal;
+      return journal;
+    } finally { await file.close(); }
+  }
+
+  // Writers hold the installation lease across a read/modify/write sequence.
   async write(state: Installation): Promise<void> {
+    const previous = await this.load().catch(error => {
+      if (error instanceof CorruptState) return null;
+      throw error;
+    });
+    if (!previous || previous.state.generation !== state.generation ||
+        previous.state.installation !== state.installation || previous.state.version !== state.version) {
+      await this.checkpoint(state);
+      return;
+    }
+    const frame = encodeFrame(encodePatch(previous.state, state));
+    const journal = previous.records >= compactAfterRecords || previous.deltaBytes >= compactAfterBytes
+      ? await this.checkpoint(previous.state) : previous;
+    // A process can die after renaming a checkpoint and before syncing its directory.
+    // Publish that name before appending the first new mutation to a checkpoint we recovered.
+    if (!journal.published) await this.syncDirectory();
+    const file = await open(this.walPath, constants.O_WRONLY | constants.O_APPEND);
+    try {
+      if (BigInt(journal.end) < journal.stamp.size) await file.truncate(journal.end);
+      await file.writeFile(frame);
+      await file.sync();
+      this.cached = {
+        state: copyInstallation(state), stamp: await file.stat({bigint: true}),
+        end: journal.end + frame.length, records: journal.records + 1,
+        deltaBytes: journal.deltaBytes + frame.length, published: true,
+      };
+    } finally { await file.close(); }
+  }
+
+  private async checkpoint(state: Installation): Promise<Journal> {
+    const frame = encodeFrame(encodeState(state));
     const temporary = join(this.directory, `.state-${process.pid}-${crypto.randomUUID()}`);
     const file = await open(temporary, 'wx', 0o600).catch(async error => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -60,13 +127,77 @@ export class NodeStorage implements Storage {
       return open(temporary, 'wx', 0o600);
     });
     try {
-      try { await file.writeFile(encodeState(state)); await file.sync(); }
-      finally { await file.close(); }
-      await rename(temporary, join(this.directory, 'state.json'));
-    } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
+      await file.writeFile(frame);
+      await file.sync();
+      // The checkpoint contains every prior committed frame. Either inode is sufficient
+      // for recovery until the rename is durable.
+      await rename(temporary, this.walPath);
+      await this.syncDirectory();
+      return this.cached = {
+        state: copyInstallation(state), stamp: await file.stat({bigint: true}),
+        end: frame.length, records: 0, deltaBytes: 0, published: true,
+      };
+    } catch (error) {
+      await unlink(temporary).catch(() => {});
+      throw error;
+    } finally {
+      await file.close();
+    }
+  }
+
+  private async syncDirectory(): Promise<void> {
     const directory = await open(this.directory, 'r');
     try { await directory.sync(); } finally { await directory.close(); }
   }
+}
+
+function missing(error: NodeJS.ErrnoException): null {
+  if (error.code === 'ENOENT') return null;
+  throw error;
+}
+
+function sameFile(a: BigIntStats, b: BigIntStats): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.ctimeNs === b.ctimeNs && a.mtimeNs === b.mtimeNs;
+}
+
+function checksum(payload: Buffer): number {
+  return hash('sha256', payload, 'buffer').readUInt32BE();
+}
+
+function encodeFrame(text: string): Buffer {
+  const payload = Buffer.from(text);
+  const header = Buffer.allocUnsafe(headerBytes);
+  header.writeUInt32BE(magic, 0);
+  header.writeUInt32BE(payload.length, 4);
+  header.writeUInt32BE(~payload.length >>> 0, 8);
+  header.writeUInt32BE(checksum(payload), 12);
+  return Buffer.concat([header, payload]);
+}
+
+function replay(bytes: Buffer, stamp: BigIntStats): Journal {
+  let end = 0, checkpointBytes = 0, records = 0;
+  let state: Installation | undefined;
+  while (bytes.length - end >= headerBytes) {
+    const length = bytes.readUInt32BE(end + 4);
+    if (bytes.readUInt32BE(end) !== magic || bytes.readUInt32BE(end + 8) !== (~length >>> 0) || length === 0) {
+      throw new CorruptState('invalid client WAL header');
+    }
+    const next = end + headerBytes + length;
+    if (next > bytes.length) break;
+    const payload = bytes.subarray(end + headerBytes, next);
+    if (bytes.readUInt32BE(end + 12) !== checksum(payload)) throw new CorruptState('invalid client WAL checksum');
+    const text = payload.toString('utf8');
+    if (state) {
+      applyPatch(state, text);
+      records++;
+    } else {
+      state = decodeState(text);
+      checkpointBytes = next;
+    }
+    end = next;
+  }
+  if (!state) throw new CorruptState('missing client WAL checkpoint');
+  return {state, stamp, end, records, deltaBytes: end - checkpointBytes, published: records > 0};
 }
 
 async function readOwner(path: string): Promise<string | null> {

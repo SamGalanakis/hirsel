@@ -21,10 +21,21 @@ export interface Lease { release(): Promise<void>; lost: Promise<void> }
 // The installation shell, directory, stream records and pending records are mutable working
 // state between read and write. Nested caller, want, args, http, stream id and terminal outcome
 // values are immutable once stored.
+// Hold the installation lease across a read/modify/write sequence.
 export interface Storage {
   lock(name: string, wait: boolean): Promise<Lease | null>;
   read(): Promise<Installation | null>;
   write(state: Installation): Promise<void>;
+}
+
+export function copyInstallation(state: Installation): Installation {
+  const streams: Installation['streams'] = {};
+  for (const [name, record] of Object.entries(state.streams)) {
+    const copy: StreamRecord = {...record};
+    if (record.pending) copy.pending = {...record.pending};
+    streams[name] = copy;
+  }
+  return {...state, directory: state.directory.slice(), streams};
 }
 
 export const fresh = (installation = randomGeneration()): Installation => ({
@@ -63,8 +74,8 @@ export function intact(s: Installation): boolean {
   });
 }
 
-export function encodeState(state: Installation): string {
-  return JSON.stringify(state, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
+export function encodeState(value: Installation | StatePatch): string {
+  return JSON.stringify(value, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
     : value instanceof Uint8Array ? {$bytes: [...value]} : value);
 }
 // Parse JSON on the native fast path, then visit only the containers that can hold tagged values.
@@ -95,21 +106,75 @@ function reviveState(value: unknown): unknown {
   }
   return object;
 }
-export function decodeState(text: string): Installation {
+function parseRecoveryValue(text: string): unknown {
   try {
-    const state = reviveState(JSON.parse(text)) as Installation;
-    if (!state || state.version !== RECOVERY_VERSION || !token(state.generation) || !token(state.installation)
-      || !Array.isArray(state.directory) || !state.directory.every(streamKey)
-      || new Set(state.directory).size !== state.directory.length
-      || !state.streams || typeof state.streams !== 'object' || Array.isArray(state.streams)) throw new CorruptState();
-    // A missing directory member is deliberately retained for the generation
-    // loss path in Client.open(), rather than silently treated as unused.
-    for (const [n, record] of Object.entries(state.streams)) {
-      if (!state.directory.includes(n) || !validRecord(record, n)) throw new CorruptState();
-    }
-    return state;
+    return reviveState(JSON.parse(text));
   } catch (error) { if (error instanceof CorruptState) throw error; throw new CorruptState('unreadable client state'); }
 }
+
+export function decodeState(text: string): Installation {
+  const state = parseRecoveryValue(text) as Installation;
+  if (!state || state.version !== RECOVERY_VERSION || !token(state.generation) || !token(state.installation)
+    || !validDirectory(state.directory) || !recordMap(state.streams)) throw new CorruptState();
+  // Missing directory members are retained for generation fencing in Client.open().
+  const names = new Set(state.directory);
+  for (const [name, record] of Object.entries(state.streams)) {
+    if (!names.has(name) || !validRecord(record, name)) throw new CorruptState();
+  }
+  return state;
+}
+
+interface StatePatch {
+  directory?: string[];
+  streams: Record<string, StreamRecord | null>;
+}
+
+function sameFields<T extends object>(before: T, after: T, nested?: keyof T): boolean {
+  const keys = Object.keys(before) as Array<keyof T>;
+  return keys.length === Object.keys(after).length
+    && keys.every(key => Object.hasOwn(after, key) && (key === nested || before[key] === after[key]));
+}
+
+export function encodePatch(before: Installation, after: Installation): string {
+  const patch: StatePatch = {streams: {}};
+  if (before.directory.length !== after.directory.length ||
+      before.directory.some((name, index) => name !== after.directory[index])) patch.directory = after.directory;
+  for (const name of Object.keys(before.streams)) {
+    if (!Object.hasOwn(after.streams, name)) patch.streams[name] = null;
+  }
+  for (const [name, record] of Object.entries(after.streams)) {
+    const old = before.streams[name];
+    if (!old || !sameFields(old, record, 'pending') ||
+        (old.pending && record.pending ? !sameFields(old.pending, record.pending) : old.pending !== record.pending)) {
+      patch.streams[name] = record;
+    }
+  }
+  return encodeState(patch);
+}
+
+export function applyPatch(state: Installation, text: string): void {
+  const patch = parseRecoveryValue(text) as StatePatch;
+  if (!patch || !recordMap(patch.streams)) throw new CorruptState();
+  if (patch.directory !== undefined) {
+    if (!validDirectory(patch.directory)) throw new CorruptState();
+    state.directory = patch.directory;
+  }
+  const names = new Set(state.directory);
+  for (const [name, record] of Object.entries(patch.streams)) {
+    if (!streamKey(name)) throw new CorruptState();
+    if (record === null) delete state.streams[name];
+    else {
+      if (!names.has(name) || !validRecord(record, name)) throw new CorruptState();
+      state.streams[name] = record;
+    }
+  }
+  if (patch.directory && Object.keys(state.streams).some(name => !names.has(name))) throw new CorruptState();
+}
+
+const recordMap = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value);
+const validDirectory = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every(streamKey) && new Set(value).size === value.length;
+
 const byte = (n: unknown) => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 255;
 const u32 = (n: unknown) => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 0xffffffff;
 const token = (n: unknown) => typeof n === 'bigint' && n >= 0n && n < 1n << 128n;

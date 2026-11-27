@@ -9,7 +9,7 @@
     "./node": {"types": "./dist/node.d.ts", "default": "./dist/node.js"}
   },
   "files": ["dist"],
-  "scripts": {"build": "tsc -p tsconfig.json"},
+  "scripts": {"build": "tsc -p tsconfig.json", "test": "npm run build && node --test tests/*.mjs"},
   "devDependencies": {"typescript": "5.9.3", "@types/node": "22.19.1"},
   "engines": {"node": ">=22"}
 }

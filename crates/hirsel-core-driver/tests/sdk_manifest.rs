@@ -410,6 +410,7 @@ runner = { major = 1, path = "../runner" }
                 "testCancellationHeldAtCRegistrationBoundary",
                 "testEarlyOutcomeBeforeCReturnsWins",
                 "testAbandonNotLiveLeavesDeliveryInCharge",
+                "testBreakKeepsCallLiveUntilStreamRelease",
             ][..],
         ),
     ] {

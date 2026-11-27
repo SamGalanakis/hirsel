@@ -1236,10 +1236,16 @@ Swift files, with `platforms` from the records (`.iOS("26.0")`, `.macOS("26.0")`
 
   If a yield finds the buffer full, the stream finishes with `ClientCapacity`, and the
   binding unsubscribes. A slow consumer thus gets an explicit end, never a dropped change.
-  Ending the stream's iteration calls `unsubscribe`.
 - **Rooms.** `api.room.<module>.<name>(args, buffer:)` returns a room value. It has an
   `AsyncThrowingStream` of `RoomEvent`s with the same buffer rule, plus `set(_:)`,
   `send(_:to:)` and `leave()`, matching EMB-4's room calls.
+
+  The binding cleans up a subscription or room when its stream terminates, when
+  iteration observes cancellation of the iterating task, or when the last reference to
+  the stream and its iterators is released. `Room.leave()` explicitly ends the room, and
+  `Session.close()` ends all calls, subscriptions and rooms in the session. A
+  `for try await` loop that breaks while the stream is still retained leaves the
+  subscription or room call live until one of those events.
 
 **Where it lives.** The header, the generator, the XCFramework assembly and the
 `Package.swift` generation live in the Hirsel repository, in the driver beside

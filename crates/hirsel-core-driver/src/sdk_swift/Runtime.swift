@@ -235,14 +235,9 @@ public struct Session: @unchecked Sendable {
     private func stream<Element: Sendable>(
         _ element: Element.Type, buffer: Int, id: UInt64, end: @escaping @Sendable () -> hirsel_status
     ) throws -> (AsyncThrowingStream<Element, Error>, StreamSink<Element>) {
-        guard buffer >= 0 else { throw EmbedError.invalidBuffer }
-        let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream(
-            bufferingPolicy: .bufferingOldest(buffer)
-        )
-        continuation.onTermination = { [weak state] _ in
+        return try StreamSink<Element>.make(buffer: buffer) { [weak state] in
             if state?.remove(id) != nil { _ = end() }
         }
-        return (stream, StreamSink(continuation: continuation))
     }
 }
 
@@ -273,8 +268,19 @@ public struct Room<State: Equatable & Sendable, Message: Equatable & Sendable>: 
     }
 }
 
-private struct StreamSink<Element: Sendable>: Sendable {
+struct StreamSink<Element: Sendable>: Sendable {
     let continuation: AsyncThrowingStream<Element, Error>.Continuation
+
+    static func make(
+        buffer: Int, onTermination: @escaping @Sendable () -> Void
+    ) throws -> (AsyncThrowingStream<Element, Error>, Self) {
+        guard buffer >= 0 else { throw EmbedError.invalidBuffer }
+        let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream(
+            bufferingPolicy: .bufferingOldest(buffer)
+        )
+        continuation.onTermination = { _ in onTermination() }
+        return (stream, Self(continuation: continuation))
+    }
 
     func yield(_ value: Element) {
         if case .dropped = continuation.yield(value) {

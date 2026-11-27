@@ -77,6 +77,39 @@ final class CancellationRaces: XCTestCase {
         XCTAssertEqual(audit.counts(), [1, 1])
     }
 
+    func testBreakKeepsCallLiveUntilStreamRelease() async throws {
+        let call = SubscriptionCall()
+        var retained: AsyncThrowingStream<UInt8, Error>?
+        let sink: StreamSink<UInt8>
+        (retained, sink) = try StreamSink<UInt8>.make(buffer: 1, onTermination: call.unsubscribe)
+        sink.yield(7)
+
+        try await breakAfterFirst(XCTUnwrap(retained))
+        withExtendedLifetime(retained) {
+            XCTAssertEqual(call.results(), [])
+        }
+
+        retained = nil
+        XCTAssertEqual(call.results(), [HIRSEL_OK])
+        sink.finish()
+        XCTAssertEqual(call.results(), [HIRSEL_OK])
+    }
+
+    private func breakAfterFirst(_ stream: AsyncThrowingStream<UInt8, Error>) async throws {
+        for try await value in stream {
+            XCTAssertEqual(value, 7)
+            break
+        }
+    }
+
+    private final class SubscriptionCall: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completions: [hirsel_status] = []
+
+        func unsubscribe() { lock.withLock { completions.append(HIRSEL_OK) } }
+        func results() -> [hirsel_status] { lock.withLock { completions } }
+    }
+
     private final class Calls: @unchecked Sendable {
         private let lock = NSLock()
         private var registered = 0

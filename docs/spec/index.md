@@ -71,6 +71,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Launch](launch.md) | |
 | [Foreign calls](foreign.md) | FFI-1 to FFI-16 |
 | [Process creation](exec.md) | EXEC-1 to EXEC-8 |
+| [In-process code loading](packing.md) | PACK-1 to PACK-10 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
@@ -116,6 +117,7 @@ The [MoQ specification](moq.md) defines the Media over QUIC endpoint and relay o
 The [SFU cascade specification](sfu_cascade.md) defines rooms that span SFU nodes over QUIC links, with a cross-node revocation fence that fails closed under partition (specified, not built; its room directory is a contract with an in-memory fake, and the Store adapter comes later).
 The [Fleet specification](fleet.md) defines single-binary multi-machine orchestration over `objects@1`: the three workload archetypes, `ClaimAuth` + `ORIGIN` move fencing, controller takeover and scoped barriers, dedicated `Directory[K]` Places, proof-ready kernel rules K1–K13, and verification tiers T0–T3 (Phase 1 kernel and proofs; orchestration seams unbuilt).
 The [Embedding specification](embed.md) defines the static-library output kind, the embedded launch and its versioned C embed ABI over runner entries, generated Swift bindings and a static XCFramework, the Apple target records (one per platform variant, from which every floor and triple is derived), and the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets with their capability refusals (EMB-1 to EMB-9; specified, not built).
+The [in-process code loading specification](packing.md) defines how a pack host installs compiled Hirsel code while it runs: the `.hirsel-mod` v1 artifact, the out-of-process capped `Compiler` service, the write-xor-execute code slab, the counted `Code[F]` handle with `activate`, the closed import mask, and the PC table (PACK-1 to PACK-10; each rule states what is built).
 The [Compute specification](compute.md) defines the reusable core scheduler for Archetype C elastic remote compute (`compute@1`) outside `fleet@1`: worker-only admission, hard per-principal concurrency limits, placement (`COMP-3`, credit desk), three retry classes, `AccountBeforeMint` restart custody by `ReapBeforeMint`, opaque versioned handles, contained Wasm pricing, multi-cell federation, and the formal/statistical verification split (specified, not built).
 The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
 The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).

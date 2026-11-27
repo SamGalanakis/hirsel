@@ -30,7 +30,7 @@ pub use fault::{
     Alternate, ArmError, arm_embedded, growth_faults, guard_hits, reset_fault_counters,
 };
 
-const RESERVE: usize = 8 << 20;
+const RESERVE: usize = hirsel_core_layout::stack::RESERVATION as usize;
 pub(crate) const COMMIT: usize = 64 << 10;
 pub(crate) fn commit_for_page(page: usize) -> usize {
     COMMIT.max(4 * page)

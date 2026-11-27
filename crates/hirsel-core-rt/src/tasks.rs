@@ -3477,6 +3477,11 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     // SAFETY: start owns this fiber. The body cleans its input/temporaries;
     // its result is initialized only on status zero.
     unsafe {
+        // FAIL-17: the limit is committed before the body first runs on this stack.
+        crate::stack::commit(
+            &mut *(*task).context,
+            (*task).stack.as_ref().unwrap().bounds(),
+        );
         loop {
             let input = match &mut (*task).moved {
                 Moved::Spawned => (*task).input,
@@ -3567,6 +3572,45 @@ pub(crate) type UnitGroup = ();
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn run_root_with_unit_contained(
+    context: *mut Context,
+    body: Body,
+    argument: *mut u8,
+    destination: *mut u8,
+    input_bytes: usize,
+    result_bytes: usize,
+    provider: SchedulerProvider,
+    unit: Option<&mut crate::units_lang::LangUnit>,
+    group: UnitGroup,
+) -> Result<u8, crate::run_stop::EndReason> {
+    // SAFETY: forwarded caller contract.
+    let ended = unsafe {
+        run_root_scheduler(
+            context,
+            body,
+            argument,
+            destination,
+            input_bytes,
+            result_bytes,
+            provider,
+            unit,
+            group,
+        )
+    };
+    // FAIL-17: the root task's stack is gone; code the run's teardown runs on
+    // this context, on another stack, is refused nothing.
+    // SAFETY: the caller pins the context through the run.
+    unsafe {
+        (*context).stack_limit = 0;
+        (*context).stack_floor = 0;
+    }
+    ended
+}
+
+/// The root scheduler loop of [`run_root_with_unit_contained`].
+/// # Safety
+/// As for [`run_root`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn run_root_scheduler(
     context: *mut Context,
     body: Body,
     argument: *mut u8,

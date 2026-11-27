@@ -924,7 +924,8 @@ impl<'a> Seal<'a> {
             | Inst::RegionOpen { .. }
             | Inst::BuiltinUse { .. }
             | Inst::LimitExit
-            | Inst::Step { .. } => {}
+            | Inst::Step { .. }
+            | Inst::StackCheck { .. } => {}
         }
     }
 }

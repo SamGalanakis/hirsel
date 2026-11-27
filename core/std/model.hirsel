@@ -172,6 +172,7 @@ fn describe_cause(primary: CauseKind) -> String {
         Cancelled => string.from("Cancelled"),
         Capacity(_) => string.from("Capacity"),
         OutOfTime => string.from("OutOfTime"),
+        Stack => string.from("Stack"),
         _ => string.from("Bounds"),
     }
 }

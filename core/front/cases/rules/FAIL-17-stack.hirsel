@@ -1,0 +1,357 @@
+// FAIL-17: an activation past its task's stack allowance fails at its entry with the
+// cause `Stack`. Only `isolate` catches it; `bound bytes` and `bound steps` do not, so it
+// passes through them to the enclosing isolate. A refusal releases the cleanup margin, so
+// finalizers of the unwinding frames run without a second `Stack`. A frame larger than
+// the allowance is refused when the function is built. Oracle: FAIL-17's text; each law
+// answers 1 when it holds. These are reference runs: the native source runners call from
+// a C thread with no task stack, so Cranelift and LLVM run every law here on task stacks
+// through test_run_native.rs (`fail17_stack_laws`).
+// expect: reference run recursion_caught() = 1 used 32
+// expect: reference run steps_pass_it() = 1 used 32
+// expect: reference run bytes_pass_it() = 1 used 32
+// expect: reference run chain_caught() = 1 used 32
+// expect: reference run finalizer_within_margin() = 1 used 32
+// expect: reference run continues() = 1 used 32
+// expect: refuse FAIL-17 at 352:1
+
+// A 4 KiB frame per level: a million levels are far past the 7.5 MiB allowance.
+fn deep(n: u64) -> u64 {
+    let mut pad: Inline[u64, 512] = [0u64; 512]
+    pad[n % 512u64] = n
+    if n == 0u64 {
+        pad[0u64]
+    } else {
+        deep(n - 1u64) + pad[n % 512u64] - n + 1u64
+    }
+}
+
+// The cause chain holds exactly one cause, `Stack`.
+fn only_stack(take r: Result[Result[u64, Causes], Capacity]) -> u64 {
+    match take r {
+        Ok(Error(causes)) => {
+            let mut stacks = 0u64
+            let mut others = 0u64
+            for cause in causes {
+                match cause.kind {
+                    Stack => { stacks += 1u64 },
+                    _ => { others += 1u64 },
+                }
+            }
+            if stacks == 1u64 && others == 0u64 { 1u64 } else { 2u64 }
+        },
+        Ok(Ok(_)) => 3u64,
+        Error(_) => 4u64,
+    }
+}
+
+fn recursion_caught() -> u64 {
+    only_stack(isolate(fn() -> u64 { deep(1000000u64) }))
+}
+
+// `bound steps` does not catch `Stack`: its own arms never run.
+fn steps_pass_it() -> u64 {
+    only_stack(isolate(fn() -> u64 {
+        match (bound steps 1000000000 { deep(1000000u64) }) {
+            Ok(_) => 5u64,
+            Error(_) => 6u64,
+        }
+    }))
+}
+
+fn bytes_pass_it() -> u64 {
+    only_stack(isolate(fn() -> u64 {
+        match (bound bytes 65536 { deep(1000000u64) }) {
+            Ok(_) => 5u64,
+            Error(_) => 6u64,
+        }
+    }))
+}
+
+// Every element of a frame, read after its callee returns, so the frame stays whole.
+fn held(pad: Inline[u64, 32768]) -> u64 {
+    let mut sum = 0u64
+    let mut i = 0u64
+    while i < 32768u64 {
+        sum += pad[i]
+        i += 1u64
+    }
+    sum
+}
+
+// Forty distinct functions with 256 KiB frames: 10 MiB of frames, no recursion.
+fn c01(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c02(n + 1u64)
+    below + held(pad) - n
+}
+fn c02(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c03(n + 1u64)
+    below + held(pad) - n
+}
+fn c03(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c04(n + 1u64)
+    below + held(pad) - n
+}
+fn c04(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c05(n + 1u64)
+    below + held(pad) - n
+}
+fn c05(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c06(n + 1u64)
+    below + held(pad) - n
+}
+fn c06(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c07(n + 1u64)
+    below + held(pad) - n
+}
+fn c07(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c08(n + 1u64)
+    below + held(pad) - n
+}
+fn c08(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c09(n + 1u64)
+    below + held(pad) - n
+}
+fn c09(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c10(n + 1u64)
+    below + held(pad) - n
+}
+fn c10(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c11(n + 1u64)
+    below + held(pad) - n
+}
+fn c11(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c12(n + 1u64)
+    below + held(pad) - n
+}
+fn c12(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c13(n + 1u64)
+    below + held(pad) - n
+}
+fn c13(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c14(n + 1u64)
+    below + held(pad) - n
+}
+fn c14(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c15(n + 1u64)
+    below + held(pad) - n
+}
+fn c15(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c16(n + 1u64)
+    below + held(pad) - n
+}
+fn c16(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c17(n + 1u64)
+    below + held(pad) - n
+}
+fn c17(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c18(n + 1u64)
+    below + held(pad) - n
+}
+fn c18(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c19(n + 1u64)
+    below + held(pad) - n
+}
+fn c19(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c20(n + 1u64)
+    below + held(pad) - n
+}
+fn c20(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c21(n + 1u64)
+    below + held(pad) - n
+}
+fn c21(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c22(n + 1u64)
+    below + held(pad) - n
+}
+fn c22(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c23(n + 1u64)
+    below + held(pad) - n
+}
+fn c23(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c24(n + 1u64)
+    below + held(pad) - n
+}
+fn c24(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c25(n + 1u64)
+    below + held(pad) - n
+}
+fn c25(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c26(n + 1u64)
+    below + held(pad) - n
+}
+fn c26(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c27(n + 1u64)
+    below + held(pad) - n
+}
+fn c27(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c28(n + 1u64)
+    below + held(pad) - n
+}
+fn c28(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c29(n + 1u64)
+    below + held(pad) - n
+}
+fn c29(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c30(n + 1u64)
+    below + held(pad) - n
+}
+fn c30(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c31(n + 1u64)
+    below + held(pad) - n
+}
+fn c31(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c32(n + 1u64)
+    below + held(pad) - n
+}
+fn c32(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c33(n + 1u64)
+    below + held(pad) - n
+}
+fn c33(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c34(n + 1u64)
+    below + held(pad) - n
+}
+fn c34(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c35(n + 1u64)
+    below + held(pad) - n
+}
+fn c35(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c36(n + 1u64)
+    below + held(pad) - n
+}
+fn c36(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c37(n + 1u64)
+    below + held(pad) - n
+}
+fn c37(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c38(n + 1u64)
+    below + held(pad) - n
+}
+fn c38(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c39(n + 1u64)
+    below + held(pad) - n
+}
+fn c39(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = c40(n + 1u64)
+    below + held(pad) - n
+}
+fn c40(n: u64) -> u64 {
+    let mut pad: Inline[u64, 32768] = [0u64; 32768]
+    pad[n % 32768u64] = n
+    let below = n
+    below + held(pad) - n
+}
+
+fn chain_caught() -> u64 {
+    only_stack(isolate(fn() -> u64 { c01(0u64) }))
+}
+
+// Each 4 KiB level holds a probe whose finalizer calls a function with a 4 KiB frame;
+// the deepest ones run at the edge of the allowance, inside the released margin.
+resource type Probe { depth: u64 } drop(p) { let _ = deep(p.depth % 2u64); }
+
+fn probed(n: u64) -> u64 {
+    let probe = Probe(depth: n)
+    let mut pad: Inline[u64, 512] = [0u64; 512]
+    pad[n % 512u64] = n
+    let below = if n == 0u64 { 0u64 } else { probed(n - 1u64) + pad[n % 512u64] - n + 1u64 }
+    let _ = take probe
+    below
+}
+
+fn finalizer_within_margin() -> u64 {
+    only_stack(isolate(fn() -> u64 { probed(1000000u64) }))
+}
+
+// After a caught `Stack`, the margin is restored and the program goes on: a second
+// refusal is caught alike, and ordinary calls run.
+fn continues() -> u64 {
+    let first = recursion_caught()
+    let second = recursion_caught()
+    if first == 1u64 && second == 1u64 && deep(100u64) == 100u64 { 1u64 } else { 0u64 }
+}
+
+// An 8 MiB frame is past the single-frame ceiling (the allowance).
+fn oversized(n: u64) -> u64 {
+    let mut pad: Inline[u64, 1048576] = [0u64; 1048576]
+    pad[n % 1048576u64] = n
+    pad[0u64]
+}

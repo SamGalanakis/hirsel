@@ -646,6 +646,7 @@ fn http_law_cause(causes: Causes) -> String {
             Unwrap => string.push(mut message, "Unwrap"),
             Cancelled => string.push(mut message, "Cancelled"),
             OutOfTime => string.push(mut message, "OutOfTime"),
+            Stack => string.push(mut message, "Stack"),
         }
         string.push(mut message, " at native site ")
         string.push_u64(mut message, site_word(cause.site))

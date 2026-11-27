@@ -46,6 +46,7 @@ mod scalar;
 mod simd;
 mod sink;
 mod sites;
+mod stack;
 mod steps;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]

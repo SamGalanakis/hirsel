@@ -70,6 +70,7 @@ pub(super) fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item 
         | Inst::Mark { .. }
         | Inst::Unmark { .. }
         | Inst::Step { .. }
+        | Inst::StackCheck { .. }
         | Inst::PromoteFrame { .. }
         | Inst::PutLanes { .. }
         | Inst::Prefetch { .. } => ([None; 3], &[]),

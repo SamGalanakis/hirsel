@@ -129,9 +129,13 @@ impl UntiedPlan {
         let memory_stack = 256 * KIB;
         let unit_stack = MIB;
         let commit = crate::fiber::commit_for_page(page);
-        let task_reserve = host.address_space_limit.map_or(8 * MIB, |limit| {
-            let share = (limit / (16 * w as u64)).min((8 * MIB) as u64) as usize;
-            (share / page * page).max(256 * KIB)
+        // FAIL-17: a task stack is the build's reservation. Only an address
+        // space limit narrows it, and never below 1 MiB, so the allowance the
+        // limit commits (stack::commit) keeps a cleanup margin above the guard.
+        let reservation = hirsel_core_layout::stack::RESERVATION as usize;
+        let task_reserve = host.address_space_limit.map_or(reservation, |limit| {
+            let share = (limit / (16 * w as u64)).min(reservation as u64) as usize;
+            (share / page * page).max(MIB)
         });
         let (reactor, pinned, io_workers) = reactor_plan(w, host, choice)?;
         let fixed_threads = w + 1 + io_workers;

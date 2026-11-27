@@ -20,6 +20,8 @@ pub const FAIL: u8 = 4;
 pub const CANCELLED: u8 = 5;
 pub const CAPACITY: u8 = 6;
 pub const OUT_OF_TIME: u8 = 7;
+/// FAIL-17: an activation of user code the stack allowance refused.
+pub const STACK: u8 = 8;
 
 /// Core's 32-byte Cause: `Fail`'s String at 0, then the site at 24. `CauseKind` is
 /// that String's niche (FORM #75): every other kind is a capacity at or above 2^63

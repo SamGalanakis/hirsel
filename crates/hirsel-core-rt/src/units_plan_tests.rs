@@ -26,7 +26,7 @@ fn plan_derivation_and_envelope_refusal() {
     assert_eq!(plan.reactor.iowq_bounded, 1);
     assert_eq!(plan.reactor.iowq_unbounded, 1);
     assert_eq!(plan.pinned_ring_bytes, 384 * KIB);
-    assert_eq!(plan.task_stack_reserve, 512 * KIB);
+    assert_eq!(plan.task_stack_reserve, MIB);
     for bytes in [
         plan.worker_stack_bytes,
         plan.host_stack_bytes,

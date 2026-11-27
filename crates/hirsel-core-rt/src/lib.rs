@@ -81,6 +81,7 @@ mod sha256;
 mod sha512;
 pub mod shared;
 mod signature;
+pub mod stack;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 mod stdin;
@@ -137,10 +138,18 @@ pub struct Context {
     pub events: usize,
     /// MEM-30 fast-path window, at the frozen offset CONTEXT_STEPS.
     pub steps: i64,
-    pub(crate) run: *const crate::process::Config,
+    /// FAIL-17: the lowest stack address an activation of user code may enter
+    /// with, at the frozen offset CONTEXT_STACK_LIMIT. Zero refuses nothing (a
+    /// context that does not run on a task stack). A task stack sets it before
+    /// the task first runs ([`stack::commit`]); an isolate saves it and a `Stack`
+    /// refusal releases the cleanup margin below it ([`stack::hirsel_core_stack_out`]).
+    pub stack_limit: usize,
     pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) map_fast_salt: [u64; 2],
     pub(crate) map_strong_key: hirsel_core_layout::map_hash::PreparedKey,
+    pub(crate) run: *const crate::process::Config,
+    /// The limit `stack_limit` returns to when the cleanup margin is restored.
+    pub(crate) stack_floor: usize,
     pub(crate) cancel_requested: AtomicBool,
     // Standalone roots and concurrent test tasks close their own heaps.
     owns_heap: bool,
@@ -167,8 +176,11 @@ pub struct Context {
     pub(crate) root_refusal: *const causes::Cause,
 }
 
-const _: () =
+const _: () = {
     assert!(std::mem::offset_of!(Context, map_hash_key) == abi_layout::CONTEXT_MAP_HASH_KEY);
+    assert!(std::mem::offset_of!(Context, steps) == abi_layout::CONTEXT_STEPS);
+    assert!(std::mem::offset_of!(Context, stack_limit) == abi_layout::CONTEXT_STACK_LIMIT);
+};
 
 type MapKeys = (
     hirsel_core_layout::map_hash::PreparedKey,
@@ -230,6 +242,8 @@ impl Context {
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
+            stack_limit: 0,
+            stack_floor: 0,
             map_hash_key,
             map_fast_salt,
             map_strong_key,

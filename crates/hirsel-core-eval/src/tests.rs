@@ -342,7 +342,9 @@ fn samples_behave_as_derived_by_hand() {
                     let what = format!("{name}: {run}: flat (checks {checks})");
                     assert_eq!(flat.outcome, tree.outcome, "{what}");
                     // How deep the host stack goes differs between the engines.
-                    if tree.outcome != eval::Outcome::Stopped("Stack") {
+                    let stack = tree.outcome == eval::Outcome::Stopped("Stack")
+                        || tree.chain.iter().any(|cause| cause.starts_with("Stack"));
+                    if !stack {
                         let facts = |r: &eval::PureRun| {
                             (
                                 r.used,

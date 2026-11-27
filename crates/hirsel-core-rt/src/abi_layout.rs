@@ -91,6 +91,8 @@ pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
+// FAIL-17: the task's stack limit word, in the Context's first cache line.
+pub const CONTEXT_STACK_LIMIT: usize = 24;
 pub const CONTEXT_MAP_HASH_KEY: usize = 32;
 pub const CONTEXT_MAP_FAST_SALT: usize = 64;
 pub const CONTEXT_MAP_STRONG_KEY: usize = 80;

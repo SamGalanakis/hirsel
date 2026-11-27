@@ -961,7 +961,7 @@ task bit is 0, because a take names no task. Then:
 | 9 | refund | limit ordinal `varint`; amount `u64` |
 
 - **Causes** are a count `varint` of at least 1, then each cause of the chain, primary
-  first: its kind `u8` in `CauseKind`'s declared order (`Overflow` 0 to `OutOfTime` 7), its
+  first: its kind `u8` in `CauseKind`'s declared order (`Overflow` 0 to `Stack` 8), its
   site `u64`, then for `Fail` its message as `bytes` and the message's `String` capacity
   as a `varint` (0 for static text, which no limit pays for; the owner's join admits a
   message of that capacity, so its replay charges what the run did), for `Capacity` its requested and

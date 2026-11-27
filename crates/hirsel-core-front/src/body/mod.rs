@@ -84,6 +84,7 @@ mod simd;
 mod slots;
 mod spans;
 mod stable;
+mod stack_frame;
 mod templates;
 mod temporaries;
 mod types;
@@ -2429,6 +2430,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.dest = Some((at, id));
             }
         }
+        // FAIL-17: an activation of source code is refused at its entry, after
+        // its parameters are bound and before any of its code runs.
+        if self.steps_in_source && self.live() {
+            let fail = self.fail_to(body);
+            self.inst(Inst::StackCheck { fail }, body);
+        }
         if self.fd.drop_of.is_some() || self.fd.clone_of.is_some() {
             self.source_step(body);
         }
@@ -2444,6 +2451,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let v = self.return_operand(body);
         self.ret(v, body);
+        self.frame_ceiling();
         // Only a body checked to its end shows that nothing it calls waits.
         if self.fd.waits && !self.waited && !self.entry && self.fd.drop_of.is_none() && !self.broken
         {

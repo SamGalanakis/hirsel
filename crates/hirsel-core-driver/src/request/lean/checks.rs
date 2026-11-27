@@ -77,6 +77,7 @@ fn allowed(inst: &Inst) -> bool {
             | Inst::SetCase { .. }
             | Inst::Drop { .. }
             | Inst::Step { .. }
+            | Inst::StackCheck { .. }
             | Inst::Share { .. }
             | Inst::BuiltinUse { .. }
             | Inst::Pointer { .. }
@@ -92,8 +93,9 @@ pub(super) fn fail_modelled(inst: &Inst, body: &IrBody) -> bool {
         Inst::Call { call } => !matches!(body.calls[call.index()].callee, Callee::Indirect(_)),
         // The reverse join demands a matching arithmetic or index expression.
         Inst::Binary { .. } | Inst::Address { .. } => true,
-        // Freeing memory and charging steps fail only on resource limits, which the model omits.
-        Inst::Drop { .. } | Inst::Step { .. } => true,
+        // Freeing memory, charging steps and the stack check fail only on resource limits, which
+        // the model omits.
+        Inst::Drop { .. } | Inst::Step { .. } | Inst::StackCheck { .. } => true,
         _ => false,
     }
 }

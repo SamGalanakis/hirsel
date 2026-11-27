@@ -696,6 +696,7 @@ impl Printer {
                     Inst::LimitExit => "limit_exit".into(),
                     Inst::BuiltinUse { definition } => format!("builtin_use {definition}"),
                     Inst::Step { fail: f } => format!("step{}", fail(*f)),
+                    Inst::StackCheck { fail: f } => format!("stack_check{}", fail(*f)),
                     Inst::Drop {
                         address,
                         ty,
@@ -1397,6 +1398,10 @@ impl BodyParser {
             Some("step") => {
                 l.next()?;
                 return Ok(Inst::Step { fail: l.fail()? });
+            }
+            Some("stack_check") => {
+                l.next()?;
+                return Ok(Inst::StackCheck { fail: l.fail()? });
             }
             Some("builtin_use") => {
                 l.next()?;

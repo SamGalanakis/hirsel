@@ -304,8 +304,8 @@ fn take_cases() {
         b"\x05\0",
         b"\0\x07\0\x01\x01\x0d\0",
         b"\x04\0\0\0\0\x01\x08\0\0\0\0\0\0\0\0\0",
-        // Cause kind 8 is past OutOfTime.
-        b"\x04\x03\x01\x01\x08\0\0\0\0\0\0\0\0\0",
+        // Cause kind 9 is past Stack.
+        b"\x04\x03\x01\x01\x09\0\0\0\0\0\0\0\0\0",
     ] {
         assert_eq!(
             Decoder::default().block(&take(0, body), false),

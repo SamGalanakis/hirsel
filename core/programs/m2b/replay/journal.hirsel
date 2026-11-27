@@ -218,6 +218,7 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
             Cancelled => put_u8(mut b, 6)?,
             Capacity(_) => put_u8(mut b, 7)?,
             OutOfTime => put_u8(mut b, 9)?,
+            Stack => put_u8(mut b, 10)?,
         }
         break
     }

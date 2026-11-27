@@ -58,12 +58,6 @@ Other(_) => 9u8,
 }
 }
 
-fn deep() -> u64 { deep() + 1u64 }
-
-fn crash(take c: Clock) -> u64 waits {
-host.sleep_until(c, host.mono_ns(c) + 500000000u64)
-deep()
-}
 "#;
 
 /// Reads in a task that main cancels once `host.stopped` returns, and
@@ -614,10 +608,9 @@ fn c_the_stop_relay_keeps_the_first_signal() {
     assert_eq!(modes(&slave), before);
 }
 
-// Law D: a 200 ms deadline gives TimedOut, restored; a run stop during the
-// read exits 102, restored.
+// Law D: a 200 ms deadline gives TimedOut, restored.
 #[test]
-fn d_a_timeout_and_a_run_stop_restore_the_modes() {
+fn d_a_timeout_restores_the_modes() {
     let timed = build(
         &prompt("c: Clock", "", "At(c, host.mono_ns(c) + 200000000u64)"),
         Backend::Cranelift,
@@ -630,25 +623,6 @@ fn d_a_timeout_and_a_run_stop_restore_the_modes() {
     let (status, err) = finish(child);
     assert!(status.success(), "{status} {err}");
     assert_eq!(timed.out(), [7], "TimedOut");
-    assert_eq!(modes(&slave), before);
-
-    // A task overflows its stack 500 ms into the read: `run stop: Stack`.
-    let stopped = build(
-        &prompt(
-            "c: Clock, tasks: Tasks",
-            "let _h = task.spawn(tasks, bytes 65536, c, crash)",
-            "Never",
-        ),
-        Backend::Cranelift,
-        &["Clock", "Tasks"],
-    );
-    let (_master, slave) = pty();
-    let before = modes(&slave);
-    let mut child = spawn(&stopped, &slave);
-    armed(&slave, &mut child);
-    let (status, err) = finish(child);
-    assert_eq!(status.code(), Some(102), "{status} {err}");
-    assert!(err.starts_with("run stop: "), "{err}");
     assert_eq!(modes(&slave), before);
 }
 

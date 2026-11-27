@@ -545,7 +545,7 @@ struct Cause {
     site: Option<Anchor>,
 }
 /// `CauseKind` in declaration order, its case ordinals.
-const CAUSE_KINDS: [&str; 8] = [
+const CAUSE_KINDS: [&str; 9] = [
     "Overflow",
     "Bounds",
     "Division",
@@ -554,6 +554,7 @@ const CAUSE_KINDS: [&str; 8] = [
     "Cancelled",
     "Capacity",
     "OutOfTime",
+    "Stack",
 ];
 /// A cause cell: core's `Cause` (32 bytes: the `Fail` carrier at 0, `Site` at 24),
 /// then the next cell's pointer. `CauseKind` is the carrier's capacity niche (FORM
@@ -675,6 +676,8 @@ struct Cell {
 /// and the active chain it set aside, with that chain's cells.
 struct Reservation {
     limit: Limit,
+    /// Whether the FAIL-17 cleanup margin was released when it was entered.
+    stack_released: bool,
     chain: Vec<Cause>,
     cells: Vec<(Limit, u64)>,
 }
@@ -954,6 +957,10 @@ const STACK_HEADROOM: usize = 64 << 10;
 thread_local! {
     static TASK_STACK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(TASK_STACK) };
     static TASK_STACK_ROOM: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
+    /// FAIL-17: the frame slot bytes of the thread's running activations.
+    static TASK_FRAME_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// FAIL-17: whether a `Stack` refusal has released the cleanup margin.
+    static TASK_STACK_RELEASED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 /// Run a harness control with a smaller spawned-task stack. The root keeps
 /// its existing stack, and a control cannot exceed the ordinary reservation.
@@ -1686,11 +1693,7 @@ fn task_thread<'m>(
     TASK_STACK_ROOM.with(|room| {
         room.set((
             &origin as *const u8 as usize,
-            if t.k == 0 {
-                usize::MAX
-            } else {
-                stack.saturating_sub(STACK_HEADROOM)
-            },
+            stack.saturating_sub(STACK_HEADROOM),
         ))
     });
     let Ok(Resume::Run(mut mach)) = link.resume.recv() else {
@@ -4584,6 +4587,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 }
                 let r = Reservation {
                     limit: cur.clone(),
+                    stack_released: TASK_STACK_RELEASED.with(std::cell::Cell::get),
                     chain: std::mem::take(&mut t.chain),
                     cells: std::mem::take(&mut t.cells),
                 };
@@ -4592,6 +4596,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
             RtOp::IsolateLeave => {
                 let r = t.reserved.pop().expect("isolate_leave with no reservation");
+                TASK_STACK_RELEASED.with(|released| released.set(r.stack_released));
                 assert!(t.chain.is_empty(), "isolate_leave during a failure");
                 self.refund(r.limit, charge::CAUSE_CELL);
                 (t.chain, t.cells) = (r.chain, r.cells);
@@ -4599,6 +4604,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
             RtOp::IsolateCatch => {
                 let r = t.reserved.pop().expect("isolate_catch with no reservation");
+                TASK_STACK_RELEASED.with(|released| released.set(r.stack_released));
                 assert!(!t.chain.is_empty(), "isolate_catch with no failure");
                 if t.chain.first().is_some_and(|cause| {
                     cause.kind == "Cancelled"
@@ -5649,6 +5655,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 }
             }
             Inst::Step { .. } => self.take_steps(t, 1)?,
+            Inst::StackCheck { .. } => self.stack_check(t)?,
             Inst::LimitEnter {
                 admitted,
                 available,

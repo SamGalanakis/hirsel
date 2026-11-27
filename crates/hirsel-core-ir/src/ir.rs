@@ -726,6 +726,33 @@ pub enum Inst {
         data: ValueId,
         offset: ValueId,
     },
+    /// FAIL-17: the entry of an activation of user code. When the activation's
+    /// stack pointer, its whole frame already made, lies below the task's stack
+    /// limit, the entry is refused: a `Stack` cause is recorded at the entry and
+    /// control continues at `fail`, the cleanup of a failure before the body ran.
+    /// An engine may emit nothing for it in a body that [`stack_check_elided`].
+    StackCheck {
+        fail: Option<BlockId>,
+    },
+}
+
+/// The largest frame, in bytes of slots, a body may have and still leave out its
+/// `stack_check` (FAIL-17): a leaf of at most this much fits in the engine reserve.
+pub const STACK_LEAF_SLOT_BYTES: u64 = 4096;
+
+/// A body whose `stack_check` an engine may skip: it makes no call of user code
+/// or a callable value, so its frame is the last one on the stack, and that frame
+/// is small enough for the engine reserve. The answer depends on the body alone,
+/// so every engine and every run of a build agree on it.
+pub fn stack_check_elided(body: &Body, slot_bytes: impl Fn(PlaceTy) -> u64) -> bool {
+    body.calls
+        .iter()
+        .all(|c| matches!(c.callee, Callee::Runtime(_)))
+        && body
+            .slots
+            .iter()
+            .try_fold(0u64, |sum, &s| sum.checked_add(slot_bytes(s)))
+            .is_some_and(|bytes| bytes <= STACK_LEAF_SLOT_BYTES)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

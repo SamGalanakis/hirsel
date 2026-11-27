@@ -298,6 +298,7 @@ tags!(Inst {
     46 => FrameActive { storage, result },
     47 => FrameRefund { storage },
     48 => Prefetch { data, offset },
+    49 => StackCheck { fail },
 });
 
 tags!(LayoutQuery {

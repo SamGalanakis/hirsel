@@ -240,6 +240,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::Call { .. }
         | Inst::SetCase { .. }
         | Inst::Step { .. }
+        | Inst::StackCheck { .. }
         | Inst::PromoteFrame { .. }
         | Inst::BuiltinUse { .. }
         | Inst::LimitExit

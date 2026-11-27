@@ -26,14 +26,22 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         };
         let l = self.lowered(f, b);
         let mut slots = self.take_words();
-        match &l {
-            Some(l) => self.frame_slots(&mut slots, l.slot_sizes()),
-            None => {
-                for s in &b.slots {
-                    slots.push(self.block(self.place_size(*s), None, 0, None));
-                }
+        let frame_bytes = match &l {
+            Some(l) => {
+                self.frame_slots(&mut slots, l.slot_sizes());
+                l.slot_sizes().iter().sum::<u64>()
             }
-        }
+            None => {
+                let mut bytes = 0u64;
+                for s in &b.slots {
+                    let size = self.place_size(*s);
+                    bytes += size;
+                    slots.push(self.block(size, None, 0, None));
+                }
+                bytes
+            }
+        };
+        TASK_FRAME_BYTES.with(|live| live.set(live.get() + frame_bytes));
         self.enter_frame(t, f);
         let r = match l {
             Some(l) => self.flat_blocks(t, &l, b, &slots, flat::Args::Words(args)),
@@ -41,7 +49,41 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         };
         t.at.pop();
         self.free_slots(slots);
+        TASK_FRAME_BYTES.with(|live| live.set(live.get() - frame_bytes));
         r
+    }
+
+    /// FAIL-17: refuse the entered activation with a `Stack` cause when the
+    /// task's frame slots pass the stack allowance, or the evaluator's own
+    /// stack passes its room less the cleanup margin. The first refusal
+    /// releases the margin for the failure's cleanup; an `isolate` restores it.
+    /// `enter`'s run stop stays the backstop when cleanup exhausts the margin.
+    pub(super) fn stack_check(&mut self, t: &mut Task) -> X<()> {
+        use hirsel_core_layout::stack::{ALLOWANCE, MARGIN};
+        let frame = 0u8;
+        let released = TASK_STACK_RELEASED.with(std::cell::Cell::get);
+        let (base, available) = TASK_STACK_ROOM.with(std::cell::Cell::get);
+        let used = base.abs_diff(&frame as *const u8 as usize);
+        let (slot_room, host_room) = if released {
+            (ALLOWANCE + MARGIN, available)
+        } else {
+            (ALLOWANCE, available - available / 8)
+        };
+        let slots = TASK_FRAME_BYTES.with(std::cell::Cell::get);
+        if slots <= slot_room as u64 && used <= host_room {
+            return Ok(());
+        }
+        TASK_STACK_RELEASED.with(|r| r.set(true));
+        let site = self.site(t);
+        self.record(
+            t,
+            Cause {
+                kind: "Stack",
+                message: [0, 0, 0],
+                site,
+            },
+        );
+        Err(Stop::Chained)
     }
 
     /// An activation is entered: FAIL-15 when the task's stack has no room left

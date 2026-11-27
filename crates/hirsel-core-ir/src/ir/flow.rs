@@ -21,7 +21,7 @@ impl Inst {
                 Callee::Runtime(op) => op.fails(),
                 Callee::Direct(_) | Callee::Indirect(_) => true,
             }),
-            Inst::Step { .. } | Inst::Drop { .. } => true,
+            Inst::Step { .. } | Inst::StackCheck { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }
@@ -30,6 +30,7 @@ impl Inst {
     pub fn fail(&self, b: &Body) -> Option<BlockId> {
         match *self {
             Inst::Step { fail }
+            | Inst::StackCheck { fail }
             | Inst::Unary { fail, .. }
             | Inst::Binary { fail, .. }
             | Inst::Simd { fail, .. }

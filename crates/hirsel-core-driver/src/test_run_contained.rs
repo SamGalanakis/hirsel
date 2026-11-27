@@ -333,8 +333,8 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         let out = run("signals", "2");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(102), "{engine} signals: {:?}\n{stderr}", out.status);
-        assert!(stderr.contains("run stop: Stack"), "{engine} signals: {stderr}");
+        assert_eq!(out.status.code(), Some(101), "{engine} signals: {:?}\n{stderr}", out.status);
+        assert!(stderr.starts_with("Stack at "), "{engine} signals: {stderr}");
         assert!(!stdout.is_empty() && stdout.lines().all(|line| line == trap("memory out of bounds")), "{engine} signals: {stdout}");
     }
 }

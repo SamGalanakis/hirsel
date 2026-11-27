@@ -521,7 +521,7 @@
 //! The `Cause` is in core's layout (32 bytes): `Fail`'s `String` carrier at 0 and the
 //! `Site` (u64) at 24. `CauseKind` is that carrier's capacity niche (FORM #75): kind
 //! `k` (declaration order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4,
-//! Cancelled 5, Capacity 6, OutOfTime 7) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
+//! Cancelled 5, Capacity 6, OutOfTime 7, Stack 8) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
 //! is that pointer, valid while the `Causes` lives. A `Fail` cause owns its message;
 //! cleaning the `Causes` frees it when its capacity is not 0.
 //!

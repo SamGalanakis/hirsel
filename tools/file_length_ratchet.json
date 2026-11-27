@@ -20,17 +20,17 @@
     "lines": 1152
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 3842,
-    "raise_revision": 8,
-    "reason": "m3-s3-slots-2010"
+    "lines": 3795,
+    "raise_revision": 9,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "core/programs/search/unicode.hirsel": {
     "lines": 1936
   },
   "core/programs/store/store.hirsel": {
-    "lines": 4806,
-    "raise_revision": 20,
-    "reason": "vector-single-open-design-3101"
+    "lines": 3974,
+    "raise_revision": 21,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "core/std/codec.hirsel": {
     "lines": 2695,
@@ -71,9 +71,9 @@
     "reason": "store-d7-s4-residency-3193"
   },
   "core/std/prop.hirsel": {
-    "lines": 1748,
-    "raise_revision": 1,
-    "reason": "verify-observer-2037"
+    "lines": 1749,
+    "raise_revision": 2,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "core/std/regex.hirsel": {
     "lines": 14358,
@@ -218,9 +218,9 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 6547,
-    "raise_revision": 12,
-    "reason": "cli-s2-prims-2712"
+    "lines": 5981,
+    "raise_revision": 13,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2590,
@@ -252,9 +252,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3058,
-    "raise_revision": 8,
-    "reason": "comptime-phase2-2693"
+    "lines": 3061,
+    "raise_revision": 9,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2530,
@@ -303,9 +303,9 @@
     "lines": 1167
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1806,
-    "raise_revision": 16,
-    "reason": "coverage-release-reorder-2667"
+    "lines": 1533,
+    "raise_revision": 17,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1140,
@@ -318,14 +318,14 @@
     "reason": "fixfwd-place-comptime-unbound-2845"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2450,
-    "raise_revision": 3,
-    "reason": "coverage-release-reorder-2667"
+    "lines": 2451,
+    "raise_revision": 4,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2394,
-    "raise_revision": 12,
-    "reason": "comptime-phase2-2693"
+    "lines": 2334,
+    "raise_revision": 13,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1845,
@@ -421,9 +421,9 @@
     "lines": 2478
   },
   "crates/hirsel-core-rt/src/tasks.rs": {
-    "lines": 4536,
-    "raise_revision": 1,
-    "reason": "unit-tapes-u3b-2616: RL8 take points and the hold hook"
+    "lines": 4378,
+    "raise_revision": 2,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-rt/src/tasks_tests.rs": {
     "lines": 1088
@@ -489,9 +489,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2552,
-    "raise_revision": 5,
-    "reason": "coverage-c3-2578"
+    "lines": 2524,
+    "raise_revision": 6,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
     "lines": 1145,
@@ -504,12 +504,14 @@
     "reason": "elf-debug-alias-key-2870"
   },
   "crates/hirsel-llvm/src/core/steps.rs": {
-    "lines": 1706,
-    "raise_revision": 1,
-    "reason": "coverage-c3-2578"
+    "lines": 1707,
+    "raise_revision": 2,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-llvm/src/core/storage.rs": {
-    "lines": 1120
+    "lines": 1119,
+    "raise_revision": 1,
+    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-llvm/src/core/tests.rs": {
     "lines": 2964,

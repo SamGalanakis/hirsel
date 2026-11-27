@@ -1,7 +1,8 @@
 // LANG-19: functions call each other and themselves freely, before or after their
 // declaration; each call's signature is all the caller needs. Hand-derived: 10 is even,
-// 7 is odd, and fact(5) = 120. Exhausting the stack is a run stop (FAIL-15): its fence
-// is test_run_native.rs prog4_runs "stopped" (`deep()`, status 102, `run stop: Stack`).
+// 7 is odd, and fact(5) = 120. Exhausting the stack allowance is the failure `Stack`
+// (FAIL-17): its fence is test_run_native.rs prog4_runs "stopped" (`deep()`, status 101,
+// `Stack at ...`).
 // expect: run even(10) = 1
 // expect: run even(7) = 0
 // expect: run fact(5) = 120

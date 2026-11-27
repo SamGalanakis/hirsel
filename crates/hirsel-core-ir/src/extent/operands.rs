@@ -111,7 +111,8 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         | Inst::StorageDead { .. }
         | Inst::BuiltinUse { .. }
         | Inst::LimitExit
-        | Inst::Step { .. } => {}
+        | Inst::Step { .. }
+        | Inst::StackCheck { .. } => {}
         Inst::UpdateMask { result, mask, .. } => {
             uses.push(v(mask));
             defs.push(v(result));

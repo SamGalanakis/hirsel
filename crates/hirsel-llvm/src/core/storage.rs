@@ -1003,6 +1003,7 @@ impl FunctionEmitter<'_> {
                 self.put(available, &room);
             }
             Inst::Step { fail } => self.step(fail),
+            Inst::StackCheck { fail } => self.stack_check(fail),
             Inst::LimitExit => {
                 if !self.empty_bounds.exits.contains(&index) {
                     self.runtime_void("hirsel_core_limit_exit", &[ptr(CONTEXT)]);

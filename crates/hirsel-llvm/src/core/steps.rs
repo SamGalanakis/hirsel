@@ -286,7 +286,8 @@ fn borrowed_index(
                     | Inst::UpdateMask { .. }
                     | Inst::Pointer { .. }
                     | Inst::Case { .. }
-                    | Inst::Step { .. } => true,
+                    | Inst::Step { .. }
+                    | Inst::StackCheck { .. } => true,
                     _ => false,
                 })
         })
@@ -310,7 +311,7 @@ pub(super) fn pure(
     stores: bool,
 ) -> bool {
     match *inst {
-        Inst::Step { .. } => true,
+        Inst::Step { .. } | Inst::StackCheck { .. } => true,
         Inst::Store { address, .. } => stores && local(body, address),
         Inst::Binary {
             op, left, right, ..

@@ -11,6 +11,9 @@ pub struct Reservation {
     pub(crate) saved: Causes,
     pub(crate) obligation: *mut causes::Resource,
     pub(crate) used: bool,
+    /// The stack limit at entry, restored when the isolate returns or catches
+    /// (FAIL-17: it takes back the cleanup margin a `Stack` refusal released).
+    pub(crate) stack_limit: usize,
 }
 
 #[repr(C)]
@@ -59,6 +62,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
             saved: std::mem::take(&mut context.causes),
             obligation: context.active_resource,
             used: false,
+            stack_limit: crate::stack::tighten(context, 0),
         };
         context.isolates.push(reservation);
         IsolateEnter {
@@ -76,6 +80,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_leave(context: *mut Context) {
     unsafe {
         let context = &mut *context;
         let reservation = context.isolates.pop().expect("isolate leave without enter");
+        crate::stack::restore(context, reservation.stack_limit);
         release_unused(context, reservation.cell);
         context.causes = reservation.saved;
     }
@@ -89,6 +94,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
     unsafe {
         let context = &mut *context;
         let mut reservation = context.isolates.pop().expect("isolate catch without enter");
+        crate::stack::restore(context, reservation.stack_limit);
         let caught = std::mem::take(&mut context.causes);
         let cancelled = caught.iter().next().is_some_and(|cause| {
             cause.kind() == causes::CANCELLED

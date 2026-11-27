@@ -21,6 +21,7 @@ pub(super) fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> I
         | Inst::BuiltinUse { .. }
         | Inst::LimitExit
         | Inst::Step { .. }
+        | Inst::StackCheck { .. }
         | Inst::PromoteFrame { .. }
         | Inst::Call { .. } => {}
         Inst::Simd { first, second, .. } => {

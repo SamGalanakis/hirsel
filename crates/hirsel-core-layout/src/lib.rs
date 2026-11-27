@@ -31,6 +31,7 @@ mod recipe;
 mod shape;
 pub mod show;
 pub mod source_positions;
+pub mod stack;
 mod target;
 
 pub use continuation::{Frames, Point, frames, spare_words};

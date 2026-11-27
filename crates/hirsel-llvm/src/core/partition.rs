@@ -100,6 +100,31 @@ impl Analyses {
             .map(|(i, f)| {
                 let body = f.body.as_ref()?;
                 let definition = module.instances[f.instance.index()].definition.to_string();
+                // FAIL-17: a checked body with more than a leaf's frame stays out of
+                // line, so inlining cannot merge frames into one past the reservation.
+                let slot_bytes = |t: PlaceTy| match t {
+                    PlaceTy::Value(t) => size(t),
+                    PlaceTy::Declared(t) => {
+                        match (module.types[t.index()].repr, &recipes[t.index()].layout) {
+                            (
+                                hirsel_core_layout::Repr::Resource
+                                | hirsel_core_layout::Repr::Region,
+                                _,
+                            ) => 8,
+                            (_, hirsel_core_layout::Layout::Fixed(f)) => f.size,
+                            _ => 0,
+                        }
+                    }
+                };
+                if body
+                    .insts
+                    .iter()
+                    .any(|i| matches!(i, Inst::StackCheck { .. }))
+                    && body.slots.iter().map(|&t| slot_bytes(t)).sum::<u64>()
+                        > hirsel_core_ir::STACK_LEAF_SLOT_BYTES
+                {
+                    return Some(Inline::Never);
+                }
                 Some(inlining::definition(
                     &definition,
                     module,

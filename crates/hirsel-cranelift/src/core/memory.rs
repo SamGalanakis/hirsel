@@ -119,6 +119,37 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(ready);
         Ok(())
     }
+    /// FAIL-17: refuse the activation when the stack pointer, this function's
+    /// frame made, lies below the task's stack limit.
+    fn stack_check(&mut self, fail: Option<BlockId>) -> Result<()> {
+        if stack_elided(self.input, self.layouts, self.body) {
+            return Ok(());
+        }
+        let limit = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.context,
+            memory_layout::CONTEXT_STACK_LIMIT as i32,
+        );
+        let sp = self.b.ins().get_stack_pointer(types::I64);
+        let below = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+        let slow = self.b.create_block();
+        self.b.set_cold_block(slow);
+        let ready = self.b.create_block();
+        self.b.ins().brif(below, slow, &[], ready, &[]);
+        self.b.switch_to_block(slow);
+        let site = self.site()?;
+        let status = self.c_call(
+            "hirsel_core_stack_out",
+            &[Ty::Ptr, Ty::Scalar(Scalar::U64)],
+            &[Ty::Scalar(Scalar::U8)],
+            &[self.context, site],
+        )?[0];
+        self.call_failure(status, fail)?;
+        self.b.ins().jump(ready, &[]);
+        self.b.switch_to_block(ready);
+        Ok(())
+    }
     pub fn memory(&mut self, inst: &Inst) -> Result<()> {
         let p = Ty::Ptr;
         let u = Ty::Scalar(Scalar::U64);
@@ -629,6 +660,7 @@ impl Function<'_, '_, '_> {
                 self.set(available, values[2]);
             }
             Inst::Step { fail } => self.step(fail)?,
+            Inst::StackCheck { fail } => self.stack_check(fail)?,
             Inst::LimitExit => {
                 if self.empty_bound {
                     return Ok(());
@@ -666,4 +698,15 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
+}
+
+/// Whether `body` leaves out its `stack_check` (FAIL-17's leaf rule).
+pub(super) fn stack_elided(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::RecipeRow],
+    body: &Body,
+) -> bool {
+    c::stack_check_elided(body, |s| {
+        super::place::storage(input, layouts, s).map_or(u64::MAX, |(size, _)| size)
+    })
 }

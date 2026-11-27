@@ -14,3 +14,9 @@ fn static_bytes_preserve_budget_law() {
     let failures = run_case(&root().join("cases/rules/MEM-28-static-bytes.hirsel"));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn stack_exhaustion_laws() {
+    let failures = run_case(&root().join("cases/rules/FAIL-17-stack.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

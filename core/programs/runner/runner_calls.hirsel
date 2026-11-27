@@ -506,6 +506,7 @@ fn cause_text(take prefix: String, cs: Causes) -> String {
                 string.push_u64(mut line, k.available)
             },
             OutOfTime => string.push(mut line, "OutOfTime"),
+            Stack => string.push(mut line, "Stack"),
         }
         break
     }

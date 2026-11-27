@@ -717,6 +717,7 @@ fn cause_failure(causes: Causes) -> FailureInfo {
             Cancelled => failure_info(AtSite(5, site), "Cancelled"),
             Capacity(_) => failure_info(ByteCapacity, "Capacity"),
             OutOfTime => failure_info(TimedOut, "OutOfTime"),
+            Stack => failure_info(AtSite(6, site), "Stack"),
         }
     }
     fail("prop: empty failure causes")

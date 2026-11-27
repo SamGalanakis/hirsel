@@ -55,7 +55,7 @@ fn prog4_runs(backend: Backend) {
         ("exit_zero", 4096, 0, 1, "", ""),
         ("exit_seven", 4096, 0, 7, "", ""),
         ("failed", 4096, 0, 101, "", "Fail"),
-        ("stopped", 4096, 0, 102, "", "run stop: Stack\n"),
+        ("stopped", 4096, 0, 101, "", "Stack at app@1/main.hirsel:"),
         ("own_error", 4096, 0, 101, "", "Division"),
         ("own_success", 288, 0, 0, "", ""),
         // No room beyond main's 288: reserving 8 one-byte elements asks for 8.
@@ -75,9 +75,7 @@ fn prog4_runs(backend: Backend) {
         assert_eq!(outcome.passed(), code == 0, "{name}: {outcome:?}");
         assert_eq!(outcome.output.status.code(), Some(code), "{name}: {outcome:?}");
         assert_eq!(outcome.output.stdout, stdout.as_bytes(), "{name}");
-        if name == "stopped" {
-            assert!(outcome.output.stderr.ends_with(b"Stack\n"), "{outcome:?}");
-        } else if matches!(name, "failed" | "own_error" | "raised_allocation") {
+        if matches!(name, "failed" | "stopped" | "own_error" | "raised_allocation") {
             let lines = String::from_utf8(outcome.output.stderr).unwrap();
             assert_eq!(lines.lines().count(), 1, "{name}: {lines}");
             assert!(lines.starts_with(stderr), "{name}: {lines}");
@@ -133,7 +131,7 @@ fn prog4_pass_cache(backend: Backend) {
             ("granted", 4096, 1 << 4, 0),
             ("own_error", 4096, 0, 101),
             ("own_success", 288, 0, 0),
-            ("stopped", 4096, 0, 102),
+            ("stopped", 4096, 0, 101),
         ] {
             let options = NativeOptions {
                 root_limit: limit,
@@ -584,6 +582,7 @@ fn coverage_reached(coverage: &crate::test_run::RunCoverage) -> BTreeMap<String,
 fn prog4_independent_runs_limits_and_outcomes_cranelift() {
     prog4_runs(Backend::Cranelift);
     prog4_pass_cache(Backend::Cranelift);
+    fail17_stack_laws(Backend::Cranelift);
     coverage_off_and_known_arms(Backend::Cranelift, false);
 }
 #[test]
@@ -591,6 +590,7 @@ fn prog4_independent_runs_limits_and_outcomes_cranelift() {
 fn prog4_independent_runs_limits_and_outcomes_llvm() {
     prog4_runs(Backend::Llvm);
     prog4_pass_cache(Backend::Llvm);
+    fail17_stack_laws(Backend::Llvm);
     // Engines agree: every site of the program, for one input, is reached or
     // not alike under Cranelift and both LLVM builds.
     let cranelift = coverage_off_and_known_arms(Backend::Cranelift, false);

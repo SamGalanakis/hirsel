@@ -4,7 +4,7 @@
 //! instructions, failure chain (kinds, messages and sites) and destination bytes,
 //! or stop with the same message. Both runs hash maps with one fixed key, since
 //! a fresh key moves probe lengths and so the instruction count. How deep the host stack goes differs between the
-//! engines, so a `Stack` stop compares its outcome only.
+//! engines, so a `Stack` failure (FAIL-17) or stop compares its outcome only.
 use hirsel_core_eval as eval;
 use hirsel_core_ir::{FuncId, Module};
 
@@ -23,7 +23,9 @@ fn run(
             ..eval::PureInput::default()
         };
         let r = eval::run_pure(module, f, args, input);
-        let facts = (r.outcome != eval::Outcome::Stopped("Stack")).then_some((
+        let stack = r.outcome == eval::Outcome::Stopped("Stack")
+            || r.chain.iter().any(|cause| cause.starts_with("Stack"));
+        let facts = (!stack).then_some((
             r.used,
             r.peak_reserved,
             r.steps,

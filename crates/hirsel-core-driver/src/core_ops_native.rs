@@ -1373,10 +1373,10 @@ fn ordered_compact_llvm() {
 ///
 /// The bound is checked through the task stack: `place` recurses DEPTH levels
 /// before its straight-line body, so every level's frame is live at once. A task
-/// stack reserves 8 MiB (fiber.rs), which allows 8 MiB / 1,024 = 8 KiB per level.
+/// stack's allowance is 7.5 MiB (FAIL-17), which allows 7.5 KiB per level.
 /// A shared frame holds a few result slots and spills, well under that. Unshared,
 /// a level holds at least 36 B per call: 108 KB at 3,000 calls, so 1,024 levels
-/// need about 110 MB and stop with `run stop: Stack`.
+/// need about 110 MB and fail with `Stack`.
 fn straight_line_calls(backend: Backend) {
     const DEPTH: u64 = 1024;
     for n in [3000u64, 10000] {

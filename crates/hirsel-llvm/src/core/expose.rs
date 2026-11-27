@@ -48,6 +48,7 @@ fn supported(i: &Inst) -> bool {
             | Inst::Case { .. }
             | Inst::SetCase { .. }
             | Inst::Step { .. }
+            | Inst::StackCheck { .. }
             | Inst::Simd { .. }
             | Inst::PutLanes { .. }
     )
@@ -230,7 +231,7 @@ impl Rename {
                 v(vector);
                 v(count);
             }
-            Inst::Step { fail } => *fail = self.f(*fail),
+            Inst::Step { fail } | Inst::StackCheck { fail } => *fail = self.f(*fail),
             _ => unreachable!("selected helper instruction"),
         }
     }

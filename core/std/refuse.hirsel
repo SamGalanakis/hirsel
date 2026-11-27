@@ -73,6 +73,7 @@ fn cause_name(kind: CauseKind) -> String {
         Cancelled => string.from("fault Cancelled"),
         Capacity(_) => string.from("fault Capacity"),
         OutOfTime => string.from("fault OutOfTime"),
+        Stack => string.from("fault Stack"),
     }
 }
 

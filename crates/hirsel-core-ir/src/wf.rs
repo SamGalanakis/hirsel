@@ -1306,7 +1306,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 "unknown builtin use".into()
             })
         }
-        Inst::Step { fail } => c.fail(fail, true),
+        Inst::Step { fail } | Inst::StackCheck { fail } => c.fail(fail, true),
         Inst::Prefetch { data, offset } => {
             c.is(data, Ty::Ptr)?;
             c.is(offset, Ty::Scalar(Scalar::U64))

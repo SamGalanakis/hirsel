@@ -549,10 +549,14 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         self.enter(t);
         let mut slots = self.take_words();
         self.frame_slots(&mut slots, callee.slot_sizes());
+        // FAIL-17: the frame counts toward the allowance as `activation`'s does.
+        let frame_bytes = callee.slot_sizes().iter().sum::<u64>();
+        crate::TASK_FRAME_BYTES.with(|live| live.set(live.get() + frame_bytes));
         self.enter_frame(t, f);
         let r = self.flat_blocks(t, &callee, b, &slots, Args::Caller(sources, vals, places));
         t.at.pop();
         self.free_slots(slots);
+        crate::TASK_FRAME_BYTES.with(|live| live.set(live.get() - frame_bytes));
         Some(r)
     }
 

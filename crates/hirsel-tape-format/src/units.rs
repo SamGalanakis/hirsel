@@ -498,7 +498,7 @@ fn causes<'a>(c: &mut Cursor<'a>) -> Result<Vec<Cause<'a>>, Corrupt> {
     }
     (0..count)
         .map(|_| {
-            let kind = tag(c, 7)?;
+            let kind = tag(c, 8)?;
             let site = c.u64()?;
             let detail = match kind {
                 4 => CauseDetail::Fail {

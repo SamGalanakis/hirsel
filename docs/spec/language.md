@@ -726,8 +726,8 @@ fn f(n: u64) -> Option[u64] { Some(half(n) ?=> |_| 0) }   // refused: LANG-18, t
 ### LANG-19: Recursion
 
 Functions may call each other and themselves freely; each call's signature is all the
-caller needs. Exhausting the stack is a run stop ([FAIL-15](failure.md#fail-15-run-stops)),
-not a failure. Mechanical release ([FAIL-13](failure.md#fail-13-mechanical-release)) uses
+caller needs. An activation past the task's stack allowance fails with the cause `Stack`
+([FAIL-17](failure.md#fail-17-stack-exhaustion)). Mechanical release ([FAIL-13](failure.md#fail-13-mechanical-release)) uses
 constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants

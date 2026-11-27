@@ -615,6 +615,7 @@ fn hoisted(inst: &Inst) -> Option<ValueId> {
 fn map_fail(inst: &mut Inst, f: impl Fn(BlockId) -> BlockId) {
     match inst {
         Inst::Step { fail }
+        | Inst::StackCheck { fail }
         | Inst::Unary { fail, .. }
         | Inst::Binary { fail, .. }
         | Inst::Simd { fail, .. }

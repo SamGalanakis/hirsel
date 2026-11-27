@@ -46,7 +46,7 @@ environmental termination. Unsafe/foreign operations require explicit authority 
 outside replay unless an explicit model/provider contract admits them." *v1:* FFI-1 to FFI-9
 ([foreign](foreign.md)): audited archives pinned per target, entry-granted `Foreign[I]`,
 call-scoped loans, checked handles, and no recording, replay or reused pass for a program that
-reaches native foreign code. FAIL-15 makes Hirsel stack exhaustion a run stop. On Linux
+reaches native foreign code. FAIL-17 makes Hirsel stack exhaustion the failure `Stack`. On Linux
 targets, a module marked `containment = "wasm"` may ship one pinned core WebAssembly
 module. Embedded Wasmtime (48 LTS) runs it with no OS access. The runtime charges linear
 memory to the byte limit and fuel to the step bound, maps traps to failures, and supports
@@ -86,7 +86,7 @@ failure or poison/discard the affected state. Environment death is not catchable
 `shield(body)` defers cooperative cancellation only and does not suppress bug failure."
 *v1:* FAIL-16: `isolate` reserves a cell for the current obligation before its body runs, returns
 the refused `Capacity` and leaves the chain as it is when that admission fails, catches
-after FAIL-8's cleanup, lets outer effects persist, never catches `Cancelled` or a run stop,
+after FAIL-8's cleanup, catches `Stack` (FAIL-17), lets outer effects persist, never catches `Cancelled` or a run stop,
 and accepts only a body whose capture descriptor lends nothing `mut`. `shield` has no v1
 form, and a commit of several provider operations needs none: cancellation reaches a task
 only at a cancellation point and a host operation only at its issue, which completes it

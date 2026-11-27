@@ -852,7 +852,15 @@ impl Function<'_, '_, '_> {
                             .body
                             .as_ref()
                             .is_some_and(|body| {
-                                body.insts.is_empty()
+                                body.insts
+                                    .iter()
+                                    .all(|i| matches!(i, Inst::StackCheck { .. }))
+                                    && (body.insts.is_empty()
+                                        || super::memory::stack_elided(
+                                            self.input,
+                                            self.layouts,
+                                            body,
+                                        ))
                                     && body
                                         .terminators
                                         .iter()

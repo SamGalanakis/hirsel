@@ -147,9 +147,11 @@ pub(crate) fn protection(at: usize) -> String {
     String::new()
 }
 
-/// Whether this host has a slab; the laws of one run only where it does.
+/// Whether this process can have a slab; the laws of one run only where it can.
 #[cfg(test)]
-pub(crate) const SLAB: bool = true;
+pub(crate) fn slab() -> bool {
+    true
+}
 
 /// The protection letters of a published text run and of one being filled, and the
 /// signal a jump into a recycled run raises.

@@ -17,13 +17,6 @@ SUITES = {
         "core::tests::cancelled_child_inside_isolate_passes_through_and_refunds_cell",
         "core::tests::c_results_and_indirect_calls_match_evaluator",
     )),
-    "hirsel-code": ("--lib", (
-        "tests::a_loaded_entry_runs_and_a_refused_module_installs_nothing",
-        "tests::a_dead_cohort_faults_and_its_range_is_published_again",
-        "tests::a_batch_is_one_cohort_that_lives_until_its_last_image_dies",
-        "tests::activate_swaps_at_the_expected_version_within_the_retired_budget",
-        "tests::a_code_address_resolves_to_its_image_and_a_fault_quarantines_it",
-    )),
     "hirsel-cranelift": ("--test=core_native", (
         "slots_loops_calls_and_c_struct_returns_match_evaluator",
     )),

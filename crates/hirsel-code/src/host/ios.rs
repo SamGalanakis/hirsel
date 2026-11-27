@@ -46,9 +46,11 @@ pub(crate) fn publish(_at: usize, _bytes: usize) -> io::Result<()> {
     none()
 }
 
-/// Whether this host has a slab; the laws of one run only where it does.
+/// Whether this process can have a slab; the laws of one run only where it can.
 #[cfg(test)]
-pub(crate) const SLAB: bool = false;
+pub(crate) fn slab() -> bool {
+    false
+}
 
 #[cfg(test)]
 pub(crate) const LIVE: &str = "";

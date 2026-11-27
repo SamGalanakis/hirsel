@@ -280,7 +280,8 @@ alias can write live code.
   executable to them, and no address in it has left the loader. The data band is
   published with one `mprotect`. Recycling follows PACK-4, except that returned pages may keep their bytes
   (`MADV_FREE`), so a range is filled with the trap pattern when it is next mapped. A
-  process whose `MAP_JIT` reservation is denied has no slab (`Unsupported`).
+  process that has no per-thread write window (a virtual machine guest, for one) or whose
+  `MAP_JIT` reservation is denied has no slab (`Unsupported`).
 - **iOS, and any host that denies dynamic code.** There is no slab. Every image is
   **prelinked**: compiled ahead of time, signed with the application, and registered in the
   host image's table by module key. `load` of a key in that table returns its `Code[F]`;

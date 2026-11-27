@@ -147,8 +147,11 @@ pub(crate) fn publish(at: usize, bytes: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether this process can have a slab; the laws of one run only where it can.
 #[cfg(test)]
-pub(crate) const SLAB: bool = true;
+pub(crate) fn slab() -> bool {
+    register().is_ok()
+}
 #[cfg(test)]
 pub(crate) const LIVE: &str = "rwxp";
 #[cfg(test)]

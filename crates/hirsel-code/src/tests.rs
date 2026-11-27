@@ -278,7 +278,7 @@ fn a_fixup_patches_the_field_its_kind_names_or_is_refused() {
 /// pages are never writable; a refusal installs nothing.
 #[test]
 fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
-    if !host::SLAB {
+    if !host::slab() {
         return;
     }
     let loader = Loader::new(config()).unwrap();
@@ -405,7 +405,7 @@ fn child(name: &str, role: &std::ffi::OsStr) -> std::process::ExitStatus {
 /// new code after it is published again (PACK-4 step 5).
 #[test]
 fn a_dead_cohort_faults_and_its_range_is_published_again() {
-    if !host::SLAB {
+    if !host::slab() {
         return;
     }
     let loader = Loader::new(config()).unwrap();
@@ -445,7 +445,7 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
 /// published, and the cohort lives until its last image dies (PACK-4 steps 3 and 5).
 #[test]
 fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
-    if !host::SLAB {
+    if !host::slab() {
         return;
     }
     let loader = Loader::new(Config {
@@ -498,7 +498,7 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
 /// (PACK-6 steps 3 to 5).
 #[test]
 fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
-    if !host::SLAB {
+    if !host::slab() {
         return;
     }
     let loader = Loader::new(Config {
@@ -581,7 +581,7 @@ extern "C" fn report(_: libc::c_int, info: *mut libc::siginfo_t, context: *mut l
 /// quarantines the digest; a recycled cohort resolves to nothing.
 #[test]
 fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
-    if !host::SLAB {
+    if !host::slab() {
         return;
     }
     let loader = Loader::new(Config {

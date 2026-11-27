@@ -46,7 +46,7 @@ pub fn backup_offline(take p: PreparedBackup, take attempt: Bytes) -> Result[Opt
     let (take checked, head) = check_prepared(mut selected, Some(target), fn(found: Fault) -> Result[(), Error] {
         Error(Corrupt(clone(found)))
     }) ?=> BackupCheck
-    let written = bound bytes JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH {
+    let written = bound bytes journal.JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH {
         copy_backup_journal(mut selected, target)
     } ?=> |cause| BackupCheck(CheckBudget(cause))
     written ?=> BackupDeploy
@@ -82,7 +82,7 @@ fn copy_backup_journal(mut p: PreparedCapture, target: Dir) -> Result[(), Deploy
     for i in 0u64 .. list.len(p.segments) {
         let path = scratch_result(failure_result_from_rep(manifest.journal_path(p.segments[i].seq, "")))?
         let end = p.segments[i].end
-        scratch_result(copy_export_prefix(mut p.segments[i].file, target, path, Some(end), JOURNAL_CHUNK_BYTES))?
+        scratch_result(copy_export_prefix(mut p.segments[i].file, target, path, Some(end), journal.JOURNAL_CHUNK_BYTES))?
     }
     Ok(())
 }

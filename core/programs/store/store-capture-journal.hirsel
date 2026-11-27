@@ -83,7 +83,7 @@ fn capture_chunk_at(mut file: HostFile, path: String, mut source: CaptureChunk, 
     }
     source.raw = list.new()
     source.base = at
-    source.raw = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, at, order.min(JOURNAL_CHUNK_BYTES, source.end - at)))?
+    source.raw = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, at, order.min(journal.JOURNAL_CHUNK_BYTES, source.end - at)))?
     Ok(0u64)
 }
 

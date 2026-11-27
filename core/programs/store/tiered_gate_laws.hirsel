@@ -37,7 +37,7 @@ fn gate_walk_all(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] 
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !compact_listed(db, seq) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L88: every published root reaches its frames in listed packs on disk")
         }
     }
@@ -86,10 +86,10 @@ fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options
         "MANIFEST.tmp"
     }, sealed))?
     let reopened = open(tasks, d, c, r, options)?
-    if disk_exists(d, "MANIFEST.tmp")? {
+    if failure_result_from_rep(journal.disk_exists(d, "MANIFEST.tmp"))? {
         fail("§13.6 crash: open removes an unpublished MANIFEST.tmp")
     }
-    if !renamed && disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
+    if !renamed && failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: open removes an unpublished cut's packs")
     }
     Ok(take reopened)
@@ -165,7 +165,7 @@ fn gate_pin_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -
     drop(take s)
     let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = refused_cut_bytes(mut db, take delta)?
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: the pin's cut wrote its materialization before the rename")
     }
     if let Some(_) = pinned(db, "history") {
@@ -221,7 +221,7 @@ fn gate_fork_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     drop(take s)
     let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = refused_cut_bytes(mut db, take delta)?
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: the fork's cut wrote its materialization before the rename")
     }
     if let Some(_) = gate_head(db, "beta") {
@@ -708,7 +708,7 @@ fn gate_walk_queue(d: Dir, db: Db) -> Result[CompactWalk, Error] waits {
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !compact_listed(db, seq) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L87 (c): every queue row reaches its frames in listed packs on disk")
         }
     }

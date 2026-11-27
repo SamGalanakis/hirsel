@@ -276,7 +276,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
         if compact_listed(db2, seq) {
             fail("L96 (b): Tiered-idle cut did not retire leased pack from MANIFEST")
         }
-        if !disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !failure_result_from_rep(journal.disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L96 (b): retiring cut deleted a class-3/4 pack still held by an export lease")
         }
     }
@@ -286,7 +286,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
         if compact_listed(db2, seq) {
             fail("L96 (b): second cut under export lease re-listed a retired Tiered pack")
         }
-        if !disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !failure_result_from_rep(journal.disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L96 (b): second cut deleted a pack still held by an export lease")
         }
     }
@@ -294,7 +294,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     release_export(mut db2, attempt)
     let _ = checkpoint(mut db2)?
     for (seq, _) in leased_packs {
-        if disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if failure_result_from_rep(journal.disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L96 (b): pack was not removed at the first cut after release_export")
         }
     }
@@ -325,13 +325,13 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     let attempt2 = b"l96b-lease-00002"
     let job2 = result.unwrap(begin_backup(mut db4, b2, failure_result_from_rep(types.copied(attempt2))?))
     let _ = checkpoint(mut db4)?
-    if compact_listed(db4, old_pack) || !disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?)? {
+    if compact_listed(db4, old_pack) || !failure_result_from_rep(journal.disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?))? {
         fail("L96 (b): reading-probe retirement did not defer unlink of leased pack")
     }
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db4, attempt2)
     let _ = checkpoint(mut db4)?
-    if disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?)? {
+    if failure_result_from_rep(journal.disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?))? {
         fail("L96 (b): reading-probe pack was not removed after release_export")
     }
     close(take db4)
@@ -369,7 +369,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
         fail("L96 (c) E1: lease survived a crash")
     }
     let _ = checkpoint(mut after_e1)?
-    if compact_listed(after_e1, pack_p) || disk_exists(source, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if compact_listed(after_e1, pack_p) || failure_result_from_rep(journal.disk_exists(source, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L96 (c) E1: next cut after E1 crash did not erase P")
     }
     // Re-Tier for E2/E3/R3/R5.
@@ -399,7 +399,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
     }
     // E3 + R5: complete restore removes EXPORT and opens cleanly at H.
     let restored_stamp = result.unwrap(restore(target, full_restore, c, clone(run_opts)))
-    if restored_stamp.head != head_h || disk_exists(full_restore, "EXPORT")? {
+    if restored_stamp.head != head_h || failure_result_from_rep(journal.disk_exists(full_restore, "EXPORT"))? {
         fail("L96 (c) R5: restore head mismatch or EXPORT survived")
     }
     let twin = open(tasks, full_restore, c, r, clone(run_opts))?
@@ -497,7 +497,7 @@ fn test_l96_d_corrupt_incoming_cold_pointer_at_r4(d: Dir, c: Clock, r: Random, t
             Error(Store(Corrupt(_))) => (),
             _ => fail("L96 (d): R4 did not reject mismatched incoming Cold pointer as Corrupt"),
         }
-        if !disk_exists(restore_dir, "EXPORT")? {
+        if !failure_result_from_rep(journal.disk_exists(restore_dir, "EXPORT"))? {
             fail("L96 (d): EXPORT did not survive in restore target after R4 Corrupt")
         }
     }
@@ -550,7 +550,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     let job2 = result.unwrap(begin_backup(mut db, conv_backup, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db, attempt)
-    if !disk_exists(conv_backup, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if !failure_result_from_rep(journal.disk_exists(conv_backup, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L96 (e) D-ZL-2: backup of last-conversion store omitted listed zero-live pack P")
     }
     // R4 on the last-conversion store takes NO Tiered plan reserve: exact
@@ -570,7 +570,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
         fail("L96 (e): restored last-conversion store lost listed pack P before probe")
     }
     let _ = checkpoint(mut twin)?
-    if compact_listed(twin, pack_p) || disk_exists(conv_restored, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if compact_listed(twin, pack_p) || failure_result_from_rep(journal.disk_exists(conv_restored, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L96 (e): restored last-conversion store failed to retire P via Tiered-idle probe")
     }
     l96_full_scrub_clean(mut twin)?
@@ -644,7 +644,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     let _ = result.unwrap(restore(bak_b, res_b, c, clone(run_opts)))
     let mut twin_b = open(tasks, res_b, c, r, clone(run_opts))?
     let _ = checkpoint(mut twin_b)?
-    if compact_listed(twin_b, pack_b) || disk_exists(res_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?)? {
+    if compact_listed(twin_b, pack_b) || failure_result_from_rep(journal.disk_exists(res_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?))? {
         fail("L100 (c) (b): restored idle store did not retire P")
     }
     l96_full_scrub_clean(mut twin_b)?

@@ -349,15 +349,6 @@ fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, 
     Ok(Some((take key, take body)))
 }
 
-fn apply_log_append(mut tree: pages.PageTree, key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
-    let collection = list.slice(key, 0, 4)
-    let suffix = list.slice(key, 4, list.len(key))
-    let inline = tree.inline
-    failure_result_from_rep(pages.page_result(std.page.edit_collection(mut tree.root, collection, first, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-        std.page.append_row(mut root, suffix, value, shared, inline, first, mut stamps)
-    })))
-}
-
 pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
     check_write_attempt(tx)?
     readable_value(tx.store, tx.roots, l.binding)?

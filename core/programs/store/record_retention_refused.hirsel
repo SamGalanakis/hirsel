@@ -1,0 +1,3 @@
+fn forge_record_retention() -> store.journal.RecordRetention {
+    store.journal.RecordRetention(first: 1, main_after: 0)
+}

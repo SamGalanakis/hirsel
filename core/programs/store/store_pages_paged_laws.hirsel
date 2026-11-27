@@ -161,7 +161,7 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let mut db = open(tasks, dir, c, r, options)?
     law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let seq = db.file_seq
+    let seq = file_seq(db)
     let mut wide: Bytes = list.with_capacity(914)
     list.fill(mut wide, 914, b'w')
     let short = string.as_bytes("s")
@@ -210,7 +210,7 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         return Error(Missing("overwrite commit"))
     }
     durable(mut db, done.ticket)?
-    if db.file_seq != seq {
+    if file_seq(db) != seq {
         return Error(Missing("uncovered journal"))
     }
     check_shrunk_collection(db, rows, wide, short)?

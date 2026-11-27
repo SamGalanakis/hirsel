@@ -372,22 +372,17 @@ fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkp
 
 // The Directory journal worker's grant beyond its group buffer, holding its
 // END scratch and write state (§3.4).
-const JOURNAL_WORKER_SLACK: u64 = 32768
-
-const JOURNAL_WINDOW_STEP: u64 = 1048576
-
-const JOURNAL_BULK_GROUP: u64 = 65536
-
-// Recovery reads the journal through one input chunk of this many bytes.
-const JOURNAL_CHUNK_BYTES: u64 = 65536
-
 // The ready channel covers startup. Four channels stay live after open.
 fn journal_ready_bytes() -> u64 {
     option.unwrap(charge.channel(bytes[Result[(), Capacity]], 1))
 }
 
 fn journal_channel_bytes(group_count: u64) -> u64 {
-    option.unwrap(charge.channel(bytes[JournalMsg], 2 * group_count)) + option.unwrap(charge.channel(bytes[Ack], 3 * group_count + 3)) + journal_ready_bytes() + option.unwrap(charge.channel(bytes[WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1))
+    journal_channel_charge(group_count, bytes[journal.DirJournalMsg], bytes[journal.DirAck])
+}
+
+fn journal_channel_charge(group_count: u64, message_bytes: u64, ack_bytes: u64) -> u64 {
+    option.unwrap(charge.channel(message_bytes, 2 * group_count)) + option.unwrap(charge.channel(ack_bytes, 3 * group_count + 3)) + journal_ready_bytes() + option.unwrap(charge.channel(bytes[journal.WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1))
 }
 
 fn writer_state_bytes() -> u64 {
@@ -446,16 +441,16 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
     let frame = l.frame
     let floor = int.checked_add(checkpoint_budget, frame)
     let minimum_journal = size_or(floor, unbounded)
-    let journal = size_or(o.journal_limit, minimum_journal)
+    let journal_budget = size_or(o.journal_limit, minimum_journal)
     let group = size_or(o.group_bytes, 4 * MIB)
     let commits = match o.group_commits {
         Some(n) => n,
         None => 64u32
     }
-    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64 && types.limits_fit(limits_to_rep(l))
+    let mut valid = floor != None && journal_budget >= minimum_journal && group > 0 && group <= 4294967295u64 && types.limits_fit(limits_to_rep(l))
     let mut parts = writer_parts()
     let mut cut_parts = writer_parts()
-    let mut recovery = JOURNAL_CHUNK_BYTES + frame
+    let mut recovery = journal.JOURNAL_CHUNK_BYTES + frame
     if let Bucket(config) = kind {
         let lanes = std.object.lane_reservation(config)
         valid = valid && lanes != None
@@ -475,14 +470,19 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         recovery = order.max(fetched_entry + frame, size_or(checkpoint_read, unbounded))
         cut_parts = bucket_cut_parts(pack, l)
     } else {
-        let aligned_room = journal_group_room(order.min(group, 4294967295u64))
-        let worker = charge.task(bytes[Result[(), Error]], aligned_room + JOURNAL_WORKER_SLACK)
+        let aligned_room = journal.journal_group_room(order.min(group, 4294967295u64))
+        let worker = charge.task(bytes[Result[(), types.Failure]], aligned_room + journal.JOURNAL_WORKER_SLACK)
         writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
         writer_add(mut parts, "journal_creation", option.unwrap(charge.seq(bytes[u8], 4096)))
         // The output buffer is a byte sequence, charged rounded up to 8.
         writer_add(mut cut_parts, "cut_output", size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
     }
-    writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
+    let channels = if let Bucket(_) = kind {
+        journal_channel_charge(int.widen(commits), bytes[JournalMsg], bytes[journal.Ack])
+    } else {
+        journal_channel_bytes(int.widen(commits))
+    }
+    writer_add(mut parts, "journal_channels", channels)
     writer_add(mut parts, "writer_state", writer_state_bytes())
     let write = 2 * frame
     writer_add(mut cut_parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
@@ -513,7 +513,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         writer_add(mut parts, "frames_in_flight", frame)
     } else {
         if let Directory = kind {
-            writer_add(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES)
+            writer_add(mut parts, "journal_chunk", journal.JOURNAL_CHUNK_BYTES)
             writer_add(mut parts, "recovered_frame", frame)
         } else {
             writer_add(mut parts, "recovery", recovery)
@@ -525,7 +525,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
     if !valid || resident < MIB || total > share {
         return Error(take parts)
     }
-    Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
+    Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal_budget, pack, resident), WriterPlan(total, parts: take parts)))
 }
 
 pub opaque type FollowerPlan: send {

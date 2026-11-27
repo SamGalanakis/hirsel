@@ -77,7 +77,7 @@ fn check_open_pack(d: Dir, path: String) -> Result[HostFile, Error] waits {
 fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], mut spent: u64) -> Result[(), Error] waits {
     let path = failure_result_from_rep(manifest.paged_pack_path(pack.seq))?
     let opened = check_open_pack(p.dir, path)?
-    let mut input = journal_input(take opened, false)?
+    let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
     if let Some(to) = target {
         format.journal_input_copy_to(mut input, failure_result_from_rep(manifest.disk_io(host.open(to, path, Write)))?)
     }
@@ -240,7 +240,7 @@ fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Re
     }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + 3
     let opened = check_open_pack(walk.dir, path)?
-    let mut input = journal_input(take opened, false)?
+    let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
     check_at_head(mut input, mut walk.packs[slot], path, ptr)?
     let mut scanned = manifest.pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
     let mut spent = 0u64
@@ -277,7 +277,7 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     let allow_tiered = domain == CollectionMap
     let image = {
         let file = check_open_pack(walk.dir, path)?
-        let mut input = journal_input(take file, false)?
+        let mut input = failure_result_from_rep(journal.journal_input(take file, false))?
         check_at_head(mut input, mut walk.packs[slot], path, ptr)?
         format.with_journal_file(mut input, scoped fn(mut opened: HostFile) -> Result[std.page.Image, Error] waits {
             capture_read_page_mode(mut opened, path, walk.id, ptr, domain, expected_level, allow_tiered)

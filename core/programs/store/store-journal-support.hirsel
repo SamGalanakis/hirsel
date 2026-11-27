@@ -1,0 +1,241 @@
+pub fn check_list_pack(d: Dir, id: types.StoreKey, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, types.Failure] waits {
+    let path = types.capacity(manifest.disk_path("p-", seq, ""))?
+    let opened = manifest.disk_io(host.open(d, path, Read))?
+    let mut input = journal_input(take opened, false)?
+    let header = manifest.disk_read_header(path, manifest.journal_prefix(mut input, path, 0, 72)?, 3, Some(seq), Some(id))?
+    let mut reached = manifest.disk_allocation(scoped fn() -> Result[List[u64], types.Failure] {
+        Ok(clone(offsets))
+    })?
+    list.sort(mut reached, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let mut at = 72u64
+    let mut slot_order = 0u64
+    let mut live_bytes = 0u64
+    let mut checked_pack = manifest.pack_scan(2, next_stamp)
+    while at < format.journal_input_size(input) {
+        let mut spent = 0u64
+        let frame = manifest.read_pack_frame(mut input, path, header.context, mut checked_pack, at, false, mut spent)?
+        let end = at + 16 + frame.size
+        if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
+            slot_order += 1
+            live_bytes += frame.size
+        }
+        if slot_order < list.len(reached) && reached[slot_order] < end {
+            return Error(format.disk_fault(path, reached[slot_order], Malformed))
+        }
+        at = end
+    }
+    if slot_order != list.len(reached) || checked_pack.frames > 4294967295 {
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    let handle = format.take_journal_file(take input)
+    manifest.disk_io(host.close(take handle))?
+    Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
+}
+
+pub type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u64, u64) | ObjectBroken(types.Failure)
+
+type SegmentSpan: send {
+    first: u64,
+    end: u64
+}
+
+pub type DiskRemovals: send {
+    packs: List[u64],
+    before: SegmentSpan,
+    after: SegmentSpan,
+    name: String
+}
+
+pub fn removal_spans(first: u64, end: u64, lease: Option[(u64, u64)]) -> (SegmentSpan, SegmentSpan) {
+    if let Some((from, through)) = lease {
+        if from < end && through >= first {
+            return (SegmentSpan(first: first, end: order.max(first, from)), SegmentSpan(first: order.min(end, int.saturating_add(through, 1)), end: end))
+        }
+    }
+    (SegmentSpan(first: first, end: end), SegmentSpan(first: end, end: end))
+}
+
+pub fn remove_cut_files(d: Dir, take plan: DiskRemovals) -> Result[(), types.Failure] waits {
+    let DiskRemovals(packs: take packs, before: before, after: after, name: take scratch) = take plan
+    let mut name = take scratch
+    for seq in packs {
+        manifest.remove_numbered(d, "p-", seq, false, mut name)?
+    }
+    for seq in before.first .. before.end {
+        manifest.remove_numbered(d, "j-", seq, true, mut name)?
+    }
+    for seq in after.first .. after.end {
+        manifest.remove_numbered(d, "j-", seq, true, mut name)?
+    }
+    Ok(())
+}
+
+// END damage loses the detection boundary, never the journal's valid prefix.
+// A valid unknown MUST kind is a newer format and still refuses the open.
+pub fn disk_read_end(file: String, id: types.StoreKey, seq: u64, raw: Bytes) -> Result[u64, types.Failure] {
+    let header = manifest.disk_read_header(file, raw, 4, Some(seq), Some(id))?
+    let mut at = 72u64
+    let mut room = 0u64
+    let mut found: Option[u64] = None
+    while at < list.len(raw) {
+        let frame = manifest.disk_read_frame(file, header.context, raw, at)?
+        if frame.kind == 0x0012 {
+            if let Some(_) = found {
+                return Error(format.disk_fault(file, at, Malformed))
+            }
+            if frame.end - frame.payload != 8 {
+                return Error(format.disk_fault(file, at, Malformed))
+            }
+            found = Some(format.read_le(raw, frame.payload, 8))
+        } else {
+            room += frame.end - at
+            if room > 1048576 {
+                return Error(format.disk_fault(file, at, Malformed))
+            }
+        }
+        at = frame.end
+    }
+    match found {
+        Some(value) => Ok(value),
+        None => Error(format.disk_fault(file, 72, Malformed))
+    }
+}
+
+pub fn disk_end(d: Dir, id: types.StoreKey, seq: u64) -> Result[Option[u64], types.Failure] waits {
+    let path = manifest.journal_path(seq, ".end")?
+    let raw = match manifest.disk_read_file(d, path, 96 + 1048576) {
+        Ok(take raw) => take raw,
+        Error(Io(NotFound)) => return Ok(None),
+        Error(Corrupt(_)) => return Ok(None),
+        Error(take e) => return Error(take e)
+    }
+    match disk_read_end(path, id, seq, raw) {
+        Ok(value) => Ok(Some(value)),
+        Error(Corrupt(_)) => Ok(None),
+        Error(take e) => Error(take e)
+    }
+}
+
+pub fn disk_exists(d: Dir, path: String) -> Result[bool, types.Failure] waits {
+    match host.open(d, path, Read) {
+        Ok(take file) => {
+            manifest.disk_io(host.close(take file))?;
+            Ok(true)
+        },
+        Error(NotFound) => Ok(false),
+        Error(e) => Error(Io(e))
+    }
+}
+
+pub type DiskStartup: send {
+    store: types.StoreKey,
+    fence: u32,
+    state: pages.State,
+    live: u64,
+    tiered: u64,
+    resident_pages: u64,
+    uncovered: u64,
+    next_node: u64,
+    next_table: u32,
+    generation: u64,
+    cut_first: u64,
+    recorded_after: u64,
+    seq: u64,
+    segment: HostFile,
+    end_file: HostFile,
+    header: Bytes,
+    creation: Bytes,
+    pages: manifest.PackDiskState,
+    limits: types.LimitsRep
+}
+
+pub type DiskSession {
+    lock: HostFile,
+    startup: DiskStartup
+}
+
+pub fn disk_lock(d: Dir, c: Clock, wait_ms: u64) -> Result[HostFile, types.Failure] waits {
+    let mut lock = manifest.disk_io(host.open(d, "LOCK", Write))?
+    if manifest.disk_io(host.try_lock(mut lock))? {
+        return Ok(take lock)
+    }
+    if wait_ms == 0 {
+        return Error(Held)
+    }
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(c), wait_ms)
+    loop {
+        let now = host.mono_ns(c)
+        if now >= deadline {
+            return Error(Held)
+        }
+        let poll = int.saturating_add(now, 1000000)
+        host.sleep_until(c, if poll < deadline {
+            poll
+        } else {
+            deadline
+        })
+        if manifest.disk_io(host.try_lock(mut lock))? {
+            return Ok(take lock)
+        }
+    }
+}
+
+pub fn journal_account(replay: pager.JournalReplay) -> Result[u64, types.Failure] {
+    manifest.disk_allocation(scoped fn() -> Result[u64, types.Failure] {
+        types.capacity(pages.state_account(replay.state))
+    })
+}
+
+pub fn journal_following(d: Dir, id: types.StoreKey, seq: u64, flush: Option[Clock]) -> Result[Option[format.DiskHeader], types.Failure] waits {
+    let Some(next_seq) = int.checked_add(seq, 1) else {
+        return Ok(None)
+    }
+    let next_header = manifest.journal_header(d, id, next_seq, flush)
+    match take next_header {
+        Ok(h) => Ok(h),
+        Error(Corrupt(_)) => {
+            let beyond = if let Some(following_seq) = int.checked_add(next_seq, 1) {
+                disk_exists(d, manifest.journal_path(following_seq, "")?)?
+            } else {
+                false
+            }
+            if beyond || disk_end(d, id, next_seq)? != None {
+                let next_path = manifest.journal_path(next_seq, "")?
+                return Error(format.disk_fault(next_path, 0, Header))
+            }
+            Ok(None)
+        },
+        Error(take e) => return Error(take e)
+    }
+}
+
+const JOURNAL_WINDOW_STEP: u64 = 1048576
+
+const JOURNAL_BULK_GROUP: u64 = 65536
+
+// Recovery reads the journal through one input chunk of this many bytes.
+pub const JOURNAL_CHUNK_BYTES: u64 = 65536
+
+// The service's answers: the grant (inc, next_seq), the last ticket sequence
+// decided acked with its batch seq, a stall head-poll ask, an unhold settle
+// ask (settle_id, through_seq, next_seq), a fenced verdict (epoch, ok_through,
+// missing_evidence), or the incarnation's latch.
+pub type SlotAck: cross = SlotGranted(u64, u64) | SlotAcked(u64, u64) | SlotPollHead | SlotSettle(u64, u64, u64) | SlotFenced(u64, u64, bool) | SlotLatched(status.StreamLatch)
+
+pub type ObjectExportFetch: send {
+    key: String,
+    reference: pages.HistoryRef,
+    buffer: Bytes,
+    reply: Sender[Result[Bytes, types.Failure]]
+}
+
+pub fn apply_log_append(mut tree: pages.PageTree, key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), types.Failure] {
+    let collection = list.slice(key, 0, 4)
+    let suffix = list.slice(key, 4, list.len(key))
+    let inline = tree.inline
+    pages.page_result(std.page.edit_collection(mut tree.root, collection, first, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.append_row(mut root, suffix, value, shared, inline, first, mut stamps)
+    }))
+}

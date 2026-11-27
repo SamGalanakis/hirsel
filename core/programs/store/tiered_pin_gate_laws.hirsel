@@ -530,7 +530,7 @@ fn idle_walk_holders(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Err
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !compact_listed(db, seq) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L100 (d): every holder reaches its frames in listed packs on disk")
         }
     }
@@ -719,13 +719,13 @@ fn test_l100_idle_retire_lease_defers_remove_until_pin(d: Dir, c: Clock, r: Rand
     if compact_listed(db, pack) {
         fail("L100 (d2): idle cut retires P whole")
     }
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?))? {
         fail("L100 (d2): S's lease defers Remove of P's file")
     }
     let _ = pin(mut db, "s", s)?
     drop(take s)
     let _ = checkpoint(mut db)?
-    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?))? {
         fail("L100 (d2): P's file is removed at the first cut after S's lease ends")
     }
     let _ = idle_walk_holders(d, db, rows.id)?

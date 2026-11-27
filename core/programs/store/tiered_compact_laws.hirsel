@@ -142,7 +142,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
         // pack the inventory no longer lists.
         let walk = compact_walk(d, db, events.binding.id)?
         for (seq, _) in walk.live {
-            if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+            if !compact_listed(db, seq) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
                 fail("L88 (h): a reachable frame lives in a listed pack on disk")
             }
         }
@@ -173,7 +173,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
         }
         let _ = checkpoint(mut db)?
         idle += 1
-        if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+        if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
             fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
         }
     }
@@ -192,7 +192,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
     }
     drop(take before)
     let _ = checkpoint(mut db)?
-    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("L88 (h): the cut after the last reader removes the retired file")
     }
     close(take db)?
@@ -322,7 +322,7 @@ fn test_l87_probe_across_a_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     // Two more cuts let the retired file go once no inventory lists it.
     let _ = checkpoint(mut db)?
     let _ = checkpoint(mut db)?
-    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("L87 (b): the retired pack's file is removed")
     }
     for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
@@ -385,7 +385,7 @@ fn compact_blob_pack(db: Db) -> Result[u64, Error] {
 fn compact_check_published(d: Dir, db: Db, collection: u32) -> Result[(), Error] waits {
     let walk = compact_walk_from(d, db, compact_branch_root(db, 0, collection)?)?
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !compact_listed(db, seq) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("L88 (h): a reachable frame lives in a listed pack on disk")
         }
     }
@@ -476,13 +476,13 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
         }
         drop(take read_handle)
     }
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
     }
     drop(take before)
     let _ = checkpoint(mut db)?
     let _ = checkpoint(mut db)?
-    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("L88 (h): the cut after the last reader removes the retired class-4 file")
     }
     close(take db)?
@@ -645,16 +645,16 @@ fn test_l88_crash_before_publication_keeps_the_probed_pack(d: Dir, c: Clock, r: 
     let probed = compact_branch_root(db, 0, rows.id)?.pack
     let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = compact_refused_retiring_cut(mut db)?
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: the retiring cut wrote its packs before the rename")
     }
     failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", sealed))?
     close(take db)?
     let mut reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
-    if disk_exists(d, "MANIFEST.tmp")? || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, "MANIFEST.tmp"))? || failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: open removes an unpublished cut's outputs")
     }
-    if !compact_listed(reopened, probed) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if !compact_listed(reopened, probed) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("§13.6 crash: the previous generation recovers with P listed and on disk")
     }
     compact_check_published(d, reopened, rows.id)?
@@ -685,14 +685,14 @@ fn test_l88_crash_after_publication_resumes_remove(d: Dir, c: Clock, r: Random, 
     let sealed = compact_refused_retiring_cut(mut db)?
     close(take db)?
     failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", sealed))?
-    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("§13.6 crash: P's file is still on disk when Remove has not run")
     }
     let reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
     if compact_listed(reopened, probed) {
         fail("§13.6 crash: reopen selects the new generation, which retired P")
     }
-    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
+    if failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?))? {
         fail("§13.6 crash: Remove resumes at open and unlinks P")
     }
     compact_check_published(d, reopened, rows.id)?
@@ -895,12 +895,12 @@ fn test_l100_tiered_idle_retires_without_pager(d: Dir, c: Clock, r: Random, task
     if let Some(_) = pager.pager_requests(after_before.pager) {
         fail("L100 (b): reopen after before-rename crash still starts no pager")
     }
-    if !compact_listed(after_before, pack_p) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if !compact_listed(after_before, pack_p) || !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L100 (b): before-rename crash keeps P listed and on disk")
     }
     // No-crash cut retires P whole with no pager and removes its file.
     let _ = checkpoint(mut after_before)?
-    if compact_listed(after_before, pack_p) || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if compact_listed(after_before, pack_p) || failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L100 (b): Tiered-idle cut retires P whole and removes its file")
     }
     l100_b_check_row(after_before, clone(rows), clone(v1))?
@@ -929,7 +929,7 @@ fn test_l100_tiered_idle_retires_without_pager_crash_after_rename(d: Dir, c: Clo
     close(take db)?
     failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", sealed))?
     let reopened = open(tasks, d, c, r, active)?
-    if compact_listed(reopened, pack_p) || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
+    if compact_listed(reopened, pack_p) || failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?))? {
         fail("L100 (b): after-rename crash retires P and open removes its file")
     }
     l100_b_check_row(reopened, rows, v1)?

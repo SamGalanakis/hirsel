@@ -28,10 +28,13 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     close(take mem)?
     let root = disk_test_directory(d)
     let mut db = open(tasks, root, c, r, journal_crash_options())?
-    let (take sender, take receiver): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+    let (take sender, take receiver): (Sender[journal.DirJournalMsg], Receiver[journal.DirJournalMsg]) = channel.new(1)
     let _ = take receiver
-    let original = write_disk(mut db.disk, take sender, scoped fn(mut state: DiskState, take disconnected: Sender[JournalMsg]) -> Sender[JournalMsg] {
-        replace(mut state.journal, take disconnected)
+    let original = write_disk(mut db.disk, take sender, scoped fn(mut state: DiskState, take disconnected: Sender[journal.DirJournalMsg]) -> Sender[journal.DirJournalMsg] {
+        match state.backend {
+            DirBackend(mut directory) => journal.replace_sender(mut directory, take disconnected),
+            ObjectBackend(_) => fail("expected Directory"),
+        }
     })
     let saved_disk = snapshot(db)
     match fork(mut db, "beta", saved_disk) {
@@ -101,7 +104,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     deploy_result(failure_result_from_rep(manifest.disk_io(host.remove(child, "EXPORT"))))?
     let mut db = deploy_result(open(tasks, child, c, r, options))?
-    if pages.holder_record_bytes(db.holders) != 16777216 || disk_state(db).uncovered != 46 {
+    if pages.holder_record_bytes(db.holders) != 16777216 || queue_accounting(disk_state(db)).uncovered != 46 {
         fail("open lost the equality FORK")
     }
     let beta = option.unwrap(branch(db, "beta"))
@@ -193,10 +196,10 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         let mut db = open(tasks, child, c, r, options)?
         law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 77 {
+        if !typed_put(mut db, rows, 1, 11) || queue_accounting(disk_state(db)).uncovered != 77 {
             return Error(Foreign)
         }
-        let previous = db.file_seq
+        let previous = file_seq(db)
         let generation = db.checkpointed
         let saved = snapshot(db)
         let (beta, receipt) = if refuse {
@@ -212,7 +215,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         } else {
             previous + 1
         }
-        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || disk_state(db).since_cut != 0 {
+        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || file_seq(db) != expected_segment || queue_accounting(disk_state(db)).since_cut != 0 {
             return Error(Foreign)
         }
         let expected_journal = if refuse {
@@ -220,7 +223,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         } else {
             0u64
         }
-        if disk_state(db).uncovered != expected_journal || db.checkpointed != (if refuse {
+        if queue_accounting(disk_state(db)).uncovered != expected_journal || db.checkpointed != (if refuse {
             generation
         } else {
             generation + 1
@@ -229,7 +232,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
         close(take db)?
         let reopened = open(tasks, child, c, r, options)?
-        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(result.unwrap(reader(reopened, 0u64)), snapshot_of(reopened, beta)?, rows, 1)? != Some(11u64) {
+        if option.unwrap(branch(reopened, "beta")).id != 1 || queue_accounting(disk_state(reopened)).uncovered != expected_journal || get(result.unwrap(reader(reopened, 0u64)), snapshot_of(reopened, beta)?, rows, 1)? != Some(11u64) {
             return Error(Foreign)
         }
         close(take reopened)?
@@ -283,7 +286,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     list.append(mut orphan_wire, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 33, 1, unused_page)))?)
     failure_result_from_rep(manifest.disk_write_synced(child, orphan, orphan_wire))?
     let reopened = open(tasks, child, c, r, options)?
-    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(manifest.pack_lists(disk_state(reopened).packs).packs)) < 2 {
+    if failure_result_from_rep(journal.disk_exists(child, orphan))? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(manifest.pack_lists(disk_state(reopened).packs).packs)) < 2 {
         return Error(Foreign)
     }
     let mut blob_count = 0u64
@@ -356,7 +359,7 @@ fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out:
     let turn = task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn)
     result.unwrap(channel.send(wake, ()))
     result.unwrap(task.join(take turn))
-    let boundary = disk_end(d, db.store, db.file_seq)?
+    let boundary = failure_result_from_rep(journal.disk_end(d, store_key_to_rep(db.store), file_seq(db)))?
     // HEADER (72) + COMMIT with DATA section (42) + the format-5 put:
     // tag and lengths (9), prior (4), prefixed key (12), tagged row (10).
     Ok(boundary == Some(149u64))
@@ -462,11 +465,11 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
     for _ in 0u64 .. wakes {
         if let Some(disk) = db.disk {
-            let sender = view disk.journal
+            let sender = journal.dir_sender(dir_state(disk))
             result.unwrap(channel.send(sender, Barrier))
         }
         if let Some(disk) = db.disk {
-            let receiver = view disk.written
+            let receiver = journal_written(disk)
             match result.unwrap(channel.receive(receiver)) {
                 Written => {},
                 WriteFailed(e) => return Error(Poisoned(e))
@@ -495,7 +498,7 @@ fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[()
     close(take owned)
 }
 
-fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String, cadence_spec: JournalCadence) -> Result[(), Error] waits {
+fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String, cadence_spec: journal.JournalCadence) -> Result[(), Error] waits {
     let mut options = journal_crash_options()
     if scenario == "journal-place-idle" {
         options.group_commits = 1
@@ -540,11 +543,11 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
             Committed(_) => {},
             _ => fail("cut input refused")
         }
-        let next_path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq + 1, "")))?
+        let next_path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(db) + 1, "")))?
         if !journal_is_poisoned(checkpoint(mut db)) {
             fail("cut missed prior sync failure")
         }
-        if disk_exists(d, next_path)? {
+        if failure_result_from_rep(journal.disk_exists(d, next_path))? {
             fail("cut created successor after prior failure")
         }
         if !journal_is_poisoned(close(take db)) {
@@ -953,7 +956,7 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         },
         _ => return false
     }
-    if result.unwrap(disk_exists(d, "LOCK")) || result.unwrap(disk_exists(d, "MANIFEST")) || result.unwrap(disk_exists(d, "j-1")) {
+    if result.unwrap(failure_result_from_rep(journal.disk_exists(d, "LOCK"))) || result.unwrap(failure_result_from_rep(journal.disk_exists(d, "MANIFEST"))) || result.unwrap(failure_result_from_rep(journal.disk_exists(d, "j-1"))) {
         return false
     }
     options.group_commits = 1
@@ -964,7 +967,7 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         },
         _ => return false
     }
-    if result.unwrap(disk_exists(d, "LOCK")) || result.unwrap(disk_exists(d, "MANIFEST")) || result.unwrap(disk_exists(d, "j-1")) {
+    if result.unwrap(failure_result_from_rep(journal.disk_exists(d, "LOCK"))) || result.unwrap(failure_result_from_rep(journal.disk_exists(d, "MANIFEST"))) || result.unwrap(failure_result_from_rep(journal.disk_exists(d, "j-1"))) {
         return false
     }
     options.group_commits = 0

@@ -446,7 +446,7 @@ pub fn law_look(c: Clock) -> bool waits {
     let head = pages.holder_heads(db.holders)[0].head
     let live_bytes = db.resident
     let high_water = pages.holder_next_node(db.holders)
-    let end = db.file_end
+    let end = file_end(db)
     let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
         look_query(tx, call_env.1, call_env.0)
     }))
@@ -458,7 +458,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || pages.holder_heads(db.holders)[0].head != head || db.resident != live_bytes || pages.holder_next_node(db.holders) != high_water || db.file_end != end {
+    if got.version != head || pages.holder_heads(db.holders)[0].head != head || db.resident != live_bytes || pages.holder_next_node(db.holders) != high_water || file_end(db) != end {
         return false
     }
     let mut expected: List[Read] = list.new()

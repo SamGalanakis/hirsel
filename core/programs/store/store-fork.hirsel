@@ -55,7 +55,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let size = 42 + string.byte_len(name)
     let disk = is_disk(db)
     if disk {
-        if let Some(over) = journal_refusal(disk_state(db).uncovered, size, available_journal(db, db.keyed_credit)) {
+        if let Some(over) = journal_refusal(queue_accounting(disk_state(db)).uncovered, size, available_journal(db, db.keyed_credit)) {
             return Error(Full(Journal(over)))
         }
     }
@@ -65,8 +65,8 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         let source = pages.holder_heads(db.holders)[parent]
         let head = pages.Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: pages.share_roots(source.roots), head: source.head, at: source.at)
         let frame: Option[Bytes] = if disk {
-            let context = format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: db.file_seq)
-            Some(failure_result_from_rep(types.capacity(pages.encode_fork(context, db.file_end, head, watermark)))?)
+            let context = format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: file_seq(db))
+            Some(failure_result_from_rep(types.capacity(pages.encode_fork(context, file_end(db), head, watermark)))?)
         } else {
             None
         }
@@ -82,10 +82,9 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     pages.advance_branch(mut db.holders)
     let exact = !retaining(db) || db.changes == db.settled
     let sequence = if let Some(take raw) = take frame {
-        db.file_end += size
         db.frame_seq += 1
         write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
-            state.pending = Some(take frame_bytes)
+            stage_disk_frame(mut state, size, Some(take frame_bytes))
         })
         handoff(mut db)?
         db.frame_seq

@@ -207,7 +207,7 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let _ = checkpoint(mut db)?
     let mut retired = 0u64
     for seq in tour.lease.packs {
-        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !failure_result_from_rep(journal.disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             return Error(MigrationFault)
         }
     }
@@ -227,7 +227,7 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let _ = checkpoint(mut db)?
     let mut gone = 0u64
     for seq in leased {
-        let present = disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)?
+        let present = failure_result_from_rep(journal.disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?))?
         let listed = match manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) {
             Some(_) => true,
             None => false
@@ -516,7 +516,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     scrub_fill(mut db, t, 1200, 1)?
     let _ = checkpoint(mut db)?
     for seq in leased_packs {
-        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !failure_result_from_rep(journal.disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             fail("active pacer tour must hold its ScrubLease across cuts")
         }
     }
@@ -529,7 +529,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     let _ = checkpoint(mut db)?
     let mut unlinked = 0u64
     for seq in leased_packs {
-        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
+        if !failure_result_from_rep(journal.disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?))? {
             unlinked += 1
         }
     }

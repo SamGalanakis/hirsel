@@ -10,7 +10,10 @@ pub type Accounts {
 
 pub fn accounts(db: Db) -> Accounts {
     let (frames, journal) = match db.disk {
-        Some(state) => (state.inflight, state.uncovered),
+        Some(state) => {
+            let queue = queue_accounting(state)
+            (queue.inflight, queue.uncovered)
+        },
         None => (0u64, 0u64)
     }
     let resident = if is_disk(db) {

@@ -1,39 +1,3 @@
-fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, Error] waits {
-    let path = failure_result_from_rep(types.capacity(manifest.disk_path("p-", seq, "")))?
-    let opened = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
-    let mut input = journal_input(take opened, false)?
-    let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.journal_prefix(mut input, path, 0, 72))?, 3, Some(seq), optional_store_key_to_rep(Some(id))))?
-    let mut reached = disk_allocation(scoped fn() -> Result[List[u64], Error] {
-        Ok(clone(offsets))
-    })?
-    list.sort(mut reached, fn(a: u64, b: u64) -> Order {
-        order.compare(a, b)
-    })
-    let mut at = 72u64
-    let mut slot_order = 0u64
-    let mut live_bytes = 0u64
-    let mut checked_pack = manifest.pack_scan(2, next_stamp)
-    while at < format.journal_input_size(input) {
-        let mut spent = 0u64
-        let frame = failure_result_from_rep(manifest.read_pack_frame(mut input, path, header.context, mut checked_pack, at, false, mut spent))?
-        let end = at + 16 + frame.size
-        if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
-            slot_order += 1
-            live_bytes += frame.size
-        }
-        if slot_order < list.len(reached) && reached[slot_order] < end {
-            return Error(failure_from_rep(format.disk_fault(path, reached[slot_order], Malformed)))
-        }
-        at = end
-    }
-    if slot_order != list.len(reached) || checked_pack.frames > 4294967295 {
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    let handle = format.take_journal_file(take input)
-    failure_result_from_rep(manifest.disk_io(host.close(take handle)))?
-    Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
-}
-
 fn validate_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
     failure_result_from_rep(manifest.require_object_memory_manifest(page_record))?
     failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
@@ -69,7 +33,7 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
     }
     let mut data: Map[u64, manifest.LoadedPack] = map.new()
     for (seq, pack) in lists.class_two {
-        let checked = check_list_pack(d, id, seq, page_record.next_stamp, pack)?
+        let checked = failure_result_from_rep(journal.check_list_pack(d, store_key_to_rep(id), seq, page_record.next_stamp, pack))?
         failure_result_from_rep(types.capacity(map.try_reserve(mut lists.packs, 1)))?
         map.insert(mut lists.packs, seq, checked)
     }

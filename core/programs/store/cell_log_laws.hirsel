@@ -331,9 +331,9 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let _ = cell_law_commit(mut db, cell, a)?
     cell_law_require(db.resident == baseline + 270, "200-byte cell charge")?
     let from = snapshot(db)
-    let size = db.file_end
+    let size = file_end(db)
     let _ = cell_law_nested(mut db, cell, a, b, false)?
-    cell_law_require(db.file_end == size, "net-zero cell has no op")?
+    cell_law_require(file_end(db) == size, "net-zero cell has no op")?
     cell_law_require(pages.tree_stamp(snapshot(db).roots.collections) == pages.tree_stamp(from.roots.collections), "net-zero cell stamp")?
     cell_law_require(list.len((changes(cell_reader, from, snapshot(db))?).rows) == 0, "net-zero cell diff")?
     let held_a = snapshot(db)
@@ -550,12 +550,12 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let target = declare_log(mut declaring, "events", std.codec.of_bytes(), Forever)?
     let _ = seal(mut db, take declaring)?
     let baseline = db.resident
-    let start = db.file_end
+    let start = file_end(db)
     let receipt = trim_law_receipt(run(mut db, None, copy_env(target), trim_law_nested)?)?
     durable(mut db, receipt)?
-    cell_law_require(db.resident == baseline + 110 && db.file_end == start + 42 + 21 + 55, "masked append charge and frame")?
-    let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, "")))?
-    let wire = read_journal_prefix(dir, path, db.file_end)?
+    cell_law_require(db.resident == baseline + 110 && file_end(db) == start + 42 + 21 + 55, "masked append charge and frame")?
+    let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(db), "")))?
+    let wire = read_journal_prefix(dir, path, file_end(db))?
     cell_law_require(wire[start + 42] == 3 && format.word_be(wire, start + 47) == 1 && format.word_be(wire, start + 55) == 0 && wire[start + 63] == 1, "trim sorts before append and drops zero head rows")?
     let written = run(mut db, None, copy_env(target), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
         let payload = cell_law_value(994, 9)
@@ -577,20 +577,20 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let final_leaf = option.unwrap(std.page.child(left, std.page.count(left_image) - 1))
     let trim_key = option.unwrap(std.page.key_at(std.page.image_of(final_leaf), 0))
     let floor = decode_word(trim_key)
-    let offset = db.file_end
+    let offset = file_end(db)
     let changed = run(mut db, None, (copy_env(target), floor), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
         trim_before(mut tx, env.0, env.1 - 1)?
         trim_before(mut tx, env.0, env.1)
     })?
     durable(mut db, trim_law_receipt(take changed)?)?
-    cell_law_require(db.file_end == offset + 63, "replacement trims seal one op")?
+    cell_law_require(file_end(db) == offset + 63, "replacement trims seal one op")?
     let captured = snapshot(db)
     let Some(root) = std.page.collection_child(captured.roots.collections.root, id_key) else {
         return Error(Missing("trim root"))
     }
     cell_law_require(trim_law_min_children(root), "trim left no unary branch")?
     cell_law_require(db.resident == baseline + (602 - floor) * 1078, "trim subtracted exactly once")?
-    let suffix_wire = read_journal_prefix(dir, path, db.file_end)?
+    let suffix_wire = read_journal_prefix(dir, path, file_end(db))?
     cell_law_require(format.word_be(suffix_wire, offset + 55) == 110 + (floor - 2) * 1078, "trim dropped wire charge")?
     let mut bad = pages.share_page_tree(held.roots.collections)
     let mut draw = pages.holder_next_node(db.holders) + 1

@@ -50,13 +50,13 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
         Error(Corrupt(Fault(why: Malformed, offset: 88, ..))) => (),
         _ => return Error(Foreign),
     }
-    if !disk_exists(path, "MANIFEST.tmp")? || !disk_exists(path, "p-3")? {
+    if !failure_result_from_rep(journal.disk_exists(path, "MANIFEST.tmp"))? || !failure_result_from_rep(journal.disk_exists(path, "p-3"))? {
         return Error(Foreign)
     }
     failure_result_from_rep(manifest.disk_write_synced(path, "MANIFEST", page_manifest_vector()))?
     failure_result_from_rep(manifest.disk_write_synced(path, "p-2", page_list_pack_vector()))?
     let _ = read_selected_page_manifest(path)?
-    if disk_exists(path, "MANIFEST.tmp")? || disk_exists(path, "p-3")? {
+    if failure_result_from_rep(journal.disk_exists(path, "MANIFEST.tmp"))? || failure_result_from_rep(journal.disk_exists(path, "p-3"))? {
         return Error(Foreign)
     }
     Ok(())
@@ -92,14 +92,14 @@ fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreI
     let scratch = string.as_bytes("unselected")
     failure_result_from_rep(manifest.disk_write_synced(directory, "MANIFEST", page_record))?
     failure_result_from_rep(manifest.disk_write_synced(directory, "MANIFEST.tmp", scratch))?
-    let lock = disk_lock(directory, c, 0)?
+    let lock = failure_result_from_rep(journal.disk_lock(directory, c, 0))?
     let observed: u64 = int.widen(word)
     match open(tasks, directory, c, r, journal_crash_options()) {
         Error(Unsupported(found)) if found == observed => (),
         _ => return Error(Missing("directory format refusal")),
     }
     failure_result_from_rep(manifest.disk_io(host.close(take lock)))?
-    if failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST", list.len(page_record)))? != page_record || failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch)))? != scratch || disk_exists(directory, "j-1")? {
+    if failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST", list.len(page_record)))? != page_record || failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch)))? != scratch || failure_result_from_rep(journal.disk_exists(directory, "j-1"))? {
         return Error(Missing("directory changed after format refusal"))
     }
     let retired = failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0030, 1, list.new())))?

@@ -89,7 +89,7 @@ fn capture_test_catalog(mut m: manifest.PageManifest, id: StoreId, d: Dir) -> Re
     }
     let index_record = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(CATALOG_REVISION_MAX, 19))
     let large_value = encode_catalog(index_record)?
-    if list.len(large_value) <= JOURNAL_CHUNK_BYTES {
+    if list.len(large_value) <= journal.JOURNAL_CHUNK_BYTES {
         fail("catalog BLOB fixture did not cross a chunk boundary")
     }
     let payload = failure_result_from_rep(pages.page_result(std.page.encode_blob(1, large_value)))?

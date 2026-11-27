@@ -36,17 +36,17 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[format.Journ
     // so it is written (X1 step 0's condition); never compare a version with
     // `journaled`, which counts frames.
     if !covered(db, Journal(db.frame_seq, 0, 0)) {
-        let _ = channel.send(state.journal, Barrier)
-        match result.unwrap(channel.receive(state.written)) {
+        journal_barrier(state)
+        match result.unwrap(channel.receive(journal_written(state))) {
             Written => (),
             WriteFailed(e) => {
-                let _ = channel.try_send(state.written_send, WriteFailed(e))
+                let _ = channel.try_send(journal_written_send(state), WriteFailed(e))
                 return Error(Poisoned(e))
             }
         }
     }
     let d = log_directory(db)?
-    let mut seq = disk_state(db).record_cut
+    let mut seq = journal.first_live(disk_state(db).retention)
     loop {
         let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
         let file = match host.open(d, path, Read) {
@@ -54,11 +54,11 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[format.Journ
             Error(NotFound) => return Ok(None),
             Error(e) => return Error(Io(e))
         }
-        let mut source = journal_input(take file, false)?
-        let following = journal_following(d, db.store, seq, None)?
+        let mut source = failure_result_from_rep(journal.journal_input(take file, false))?
+        let following = failure_result_from_rep(journal.journal_following(d, store_key_to_rep(db.store), seq, None))?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
-            None => disk_end(d, db.store, seq)?
+            None => failure_result_from_rep(journal.disk_end(d, store_key_to_rep(db.store), seq))?
         }
         let final_item = match following {
             Some(_) => false,
@@ -118,11 +118,11 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
             Ok(take handle) => take handle,
             Error(e) => return Error(Io(e))
         }
-        let mut source = journal_input(take file, false)?
-        let following = journal_following(d, id, seq, None)?
+        let mut source = failure_result_from_rep(journal.journal_input(take file, false))?
+        let following = failure_result_from_rep(journal.journal_following(d, store_key_to_rep(id), seq, None))?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
-            None => disk_end(d, id, seq)?
+            None => failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), seq))?
         }
         let final_item = match following {
             Some(_) => false,
@@ -140,7 +140,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
                     }
                     journal_apply_commit(path, mut at.replay, commit)
                 },
-                Fork(take encoded) => journal_apply_fork(path, mut at.replay, take encoded),
+                Fork(take encoded) => failure_result_from_rep(journal.journal_apply_fork(path, mut at.replay, take encoded)),
             }
         })
         let consumed_file = format.take_journal_file(take source)

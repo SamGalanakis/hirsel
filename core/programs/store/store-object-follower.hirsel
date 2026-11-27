@@ -215,7 +215,7 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
         if latest.checkpoint.seq <= old.current.entry.seq {
             let state = copy_follow_state(old_capture.state)?
             let initial = failure_result_from_rep(pager.journal_replay(take state, old.next_node, limits_to_rep(default_limits())))?
-            failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, ceiling))?
+            failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(initial))?, ceiling))?
             return history_rebase_suffix(mut source, latest, old.current.entry, take initial, ceiling)
         }
     }
@@ -267,7 +267,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         },
         Error(take problem) => return Error(take problem),
     }
-    let resident = journal_account(replay)?
+    let resident = failure_result_from_rep(journal.journal_account(replay))?
     let pager.JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: latest, tag, next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)
     Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
@@ -279,7 +279,7 @@ fn object_floor_loaded(mut source: ObjectPackRead, captured: HistoryHead, mark: 
         return Ok(None)
     }
     let (take recovered, _) = history_open_checkpoint(mut source, captured, mark, raw, take manifest, ceiling)?
-    let resident = journal_account(recovered)?
+    let resident = failure_result_from_rep(journal.journal_account(recovered))?
     let pager.JournalReplay(state: take state, next_node: stamp, ..) = take recovered
     Ok(Some(follow_capture(captured.store, take state, resident, None, 0, failure_result_from_rep(catalog.stamp_after(stamp))?)?))
 }

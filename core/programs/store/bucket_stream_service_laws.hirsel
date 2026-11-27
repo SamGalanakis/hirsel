@@ -606,23 +606,23 @@ fn stream_reissue_settle(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Er
     let epoch = claim_of(place)?.epoch
     let (take handover, take paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (take resume, take resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    result.unwrap(channel.send(disk_state(place).journal, ObjectPause(take handover, take resuming)))
+    result.unwrap(channel.send(object_sender(disk_state(place)), ObjectPause(take handover, take resuming)))
     let mut parked = result.unwrap(channel.receive(paused))
     // One answer fits behind the blocked relay. Both are occupied before hold_ms.
-    let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
+    let made: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(1, bytes 0)
     let (take answer_client, take answers) = failure_result_from_rep(types.capacity(take made))?
     let relay = match parked.stream {
         Some(mut link) => {
             link.answer_client = Some(take answer_client)
             link.answers = Some(take answers)
             let _ = slot_attach(mut link, place.store, epoch, "p1/", place.limits)?
-            SlotRelayInput(answers: option.unwrap(replace(mut link.answers, None)), journal: channel.sender(disk_state(place).journal))
+            SlotRelayInput(answers: option.unwrap(replace(mut link.answers, None)), journal: channel.sender(object_sender(disk_state(place))))
         },
         None => fail("paused journal lost its stream"),
     }
     let running = task.spawn(tasks, bytes OBJECT_TIMER_GRANT, take relay, slot_relay)
     let stalled = stream_unhold_commit_ticket(mut place, 2)?
-    while let Ok(()) = channel.try_send(disk_state(place).journal, Barrier) {}
+    while let Ok(()) = channel.try_send(object_sender(disk_state(place)), Barrier) {}
     stream_unhold_raw_hold(s, tasks, 240, place.store, epoch, StoreId(hi: 3134, lo: 1))?
     // Keep the journal paused past both the first rule-(a) request and the
     // following head poll. The first settle is queued and then overwritten.
@@ -659,7 +659,7 @@ fn stream_reap_pending_settle(s: BucketSim, tasks: Tasks) -> Result[(), Error] w
     let mut service = StreamService(lane: take lane, client: take client, clock: s.time, plan: stream_unhold_plan(4), op_ms: UNHOLD_OP_MS, slots: list.with_capacity(1), rings: take ring_inbox, reports: take report_inbox, control: take service_control, waiting: list.new(), tickets: list.new(), prefixes: map.new(), observed_rows: list.new(), active_settles: list.with_capacity(1), stall_polls: list.new(), next_settle_id: 2, last_reg_ns: 0, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc, janitor_asks: list.new())
     let data: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(1, bytes 0)
     let (take data_client, take data_inbox) = failure_result_from_rep(types.capacity(take data))?
-    let answers: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
+    let answers: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(1, bytes 0)
     let (take answer_client, take answer_inbox) = failure_result_from_rep(types.capacity(take answers))?
     let place = SlotPlace(store, epoch: 1, fenced: false, settled_from: 0, answers: take answer_client)
     list.push(mut service.slots, ServiceSlot(inbox: Some(take data_inbox), place: Some(take place), held: None, unsent: Some(SlotSettle(1, 0, 1))))

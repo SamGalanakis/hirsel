@@ -68,15 +68,15 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let mut db = open(tasks, dir, c, r, options)?
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let baseline = db.resident
-    let start = db.file_end
-    let seq = db.file_seq
+    let start = file_end(db)
+    let seq = file_seq(db)
     let Committed(initial) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, types.key_word(7), prior_fixture_value(34))
     })? else {
         return Error(Missing("insert"))
     }
     // entry(12, 34) = 62 + 16 + 40 = 118.
-    if db.resident != baseline + 118 || db.file_end != start + 101 {
+    if db.resident != baseline + 118 || file_end(db) != start + 101 {
         return Error(Missing("insert charge or length"))
     }
     let first = pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections)
@@ -87,7 +87,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(Missing("overwrite"))
     }
     // entry(12, 10) = 62 + 16 + 16 = 94. Only one put survives in the frame.
-    if db.resident != baseline + 94 || db.file_end != start + 101 + 77 {
+    if db.resident != baseline + 94 || file_end(db) != start + 101 + 77 {
         return Error(Missing("overwrite charge or length"))
     }
     let Committed(removed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
@@ -96,7 +96,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     })? else {
         return Error(Missing("delete"))
     }
-    if db.resident != baseline || db.file_end != start + 101 + 77 + 63 {
+    if db.resident != baseline || file_end(db) != start + 101 + 77 + 63 {
         return Error(Missing("delete charge or length"))
     }
     durable(mut db, removed.ticket)?
@@ -155,8 +155,8 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let primary = finish(mut declaring, take declared)?
     let _ = seal(mut db, take declaring)?
     for new_value in 6u32 .. 8 {
-        let start = db.file_end
-        let seq = db.file_seq
+        let start = file_end(db)
+        let seq = file_seq(db)
         let commit = run(mut db, None, (copy_env(primary), new_value), fn(mut tx: Tx, args: (Table[u64, u32], u32)) -> Result[(), Error] {
             put(mut tx, args.0, 9u64, args.1)
         })?
@@ -166,7 +166,7 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         durable(mut db, done.ticket)?
         if new_value == 7 {
             let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
-            let raw = read_journal_prefix(directory, path, db.file_end)?
+            let raw = read_journal_prefix(directory, path, file_end(db))?
             // Payload is a two-byte schema number plus a four-byte u32.
             // The 20-byte Many key follows the primary's 31-byte put.
             let op = start + 42 + 31
@@ -219,8 +219,8 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     } else {
         return Error(Missing("12 MiB seed row"))
     }
-    let start = reopened.file_end
-    let seq = reopened.file_seq
+    let start = file_end(reopened)
+    let seq = file_seq(reopened)
     let removed = run(mut reopened, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         if !delete_bytes(mut tx, 1, types.key_word(7))? {
             return Error(Missing("delete 12 MiB"))
@@ -329,13 +329,13 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         let mut state = failure_result_from_rep(types.capacity(pages.main_state(pages.share_roots(pages.holder_heads(replayed.holders)[0].roots), pages.holder_heads(replayed.holders)[0].head, 0)))?
         install_cold_companion(mut state.tips[0].roots, 101)?
         let mut restored = failure_result_from_rep(pager.journal_replay(take state, 102, limits_to_rep(default_limits())))?
-        if journal_account(restored)? != baseline + 172 + 126 {
+        if failure_result_from_rep(journal.journal_account(restored))? != baseline + 172 + 126 {
             return Error(Missing("single mixed root Memory account"))
         }
         let mut held = failure_result_from_rep(types.capacity(pages.share_pin(pages.holder_pins(replayed.holders)[0])))?
         install_cold_companion(mut held.roots, 102)?
         list.push(mut restored.state.pins, take held)
-        if journal_account(restored)? != baseline + 172 + 126 {
+        if failure_result_from_rep(journal.journal_account(restored))? != baseline + 172 + 126 {
             return Error(Missing("retained mixed root Memory account"))
         }
     }
@@ -592,15 +592,15 @@ fn source_rightmost_witness() -> Result[(), Error] {
     let mut actual = arc.share(base)
     let mut reference_stamps = stamps
     let mut right_edits: List[std.page.BatchEdit] = list.new()
-    let mut journal: List[format.JournalOp] = list.new()
+    let mut right_ops: List[format.JournalOp] = list.new()
     for i in 5u64 .. 7 {
         let key = types.key_word(i)
         let raw = prior_fixture_value(32)
-        list.push(mut journal, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, key))?, value: Some(clone(raw)), prior: 0, trim: None))
+        list.push(mut right_ops, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, key))?, value: Some(clone(raw)), prior: 0, trim: None))
         list.push(mut right_edits, std.page.BatchEdit(key: take key, value: Some(BatchBytes(take raw)), prior: Some(0u32)))
     }
     failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps)))?
-    failure_result_from_rep(pages.page_result(std.page.apply_sorted_source(mut actual, journal, visit_journal_edit, 0, 2, 1024, mut stamps)))?
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_source(mut actual, right_ops, journal.visit_journal_edit, 0, 2, 1024, mut stamps)))?
     if reference_stamps != stamps || !source_layout_equal(reference, actual) || !failure_result_from_rep(pages.page_result(std.page.canonical(actual)))? {
         return Error(Missing("rightmost source changed layout or stamps"))
     }

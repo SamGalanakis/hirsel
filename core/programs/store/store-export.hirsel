@@ -468,8 +468,8 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: match activation {
         Some(given) => given,
         None => 0u64
-    }, terminal: db.file_seq, end: db.file_end)
-    let first_live = disk_state(db).record_cut
+    }, terminal: file_seq(db), end: file_end(db))
+    let first_live = journal.first_live(disk_state(db).retention)
     let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
         Ok(export_lease_pack_sequences(manifest.pack_locations(disk_state(db).packs)))
     }))?
@@ -549,14 +549,14 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
             StepReady(take ready) => list.push(mut steps, take ready),
         }
     }
-    let journaled = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, db.file_seq, db.file_end))?
+    let journaled = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, file_seq(db), file_end(db)))?
     let tail = int.saturating_add(journaled, step_bytes(steps))
     if tail > db.resident / 100 {
         release_export(mut db, attempt)
         let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(failure_result_from_rep(types.copied(attempt)))?, Some(lease.activation))?
         return Ok(Full(take renewed))
     }
-    let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: lease.activation, terminal: db.file_seq, end: db.file_end)
+    let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: lease.activation, terminal: file_seq(db), end: file_end(db))
     let packs: List[u64] = clone(lease.packs)
     let kept = manifest.ExportLease(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[manifest.ExportLease]) {
@@ -722,7 +722,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }
-    let live_bytes = deploy_result(journal_account(replayed))?
+    let live_bytes = deploy_result(failure_result_from_rep(journal.journal_account(replayed)))?
     let pager.JournalReplay(state: take state, next_node: ids, tiered: tiered_account, ..) = take replayed
     let admitted = if has_tiered {
         int.saturating_add(live_bytes, tiered_plan_reserve(options))
@@ -824,7 +824,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
                 None => return Error(failure_from_rep(format.disk_fault(path, 0u64, Header)))
             }
         }
-        let mut source = journal_input(failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?, false)?
+        let mut source = failure_result_from_rep(journal.journal_input(failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?, false))?
         if seq == terminal && format.journal_input_size(source) > boundary {
             return Error(failure_from_rep(format.disk_fault(path, boundary, Malformed)))
         }

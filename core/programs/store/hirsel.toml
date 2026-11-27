@@ -7,6 +7,10 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"store-journal-state.hirsel" = "journal"
+"store-journal-support.hirsel" = "journal"
+"store-dir-journal-recover.hirsel" = "journal"
+"store-dir-journal-worker.hirsel" = "journal"
 "store-pager-state.hirsel" = "pager"
 "store-api-tiered-cache.hirsel" = "store"
 "store-api-tiered-residency.hirsel" = "store"
@@ -123,7 +127,7 @@ std = { major = 1 }
 "store-pack-index.hirsel" = "manifest"
 "store-scrub.hirsel" = "manifest"
 "store-scrub-pace.hirsel" = "manifest"
-"store-cut-retirement.hirsel" = "store"
+"store-cut-retirement.hirsel" = "journal"
 "store-history.hirsel" = "store"
 "store-stream-frames.hirsel" = "format"
 "store-stream-types.hirsel" = "store"

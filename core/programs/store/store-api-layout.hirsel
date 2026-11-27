@@ -1,10 +1,18 @@
 // Runner laws (admission-laws L33) break the frame handoff with this.
 // It disconnects the writer after the runner has admitted a position.
 pub fn fixture_broken_handoff(mut db: Db) {
-    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
-    let mut disconnected = Some(take abandoned)
-    disconnected = None
-    write_disk(mut db.disk, take to, scoped fn(mut state: DiskState, take disconnected_to: Sender[JournalMsg]) {
-        state.journal = take disconnected_to
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        match state.backend {
+            DirBackend(mut directory) => {
+                let (to, abandoned): (Sender[journal.DirJournalMsg], Receiver[journal.DirJournalMsg]) = channel.new(1)
+                drop(take abandoned)
+                let _ = journal.replace_sender(mut directory, take to)
+            },
+            ObjectBackend(mut queue) => {
+                let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+                drop(take abandoned)
+                queue.journal = take to
+            },
+        }
     })
 }

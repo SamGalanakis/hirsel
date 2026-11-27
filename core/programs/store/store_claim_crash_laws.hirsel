@@ -879,26 +879,26 @@ fn claim_dropped_op_clock_floor_and_skip(d: Dir, r: Random, tasks: Tasks) -> Res
     // Claim expires at 1000 + 10000 = 11000. Advance clock to 12000.
     clock.set_wall(mut wall, 12000)
     let seq_before = db.frame_seq
-    let end_before = db.file_end
+    let end_before = file_end(db)
     let dropped = check_dropped_claim_ops(mut db, fn(_op: Bytes) -> bool {
         false
     })?
     if let Some(_) = dropped {
         fail("L91 E4: expired claim reported as live")
     }
-    if db.frame_seq != seq_before + 1 || db.file_end <= end_before || pages.holder_heads(db.holders)[0].at != 12000 {
+    if db.frame_seq != seq_before + 1 || file_end(db) <= end_before || pages.holder_heads(db.holders)[0].at != 12000 {
         fail("L91 E4: check_dropped_claim_ops did not commit clock-floor frame")
     }
     // Second call with wall == head.at writes 0 frames and 0 bytes.
     let seq_after = db.frame_seq
-    let end_after = db.file_end
+    let end_after = file_end(db)
     let dropped_again = check_dropped_claim_ops(mut db, fn(_op: Bytes) -> bool {
         false
     })?
     if let Some(_) = dropped_again {
         fail("L91 E4: second check reported live claim")
     }
-    if db.frame_seq != seq_after || db.file_end != end_after {
+    if db.frame_seq != seq_after || file_end(db) != end_after {
         fail("L91 E4: check_dropped_claim_ops wrote a frame when at <= head.at")
     }
     close(take db)?

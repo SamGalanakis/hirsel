@@ -184,12 +184,12 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
     result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let mut n = 0u64
-    while db.file_end - 72 < 8388608 {
+    while file_end(db) - 72 < 8388608 {
         let committed = disk_bench_burst_commit(mut db, t, n, 4096)
         result.unwrap(durable(mut db, committed))
         n += 1
     }
-    let mut file = result.unwrap(host.open(child, result.unwrap(journal_path(db.file_seq, "")), Read))
+    let mut file = result.unwrap(host.open(child, result.unwrap(journal_path(file_seq(db), "")), Read))
     let mut gate = result.unwrap(host.open(d, gate_name, Read))
     let mut byte: Bytes = list.with_capacity(1)
     let trials = 2000u64
@@ -205,7 +205,7 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
         let scheduled = last_ack + splitmix64(trial + 2177) % 2000001
         host.sleep_until(c, scheduled)
         let before = result.unwrap(host.stat_file(mut file)).size
-        let start_end = db.file_end
+        let start_end = file_end(db)
         list.clear(mut tickets)
         for _ in 0u64 .. burst {
             list.push(mut tickets, disk_bench_burst_commit(mut db, t, n, width))
@@ -220,7 +220,7 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
         if before == after {
             engaged += 1
         }
-        if db.file_end - start_end != width * burst {
+        if file_end(db) - start_end != width * burst {
             fail("disk bench burst frame size")
         }
     }
@@ -228,7 +228,7 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
     string.push(mut report, "BURST ")
     string.push_u64(mut report, engaged)
     string.push(mut report, " ")
-    string.push_u64(mut report, db.file_end)
+    string.push_u64(mut report, file_end(db))
     for latency in latencies {
         string.push(mut report, " ")
         string.push_u64(mut report, latency)

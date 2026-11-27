@@ -32,14 +32,14 @@ type SlotPlace {
     epoch: u64,
     fenced: bool,
     settled_from: u64,
-    answers: Client[SlotAck]
+    answers: Client[journal.SlotAck]
 }
 
 type ServiceSlot {
     inbox: Option[Inbox[SlotMsg]],
     place: Option[SlotPlace],
     held: Option[SlotMsg],
-    unsent: Option[SlotAck]
+    unsent: Option[journal.SlotAck]
 }
 
 // A stalled Place's outstanding tickets (§12.11.4): its slot, its (store,
@@ -341,7 +341,7 @@ fn stream_reap_slot(mut s: StreamService, slot: u64) {
     s.slots[slot].unsent = None
 }
 
-fn stream_discard_answer(mut s: StreamService, answer: SlotAck) {
+fn stream_discard_answer(mut s: StreamService, answer: journal.SlotAck) {
     if let SlotSettle(id, _, _) = answer {
         let _ = stream_take_active_settle(mut s, id)
     }
@@ -349,7 +349,7 @@ fn stream_discard_answer(mut s: StreamService, answer: SlotAck) {
 
 // Acks never wait on a Place (§12.11.12): a full answer connection keeps
 // the newest answer for the next wake. Only a discarded settle loses its id.
-fn stream_answer(mut s: StreamService, slot: u64, take answer: SlotAck) {
+fn stream_answer(mut s: StreamService, slot: u64, take answer: journal.SlotAck) {
     if let Some(old) = replace(mut s.slots[slot].unsent, None) {
         stream_discard_answer(mut s, old)
     }
@@ -433,7 +433,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                     let _ = map.try_reserve(mut s.prefixes, 1)
                     map.insert(mut s.prefixes, store, take place_prefix)
                     s.slots[i].place = Some(SlotPlace(store, epoch, fenced: false, settled_from: 0, answers: take answers))
-                    let answer = match s.lane.latched {
+                    let answer: journal.SlotAck = match s.lane.latched {
                         Some(cause) => SlotLatched(cause),
                         None => SlotGranted(s.lane.inc, s.lane.seq),
                     }

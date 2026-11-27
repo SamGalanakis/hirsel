@@ -27,7 +27,7 @@ fn trust_indexes(mut db: Db) -> Result[(), Error] waits {
 fn trust_store(mut db: Db) -> Result[(), Error] waits {
     healthy(db)?
     if let Some(state) = view db.disk {
-        if let Some(d) = state.d {
+        if let Some(d) = disk_directory(state) {
             trust_directory(d)?
         }
         if let Some(_) = view state.object {

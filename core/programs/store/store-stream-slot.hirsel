@@ -28,13 +28,7 @@ pub type StreamRoot: cross {
 
 // What a Place sends on its slot: its attachment with its Place prefix and the
 // connection the service answers on, then each frame as its first chunk and the rest.
-type SlotMsg: cross = SlotAttach(u64, u64, u64, String, Client[SlotAck]) | SlotFrame(u64, u64, Bytes) | SlotMore(Bytes)
-
-// The service's answers: the grant (inc, next_seq), the last ticket sequence
-// decided acked with its batch seq, a stall head-poll ask, an unhold settle
-// ask (settle_id, through_seq, next_seq), a fenced verdict (epoch, ok_through,
-// missing_evidence), or the incarnation's latch.
-type SlotAck: cross = SlotGranted(u64, u64) | SlotAcked(u64, u64) | SlotPollHead | SlotSettle(u64, u64, u64) | SlotFenced(u64, u64, bool) | SlotLatched(StreamLatch)
+type SlotMsg: cross = SlotAttach(u64, u64, u64, String, Client[journal.SlotAck]) | SlotFrame(u64, u64, Bytes) | SlotMore(Bytes)
 
 // Out-of-band head reports from a Place to the service (§12.11.12), carried on
 // a dedicated shared connection so queued frames on a stalled slot never block
@@ -397,8 +391,8 @@ type SlotLink: send {
     sid: HostStreamId,
     chunk: u64,
     max_batch_bytes: u64,
-    answers: Option[Inbox[SlotAck]],
-    answer_client: Option[Client[SlotAck]],
+    answers: Option[Inbox[journal.SlotAck]],
+    answer_client: Option[Client[journal.SlotAck]],
     inc: u64,
     last_batch_seq: u64,
     commit_batches: List[u64],
@@ -407,7 +401,7 @@ type SlotLink: send {
 }
 
 fn slot_link(slot: JournalSlot) -> Result[SlotLink, Error] {
-    let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(STREAM_SLOT_ACKS, bytes 0)
+    let made: Result[(Client[journal.SlotAck], Inbox[journal.SlotAck]), Capacity] = conn.new(STREAM_SLOT_ACKS, bytes 0)
     let (take answer_client, take answers) = failure_result_from_rep(types.capacity(take made))?
     Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), reports: conn.client(slot.reports), slot: slot.slot, sid: slot.sid, chunk: stream_slot_chunk(slot.slot_bytes), max_batch_bytes: slot.max_batch_bytes, answers: Some(take answers), answer_client: Some(take answer_client), inc: 0, last_batch_seq: 0, commit_batches: list.new(), root: string.from(slot.root), max_rows: slot.max_rows))
 }
@@ -429,7 +423,7 @@ fn slot_report_head(link: SlotLink, store: StoreId, attach: Option[format.Attach
 // Forwards service answers on a Place's reply connection into the Place's
 // journal worker channel so an idle or stalled Place reacts without blocking.
 type SlotRelayInput: send {
-    answers: Inbox[SlotAck],
+    answers: Inbox[journal.SlotAck],
     journal: Sender[JournalMsg]
 }
 

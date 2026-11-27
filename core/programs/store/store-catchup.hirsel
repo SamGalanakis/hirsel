@@ -86,7 +86,7 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let round_totals = deploy_result(range_totals(staged.plan.schema.roots.collections, round_ranges))?
     let round = last_round + 1
     write_round(d, id, RoundMeta(round: round, from: clone(source.stamp), to: clone(stamp), ops: list.len(ops), totals: take round_totals), ops)?
-    let live_bytes = deploy_result(journal_account(replayed))?
+    let live_bytes = deploy_result(failure_result_from_rep(journal.journal_account(replayed)))?
     let pager.JournalReplay(state: take advanced, tiered: tiered_account, deferred_frees: take freed_rows, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
     source.db.resident = live_bytes

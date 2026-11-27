@@ -175,7 +175,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let table_handle = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = view table_handle
     let id = db.store
-    let seq = db.file_seq
+    let seq = file_seq(db)
     let baseline = db.resident
     let wall = pages.holder_heads(db.holders)[0].at + 17
     let next_node = pages.holder_next_node(db.holders)
@@ -231,16 +231,16 @@ fn journal_test_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
 }
 
-const JOURNAL_IMMEDIATE_CADENCE: JournalCadence = JournalCadence(group_delay_us: 0, end_groups: 64, end_interval_ms: 0)
+const JOURNAL_IMMEDIATE_CADENCE: journal.JournalCadence = journal.JournalCadence(group_delay_us: 0, end_groups: 64, end_interval_ms: 0)
 
 // Live-capture laws need a named END for each durable group. The barrier
 // acknowledges only after the worker has finished the previous group.
-const JOURNAL_LAW_NAMED_END_CADENCE: JournalCadence = JournalCadence(group_delay_us: 0, end_groups: 1, end_interval_ms: 10)
+const JOURNAL_LAW_NAMED_END_CADENCE: journal.JournalCadence = journal.JournalCadence(group_delay_us: 0, end_groups: 1, end_interval_ms: 10)
 
 fn journal_law_await_end(db: Db) -> Result[(), Error] waits {
-    let journal = disk_state(db)
-    result.unwrap(channel.send(journal.journal, Barrier))
-    match result.unwrap(channel.receive(journal.written)) {
+    let state = disk_state(db)
+    journal_barrier(state)
+    match result.unwrap(channel.receive(journal_written(state))) {
         Written => Ok(()),
         WriteFailed(problem) => Error(Poisoned(problem)),
     }
@@ -252,17 +252,17 @@ fn journal_legacy_open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Optio
 
 fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
-    let mut creation = result.unwrap(disk_creation_block())
-    let (take segment, take end_file, take header) = result.unwrap(disk_new_segment(d, c, id, 7, 0, mut creation))
-    let (send, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(128)
-    let (acks, received): (Sender[Ack], Receiver[Ack]) = channel.new(128)
+    let mut creation = result.unwrap(failure_result_from_rep(journal.disk_creation_block()))
+    let (take segment, take end_file, take header) = result.unwrap(failure_result_from_rep(journal.disk_new_segment(d, c, store_key_to_rep(id), 7, 0, mut creation)))
+    let (send, receive): (Sender[journal.DirJournalMsg], Receiver[journal.DirJournalMsg]) = channel.new(128)
+    let (acks, received): (Sender[journal.DirAck], Receiver[journal.DirAck]) = channel.new(128)
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
-    let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
+    let (written_send, written_receive): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(2)
     let (synced_send, _synced): (Sender[()], Receiver[()]) = channel.new(1)
     let first = journal_empty_commit(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 72, 1)
     result.unwrap(channel.send(send, Frame(take first, 1)))
     if mode == 3 {
-        let (take rotated, take rotated_end, take rotated_header) = result.unwrap(disk_new_segment(d, c, id, 8, 114, mut creation))
+        let (take rotated, take rotated_end, take rotated_header) = result.unwrap(failure_result_from_rep(journal.disk_new_segment(d, c, store_key_to_rep(id), 8, 114, mut creation)))
         result.unwrap(channel.send(send, Rotate(take rotated, take rotated_end, take rotated_header)))
     }
     let startup_frames = if mode == 4 {
@@ -296,18 +296,18 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     } else {
         100u32
     }
-    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: max_frames, group_bytes: max_bytes, clock: c, cadence: JOURNAL_IMMEDIATE_CADENCE, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
-    let reserve = journal_group_room(int.widen(max_bytes))
+    let input = journal.JournalWorker(store: store_key_to_rep(id), seq: 7, segment: take segment, end_file: take end_file, header: take header, group_commits: max_frames, group_bytes: max_bytes, clock: c, cadence: JOURNAL_IMMEDIATE_CADENCE, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
+    let reserve = journal.journal_group_room(int.widen(max_bytes))
     let worker = if mode == 0 || mode == 2 {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker_zero)
     } else {
-        task.spawn(tasks, bytes reserve + 65536, take input, journal_worker)
+        task.spawn(tasks, bytes reserve + 65536, take input, journal.journal_worker)
     }
     result.unwrap(result.unwrap(channel.receive(waiting)))
     let mut previously_acked = 0u64
     if mode == 4 {
         match result.unwrap(channel.receive(received)) {
-            Journaled(2, 84) => {},
+            DirJournaled(2, 84) => {},
             _ => return false
         }
         for head in 3u64 .. 5 {
@@ -315,7 +315,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
             result.unwrap(channel.send(send, Frame(take raw, head)))
         }
         match result.unwrap(channel.receive(received)) {
-            Journaled(4, 168) => {},
+            DirJournaled(4, 168) => {},
             _ => return false
         }
         // Another batch after the worker goes back to receive.
@@ -332,7 +332,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     let mut final_bytes = previously_acked * 42
     while let Ok(ack) = channel.try_receive(received) {
         match ack {
-            Journaled(n, bytes_out) => {
+            DirJournaled(n, bytes_out) => {
                 group_count += 1
                 if n <= final_number || bytes_out != n * 42 {
                     return false
@@ -364,7 +364,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     if group_count != expected_groups || final_number != expected_frames || final_bytes != expected_frames * 42 {
         return false
     }
-    let end = result.unwrap(disk_end(d, id, 7))
+    let end = result.unwrap(failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7)))
     if end != Some(if mode == 3 {
         114u64
     } else {
@@ -410,7 +410,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = view t
-    let before = db.file_seq
+    let before = file_seq(db)
     let saved = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 7, 70)
     }))
@@ -421,13 +421,13 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
         },
         _ => return false
     }
-    if disk_state(db).journaled != 1 || disk_state(db).inflight != 0 {
+    if queue_accounting(disk_state(db)).journaled != 1 || queue_accounting(disk_state(db)).inflight != 0 {
         return false
     }
     if !typed_put(mut db, t, 8, 80) {
         return false
     }
-    if db.file_seq != before {
+    if file_seq(db) != before {
         return false
     }
     result.unwrap(close(take db))
@@ -439,12 +439,12 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
         return false
     }
     let path = result.unwrap(manifest.disk_path("j-", before, ""))
-    if !result.unwrap(disk_exists(d, path)) {
+    if !result.unwrap(failure_result_from_rep(journal.disk_exists(d, path))) {
         return false
     }
     let cut = result.unwrap(checkpoint(mut reopened))
     result.unwrap(durable(mut reopened, cut))
-    if result.unwrap(disk_exists(d, path)) {
+    if result.unwrap(failure_result_from_rep(journal.disk_exists(d, path))) {
         return false
     }
     result.unwrap(close(take reopened))
@@ -467,18 +467,18 @@ fn journal_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 
 pub fn journal_law_end_storage(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
-    let mut scratch = result.unwrap(journal_buffers(1024))
+    let mut scratch = result.unwrap(journal.journal_buffers(1024))
     for seq in[7u64, 257u64] {
         let mut file = result.unwrap(host.open(d, result.unwrap(manifest.disk_path("j-", seq, ".end")), Durable))
         let attempt = bound bytes 0 {
-            journal_write_end(id, seq, 198, mut file, mut scratch.end_bytes, mut scratch.binding)
+            failure_result_from_rep(journal.journal_write_end(store_key_to_rep(id), seq, 198, mut file, mut scratch.end_bytes, mut scratch.binding))
         }
         result.unwrap(host.close(take file))
         match take attempt {
             Ok(Ok(())) => {},
             _ => return false
         }
-        if result.unwrap(disk_end(d, id, seq)) != Some(198u64) {
+        if result.unwrap(failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), seq))) != Some(198u64) {
             return false
         }
     }
@@ -496,13 +496,13 @@ fn journal_test_end_storage(d: Dir) -> Result[(), ()] waits {
 
 // The law alone gives the running loop zero new bytes after its startup.
 // Production reserves its root once and relies on the preallocated buffers.
-fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
-    let reserved = failure_result_from_rep(types.capacity(journal_buffers(int.widen(input.group_bytes))))?
+fn journal_worker_zero(take input: journal.JournalWorker) -> Result[(), types.Failure] waits {
+    let reserved = types.capacity(journal.journal_buffers(int.widen(input.group_bytes)))?
     let _ = channel.send(input.ready, Ok(()))
     let attempt = bound bytes 0 {
-        journal_loop(take input, take reserved)
+        journal.journal_loop(take input, take reserved)
     }
-    failure_result_from_rep(types.capacity(take attempt))?
+    types.capacity(take attempt)?
 }
 
 // STORE-SPEC §1.8: issuer, length, subject, and two BE u64s.
@@ -528,7 +528,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     options.pack_bytes = 512
     let db = result.unwrap(open(tasks, d, c, r, options))
     let id = db.store
-    let seq = db.file_seq
+    let seq = file_seq(db)
     result.unwrap(close(take db))
     let mut payload: Bytes = list.new()
     result.unwrap(format.le(mut payload, 0, 4))
@@ -599,7 +599,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let bad_dir = disk_test_directory(d)
     let bad = result.unwrap(open(tasks, bad_dir, c, r, options))
     let bad_id = bad.store
-    let bad_seq = bad.file_seq
+    let bad_seq = file_seq(bad)
     result.unwrap(close(take bad))
     let mut one: Bytes = list.new()
     list.fill(mut one, 1, 7u8)
@@ -665,7 +665,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     result.unwrap(durable(mut db, final_item))
-    if disk_state(db).journaled != 100 || pages.holder_heads(db.holders)[0].head != 101 {
+    if queue_accounting(disk_state(db)).journaled != 100 || pages.holder_heads(db.holders)[0].head != 101 {
         return false
     }
     let (f, _) = result.unwrap(fork(mut db, "f", early))
@@ -800,15 +800,15 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     durable(mut db, preceding)?
     let before = accounts(db)
     let old_generation = db.checkpointed
-    let old_segment = db.file_seq
+    let old_segment = file_seq(db)
     let old_stamp = pages.holder_next_node(db.holders)
-    let old_end = db.file_end
+    let old_end = file_end(db)
     let file = failure_result_from_rep(types.capacity(manifest.disk_path("j-", old_segment, "")))?
     let saved = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
     let raw = read_journal_prefix(child, file, old_end + 46)?
-    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || pages.holder_next_node(db.holders) != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || pages.holder_next_node(db.holders) != old_stamp || db.checkpointed != old_generation || file_seq(db) != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?
@@ -865,7 +865,7 @@ fn journal_test_fork_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         Error(Limit(Ids)) => (),
         _ => return Error(Foreign)
     }
-    let seq = exhausted.file_seq
+    let seq = file_seq(exhausted)
     close(take exhausted)?
     fork_test_append(root, store, seq, 72, 4294967295, "bad")?
     match open(tasks, root, c, r, options) {

@@ -326,13 +326,13 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
     offline_law_write(mut db, rows, 0, wide)?
     let _ = checkpoint(mut db)?
     offline_law_write(mut db, rows, 1, b"one")?
-    let stale = db.file_end
+    let stale = file_end(db)
     offline_law_write(mut db, rows, 2, b"two")?
     offline_law_write(mut db, rows, 3, b"three")?
     let head = version(snapshot(db))
-    let recovered_end = db.file_end
+    let recovered_end = file_end(db)
     let id = db.store
-    let seq = db.file_seq
+    let seq = file_seq(db)
     let terminal = failure_result_from_rep(manifest.journal_path(seq, ""))?
     let end_file = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
     close(take db)?
@@ -351,7 +351,7 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
         failure_result_from_rep(manifest.disk_io(host.unlock(mut probe)))?
         std.clock.sleep_ns(c, 1000000)
     }
-    if disk_exists(target, "EXPORT")? {
+    if failure_result_from_rep(journal.disk_exists(target, "EXPORT"))? {
         fail("backup stamped while the terminal fence was held")
     }
     failure_result_from_rep(manifest.disk_io(host.unlock(mut fence)))?
@@ -361,7 +361,7 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
     if stamp.head != head || stamp.opened != seq || stamp.terminal != seq || stamp.end != recovered_end {
         fail("backup did not stamp the recovered terminal and head")
     }
-    if failure_result_from_rep(manifest.disk_io(host.stat(source, terminal)))?.size != original_terminal.size || disk_end(source, id, seq)? != Some(stale) || failure_result_from_rep(manifest.read_page_manifest_bytes(source))? != original_manifest {
+    if failure_result_from_rep(manifest.disk_io(host.stat(source, terminal)))?.size != original_terminal.size || failure_result_from_rep(journal.disk_end(source, store_key_to_rep(id), seq))? != Some(stale) || failure_result_from_rep(manifest.read_page_manifest_bytes(source))? != original_manifest {
         fail("backup changed the source")
     }
     let _ = result.unwrap(restore(target, restored, c, options))
@@ -394,7 +394,7 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
         }
     }
     let head = version(snapshot(db))
-    let seq = db.file_seq
+    let seq = file_seq(db)
     close(take db)?
     if !orphan {
         let _ = failure_result_from_rep(manifest.disk_remove_optional(source, failure_result_from_rep(manifest.journal_path(seq, ".end"))?))?
@@ -403,7 +403,7 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
     if let Some(_) = result.unwrap(offline_law_copy(source, target, c)) {
         fail("the offline backup bypassed the writer fallback")
     }
-    if disk_exists(target, "EXPORT")? {
+    if failure_result_from_rep(journal.disk_exists(target, "EXPORT"))? {
         fail("a writer fallback published an offline stamp")
     }
     let stamp = result.unwrap(backup_with_writer(tasks, source, target, c, r, clone(options), b"backup-law-3079!"))
@@ -453,13 +453,13 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     let Some((stamp, _)) = result.unwrap(offline_law_copy(source, target, c)) else {
         fail("backup refused a store with an unlisted pack")
     }
-    if disk_exists(target, extra)? || disk_exists(target, temp)? || !disk_exists(source, extra)? || !disk_exists(source, temp)? {
+    if failure_result_from_rep(journal.disk_exists(target, extra))? || failure_result_from_rep(journal.disk_exists(target, temp))? || !failure_result_from_rep(journal.disk_exists(source, extra))? || !failure_result_from_rep(journal.disk_exists(source, temp))? {
         fail("backup copied or removed unlisted files")
     }
     failure_result_from_rep(manifest.disk_write_synced(target, extra, b"stray"))?
     failure_result_from_rep(manifest.disk_write_synced(target, temp, b"temporary"))?
     let restored_stamp = result.unwrap(restore(target, restored, c, options))
-    if !same_stamp(stamp, restored_stamp) || disk_exists(restored, extra)? || disk_exists(restored, temp)? {
+    if !same_stamp(stamp, restored_stamp) || failure_result_from_rep(journal.disk_exists(restored, extra))? || failure_result_from_rep(journal.disk_exists(restored, temp))? {
         fail("restore copied unlisted files or changed the stamp")
     }
     let raw = failure_result_from_rep(manifest.disk_read_file(source, pack, 1048576))?
@@ -489,7 +489,7 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
             Error(Scratch(Io(NotFound))) if damage != 1 => (),
             _ => fail("restore accepted a mutilated listed pack"),
         }
-        if disk_exists(output, "EXPORT")? || !disk_exists(incomplete, "EXPORT")? {
+        if failure_result_from_rep(journal.disk_exists(output, "EXPORT"))? || !failure_result_from_rep(journal.disk_exists(incomplete, "EXPORT"))? {
             fail("a refused copy published an openable image")
         }
         for at in[source, target] {
@@ -525,7 +525,7 @@ fn l96_memory_exact_and_below(target: Dir, d: Dir, c: Clock, options: Options, r
         Error(Store(Full(Resident(Capacity(requested, available))))) if requested == resident_exact && available == resident_exact - 1 => (),
         _ => return Error(ExportMismatch),
     }
-    if !deploy_result(disk_exists(restored_bad, "EXPORT"))? {
+    if !deploy_result(failure_result_from_rep(journal.disk_exists(restored_bad, "EXPORT")))? {
         return Error(ExportMismatch)
     }
     Ok(())

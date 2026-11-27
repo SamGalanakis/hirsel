@@ -51,7 +51,7 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     let (_, id, take page_record) = read_only_manifest(d)?
     let first = page_record.first_live
     let initial = read_only_checkpoint(d, id, take page_record)?
-    let JournalRecovered(replay: take known, seq: seq, end: end, ..) = journal_recover(d, id, first, c, take initial)?
+    let journal.JournalRecovered(replay: take known, seq: seq, end: end, ..) = journal_recover(d, id, first, c, take initial)?
     let wanted = known.state.tips[0u64].head + 1
     if scenario == "read-only-creation" {
         return disk_crash_creation_read(d, c, out, id, seq, end, wanted - 1)
@@ -131,8 +131,8 @@ fn disk_crash_follower_polls(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Std
     }
     durable(mut writer, done.ticket)?
     let head = version(snapshot(writer))
-    let end = journal_end_bytes(writer.store, writer.file_seq, writer.file_end)
-    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, ".end")))?, end))?
+    let end = journal_end_bytes(writer.store, file_seq(writer), file_end(writer))
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), ".end")))?, end))?
     let _ = stdout.write(out, "SYNCS")
     if catch_up(mut replica, forever)?.version != head {
         fail("BL10: the changed END did not move the follower")
@@ -197,8 +197,8 @@ fn disk_crash_follower_poison(d: Dir, c: Clock, r: Random, tasks: Tasks, out: St
     if acked != 63 || top != base + 63 {
         fail("BL5: the poisoned store did not ack exactly 63 groups")
     }
-    let creation_end = journal_end_bytes(writer.store, writer.file_seq, 72)
-    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, ".end")))?
+    let creation_end = journal_end_bytes(writer.store, file_seq(writer), 72)
+    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), ".end")))?
     if failure_result_from_rep(manifest.disk_read_file(d, ending, list.len(creation_end)))? != creation_end {
         fail("BL5: an END covered the acked groups; the poison case is vacuous")
     }
@@ -234,7 +234,7 @@ fn disk_crash_restart_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdo
     let trunk = main_branch(writer)
     let at = snapshot(writer)
     let (side, _) = fork(mut writer, "side", at)?
-    let fork_end = writer.file_end
+    let fork_end = file_end(writer)
     let _ = stdout.write(out, "ARM")
     let mut tickets: List[Ticket] = list.new()
     for k in 0u64 .. 64 {
@@ -275,8 +275,8 @@ fn disk_crash_restart_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdo
     if acked != 63 || main_top != base + 32 || side_top != base + 31 {
         fail("BL9: the writer did not ack 63 commits over both branches")
     }
-    let fork_ending = journal_end_bytes(writer.store, writer.file_seq, fork_end)
-    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, ".end")))?
+    let fork_ending = journal_end_bytes(writer.store, file_seq(writer), fork_end)
+    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), ".end")))?
     if failure_result_from_rep(manifest.disk_read_file(d, ending, list.len(fork_ending)))? != fork_ending {
         fail("BL9: the END is not the fork's; the acks are not past d")
     }
@@ -555,7 +555,7 @@ fn log_follower_unreadable_end(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     for _ in 0u64 .. 96 {
         list.push(mut garbage, 255u8)
     }
-    failure_result_from_rep(manifest.disk_write_synced(directory, failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, ".end")))?, garbage))?
+    failure_result_from_rep(manifest.disk_write_synced(directory, failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), ".end")))?, garbage))?
     let forever = 18446744073709551615u64
     let wanted = applied(replica, mirror)?
     for call in 0u64 .. 3 {
@@ -596,9 +596,9 @@ fn log_follower_behind_torn_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let again = snapshot(writer)
     let (upper, _) = fork(mut writer, "b", again)?
     let _ = checkpoint(mut writer)?
-    let segment = failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, "")))?
-    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", writer.file_seq, ".end")))?
-    let stop = writer.file_end
+    let segment = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), "")))?
+    let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(writer), ".end")))?
+    let stop = file_end(writer)
     let durable_prefix = read_journal_prefix(directory, segment, stop)?
     let mut tips: List[u64] = list.new()
     for side in[lower, upper] {
@@ -660,12 +660,12 @@ fn log_follower_end_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
             fail("BL4: a row was not committed")
         }
         durable(mut writer, done.ticket)?
-        list.push(mut acked, (version(snapshot(writer)), writer.file_end))
+        list.push(mut acked, (version(snapshot(writer)), file_end(writer)))
     }
     let (bounded, limit_at) = acked[0u64]
     let (torn, _) = acked[1u64]
     let id = writer.store
-    let seq = writer.file_seq
+    let seq = file_seq(writer)
     let ending = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ".end")))?
     failure_result_from_rep(manifest.disk_write_synced(directory, ending, journal_end_bytes(id, seq, limit_at)))?
     if log_end_bound_head(directory, c)? != bounded {

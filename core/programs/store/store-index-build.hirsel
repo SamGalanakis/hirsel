@@ -77,7 +77,7 @@ fn snapshot_rows_after(db: Db, s: Snapshot, inventory: pages.TieredReadInventory
     let mut previous = take after
     let direct_dir: Option[Dir] = if direct {
         match view db.disk {
-            Some(state) => state.d,
+            Some(state) => disk_directory(state),
             None => None,
         }
     } else {

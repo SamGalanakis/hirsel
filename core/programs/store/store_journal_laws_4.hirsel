@@ -12,7 +12,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     options.create = false
     let mut db = open(tasks, d, c, r, options)?
     let initial_generation = db.checkpointed
-    let initial_segment = db.file_seq
+    let initial_segment = file_seq(db)
     let start = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         let mut body: Bytes = list.with_capacity(4023)
         list.fill(mut body, 4023, 7u8)
@@ -21,7 +21,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let Committed(_) = start else {
         return Error(Foreign)
     }
-    if disk_state(db).uncovered != 4096 || disk_state(db).since_cut != 4096 || db.file_seq != initial_segment {
+    if queue_accounting(disk_state(db)).uncovered != 4096 || queue_accounting(disk_state(db)).since_cut != 4096 || file_seq(db) != initial_segment {
         return Error(Foreign)
     }
     let keep_reply: Option[fn(Error) -> bool] = None
@@ -35,7 +35,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     result.unwrap(bound bytes 1048576 {
         maybe_checkpoint(mut db)
     })?
-    if db.checkpointed != initial_generation || db.file_seq != initial_segment || disk_state(db).uncovered != 16781392 || disk_state(db).since_cut != 0 || disk_state(db).inflight != 0 {
+    if db.checkpointed != initial_generation || file_seq(db) != initial_segment || queue_accounting(disk_state(db)).uncovered != 16781392 || queue_accounting(disk_state(db)).since_cut != 0 || queue_accounting(disk_state(db)).inflight != 0 {
         return Error(Foreign)
     }
     let previous_head = version(snapshot(db))
@@ -73,12 +73,12 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if pages.holder_next_branch(db.holders) != id_before || db.frame_seq != frame_before || pages.holder_record_bytes(db.holders) != bytes_before {
         return Error(Foreign)
     }
-    if disk_state(db).uncovered != 16781392 || version(snapshot(db)) != previous_head {
+    if queue_accounting(disk_state(db)).uncovered != 16781392 || version(snapshot(db)) != previous_head {
         return Error(Foreign)
     }
     close(take db)?
     let mut recovered = open(tasks, d, c, r, options)?
-    if accounts(recovered).journal != 16781392 || disk_state(recovered).since_cut != 0 || version(snapshot(recovered)) != previous_head {
+    if accounts(recovered).journal != 16781392 || queue_accounting(disk_state(recovered)).since_cut != 0 || version(snapshot(recovered)) != previous_head {
         return Error(Foreign)
     }
     let refused_again = run(mut recovered, None, rows, fn(mut tx, call_env) -> Result[bool, Error] {
@@ -166,7 +166,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }))
     let before = version(snapshot(db))
     let frames = db.frame_seq
-    if accounts(db).journal != 16781392 || disk_state(db).since_cut != 0 {
+    if accounts(db).journal != 16781392 || queue_accounting(disk_state(db)).since_cut != 0 {
         return Error(())
     }
     // Two section heads (47 including the frame header), one data put
@@ -706,7 +706,7 @@ fn disk_window_width(commit_number: u64) -> u64 {
 fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
     for commit_number in 0u64 .. 5 {
         let width = disk_window_width(commit_number)
-        let start_end = db.file_end
+        let start_end = file_end(db)
         result.unwrap(stdout.write(out, "ISSUE"))
         let edit = run(mut db, None, (copy_env(t), copy_env(commit_number), copy_env(width)), fn(mut tx, input) -> Result[(), Error] {
             let mut value: Bytes = list.with_capacity(input.2 - 73)
@@ -716,7 +716,7 @@ fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout)
         let Committed(done) = edit else {
             return Error(Missing("window commit"))
         }
-        if db.file_end - start_end != width {
+        if file_end(db) - start_end != width {
             return Error(Missing("window commit size"))
         }
         durable(mut db, done.ticket)?
@@ -760,8 +760,8 @@ fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, ackn
             return Error(Missing("window unissued row"))
         }
     }
-    let header = option.unwrap(failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(db.store), db.file_seq, None))?)
-    let segment = failure_result_from_rep(manifest.journal_path(db.file_seq - 1, ""))?
+    let header = option.unwrap(failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(db.store), file_seq(db), None))?)
+    let segment = failure_result_from_rep(manifest.journal_path(file_seq(db) - 1, ""))?
     let mut previous = failure_result_from_rep(manifest.disk_io(host.open(d, segment, Read)))?
     let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut previous)))?.size
     failure_result_from_rep(manifest.disk_io(host.close(take previous)))?
@@ -862,8 +862,8 @@ fn journal_test_empty_commit_at_limit_and_due_cut(d: Dir, c: Clock, r: Random, t
     // Here since_cut > checkpoint_bytes (cut is due) AND uncovered == journal_limit.
     // A zero-mutation run must succeed with 0 frames/bytes and perform no cut.
     let gen_before = db.checkpointed
-    let seg_before = db.file_seq
-    let end_before = db.file_end
+    let seg_before = file_seq(db)
+    let end_before = file_end(db)
     let seq_before = db.frame_seq
     let v_before = version(snapshot(db))
     let Committed(skipped_at_limit) = run(mut db, None, copy_env(rows), fn(mut tx, call_env) -> Result[bool, Error] {
@@ -871,7 +871,7 @@ fn journal_test_empty_commit_at_limit_and_due_cut(d: Dir, c: Clock, r: Random, t
     })? else {
         fail("L91 E2: zero-mutation run was refused at journal_limit")
     }
-    if !skipped_at_limit.value || db.checkpointed != gen_before || db.file_seq != seg_before || db.file_end != end_before || db.frame_seq != seq_before || version(snapshot(db)) != v_before {
+    if !skipped_at_limit.value || db.checkpointed != gen_before || file_seq(db) != seg_before || file_end(db) != end_before || db.frame_seq != seq_before || version(snapshot(db)) != v_before {
         fail("L91 E2/F3: skipped run at journal_limit wrote bytes or triggered a cut")
     }
     if let Some(_) = skipped_at_limit.info {
@@ -911,14 +911,14 @@ fn journal_test_empty_commit_at_limit_and_due_cut(d: Dir, c: Clock, r: Random, t
     // Now run a skipped zero-mutation run with ample memory: must NOT cut and
     // must write 0 frames/bytes.
     let b_seq_before = bdb.frame_seq
-    let b_end_before = bdb.file_end
+    let b_end_before = file_end(bdb)
     let b_v_before = version(snapshot(bdb))
     let Committed(bskip) = run(mut bdb, None, copy_env(brows), fn(mut tx, t) -> Result[Option[u64], Error] {
         fetch(tx, t, 1u64)
     })? else {
         fail("L91 F3: bucket skipped run failed")
     }
-    if bskip.value != Some(11u64) || bdb.checkpointed != b_gen_0 || !object_cut_due(bdb) || bdb.frame_seq != b_seq_before || bdb.file_end != b_end_before || version(snapshot(bdb)) != b_v_before {
+    if bskip.value != Some(11u64) || bdb.checkpointed != b_gen_0 || !object_cut_due(bdb) || bdb.frame_seq != b_seq_before || file_end(bdb) != b_end_before || version(snapshot(bdb)) != b_v_before {
         fail("L91 F3: skipped run performed a due cut or wrote bytes")
     }
     if let Some(_) = bskip.info {

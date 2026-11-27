@@ -1,0 +1,221 @@
+pub const JOURNAL_WORKER_SLACK: u64 = 32768
+
+pub type DirJournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile, Bytes) | Barrier | Flush
+
+pub type DirAck: send = DirJournaled(u64, u64) | DirBroken(IoError)
+
+pub type QueueAccounting {
+    journaled: u64,
+    inflight: u64,
+    uncovered: u64,
+    since_cut: u64,
+    acked_bytes: u64,
+    pending: Option[Bytes],
+    poison: Option[IoError]
+}
+
+pub fn queue_accounting(uncovered: u64) -> QueueAccounting {
+    QueueAccounting(journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, pending: None, poison: None)
+}
+
+pub opaque type RecordRetention {
+    first: u64,
+    main_after: u64
+}
+
+pub fn record_retention(first: u64, main_after: u64) -> RecordRetention {
+    RecordRetention(first: first, main_after: main_after)
+}
+
+pub fn first_live(retention: RecordRetention) -> u64 {
+    retention.first
+}
+
+pub fn retained_after(retention: RecordRetention) -> u64 {
+    retention.main_after
+}
+
+pub opaque type DirJournalState {
+    lock: HostFile,
+    d: Dir,
+    creation: Bytes,
+    file_seq: u64,
+    file_end: u64,
+    journal: Sender[DirJournalMsg],
+    acks: Receiver[DirAck],
+    accounting: QueueAccounting,
+    written: Receiver[WriteNotice],
+    written_send: Sender[WriteNotice],
+    synced: Option[Receiver[()]],
+    writer: Task[Result[(), types.Failure]],
+    gather: bool
+}
+
+pub type DirJournalChannels {
+    frames: Sender[DirJournalMsg],
+    queued: Receiver[DirJournalMsg],
+    acks: Sender[DirAck],
+    received: Receiver[DirAck],
+    ready: Sender[Result[(), Capacity]],
+    waiting: Receiver[Result[(), Capacity]],
+    written_send: Sender[WriteNotice],
+    written_receive: Receiver[WriteNotice],
+    synced_send: Sender[()],
+    synced_receive: Receiver[()]
+}
+
+pub fn dir_journal_channels(group_count: u64) -> DirJournalChannels {
+    let (frames, queued): (Sender[DirJournalMsg], Receiver[DirJournalMsg]) = channel.new(group_count * 2)
+    // The queued, grouped, handoff and byte-split frames plus a final failure.
+    let (acks, received): (Sender[DirAck], Receiver[DirAck]) = channel.new(group_count * 3 + 3)
+    let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
+    let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
+    let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
+    DirJournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
+}
+
+pub type DirJournalStart {
+    lock: HostFile,
+    seq: u64,
+    uncovered: u64,
+    creation: Bytes,
+    segment: HostFile,
+    end_file: HostFile,
+    header: Bytes
+}
+
+pub fn start_directory(tasks: Tasks, d: Dir, c: Clock, id: types.StoreKey, group_commits: u32, group_bytes: u32, cadence: JournalCadence, zero_extension: bool, take start: DirJournalStart) -> Result[DirJournalState, types.Failure] waits {
+    let DirJournalStart(lock: take lock, seq, uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header) = take start
+    let channels = manifest.disk_allocation(scoped fn() -> Result[DirJournalChannels, types.Failure] {
+        Ok(dir_journal_channels(int.widen(group_commits)))
+    })?
+    let DirJournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
+    let reserve = journal_group_room(int.widen(group_bytes))
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, header: take header, group_commits: group_commits, group_bytes: group_bytes, clock: c, cadence: cadence, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send)
+    let writer = match task.try_spawn(tasks, bytes reserve + JOURNAL_WORKER_SLACK, take input, journal_worker) {
+        Ok(take running) => take running,
+        Error((problem, _)) => return Error(Full(Allocation(problem))),
+    }
+    types.capacity(result.unwrap(channel.receive(waiting)))?
+    Ok(DirJournalState(lock: take lock, d: d, creation: take creation, file_seq: seq, file_end: 72, journal: take frames, acks: take journal_received, accounting: queue_accounting(uncovered), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take writer, gather: cadence.group_delay_us != 0))
+}
+
+pub fn directory(state: DirJournalState) -> Dir {
+    state.d
+}
+
+pub fn segment_seq(state: DirJournalState) -> u64 {
+    state.file_seq
+}
+
+pub fn segment_end(state: DirJournalState) -> u64 {
+    state.file_end
+}
+
+pub fn set_segment(mut state: DirJournalState, seq: u64) {
+    state.file_seq = seq
+    state.file_end = 72
+}
+
+pub fn advance_offset(mut state: DirJournalState, size: u64) {
+    state.file_end += size
+}
+
+pub fn dir_accounting(state: DirJournalState) -> View[QueueAccounting] in state {
+    view state.accounting
+}
+
+pub fn edit_accounting[R](mut state: DirJournalState, edit: scoped fn(mut QueueAccounting) -> R) -> R {
+    edit(mut state.accounting)
+}
+
+pub fn stash_frame(mut state: DirJournalState, take frame: Option[Bytes]) {
+    state.accounting.pending = take frame
+}
+
+pub fn dir_sender(state: DirJournalState) -> View[Sender[DirJournalMsg]] in state {
+    view state.journal
+}
+
+pub fn replace_sender(mut state: DirJournalState, take sender: Sender[DirJournalMsg]) -> Sender[DirJournalMsg] {
+    replace(mut state.journal, take sender)
+}
+
+pub fn dir_acks(state: DirJournalState) -> View[Receiver[DirAck]] in state {
+    view state.acks
+}
+
+pub fn dir_written(state: DirJournalState) -> View[Receiver[WriteNotice]] in state {
+    view state.written
+}
+
+pub fn dir_written_send(state: DirJournalState) -> View[Sender[WriteNotice]] in state {
+    view state.written_send
+}
+
+pub fn dir_sync_notices(mut state: DirJournalState) -> Option[Receiver[()]] {
+    replace(mut state.synced, None)
+}
+
+pub fn flush_directory(state: DirJournalState) waits {
+    if state.gather {
+        // The ack channel preserves the worker's first failure if it exited.
+        let _ = channel.send(state.journal, Flush)
+    }
+}
+
+pub fn rotate(mut state: DirJournalState, c: Clock, id: types.StoreKey, seq: u64, previous: u64) -> Result[bool, types.Failure] waits {
+    let (take segment, take end_file, take header) = disk_new_segment(state.d, c, id, seq, previous, mut state.creation)?
+    Ok(match channel.send(state.journal, Rotate(take segment, take end_file, take header)) {
+        Ok(()) => false,
+        Error(_) => true,
+    })
+}
+
+pub fn close_directory(take state: DirJournalState, take prior: Option[types.Failure]) -> Result[(), types.Failure] waits {
+    let DirJournalState(lock: take lock, journal: take frames, acks: take acknowledgements, accounting: take accounting, writer: take writer, written: take notices, written_send: take notice_to, ..) = take state
+    let _ = take frames
+    let mut failure = take prior
+    let mut poison = accounting.poison
+    let remaining: Option[Receiver[DirAck]] = if let Some(_) = poison {
+        let _ = take acknowledgements
+        None
+    } else {
+        Some(take acknowledgements)
+    }
+    match task.join(take writer) {
+        Ok(Error(Io(e))) => if let None = poison {
+            poison = Some(e)
+        },
+        Ok(Error(take e)) => if let None = failure {
+            failure = Some(take e)
+        },
+        Ok(Ok(())) => (),
+        Error(_) => if let None = poison {
+            poison = Some(Closed)
+        },
+    }
+    if let Some(receiver) = remaining {
+        while let Ok(ack) = channel.try_receive(receiver) {
+            if let DirBroken(e) = ack {
+                if let None = poison {
+                    poison = Some(e)
+                }
+            }
+        }
+    }
+    let _ = take notices
+    let _ = take notice_to
+    if let Error(e) = host.close(take lock) {
+        if let None = poison {
+            poison = Some(e)
+        }
+    }
+    match poison {
+        Some(e) => Error(Poisoned(e)),
+        None => match take failure {
+            Some(take e) => Error(take e),
+            None => Ok(()),
+        },
+    }
+}

@@ -139,7 +139,7 @@ fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: 
 }
 
 fn stream_follow_make_capture(head: HistoryHead, tag: std.object.ETag, take attach: Option[format.Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: pager.JournalReplay) -> Result[Option[Arc[FollowCapture]], Error] {
-    let resident = journal_account(replay)?
+    let resident = failure_result_from_rep(journal.journal_account(replay))?
     let pager.JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: head, tag, next_node, attach: take attach, head_bytes: take head_bytes, live_next_seq)
     Ok(Some(follow_capture(head.store, take built, resident, Some(remote), 0, failure_result_from_rep(catalog.stamp_after(next_node))?)?))
@@ -223,7 +223,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
                 Some((take old_a, _)) => {
                     let state = copy_follow_state(old_capture.state)?
                     let initial = failure_result_from_rep(pager.journal_replay(take state, old.next_node, limits_to_rep(default_limits())))?
-                    failure_result_from_rep(catalog.over_ceiling(journal_account(initial)?, avail))?
+                    failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(initial))?, avail))?
                     cur_head = old.current
                     cur_tag = old.tag
                     cur_attach = Some(take old_a)

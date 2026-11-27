@@ -201,7 +201,7 @@ fn journal_empty_commit(ctx: format.DiskContext, offset: u64, head: u64) -> Byte
 
 fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], final_item: bool) -> Result[(u64, u64, List[format.JournalEvent]), Error] waits {
     failure_result_from_rep(manifest.disk_write_synced(d, "j-7", raw))?
-    let mut input = journal_input(failure_result_from_rep(manifest.disk_io(host.open(d, "j-7", Read)))?, false)?
+    let mut input = failure_result_from_rep(journal.journal_input(failure_result_from_rep(manifest.disk_io(host.open(d, "j-7", Read)))?, false))?
     let mut events: List[format.JournalEvent] = list.new()
     let scanned = journal_scan(mut input, "j-7", id, 7, 72, boundary, final_item, mut events, scoped fn(mut observed: List[format.JournalEvent], take event: format.JournalEvent) -> Result[(), Error] {
         list.push(mut observed, take event)

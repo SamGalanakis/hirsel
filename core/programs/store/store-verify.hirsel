@@ -292,7 +292,7 @@ fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkP
     }
     if direct {
         if let Some(state) = view db.disk {
-            if let Some(d) = state.d {
+            if let Some(d) = disk_directory(state) {
                 return Ok(WalkDirect(d))
             }
         }
@@ -538,7 +538,7 @@ fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
     }
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    if let Error(_) = channel.try_send(state.journal, ObjectPause(take handover, take resuming)) {
+    if let Error(_) = channel.try_send(object_sender(state), ObjectPause(take handover, take resuming)) {
         return Ok(())
     }
     let Ok(take owned_io) = channel.receive(paused) else {
@@ -576,10 +576,10 @@ fn verify_teardown(db: Db) waits {
         return
     }
     if let Some(state) = view db.disk {
-        if let Some(_) = state.poison {
+        if let Some(_) = queue_accounting(state).poison {
             fail("store trust teardown: database is Poisoned")
         }
-        if let Some(d) = state.d {
+        if let Some(d) = disk_directory(state) {
             match read_only_manifest(d) {
                 Ok((_, id, take manifest)) => match validate_directory_graph(d, id, take manifest, true) {
                     Ok(_) => (),

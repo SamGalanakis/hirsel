@@ -804,7 +804,7 @@ journal_apply_ops	store-journal-recover.hirsel	journal	txn	L12	push-up journal -
 journal_sorted_run	store-journal-recover.hirsel	journal	journal	L6
 journal_collection_batch	store-journal-recover.hirsel	journal	journal	L6
 journal_collection_bulk	store-journal-recover.hirsel	journal	txn	L12	push-up journal -> txn (refs at layer 10)
-durable_latch_error	store-journal-status.hirsel	journal	journal	L6
+durable_latch_error	store-journal-status.hirsel	journal	store	-	public root Error signature
 journal_receive	store-journal-status.hirsel	store	store	-
 journal_ack	store-journal-status.hirsel	store	store	-
 journal_poll	store-journal-status.hirsel	store	store	-
@@ -815,7 +815,7 @@ JournalMsg	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal 
 WriteNotice	store-journal-worker.hirsel	journal	journal	L6
 JournalIdleTimer	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
 journal_idle_timer	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
-JournalWorker	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+JournalWorker	store-journal-worker.hirsel	journal	journal	L6	Directory-only worker uses DirJournalMsg and DirAck
 JournalBuffers	store-journal-worker.hirsel	journal	journal	L6
 journal_set	store-journal-worker.hirsel	journal	journal	L6
 journal_fixed_check	store-journal-worker.hirsel	journal	journal	L6
@@ -827,8 +827,8 @@ journal_group_room	store-journal-worker.hirsel	journal	journal	L6
 journal_window_step	store-journal-worker.hirsel	journal	journal	L6
 journal_write_aligned	store-journal-worker.hirsel	journal	journal	L6
 journal_write_oversized	store-journal-worker.hirsel	journal	journal	L6
-journal_loop	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
-journal_worker	store-journal-worker.hirsel	journal	object_writer	L9	push-up journal -> object_writer (refs at layer 8)
+journal_loop	store-journal-worker.hirsel	journal	journal	L6	Directory-only worker uses DirJournalMsg and DirAck
+journal_worker	store-journal-worker.hirsel	journal	journal	L6	Directory-only worker uses DirJournalMsg and DirAck
 disk_creation_block	store-journal-worker.hirsel	journal	journal	L6
 disk_new_segment	store-journal-worker.hirsel	journal	journal	L6
 KEYED_OPS	store-keyed-claims.hirsel	txn	txn	L12
@@ -1122,16 +1122,16 @@ validate_cold_root	store-manifest.hirsel	manifest	manifest	L4
 resolve_data_page	store-manifest.hirsel	manifest	manifest	L4
 resolve_data_roots	store-manifest.hirsel	manifest	manifest	L4
 ValidatedPageManifest	store-manifest.hirsel	manifest	manifest	L4
-validate_page_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
-validate_directory_graph	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
-walk_directory_graph	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_page_manifest	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
+validate_directory_graph	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
+walk_directory_graph	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
 parse_pack_filename	store-manifest.hirsel	manifest	manifest	L4
 cleanup_dead_packs	store-manifest.hirsel	manifest	manifest	L4
 cleanup_page_manifest	store-manifest.hirsel	manifest	manifest	L4
-validate_store_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
-select_page_manifest	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_store_manifest	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
+select_page_manifest	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
 validate_new_page_manifest	store-manifest.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 3)
-validate_leased_cut	store-manifest.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+validate_leased_cut	store-manifest.hirsel	manifest	store	-	root Cold walk and validation order (3261 ruling)
 validate_cut_pages	store-manifest.hirsel	manifest	store	-	push-up manifest -> pager (refs at layer 4); push-up pager -> store (refs at layer 12)
 publish_page_manifest_bytes	store-manifest.hirsel	manifest	manifest	L4
 journal_path	store-manifest.hirsel	manifest	manifest	L4
@@ -1747,7 +1747,7 @@ begin_scrub	store-scrub.hirsel	store	store	-
 scrub_step	store-scrub.hirsel	store	store	-
 scrub_finish_pack	store-api-scrub.hirsel	manifest	store	-	L3 public root type ruling
 scrub_pack_pointers	store-scrub.hirsel	manifest	manifest	L4
-scrub_next	store-scrub.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
+scrub_next	store-scrub.hirsel	manifest	store	-	public root Scrub signature
 scrub_prefix	store-scrub.hirsel	manifest	manifest	L4
 scrub_frame	store-scrub.hirsel	manifest	manifest	L4
 ScannedPackFrame	store-scrub.hirsel	manifest	manifest	L4
@@ -3083,3 +3083,12 @@ PagerState	store-pager-state.hirsel	pager	pager	L5	-
 DiskPagerState	store-pager-state.hirsel	pager	pager	L5	-
 TieredManifestRestore	store-tiered-replay.hirsel	pager	pager	L5	-
 tiered_manifest_restore	store-tiered-replay.hirsel	pager	pager	L5	-
+DirJournalState	store-journal-state.hirsel	journal	journal	L6
+RecordRetention	store-journal-state.hirsel	journal	journal	L6
+DirJournalMsg	store-journal-state.hirsel	journal	journal	L6
+DirAck	store-journal-state.hirsel	journal	journal	L6
+QueueAccounting	store-journal-state.hirsel	journal	journal	L6
+DirJournalChannels	store-journal-state.hirsel	journal	journal	L6
+DirJournalStart	store-journal-state.hirsel	journal	journal	L6
+dir_journal_channels	store-journal-state.hirsel	journal	journal	L6
+start_directory	store-journal-state.hirsel	journal	journal	L6

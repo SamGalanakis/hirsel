@@ -32,7 +32,7 @@ const NAME_SLOT: u64 = 32
 
 const CAPTURE_SCRATCH: u64 = 32768
 
-pub const BOOTSTRAP: u64 = 2 * manifest.PAGE_MANIFEST_FILE_LIMIT + MANIFEST_DECODED + END_IMAGE + JOURNAL_CHUNK_BYTES + FRAME_LIMIT + CAPTURE_PATH + CAPTURE_SCRATCH
+pub const BOOTSTRAP: u64 = 2 * manifest.PAGE_MANIFEST_FILE_LIMIT + MANIFEST_DECODED + END_IMAGE + journal.JOURNAL_CHUNK_BYTES + FRAME_LIMIT + CAPTURE_PATH + CAPTURE_SCRATCH
 
 type PreparedSegment: send {
     seq: u64,
@@ -93,14 +93,14 @@ fn capture_branch_slots(limits: StoreLimits) -> u64 {
 
 fn capture_check_scratch(p: PreparedCapture) -> u64 {
     // A collections-map path can lead into a second page tree.
-    capture_bootstrap(p) + CAPTURE_PATH + CAPTURE_BRANCH * capture_branch_slots(limits_from_rep(p.manifest.limits)) + JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH
+    capture_bootstrap(p) + CAPTURE_PATH + CAPTURE_BRANCH * capture_branch_slots(limits_from_rep(p.manifest.limits)) + journal.JOURNAL_CHUNK_BYTES + CAPTURE_SCRATCH
 }
 
 fn capture_check_need(p: PreparedCapture) -> u64 {
     let tables = capture_add(capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)), 2 * capture_bitmap_bytes(p))
     let total = capture_add(capture_add(capture_check_scratch(p), tables), capture_mul(SEG, list.len(p.segments)))
     if p.purpose == Copy {
-        return capture_add(total, JOURNAL_CHUNK_BYTES)
+        return capture_add(total, journal.JOURNAL_CHUNK_BYTES)
     }
     total
 }
@@ -113,9 +113,9 @@ pub fn capture_need(p: PreparedCapture) -> Need {
         capture_need_part(mut n, "lists", capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)))
         capture_need_part(mut n, "bitmaps", 2 * capture_bitmap_bytes(p))
         capture_need_part(mut n, "branches", CAPTURE_BRANCH * capture_branch_slots(limits_from_rep(p.manifest.limits)))
-        capture_need_part(mut n, "chunk", JOURNAL_CHUNK_BYTES)
+        capture_need_part(mut n, "chunk", journal.JOURNAL_CHUNK_BYTES)
         if p.purpose == Copy {
-            capture_need_part(mut n, "copy chunk", JOURNAL_CHUNK_BYTES)
+            capture_need_part(mut n, "copy chunk", journal.JOURNAL_CHUNK_BYTES)
         }
         capture_need_part(mut n, "scratch", CAPTURE_PATH + CAPTURE_SCRATCH)
         return take n
@@ -123,7 +123,7 @@ pub fn capture_need(p: PreparedCapture) -> Need {
     capture_need_part(mut n, "held", capture_mul(PACK_HELD, capture_add(p.lists.pack_rows, p.lists.pages)))
     capture_need_part(mut n, "deltas", capture_mul(32, int.widen(p.manifest.next_table)))
     capture_need_part(mut n, "catalog", capture_add(capture_mul(NAME_SLOT, p.names), p.name_bytes))
-    capture_need_part(mut n, "chunk", JOURNAL_CHUNK_BYTES)
+    capture_need_part(mut n, "chunk", journal.JOURNAL_CHUNK_BYTES)
     capture_need_part(mut n, "scratch", CAPTURE_SCRATCH)
     take n
 }
@@ -220,11 +220,11 @@ fn capture_segment_walk(d: Dir, id: StoreId, first: u64, hold: bool, locked: Opt
             Ok(found) => found,
             Error(Corrupt(take fault)) => {
                 let successor = if let Some(next_seq) = int.checked_add(seq, 1) {
-                    disk_exists(d, failure_result_from_rep(manifest.journal_path(next_seq, ""))?)?
+                    failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.journal_path(next_seq, ""))?))?
                 } else {
                     false
                 }
-                if successor || capture_end(id, seq, capture_end_image(d, seq)?)? != None {
+                if successor || failure_result_from_rep(journal.capture_end(store_key_to_rep(id), seq, failure_result_from_rep(journal.capture_end_image(d, seq))?))? != None {
                     return Error(Corrupt(take fault))
                 }
                 return Ok(true)
@@ -263,8 +263,8 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
     }
     let tail = n - 1
     let seq = segments[tail].seq
-    let image = capture_end_image(d, seq)?
-    let durable_end = match capture_end(s.id, seq, image)? {
+    let image = failure_result_from_rep(journal.capture_end_image(d, seq))?
+    let durable_end = match failure_result_from_rep(journal.capture_end(store_key_to_rep(s.id), seq, image))? {
         Some(found) => found,
         None => 72u64,
     }
@@ -274,7 +274,7 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
             free = true
             break
         }
-        if !capture_lock_free(d)? {
+        if !failure_result_from_rep(journal.capture_lock_free(d))? {
             break
         }
         std.clock.sleep_ns(c, 1000000)
@@ -302,7 +302,7 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
 pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Error] waits {
     let lock: Option[HostFile] = match purpose {
         Describe => None,
-        Check => Some(disk_lock(d, c, 0)?),
+        Check => Some(failure_result_from_rep(journal.disk_lock(d, c, 0))?),
         Copy => Some(backup_lock(d)?),
     }
     prepare_capture(d, c, purpose, take lock)
@@ -364,7 +364,7 @@ fn capture_locked_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prepa
     }
     let tail = n - 1
     let seq = segments[tail].seq
-    let durable_end = match disk_end(s.dir, s.id, seq)? {
+    let durable_end = match failure_result_from_rep(journal.disk_end(s.dir, store_key_to_rep(s.id), seq))? {
         Some(found) => found,
         None => 72u64,
     }

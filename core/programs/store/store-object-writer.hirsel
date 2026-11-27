@@ -26,7 +26,7 @@ type ObjectWriterState {
 }
 
 fn log_directory(db: Db) -> Result[Dir, Error] {
-    let Some(d) = disk_state(db).d else {
+    let Some(d) = disk_directory(disk_state(db)) else {
         return Error(Unsupported(1))
     }
     Ok(d)
@@ -113,9 +113,9 @@ type ObjectWriterOpen {
     blank: HistoryOpenBase,
     start: Sender[ObjectJournalStart],
     frames: Sender[JournalMsg],
-    journal_received: Receiver[Ack],
-    written_send: Sender[WriteNotice],
-    written_receive: Receiver[WriteNotice],
+    journal_received: Receiver[journal.Ack],
+    written_send: Sender[journal.WriteNotice],
+    written_receive: Receiver[journal.WriteNotice],
     synced_receive: Receiver[()],
     health_state: Latest[Health],
     reclaims_state: Latest[ReclaimFailures],
@@ -218,7 +218,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         pages.set_next_node(mut prepared.holders, replay.next_node)
         prepared.limits = limits_from_rep(replay.limits)
         catalog.set_next_table(mut prepared.schema, replay.state.next_table)
-        prepared.resident = journal_account(replay)?
+        prepared.resident = failure_result_from_rep(journal.journal_account(replay))?
         rebuild_keyed_credit(mut prepared, 0, options.journal_limit)?
         Ok(take prepared)
     })?
@@ -313,14 +313,10 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     }
     db.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
-    db.file_seq = head.entry.seq
     db.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
     let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: optional_host_stream_id_from_rep(attached_sid), attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
-    let journal_wake = match take timer {
-        Some(take running) => ObjectIdleTimer(take running),
-        None => NoJournalWake,
-    }
-    db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after, packs: take pages, object: Some(take object), acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take work, journal_wake: take journal_wake, creation: list.new(), tasks, tiered: pager.disk_pager_state(None)))
+    let queue = ObjectJournalQueue(file_seq: head.entry.seq, file_end: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
+    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), imported: None, reserving: None, target: None, retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, object: Some(take object), backend: ObjectBackend(take queue), tasks, tiered: pager.disk_pager_state(None)))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
         if let Ok(cut_ticket) = checkpoint(mut db) {
@@ -353,7 +349,7 @@ pub fn origin_of(db: Db) -> Result[Option[Origin], Error] {
 
 fn object_stream_close(mut db: Db) -> Result[(), Error] waits {
     let (reply_send, reply_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
-    let closed = match channel.send(disk_state(db).journal, ObjectClose(take reply_send)) {
+    let closed = match channel.send(object_sender(disk_state(db)), ObjectClose(take reply_send)) {
         Ok(()) => false,
         Error(_) => true,
     }
@@ -400,7 +396,7 @@ fn take_object_journal_with(mut db: Db, allow_attached: bool) -> Result[(ObjectJ
     }
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    let closed = match channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)) {
+    let closed = match channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)) {
         Ok(()) => false,
         Error(_) => true,
     }
@@ -531,8 +527,8 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         lane.next_pack = cut_plan.lists.run_packs.next_pack
         let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, cache_dir, mut buffers, mut workspace, now)?
         fill_cut_manifest(mut buffers.out, db, delta, participants.roots, generation, seq, seq, layout, stamp, base.account, write_seal)?
-        let (take pages, _, _) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), Error] {
-            cut_retirement(layout, participants.holders, None, list.new(), pager.no_tiered_compaction(), None, seq, seq)
+        let (take pages, _, _) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
+            failure_result_from_rep(journal.cut_retirement(layout, participants.holders, None, list.new(), pager.no_tiered_compaction(), None, seq, seq))
         })?
         let (_, take parsed) = disk_read_page_manifest("MANIFEST", buffers.out)?
         let mut page_record = take parsed
@@ -623,10 +619,11 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     write_disk(mut db.disk, (take candidate_pages, take locator), scoped fn(mut state: DiskState, take installation: (manifest.PackDiskState, HistoryLocator)) {
         let (take installed, take installed_locator) = take installation
         manifest.install_pack_cut(mut state.packs, take installed)
-        state.record_cut = seq
-        state.recorded_after = recorded_after
-        state.uncovered = 0
-        state.since_cut = 0
+        state.retention = journal.record_retention(seq, recorded_after)
+        if let ObjectBackend(mut queue) = state.backend {
+            queue.accounting.uncovered = 0
+            queue.accounting.since_cut = 0
+        }
         if let Some(mut object_writer) = state.object {
             object_writer.entries = 0
             object_writer.locator = take installed_locator
@@ -641,8 +638,12 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         pager.reset_compaction(mut state.tiered)
     })
-    db.file_seq = seq
-    db.file_end = 72
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        if let ObjectBackend(mut queue) = state.backend {
+            queue.file_seq = seq
+            queue.file_end = 72
+        }
+    })
     db.checkpointed = generation
     db.resident = base.account
     db.page_resident = resident_pages
@@ -673,7 +674,7 @@ pub fn archive(mut db: Db, on: bool) -> Result[(u64, Ticket), Error] waits {
         }
     })
     let cut_ticket = result?
-    Ok((db.file_seq, take cut_ticket))
+    Ok((file_seq(db), take cut_ticket))
 }
 
 pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] waits {
@@ -682,7 +683,7 @@ pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] w
     durable(mut db, receipt)?
     if object_writer_open(db) {
         let (destination, pending): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
-        let closed = match channel.send(disk_state(db).journal, ObjectFresh(take destination, deadline_ns)) {
+        let closed = match channel.send(object_sender(disk_state(db)), ObjectFresh(take destination, deadline_ns)) {
             Ok(()) => false,
             Error(_) => true,
         }
@@ -705,7 +706,7 @@ pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] w
 
 fn object_skip_fence(mut db: Db) -> Result[(), Error] waits {
     let (destination, pending): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
-    let closed = match channel.send(disk_state(db).journal, ObjectSkipFence(take destination)) {
+    let closed = match channel.send(object_sender(disk_state(db)), ObjectSkipFence(take destination)) {
         Ok(()) => false,
         Error(_) => true,
     }

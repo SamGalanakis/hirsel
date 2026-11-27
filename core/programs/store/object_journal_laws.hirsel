@@ -35,8 +35,8 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let initial_head = held.head
     let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
-    let (acks, delivered): (Sender[Ack], Receiver[Ack]) = channel.new(4)
-    let (notices, _observed): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(1)
+    let (acks, delivered): (Sender[journal.Ack], Receiver[journal.Ack]) = channel.new(4)
+    let (notices, _observed): (Sender[journal.WriteNotice], Receiver[journal.WriteNotice]) = channel.new(1)
     let (synced, _woken): (Sender[()], Receiver[()]) = channel.new(1)
     let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None)
     let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
@@ -198,7 +198,7 @@ fn bucket_test_m2_fresh_holder(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 fn reclaim_barrier(db: Db) -> Result[(), Error] waits {
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))
+    result.unwrap(channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)))
     let parked = result.unwrap(channel.receive(paused))
     let mut lane = object_journal_begin(take parked)
     let execution = match replace(mut lane.reclaim, None) {
@@ -264,7 +264,7 @@ fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result
 fn journal_turn(db: Db) -> Result[bool, Error] waits {
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
-    result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))
+    result.unwrap(channel.send(object_sender(disk_state(db)), ObjectPause(take handover, take resuming)))
     let parked = result.unwrap(channel.receive(paused))
     let pending = if let Some(_) = parked.reclaim {
         true

@@ -442,8 +442,8 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         fail("L63 (d): B's insert commits while A is parked")
     }
     durable(mut db, inserted.ticket)?
-    let seq = db.file_seq
-    let start = db.file_end
+    let seq = file_seq(db)
+    let start = file_end(db)
     let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take a)), copy_env(rows), l63_prior_body) else {
         fail("L63 (d): A commits after B moved the head")
     }
@@ -452,8 +452,8 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         fail("L63 (d): A reruns at B's head, reads 40 and commits once")
     }
     let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
-    let wire = read_journal_prefix(directory, path, db.file_end)?
-    let frame = journal_decode_commit(path, failure_result_from_rep(types.copied(list.slice(wire, start + 16, db.file_end)))?)?
+    let wire = read_journal_prefix(directory, path, file_end(db))?
+    let frame = journal_decode_commit(path, failure_result_from_rep(types.copied(list.slice(wire, start + 16, file_end(db))))?)?
     let k = failure_result_from_rep(catalog.logical_key(rows.id, types.key_word(4)))?
     let mut prior: Option[u32] = None
     for op in frame.data {

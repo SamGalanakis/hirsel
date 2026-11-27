@@ -553,6 +553,6 @@ fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: 
         failure_result_from_rep(types.capacity(manifest.manifest_state(loaded.manifest, loaded.holders)))
     })?
     let replay = failure_result_from_rep(pager.journal_replay_manifest(take initial, loaded.manifest))?
-    failure_result_from_rep(catalog.over_ceiling(journal_account(replay)?, ceiling))?
+    failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, ceiling))?
     Ok((take replay, take loaded))
 }

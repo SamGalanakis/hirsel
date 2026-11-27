@@ -132,7 +132,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     let call = Some(format.CallSection(record: call_record_to_rep(take checked), settlement: None))
     let ci = call_info(db.store, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head + 1, pages.holder_heads(db.holders)[i].at + 1, pages.holder_heads(db.holders)[i].at)
     let mut data: pages.DataRows = pages.new_data_rows()
-    let raw = result.unwrap(encode_sections(ci, mut data, streams, call, db.file_seq, db.file_end))
+    let raw = result.unwrap(encode_sections(ci, mut data, streams, call, file_seq(db), file_end(db)))
     let size = list.len(raw)
     let commit = {
         let payload = list.slice(raw, 16, size)
@@ -147,11 +147,10 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     pages.set_next_node(mut db.holders, replay.next_node)
     db.changes += 1
     db.resident = result.unwrap(pages.state_account(replay.state))
-    db.file_end += size
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
-        state.pending = Some(take frame_bytes)
+        stage_disk_frame(mut state, size, Some(take frame_bytes))
     })
     handoff(mut db)?
     Ok(commit_ticket)
@@ -189,13 +188,13 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     }
     if refuse {
         for _ in 0u64 .. 2 {
-            let segment = db.file_seq
+            let segment = file_seq(db)
             match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
                 failure_result_from_rep(types.capacity(bound bytes 0 {
                     seal_page_manifest_file(mut raw, context, fence)
                 }))?
             }) {
-                Error(Full(Allocation(_))) if db.file_seq == segment + 1 => (),
+                Error(Full(Allocation(_))) if file_seq(db) == segment + 1 => (),
                 _ => return false
             }
         }
@@ -493,7 +492,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let before = pages.holder_heads(db.holders)[0].head
     let live_bytes = db.resident
     let frames = db.frame_seq
-    let end = db.file_end
+    let end = file_end(db)
     let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 7u64, 70u64)?
         loop {}
@@ -504,7 +503,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if pages.holder_heads(db.holders)[0].head != before || db.resident != live_bytes || db.frame_seq != frames || db.file_end != end {
+    if pages.holder_heads(db.holders)[0].head != before || db.resident != live_bytes || db.frame_seq != frames || file_end(db) != end {
         return false
     }
     let main = main_branch(db)
@@ -516,7 +515,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         return false
     }
     // (c): None, then Some with room to finish.
-    let open_end = db.file_end
+    let open_end = file_end(db)
     let unbounded = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 8u64, 80u64)?
         Ok(5u64)
@@ -530,8 +529,8 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     if pages.holder_heads(db.holders)[0].head != before + 1 {
         return false
     }
-    let unbounded_bytes = db.file_end - open_end
-    let bounded_end = db.file_end
+    let unbounded_bytes = file_end(db) - open_end
+    let bounded_end = file_end(db)
     let bounded = result.unwrap(run(mut db, Some(1048576u64), t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 9u64, 90u64)?
         Ok(5u64)
@@ -544,7 +543,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if pages.holder_heads(db.holders)[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
+    if pages.holder_heads(db.holders)[0].head != before + 2 || file_end(db) - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
         return false
     }
     result.unwrap(durable(mut db, final_item))
@@ -657,14 +656,14 @@ fn journal_test_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
 fn journal_failure_notice(db: Db) -> Option[IoError] {
     let mut found: Option[IoError] = None
     if let Some(disk) = db.disk {
-        let receiver = view disk.written
+        let receiver = journal_written(disk)
         if let Ok(WriteFailed(e)) = channel.try_receive(receiver) {
             found = Some(e)
         }
     }
     if let Some(e) = found {
         if let Some(disk) = db.disk {
-            let sender = view disk.written_send
+            let sender = journal_written_send(disk)
             let _ = channel.try_send(sender, WriteFailed(e))
         }
     }
@@ -699,10 +698,10 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
         }
     }
     let wanted = db.frame_seq
-    let pending_end = db.file_end
-    let previous_seq = db.file_seq
+    let pending_end = file_end(db)
+    let previous_seq = file_seq(db)
     let cut = result.unwrap(checkpoint(mut db))
-    if disk_state(db).journaled != wanted {
+    if queue_accounting(disk_state(db)).journaled != wanted {
         return false
     }
     let header = option.unwrap(result.unwrap(failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(db.store), previous_seq + 1, None))))
@@ -711,11 +710,11 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     }
     result.unwrap(durable(mut db, cut))
     if let Some(disk) = db.disk {
-        let sender = view disk.journal
+        let sender = journal.dir_sender(dir_state(disk))
         result.unwrap(channel.send(sender, Barrier))
     }
     if let Some(disk) = db.disk {
-        let receiver = view disk.written
+        let receiver = journal_written(disk)
         match result.unwrap(channel.receive(receiver)) {
             Written => {},
             _ => return false
@@ -882,7 +881,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
         },
         _ => return false
     }
-    let seq = db.file_seq
+    let seq = file_seq(db)
     result.unwrap(close(take db))
     let path = result.unwrap(manifest.disk_path("j-", seq, ""))
     if accepted {

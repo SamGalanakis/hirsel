@@ -279,9 +279,9 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = view t
     let (_, take page_record) = disk_read_page_manifest("MANIFEST", failure_result_from_rep(manifest.disk_read_file(d, "MANIFEST", 4096))?)?
-    let segment = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, "")))?
-    let end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, ".end")))?
-    let durable_prefix = read_journal_prefix(d, segment, db.file_end)?
+    let segment = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(db), "")))?
+    let end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", file_seq(db), ".end")))?
+    let durable_prefix = read_journal_prefix(d, segment, file_end(db))?
     let boundary = failure_result_from_rep(manifest.disk_read_file(d, end, 4096))?
     if !typed_put(mut db, t, 1, 10) {
         fail("watermark: old insert did not commit")
@@ -294,7 +294,7 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     // Drain the writer to materialize the frame, then construct the two
     // legal power-cut images before its sync: absent write or torn tail.
     // The retained Snapshot models a reader holding the old-open roots.
-    let frame_end = db.file_end
+    let frame_end = file_end(db)
     close(take db)?
     if torn {
         if frame_end <= list.len(durable_prefix) + 1 {

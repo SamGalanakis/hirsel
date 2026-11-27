@@ -1,26 +1,4 @@
-fn journal_input(take file: HostFile, flush: bool) -> Result[format.JournalInput, Error] waits {
-    failure_result_from_rep(format.open_journal_input(take file, flush, fn() -> Result[Bytes, types.Failure] {
-        failure_result_to_rep(disk_allocation(fn() -> Result[Bytes, Error] {
-            Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
-        }))
-    }))
-}
-
-type JournalRecovered {
-    replay: pager.JournalReplay,
-    seq: u64,
-    end: u64,
-    uncovered: u64
-}
-
-// A live reader may stat before the writer extends the file and then read a
-// newer END or successor. The boundary names bytes the writer synced, so the
-// handle's current size covers it unless the file is damaged.
-fn journal_refresh_size(mut input: format.JournalInput, boundary: Option[u64]) -> Result[(), Error] waits {
-    failure_result_from_rep(format.refresh_journal_size(mut input, boundary))
-}
-
-fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: pager.JournalReplay) -> Result[JournalRecovered, Error] waits {
+fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: pager.JournalReplay) -> Result[journal.JournalRecovered, Error] waits {
     let mut replay = take initial
     let mut seq = first
     let mut uncovered = 0u64
@@ -32,11 +10,11 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
             Error(e) => return Error(Io(e))
         }
         failure_result_from_rep(manifest.journal_wait_shared(mut file, c))?
-        let mut source = journal_input(take file, true)?
-        let following = journal_following(d, id, seq, Some(c))?
+        let mut source = failure_result_from_rep(journal.journal_input(take file, true))?
+        let following = failure_result_from_rep(journal.journal_following(d, store_key_to_rep(id), seq, Some(c)))?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
-            None => disk_end(d, id, seq)?
+            None => failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), seq))?
         }
         let final_item = match following {
             None => true,
@@ -60,7 +38,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
                 }
                 if final_item && no_end && seq == first {
                     if let Error(Corrupt(_)) = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq, None)) {
-                        return Ok(JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
+                        return Ok(journal.JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
                     }
                 }
                 return Error(Corrupt(take fault))
@@ -69,172 +47,14 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
         }
         uncovered = int.saturating_add(uncovered, segment_bytes)
         if let None = following {
-            return Ok(JournalRecovered(replay: take replay, seq: seq, end: end, uncovered: uncovered))
+            return Ok(journal.JournalRecovered(replay: take replay, seq: seq, end: end, uncovered: uncovered))
         }
         seq += 1
     }
 }
 
-fn journal_apply_fork(file: String, mut replay: pager.JournalReplay, take encoded: format.JournalFork) -> Result[(), Error] {
-    let format.JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
-    if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-    }
-    let (take roots, at, take key) = disk_allocation(scoped fn() -> Result[(pages.Roots, u64, String), Error] {
-        for source in replay.state.tips {
-            if source.id != parent {
-                continue
-            }
-            if source.head != forked_at {
-                return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-            }
-            let mut roots = pages.share_roots(source.roots)
-            if let Some(layer) = view source.roots.collections.replay {
-                roots.collections.replay = Some(arc.new(pages.ReplayBranch(collections: clone(layer.collections), fork_time: Some(clone(layer.collections)), ids: layer.ids, charged: layer.charged)))
-            }
-            return Ok((take roots, source.at, string.from(name)))
-        }
-        Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-    })?
-    let charge = manifest.branch_root_bytes(name, roots)
-    if charge > replay.limits.meta - replay.record_bytes {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-    }
-    failure_result_from_rep(types.capacity(list.try_reserve(mut replay.state.tips, 1)))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut replay.forked, 1)))?
-    failure_result_from_rep(types.capacity(map.try_reserve(mut replay.names, 1)))?
-    map.insert(mut replay.names, take key, id)
-    list.push(mut replay.state.tips, pages.Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
-    replay.record_bytes += charge
-    list.push(mut replay.forked, manifest.LineageFork(child: id, parent: parent, watermark: watermark, adopted: false))
-    replay.state.next_branch = id + 1
-    replay.next_node = order.max(replay.next_node, watermark - 1)
-    replay.tiered.exact = false
-    Ok(())
-}
-
-type CaptureSegment {
-    file: HostFile,
-    seq: u64,
-    boundary: Option[u64]
-}
-
-type CaptureWalk {
-    segments: List[CaptureSegment],
-    end_image: Option[Bytes],
-    torn_tail: bool
-}
-
-fn capture_end_image(d: Dir, seq: u64) -> Result[Option[Bytes], Error] waits {
-    let path = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
-    match failure_result_from_rep(manifest.disk_read_file(d, path, 96 + 1048576)) {
-        Ok(take raw) => Ok(Some(take raw)),
-        Error(Io(NotFound)) => Ok(None),
-        Error(Io(Other(5))) => Ok(None),
-        Error(Corrupt(_)) => Ok(None),
-        Error(take problem) => Error(take problem),
-    }
-}
-
-fn capture_end(id: StoreId, seq: u64, raw: Option[Bytes]) -> Result[Option[u64], Error] {
-    if let Some(image) = raw {
-        let path = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
-        match disk_read_end(path, id, seq, image) {
-            Ok(at) => Ok(Some(at)),
-            Error(Corrupt(_)) => Ok(None),
-            Error(take problem) => Error(take problem),
-        }
-    } else {
-        Ok(None)
-    }
-}
-
-// Hold the descriptions walked so a cut cannot substitute a file between
-// its checked HEADER or END and the scan. No fence is taken during the walk.
-fn capture_walk(d: Dir, id: StoreId, first: u64, restarted: bool) -> Result[Option[CaptureWalk], Error] waits {
-    let mut seen: List[CaptureSegment] = list.new()
-    let mut terminal_image: Option[Bytes] = None
-    let mut seq = first
-    loop {
-        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
-        let mut file = match host.open(d, path, Read) {
-            Ok(take opened) => take opened,
-            Error(NotFound) if seq != first => break,
-            Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Header))),
-            Error(problem) => return Error(Io(problem)),
-        }
-        let image = capture_end_image(d, seq)?
-        let boundary_read = capture_end(id, seq, image)?
-        let header_read = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, 0, 72))
-        let parsed_header = match take header_read {
-            Ok(take head_bytes) => failure_result_from_rep(manifest.disk_read_header(path, head_bytes, 2, Some(seq), optional_store_key_to_rep(Some(id)))),
-            Error(take problem) => Error(take problem),
-        }
-        let header = match take parsed_header {
-            Ok(found) => found,
-            Error(Corrupt(take problem)) => {
-                let successor = failure_result_from_rep(manifest.journal_path(seq + 1, ""))?
-                if disk_exists(d, successor)? {
-                    if !restarted {
-                        return Ok(None)
-                    }
-                    return Error(Corrupt(take problem))
-                }
-                if let Some(_) = boundary_read {
-                    return Error(Corrupt(take problem))
-                }
-                break
-            },
-            Error(take problem) => return Error(take problem),
-        }
-        let segment_count = list.len(seen)
-        if segment_count != 0 {
-            seen[segment_count - 1].boundary = Some(header.prev_end)
-        }
-        list.push(mut seen, CaptureSegment(file: take file, seq: seq, boundary: boundary_read))
-        terminal_image = take image
-        seq += 1
-    }
-    Ok(Some(CaptureWalk(segments: take seen, end_image: take terminal_image, torn_tail: true)))
-}
-
-fn capture_lock_free(d: Dir) -> Result[bool, Error] waits {
-    let mut probe = match host.open(d, "LOCK", Read) {
-        Ok(take file) => take file,
-        Error(NotFound) => return Ok(true),
-        Error(problem) => return Error(Io(problem)),
-    }
-    let free = failure_result_from_rep(manifest.disk_io(host.try_lock_shared(mut probe)))?
-    if free {
-        failure_result_from_rep(manifest.disk_io(host.unlock(mut probe)))?
-    }
-    failure_result_from_rep(manifest.disk_io(host.close(take probe)))?
-    Ok(free)
-}
-
-fn capture_fence(d: Dir, c: Clock, deadline: u64, mut walk: CaptureWalk) -> Result[(), Error] waits {
-    let segment_count = list.len(walk.segments)
-    if segment_count == 0 {
-        return Ok(())
-    }
-    loop {
-        if failure_result_from_rep(manifest.disk_io(host.try_lock_shared(mut walk.segments[segment_count - 1].file)))? {
-            return Ok(())
-        }
-        if !capture_lock_free(d)? {
-            walk.torn_tail = false
-            return Ok(())
-        }
-        let now = host.mono_ns(c)
-        if now >= deadline {
-            return Error(Remote(Retriable(Deadline)))
-        }
-        host.sleep_until(c, order.min(deadline, int.saturating_add(now, 1000000)))
-    }
-}
-
-fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
-    let CaptureWalk(segments: take selected, torn_tail: torn_tail, ..) = take walk
+fn capture_scan(id: StoreId, take walk: journal.CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
+    let journal.CaptureWalk(segments: take selected, torn_tail: torn_tail, ..) = take walk
     let mut segments = take selected
     let segment_count = list.len(segments)
     // Scan the oldest segment first and transfer each descriptor once.
@@ -243,7 +63,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: pager.Journal
     }
     let mut replay = take initial
     while let Some(take segment) = list.pop(mut segments) {
-        let CaptureSegment(file: take opened, seq: seq, boundary: stored_end) = take segment
+        let journal.CaptureSegment(file: take opened, seq: seq, boundary: stored_end) = take segment
         let tail = list.len(segments) == 0
         let torn = tail && torn_tail
         let boundary = if tail && !torn {
@@ -255,8 +75,8 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: pager.Journal
             stored_end
         }
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
-        let mut source = journal_input(take opened, torn)?
-        journal_refresh_size(mut source, boundary)?
+        let mut source = failure_result_from_rep(journal.journal_input(take opened, torn))?
+        failure_result_from_rep(journal.journal_refresh_size(mut source, boundary))?
         let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })?
@@ -306,7 +126,7 @@ fn journal_apply_commit(file: String, mut replay: pager.JournalReplay, commit: f
 fn journal_apply(file: String, mut replay: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
     match take event {
         Commit(take commit) => journal_apply_commit(file, mut replay, commit),
-        Fork(take encoded) => journal_apply_fork(file, mut replay, take encoded),
+        Fork(take encoded) => failure_result_from_rep(journal.journal_apply_fork(file, mut replay, take encoded)),
     }
 }
 
@@ -359,17 +179,17 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
                 if seq != limits.next || seq == 18446744073709551615u64 {
                     return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
                 }
-                apply_log_append(mut tree, op.key, value, None, 0, mut next_stamp)?
+                failure_result_from_rep(journal.apply_log_append(mut tree, op.key, value, None, 0, mut next_stamp))?
                 continue
             }
             if kind == TableCollection || kind == IndexCollection {
-                processed = journal_sorted_run(ops, slot)
+                processed = journal.journal_sorted_run(ops, slot)
                 if processed > slot + 1 {
                     if immutable && row_count == 0 {
-                        journal_collection_empty(file, mut tree, ops, slot, processed, mut next_stamp)?
+                        failure_result_from_rep(journal.journal_collection_empty(file, mut tree, ops, slot, processed, mut next_stamp))?
                         continue
                     }
-                    journal_collection_batch(file, mut tree, ops, slot, processed, mut next_stamp)?
+                    failure_result_from_rep(journal.journal_collection_batch(file, mut tree, ops, slot, processed, mut next_stamp))?
                     continue
                 }
             }
@@ -407,55 +227,4 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, ops: 
     }
     ids = next_stamp - 1
     Ok(())
-}
-
-fn journal_sorted_run(ops: List[format.JournalOp], start: u64) -> u64 {
-    let collection = list.slice(ops[start].key, 0, 4)
-    let mut end = start + 1
-    while end < list.len(ops) {
-        let op = view ops[end]
-        if let Some(_) = op.trim {
-            break
-        }
-        if list.len(op.key) < 4 || list.slice(op.key, 0, 4) != collection || list.compare_bytes(ops[end - 1].key, op.key) != Less {
-            break
-        }
-        end += 1
-    }
-    end
-}
-
-fn journal_collection_batch(file: String, mut tree: pages.PageTree, ops: List[format.JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
-    let collection = list.slice(ops[start].key, 0, 4)
-    match pages.apply_collection_batch(mut tree, collection, ops, visit_journal_edit, start, end, 0, mut draw) {
-        Ok(()) => Ok(()),
-        Error(MalformedPage) => Error(failure_from_rep(format.disk_fault(file, 0, Malformed))),
-        Error(problem) => Error(failure_from_rep(pages.page_error(problem))),
-    }
-}
-
-fn visit_journal_edit(ops: List[format.JournalOp], slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
-    let op = view ops[slot]
-    let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
-        Some(raw) => Some((raw, None)),
-        None => None,
-    }
-    visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: Some(op.prior)))
-}
-
-fn journal_collection_empty(file: String, mut tree: pages.PageTree, ops: List[format.JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
-    let mut has_put = false
-    for slot in start .. end {
-        let op = view ops[slot]
-        if op.prior != 0 {
-            return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
-        }
-        if let Some(_) = view op.value {
-            has_put = true
-        }
-    }
-    if !has_put {
-        return Ok(())
-    }
-    journal_collection_batch(file, mut tree, ops, start, end, mut draw)
 }

@@ -526,15 +526,15 @@ fn db_lease(db: Db) -> Option[Arc[manifest.ExportLease]] {
 fn disk_test_removal_spans() -> Result[(), ()] {
     // L28(c). After the first cut, both 7 and 8 are leased. After the
     // second, exactly segment 9 and its END can be unlinked.
-    let (before, after) = removal_spans(7, 9, Some((7, 8)))
+    let (before, after) = journal.removal_spans(7, 9, Some((7, 8)))
     if before.first != 7 || before.end != 7 || after.first != 9 || after.end != 9 {
         return Error(())
     }
-    let (before_second, after_second) = removal_spans(7, 10, Some((7, 8)))
+    let (before_second, after_second) = journal.removal_spans(7, 10, Some((7, 8)))
     if before_second.first != 7 || before_second.end != 7 || after_second.first != 9 || after_second.end != 10 {
         return Error(())
     }
-    let (unleased, empty) = removal_spans(7, 11, None)
+    let (unleased, empty) = journal.removal_spans(7, 11, None)
     if unleased.first != 7 || unleased.end != 11 || empty.first != 11 || empty.end != 11 {
         return Error(())
     }
@@ -583,17 +583,17 @@ pub fn journal_law_end() -> bool {
         let end = result.unwrap(format.disk_seal(ctx, 72, 0x0012, 1, payload))
         let mut plain = result.unwrap(failure_result_from_rep(types.copied(header)))
         list.append(mut plain, end)
-        if result.unwrap(disk_read_end("j-7.end", id, 7, plain)) != value {
+        if result.unwrap(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, plain))) != value {
             return false
         }
         for n in 0u64 .. 96 {
-            if !disk_corrupt(disk_read_end("j-7.end", id, 7, list.slice(plain, 0, n))) {
+            if !disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, list.slice(plain, 0, n)))) {
                 return false
             }
             let mut broken = result.unwrap(failure_result_from_rep(types.copied(plain)))
             let byte = broken[n] ^ 1u8
             let _ = list.set(mut broken, n, byte)
-            if !disk_corrupt(disk_read_end("j-7.end", id, 7, broken)) {
+            if !disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, broken))) {
                 return false
             }
         }
@@ -604,27 +604,27 @@ pub fn journal_law_end() -> bool {
         list.append(mut extended, optional)
         list.append(mut extended, shifted)
         list.append(mut extended, tail)
-        if result.unwrap(disk_read_end("j-7.end", id, 7, extended)) != value {
+        if result.unwrap(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, extended))) != value {
             return false
         }
         let required = result.unwrap(format.disk_seal(ctx, 96, 0x7ffe, 1, empty))
         let mut newer = result.unwrap(failure_result_from_rep(types.copied(plain)))
         list.append(mut newer, required)
-        match disk_read_end("j-7.end", id, 7, newer) {
+        match failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, newer)) {
             Error(Unsupported(0x7ffe)) => {},
             _ => return false
         }
         let duplicate = result.unwrap(format.disk_seal(ctx, 96, 0x0012, 1, payload))
         let mut doubled = result.unwrap(failure_result_from_rep(types.copied(plain)))
         list.append(mut doubled, duplicate)
-        if !disk_corrupt(disk_read_end("j-7.end", id, 7, doubled)) {
+        if !disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, doubled))) {
             return false
         }
     }
     let optional = result.unwrap(format.disk_seal(ctx, 72, 0x7ffe, 0, empty))
     let mut missing = result.unwrap(failure_result_from_rep(types.copied(header)))
     list.append(mut missing, optional)
-    if !disk_corrupt(disk_read_end("j-7.end", id, 7, missing)) {
+    if !disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, missing))) {
         return false
     }
     // UNKNOWN_ROOM includes heads. Fifteen full optional frames plus one
@@ -646,12 +646,12 @@ pub fn journal_law_end() -> bool {
     result.unwrap(format.le(mut boundary, 169, 8))
     let final_end = result.unwrap(format.disk_seal(ctx, list.len(room_file), 0x0012, 1, boundary))
     list.append(mut room_file, final_end)
-    if result.unwrap(disk_read_end("j-7.end", id, 7, room_file)) != 169 {
+    if result.unwrap(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, room_file))) != 169 {
         return false
     }
     let overflow = result.unwrap(format.disk_seal(ctx, list.len(room_file), 0x7ffe, 0, empty))
     list.append(mut room_file, overflow)
-    if !disk_corrupt(disk_read_end("j-7.end", id, 7, room_file)) {
+    if !disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, room_file))) {
         return false
     }
     let mut overlong: Bytes = list.new()
@@ -660,7 +660,7 @@ pub fn journal_law_end() -> bool {
     let invalid = result.unwrap(format.disk_seal(ctx, 72, 0x0012, 1, overlong))
     let mut invalid_file = result.unwrap(failure_result_from_rep(types.copied(header)))
     list.append(mut invalid_file, invalid)
-    disk_corrupt(disk_read_end("j-7.end", id, 7, invalid_file))
+    disk_corrupt(failure_result_from_rep(journal.disk_read_end("j-7.end", store_key_to_rep(id), 7, invalid_file)))
 }
 
 @test
@@ -672,8 +672,8 @@ fn journal_test_end() -> Result[(), ()] {
     }
 }
 
-fn disk_session_close(take session: DiskSession) -> Result[(), Error] waits {
-    let DiskSession(lock: take lock, startup: _) = take session
+fn disk_session_close(take session: journal.DiskSession) -> Result[(), Error] waits {
+    let journal.DiskSession(lock: take lock, startup: _) = take session
     failure_result_from_rep(manifest.disk_io(host.close(take lock)))
 }
 
@@ -683,7 +683,7 @@ type WaitedLock: send {
 }
 
 fn wait_lock(take waiting: WaitedLock) -> bool waits {
-    match disk_lock(waiting.d, waiting.clock, 1000u64) {
+    match failure_result_from_rep(journal.disk_lock(waiting.d, waiting.clock, 1000u64)) {
         Ok(take held) => {
             let _ = take held;
             true
@@ -733,7 +733,7 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
         return false
     }
     {
-        let held = result.unwrap(disk_lock(d, c, 0u64))
+        let held = result.unwrap(failure_result_from_rep(journal.disk_lock(d, c, 0u64)))
         let waiting = task.spawn(tasks, bytes 16384, WaitedLock(d: d, clock: c), wait_lock)
         host.sleep_until(c, std.clock.deadline_after_ms(host.mono_ns(c), 20u64))
         let _ = take held
@@ -743,14 +743,14 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     }
     let mut too_new = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     too_new.fence = 2
-    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, store_key_to_rep(id), too_new)))
+    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, id, too_new)))
     let left: Bytes = list.new()
     result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", left)))
     match open(tasks, d, c, r, options) {
         Error(Unsupported(0x0070)) => {},
         _ => return false
     }
-    if !result.unwrap(disk_exists(d, "MANIFEST.tmp")) {
+    if !result.unwrap(failure_result_from_rep(journal.disk_exists(d, "MANIFEST.tmp"))) {
         return false
     }
     // AP21 rejects the corrupt list before removing any file.
@@ -758,7 +758,7 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     damaged.next_pack = 2
     damaged.next_stamp = 2
     damaged.pack_root = std.page.PagePtr(pack: 1, offset: 72, len: 60, checksum: 0, stamp: 1)
-    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, store_key_to_rep(id), damaged)))
+    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, id, damaged)))
     let empty: Bytes = list.new()
     result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "p-1", empty)))
     result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "p-2", empty)))
@@ -767,7 +767,7 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
         Error(Corrupt(_)) => {},
         _ => return false
     }
-    result.unwrap(disk_exists(d, "p-2")) && result.unwrap(disk_exists(d, "MANIFEST.tmp"))
+    result.unwrap(failure_result_from_rep(journal.disk_exists(d, "p-2"))) && result.unwrap(failure_result_from_rep(journal.disk_exists(d, "MANIFEST.tmp")))
 }
 
 @test

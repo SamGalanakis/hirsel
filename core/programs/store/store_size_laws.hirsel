@@ -26,9 +26,9 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
     let mut db = open(input.tasks, input.d, input.c, input.r, input.options)?
     // Wait until the worker is in its loop and has released the ready sender.
     {
-        let journal = disk_state(db)
-        result.unwrap(channel.send(journal.journal, Barrier))
-        if let WriteFailed(e) = result.unwrap(channel.receive(journal.written)) {
+        let state = disk_state(db)
+        journal_barrier(state)
+        if let WriteFailed(e) = result.unwrap(channel.receive(journal_written(state))) {
             return Error(Io(e))
         }
     }
@@ -36,7 +36,7 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
     // The ready channel is refunded. The creator keeps one aligned block.
     let group: u64 = int.widen(input.options.group_bytes)
     let commits: u64 = int.widen(input.options.group_commits)
-    let worker = option.unwrap(charge.task(bytes[Result[(), Error]], journal_group_room(group) + JOURNAL_WORKER_SLACK))
+    let worker = option.unwrap(charge.task(bytes[Result[(), types.Failure]], journal.journal_group_room(group) + journal.JOURNAL_WORKER_SLACK))
     let creation = option.unwrap(charge.seq(bytes[u8], 4096))
     let fixed = open_charge - worker - creation - (journal_channel_bytes(commits) - journal_ready_bytes())
     if fixed != GENESIS_WRITER_STATE || fixed != writer_state_bytes() {
@@ -99,16 +99,19 @@ fn check_directory_sizing_boundary(o: Overrides) {
 // group used to size inside a 39,839,262 B share. At the resident floor:
 //   journal worker: (67,108,864 + 4,096) + 32,768 + 288 + 64 = 67,146,080
 //   segment creation block: 4,096
-//   journal channels for 64 commits: 416 × 64 + 576 = 27,200
+//   journal channels for 64 commits: 168 × 64 + 456 = 11,208
 //   writer state: 1,768
 //   resident: 1,048,576
 //   cut phase: round8(16,777,604) + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
 //            = 33,749,572, above the write peak of 2 × 16,777,296
-//   total: 101,977,292
+//   total: 101,961,300
 @test
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    if journal_channel_bytes(64) != 11208 {
+        fail("§1.1: the five Directory channels cost 11,208 bytes")
+    }
     let o = group_override(67108864)
-    let need = 101977292u64
+    let need = 101961300u64
     match (bound bytes 0u64 {
         directory_writer_need(o)
     }) {
@@ -140,14 +143,14 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
 // With a 64 KiB group, 64 commits and the 1 MiB resident floor:
 //   journal worker: (65,536 + 4,096) + 32,768 + 288 + 64 = 102,752
 //   segment creation block: 4,096
-//   journal channels for 64 commits: 416 × 64 + 576 = 27,200
+//   journal channels for 64 commits: 168 × 64 + 456 = 11,208
 //   writer state: 1,768
 //   resident: 1,048,576
 //   write peak: 2 × 327,760 = 655,520, above the cut phase
 //     max(65,536, round8(72 + 16 + 280 + 65,536 + 20)) + 65,536 + 2 × 95,326
 //     + (4,096 + 262,144) = 588,356 and recovery 65,536 + 327,760 = 393,296
-//   total: 1,839,912 <= 2,097,152
-// The same sizes with the ceilings need 34,933,964 (the cut phase,
+//   total: 1,823,920 <= 2,097,152
+// The same sizes with the ceilings need 34,917,972 (the cut phase,
 // 33,749,572, wins there; directory_grant_covers_journal_worker keeps the
 // default figure).
 @test
@@ -156,12 +159,12 @@ fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     o.pack_bytes = Some(65536)
     o.resident_limit = Some(MIB)
     o.limits = Some(small_place_limits())
-    let need = 1839912u64
+    let need = 1823920u64
     if directory_writer_need(o) != need || need > 2 * MIB {
         fail("§11.1 AP4a: the small Directory Place need")
     }
     o.limits = None
-    if directory_writer_need(o) != 34933964u64 {
+    if directory_writer_need(o) != 34917972u64 {
         fail("§1.1: the same sizes at the ceilings")
     }
     o.limits = Some(small_place_limits())

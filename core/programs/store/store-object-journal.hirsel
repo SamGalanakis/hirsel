@@ -19,8 +19,8 @@ type ObjectJournalStart: send {
 type ObjectJournalTask: send {
     ready: Receiver[ObjectJournalStart],
     receive: Receiver[JournalMsg],
-    acks: Sender[Ack],
-    notices: Sender[WriteNotice],
+    acks: Sender[journal.Ack],
+    notices: Sender[journal.WriteNotice],
     synced: Sender[()],
     group_bytes: u64,
     group_commits: u64,
@@ -527,9 +527,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 }
             },
             ObjectExportRead(take request) => {
-                let ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
+                let journal.ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
                 let read = object_export_read(mut lane, key, reference, take buffer)
-                let _ = channel.send(outlet, take read)
+                let _ = channel.send(outlet, failure_result_to_rep(take read))
             },
             ObjectPause(take pause_response, take resuming) => {
                 let owner = object_journal_pause(take lane)
@@ -606,7 +606,7 @@ fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] wai
         if let Some(signal) = signals {
             emit_health(signal, health_failure(problem))
         }
-        let _ = channel.send(acks, ObjectBroken(clone(problem)))
+        let _ = channel.send(acks, ObjectBroken(failure_to_rep(clone(problem))))
         weak_notify_strong(weak_wakes)
         let _ = channel.try_send(synced, ())
     }

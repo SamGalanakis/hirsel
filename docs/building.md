@@ -54,6 +54,28 @@ runtime archive identities by target.
 request would use; `--json` prints the same as JSON and `--target` selects another
 target's runtime.
 
+### Build a local toolchain with Cargo
+
+Run the installer from a source checkout on Linux x86_64 or macOS 26+ on Apple Silicon.
+
+```sh
+tools/install-cargo-toolchain.sh --prefix "$HOME/.local/share/hirsel-cargo"
+export PATH="$HOME/.local/share/hirsel-cargo:$PATH"
+```
+
+The script uses that prefix by default. Choose a new or empty directory. Run it
+with Cargo and the Rust version in `rust-toolchain.toml`, Python 3.12 or later,
+and a host C toolchain (a C compiler, development headers and binutils on Linux,
+or the Xcode command line tools on macOS). On Linux with Python 3.12 or 3.13,
+use libzstd or the `zstd` command to read the pinned C++ header packages.
+
+The installer downloads and verifies the pinned LLVM and link inputs, then
+builds and registers the compiler, core and std images, and the base PIC runtime
+for the host target. You can use the prefix outside the checkout for
+`hirsel check`, `hirsel test` and `hirsel build`. It requires neither Buck2 nor
+Debian package tools. Use `buck2 build //:hirsel-toolchain` for the distribution
+bundle with cross-target runtimes and toolchain packages.
+
 ### Compiler identity
 
 The compiler identity is what the compiler is, not where it was built or linked: two

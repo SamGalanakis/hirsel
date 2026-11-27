@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {Client, type Socket, type Subscription} from '@hirsel/client';
+import {Client, type Installation, type Socket, type Storage, type Subscription} from '@hirsel/client';
+import {MemoryStorage} from '@hirsel/client/memory';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
 import * as codec from './generated/codec.js';
@@ -14,7 +15,31 @@ const batch = produced.subarray(replyEnd);
 const caller = {issuer: 2, subject: new Uint8Array(16).fill(1)};
 let diagnostic: (error: Error) => void = console.error;
 
-function openSocket(): Socket {
+// MemoryStorage hands every caller a mutable working shell while keeping the committed shell
+// isolated: mutations before or after write, or without one, never become committed state.
+async function memoryStorageIsolation() {
+  const storage = new MemoryStorage(), key = 'pending-' + '0'.repeat(32);
+  const record: Installation['streams'][string] = {
+    caller, next: 0n, retired: false, minter: null, sent: false,
+    pending: {p: 0n, want: {identity: new Uint8Array([1]), args_fp: 1n, result_fp: 2n},
+      args: new Uint8Array([7]), slot: 0, inflight: false, untouched: true, remintsLeft: 1},
+  };
+  await storage.write({version: 4, installation: 2n, generation: 1n, directory: [key], streams: {[key]: record}});
+  record.next = 9n;
+  record.pending!.inflight = true;
+  const committed = await storage.read();
+  assert.equal(committed?.streams[key].next, 0n, 'mutating the written record must not commit');
+  assert.equal(committed?.streams[key].pending?.inflight, false, 'mutating the written pending shell must not commit');
+  committed!.streams[key].next = 8n;
+  committed!.streams[key].pending!.untouched = false;
+  const reread = await storage.read();
+  assert.equal(reread?.streams[key].next, 0n, 'mutating a read record without write must not commit');
+  assert.equal(reread?.streams[key].pending?.untouched, true, 'mutating a read pending shell without write must not commit');
+}
+await memoryStorageIsolation();
+
+type SentCall = {stream: {t: bigint; n: bigint}; p: bigint; args: Uint8Array};
+function openSocket(captured?: SentCall[]): Socket {
   let version = 1n;
   const emit = (frame: Frame) => {
     const data = Frame.encode(frame);
@@ -41,7 +66,8 @@ function openSocket(): Socket {
         assert.equal(frame.tag, 'Call');
         const [stream, p, slot, , args] = frame.values;
         assert.equal(slot, 0);
-        assert.deepEqual(args, new Uint8Array());
+        if (captured) captured.push({stream, p, args: args.slice()});
+        else assert.deepEqual(args, new Uint8Array());
         emit({tag: 'Batch', values: [version, [], [], [{stream, p, outcome: {tag: 'Returned', value: payload}}]]});
       }
     },
@@ -52,7 +78,7 @@ function openSocket(): Socket {
 }
 
 const client = await Client.open({
-  url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity, socket: openSocket,
+  url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity, socket: () => openSocket(),
   storage: new NodeStorage('state'), onDiagnostic: message => diagnostic(new Error(message)),
 });
 try {
@@ -63,6 +89,71 @@ try {
     tag: 'Returned', value: {tag: 'Value', values: [{tag: 'Some', value: {tag: 'None'}}, 9007199254740993n]},
   };
   assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined), expected);
+  const clone = globalThis.structuredClone;
+  let clones = 0;
+  globalThis.structuredClone = value => { clones++; return clone(value); };
+  try {
+    assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined), expected);
+  } finally {
+    globalThis.structuredClone = clone;
+  }
+  assert.equal(clones, 0, 'steady-state dispatch/settle must not deep-clone lane state');
+
+  // Raw wire calls own their input bytes on submission and their returned bytes on completion.
+  // Mutating either one must not change what went on the wire or make a duplicate outcome look different.
+  const captured: SentCall[] = [], diagnostics: string[] = [];
+  let rawSocket: Socket | undefined;
+  const memory = new MemoryStorage();
+  const raw = await Client.open({
+    url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity,
+    socket: () => rawSocket = openSocket(captured), storage: memory,
+    onDiagnostic: message => diagnostics.push(message),
+  });
+  await raw.whenReady();
+  const input = new Uint8Array([7]);
+  const result = raw.call(want[0], input, bytes => bytes);
+  input[0] = 99;
+  const outcome = await result;
+  assert.equal(outcome.tag, 'Returned');
+  assert.deepEqual(captured[0]?.args, new Uint8Array([7]), 'mutating submitted args must not alter the wire request');
+  if (outcome.tag !== 'Returned') throw new Error('unreachable');
+  const answer = outcome.value, original = answer.slice(), sent = captured[0];
+  answer[0] ^= 0xff;
+  rawSocket!.onmessage?.({data: Frame.encode({tag: 'Batch', values: [2n, [], [], [
+    {stream: sent.stream, p: sent.p, outcome: {tag: 'Returned', value: original}},
+  ]]})});
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(diagnostics.some(message => /disagree|mismatch/.test(message)), false,
+    'mutating a returned result must not alias the stored terminal outcome');
+  await raw.close();
+
+  // A write failed after an earlier commit leaves that earlier committed state intact: the
+  // rolled-back in-flight mutation is never half-visible in MemoryStorage.
+  const inner = new MemoryStorage();
+  let armed = false, writes = 0;
+  let committed: Installation | null = null;
+  const failing: Storage = {
+    lock: (name, wait) => inner.lock(name, wait),
+    read: () => inner.read(),
+    write: async state => {
+      if (!armed) return inner.write(state);
+      writes++;
+      if (writes === 2) throw new Error('abort write');
+      await inner.write(state);
+      if (writes === 1) committed = await inner.read();
+    },
+  };
+  const aborted = await Client.open({
+    url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity,
+    socket: () => openSocket(), storage: failing,
+  });
+  await aborted.whenReady();
+  armed = true;
+  void aborted.call(want[0], new Uint8Array(), bytes => bytes).catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(committed, 'the first dispatch write should commit before the aborted write');
+  assert.deepEqual(await inner.read(), committed, 'aborted write must not expose partial mutations');
+  await aborted.close();
   assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
     [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
   type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};

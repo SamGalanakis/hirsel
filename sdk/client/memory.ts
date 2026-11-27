@@ -43,6 +43,6 @@ export class MemoryStorage implements Storage {
   }
 
   async write(state: Installation): Promise<void> {
-    this.installation = copyInstallation(state);
+    this.installation = copyInstallation(state, this.installation ?? undefined);
   }
 }

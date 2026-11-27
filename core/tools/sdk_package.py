@@ -83,6 +83,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         subprocess.run([*install, *tool_tarballs], cwd=standalone, env=npm_env, check=True)
         standalone_source = (consumer / 'consumer.ts').read_text()
         standalone_source = standalone_source.replace("'@hirsel/client'", "'./generated/client.js'")
+        standalone_source = standalone_source.replace("'@hirsel/client/memory'", "'./generated/memory.js'")
         standalone_source = standalone_source.replace("'@hirsel/client/node'", "'./generated/node.js'")
         (standalone / 'consumer.ts').write_text(standalone_source)
         compiled = standalone / 'compiled'

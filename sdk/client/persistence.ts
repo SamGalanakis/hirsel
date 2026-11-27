@@ -28,20 +28,41 @@ export interface Storage {
   write(state: Installation): Promise<void>;
 }
 
-export function copyInstallation(state: Installation): Installation {
+// Copies the mutable installation, stream-record and pending shells. When replacing a previous
+// in-memory commit, unchanged records and directories keep the previous commit's copies: the input
+// shell is still distinct, so later caller mutation cannot reach stored state, but untouched streams
+// cost no fresh copy.
+export function copyInstallation(state: Installation, previous?: Installation): Installation {
   const streams: Installation['streams'] = {};
+  let reuseStreams = previous !== undefined && Object.keys(previous.streams).length === Object.keys(state.streams).length;
   for (const [name, record] of Object.entries(state.streams)) {
-    const copy: StreamRecord = {...record};
-    if (record.pending) copy.pending = {...record.pending};
+    const before = previous?.streams[name];
+    const copy = before && sameRecord(record, before) ? before : copyStreamRecord(record);
     streams[name] = copy;
+    if (before !== copy) reuseStreams = false;
   }
-  return {...state, directory: state.directory.slice(), streams};
+  const directory = previous && sameDirectory(state.directory, previous.directory) ? previous.directory : state.directory.slice();
+  const copy: Installation = {...state, directory, streams: reuseStreams && previous ? previous.streams : streams};
+  return previous && sameFields(copy, previous) ? previous : copy;
+}
+function sameRecord(a: StreamRecord, b: StreamRecord): boolean {
+  return sameFields(a, b, 'pending') && (a.pending === b.pending || (!!a.pending && !!b.pending && sameFields(a.pending, b.pending)));
+}
+function sameDirectory(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((name, i) => name === b[i]);
 }
 
 export const fresh = (installation = randomGeneration()): Installation => ({
   version: RECOVERY_VERSION, installation, generation: randomGeneration(), directory: [], streams: {},
 });
 export const emptyStream = (caller: Caller | null = null): StreamRecord => ({caller, next: 0n, retired: false, minter: null, sent: false});
+// Copies the mutable record and pending shells. Nested caller, want, args, http, stream id and
+// terminal outcome values are immutable once stored, so they move by reference.
+export function copyStreamRecord(record: StreamRecord): StreamRecord {
+  const copy: StreamRecord = {...record};
+  if (record.pending) copy.pending = {...record.pending};
+  return copy;
+}
 export const maxU64 = 0xffffffffffffffffn;
 export const hex = (value: bigint, width: number) => value.toString(16).padStart(width, '0');
 export const streamHex = (id: StreamId) => hex(id.t, 16) + hex(id.n, 16);

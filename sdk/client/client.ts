@@ -1,6 +1,6 @@
 import {defaultClock, listenForBrowserWake, type Clock, type Socket} from './browser.js';
 import {claimStream, CorruptState, leaseStreams, recover, sameCaller, emptyStream, fresh, hex, intact, maxU64, randomGeneration, streamHex, replaceStream,
-  streamLock, u64, validCaller, validHttpRequest, type Caller, type HttpRequest, type Installation,
+  streamLock, u64, validCaller, validHttpRequest, copyStreamRecord, type Caller, type HttpRequest, type Installation,
   type Lease, type Storage, type StreamId, type StreamRecord} from './persistence.js';
 export {CorruptState, RECOVERY_VERSION, intact, validCaller, validHttpRequest} from './persistence.js';
 export type {Clock, Socket} from './browser.js';
@@ -103,7 +103,7 @@ export class Client implements Transport {
   private constructor(private options: Options, state: Installation, leased: ReadonlyArray<readonly [string, Lease]>) {
     this.generation = state.generation; this.installationId = state.installation;
     this.caller = state.streams[leased[0][0]].caller;
-    for (const [stream, lease] of leased) this.addLeased(stream, structuredClone(state.streams[stream]), lease);
+    for (const [stream, lease] of leased) this.addLeased(stream, copyStreamRecord(state.streams[stream]), lease);
     this.wants = options.wants.map(copyWant);
     this.clock = options.clock ?? defaultClock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
@@ -343,11 +343,11 @@ export class Client implements Transport {
           this.overlays.clear();
           for (const lane of lanes) if (lane.record.pending) this.finish(lane, {tag: 'LocallyUnknown'});
           for (const lane of rest) await this.dropLane(lane);
-          first.record = structuredClone(record);
+          first.record = copyStreamRecord(record);
         } else {
-          for (const lane of lanes) state.streams[lane.stream] = {...lane.record, caller};
+          for (const lane of lanes) state.streams[lane.stream] = {...copyStreamRecord(lane.record), caller};
           await this.options.storage.write(state);
-          for (const lane of lanes) lane.record = structuredClone(state.streams[lane.stream]);
+          for (const lane of lanes) lane.record = copyStreamRecord(state.streams[lane.stream]);
         }
         this.caller = caller;
       }}));
@@ -596,7 +596,7 @@ export class Client implements Transport {
       }
       await this.options.storage.write(state);
       for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
-      for (const lane of used) lane.record = structuredClone(state.streams[lane.stream]);
+      for (const lane of used) lane.record = copyStreamRecord(state.streams[lane.stream]);
     } catch (error) {
       for (const {lease} of claimed) await lease.release();
       for (const call of take) {
@@ -615,7 +615,7 @@ export class Client implements Transport {
       const lease = await this.options.storage.lock(streamLock(state, n), false);
       if (!lease) continue;
       recover(state, record, granted(this.options), lost(this.options));
-      return this.addLeased(n, structuredClone(record), lease);
+      return this.addLeased(n, copyStreamRecord(record), lease);
     }
     let stream: string;
     do { stream = 'pending-' + hex(randomGeneration(), 32); } while (Object.hasOwn(state.streams, stream));
@@ -654,7 +654,7 @@ export class Client implements Transport {
     }
     await this.options.storage.write(state);
     for (const lane of lanes) {
-      const record = lane.record = structuredClone(state.streams[lane.stream]), pending = record.pending!, id = record.id!;
+      const record = lane.record = copyStreamRecord(state.streams[lane.stream]), pending = record.pending!, id = record.id!;
       const delivery = pending.http ? {tag: 'Http', p: pending.p} as const : {tag: 'WebSocket'} as const;
       // Each send carries its own call's remaining time, so the place refuses or abandons it alone.
       const left = lane.call?.deadlineAt === undefined ? wire : Math.ceil(lane.call.deadlineAt - this.clock.now());
@@ -692,7 +692,7 @@ export class Client implements Transport {
       const record = installation.streams[lane.stream];
       fn(record);
       await this.options.storage.write(installation);
-      lane.record = structuredClone(record);
+      lane.record = copyStreamRecord(record);
       return true;
     };
     return state ? write(state) : !!await this.installation(write);
@@ -725,7 +725,7 @@ export class Client implements Transport {
         else Object.assign(record.pending!, {inflight: false, untouched: false});
       }
       await this.options.storage.write(state);
-      for (const lane of lost) lane.record = structuredClone(state.streams[lane.stream]);
+      for (const lane of lost) lane.record = copyStreamRecord(state.streams[lane.stream]);
       for (const lane of granted) this.finish(lane, {tag: 'LocallyUnknown'});
     });
   }
@@ -739,7 +739,7 @@ export class Client implements Transport {
         pending: {...pending, p: 0n, inflight: false, remintsLeft: 0},
       };
       await this.moveStream(lane, state, streamHex(id), record);
-      lane.record = structuredClone(record);
+      lane.record = copyStreamRecord(record);
       await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
     });
   }
@@ -783,7 +783,7 @@ export class Client implements Transport {
       for (const completion of done) settle(state.streams[completion.lane.stream], completion);
       await this.options.storage.write(state);
       for (const {lane, outcome, http} of done) {
-        lane.record = structuredClone(state.streams[lane.stream]);
+        lane.record = copyStreamRecord(state.streams[lane.stream]);
         if (http && !lane.call && this.options.onHttpRecovered) {
           await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
           this.options.onHttpRecovered(http);

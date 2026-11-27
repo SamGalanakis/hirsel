@@ -1,6 +1,6 @@
 import type {HttpReply} from './delivery.js';
 import {maxU64, type HttpRequest, type Lease, type Pending, type StreamRecord} from './persistence.js';
-import type {Done, Outcome, Want} from './wire.js';
+import type {Done, Fault, Outcome, Refusal, Want} from './wire.js';
 
 // A caller waiting on one call. `deadlineAt` (client clock) bounds this call alone.
 export interface Waiter {
@@ -27,10 +27,39 @@ export const pendingFor = (record: StreamRecord, call: QueuedCall, installation:
   p: record.next, want: call.want, args: call.args, slot: call.slot, inflight: false,
   untouched: record.minter === installation, remintsLeft: 1, ...(call.http && {http: call.http}),
 });
+function copyFault(fault: Fault): Fault {
+  switch (fault.tag) {
+    case 'Raised': return {tag: 'Raised', value: fault.value};
+    case 'OutOfBytes': return {tag: 'OutOfBytes', value: {...fault.value}};
+    case 'OutOfTime': return {tag: 'OutOfTime', value: fault.value};
+    case 'Gone': return {tag: 'Gone'};
+    case 'Conflict': return {tag: 'Conflict', value: fault.value};
+  }
+}
+function copyRefusal(refusal: Refusal): Refusal {
+  switch (refusal.tag) {
+    case 'NoEntry': case 'Overloaded': case 'Deadline': case 'NotAllowed':
+    case 'RequestMismatch': case 'HistoryUnavailable':
+      return {tag: refusal.tag};
+    case 'Malformed': return {tag: 'Malformed', value: {...refusal.value}};
+    case 'Budget': return {tag: 'Budget', value: {...refusal.value}};
+    case 'StreamFuture': return {tag: 'StreamFuture', value: refusal.value};
+  }
+}
+// The terminal stays owned by recovery state while the original outcome goes to the caller.
+function copyOutcome(outcome: Outcome<Uint8Array>): Outcome<Uint8Array> {
+  switch (outcome.tag) {
+    case 'Returned': return {tag: 'Returned', value: outcome.value.slice()};
+    case 'Failed': return {tag: 'Failed', value: copyFault(outcome.value)};
+    case 'Refused': return {tag: 'Refused', value: copyRefusal(outcome.value)};
+    case 'Abandoned': case 'InDoubt': case 'LocallyUnknown': case 'RequestMismatch':
+      return {tag: outcome.tag};
+  }
+}
 // Stores one lane's answer: its terminal, the position it moves to, and whether the stream ends.
 export function settle(record: StreamRecord, {outcome, advance, retire}: Completion): void {
   const pending = record.pending!;
-  record.terminal = {p: pending.p, outcome: structuredClone(outcome)};
+  record.terminal = {p: pending.p, outcome: copyOutcome(outcome)};
   delete record.pending;
   if (advance && pending.p !== maxU64) record.next = pending.p + 1n;
   if (retire || (advance && pending.p === maxU64)) record.retired = true;

@@ -81,12 +81,14 @@ mod tests {
     #[test]
     fn a_written_executable_runs_while_another_thread_forks() {
         let dir = tempfile::tempdir().unwrap();
-        let program = std::fs::read("/bin/true").unwrap();
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let true_path = crate::host::find_program(std::path::Path::new("true"), &search).unwrap();
+        let program = std::fs::read(&true_path).unwrap();
         let stop = AtomicBool::new(false);
         let busy = std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !stop.load(Ordering::Relaxed) {
-                    Command::new("/bin/true").status().unwrap();
+                    Command::new(&true_path).status().unwrap();
                 }
             });
             let mut busy = 0;

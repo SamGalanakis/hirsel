@@ -2,6 +2,7 @@
 //! on every request, so a request whose PATH names another ld.lld (an earlier
 //! candidate installed since, a test's private LLVM copy) never links through
 //! a recipe another request captured with its own.
+use crate::host::find_program;
 use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
@@ -9,7 +10,7 @@ use hirsel_core_layout::{Arch, ObjectFormat, Os, Target};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -134,31 +135,11 @@ impl LinkRecipe {
             })
     }
 }
-fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
-    if program.components().count() > 1 || program.is_absolute() {
-        return std::fs::canonicalize(program);
-    }
-    std::env::split_paths(search)
-        .map(|directory| directory.join(program))
-        .find(|candidate| {
-            candidate.is_file()
-                && candidate
-                    .metadata()
-                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-        })
-        .map(std::fs::canonicalize)
-        .transpose()?
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("link tool {} is not on PATH", program.display()),
-            )
-        })
-}
+
 /// The C driver a request names, resolved once at the command line: a bare
 /// name such as the default `cc` is looked up on `PATH`, like the shell does.
 pub fn link_driver(program: &Path) -> io::Result<PathBuf> {
-    selected(program, &search())
+    find_program(program, &search())
 }
 
 /// Link recipes, the link editor a driver names, and toolchain manifests are
@@ -592,7 +573,7 @@ fn selected_editor(
     }
     let recorded = read_record::<EditorName>(store, editor_name_key(target, driver_key)?)
         .filter(|record| record.schema == EDITOR_NAME_SCHEMA);
-    Ok(recorded.and_then(|record| selected(&record.name, search).ok()))
+    Ok(recorded.and_then(|record| find_program(&record.name, search).ok()))
 }
 
 /// This request's `PATH`, which selects a link editor the driver names bare.
@@ -874,7 +855,7 @@ fn capture_link_recipe_with(
     }
     let linker = match &installed_linker {
         Some(installed) => installed.clone(),
-        None => selected(&name, search)?,
+        None => find_program(&name, search)?,
     };
     // clang looks beside itself, then on PATH: an editor it found on PATH is
     // PATH's choice, so the record keeps it bare and each request selects its own.
@@ -883,7 +864,7 @@ fn capture_link_recipe_with(
             if !collect2
                 && name.is_absolute()
                 && linker.parent() != driver.canonicalize()?.parent()
-                && selected(Path::new(file), search).ok().as_ref() == Some(&linker) =>
+                && find_program(Path::new(file), search).ok().as_ref() == Some(&linker) =>
         {
             PathBuf::from(file)
         }

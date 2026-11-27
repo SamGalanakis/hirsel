@@ -18,10 +18,34 @@ use linux::runtime_root;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{spawn as launch, *};
 
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+/// Resolve a program path, searching the given PATH for a bare name.
+pub(crate) fn find_program(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
+    if program.components().count() > 1 || program.is_absolute() {
+        return fs::canonicalize(program);
+    }
+    std::env::split_paths(search)
+        .map(|directory| directory.join(program))
+        .find(|candidate| {
+            candidate.is_file()
+                && candidate
+                    .metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+        })
+        .map(fs::canonicalize)
+        .transpose()?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("program {} is not on PATH", program.display()),
+            )
+        })
+}
 
 /// The compiler a test's request children run: this test binary on Linux, its
 /// installed copy on Darwin, whose default link is the installation's recipe.

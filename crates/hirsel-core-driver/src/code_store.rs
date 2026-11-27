@@ -445,7 +445,8 @@ mod tests {
             store.commit().unwrap();
             refs
         };
-        let written = CodeStore::cache(&dir.path().join("written"), "code").unwrap();
+        let written_root = dir.path().join("written");
+        let written = CodeStore::cache(&written_root, "code").unwrap();
         let refs = put_all(&written);
         let files = |root: &Path| -> Vec<PathBuf> {
             let mut found = Vec::new();
@@ -456,7 +457,9 @@ mod tests {
             }
             found
         };
-        let [pack] = files(&dir.path().join("written/o")).try_into().unwrap();
+        let [pack] = files(&written_root.join(crate::store::collect::BLOBS))
+            .try_into()
+            .unwrap();
         let bytes = fs::read(&pack).unwrap();
         let cuts = pack::tests::boundaries(&bytes);
         let payloads = refs
@@ -483,16 +486,19 @@ mod tests {
                 Damage::Payload(at) => damaged[payloads[at].clone()].fill(0),
             }
             let driver = dir.path().join(format!("case-{case}"));
-            for file in files(&dir.path().join("written/k"))
+            for file in files(&written_root.join(crate::store::collect::RECORDS))
                 .into_iter()
-                .chain([pack.clone(), dir.path().join("written/layout")])
+                .chain([
+                    pack.clone(),
+                    written_root.join(crate::store::collect::LAYOUT),
+                ])
             {
-                let to = driver.join(file.strip_prefix(dir.path().join("written")).unwrap());
+                let to = driver.join(file.strip_prefix(&written_root).unwrap());
                 fs::create_dir_all(to.parent().unwrap()).unwrap();
                 fs::copy(&file, &to).unwrap();
             }
             fs::write(
-                driver.join(pack.strip_prefix(dir.path().join("written")).unwrap()),
+                driver.join(pack.strip_prefix(&written_root).unwrap()),
                 &damaged,
             )
             .unwrap();

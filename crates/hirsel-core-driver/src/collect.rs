@@ -47,9 +47,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 /// Records: key to the blobs they name.
-pub(super) const RECORDS: &str = "keys";
+pub(crate) const RECORDS: &str = "keys";
 /// Blobs, named by the SHA-256 of their bytes.
-pub(super) const BLOBS: &str = "o";
+pub(crate) const BLOBS: &str = "o";
 /// Fallback std sides, each a content store.
 const SIDES: &str = "sides";
 /// Signed records received from a remote cache, by signer (`signed`).
@@ -59,7 +59,7 @@ pub(super) const REMOTE: &str = "signed";
 const EARLIER: [&str; 3] = ["k", "s", "r"];
 /// The layout stamp: the directory layout a store's files are kept in.
 /// Files carry their own format, so it does not name `VERSION`.
-const LAYOUT: &str = "format";
+pub(crate) const LAYOUT: &str = "format";
 /// The per-user store's directory name.
 const USER: &str = "cas";
 

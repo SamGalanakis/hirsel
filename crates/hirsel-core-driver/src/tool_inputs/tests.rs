@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn sealed_foreign_archives_check_pin_object_features_and_abi() {

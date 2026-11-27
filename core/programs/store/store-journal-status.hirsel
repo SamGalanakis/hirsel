@@ -162,6 +162,17 @@ fn journal_flush(db: Db) waits {
     }
 }
 
+/// Asks a Directory journal to end its open group now instead of at its gather
+/// deadline (L94), without waiting for the sync. A caller that waits on
+/// `sync_notices` for a commit `durable_now` found unsynced calls this before it
+/// parks: no other arrival may come to end the group (RUNNER-SPEC H3). Other
+/// stores do nothing: their syncs never wait on a deadline.
+pub fn request_sync(db: Db) waits {
+    if is_disk(db) {
+        journal_flush(db)
+    }
+}
+
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
     if let Some(raw) = frame {
         let size = list.len(raw)

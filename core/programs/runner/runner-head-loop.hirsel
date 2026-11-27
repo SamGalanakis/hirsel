@@ -281,9 +281,13 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             continue
         }
         if list.len(head.held) != 0u64 {
-            // Every group is closed. A SyncWake or new work ends this wait.
+            // Every group is closed. A SyncWake or new work ends this wait. The
+            // journal's gather deadline is not a wake (H3): ask it to sync the open
+            // group before parking, or the SyncWake waits on an arrival that only
+            // this head's own next release could cause.
             release_held(mut head, false)?
             if list.len(head.held) != 0u64 {
+                store.request_sync(head.db)
                 match head_next(inbox, true) {
                     Some(take message) => {
                         input = Some(take message)

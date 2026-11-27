@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.90: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.91: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.91 (a parked head asks for its sync; lane runner-http-retry-hang-3266)
+
+H3 gains one rule. A head whose store's syncs wake it (`SyncWake`) waits for a held group's sync on its inbox instead of in `durable`. Before it parks there with a group still unsynced it calls `store.request_sync`, which ends the Directory journal's open group at once instead of at its gather deadline (STORE-SPEC L94). The deadline is the journal worker's own and wakes nobody else: an armed group with no further arrival synced only when the deadline passed, which under a program-made clock is only at `clock.advance_to` (STORE-SPEC L94), so `http_invisible_retry_keeps_one_effect` hung at Y's newer-stream send, and under a real clock every idle release waited up to `group_delay_us` for nothing. Back-to-back commits still share a group; a head that goes idle gives up gathering beyond that point. No wire, API or format change. Reversible: code and text only.
 
 ## CHANGES-v2.90 (claim authority, Deposed and the Bucket L70 (d) half; lane store-claim-auth-origin-3048)
 
@@ -1503,7 +1507,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
   - `HistoryUnavailable` (p < latest) or `RequestMismatch` (p = latest, another digest): `Refused(HistoryUnavailable)` or `Refused(RequestMismatch)`, as V3; nothing is committed and nothing runs (STORE AH1, AH2; v2.11.4).
   - `StreamFuture(at)`: `Refused(StreamFuture(at))`, as V3. Nothing is committed and nothing runs.
   - A gone key (§6): `Admitted(c)`/`Abandoned(c)` gives `store.conclude(mut db, store.untried(take c, None), Failed(Gone))`; `Duplicate(Stored)` answers it.
-- **H3. Gate.** After each group, the head calls `durable` on the group's newest ticket. It collects every worker answer in commit order and pushes one `Release{version: d, snapshot, outcomes}` for the group. Here d is the durable version the group reached. (v2.46) The head may first push `Staged(v, snapshot)` for the group's commit version v, before it calls `durable`; it carries no outcomes and releases nothing (G1 "Pipelining").
+- **H3. Gate.** After each group, the head calls `durable` on the group's newest ticket. It collects every worker answer in commit order and pushes one `Release{version: d, snapshot, outcomes}` for the group. Here d is the durable version the group reached. (v2.46) The head may first push `Staged(v, snapshot)` for the group's commit version v, before it calls `durable`; it carries no outcomes and releases nothing (G1 "Pipelining"). (v2.91) A head woken by its store's sync notices may wait for the sync on its inbox instead of in `durable`, taking later work meanwhile; before it parks with a group still unsynced, it calls `store.request_sync`, so the group never waits on the journal's gather deadline.
 - **H4. Across opens.** An admitted-unreplied position from a crashed open returns `Abandoned` and re-runs. `p+1` arriving first gets `Rejected(p)` from S7 and waits until p is re-sent.
 - **Throughput.** H1 serialises only within a stream. Different streams interleave inside one group commit.
 

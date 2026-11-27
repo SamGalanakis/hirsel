@@ -109,6 +109,22 @@ demotion's step installs the empty root under that overlay, leaving the child's 
 TLC runs with several workers, so `--save-traces` can write a different shortest trace on another
 run.
 
+## Pending model change: the build pin (STORE-SPEC v2.169)
+
+v2.169 (§13.10a "Hot Tiered builds") adds a holder that neither model has. It is an owner-3 pin of fresh Hot pages that is never promoted, emitted by its own cuts, and grafted onto main by one `ReplaceMain` cut that drops it. The abstraction above, where one Snapshot pin stands for every pin, does not cover it: the import pin's own graft is not modelled either. So under the standing rule, `StoreRetention.tla` changes before the M3b-S5b implementation lane starts (DESIGN-v2 §4.4a gate):
+- **Ops.**
+  - `build`: a cut whose only holder change sets the build pin to a root of fresh stamps it emits.
+  - `graft`: one cut that sets main's head to the pin's frames, drops the pin, and queues main's old Cold base as released roots.
+  - The crash then reopen drops an orphan pin at the first holder-free cut.
+  - A second collection that the plan leaves untouched, so that a probe at a `build` cut can relocate it.
+- **Invariants.** The existing ones, unchanged: RetainReachable, SnapReadable, ImageComplete, AckedDurable, IdleReachesNoFrame, ProbeClaim, Progress, CellsListed, IdleProgress.
+- **Mutants**, each required to violate one of them:
+  - `graft_queues_pin`: the graft queues the pin's frames as released, so the drain retires frames main now names, which violates RetainReachable.
+  - `graft_stale_root`: the graft publishes the untouched collection's staging-time root after a `build` cut's probe moved it, which violates RetainReachable.
+  - `build_unlisted`: a `build` step writes its frames into a pack outside the cut's list (lane 3220's live `child_cut_tiered`). A crash then reopen removes the unlisted pack while the durable pin still names it, which violates RetainReachable.
+- **`StoreCatchUp.tla` is unchanged.** The build pin exists only inside a hot `Migrate`, and the publish's lease step is `Drift`, so no catch-up round replays a hot build.
+- **Not a model case.** An orphan rule keyed on `import` alone keeps a crashed build's pin listed forever. That is a liveness failure, and the models check only safety, so L102 (c) catches it instead.
+
 ## What is abstracted
 
 - **One collection, small bounds.** `StoreRetention` has one Tiered collection of `NKeys` rows, one frame per row, a few stamps and packs, one crash. Pages, offsets, BLOB frames and the class-3/4 split are not modelled: a frame is a stamp at a PACK_INDEX row.

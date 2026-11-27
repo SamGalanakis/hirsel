@@ -610,7 +610,12 @@ impl ClientEngine {
                 continue;
             };
             let lane_id = st.lanes[idx].id;
-            let Some(pending) = st.lanes[idx].settle(&done.outcome) else {
+            let lane = &mut st.lanes[idx];
+            let Some(call) = lane.pending.as_ref() else {
+                continue;
+            };
+            let kind = self.manifest.entries[call.want as usize].kind;
+            let Some(pending) = lane.settle(kind, &done.outcome) else {
                 continue;
             };
             // Refund the call's request charge now that its lane settled.

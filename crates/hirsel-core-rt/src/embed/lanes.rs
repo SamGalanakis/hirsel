@@ -1,5 +1,6 @@
 //! Leased-stream lane records (`sdk/client/lanes.ts`) and kernel vector unit tests.
 use super::codec::{KeyedDone, Outcome, Refusal, StreamId};
+use hirsel_core_ids::embed::EntryKind;
 // ---------------------------------------------------------------------------
 // Leased-stream lane records (`sdk/client/lanes.ts`)
 // ---------------------------------------------------------------------------
@@ -45,16 +46,12 @@ impl StreamLane {
             .is_some_and(|p| p.inflight && self.stream == done.stream && p.p == done.p)
     }
 
-    /// Settle this lane's pending call, advancing `next` or retiring on `HistoryUnavailable` / `u64::MAX`.
-    pub fn settle(&mut self, outcome: &Outcome) -> Option<PendingLaneCall> {
+    /// Advance only when the runner stored a transact reply at this position.
+    pub fn settle(&mut self, kind: EntryKind, outcome: &Outcome) -> Option<PendingLaneCall> {
         let pending = self.pending.take()?;
         let retire = matches!(outcome, Outcome::Refused(Refusal::HistoryUnavailable));
-        let advance = !matches!(
-            outcome,
-            Outcome::Refused(
-                Refusal::Overloaded | Refusal::RequestMismatch | Refusal::HistoryUnavailable
-            )
-        );
+        let advance = kind == EntryKind::Transact
+            && matches!(outcome, Outcome::Returned(_) | Outcome::Failed(_));
         if advance && pending.p != u64::MAX {
             self.next = pending.p + 1;
         }

@@ -81,41 +81,41 @@ final class RuntimeTests: XCTestCase {
             let b = try runtime.open(credential: fixtureCredential)
             let roomA = try a.api.room.main.room(HirselUnit())
             var aEvents = roomA.events.makeAsyncIterator()
-            guard case .peers(let selfA)? = try await aEvents.next() else {
+            guard case .peers(let selfA)? = try await nextLiveEvent(&aEvents) else {
                 return XCTFail("Expected A to join")
             }
             let roomB = try b.api.room.main.room(HirselUnit())
             var bEvents = roomB.events.makeAsyncIterator()
-            guard case .peers(let selfB)? = try await bEvents.next() else {
+            guard case .peers(let selfB)? = try await nextLiveEvent(&bEvents) else {
                 return XCTFail("Expected B to join")
             }
             XCTAssertNotEqual(selfA.me, selfB.me)
-            let joined = try await aEvents.next()
+            let joined = try await nextLiveEvent(&aEvents)
             guard case .peers(let join)? = joined else { return XCTFail("Expected B to join A") }
             XCTAssertEqual(join.joined.map(\.peer), [try XCTUnwrap(selfB.me)])
 
             let c = try runtime.open(credential: fixtureCredential)
             let fullRoom = try c.api.room.main.room(HirselUnit())
             var fullEvents = fullRoom.events.makeAsyncIterator()
-            let first = try await fullEvents.next()
+            let first = try await nextLiveEvent(&fullEvents)
             XCTAssertEqual(first, .full)
             try await c.close()
 
             try roomB.set(513)
-            guard case .peers(let set)? = try await aEvents.next() else {
+            guard case .peers(let set)? = try await nextLiveEvent(&aEvents) else {
                 return XCTFail("Expected B's state on A")
             }
             XCTAssertEqual(set.states, [PeerState(peer: try XCTUnwrap(selfB.me),
                                                  state: Data([1, 2, 0, 0, 0, 0, 0, 0]))])
             try roomB.send(514, to: selfA.me)
             try roomB.leave()
-            guard case .message(let message)? = try await aEvents.next() else {
+            guard case .message(let message)? = try await nextLiveEvent(&aEvents) else {
                 return XCTFail("Expected B's direct message on A")
             }
             XCTAssertEqual(message.from, selfB.me)
             XCTAssertEqual(message.message, Data([2, 2, 0, 0, 0, 0, 0, 0]))
             XCTAssertTrue(message.direct)
-            guard case .peers(let left)? = try await aEvents.next() else {
+            guard case .peers(let left)? = try await nextLiveEvent(&aEvents) else {
                 return XCTFail("Expected B to leave A")
             }
             XCTAssertEqual(left.left, [try XCTUnwrap(selfB.me)])
@@ -123,6 +123,18 @@ final class RuntimeTests: XCTestCase {
             try await a.close()
             try await b.close()
         }
+    }
+
+    private func nextLiveEvent(_ events: inout AsyncThrowingStream<RoomEvent, Error>.Iterator) async throws -> RoomEvent? {
+        // Live and Batch frames can deliver peer and admission events in either order.
+        while let event = try await events.next() {
+            if case .admission = event { continue }
+            if case .ended(.server(let raw)) = event {
+                XCTFail("Room ended with \(try WireOutcomeCodec.decode(raw))")
+            }
+            return event
+        }
+        return nil
     }
 
     func testStopThenStart() async throws {

@@ -906,7 +906,19 @@ fn law_m3_exact_b_stalled_peak_b2_stop_barrier_and_m1_reconnect() {
         raw_outcome: Outcome::Returned(b"replyA".to_vec()).encode_bytes(),
     };
     assert!(lane_b.matches_done(&done_b) && !lane_a.matches_done(&done_b));
-    assert_eq!(lane_b.settle(&done_b.outcome).unwrap().host_call, Some(200));
+    assert_eq!(
+        lane_b
+            .settle(hirsel_core_ids::embed::EntryKind::Transact, &done_b.outcome)
+            .unwrap()
+            .host_call,
+        Some(200)
+    );
     assert!(lane_a.matches_done(&done_a));
-    assert_eq!(lane_a.settle(&done_a.outcome).unwrap().host_call, Some(100));
+    assert_eq!(
+        lane_a
+            .settle(hirsel_core_ids::embed::EntryKind::Transact, &done_a.outcome)
+            .unwrap()
+            .host_call,
+        Some(100)
+    );
 }

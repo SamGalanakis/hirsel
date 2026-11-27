@@ -7,7 +7,7 @@ final class AbiTests: XCTestCase {
     func testWelcomeTarget() async throws {
         try await withRuntime { runtime in
             let session = try runtime.open(credential: fixtureCredential)
-            let reply = try await session.api.call.main.answer(0, deadline: 0)
+            let reply = try await session.api.call.main.answer(0, deadline: 5_000)
             XCTAssertEqual(reply, .returned(7))
             var target = [UInt8](repeating: 0, count: 128)
             let count = hirsel_embed_harness_welcome_target(runtime.handle.generation, &target, target.count)

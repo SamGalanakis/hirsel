@@ -77,7 +77,7 @@ fn place(mut registry: runner.Registry[Net, Handles]) -> Result[(), runner.Regis
     runner.query(mut registry, code.describe(rows), slots()?, 65536u64, runner.DEFAULT_STEPS)?
     let codec: std.codec.Codec[u64] = std.codec.of()
     runner.room(mut registry, code.describe(room), slots()?, codec, codec,
-        runner.RoomBounds(peers: 2u32, state: 8u32, message: 8u32), 1024u64, 1024u64, runner.DEFAULT_STEPS)
+        runner.RoomBounds(peers: 2u32, state: 8u32, message: 8u32), 65536u64, 1024u64, runner.DEFAULT_STEPS)
 }
 
 fn mint_network(seed: Net, _handles: Handles, _input: ()) -> Result[Net, Capacity] {

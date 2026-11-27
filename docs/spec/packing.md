@@ -2,9 +2,8 @@
 
 *Specified 2026-11-27 (lane packing-p1-loader-3253, from the ratified in-process packing
 proposal). Rules PACK-1 to PACK-10 are slice P1, the loader core. Rules from PACK-11 are
-slice P2 (lane packing-p2-hot-abi-3281), the hot call ABI. Each rule says what is built; the
-rest is specified, not built. The typed export adapter, `Held` and the language surface of
-`core.code` over these rules are slice P2 and are specified as they are built.*
+slice P2 (lane packing-p2-hot-abi-3281), the hot call ABI. PACK-9 item 7 and PACK-14 through PACK-17
+specify the P2b language and runner cutover. Their typed adapter, cause owner, Held and runner bindings are not yet built.*
 
 A **pack host** is an OS process that runs many Places. It installs compiled Hirsel code
 while it runs, calls it, replaces it and unloads it. This chapter defines the artifact it
@@ -431,8 +430,43 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
      row addresses its loader binds imports to from its own image. A row the image lacks
      (the law and measurement rows) has no address, and a module that imports one is
      refused as `Import(row)`.
-7. **Causes** never point into text. A cause that outlives its image keeps the image's
-   site and literal data alive, not its code (slice P2 defines the owner word).
+7. **Causes (L2, specified).** On supported 64-bit targets the prepaid native cell
+   starts with the public 32-byte Cause (message/kind carrier at 0, site word at 24),
+   the next-cell pointer at 32 and one aligned 64-bit counted data-owner word at 40.
+   Funding and reservation state follow at 48. The public value, iterator prefix and
+   MEM-24 logical 32-byte charge stay fixed. The changed native layout takes a new
+   PACK-2 ABI revision.
+
+   The word is zero on reservation. Zero in a recorded cell means all referenced
+   literal/source data has process lifetime or is owned by the moved message itself.
+   Otherwise it points to a native owner for the exact R/NX literal storage and source
+   directory for this cause. The mutable counts live outside the read-only bytes.
+   The directory owns the release-local site map and the source bytes needed to render
+   it (or their immutable content-store pin). It has no edge to text, an image handle,
+   executable glue, a slab cohort or a PC-table row. Install establishes the data
+   owners before publishing an entry. They can survive independent recycling of RX.
+
+   Recording takes the site owner from the code supplying the ordinal (the caller for
+   an inherited site), while that generation is pinned. Move a heap message and its
+   payer unchanged. For a literal, retain its own backing, including when a caller's
+   literal fails in a different release. With a single origin the word holds one count
+   on its data owner. With two different unloadable origins it holds one counted
+   reference to a pair (site owner first, literal owner second), each owning one count.
+   The fixed two-reference record is provided with the cell reservation, so even this
+   case admits and allocates nothing on failure. A host site or literal uses its
+   immortal backing in the corresponding role. Never infer either origin from the
+   currently active slot or from the ordinal alone.
+
+   Splicing, catching, joining or moving a chain transfers its cells intact. Iteration
+   borrows the cell. On destruction clean the message, release the owner (both counts
+   for a pair), then settle the original cell funding. Recycling clears the word.
+   Detached copies of message bytes must own their backing. There is no truncation,
+   extra logical charge or lookup of live code on any of these paths
+   ([FAIL-10](failure.md#fail-10-cause-chain)). Every RX byte becomes eligible for
+   ordinary PACK-6 reclaim as soon as its last executable owner is gone, even while a
+   chain survives. Formatting uses the recorded owner and ordinal. `core.site_word`
+   and tapes contain the unchanged release-local word, never an address, owner tag or
+   load-order prefix.
 
 ## PACK-10: Refusals
 
@@ -585,12 +619,215 @@ A row of any class that can reach a new stop is listed here with its reason, or 
 to return a failure. `crates/hirsel-core-rt/audit-stops.py` prints, for each row, the
 functions that raise a stop and that the row reaches in the built runtime.
 
+## PACK-14: Loading and calling an entry
+
+PACK-14 through PACK-17 and the owner in PACK-9.7 specify P2b. The language bindings,
+typed adapter and runner cutover are unbuilt. The Rust loader already implements the
+counted image, versioned slot and worker cache (PACK-6). The compiled-module driver
+currently calls a program entry with a fixed signature. The loader check is
+`activate_swaps_at_the_expected_version_within_the_retired_budget` in
+`crates/hirsel-code/src/tests.rs`. The compiled caller and adapter are separate gates below.
+
+**Binding.** `code.load[F](loader, key, identity)` returns `Result[Code[F], LoadError]`.
+`loader` is a host-issued capability for one pool and import policy. Key and entry
+identity are the two PACK-2 digests. The checker requires a closed function type at the
+use, including modes, effects, result anchors and concrete type arguments. It derives
+the signature itself. Source code cannot supply an expected signature digest, mint an
+admission, derive a Loader from a digest, or turn a code address into a callable.
+The host resolves the key through its local PACK-1 binding, obtains the exact bytes by
+digest, checks the PACK-2 header, imports and fixups, and matches the requested entry
+before publishing a new image. An intern hit still requires the binding, policy,
+quarantine and entry checks. A host without a slab uses the PACK-5 signed table as its
+local binding. The result on refusal is the applicable PACK-10 error. An absent identity,
+wrong signature (including a `waits` mismatch), or equal machine layout with a different
+source type gives `NoEntry`. Refusal publishes no handle, slot change or new image.
+
+The typed export's PACK-2 signature is the framed hash under
+`hirsel.pack-export.v1` of the closed PROG-9 callable type text, the PACK-16 hashes of
+each closed parameter referent and result (in order), and the canonical CoreIR lowered
+adapter signature digest, as separate parts. Anchors and region binders use PROG-9
+positional spelling. For a scoped constructor, hash its compiled type row with its
+binders so named, even though its value cannot enter a Held. The entry's waits flag
+must agree. The ABI revision distinguishes these adapters from the program-root ABI.
+An image records the identities of all requested exports as PACK-2 entries.
+
+**Using a handle.** `c(args)`, for `c: Code[F]`, invokes exactly that entry, with the
+call checks, argument order, loans and authority of a call of type `F`. A handle can
+be moved and explicitly shared within its pool. Both handles then keep the same image.
+It has no wire codec or address-based key. Possession permits invocation. It supplies
+none of the capabilities the entry takes. PACK-7 checks the transitive imports,
+including host-instance dependencies, against the pool policy. Supplying a grant to
+a call never widens that mask. Loading and changing a slot require explicit authority.
+A Call borrows its handle through the last return and failure cleanup. It cannot yield
+a free-standing `F` that outlives the handle.
+
+`code.bind(f)` names a closed top-level function in the calling image under the
+inference rules of [PROG-9](programs.md#prog-9-code-descriptors) and produces its
+`Code[F]` under that image's existing authority. Statically linked entries have
+process-lifetime backing. `code.identity(c)` and `code.revision(c)` expose the same
+PROG-9 bytes and optional revision as the named instance, with views anchored in `c`.
+A PROG-9 `StaticFn` remains the plain descriptor for statically bound code. Its
+identity equality and its role in codec derivation stay as specified. It cannot
+denote an entry looked up by key, nor can an unloadable descriptor or bare callable
+escape its image's lifetime, including inside another value. Runner registration and
+execution use `Code` for both linked and loaded entries. They have one dispatch path.
+
+**Selecting a generation.** `code.slot[F](loader)` creates an empty version-0 slot.
+`code.activate(slot, expected, c)` requires write authority to that slot and a handle
+of its pool and type. Pool identity is checked before mutation. A foreign pool gives
+`WrongPool`. Under the slot lock, a stale expected version gives `Stale(current)`.
+A version that would wrap or a retirement exceeding the PACK-6 budget gives
+`Capacity`. Success installs the handle and publishes the incremented version at one
+linearisation point, even on replacement with the same handle. A refusal preserves
+the old entry, version and counts. Dispatch permission alone cannot activate.
+
+`code.dispatch(slot, args…)` returns the entry result in `Ok`, or `Error(Empty)`
+without calling user code for an empty slot. Dispatch selects the entry by PACK-6.
+A cache hit borrows the matching worker-owned generation with a version load and no shared-line write or refcount increment. A miss takes entry and version
+together under the lock. A call overlapping activation may finish on its selected
+generation. A later dispatch cannot combine old code with new metadata. The borrowed
+row cannot be evicted or refreshed out from under a nested call or a suspended frame.
+If the activation leaves worker custody, its continuation takes an owning pin before
+the worker can release the row. Every return address, pending cleanup and resumed call
+is covered until its last use. A Unit owns its generation from spawn through end
+publication. Activation waits for none of them.
+
+## PACK-15: The typed export adapter
+
+Call, Dispatch and Unit use one generated adapter per closed entry. Both native engines
+lower the same CoreIR contract. A synchronous Call takes its caller's task, fiber and
+PACK-11 context. Dispatch binds the selected Place's execution to worker stock. A
+`waits` entry runs only where waiting is allowed, with Unit custody for a parked Place.
+
+1. The adapter takes the current context, a caller-owned, aligned uninitialized
+   result place, then the lowered arguments of `F` in order. Its status reports normal
+   return or Hirsel failure. A zero-sized result needs no writable bytes. No codec,
+   heap argument block or second stack is part of this calling convention.
+2. A `view` place is the caller's actual address, CoreIR `Param::Address` with
+   `Loan::View`. Its owner stays live and its exposed storage frozen through the last
+   use, including cleanup. Overlapping views are legal. A `mut` place is exclusive
+   under OWN-9. The result destination is disjoint from live input loans. No address
+   may escape beyond its declared anchors. A returned view may borrow caller storage
+   only under the result type's anchor contract. A parked activation retains every
+   required owner or the borrow is refused by the checker.
+3. Value parameters observe normal copy and move semantics, including when passed
+   indirectly. A callee that modifies a by-value plain argument and then fails leaves
+   the caller's original value intact. A transferred owner has exactly one cleanup
+   obligation at each point, including before frame admission. A caught failure
+   preserves writes already made through legal mutable loans and effects on capabilities.
+4. Construct directly in the result place. The caller may read, move or drop it only
+   after normal status. Until then the producer owns initialized components, including
+   a pending result if exit cleanup fails. It cleans each exactly once under FAIL-8/9.
+   On failure the destination holds no live value. For assignment, stage the result
+   before replacing a still-live destination. Returning image-backed data, code or
+   cleanup obligations transfers their backing owners before the call's pin ends.
+5. Argument evaluation, frame refusal, byte admission, payer handover, step debits and
+   refunds, cause order and isolate results match a linked call under the same build
+   and bounds (MEM-19/30, FAIL-16/17). Dispatch bookkeeping contributes no language
+   step or byte charge. A run stop follows PACK-13. A hardware code fault follows
+   PACK-9.6. Neither returns a language failure status to an isolate.
+
+## PACK-16: Held values across replacement
+
+`code.hold(take value)` moves one closed, owned-lifetime value into an opaque `Held`.
+Its logical contents are `(type_closure_hash, payload)`. It is local to its pool and
+target ABI. The checker rejects a scoped value, a region-backed value or an embedded
+uncounted reference into unloadable code or data. Erasure cannot add `send`, sharing,
+copy rights or authority. Unqualified Held is task-local. Its transferable form,
+`Held[send]`, requires a statically proved `T: send` when constructed.
+The representation preserves the payload's alignment, live fields and original payer.
+
+**The 32 bytes.** Let `cT` be the *full* [PROG-10](programs.md#prog-10-code-addresses) type
+closure hash. For a type row this is the repository's framed SHA-256
+`H("hirsel.core-closure.v1", c)` with one part, the frozen closure wire encoding.
+Start at the closed root (row zero), number rows on first visit through fields, held
+parts, hook type arguments and hook signatures, and encode their shapes and hooks with
+these local references. Reuse a visited index on recursion. For a scalar or unit
+use the PROG-10 scalar/unit constant rule: the same domain and one part, its
+canonical name in UTF-8.
+
+The Held hash is `H("hirsel.held-type.v1", S(T), cT, graph)` with three framed parts.
+`S` is the UTF-8 PROG-9 type spelling (aliases expanded, nominal package major
+included). The last part retains source distinctions erased by lowering, for example
+the parameter type of a callback nested in a record. Starting at T, visit its closed
+type arguments, callable parameters and result, and declared variant payloads or
+record fields (including private ones) in their written order, recursively, expanding
+each distinct S only once. Within a callable, binders and anchors have PROG-9's
+positional spelling. Emit a SEM-10 `u32` node count, then nodes sorted bytewise by S.
+A node is its SEM-10 length-prefixed S text followed by four lists in the visit order
+above (one result or none). Each list is a `u32` count and the children's S texts.
+Native row bytes already bind field names, offsets determined by the ABI, tags and
+hook identities. Using names for graph edges makes recursive backreferences finite
+and independent of discovery order. No image address, load sequence or backend enters the hash.
+[SEM-10](semantics.md#sem-10-codecs) supplies the storage fingerprint when a program
+chooses to encode its state. Wire compatibility alone cannot authorize a native move:
+a `via` type can store the same bytes under different native layouts.
+
+**Ownership.** A plain self-contained payload needs no image pin and can be copied
+when its type is known. Erased owners move. A payload with drop glue retains one
+strong originating `Code` owner together with the cleanup entry. An embedded owner
+retains its own dependencies. A payload with a literal reference retains its R/NX
+backing. Plain self-contained data contributes zero executable owners after retirement.
+For glue, physical unload waits for the last owner. Destruction invokes the original
+glue under the normal cleanup and funding rules, even after replacement. The pin
+survives failure, derived-field cleanup and any resumable finalizer through completion.
+
+`code.take_as[T](take h)` checks the requested closed type witness, all 32 hash bytes
+and the pool ABI before touching the payload. On success it moves out the value once
+and transfers any backing obligations through the typed value's lifetime. Rebinding to
+an equal type never silently substitutes the new generation's finalizer. On disagreement
+it returns `Error((TypeMismatch, h))`, with the original value, payer and pins intact.
+No payload read, transmute, drop, partial consumption, codec invocation or slot update
+occurs on that path. Programs that choose a conversion use their own codec while the old
+type is still available.
+
+## PACK-17: Runner installed image and Place instance
+
+An `InstalledImage` belongs to one admitted native realization. The installer resolves
+the export entry points, identity/revision bytes, typed call and wire adapters, schema
+descriptors, route keys, binding and argument-check tables, and registration order once.
+Store schema *descriptions* belong here. Opening a particular store, migration, handle
+selection and writer fencing belong to its Place. Validate duplicate keys, bounds and
+bindings before publishing the complete immutable table. Use image-relative entry
+indices inside it and one external image owner, so entries cannot keep their own image
+alive in a cycle. The worker borrows the table and entry under the same generation pin.
+
+A registration builder may exist during installation. No serving task replays the
+registration function or keeps its own map of owning adapter closures. The installer
+separates a capture into immutable checked image input or a typed instance argument.
+Only release-determined immutable data can enter a shared row. Execution-dependent
+selection, grant mint, store or caller handles, budgets and mutable environments come
+from the bound instance or current invocation. An explicit per-launch registration
+budget still receives its existing admission/refusal outcome even on an intern hit.
+Compute, granted, transact, query and fenced-attempt entries retain their registration
+order, identities, schemas, authority checks, store replay and bounds. Local typed
+calls use PACK-15 directly. A wire or journal boundary still runs its declared codec.
+
+Each dormant synchronous Place holds its checkout/identity, selected image slot and
+version, and the references needed to bind its own execution, limits and grants. It
+owns no resident registry copy, worker context, fiber stack or private dispatch maps.
+Binding checks the checkout and selects the slot once for the invocation. Activation
+publishes one coherent installation. In-flight calls, Units and Held owners complete
+under their original generation. H1–H4 and L1–L7 qualify the loaded runner, including
+grant disposal, metered bulk operations, stack refusal, capped compilation, lifetime,
+cause stability, stop isolation, accounting and replay. PACK-13's current single-pool
+limitation leaves independent sibling stop qualification open.
+
+G8c counts the resident delta for 50,000 dormant sync/dispatch Places above the same
+warmed pool with the shared image installed. Count slot arrays, indexes, instance-owned
+allocations, execution/grant backing, allocator slack and committed worker growth.
+Exclude only the shared image paid once. The target is at most 512 B per Place and
+25 MiB total on both 4 KiB Linux and 16 KiB Apple Silicon. The 64-byte hot slot in the
+design is part of that total. G8a/b cover parked Units separately.
+
 ## Gates
 
 | gate | target |
 |---|---|
-| G1c | `activate` at most 10 µs p99 with 16 workers dispatching; no shared-line write per call |
+| G1a | compiled uncontained loaded call versus matched static direct call: at most 5 extra instructions and 2 ns |
+| G1c | bound-slot dispatch to first instruction at most 100 ns p50; `activate` at most 10 µs p99 with 16 workers dispatching; no shared-line write per call |
 | G3 | load of a cached 8 KiB module with 200 fixups at most 50 µs p50 and 250 µs p99; compile and load of an unseen 300-line release through Cranelift at most 30 ms p50 |
+| G8c | 50,000 dormant sync/dispatch Places, at most 512 B/Place and 25 MiB all-in above the shared image (PACK-17) |
 | G10 | hostile compiles: no pack host exit |
 | G11 | hostile runtime: no pack host exit other than the PACK-9 fault stop; dead cohorts fault |
 | G12 | a million load and unload rounds return resident memory to within 2% |

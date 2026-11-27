@@ -49,7 +49,7 @@ webrtc_sfu@1/laws/quiet_speakers_fill_free_slots src=5b0be570e94d42da sig=b511ea
 webrtc_sfu@1/laws/red_recovers_bursty_loss_10 src=b6c129861ddd7e09 sig=aade88618a612837 run=c7b2a52baff70a63 bug=513bd4978f532620 oracle=30a91c9f8d207370 rows=pending
 webrtc_sfu@1/laws/red_recovers_bursty_loss_20 src=9db6adc07dd8a837 sig=aade88618a612837 run=c7b2a52baff70a63 bug=e0eb19fd67a493c8 oracle=d8746b772842d1dc rows=pending
 webrtc_sfu@1/laws/red_steps_down_on_a_clean_leg src=648a80adb081fa59 sig=632c4adfabc78dd8 run=c2c0c6612d4cbb79 bug=ec31ef3d23898fc9 oracle=cdb21342e05c7c2f rows=pending
-webrtc_sfu@1/laws/relay_only_session src=e8890291ca54a09d sig=be54fe9be29abddc run=c2c0c6612d4cbb79 bug=d5afab3f74383985 oracle=3a10fc0b90aceff2 rows=pending
+webrtc_sfu@1/laws/relay_only_session src=e8890291ca54a09d sig=0f6dbe773fdae361 run=c2c0c6612d4cbb79 bug=d5afab3f74383985 oracle=3a10fc0b90aceff2 rows=pending
 webrtc_sfu@1/laws/relay_plan_binds_the_seventeenth_allocation src=b032f4075830dc5d sig=ec31ec3604ecc154 run=5ee3ac062e6ba2d5 bug=a50bb6e0528dd578 oracle=b80dd5522b20d9b3 rows=pending
 webrtc_sfu@1/laws/repair_is_edge_local src=7933fe4b21cf993d sig=fe7bf6d79de98064 run=c7b2a52baff70a63 bug=0d7408b2ed323104 oracle=fdf107cf435070b5 rows=pending
 webrtc_sfu@1/laws/repair_keeps_the_first_packet_at_high_rate src=3e6288b06b69c7f4 sig=0bb0f0df71194285 run=c2c0c6612d4cbb79 bug=9fa4c510e222785e oracle=f11925bc6fe89511 rows=pending
@@ -73,7 +73,7 @@ webrtc_sfu@1/laws/sdp_rfc_examples src=81b5ac44fee02f57 sig=b2bbe468b11154ca run
 webrtc_sfu@1/laws/sdp_totality_property src=663202c21826e3ae sig=34de31124321a58f run=c2c0c6612d4cbb79 bug=6bc05837b8c94a60 oracle=96fd3db1c0ac4d07 rows=pending
 webrtc_sfu@1/laws/sdp_write_no_ice_credentials src=ab8594d690c4b284 sig=eaf02a56bdb49b61 run=c2c0c6612d4cbb79 bug=9691099e65aa7c77 oracle=23847bbbd557caa6 rows=pending
 webrtc_sfu@1/laws/sdp_write_parse_property src=f4d098f1401754f5 sig=45e793508e1bf984 run=c2c0c6612d4cbb79 bug=057461000f91ca41 oracle=4fbeb753100b1165 rows=pending
-webrtc_sfu@1/laws/service_answers_over_the_room src=df8e7dee8cd184be sig=3e224b6e119ca0df run=1fae34646ea48cfc bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending
+webrtc_sfu@1/laws/service_answers_over_the_room src=df8e7dee8cd184be sig=6d4fe6c0beb39692 run=1fae34646ea48cfc bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending
 webrtc_sfu@1/laws/sfu_dtls_fragments_to_the_session_mtu src=a425843f5a0cc091 sig=76106abb0a1c43db run=c2c0c6612d4cbb79 bug=caeb121d21feeb91 oracle=b18b66e71ec207d8 rows=pending
 webrtc_sfu@1/laws/signaling_loss_fails_closed src=6be724f3fd9b7bae sig=7beff3e8f6c99b72 run=c7b2a52baff70a63 bug=1d8c89257f64b087 oracle=1bc13dab3fdd6e00 rows=pending
 webrtc_sfu@1/laws/silent_stream_moves_its_viewers src=7dc2e2d36ee9cae7 sig=9275920d28272d40 run=c2c0c6612d4cbb79 bug=8f8efcf4d03bed97 oracle=768b2f02a319b188 rows=pending

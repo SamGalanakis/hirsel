@@ -680,9 +680,9 @@ fn tombstone_in_schema() -> bool {
 // polynomial, seed or bit order fails it.
 // expect: run fingerprint_reference() = (0x8dbfb7fd6918702c, 0xc15d213aa4d7a795, true)
 fn fingerprint_reference() -> (u64, u64, bool) {
-    let a = result.unwrap(codec.fingerprint(codec.of_u64()))
+    let a = result.unwrap(codec.schema_fingerprint(codec.of_u64()))
     let e = codec.fingerprint_of(list.new())
-    let d = result.unwrap(codec.fingerprint(rows_tomb())) != result.unwrap(codec.fingerprint(rows()))
+    let d = result.unwrap(codec.schema_fingerprint(rows_tomb())) != result.unwrap(codec.schema_fingerprint(rows()))
     (a, e, d)
 }
 
@@ -1765,7 +1765,7 @@ fn at_path(b: Bytes, path: String) -> Bytes {
 // The derived codec's schema is the twin's at the derived path, and so is its fingerprint.
 fn same_schema[T](c: codec.Codec[T], twin: Bytes, path: String) -> bool {
     let want = at_path(twin, path)
-    result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want)
+    result.unwrap(codec.schema(c)) == want && result.unwrap(codec.schema_fingerprint(c)) == codec.fingerprint_of(want)
 }
 
 fn drow_through(writer: Bytes, b: Bytes) -> (u64, u64, i64) {
@@ -2190,7 +2190,7 @@ fn derived_via() -> (bool, bool, u64, (u64, u64), u64, bool, (bool, u64, u64, bo
     let written = enc(c, result.unwrap(dcheck(DRangeWire(lo: 2, hi: 5)))) == ok && prefixes(c, ok)
     let twin = result.unwrap(codec.schema(ranges()))
     let want = repath(repath(twin, "t.Range", "std.tests.codec.DRange"), "t.RangeWire", "std.tests.codec.DRangeWire")
-    let schema = result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want)
+    let schema = result.unwrap(codec.schema(c)) == want && result.unwrap(codec.schema_fingerprint(c)) == codec.fingerprint_of(want)
     let read = match through(c, result.unwrap(codec.schema(c)), ok) {
         Ok(x) => x.w.hi - x.w.lo,
         Error(k) => k
@@ -2224,7 +2224,7 @@ type SHold: codec {
 fn structural[T: codec](c: codec.Codec[T], x: T, hex: String, root: String, least: u64) -> bool {
     let mut want = unhex("03 00000000")
     list.append(mut want, unhex(root))
-    enc(c, x) == unhex(hex) && prefixes(c, unhex(hex)) && result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want) && codec.least(c) == least && same_codec(c, generic_of(), x)
+    enc(c, x) == unhex(hex) && prefixes(c, unhex(hex)) && result.unwrap(codec.schema(c)) == want && result.unwrap(codec.schema_fingerprint(c)) == codec.fingerprint_of(want) && codec.least(c) == least && same_codec(c, generic_of(), x)
 }
 
 fn sample() -> SHold {
@@ -2658,4 +2658,52 @@ fn key_of_opcode_21() -> bool {
         }
     }
     true
+}
+
+// Check values from core/tools/codec_storage_reference.py and SEM-10.
+type StorageDefault: codec {
+    v: u64,
+    w: u64 = 8
+}
+
+type StorageExpr: codec = StorageLit(i64) | StorageCall(String, List[StorageArg])
+
+type StorageArg: codec = StoragePos(StorageExpr) | StorageNamed(String, Option[StorageExpr])
+
+// expect: run storage_fingerprints() = true
+fn storage_fingerprints() -> bool {
+    let row_codec: codec.Codec[DTomb] = codec.of()
+    let sum: codec.Codec[DCut] = codec.of()
+    let tree: codec.Codec[DTree] = codec.of()
+    let tree_list: codec.Codec[List[DTree]] = codec.of_list()
+    let arg: codec.Codec[StorageArg] = codec.of()
+    let expr: codec.Codec[StorageExpr] = codec.of()
+    let def: codec.Codec[StorageDefault] = codec.of()
+    let desc: codec.Codec[codec.Desc[String]] = codec.of()
+    let desc_key: codec.Key[codec.Desc[String]] = codec.key_of()
+    let expected_bytes = unhex("94b65eb6b734757702eb7b7c708630df85875c694acf9c0fbf3806b3532e0949")
+    let key_v1 = unhex("2b2a718bbe0a1d5603f193dd95c26cb1401ae281920cdd347a7d59b92387e55c")
+    let key_v2 = unhex("227d393fde0e3b5ed7179ebe4b7191598bd8f2f56914b4c8d469e64628d33409")
+    let default_7 = unhex("ffc66687bda7256b0016d3b592bc317b53ccc9b54e875bfc17c3fbd69f99dd5c")
+    let default_8 = unhex("cf1a12a57677d3e19402aef711018e0934cb3cd2578bbb8c91c9b095d8c75859")
+    codec.fingerprint(row_codec) == Some(unhex("620678d29024628c15509b5b373c34a91a49dc58ebfd1bd662bb419429aa9b23")) && codec.fingerprint(sum) == Some(unhex("3cc7e5c3e9c4ffc795f0aaf387f789e3c48527d4ebf13cead7f7c90052bd577a")) && codec.fingerprint(tree) == Some(unhex("03ddacf991924c5bc08b8b0b92604db7e7cfa38d7b5547f33c14967a87b400fb")) && codec.fingerprint(tree_list) == Some(unhex("993c86878204a15b884ba24f40669436f2a4936d490d1f209654355e9a223f4c")) && codec.fingerprint(arg) == Some(unhex("e332cacede6161bc22c3dbe395c36804a84faa22c96be239f39c85a3ade132c5")) && codec.fingerprint(expr) == Some(unhex("a7e22caab1941ca96b93e12ea1960ca5ef5742fb073c79c3b616892ae377f30f")) && codec.fingerprint(desc) == Some(unhex("f6b05ee3949ad54684cf58ffbb902dd7cc710117d66bd92d02a8ba69102b283d")) && codec.key_fingerprint(desc_key) == Some(unhex("d31f9de7053802d8822486f203185779993e1c86d6f5b6ff7479050e4e776833")) && codec.fingerprint(codec.of_bytes()) == Some(clone(expected_bytes)) && list_u8_fingerprint() == Some(take expected_bytes) && codec.key_fingerprint(codec.key_string()) == Some(take key_v1) && codec.key_fingerprint(codec.key_string()) != Some(take key_v2) && codec.fingerprint(def) == Some(take default_8) && codec.fingerprint(def) != Some(take default_7) && storage_via_vector()
+}
+
+fn storage_via_vector() -> bool {
+    let c: codec.Codec[DRange] = codec.of()
+    // The public descriptor API can name from, whose revision is present
+    // on the same builds as the compiler-only revision of the anchored to.
+    let from = code.describe(dcheck)
+    match code.revision(from) {
+        None => codec.fingerprint(c) == None,
+        Some(_) => match codec.fingerprint(c) {
+            None => false,
+            Some(hash) => list.len(hash) == 32,
+        },
+    }
+}
+
+fn list_u8_fingerprint() -> Option[Bytes] {
+    let c: codec.Codec[List[u8]] = codec.of_list()
+    codec.fingerprint(c)
 }

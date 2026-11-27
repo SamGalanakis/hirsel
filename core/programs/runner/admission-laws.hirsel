@@ -22,8 +22,8 @@ fn w3c_tx(mut tx: store.Tx, h: (), author: Caller, take count: u32) -> Result[By
 
 fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = clone(f)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(cr)), mut key)
     key
 }
 

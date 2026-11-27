@@ -33,9 +33,9 @@
     "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "core/std/codec.hirsel": {
-    "lines": 2695,
-    "raise_revision": 2,
-    "reason": "vector-single-open-design-3101"
+    "lines": 2986,
+    "raise_revision": 3,
+    "reason": "codec-fingerprint-build-3244: SEM-10 storage descriptor emission and reference checks"
   },
   "core/std/float.hirsel": {
     "lines": 2263,
@@ -86,9 +86,9 @@
     "reason": "sim-multinode-c1c3-2974"
   },
   "core/std/tests/codec.hirsel": {
-    "lines": 2680,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2709,
+    "raise_revision": 2,
+    "reason": "codec-fingerprint-build-3244: SEM-10 storage descriptor emission and reference checks"
   },
   "core/std/tests/http_connection.hirsel": {
     "lines": 1880,
@@ -223,9 +223,9 @@
     "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2590,
-    "raise_revision": 7,
-    "reason": "brownout-mem30-metering-3197"
+    "lines": 2596,
+    "raise_revision": 8,
+    "reason": "codec-fingerprint-build-3244: SEM-10 storage descriptor emission and reference checks"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2853
@@ -358,7 +358,9 @@
     "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-resolve/src/resolve.rs": {
-    "lines": 1503
+    "lines": 1527,
+    "raise_revision": 1,
+    "reason": "codec-fingerprint-build-3244: SEM-10 storage descriptor emission and reference checks"
   },
   "crates/hirsel-core-resolve/src/tests.rs": {
     "lines": 1292,

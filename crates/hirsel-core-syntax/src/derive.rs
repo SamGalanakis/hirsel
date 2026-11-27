@@ -366,7 +366,7 @@ struct Payload<'a> {
 }
 /// A field type as section 0's table reads it.
 enum Ty<'a> {
-    /// `put_X`, `take_X`, `schema_X` and the width X encodes to.
+    /// `put_X`, `take_X` and the width X encodes to.
     Scalar(&'static str, u64),
     /// Element type and its source: Bytes synthesizes u8 from the written Bytes.
     List(&'a str, &'a str),
@@ -1287,26 +1287,10 @@ impl<'a> Gen<'a> {
             Ty::With(t) => format!("{c}take_with(b$, mut at$, {})?", self.of(t)),
         }
     }
-    fn schema(&mut self, ty: &Ty<'a>) -> String {
+    fn schema(&mut self, text: &'a str) -> String {
         let c = self.c;
-        match *ty {
-            Ty::Scalar(x, _) => format!("    {c}schema_{x}(mut s$)\n"),
-            Ty::List(e, source) => {
-                format!("    {c}schema_list(mut s$, {})?\n", self.of_at(e, source))
-            }
-            Ty::Option(e) => format!("    {c}schema_option(mut s$, {})?\n", self.of(e)),
-            Ty::Map(k, w) => format!(
-                "    {c}schema_map(mut s$, {}, {})?\n",
-                self.of(k),
-                self.of(w)
-            ),
-            Ty::Result(t, e) => format!(
-                "    {c}schema_result(mut s$, {}, {})?\n",
-                self.of(t),
-                self.of(e)
-            ),
-            Ty::With(t) => format!("    {c}schema_of(mut s$, {})?\n", self.of(t)),
-        }
+        let codec = self.of(text);
+        format!("    {c}schema_of(mut s$, {codec})?\n")
     }
     /// The fewest bytes a value of `ty` encodes to: a constant, or a `least` call.
     fn least(&mut self, ty: &Ty<'a>) -> Least {
@@ -1376,10 +1360,8 @@ impl<'a> Gen<'a> {
         let args = format!(
             "code.describe({name}$encode), code.describe({name}$decode), code.describe({name}$schema), {least}"
         );
-        let make = match empty {
-            Some(empty) => format!("{c}make_derived({args}, {empty})"),
-            None => format!("{c}make({args})"),
-        };
+        let empty = empty.as_deref().unwrap_or("false");
+        let make = format!("{c}storage_make({args}, {empty})");
         let body = format!("{lets}    {make}\n");
         self.function(out, &header, &body);
     }
@@ -1502,7 +1484,9 @@ impl<'a> Gen<'a> {
             && let Some(v) = &decl.via
         {
             let representation = self.of(v.wire);
-            return format!("    {c}schema_of(mut s$, {representation})\n");
+            return format!(
+                "    if {c}storage_mode(s$) {{\n        return {c}storage_desc(mut s$, {representation})\n    }}\n    {c}schema_of(mut s$, {representation})\n"
+            );
         }
         let mut s = format!(
             "    {c}define(mut s$, \"{}\", {})?\n",
@@ -1515,6 +1499,12 @@ impl<'a> Gen<'a> {
         }
         if let Some(v) = &decl.via {
             let r = self.of(v.wire);
+            let to = v.to;
+            let from = v.from;
+            let _ = writeln!(
+                s,
+                "    if {c}storage_mode(s$) {{\n        return {c}storage_via(mut s$, {r}, c$, {c}storage_to(c$, {to}), code.describe({from}))\n    }}"
+            );
             let _ = writeln!(
                 s,
                 "    if {c}via(mut s$)? {{\n        return Ok(())\n    }}\n    {c}schema_of(mut s$, {r})?"
@@ -1537,7 +1527,8 @@ impl<'a> Gen<'a> {
                     match (e.removed, e.default) {
                         (true, _) => {
                             let _ = writeln!(s, "    {c}removed_field(mut s$, \"{}\")?", e.name);
-                            s += &self.schema(&e.ty);
+                            s += &self.schema(e.text);
+                            let _ = writeln!(s, "    {c}storage_field_end(mut s$)");
                         }
                         (false, Some(v)) => {
                             let f = self.of(e.text);
@@ -1549,7 +1540,8 @@ impl<'a> Gen<'a> {
                         }
                         (false, None) => {
                             let _ = writeln!(s, "    {c}field(mut s$, \"{}\")?", e.name);
-                            s += &self.schema(&e.ty);
+                            s += &self.schema(e.text);
+                            let _ = writeln!(s, "    {c}storage_field_end(mut s$)");
                         }
                     }
                     let code = s.split_off(start);
@@ -1571,7 +1563,7 @@ impl<'a> Gen<'a> {
                         v.payload.len()
                     );
                     for p in &v.payload {
-                        let code = self.schema(&p.ty);
+                        let code = self.schema(p.text);
                         s += &self.mapped.mark(p.source, code);
                     }
                     let code = s.split_off(start);

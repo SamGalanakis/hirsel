@@ -363,7 +363,7 @@ pub fn main(argv: Args) -> Result[(), Exit] {{
     for i in 0u64 .. {count}u64 {{
         result.unwrap(runner.compute(mut r, entries[i], 4096u64, runner.DEFAULT_STEPS))
     }}
-    let fp = result.unwrap(std.codec.fingerprint(std.codec.of_u64()))
+    let fp = result.unwrap(std.codec.schema_fingerprint(std.codec.of_u64()))
     let key = runner.entry_key(code.identity(entries[pick]), fp, fp)
     let mut arg: Bytes = list.new()
     std.codec.put_u64(10u64, mut arg)

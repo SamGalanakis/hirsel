@@ -29,17 +29,22 @@ pub opaque type Codec[T]: shareable + send {
     describer: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]],
     smallest: u64,
     empty: bool,
+    structural: bool,
 }
 
-/// A codec from its parts; a generated codec calls this once per type.
+/// An opaque codec from its parts.
 /// Ex: `codec.make(code.describe(row_encode), code.describe(row_decode), code.describe(row_schema), 9)`
 pub fn make[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]], n: u64) -> Codec[T] {
     make_derived(e, d, w, n, false)
 }
 
-/// The maker used by derivation, which knows whether the type has any encodings.
+/// An opaque codec from its parts, with an explicit empty flag.
 pub fn make_derived[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]], n: u64, empty: bool) -> Codec[T] {
-    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty)
+    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: false)
+}
+
+fn storage_make[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]], n: u64, empty: bool) -> Codec[T] {
+    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: true)
 }
 
 /// The codec's revision: the code revisions (PROG-9) of its encoder, decoder and
@@ -53,6 +58,43 @@ pub fn revision[T](c: Codec[T]) -> Option[Bytes] {
 /// A key codec's revision, as `revision` gives a codec's.
 pub fn key_revision[T](k: Key[T]) -> Option[Bytes] {
     revisions(code.revision(k.encoder), code.revision(k.decoder), code.revision(k.describer))
+}
+
+/// SHA-256 storage identity under SEM-10. Opaque and via parts need code revisions.
+pub fn fingerprint[T](c: Codec[T]) -> Option[Bytes] {
+    if !c.structural {
+        return opaque_fingerprint(c)
+    }
+    let mut s = storage_builder(false)
+    result.unwrap(schema_of(mut s, c))
+    storage_finish(s)
+}
+
+/// SHA-256 storage identity of a key codec, including its ordering rule.
+pub fn key_fingerprint[T](k: Key[T]) -> Option[Bytes] {
+    if !k.structural {
+        return opaque_key_fingerprint(k)
+    }
+    let mut s = storage_builder(true)
+    result.unwrap(schema_key(mut s, k))
+    storage_finish(s)
+}
+
+fn opaque_fingerprint[T](c: Codec[T]) -> Option[Bytes] {
+    let Some(take raw) = revision(c) else {
+        return None
+    }
+    let mut data = take raw
+    put_u64(c.smallest, mut data)
+    put_bool(c.empty, mut data)
+    Some(codec_storage.hash("hirsel.codec-opaque.v1", data))
+}
+
+fn opaque_key_fingerprint[T](k: Key[T]) -> Option[Bytes] {
+    let Some(data) = key_revision(k) else {
+        return None
+    }
+    Some(codec_storage.hash("hirsel.key-opaque.v1", data))
 }
 
 fn revisions(encoder: Option[View[Bytes]], decoder: Option[View[Bytes]], describer: Option[View[Bytes]]) -> Option[Bytes] {
@@ -577,13 +619,13 @@ pub fn of[T: codec]() -> Codec[T] {
 // elements, so a value encodes as the same type does as a field.
 /// The codec of List[E]: the u32 count, then each element. Ex: `let c: Codec[List[u64]] = codec.of()`
 pub fn of_list[E: codec]() -> Codec[List[E]] {
-    make(code.describe(list_encode), code.describe(list_decode), code.describe(describe_list), 4)
+    storage_make(code.describe(list_encode), code.describe(list_decode), code.describe(describe_list), 4, false)
 }
 
 /// The codec of Bytes (List[u8]), which `of` resolves to at List[u8]: the u32 count, then
 /// the bytes, moved in bulk. Its bytes, charges, failures and schema are of_list's at u8.
 pub fn of_bytes() -> Codec[Bytes] {
-    make(code.describe(put_bytes), code.describe(take_bytes), code.describe(describe_bytes), 4)
+    storage_make(code.describe(put_bytes), code.describe(take_bytes), code.describe(describe_bytes), 4, false)
 }
 
 /// The count, then the bytes. out grows as pushing them one by one grows it, by one
@@ -627,19 +669,19 @@ fn describe_bytes(mut s: Schema, _c: Codec[Bytes]) -> Result[(), EncodeError] {
 
 /// The codec of Option[E]: tag 0 for None, or tag 1 then the value.
 pub fn of_option[E: codec]() -> Codec[Option[E]] {
-    make(code.describe(option_encode), code.describe(option_decode), code.describe(describe_option), 4)
+    storage_make(code.describe(option_encode), code.describe(option_decode), code.describe(describe_option), 4, false)
 }
 
 /// The codec of Map[K, V]: the u32 count, then key and value per entry in insertion order.
 pub fn of_map[K: key + codec, V: codec]() -> Codec[Map[K, V]] {
-    make(code.describe(map_encode), code.describe(map_decode), code.describe(describe_map), 4)
+    storage_make(code.describe(map_encode), code.describe(map_decode), code.describe(describe_map), 4, false)
 }
 
 /// The codec of Result[T, E]: tag 0 then the Ok value, or tag 1 then the Error value.
 pub fn of_result[T: codec, E: codec]() -> Codec[Result[T, E]] {
     let ct: Codec[T] = of()
     let ce: Codec[E] = of()
-    make_derived(code.describe(result_encode), code.describe(result_decode), code.describe(describe_result), 4, ct.empty && ce.empty)
+    storage_make(code.describe(result_encode), code.describe(result_decode), code.describe(describe_result), 4, ct.empty && ce.empty)
 }
 
 fn list_encode[E: codec](xs: List[E], mut out: Bytes) -> Result[(), EncodeError] {
@@ -709,15 +751,17 @@ fn encode_unit(x: (), mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_unit() -> Codec[()] {
-    make(code.describe(encode_unit), code.describe(take_unit), code.describe(describe_unit), 0)
+    storage_make(code.describe(encode_unit), code.describe(take_unit), code.describe(describe_unit), 0, false)
 }
 
 fn take_never(b: Bytes, mut at: u64) -> Result[Never, DecodeError] {
     Error(Invalid(at))
 }
 
+const NEVER_RULE: u32 = 1
+
 fn describe_never(mut s: Schema, _c: Codec[Never]) -> Result[(), EncodeError] {
-    opcode(mut s, 20)
+    schema_atom(mut s, 20, "never", NEVER_RULE, "", 0)
     Ok(())
 }
 
@@ -726,7 +770,7 @@ fn encode_never(x: Never, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_never() -> Codec[Never] {
-    make_derived(code.describe(encode_never), code.describe(take_never), code.describe(describe_never), 0, true)
+    storage_make(code.describe(encode_never), code.describe(take_never), code.describe(describe_never), 0, true)
 }
 
 fn encode_bool(x: bool, mut out: Bytes) -> Result[(), EncodeError] {
@@ -735,7 +779,7 @@ fn encode_bool(x: bool, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_bool() -> Codec[bool] {
-    make(code.describe(encode_bool), code.describe(take_bool), code.describe(describe_bool), 1)
+    storage_make(code.describe(encode_bool), code.describe(take_bool), code.describe(describe_bool), 1, false)
 }
 
 fn encode_char(x: char, mut out: Bytes) -> Result[(), EncodeError] {
@@ -744,7 +788,7 @@ fn encode_char(x: char, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_char() -> Codec[char] {
-    make(code.describe(encode_char), code.describe(take_char), code.describe(describe_char), 4)
+    storage_make(code.describe(encode_char), code.describe(take_char), code.describe(describe_char), 4, false)
 }
 
 fn encode_u8(x: u8, mut out: Bytes) -> Result[(), EncodeError] {
@@ -753,7 +797,7 @@ fn encode_u8(x: u8, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_u8() -> Codec[u8] {
-    make(code.describe(encode_u8), code.describe(take_u8), code.describe(describe_u8), 1)
+    storage_make(code.describe(encode_u8), code.describe(take_u8), code.describe(describe_u8), 1, false)
 }
 
 fn encode_u16(x: u16, mut out: Bytes) -> Result[(), EncodeError] {
@@ -762,7 +806,7 @@ fn encode_u16(x: u16, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_u16() -> Codec[u16] {
-    make(code.describe(encode_u16), code.describe(take_u16), code.describe(describe_u16), 2)
+    storage_make(code.describe(encode_u16), code.describe(take_u16), code.describe(describe_u16), 2, false)
 }
 
 fn encode_u32(x: u32, mut out: Bytes) -> Result[(), EncodeError] {
@@ -771,7 +815,7 @@ fn encode_u32(x: u32, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_u32() -> Codec[u32] {
-    make(code.describe(encode_u32), code.describe(take_u32), code.describe(describe_u32), 4)
+    storage_make(code.describe(encode_u32), code.describe(take_u32), code.describe(describe_u32), 4, false)
 }
 
 fn encode_u64(x: u64, mut out: Bytes) -> Result[(), EncodeError] {
@@ -780,7 +824,7 @@ fn encode_u64(x: u64, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_u64() -> Codec[u64] {
-    make(code.describe(encode_u64), code.describe(take_u64), code.describe(describe_u64), 8)
+    storage_make(code.describe(encode_u64), code.describe(take_u64), code.describe(describe_u64), 8, false)
 }
 
 fn encode_i8(x: i8, mut out: Bytes) -> Result[(), EncodeError] {
@@ -789,7 +833,7 @@ fn encode_i8(x: i8, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_i8() -> Codec[i8] {
-    make(code.describe(encode_i8), code.describe(take_i8), code.describe(describe_i8), 1)
+    storage_make(code.describe(encode_i8), code.describe(take_i8), code.describe(describe_i8), 1, false)
 }
 
 fn encode_i16(x: i16, mut out: Bytes) -> Result[(), EncodeError] {
@@ -798,7 +842,7 @@ fn encode_i16(x: i16, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_i16() -> Codec[i16] {
-    make(code.describe(encode_i16), code.describe(take_i16), code.describe(describe_i16), 2)
+    storage_make(code.describe(encode_i16), code.describe(take_i16), code.describe(describe_i16), 2, false)
 }
 
 fn encode_i32(x: i32, mut out: Bytes) -> Result[(), EncodeError] {
@@ -807,7 +851,7 @@ fn encode_i32(x: i32, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_i32() -> Codec[i32] {
-    make(code.describe(encode_i32), code.describe(take_i32), code.describe(describe_i32), 4)
+    storage_make(code.describe(encode_i32), code.describe(take_i32), code.describe(describe_i32), 4, false)
 }
 
 fn encode_i64(x: i64, mut out: Bytes) -> Result[(), EncodeError] {
@@ -816,7 +860,7 @@ fn encode_i64(x: i64, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_i64() -> Codec[i64] {
-    make(code.describe(encode_i64), code.describe(take_i64), code.describe(describe_i64), 8)
+    storage_make(code.describe(encode_i64), code.describe(take_i64), code.describe(describe_i64), 8, false)
 }
 
 fn encode_f32(x: f32, mut out: Bytes) -> Result[(), EncodeError] {
@@ -825,7 +869,7 @@ fn encode_f32(x: f32, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_f32() -> Codec[f32] {
-    make(code.describe(encode_f32), code.describe(take_f32), code.describe(describe_f32), 4)
+    storage_make(code.describe(encode_f32), code.describe(take_f32), code.describe(describe_f32), 4, false)
 }
 
 fn encode_f64(x: f64, mut out: Bytes) -> Result[(), EncodeError] {
@@ -834,16 +878,16 @@ fn encode_f64(x: f64, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 pub fn of_f64() -> Codec[f64] {
-    make(code.describe(encode_f64), code.describe(take_f64), code.describe(describe_f64), 8)
+    storage_make(code.describe(encode_f64), code.describe(take_f64), code.describe(describe_f64), 8, false)
 }
 
 pub fn of_string() -> Codec[String] {
-    make(code.describe(put_string), code.describe(take_string), code.describe(describe_string), 4)
+    storage_make(code.describe(put_string), code.describe(take_string), code.describe(describe_string), 4, false)
 }
 
 /// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
 pub fn of_decode_error() -> Codec[DecodeError] {
-    make(code.describe(decode_error_encode), code.describe(decode_error_decode), code.describe(decode_error_schema), 12)
+    storage_make(code.describe(decode_error_encode), code.describe(decode_error_decode), code.describe(decode_error_schema), 12, false)
 }
 
 fn decode_error_encode(x: DecodeError, mut out: Bytes) -> Result[(), EncodeError] {
@@ -906,19 +950,19 @@ fn decode_error_schema(mut s: Schema, _c: Codec[DecodeError]) -> Result[(), Enco
         return Ok(())
     }
     variant(mut s, "Truncated", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Invalid", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Utf8", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Duplicate", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Trailing", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Schema", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     variant(mut s, "Value", 1)?
-    schema_u64(mut s)
+    schema_of(mut s, of_u64())?
     close(mut s)
     Ok(())
 }
@@ -942,7 +986,8 @@ pub opaque type Schema: shareable + send {
     open: List[u64],
     keys: List[Bytes],
     defs: List[Bytes],
-    defaults: List[SchemaDefault]
+    defaults: List[SchemaDefault],
+    storage: Option[codec_storage.Graph]
 }
 
 pub type SchemaDefault: shareable + send {
@@ -959,98 +1004,293 @@ fn name(mut s: Schema, n: String) -> Result[(), EncodeError] {
     put_string(n, mut s.cur)
 }
 
-pub fn schema_unit(mut s: Schema) {
-    opcode(mut s, 0)
+fn storage_builder(key: bool) -> Schema {
+    let mut s = builder()
+    s.storage = Some(codec_storage.new(key))
+    take s
 }
+
+fn storage_mode(s: Schema) -> bool {
+    match s.storage {
+        Some(_) => true,
+        None => false
+    }
+}
+
+fn storage_finish(s: Schema) -> Option[Bytes] {
+    if let Some(g) = s.storage {
+        codec_storage.finish(g)
+    } else {
+        None
+    }
+}
+
+fn storage_type[T](_x: T) {}
+
+fn storage_enter[T](mut s: Schema, marker: StaticFn[fn(T)]) -> Option[(u64, Option[u64])] {
+    let offset = list.len(s.cur)
+    if let Some(mut g) = s.storage {
+        codec_storage.enter(mut g, marker, offset)
+    } else {
+        None
+    }
+}
+
+fn storage_leave(mut s: Schema, i: u64, parent: Option[u64], take saved: Bytes) {
+    let descriptor = replace(mut s.cur, take saved)
+    if let Some(mut g) = s.storage {
+        codec_storage.leave(mut g, i, parent, take descriptor)
+    }
+}
+
+fn storage_external(mut s: Schema, take digest: Option[Bytes]) {
+    match take digest {
+        Some(b) => {
+            put_byte(mut s.cur, 0)
+            list.append(mut s.cur, b)
+        }
+        None => {
+            if let Some(mut g) = s.storage {
+                codec_storage.unavailable(mut g)
+            }
+        }
+    }
+}
+
+fn storage_family(mut data: Bytes, family: String, version: u32) {
+    result.unwrap(put_string(family, mut data))
+    put_u32(version, mut data)
+}
+
+fn schema_atom(mut s: Schema, tag: u8, family: String, version: u32, key_family: String, key_version: u32) {
+    if let Some(g) = s.storage {
+        if codec_storage.is_key(g) {
+            storage_family(mut s.cur, key_family, key_version)
+        } else {
+            storage_family(mut s.cur, family, version)
+        }
+    } else {
+        opcode(mut s, tag)
+    }
+}
+
+fn storage_nominal(mut s: Schema, family: String, version: u32) {
+    storage_family(mut s.cur, family, version)
+    if let Some(mut g) = s.storage {
+        codec_storage.nominal(mut g)
+    }
+    if let Some(g) = s.storage {
+        let path = codec_storage.path(g)
+        result.unwrap(put_count(list.len(path), mut s.cur))
+        list.append(mut s.cur, path)
+    }
+}
+
+fn storage_field_end(mut s: Schema) {
+    if storage_mode(s) {
+        put_byte(mut s.cur, 0)
+    }
+}
+
+// The checker emits a revision carrier for a via codec's named `to` function.
+fn storage_to[T](_owner: Codec[T], _to: fn(T)) -> StaticFn[fn(T)] {
+    fail("storage_to is emitted by the checker")
+}
+
+const VIA_RULE: u32 = 1
+
+fn storage_via[T, R, E](mut s: Schema, c: Codec[R], _owner: Codec[T], to: StaticFn[fn(T)], from: StaticFn[fn(take R) -> Result[T, E]]) -> Result[(), EncodeError] {
+    storage_nominal(mut s, "via", VIA_RULE)
+    schema_of(mut s, c)?
+    let (Some(a), Some(b)) = (code.revision(to), code.revision(from)) else {
+        if let Some(mut g) = s.storage {
+            codec_storage.unavailable(mut g)
+        }
+        return Ok(())
+    }
+    list.append(mut s.cur, a)
+    list.append(mut s.cur, b)
+    Ok(())
+}
+
+const DESC_RULE: u32 = 1
+
+fn storage_desc[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
+    storage_family(mut s.cur, "desc", DESC_RULE)
+    schema_of(mut s, c)
+}
+
+const UNIT_RULE: u32 = 1
+
+const KEY_UNIT_RULE: u32 = 1
+
+pub fn schema_unit(mut s: Schema) {
+    schema_atom(mut s, 0, "unit", UNIT_RULE, "key.unit", KEY_UNIT_RULE)
+}
+
+const BOOL_RULE: u32 = 1
+
+const KEY_BOOL_RULE: u32 = 1
 
 pub fn schema_bool(mut s: Schema) {
-    opcode(mut s, 1)
+    schema_atom(mut s, 1, "bool", BOOL_RULE, "key.bool", KEY_BOOL_RULE)
 }
+
+const CHAR_RULE: u32 = 1
 
 pub fn schema_char(mut s: Schema) {
-    opcode(mut s, 2)
+    schema_atom(mut s, 2, "char", CHAR_RULE, "", 0)
 }
+
+const U8_RULE: u32 = 1
+
+const KEY_U8_RULE: u32 = 1
 
 pub fn schema_u8(mut s: Schema) {
-    opcode(mut s, 3)
+    schema_atom(mut s, 3, "u8", U8_RULE, "key.u8", KEY_U8_RULE)
 }
+
+const U16_RULE: u32 = 1
+
+const KEY_U16_RULE: u32 = 1
 
 pub fn schema_u16(mut s: Schema) {
-    opcode(mut s, 4)
+    schema_atom(mut s, 4, "u16", U16_RULE, "key.u16", KEY_U16_RULE)
 }
+
+const U32_RULE: u32 = 1
+
+const KEY_U32_RULE: u32 = 1
 
 pub fn schema_u32(mut s: Schema) {
-    opcode(mut s, 5)
+    schema_atom(mut s, 5, "u32", U32_RULE, "key.u32", KEY_U32_RULE)
 }
+
+const U64_RULE: u32 = 1
+
+const KEY_U64_RULE: u32 = 1
 
 pub fn schema_u64(mut s: Schema) {
-    opcode(mut s, 6)
+    schema_atom(mut s, 6, "u64", U64_RULE, "key.u64", KEY_U64_RULE)
 }
+
+const I8_RULE: u32 = 1
+
+const KEY_I8_RULE: u32 = 1
 
 pub fn schema_i8(mut s: Schema) {
-    opcode(mut s, 7)
+    schema_atom(mut s, 7, "i8", I8_RULE, "key.i8", KEY_I8_RULE)
 }
+
+const I16_RULE: u32 = 1
+
+const KEY_I16_RULE: u32 = 1
 
 pub fn schema_i16(mut s: Schema) {
-    opcode(mut s, 8)
+    schema_atom(mut s, 8, "i16", I16_RULE, "key.i16", KEY_I16_RULE)
 }
+
+const I32_RULE: u32 = 1
+
+const KEY_I32_RULE: u32 = 1
 
 pub fn schema_i32(mut s: Schema) {
-    opcode(mut s, 9)
+    schema_atom(mut s, 9, "i32", I32_RULE, "key.i32", KEY_I32_RULE)
 }
+
+const I64_RULE: u32 = 1
+
+const KEY_I64_RULE: u32 = 1
 
 pub fn schema_i64(mut s: Schema) {
-    opcode(mut s, 10)
+    schema_atom(mut s, 10, "i64", I64_RULE, "key.i64", KEY_I64_RULE)
 }
+
+const F32_RULE: u32 = 1
 
 pub fn schema_f32(mut s: Schema) {
-    opcode(mut s, 11)
+    schema_atom(mut s, 11, "f32", F32_RULE, "", 0)
 }
+
+const F64_RULE: u32 = 1
 
 pub fn schema_f64(mut s: Schema) {
-    opcode(mut s, 12)
+    schema_atom(mut s, 12, "f64", F64_RULE, "", 0)
 }
 
+const STRING_RULE: u32 = 1
+
+const KEY_STRING_RULE: u32 = 1
+
 pub fn schema_string(mut s: Schema) {
-    opcode(mut s, 13)
+    schema_atom(mut s, 13, "string", STRING_RULE, "key.string", KEY_STRING_RULE)
 }
 
 /// The type c writes, in place: a field's, an element's, a type argument's.
 pub fn schema_of[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
+    if storage_mode(s) {
+        if !c.structural {
+            storage_external(mut s, opaque_fingerprint(c))
+            return Ok(())
+        }
+        let marker: StaticFn[fn(T)] = code.describe(storage_type)
+        let Some((i, parent)) = storage_enter(mut s, marker) else {
+            return Ok(())
+        }
+        let saved = replace(mut s.cur, list.new())
+        (code.callable(c.describer))(mut s, c)?
+        storage_leave(mut s, i, parent, take saved)
+        return Ok(())
+    }
     (code.callable(c.describer))(mut s, c)
 }
+
+const LIST_RULE: u32 = 1
 
 pub fn schema_list[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
-    opcode(mut s, 14)
-    (code.callable(c.describer))(mut s, c)
+    schema_atom(mut s, 14, "list", LIST_RULE, "", 0)
+    schema_of(mut s, c)
 }
+
+const MAP_RULE: u32 = 1
 
 pub fn schema_map[K: key, V](mut s: Schema, ck: Codec[K], cv: Codec[V]) -> Result[(), EncodeError] {
-    opcode(mut s, 15)
-    (code.callable(ck.describer))(mut s, ck)?
-    (code.callable(cv.describer))(mut s, cv)
+    schema_atom(mut s, 15, "map", MAP_RULE, "", 0)
+    schema_of(mut s, ck)?
+    schema_of(mut s, cv)
 }
+
+const OPTION_RULE: u32 = 1
 
 pub fn schema_option[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
-    opcode(mut s, 16)
-    (code.callable(c.describer))(mut s, c)
+    schema_atom(mut s, 16, "option", OPTION_RULE, "", 0)
+    schema_of(mut s, c)
 }
 
+const RESULT_RULE: u32 = 1
+
 pub fn schema_result[T, E](mut s: Schema, ct: Codec[T], ce: Codec[E]) -> Result[(), EncodeError] {
-    opcode(mut s, 17)
-    (code.callable(ct.describer))(mut s, ct)?
-    (code.callable(ce.describer))(mut s, ce)
+    schema_atom(mut s, 17, "result", RESULT_RULE, "", 0)
+    schema_of(mut s, ct)?
+    schema_of(mut s, ce)
 }
+
+const TUPLE_RULE: u32 = 1
+
+const KEY_TUPLE_RULE: u32 = 1
 
 /// A tuple of n components; schema_of each follows.
 pub fn schema_tuple(mut s: Schema, n: u64) -> Result[(), EncodeError] {
-    opcode(mut s, 18)
+    schema_atom(mut s, 18, "tuple", TUPLE_RULE, "key.tuple", KEY_TUPLE_RULE)
     put_count(n, mut s.cur)
 }
 
 /// Starts the definition of a nominal type at its path; then its type arguments
 /// (`argument`), then `record`, `sum` or `via`, its entries and `close`.
 pub fn define(mut s: Schema, path: String, arguments: u64) -> Result[(), EncodeError] {
+    if storage_mode(s) {
+        return Ok(())
+    }
     let parent = replace(mut s.cur, list.new())
     push_own(mut s.saved, take parent)
     name(mut s, path)?
@@ -1059,17 +1299,34 @@ pub fn define(mut s: Schema, path: String, arguments: u64) -> Result[(), EncodeE
 
 /// One type argument of the definition begun by `define`.
 pub fn argument[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
+    if storage_mode(s) {
+        return Ok(())
+    }
     (code.callable(c.describer))(mut s, c)
 }
 
 /// A record of n entries (fields and removed fields). Ok(true) when the definition is
 /// already written: its reference is, and the schema function returns at once.
+const RECORD_RULE: u32 = 1
+
 pub fn record(mut s: Schema, n: u64) -> Result[bool, EncodeError] {
+    if storage_mode(s) {
+        storage_nominal(mut s, "record", RECORD_RULE)
+        put_count(n, mut s.cur)?
+        return Ok(false)
+    }
     body(mut s, 0, n)
 }
 
 /// A sum of n variants, live and removed, in declared order; as `record`.
+const SUM_RULE: u32 = 1
+
 pub fn sum(mut s: Schema, n: u64) -> Result[bool, EncodeError] {
+    if storage_mode(s) {
+        storage_nominal(mut s, "sum", SUM_RULE)
+        put_count(n, mut s.cur)?
+        return Ok(false)
+    }
     body(mut s, 1, n)
 }
 
@@ -1132,6 +1389,9 @@ fn restore(mut s: Schema) {
 
 /// Ends the definition begun by the latest `define` that `record`, `sum` or `via` left open.
 pub fn close(mut s: Schema) {
+    if storage_mode(s) {
+        return
+    }
     let index = match list.pop(mut s.open) {
         Some(i) => i,
         None => return
@@ -1155,7 +1415,15 @@ pub fn field(mut s: Schema, path: String) -> Result[(), EncodeError] {
 /// the field. Writes the type too.
 pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Result[(), EncodeError] {
     field(mut s, path)?
-    (code.callable(c.describer))(mut s, c)?
+    schema_of(mut s, c)?
+    if storage_mode(s) {
+        let mut value: Bytes = list.new()
+        (code.callable(c.encoder))(v, mut value)?
+        put_byte(mut s.cur, 1)
+        put_count(list.len(value), mut s.cur)?
+        list.append(mut s.cur, value)
+        return Ok(())
+    }
     let def = s.open[list.len(s.open) - 1]
     let mut value: Bytes = list.new()
     (code.callable(c.encoder))(v, mut value)?
@@ -1194,7 +1462,7 @@ fn push_plain(mut xs: List[u64], x: u64) {
 }
 
 fn builder() -> Schema {
-    Schema(cur: list.new(), saved: list.new(), open: list.new(), keys: list.new(), defs: list.new(), defaults: list.new())
+    Schema(cur: list.new(), saved: list.new(), open: list.new(), keys: list.new(), defs: list.new(), defaults: list.new(), storage: None)
 }
 
 fn built[T](c: Codec[T]) -> Result[Schema, EncodeError] {
@@ -1294,12 +1562,12 @@ pub fn restore_schema(raw: Bytes, take defaults: List[SchemaDefault]) -> Result[
     }
     let mut expression: Bytes = list.with_capacity(list.len(raw) - root)
     list.append(mut expression, list.slice(raw, root, list.len(raw)))
-    Ok(Schema(cur: take expression, saved: list.new(), open: list.new(), keys: list.new(), defs: take defs, defaults: take defaults))
+    Ok(Schema(cur: take expression, saved: list.new(), open: list.new(), keys: list.new(), defs: take defs, defaults: take defaults, storage: None))
 }
 
 /// The stable fingerprint of c's schema: CRC-64-AVRO (Rabin) of its bytes, so equal
 /// schemas, tombstones and variant order included, have equal fingerprints.
-pub fn fingerprint[T](c: Codec[T]) -> Result[u64, EncodeError] {
+pub fn schema_fingerprint[T](c: Codec[T]) -> Result[u64, EncodeError] {
     let b = schema(c)?
     Ok(fingerprint_of(b))
 }
@@ -2340,7 +2608,8 @@ fn make_desc[T](take x: T) -> Result[Desc[T], DecodeError] {
 pub opaque type Key[T] {
     encoder: StaticFn[fn(T, mut Bytes) -> ()],
     decoder: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]],
-    describer: StaticFn[fn(mut Schema) -> Result[(), EncodeError]]
+    describer: StaticFn[fn(mut Schema) -> Result[(), EncodeError]],
+    structural: bool
 }
 
 /// The ordered key codec of T. The checker selects the maker per instance.
@@ -2349,7 +2618,7 @@ pub fn key_of[T]() -> Key[T] {
 }
 
 fn key_unit() -> Key[()] {
-    key_make(code.describe(put_unit), code.describe(take_unit), code.describe(key_schema_unit))
+    Key(encoder: code.describe(put_unit), decoder: code.describe(take_unit), describer: code.describe(key_schema_unit), structural: true)
 }
 
 fn key_schema_unit(mut s: Schema) -> Result[(), EncodeError] {
@@ -2375,13 +2644,15 @@ fn take_key_desc[T](b: Bytes, mut at: u64, key: Key[T]) -> Result[Desc[T], Decod
     Ok(Desc(value: take value))
 }
 
+const KEY_DESC_RULE: u32 = 1
+
 fn schema_desc(mut s: Schema) {
-    opcode(mut s, 21)
+    schema_atom(mut s, 21, "", 0, "key.desc", KEY_DESC_RULE)
 }
 
 /// A key codec from its parts. Ex: `codec.key_make(code.describe(id_put), code.describe(id_take), code.describe(id_schema))`
 pub fn key_make[T](e: StaticFn[fn(T, mut Bytes) -> ()], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema) -> Result[(), EncodeError]]) -> Key[T] {
-    Key(encoder: e, decoder: d, describer: w)
+    Key(encoder: e, decoder: d, describer: w, structural: false)
 }
 
 /// Appends x's key bytes to out. Fails: Capacity; out then holds a prefix of them.
@@ -2414,6 +2685,20 @@ pub fn key_schema[T](k: Key[T]) -> Result[Bytes, EncodeError] {
 
 /// A key component's type in a key schema: a tuple key's schema_tuple, then one per part.
 pub fn schema_key[T](mut s: Schema, k: Key[T]) -> Result[(), EncodeError] {
+    if storage_mode(s) {
+        if !k.structural {
+            storage_external(mut s, opaque_key_fingerprint(k))
+            return Ok(())
+        }
+        let marker: StaticFn[fn(T)] = code.describe(storage_type)
+        let Some((i, parent)) = storage_enter(mut s, marker) else {
+            return Ok(())
+        }
+        let saved = replace(mut s.cur, list.new())
+        (code.callable(k.describer))(mut s)?
+        storage_leave(mut s, i, parent, take saved)
+        return Ok(())
+    }
     (code.callable(k.describer))(mut s)
 }
 
@@ -2594,14 +2879,20 @@ pub fn take_key_string(b: Bytes, mut at: u64) -> Result[String, DecodeError] {
     }
 }
 
+const KEY_BYTES_RULE: u32 = 1
+
 fn schema_bytes_type(mut s: Schema) -> Result[(), EncodeError] {
+    if storage_mode(s) {
+        storage_family(mut s.cur, "key.bytes", KEY_BYTES_RULE)
+        return Ok(())
+    }
     opcode(mut s, 14)
     opcode(mut s, 3)
     Ok(())
 }
 
 pub fn key_u8() -> Key[u8] {
-    Key(encoder: code.describe(put_key_u8), decoder: code.describe(take_key_u8), describer: code.describe(key_schema_u8))
+    Key(encoder: code.describe(put_key_u8), decoder: code.describe(take_key_u8), describer: code.describe(key_schema_u8), structural: true)
 }
 
 fn key_schema_u8(mut s: Schema) -> Result[(), EncodeError] {
@@ -2610,7 +2901,7 @@ fn key_schema_u8(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_u16() -> Key[u16] {
-    Key(encoder: code.describe(put_key_u16), decoder: code.describe(take_key_u16), describer: code.describe(key_schema_u16))
+    Key(encoder: code.describe(put_key_u16), decoder: code.describe(take_key_u16), describer: code.describe(key_schema_u16), structural: true)
 }
 
 fn key_schema_u16(mut s: Schema) -> Result[(), EncodeError] {
@@ -2619,7 +2910,7 @@ fn key_schema_u16(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_u32() -> Key[u32] {
-    Key(encoder: code.describe(put_key_u32), decoder: code.describe(take_key_u32), describer: code.describe(key_schema_u32))
+    Key(encoder: code.describe(put_key_u32), decoder: code.describe(take_key_u32), describer: code.describe(key_schema_u32), structural: true)
 }
 
 fn key_schema_u32(mut s: Schema) -> Result[(), EncodeError] {
@@ -2628,7 +2919,7 @@ fn key_schema_u32(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_u64() -> Key[u64] {
-    Key(encoder: code.describe(put_key_u64), decoder: code.describe(take_key_u64), describer: code.describe(key_schema_u64))
+    Key(encoder: code.describe(put_key_u64), decoder: code.describe(take_key_u64), describer: code.describe(key_schema_u64), structural: true)
 }
 
 fn key_schema_u64(mut s: Schema) -> Result[(), EncodeError] {
@@ -2637,7 +2928,7 @@ fn key_schema_u64(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_i8() -> Key[i8] {
-    Key(encoder: code.describe(put_key_i8), decoder: code.describe(take_key_i8), describer: code.describe(key_schema_i8))
+    Key(encoder: code.describe(put_key_i8), decoder: code.describe(take_key_i8), describer: code.describe(key_schema_i8), structural: true)
 }
 
 fn key_schema_i8(mut s: Schema) -> Result[(), EncodeError] {
@@ -2646,7 +2937,7 @@ fn key_schema_i8(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_i16() -> Key[i16] {
-    Key(encoder: code.describe(put_key_i16), decoder: code.describe(take_key_i16), describer: code.describe(key_schema_i16))
+    Key(encoder: code.describe(put_key_i16), decoder: code.describe(take_key_i16), describer: code.describe(key_schema_i16), structural: true)
 }
 
 fn key_schema_i16(mut s: Schema) -> Result[(), EncodeError] {
@@ -2655,7 +2946,7 @@ fn key_schema_i16(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_i32() -> Key[i32] {
-    Key(encoder: code.describe(put_key_i32), decoder: code.describe(take_key_i32), describer: code.describe(key_schema_i32))
+    Key(encoder: code.describe(put_key_i32), decoder: code.describe(take_key_i32), describer: code.describe(key_schema_i32), structural: true)
 }
 
 fn key_schema_i32(mut s: Schema) -> Result[(), EncodeError] {
@@ -2664,7 +2955,7 @@ fn key_schema_i32(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_i64() -> Key[i64] {
-    Key(encoder: code.describe(put_key_i64), decoder: code.describe(take_key_i64), describer: code.describe(key_schema_i64))
+    Key(encoder: code.describe(put_key_i64), decoder: code.describe(take_key_i64), describer: code.describe(key_schema_i64), structural: true)
 }
 
 fn key_schema_i64(mut s: Schema) -> Result[(), EncodeError] {
@@ -2673,7 +2964,7 @@ fn key_schema_i64(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_bool() -> Key[bool] {
-    Key(encoder: code.describe(put_key_bool), decoder: code.describe(take_key_bool), describer: code.describe(key_schema_bool))
+    Key(encoder: code.describe(put_key_bool), decoder: code.describe(take_key_bool), describer: code.describe(key_schema_bool), structural: true)
 }
 
 fn key_schema_bool(mut s: Schema) -> Result[(), EncodeError] {
@@ -2682,11 +2973,11 @@ fn key_schema_bool(mut s: Schema) -> Result[(), EncodeError] {
 }
 
 pub fn key_bytes() -> Key[Bytes] {
-    Key(encoder: code.describe(put_key_bytes), decoder: code.describe(take_key_bytes), describer: code.describe(schema_bytes_type))
+    Key(encoder: code.describe(put_key_bytes), decoder: code.describe(take_key_bytes), describer: code.describe(schema_bytes_type), structural: true)
 }
 
 pub fn key_string() -> Key[String] {
-    Key(encoder: code.describe(put_key_string), decoder: code.describe(take_key_string), describer: code.describe(key_schema_string))
+    Key(encoder: code.describe(put_key_string), decoder: code.describe(take_key_string), describer: code.describe(key_schema_string), structural: true)
 }
 
 fn key_schema_string(mut s: Schema) -> Result[(), EncodeError] {

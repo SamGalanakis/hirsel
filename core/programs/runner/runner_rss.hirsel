@@ -29,9 +29,9 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
 fn k_named() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(named)))
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_string())), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(std.codec.of_string())), mut key)
     let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(carried)), mut key)
     key
 }
 

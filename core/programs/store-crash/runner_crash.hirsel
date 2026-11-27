@@ -94,9 +94,9 @@ const N_PLACE: u64 = 1048576u64
 fn key_of(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(std.codec.of_u64())), mut key)
     let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(carried)), mut key)
     key
 }
 

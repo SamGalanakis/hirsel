@@ -105,7 +105,7 @@ fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner
     let reply: std.codec.Codec[R] = std.codec.of()
     let schema = result.unwrap(runner.query_result_schema(reply, declared))
     let identity = code.identity(f)
-    let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
+    let key = runner.entry_key(identity, result.unwrap(std.codec.schema_fingerprint(args)), std.codec.fingerprint_of(schema))
     Callee(key: take key, kind: Query, args: args, reply: reply)
 }
 

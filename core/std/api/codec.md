@@ -24,9 +24,12 @@ dictionary. Calling `of` at a type without the `codec` bound is refused at the c
 bytes. A refused allocation raises Capacity and leaves the completed prefix in
 out. `decode` and `decode_at` return `Result[T, DecodeError]`. A decode error or an
 allocation refusal releases all temporary storage. `schema(c)` returns the
-bytes a store keeps beside the data, and `fingerprint(c)` returns its
+bytes a store keeps beside the data, and `schema_fingerprint(c)` returns its
 CRC-64-AVRO. Both return `EncodeError` for an unrepresentable count. `fingerprint_of(b)` folds the bytes through
-Avro's 256-entry Rabin table and allocates nothing. `resolve(c, writer)` resolves
+Avro's 256-entry Rabin table and allocates nothing.
+`fingerprint(c)` and `key_fingerprint(k)` return the 32-byte SEM-10 storage identities.
+They include structural rule versions and their inputs, or the exact code revisions
+for opaque parts. They return None when a reached revision is unavailable. `resolve(c, writer)` resolves
 an older writer's schema against c (defaulted fields, tombstones and removed variants) into a `Reader[T]`,
 and `read` and `read_at` decode under it. Resolution and both reads return
 `DecodeError` for data or schema errors. `key_make`, `encode_key` and `decode_key`

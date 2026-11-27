@@ -172,7 +172,7 @@ fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[ru
 fn query_key(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u32())), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(std.codec.of_u32())), mut key)
     let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
@@ -193,8 +193,8 @@ const N_PLACE: u64 = 1048576u64
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(cr)), mut key)
     key
 }
 

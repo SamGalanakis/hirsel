@@ -4,6 +4,8 @@ use super::key_glue::{Code, signature_id};
 use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
+mod describe;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodecOp {
     /// `() -> Codec[T]`: the maker, the tuple row's codec hook.
@@ -507,6 +509,21 @@ impl Derive<'_> {
                 value: result,
             });
         }
+        let structural = Self::address(
+            c,
+            AddressBase::Address(to),
+            &[Step::Field(if self.rows.format == Format::Value {
+                5
+            } else {
+                3
+            })],
+            PlaceTy::Value(Ty::Scalar(Scalar::Bool)),
+        );
+        let value = c.boolean(true);
+        c.inst(Inst::Store {
+            address: structural,
+            value,
+        });
         if self.rows.format != Format::Value {
             Self::returns(c);
             return Ok(());
@@ -776,58 +793,6 @@ impl Derive<'_> {
         Ok(())
     }
 
-    /// `tuple(n)`, then each component's description, into `dest` as the encoder does.
-    fn describe_body(
-        &mut self,
-        c: &mut Code,
-        dest: ValueId,
-        schema: ValueId,
-    ) -> Result<(), String> {
-        let rows = self.rows;
-        let failed = c.block(&[]);
-        let result = Self::address(
-            c,
-            AddressBase::Value(dest),
-            &[],
-            PlaceTy::Declared(rows.written),
-        );
-        let into = Self::address(
-            c,
-            AddressBase::Value(schema),
-            &[],
-            scalar_abi::mut_place(&self.module.types, rows.schema),
-        );
-        if rows.format == Format::Desc {
-            let (desc, signature) = self.desc_helper(CodecOp::Describe);
-            self.call(c, Callee::Direct(desc), signature, &[Arg::Address(into)]);
-        } else {
-            let (tuple, signature) = self.schema_tuple();
-            let n = c.constant(rows.parts.len() as u64);
-            self.call(
-                c,
-                Callee::Direct(tuple),
-                signature,
-                &[Arg::Address(result), Arg::Address(into), Arg::Value(n)],
-            );
-            Self::unless_failed(c, result, failed);
-        }
-        for i in 0..rows.parts.len() {
-            let codec = self.part_codec(c, i)?;
-            let describer = Self::field_fn(c, codec, 2);
-            let env = Self::null(c);
-            let signature = self.part_signature(i, CodecOp::Describe);
-            let mut args = vec![Arg::Address(result), Arg::Value(env), Arg::Address(into)];
-            if rows.format == Format::Value {
-                args.push(Arg::Address(codec));
-            }
-            self.call(c, Callee::Indirect(describer), signature, &args);
-            Self::unless_failed(c, result, failed);
-        }
-        Self::returns(c);
-        c.start(failed);
-        Self::returns(c);
-        Ok(())
-    }
     fn desc_helper(&mut self, op: CodecOp) -> (FuncId, SigId) {
         let rows = self.rows;
         let part = rows.parts[0];

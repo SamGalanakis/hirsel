@@ -9,6 +9,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         want: Option<TyId>,
         n: NodeId,
     ) -> (TyId, Option<ValueId>) {
+        self.describe_item(result, argument, want, n, false)
+    }
+
+    /// A via `to` returns a view anchored to its parameter. It can be named for
+    /// a revision without exposing a callable through the public descriptor API.
+    pub(super) fn storage_to_descriptor(
+        &mut self,
+        result: TyId,
+        witness: NodeId,
+        argument: NodeId,
+        n: NodeId,
+    ) -> (TyId, Option<ValueId>) {
+        let (owner, _) = self.expr(witness, None);
+        let TyKind::Adt(_, arguments) = self.t.kind(self.bare(owner)).clone() else {
+            return self.gap_ty(witness, "codec storage revision has no owner type");
+        };
+        let expected = subst(&mut self.t, result, &arguments);
+        let TyKind::Adt(d, _) = *self.t.kind(expected) else {
+            return self.gap_ty(n, "codec storage revision has no descriptor type");
+        };
+        let parameter = self.t.mk(TyKind::Param(0));
+        let carrier = self.t.mk(TyKind::Adt(d, vec![parameter]));
+        self.describe_item(carrier, argument, Some(expected), n, true)
+    }
+
+    fn describe_item(
+        &mut self,
+        result: TyId,
+        argument: NodeId,
+        want: Option<TyId>,
+        n: NodeId,
+        revision_only: bool,
+    ) -> (TyId, Option<ValueId>) {
         let Some(item) = self.named_callee(argument) else {
             if matches!(self.call_target(argument), Some(Target::Missing)) {
                 self.halt();
@@ -21,10 +54,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return (ERROR, None);
         };
-        let Some(callable) = self.checked_function_item(item, argument) else {
+        let fd = &self.p.fns[item];
+        let callable = if revision_only {
+            fd.callable
+        } else if let Some(callable) = self.checked_function_item(item, argument) {
+            callable
+        } else {
             return (ERROR, None);
         };
-        let fd = &self.p.fns[item];
         let expected = want.and_then(|ty| match self.t.kind(ty) {
             TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::StaticFn) => {
                 Some(args[0])
@@ -46,7 +83,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     for ((mode, ty), (em, et)) in ps.into_iter().zip(es) {
                         fits &= self.unify(ty, et, &mut found) && mode == em;
                     }
-                    fits &= self.unify(r, er, &mut found);
+                    if !revision_only {
+                        fits &= self.unify(r, er, &mut found);
+                    }
                 }
                 (_, TyKind::Hole) => {}
                 _ => fits = false,
@@ -98,7 +137,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // LANG-13 permits a non-waiting item where a waiting callable is
         // expected. The carrier has that type, while its descriptor keeps the
         // source header and uses the item's own adapter.
-        let carried = if expected.is_some_and(|expected| {
+        let carried = if revision_only {
+            expected.expect("the generated codec fixes the owner type")
+        } else if expected.is_some_and(|expected| {
             matches!(
                 self.t.kind(expected),
                 TyKind::Fn(_, _, true, Callable::Plain)
@@ -125,19 +166,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(recipe) = self.code_identity_recipe(item, raw, &args) else {
             return self.gap_ty(argument, "StaticFn identity source is not built");
         };
-        let Some(function) =
+        let function = if revision_only {
+            raw
+        } else if let Some(adapter) =
             self.item_descriptor_adapter(raw, item, &args, ty, n, depends_on_enclosing)
-        else {
+        {
+            adapter
+        } else {
             return (result, None);
         };
         let (identity, length) = if depends_on_enclosing {
-            if let Some(template) = self.nested.get_mut(&function) {
+            if !revision_only && let Some(template) = self.nested.get_mut(&function) {
                 template.descriptor_adapter = Some(raw);
             }
             self.descriptor_recipes.insert(function, recipe);
             (self.e.static_bytes(&[1]), None)
         } else {
-            self.nested.remove(&function);
+            if !revision_only {
+                self.nested.remove(&function);
+            }
             let bytes = recipe.render(&[]).expect("closed descriptor recipe");
             (self.e.static_bytes(&bytes), Some(bytes.len() as u64))
         };

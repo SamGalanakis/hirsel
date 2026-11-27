@@ -531,7 +531,7 @@ Programs declare no storage version of their own. Store's frozen format corpus
 (`test_frozen_format_corpus`) opens and decodes every stored value and key after an upgrade,
 so a rule change without its version increment shows up there.
 
-Version note (2026-11-27, storage fingerprint; not yet built): stores keyed indexes on
+Version note (2026-11-27, storage fingerprint): stores keyed indexes on
 `codec.revision` and `codec.key_revision`, so every toolchain change to a reached std body
 forced a rebuild although no stored byte changed (STORE-SPEC v2.172). The revisions stay, with
 their 96 bytes, for consumers that name code; `fingerprint` and `key_fingerprint` are added.

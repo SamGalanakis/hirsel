@@ -1,0 +1,244 @@
+// SEM-10 descriptor graph. Edges record where to splice references into each node's
+// byte string once the strongly connected components and their fingerprints are known.
+pub opaque type Graph: shareable + send {
+    nodes: List[Node],
+    current: Option[u64],
+    available: bool,
+    key: bool
+}
+
+type Node: shareable + send {
+    identity: Bytes,
+    descriptor: Bytes,
+    edges: List[Edge],
+    nominal: bool
+}
+
+type Edge {
+    offset: u64,
+    target: u64
+}
+
+pub fn new(key: bool) -> Graph {
+    Graph(nodes: list.new(), current: None, available: true, key)
+}
+
+pub fn is_key(g: Graph) -> bool {
+    g.key
+}
+
+// PROG-9 identity of storage_type[T] is framed by a fixed prefix and suffix.
+// The argument in between is the canonical type text used to order the nodes.
+const TYPE_PREFIX: String = "\u{1}std@1/codec/storage_type["
+
+const TYPE_SUFFIX: String = "]($0)->()"
+
+pub fn enter[T](mut g: Graph, _type: StaticFn[fn(T)], offset: u64) -> Option[(u64, Option[u64])] {
+    let identity = code.identity(_type)
+    let key = list.slice(identity, string.byte_len(TYPE_PREFIX), list.len(identity) - string.byte_len(TYPE_SUFFIX))
+    let n = list.len(g.nodes)
+    let mut at: u64 = 0
+    while at < n && g.nodes[at].identity != key {
+        at += 1
+    }
+    let parent = g.current
+    if let Some(p) = parent {
+        list.push(mut g.nodes[p].edges, Edge(offset, target: at))
+    }
+    if at < n {
+        return None
+    }
+    list.push(mut g.nodes, Node(identity: clone(key), descriptor: list.new(), edges: list.new(), nominal: false))
+    g.current = Some(at)
+    Some((at, parent))
+}
+
+pub fn leave(mut g: Graph, at: u64, parent: Option[u64], take descriptor: Bytes) {
+    let _ = replace(mut g.nodes[at].descriptor, take descriptor)
+    g.current = parent
+}
+
+pub fn nominal(mut g: Graph) {
+    g.nodes[option.unwrap(g.current)].nominal = true
+}
+
+pub fn path(g: Graph) -> View[Bytes] in g {
+    let key = view g.nodes[option.unwrap(g.current)].identity
+    let mut end: u64 = 0
+    while end < list.len(key) && key[end] != 91 {
+        end += 1
+    }
+    list.slice(key, 0, end)
+}
+
+pub fn unavailable(mut g: Graph) {
+    g.available = false
+}
+
+pub fn hash(domain: String, data: Bytes) -> Bytes {
+    let d = string.as_bytes(domain)
+    let mut frame: Bytes = list.with_capacity(16 + list.len(d) + list.len(data))
+    word(mut frame, list.len(d), 8)
+    list.append(mut frame, d)
+    word(mut frame, list.len(data), 8)
+    list.append(mut frame, data)
+    let digest = sha256.hash(frame)
+    let mut out: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut out, digest[i])
+    }
+    take out
+}
+
+fn word(mut out: Bytes, k: u64, width: u64) {
+    for i in 0u64 .. width {
+        list.push(mut out, int.truncate(k >> (8 * i)))
+    }
+}
+
+// Kosaraju's two walks use explicit stacks. The second walk lists components
+// in depender-first order, which the hash loop reverses.
+fn components(nodes: List[Node]) -> List[List[u64]] {
+    let n = list.len(nodes)
+    let mut rev: List[List[u64]] = list.with_capacity(n)
+    let mut seen: List[bool] = list.with_capacity(n)
+    let mut order: List[u64] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut rev, list.new())
+    }
+    list.fill(mut seen, n, false)
+    for i in 0u64 .. n {
+        for e in nodes[i].edges {
+            list.push(mut rev[e.target], i)
+        }
+    }
+    let mut walk: List[(u64, u64)] = list.new()
+    for i in 0u64 .. n {
+        if seen[i] {
+            continue
+        }
+        let _ = list.set(mut seen, i, true)
+        list.push(mut walk, (i, 0u64))
+        while let Some((v, j)) = list.pop(mut walk) {
+            if j == list.len(nodes[v].edges) {
+                list.push(mut order, v)
+                continue
+            }
+            list.push(mut walk, (v, j + 1))
+            let w = nodes[v].edges[j].target
+            if !seen[w] {
+                let _ = list.set(mut seen, w, true)
+                list.push(mut walk, (w, 0u64))
+            }
+        }
+    }
+    let mut groups: List[List[u64]] = list.new()
+    let mut stack: List[u64] = list.new()
+    list.fill_slice(mut seen, 0, n, false)
+    while let Some(i) = list.pop(mut order) {
+        if seen[i] {
+            continue
+        }
+        let mut members: List[u64] = list.new()
+        let _ = list.set(mut seen, i, true)
+        list.push(mut stack, i)
+        while let Some(v) = list.pop(mut stack) {
+            list.push(mut members, v)
+            for w in rev[v] {
+                if !seen[w] {
+                    let _ = list.set(mut seen, w, true)
+                    list.push(mut stack, w)
+                }
+            }
+        }
+        list.push(mut groups, take members)
+    }
+    take groups
+}
+
+fn append_node(mut data: Bytes, node: Node, local: List[Option[u64]], hashes: List[Bytes]) {
+    let mut at: u64 = 0
+    for edge in node.edges {
+        list.append(mut data, list.slice(node.descriptor, at, edge.offset))
+        match local[edge.target] {
+            Some(k) => {
+                list.push(mut data, 1)
+                word(mut data, k, 4)
+            }
+            None => {
+                list.push(mut data, 0)
+                list.append(mut data, hashes[edge.target])
+            }
+        }
+        at = edge.offset
+    }
+    list.append(mut data, list.slice(node.descriptor, at, list.len(node.descriptor)))
+}
+
+pub fn finish(g: Graph) -> Option[Bytes] {
+    if !g.available {
+        return None
+    }
+    let domain = if g.key {
+        "hirsel.key-storage.v1"
+    } else {
+        "hirsel.codec-storage.v1"
+    }
+    let group_domain = if g.key {
+        "hirsel.key-group.v1"
+    } else {
+        "hirsel.codec-group.v1"
+    }
+    let n = list.len(g.nodes)
+    let mut hashes: List[Bytes] = list.with_capacity(n)
+    let mut local: List[Option[u64]] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut hashes, list.new())
+        list.push(mut local, None)
+    }
+    let mut groups = components(g.nodes)
+    while let Some(group) = list.pop(mut groups) {
+        let mut members = take group
+        let first = members[0]
+        let node = view g.nodes[first]
+        if list.len(members) == 1 && !node.nominal && !has_self_edge(node.edges, first) {
+            let mut data: Bytes = list.new()
+            list.push(mut data, 0)
+            append_node(mut data, node, local, hashes)
+            let _ = list.set(mut hashes, first, hash(domain, data))
+            continue
+        }
+        list.sort(mut members, scoped fn(a: u64, b: u64) -> Order {
+            list.compare_bytes(g.nodes[a].identity, g.nodes[b].identity)
+        })
+        let count = list.len(members)
+        let mut data: Bytes = list.new()
+        word(mut data, count, 4)
+        for k in 0u64 .. count {
+            let _ = list.set(mut local, members[k], Some(k))
+        }
+        for i in members {
+            append_node(mut data, g.nodes[i], local, hashes)
+        }
+        let digest = hash(group_domain, data)
+        for k in 0u64 .. count {
+            let i = members[k]
+            let mut selected: Bytes = list.with_capacity(37)
+            list.push(mut selected, 1)
+            list.append(mut selected, digest)
+            word(mut selected, k, 4)
+            let _ = list.set(mut hashes, i, hash(domain, selected))
+            let _ = list.set(mut local, i, None)
+        }
+    }
+    Some(replace(mut hashes[0], list.new()))
+}
+
+fn has_self_edge(edges: List[Edge], i: u64) -> bool {
+    for edge in edges {
+        if edge.target == i {
+            return true
+        }
+    }
+    false
+}

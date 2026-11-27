@@ -70,7 +70,7 @@ fn first_batch(take publisher: Publisher) -> runner.Frame waits {
     let owner = runner.fixture_owner(post, store.Caller(issuer: 2u8, subject: list.new()))
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(packed_rows)))
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_unit())), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(std.codec.of_unit())), mut key)
     let result_schema = result.unwrap(runner.query_result_schema(std.codec.of_unit(), result.unwrap(query_slots())))
     std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     runner.fixture_subscribe(owner, 0u32, take key, list.new())

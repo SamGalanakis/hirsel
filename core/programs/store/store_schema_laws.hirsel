@@ -251,7 +251,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     let mut meta = result.unwrap(catalog_entry(db, old.catalog_key))
     let writer = result.unwrap(std.codec.schema(old_codec()))
     let mut schemas: List[ValueSchema] = list.new()
-    list.push(mut schemas, ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.fingerprint(new_codec())), schema: take writer))
+    list.push(mut schemas, ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.schema_fingerprint(new_codec())), schema: take writer))
     meta.schemas = take schemas
     let raw = result.unwrap(encode_catalog(meta))
     let base = pages.share_roots(pages.holder_heads(db.holders)[0].roots)

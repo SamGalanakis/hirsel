@@ -47,8 +47,8 @@ fn e1(take x: u64) -> Result[u64, Capacity] {
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, id)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.schema_fingerprint(cr)), mut key)
     key
 }
 

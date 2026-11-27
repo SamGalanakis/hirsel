@@ -179,7 +179,7 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
 
 pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
     let identity = code.identity(definition)
-    Ok(entry_key(identity, std.codec.fingerprint(arg)?, std.codec.fingerprint(reply)?))
+    Ok(entry_key(identity, std.codec.schema_fingerprint(arg)?, std.codec.schema_fingerprint(reply)?))
 }
 
 // An attempt entry has no wire slot or call record. Only the head can attach

@@ -397,6 +397,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let want = want.and_then(|w| self.expected_part(g.result, w).map(|_| w.ty));
             return self.code_describe(g.result, args[0], want, n);
         }
+        if g.path.package_is("std", "1")
+            && g.path.0.modules == ["codec"]
+            && g.path.0.name == "storage_to"
+        {
+            return self.storage_to_descriptor(g.result, args[0], args[1], n);
+        }
         if g.waits {
             self.waited = true;
             if !self.fd.waits && !self.entry {

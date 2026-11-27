@@ -1,8 +1,12 @@
 # MCP over Streamable HTTP
 
-The server targets MCP revision 2026-07-28. The TypeScript SDK v2 supports this
-revision. Requests carry their own version, identity and capabilities, and the
-revision uses `server/discover` and `subscriptions/listen`.
+The server accepts both Streamable HTTP session and per-request clients on the
+same endpoint. At 2026-07-28, requests carry their own version, identity and
+capabilities, and clients can use `server/discover` and `subscriptions/listen`.
+Clients using a 2025 revision send `initialize`, then
+`notifications/initialized`, and attach the assigned `Mcp-Session-Id` to later
+requests. Sessions end at their configured lifetime or on HTTP DELETE.
+The server returns HTTP 404 for requests on unknown or ended sessions.
 [MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
 
 The client speaks 2026-07-28 and the Streamable HTTP session revisions
@@ -29,7 +33,11 @@ looks one up) and the result. The client does not open the GET stream,
 resume with `Last-Event-ID` or use the HTTP+SSE transport.
 [2025-11-25 transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
-Mount `server.mount` on a `std.router` and serve it with `std.http`.
+Start the bounded session registry with `sessions.start`, giving it Clock and
+Random capabilities, a session limit and a lifetime in milliseconds. Keep its
+task alive while serving. Combine the registry and the server configuration
+with `server.endpoint`, mount `server.mount` on a `std.router`, and use
+`server.connection` in the `std.http.serve_with_factory` connection factory.
 The server checks each supplied Origin against its configured allowlist.
 Bind loopback for local use. A server exposed to a network needs authentication
 at its deployment boundary. The client can pass a `Secret` bearer credential
@@ -66,7 +74,7 @@ npm install --prefix /tmp/ref-mcp-sdk @modelcontextprotocol/client@2.4.0 \
 ```
 
 Run the Hirsel fixture entry `mcp@1/interop/main` with mode `serve` to test
-the server. Grant Clock, Tasks, Stdout, a scratch directory and
+the server. Grant Clock, Random, Tasks, Stdout, a scratch directory and
 `Net=Listen 127.0.0.1/32 0-65535`. It prints its loopback port. Run
 `node tests/sdk-client.mjs http://127.0.0.1:PORT/mcp SCRATCH_DIRECTORY`
 against it. Use an empty scratch directory for each run.

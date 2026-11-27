@@ -51,7 +51,7 @@ fn config() -> std.http.Config {
     std.http.Config(ingress: list.new(), sockets_max: 8, http_max: 8, upgrades_max: 0, conns_max: 8, ip_sockets_max: 8, refuse_max: 1, refuse_ms: 100, inbox_cap: 16, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 8192, body_max: MEMORY, out_cap: 4096, handler_bytes: MEMORY, first_head_ms: 5000, idle_ms: 5000, head_ms: 5000, body_ms: 5000, handler_ms: 5000, write_ms: 5000, drain_ms: 500, linger_ms: 10, drain_max: 8192, streams_max: 1, state_max: 0, reads_max: 1, heartbeat_ms: 150, lease_ms: 20000)
 }
 
-fn serve(n: Net, c: Clock, tasks: Tasks, dir: Dir, out: Stdout) waits {
+fn serve(n: Net, c: Clock, tasks: Tasks, random: Random, dir: Dir, out: Stdout) waits {
     let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 16))
     let mut listeners: List[Listener] = list.new()
     list.push(mut listeners, take listener)
@@ -60,13 +60,18 @@ fn serve(n: Net, c: Clock, tasks: Tasks, dir: Dir, out: Stdout) waits {
     let mut resources: List[server.ResourceHandler] = list.new()
     list.push(mut resources, server.ResourceHandler(info: server.Resource(uri: string.from("fixture://notes/readme"), name: string.from("Readme"), mimeType: string.from("text/plain")), read: note))
     let state = server.Server(identity: rpc.Identity(name: string.from("hirsel-mcp"), version: string.from("1")), origins: take origins, tools: Dynamic(dir, string.from("catalog.changed"), 100u64, loader), resources: take resources, event_max: 65536, producer_bytes: MEMORY, producer_steps: 10000000)
-    let mut routes: std.router.Builder[server.Server] = std.router.builder()
+    let (take registry, _owner) = result.unwrap(sessions.start(tasks, c, random, 256, 3600000))
+    let endpoint = server.endpoint(take state, take registry)
+    let mut routes: std.router.Builder[server.Endpoint] = std.router.builder()
     result.unwrap(server.mount(mut routes, "/mcp", MEMORY, 2 * MEMORY))
     let mut ready = string.new()
     string.push_u64(mut ready, int.widen(addr.port))
     string.push(mut ready, "\n")
     result.unwrap(stdout.write(out, ready))
-    result.unwrap(std.http.serve(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), take state))
+    let make: scoped[view] fn() -> server.Endpoint = fn() -> server.Endpoint {
+        server.connection(endpoint)
+    }
+    result.unwrap(std.http.serve_with_factory(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), 4096, make, None))
 }
 
 fn invoke(n: Net, c: Clock, peer: client.Endpoint, session: client.Session, method: String, input: String, notice: scoped fn(client.Notice) -> bool) -> Result[String, client.Error] waits {
@@ -183,12 +188,12 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
     let _ = result.unwrap(invoke(n, c, peer, session, "server/discover", "{}", ignore_notice))
 }
 
-pub fn main(n: Net, c: Clock, tasks: Tasks, directory: Dir, out: Stdout, argv: Args) -> Result[(), ()] waits {
+pub fn main(n: Net, c: Clock, tasks: Tasks, random: Random, directory: Dir, out: Stdout, argv: Args) -> Result[(), ()] waits {
     let Some(action) = args.get(argv, 0) else {
         return Error(())
     }
     if action == "serve" {
-        serve(n, c, tasks, directory, out)
+        serve(n, c, tasks, random, directory, out)
     } else if action == "client" {
         let Some(arg) = args.get(argv, 1) else {
             return Error(())

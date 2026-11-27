@@ -1,0 +1,146 @@
+pub opaque type Registry: send {
+    requests: Sender[Request]
+}
+
+pub type Action: send = Inspect | Use | MarkReady | Delete
+
+type Request: send = Open(String, Sender[Option[String]]) | Access(String, Option[String], Action, Sender[Result[(), u16]])
+
+type Session: send {
+    id: String,
+    version: String,
+    expires: u64,
+    ready: bool
+}
+
+type Table: send {
+    requests: Receiver[Request],
+    clock: Clock,
+    random: Random,
+    limit: u64,
+    lifetime_ms: u64
+}
+
+/// Starts a registry with a fixed session limit and a lifetime measured from initialize.
+/// Keep the task alive while the server is serving.
+pub fn start(tasks: Tasks, clock: Clock, random: Random, limit: u16, lifetime_ms: u64) -> Result[(Registry, Task[()]), Capacity] {
+    let (to, from): (Sender[Request], Receiver[Request]) = channel.new(16)
+    let rows: u64 = int.widen(limit)
+    let table = Table(requests: take from, clock, random, limit: rows, lifetime_ms)
+    match task.try_spawn(tasks, bytes 65536 + 256 * rows, take table, run) {
+        Ok(take owner) => Ok((Registry(requests: take to), take owner)),
+        Error((e, _)) => Error(e),
+    }
+}
+
+pub fn handle(registry: Registry) -> Registry {
+    Registry(requests: channel.sender(registry.requests))
+}
+
+fn find(rows: List[Session], id: String) -> Option[u64] {
+    for i in 0u64 .. list.len(rows) {
+        if rows[i].id == id {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn remove(mut rows: List[Session], index: u64) {
+    list.swap(mut rows, index, list.len(rows) - 1)
+    let _ = list.pop(mut rows)
+}
+
+fn create(table: Table, mut rows: List[Session], version: String, now: u64) -> Option[String] {
+    if list.len(rows) == table.limit {
+        let mut i = list.len(rows)
+        while i > 0 {
+            i -= 1
+            if rows[i].expires <= now {
+                remove(mut rows, i)
+            }
+        }
+        if list.len(rows) == table.limit {
+            return None
+        }
+    }
+    let mut raw: Bytes = list.with_capacity(24)
+    host.random(table.random, mut raw)
+    let id = std.base64.encode_url(raw, false)
+    if let Some(_) = find(rows, id) {
+        return None
+    }
+    let expires = std.clock.deadline_after_ms(now, table.lifetime_ms)
+    list.push(mut rows, Session(id: string.from(id), version: string.from(version), expires, ready: false))
+    Some(take id)
+}
+
+fn check(mut rows: List[Session], id: String, version: Option[String], action: Action, now: u64) -> Result[(), u16] {
+    let Some(i) = find(rows, id) else {
+        return Error(404)
+    }
+    if rows[i].expires <= now {
+        remove(mut rows, i)
+        return Error(404)
+    }
+    if let Some(presented) = version {
+        if presented != rows[i].version {
+            return Error(400)
+        }
+    }
+    match action {
+        Inspect => Ok(()),
+        Use => if rows[i].ready {
+            Ok(())
+        } else {
+            Error(400)
+        },
+        MarkReady => {
+            rows[i].ready = true
+            Ok(())
+        },
+        Delete => {
+            remove(mut rows, i)
+            Ok(())
+        },
+    }
+}
+
+fn run(take table: Table) waits {
+    let mut rows: List[Session] = list.with_capacity(table.limit)
+    while let Ok(take request) = channel.receive(table.requests) {
+        let now = host.mono_ns(table.clock)
+        match take request {
+            Open(take version, take reply) => {
+                let take session = create(table, mut rows, version, now)
+                let _ = channel.try_send(reply, take session)
+            },
+            Access(take id, take version, action, take reply) => {
+                let status = check(mut rows, id, version, action, now)
+                let _ = channel.try_send(reply, status)
+            },
+        }
+    }
+}
+
+pub fn open(registry: Registry, version: String) -> Option[String] waits {
+    let (to, from): (Sender[Option[String]], Receiver[Option[String]]) = channel.new(1)
+    if let Error(_) = channel.send(registry.requests, Open(string.from(version), take to)) {
+        return None
+    }
+    match channel.receive(from) {
+        Ok(take id) => take id,
+        Error(_) => None,
+    }
+}
+
+pub fn access(registry: Registry, take id: String, take version: Option[String], action: Action) -> Result[(), u16] waits {
+    let (to, from): (Sender[Result[(), u16]], Receiver[Result[(), u16]]) = channel.new(1)
+    if let Error(_) = channel.send(registry.requests, Access(take id, take version, action, take to)) {
+        return Error(503)
+    }
+    match channel.receive(from) {
+        Ok(status) => status,
+        Error(_) => Error(503),
+    }
+}

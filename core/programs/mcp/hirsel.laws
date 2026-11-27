@@ -3,3 +3,4 @@ mcp@1/example/read_tool_catalog src=3475c67450a445e0 sig=d3130a3026e8d76f run=a9
 mcp@1/laws/jsonrpc_framing src=5c792091e2ee9e57 sig=eb22fe37fbfedcf3 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
 mcp@1/laws/legacy_session_handshake src=5c02b6449756de2d sig=69c30dba5fe30ed4 run=e6d81eebfad6f76c bug=- oracle=- rows=pending
 mcp@1/laws/revisions_follow_transport src=83887ebcc9d433e8 sig=64a60a7ccd6a6fc6 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
+mcp@1/laws/server_session_and_per_request src=4f86e680e7736574 sig=342333291c8f52f0 run=e6d81eebfad6f76c bug=- oracle=- rows=pending

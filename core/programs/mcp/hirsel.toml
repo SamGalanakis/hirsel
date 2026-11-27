@@ -8,6 +8,7 @@ charge = "charge-v1"
 "metadata.hirsel" = "metadata"
 "client.hirsel" = "client"
 "server.hirsel" = "server"
+"sessions.hirsel" = "sessions"
 "tests/interop.hirsel" = "interop"
 
 [dependencies]

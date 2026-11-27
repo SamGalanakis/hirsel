@@ -258,6 +258,14 @@ pub fn write_fields(writer: std.json.Writer, mut items: std.json.Items, fields: 
 }
 
 pub fn encode_result(id: Id, fields: Fields) -> String {
+    encode_result_body(id, fields, true)
+}
+
+pub fn encode_initialize_result(id: Id, fields: Fields) -> String {
+    encode_result_body(id, fields, false)
+}
+
+fn encode_result_body(id: Id, fields: Fields, complete: bool) -> String {
     let mut out = string.from("")
     std.json.write(mut out, false, fn(document) {
         std.json.object(document, 0, fn(w, mut items) {
@@ -267,8 +275,10 @@ pub fn encode_result(id: Id, fields: Fields) -> String {
             write_id(w, id)
             std.json.write_member(w, mut items, "result")
             std.json.object(w, 1, fn(result_writer, mut result_items) {
-                std.json.write_member(result_writer, mut result_items, "resultType")
-                std.json.write_string_value(result_writer, "complete")
+                if complete {
+                    std.json.write_member(result_writer, mut result_items, "resultType")
+                    std.json.write_string_value(result_writer, "complete")
+                }
                 write_fields(result_writer, mut result_items, fields)
             })
         })

@@ -57,6 +57,20 @@ pub type Server: shareable + send {
     producer_steps: u64
 }
 
+pub opaque type Endpoint: send {
+    state: Arc[Server],
+    sessions: sessions.Registry
+}
+
+pub fn endpoint(take state: Server, take registry: sessions.Registry) -> Endpoint {
+    Endpoint(state: arc.new(take state), sessions: take registry)
+}
+
+/// Use in the HTTP connection factory to share the config and session registry.
+pub fn connection(site: Endpoint) -> Endpoint {
+    Endpoint(state: arc.share(site.state), sessions: sessions.handle(site.sessions))
+}
+
 type ResourceText: codec {
     uri: String,
     mimeType: String,
@@ -526,8 +540,76 @@ fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, pa
     response(200, rpc.encode_result(id, body))
 }
 
-pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, state: Server) -> Result[std.http.Outcome, std.http.HandlerError] waits {
-    if !ok_headers(req, state) {
+fn initialize(registry: sessions.Registry, state: Server, id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let Some(take requested) = rpc.field_text(params, "protocolVersion") else {
+        return failure(400, id, -32602, "Missing protocol version")
+    }
+    let Some(capabilities) = map.get(params, "capabilities") else {
+        return failure(400, id, -32602, "Missing client capabilities")
+    }
+    if let Error(_) = rpc.object(capabilities) {
+        return failure(400, id, -32602, "Invalid client capabilities")
+    }
+    let Some(info) = map.get(params, "clientInfo") else {
+        return failure(400, id, -32602, "Missing client info")
+    }
+    let Ok(client) = rpc.object(info) else {
+        return failure(400, id, -32602, "Invalid client info")
+    }
+    if rpc.field_text(client, "name") == None || rpc.field_text(client, "version") == None {
+        return failure(400, id, -32602, "Invalid client info")
+    }
+    let version = if rpc.supports(InitializeSession, requested) {
+        take requested
+    } else {
+        rpc.preferred(InitializeSession)
+    }
+    let mut body: rpc.Fields = map.new()
+    rpc.put(mut body, "protocolVersion", rpc.typed_json(version))
+    rpc.put(mut body, "capabilities", string.from("{\"tools\":{},\"resources\":{}}"))
+    rpc.put(mut body, "serverInfo", rpc.typed_json(state.identity))
+    let mut reply = std.http.response(200, string.into_bytes(rpc.encode_initialize_result(id, body)), false)?
+    std.http.content_type(mut reply, ApplicationJson)?
+    let Some(take session) = sessions.open(registry, version) else {
+        return empty(503)
+    }
+    std.http.header(mut reply, b"Mcp-Session-Id", string.into_bytes(take session))?
+    Ok(Reply(take reply))
+}
+
+fn session_access(req: std.http.Request, registry: sessions.Registry, raw_id: Bytes, action: sessions.Action) -> Result[(), u16] waits {
+    if let Some(_) = std.http.field_at(req, b"mcp-session-id", 1) {
+        return Error(400)
+    }
+    let Ok(take id) = string.from_utf8(std.http.copy_bytes(raw_id)) else {
+        return Error(404)
+    }
+    let version = match std.http.field(req, b"mcp-protocol-version") {
+        Some(raw) => {
+            let Ok(take version) = string.from_utf8(std.http.copy_bytes(raw)) else {
+                return Error(400)
+            }
+            if let Some(_) = std.http.field_at(req, b"mcp-protocol-version", 1) {
+                return Error(400)
+            }
+            Some(take version)
+        },
+        None => None,
+    }
+    sessions.access(registry, take id, take version, action)
+}
+
+fn has_request_version(params: rpc.Fields) -> bool {
+    if let Some(raw) = map.get(params, "_meta") {
+        if let Ok(info) = rpc.object(raw) {
+            return map.get(info, metadata.VERSION_FIELD) != None
+        }
+    }
+    false
+}
+
+pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    if !ok_headers(req, site.state) {
         return empty(403)
     }
     if !request_media(req, b"content-type", "application/json") {
@@ -548,27 +630,79 @@ pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.ht
         Error(take fault) => return response(400, rpc.encode_fault(fault)),
     }
     let rpc.Request(id: take maybe_id, method: take method, params: take params) = take message
+    let session = std.http.field(req, b"mcp-session-id")
+    let handshake = method == "initialize" || method == "notifications/initialized"
+    let legacy = (session != None || handshake) && !has_request_version(params)
+    if legacy {
+        if let Some(raw_id) = session {
+            let call = match maybe_id {
+                Some(_) => true,
+                None => false,
+            }
+            let action: sessions.Action = if method == "notifications/initialized" && !call {
+                MarkReady
+            } else if method == "ping" || method == "initialize" {
+                Inspect
+            } else {
+                Use
+            }
+            if let Error(status) = session_access(req, site.sessions, raw_id, action) {
+                return empty(status)
+            }
+            if method == "initialize" || method == "notifications/initialized" && call {
+                return empty(400)
+            }
+        } else {
+            let Some(take id) = take maybe_id else {
+                return empty(400)
+            }
+            if method != "initialize" {
+                return empty(400)
+            }
+            return initialize(site.sessions, site.state, id, params)
+        }
+    }
     let Some(take id) = take maybe_id else {
         return empty(202)
     }
-    if let Error(take fault) = metadata_check(req, id, method, params) {
+    if legacy {
+        if method == "server/discover" || method == "subscriptions/listen" {
+            return failure(404, id, -32601, "Method not found")
+        }
+    } else if let Error(take fault) = metadata_check(req, id, method, params) {
         return response(400, rpc.encode_fault(fault))
     }
-    dispatch(req, state, id, method, params)
+    dispatch(req, site.state, id, method, params)
 }
 
-fn unsupported(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, state: Server) -> Result[std.http.Outcome, std.http.HandlerError] {
-    if !ok_headers(req, state) {
+fn other_method(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, site: Endpoint) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    if !ok_headers(req, site.state) {
         return empty(403)
     }
+    let mut allow = "POST"
+    if let Some(id) = std.http.field(req, b"mcp-session-id") {
+        let deleting = std.http.method(req) == b"DELETE"
+        let action: sessions.Action = if deleting {
+            Delete
+        } else {
+            Inspect
+        }
+        if let Error(status) = session_access(req, site.sessions, id, action) {
+            return empty(status)
+        }
+        if deleting {
+            return empty(204)
+        }
+        allow = "POST, DELETE"
+    }
     let mut reply = std.http.response(405, list.new(), false)?
-    std.http.header(mut reply, b"Allow", b"POST")?
+    std.http.header(mut reply, b"Allow", string.into_bytes(string.from(allow)))?
     Ok(Reply(take reply))
 }
 
-pub fn mount(mut routes: std.router.Builder[Server], path: String, body_max: u64, stream_bytes: u64) -> Result[(), std.router.AddError] {
+pub fn mount(mut routes: std.router.Builder[Endpoint], path: String, body_max: u64, stream_bytes: u64) -> Result[(), std.router.AddError] {
     let route = std.router.Route(handler: post, body_max: Some(body_max), upgrade_bytes: None, stream_bytes: Some(stream_bytes), steps: None)
     std.router.add(mut routes, "POST", path, take route)?
-    std.router.add(mut routes, "GET", path, std.router.raw(unsupported))?
-    std.router.add(mut routes, "DELETE", path, std.router.raw(unsupported))
+    std.router.add(mut routes, "GET", path, std.router.raw(other_method))?
+    std.router.add(mut routes, "DELETE", path, std.router.raw(other_method))
 }

@@ -269,3 +269,251 @@ fn legacy_session_handshake(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] wa
     }
     Ok(())
 }
+
+const LEGACY_INITIALIZE: String = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ExampleClient\",\"version\":\"1.0.0\"}}}"
+
+const LEGACY_INITIALIZED: String = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
+
+const LEGACY_WEATHER: String = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_weather\",\"arguments\":{\"location\":\"New York\"}}}"
+
+const MODERN_WEATHER: String = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_weather\",\"arguments\":{\"location\":\"New York\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"ExampleClient\",\"version\":\"1.0.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}"
+
+const WEATHER_TEXT: String = "Current weather in New York:\nTemperature: 72°F\nConditions: Partly cloudy"
+
+type WeatherInput: codec {
+    location: String
+}
+
+fn weather(mut call: server.Call, c: Clock) -> server.Step {
+    let args = result.unwrap(rpc.object(call.arguments))
+    if rpc.field_text(args, "location") != Some("New York") {
+        return ToolError(string.from("expected New York"))
+    }
+    Text(string.from(WEATHER_TEXT))
+}
+
+type LiveServer: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    registry: sessions.Registry,
+    stop: Receiver[u64]
+}
+
+fn serve_weather(take job: LiveServer) waits {
+    let LiveServer(listener: take listener, clock, tasks, registry: take registry, stop: take stop) = take job
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let format: std.json.Format[WeatherInput] = result.unwrap(std.json.interop())
+    let schema = result.unwrap(server.schema(format, list.new()))
+    let mut tools: List[server.Tool] = list.new()
+    list.push(mut tools, server.Tool(name: string.from("get_weather"), description: string.from("Get current weather"), input_schema: take schema, call: weather))
+    let identity = rpc.Identity(name: string.from("ExampleServer"), version: string.from("1.0.0"))
+    let state = server.Server(identity: take identity, origins: list.new(), tools: Fixed(take tools), resources: list.new(), event_max: 4096, producer_bytes: 65536, producer_steps: 1000000)
+    let endpoint = server.endpoint(take state, take registry)
+    let mut routes: std.router.Builder[server.Endpoint] = std.router.builder()
+    result.unwrap(server.mount(mut routes, "/mcp", 8192, 262144))
+    let mut cfg = std.http.defaults()
+    cfg.sockets_max = 4
+    cfg.http_max = 4
+    cfg.conns_max = 4
+    cfg.ip_sockets_max = 4
+    cfg.streams_max = 1
+    cfg.heartbeat_ms = 1000
+    cfg.lease_ms = 5000
+    let make: scoped[view] fn() -> server.Endpoint = fn() -> server.Endpoint {
+        server.connection(endpoint)
+    }
+    result.unwrap(std.http.serve_with_factory(take listeners, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 4096, make, Some(take stop)))
+}
+
+type WirePeer {
+    net: Net,
+    clock: Clock,
+    address: Addr,
+    authority: String,
+    deadline: u64
+}
+
+type WireReply {
+    status: u16,
+    session: Option[String],
+    media: Option[String],
+    body: String
+}
+
+fn wire_header(mut fields: List[std.http_client.Header], name: String, value: String) {
+    let value_bytes = std.http.copy_bytes(string.as_bytes(value))
+    list.push(mut fields, std.http_client.Header(name: string.from(name), value: Public(take value_bytes)))
+}
+
+fn wire_request(peer: WirePeer, method: String, payload: String, version: Option[String], session: Option[String], modern: bool) -> WireReply waits {
+    let mut headers: List[std.http_client.Header] = list.new()
+    wire_header(mut headers, "Connection", "close")
+    wire_header(mut headers, "Accept", "application/json, text/event-stream")
+    if method == "POST" {
+        wire_header(mut headers, "Content-Type", "application/json")
+    }
+    if let Some(value) = version {
+        wire_header(mut headers, "MCP-Protocol-Version", value)
+    }
+    if let Some(value) = session {
+        wire_header(mut headers, "Mcp-Session-Id", value)
+    }
+    if modern {
+        wire_header(mut headers, "Mcp-Method", "tools/call")
+        wire_header(mut headers, "Mcp-Name", "get_weather")
+    }
+    let request = std.http_client.Request(method: string.from(method), target: string.from("/mcp"), headers: take headers, body: Fixed(string.byte_len(payload)))
+    let mut connection = result.unwrap(std.http_client.dial(peer.net, peer.address, peer.authority, peer.clock, take request, peer.deadline))
+    if payload != "" {
+        result.unwrap(std.http_client.write(mut connection, string.as_bytes(payload)))
+    }
+    result.unwrap(std.http_client.finish_request(mut connection, 8192))
+    let mut assigned: Option[String] = None
+    let mut media: Option[String] = None
+    let status = scoped fn() -> u16 {
+        let head = std.http_client.head(connection)
+        for i in 0u64 .. std.http_client.field_count(head) {
+            let (name, value) = option.unwrap(std.http_client.field_at(head, i))
+            if std.http1.equal_ascii(name, b"mcp-session-id") {
+                assigned = Some(result.unwrap(string.from_utf8(std.http.copy_bytes(value))))
+            }
+            if std.http1.equal_ascii(name, b"content-type") {
+                media = Some(result.unwrap(string.from_utf8(std.http.copy_bytes(value))))
+            }
+        }
+        std.http_client.status(head)
+    }
+    let code = status()
+    let mut body: Bytes = list.with_capacity(8192)
+    while result.unwrap(std.http_client.read(mut connection, mut body)) != 0 {}
+    WireReply(status: code, session: take assigned, media: take media, body: result.unwrap(string.from_utf8(take body)))
+}
+
+fn open_weather_session(peer: WirePeer, request: String, expected_version: String) -> String waits {
+    let opened = wire_request(peer, "POST", request, None, None, false)
+    if opened.status != 200 || opened.media != Some("application/json") {
+        fail("initialize did not return a JSON HTTP 200")
+    }
+    let Reply(id, take value) = result.unwrap(rpc.incoming(opened.body)) else {
+        fail("initialize did not return a JSON-RPC result")
+    }
+    let init = result.unwrap(rpc.object(value))
+    let chosen = option.unwrap(rpc.field_text(init, "protocolVersion"))
+    if !rpc.same_id(id, IntegerId(string.from("1"))) || chosen != expected_version {
+        fail("initialize returned the wrong ID or negotiated version")
+    }
+    let Some(raw_caps) = map.get(init, "capabilities") else {
+        fail("initialize omitted capabilities")
+    }
+    let Some(raw_info) = map.get(init, "serverInfo") else {
+        fail("initialize omitted server info")
+    }
+    let caps = result.unwrap(rpc.object(raw_caps))
+    let info = result.unwrap(rpc.object(raw_info))
+    if map.get(caps, "tools") != Some("{}") || rpc.field_text(info, "name") != Some("ExampleServer") || rpc.field_text(info, "version") != Some("1.0.0") {
+        fail("initialize returned the wrong capabilities or server identity")
+    }
+    let WireReply(session: take assigned, ..) = take opened
+    let session = option.unwrap(take assigned)
+    if session == "" {
+        fail("initialize returned an empty session ID")
+    }
+    for byte in string.as_bytes(session) {
+        if byte < 0x21 || byte > 0x7e {
+            fail("initialize returned a non-visible-ASCII session ID")
+        }
+    }
+    take session
+}
+
+fn expect_weather(reply: WireReply, modern: bool) {
+    if reply.status != 200 || reply.media != Some("text/event-stream") || reply.session != None {
+        fail("tools/call did not return HTTP 200 and SSE without a session header")
+    }
+    let mut decoder = std.sse.decoder(8192)
+    let mut events: List[String] = list.new()
+    let _ = result.unwrap(std.sse.feed(mut decoder, string.as_bytes(reply.body), fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] {
+        if name == b"message" && list.len(data) != 0 {
+            list.push(mut events, result.unwrap(string.from_utf8(std.http.copy_bytes(data))))
+        }
+        Continue
+    }))
+    if list.len(events) != 1 {
+        fail("expected one tool result")
+    }
+    let Reply(id, take value) = result.unwrap(rpc.incoming(events[0])) else {
+        fail("tools/call did not return a JSON-RPC result")
+    }
+    let fields = result.unwrap(rpc.object(value))
+    if !rpc.same_id(id, IntegerId(string.from("2"))) || (modern && rpc.field_text(fields, "resultType") != Some("complete")) {
+        fail("tools/call returned the wrong ID or result type")
+    }
+    if let Some(failed) = map.get(fields, "isError") {
+        if failed != "false" {
+            fail("tools/call reported an error")
+        }
+    }
+    let Some(raw) = map.get(fields, "content") else {
+        fail("tools/call omitted content")
+    }
+    let format: std.json.Format[List[Map[String, String]]] = result.unwrap(std.json.interop())
+    let items = result.unwrap(std.json.decode_typed(format, std.http.copy_bytes(string.as_bytes(raw)), 4096))
+    if list.len(items) != 1 || map.get(items[0], "type") != Some("text") || map.get(items[0], "text") != Some(WEATHER_TEXT) {
+        fail("tools/call did not return the specification's weather content")
+    }
+}
+
+// Oracle: 2025-06-18 Initialization, 2025-11-25 Streamable HTTP Session Management,
+// and the New York tools/call examples in both 2025-06-18 and 2026-07-28.
+@test
+fn server_session_and_per_request(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 4))
+    let end = std.clock.deadline_after_ms(host.mono_ns(c), 5000)
+    let mut authority = string.from("127.0.0.1:")
+    string.push_u64(mut authority, int.widen(address.port))
+    let peer = WirePeer(net: n, clock: c, address, authority: take authority, deadline: end)
+    let (session_clock, take hand) = provide.clock(0, 0)
+    let mut time = take hand
+    let (take registry, owner) = result.unwrap(sessions.start(tasks, session_clock, provide.random(17), 1, 1000))
+    let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let live = LiveServer(listener: take listener, clock: c, tasks, registry: take registry, stop: take stopping)
+    let running = task.spawn(tasks, bytes 16777216, take live, serve_weather)
+    let legacy = Some("2025-06-18")
+    let id = open_weather_session(peer, LEGACY_INITIALIZE, "2025-06-18")
+    let session = Some(string.from(id))
+    let before = wire_request(peer, "POST", LEGACY_WEATHER, legacy, session, false)
+    if before.status != 400 {
+        fail("tools/call ran before notifications/initialized")
+    }
+    let ready = wire_request(peer, "POST", LEGACY_INITIALIZED, legacy, session, false)
+    if ready.status != 202 || ready.body != "" {
+        fail("notifications/initialized did not return an empty HTTP 202")
+    }
+    expect_weather(wire_request(peer, "POST", LEGACY_WEATHER, legacy, session, false), false)
+    expect_weather(wire_request(peer, "POST", MODERN_WEATHER, Some("2026-07-28"), None, true), true)
+    let wrong = wire_request(peer, "POST", LEGACY_WEATHER, legacy, Some("unknown-session"), false)
+    if wrong.status != 404 {
+        fail("unknown session did not get HTTP 404")
+    }
+    let ended = wire_request(peer, "DELETE", "", legacy, session, false)
+    if ended.status != 204 || ended.body != "" {
+        fail("DELETE did not end the session")
+    }
+    if wire_request(peer, "POST", LEGACY_WEATHER, legacy, session, false).status != 404 {
+        fail("the deleted session was accepted")
+    }
+    let next = open_weather_session(peer, LEGACY_INITIALIZE, "2025-06-18")
+    if next == id {
+        fail("a new handshake reused a session ID")
+    }
+    clock.advance_to(mut time, 1000000000)
+    if wire_request(peer, "POST", LEGACY_WEATHER, legacy, Some(next), false).status != 404 {
+        fail("the expired session was accepted")
+    }
+    result.unwrap(channel.send(stop, end))
+    result.unwrap(task.join(take running))
+    result.unwrap(task.join(take owner))
+    Ok(())
+}

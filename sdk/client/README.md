@@ -113,7 +113,11 @@ Reloading loses the functions and recovers only the durable call.
 Rooms (`api.room.<module>.<name>`) add the membership to a subscription:
 `self`, `peers()`, `set`, `send`, and the roster's `incarnation` and
 `revision`. A new incarnation replaces the roster; a reconnect on the same
-incarnation keeps the peers its new image shows.
+incarnation keeps the peers its new image shows. `onSeat(self, previous)`
+reports every membership-seat change, with `self` undefined when a session end
+or room fullness clears the seat. `RoomPeersChange.selfChanged` marks a Part
+that changed the peer id, even when `renewed` is false. `onLost` is only for
+dropped outgoing ephemeral messages, not seat loss.
 [SDK room contract](../../docs/spec/sdk.md#rooms)
 
 The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in

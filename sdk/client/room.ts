@@ -11,16 +11,22 @@ export interface RoomCodec<S, M> {
 }
 export interface RoomPeer<S> { readonly caller: Caller; readonly state: S | undefined }
 // One change to peers(). `renewed` marks a new roster life (incarnation): every earlier
-// peer is in `left` and peer ids start again. `revision` is the room's after this change,
-// or undefined while the roster image is not yet complete.
+// peer is in `left` and peer ids start again. `selfChanged` marks a change to this
+// membership's peer id. `revision` is the room's after this change, or undefined while
+// the roster image is not yet complete.
 export interface RoomPeersChange {
   readonly incarnation: string; readonly revision: bigint | undefined; readonly renewed: boolean;
+  readonly selfChanged: boolean;
   readonly joined: readonly PeerId[]; readonly left: readonly PeerId[]; readonly set: readonly PeerId[];
 }
 export interface RoomHandlers<S, M, V, Slots extends object, Keys extends Record<keyof Slots, unknown>> {
   // The Grant (the room's value) and any declared slot rows, as a subscription's onChange.
   onChange?: (room: LiveRoom<S, M, V, Slots, Keys>, change: Change<V, Slots>) => void;
   onPeers?: (peers: ReadonlyMap<PeerId, RoomPeer<S>>, change: RoomPeersChange) => void;
+  // Every change to this membership's peer id, including undefined when a session end,
+  // a full room or a membership image without an admission clears it. `previous` is the
+  // id it replaces.
+  onSeat?: (self: PeerId | undefined, previous: PeerId | undefined) => void;
   onMessage?: (from: PeerId, message: M, direct: boolean) => void;
   onGap?: (dropped: number) => void;
   onLost?: (dropped: number) => void;
@@ -90,7 +96,7 @@ export class RoomMember {
   apply(part: Part, [states, msgs]: Decoded): void {
     const joined: number[] = [], set = new Set<number>(), left: number[] = [];
     let renewed = false;
-    const before = this.revision;
+    const before = this.revision, seatBefore = this.self;
     if (part.complete) { this.self = undefined; this.full = false; }
     if (!part.full) {
       const incarnation = incarnationHex(part.incarnation);
@@ -130,8 +136,10 @@ export class RoomMember {
     }
     if (part.full) { this.full = true; this.self = undefined; }
     if (!this.sub.active) return;
-    if (renewed || joined.length || set.size || left.length || this.revision !== before) {
-      this.handlers.onPeers?.(this.peers, {incarnation: this.incarnation!, revision: this.revision, renewed, joined, left, set: [...set]});
+    const selfChanged = seatBefore !== this.self;
+    if (selfChanged) this.handlers.onSeat?.(this.self, seatBefore);
+    if (selfChanged || renewed || joined.length || set.size || left.length || this.revision !== before) {
+      this.handlers.onPeers?.(this.peers, {incarnation: this.incarnation!, revision: this.revision, renewed, selfChanged, joined, left, set: [...set]});
     }
     if (part.gap > 0) this.handlers.onGap?.(part.gap);
     if (part.lost > 0) this.handlers.onLost?.(part.lost);
@@ -142,8 +150,10 @@ export class RoomMember {
   // membership's image continues or replaces it, and the stored state is owed to that
   // membership, which the client gets on resubscribe.
   end(): void {
+    const seatBefore = this.self;
     this.self = undefined; this.full = false;
     this.owed = this.stored !== undefined;
+    if (seatBefore !== undefined) this.handlers.onSeat?.(undefined, seatBefore);
     this.drop();
   }
   drop(): void {

@@ -144,14 +144,17 @@ session with 1002 for such a frame.
 
 The handlers are `onPeers(peers, change)`, with `change` naming the `joined`,
 `left` and `set` peer ids, the room's `incarnation` and `revision` after the
-change, and `renewed` when the Part began a new incarnation;
-`onMessage(from, message, direct)`; `onGap(n)` for messages to this client the
-server dropped; `onLost(n)` for messages from this client that were dropped;
-`onFull()` when the grant holds but the room has no place yet; and `onEnd` as
-for a subscription, once after the server's `Ended`. The SDK applies each
-Part's `joined`, then `states`, then `msgs`, then `left`, so a message's
-sender is in `peers()` when `onMessage` runs. There is no order between
-`Live` and `Batch`.
+change, `renewed` when the Part began a new incarnation, and `selfChanged`
+when the Part changed this membership's peer id; `onSeat(self, previous)`
+after every change to `self`, including admission and reseating, with `self`
+undefined when a session end, a full room or a membership image without an
+admission clears the seat; `onMessage(from, message, direct)`; `onGap(n)` for
+messages to this client the server dropped; `onLost(n)` for ephemeral messages
+from this client that were dropped, never for seat loss; `onFull()` when the
+grant holds but the room has no place yet; and `onEnd` as for a subscription,
+once after the server's `Ended`. The SDK applies each Part's `joined`, then
+`states`, then `msgs`, then `left`, so a message's sender is in `peers()` when
+`onMessage` runs. There is no order between `Live` and `Batch`.
 
 A Part whose incarnation differs from the room's replaces the roster, never
 merges with it: every earlier peer is in `left`, with `renewed` set, even
@@ -160,10 +163,13 @@ membership's image, which may span several Parts. A peer it shows continues
 with its caller and the state the image carries, and is not reported as
 joined. A peer it has not shown by the Part with `snapshot` set has left, and
 is in that Part's `left`. A `full` Part's zero head changes neither the
-incarnation nor the revision. When a session ends, `self` clears, `peers()`,
-`incarnation` and `revision` stay as last told, and the room resubscribes
-under a fresh sub id with the other subscriptions. The next membership's
-first image then continues or replaces the roster. This client's own peer id
+incarnation nor the revision. When a session ends, `self` clears and
+`onSeat(undefined, previous)` fires if the room held a seat, while `peers()`,
+`incarnation` and `revision` stay as last told; the room resubscribes under a
+fresh sub id with the other subscriptions. The next membership's first image
+then continues or replaces the roster. If it admits this client under a
+different peer id on the same incarnation, `onSeat` fires for the new seat and
+`selfChanged` is set even though `renewed` is not. This client's own peer id
 from an old membership is dead. Parts for a room this client left are
 ignored.
 

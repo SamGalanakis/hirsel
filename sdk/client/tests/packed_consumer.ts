@@ -244,12 +244,16 @@ const roomClient = await Client.open({
 try {
   await roomClient.whenReady();
   const api = bind(roomClient);
-  const lost: number[] = [], heard: string[] = [];
+  const lost: number[] = [], heard: string[] = [], seatEvents: string[] = [], peerSeat: string[] = [];
   const roster = (peers: ReturnType<typeof room.peers>) =>
     [...peers].map(([id, p]) => `${id}:${p.state ? `${p.state.x},${p.state.y}` : '-'}`).join(' ');
   const room = api.room.packed_consumer.packed_room(undefined, {
     onLost: n => lost.push(n),
-    onPeers: (peers, change) => heard.push(`${change.renewed ? 'roster' : 'peers'} ${roster(peers)}`),
+    onSeat: (self, previous) => seatEvents.push(`${previous ?? 'none'}>${self ?? 'none'}`),
+    onPeers: (peers, change) => {
+      heard.push(`${change.renewed ? 'roster' : 'peers'} ${roster(peers)}`);
+      peerSeat.push(`${change.renewed ? 'renewed' : 'continued'}:${change.selfChanged ? 'self-changed' : 'self-same'}`);
+    },
     onMessage: (from, note, direct) => heard.push(`${from} ${direct ? 'direct' : 'room'} ${note.tag} ${roster(room.peers())}`),
   });
   const waitFor = async (done: () => boolean) => {
@@ -286,12 +290,16 @@ try {
   sockets.at(-1)!.onclose?.({code: 1006});
   await waitFor(() => sent.slice(before).some(f => f.tag === 'Subscribe'));
   assert.equal(room.self, undefined);
+  assert.deepEqual(seatEvents, ['none>5', '5>none'], 'ending the session reports the lost seat');
   assert.equal(heard.at(-1), 'peers 5:-', 'the roster stays as last told across a session end');
   const again = sent.slice(before).find(f => f.tag === 'Subscribe') as Extract<Sent, {tag: 'Subscribe'}>;
   assert(again.values[0] > first);
-  await deliver(live({sub: again.values[0], complete: true, you: {tag: 'Some', value: 9}, joined: [[9, caller]]}));
-  assert.equal(room.self, 9);
-  assert.deepEqual(heard.at(-1), 'peers 9:-', 'the same incarnation\'s image omits the old admission 5');
+  await deliver(live({sub: again.values[0], complete: true, you: {tag: 'Some', value: 6}, joined: [[6, caller]]}));
+  assert.equal(room.self, 6);
+  assert.deepEqual(seatEvents, ['none>5', '5>none', 'none>6'], 'rejoining with a new peer id reports the new seat');
+  assert.deepEqual(peerSeat, ['renewed:self-changed', 'continued:self-same', 'continued:self-changed'],
+    'the same-incarnation rejoin marks selfChanged even though renewed is false');
+  assert.deepEqual(heard.at(-1), 'peers 6:-', 'the same incarnation\'s image omits the old admission 5');
   assert.deepEqual(sent.at(-1), {tag: 'Set', values: [again.values[0], {tag: 'Some', value: codec.State2.encode({x: 6, y: 7})}]});
   room.leave();
   await waitFor(() => sent.at(-1)?.tag === 'Unsubscribe');

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, Write};
 use std::slice;
-use zstd_safe::{CCtx, CParameter, get_error_name};
+use zstd_safe::{CCtx, get_error_name};
 
 const FRAME_LIMIT: usize = 65 << 20;
 const REPLY_LIMIT: usize = 4096;
@@ -23,18 +23,10 @@ pub(super) struct Frames {
 
 impl Frames {
     pub(super) fn new() -> Result<Self, Failure> {
-        let mut encoder = CCtx::try_create().ok_or("could not allocate a Zstandard encoder")?;
-        for parameter in [
-            CParameter::CompressionLevel(3),
-            CParameter::WindowLog(23),
-            CParameter::ContentSizeFlag(true),
-        ] {
-            encoder.set_parameter(parameter).map_err(get_error_name)?;
-        }
         Ok(Self {
             file: tempfile::tempfile()?,
             offsets: BTreeMap::new(),
-            encoder,
+            encoder: crate::package_content::frame_encoder()?,
             compressed: Vec::new(),
         })
     }

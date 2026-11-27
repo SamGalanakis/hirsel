@@ -334,7 +334,10 @@ impl State {
             zstd_safe::decompress(expanded.as_mut_slice(), frame).unwrap(),
             size as usize
         );
-        let root = Root::of(&expanded);
+        let (root, library) =
+            crate::package_content::Library::read_frame(frame, Some(frame.len() as u64)).unwrap();
+        assert_eq!(library.encoded.as_ref(), expanded);
+        assert_eq!(root, Root::of(&expanded));
         let digest = hirsel_core_ids::hex::encode(&root.0);
         let content = Content::decode(&expanded).unwrap();
         assert_eq!(content.id.to_string(), format!("fixture.test/{member}@1"));

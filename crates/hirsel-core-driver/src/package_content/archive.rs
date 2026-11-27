@@ -5,10 +5,24 @@ use zstd_safe::{CCtx, CParameter, DCtx, DParameter, InBuffer, OutBuffer};
 const ARCHIVE_TAG: &str = "hirsel.package-archive.v2";
 const WINDOW_LOG: u32 = 23;
 const WINDOW_LIMIT: u64 = 1 << WINDOW_LOG;
-const COMPRESSION_LEVEL: i32 = 3;
+const COMPRESSION_LEVEL: i32 = 19;
 const FRAME_HEADER_MAX: usize = 18;
 const NOT_ONE_FRAME: &str = "not one Zstandard frame";
 const FRAME_LIMIT: usize = 65 << 20;
+
+pub(crate) fn frame_encoder() -> Result<CCtx<'static>, String> {
+    let mut encoder = CCtx::try_create().ok_or("could not allocate a Zstandard encoder")?;
+    for parameter in [
+        CParameter::CompressionLevel(COMPRESSION_LEVEL),
+        CParameter::WindowLog(WINDOW_LOG),
+        CParameter::ContentSizeFlag(true),
+    ] {
+        encoder
+            .set_parameter(parameter)
+            .map_err(zstd_safe::get_error_name)?;
+    }
+    Ok(encoder)
+}
 
 impl PackageArchive {
     /// Opens the package archive at `path`; `toolchain` admits a toolchain package's own
@@ -46,15 +60,7 @@ impl PackageArchive {
         let mut out = Writer::new(ARCHIVE_LIMIT);
         out.text(ARCHIVE_TAG);
         out.number(entries.len());
-        let mut encoder = CCtx::try_create().ok_or("could not allocate a Zstandard encoder")?;
-        for parameter in [
-            CParameter::CompressionLevel(COMPRESSION_LEVEL),
-            CParameter::WindowLog(WINDOW_LOG),
-        ] {
-            encoder
-                .set_parameter(parameter)
-                .map_err(zstd_safe::get_error_name)?;
-        }
+        let mut encoder = frame_encoder()?;
         let mut compressed = Vec::new();
         let mut total = 0;
         for library in std::iter::once(&entries[&head]).chain(

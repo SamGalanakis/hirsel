@@ -13,6 +13,7 @@ pub(crate) const ARCHIVE_LIMIT: usize = ARCHIVE_LIMIT_MIB << 20;
 const FILE_LIMIT: usize = 65_536;
 pub(crate) const PACKAGE_LIMIT: usize = 4096;
 mod archive;
+pub(crate) use archive::frame_encoder;
 pub(crate) const CHARGE: &str = "charge-v1";
 
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {

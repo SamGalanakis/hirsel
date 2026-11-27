@@ -877,14 +877,10 @@ fn add(
     let overlay = workspace
         .with_manifests(cwd, &edits, needs_package)?
         .ok_or("the workspace changed while hirsel add ran")?;
-    let trial = Resolution::resolve_cached(
-        overlay,
-        options.store.clone(),
-        false,
-        entries,
-        &mut report.fetched,
-    )
-    .map_err(|error| report.with_fetches(error))?;
+    let named_root = root.filter(|_| matches!(options.source, Source::Registry(_)));
+    let trial = registry
+        .resolve_add(overlay, entries, named_root, &mut report.fetched)
+        .map_err(|error| report.with_fetches(error))?;
     if matches!(options.source, Source::Registry(_)) {
         let (findings, authority) =
             registry.check_add(&trial, &id, root, locator.as_ref(), shared.as_ref(), alias)?;

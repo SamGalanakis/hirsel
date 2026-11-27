@@ -16,6 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 type Result<T, E = Failure> = std::result::Result<T, E>;
 
+pub(crate) type ReleaseHead<'a> = dyn Fn() -> Result<Checkpoint> + 'a;
+
 const NOTE_LIMIT: usize = 128 << 10;
 const BUNDLE_LIMIT: usize = (u16::MAX as usize + 2) * 256;
 const EVIDENCE_LIMIT: usize = 64 << 20;
@@ -101,11 +103,14 @@ impl<'a> Client<'a> {
         head: &Checkpoint,
         name: &str,
     ) -> Result<Vec<(Hint, Release)>> {
+        self.hints(head, name, self.transport.is_offline())
+    }
+
+    fn hints(&self, head: &Checkpoint, name: &str, cached: bool) -> Result<Vec<(Hint, Release)>> {
         self.require_name(name)?;
         let log = self.release_log(head)?;
         let cache_key = format!("versions/{}", hex(&Sha256::digest(name)));
-        let offline = self.transport.is_offline();
-        let bytes = if offline {
+        let bytes = if cached {
             log.cached(&cache_key, EVIDENCE_LIMIT)?
         } else {
             self.read(&format!("versions/{name}"), EVIDENCE_LIMIT)?
@@ -143,10 +148,40 @@ impl<'a> Client<'a> {
                 Err(e) => return Err(e),
             }
         }
-        if !offline && !accepted.is_empty() {
+        if !cached && !accepted.is_empty() {
             log.store_object(&cache_key, &serde_json::to_vec(&accepted)?)?;
         }
         Ok(verified.into_values().collect())
+    }
+
+    /// A graph edge pins a specific release. Cached locators suffice only if
+    /// their inclusion against this command's accepted head proves every pin.
+    pub(crate) fn verify_pins(
+        &self,
+        head: &Checkpoint,
+        name: &str,
+        pins: &std::collections::BTreeSet<(Version, Root)>,
+    ) -> Result<()> {
+        let includes = |rows: &[(Hint, Release)]| {
+            pins.iter().all(|(v, root)| {
+                rows.iter()
+                    .any(|(hint, leaf)| &hint.version == v && leaf.root() == *root)
+            })
+        };
+        if !self.transport.is_offline()
+            && self
+                .hints(head, name, true)
+                .is_ok_and(|rows| includes(&rows))
+        {
+            return Ok(());
+        }
+        if includes(&self.verified_hints(head, name)?) {
+            return Ok(());
+        }
+        Err(
+            format!("{name} lacks verified release inclusion for its pinned version and root")
+                .into(),
+        )
     }
 
     pub(crate) fn release_checkpoint(&self, now: u64) -> Result<Checkpoint> {
@@ -260,7 +295,7 @@ impl<'a> Client<'a> {
     pub(crate) fn status_replay(
         &self,
         now: u64,
-        release_head: Option<&Checkpoint>,
+        release_head: Option<&ReleaseHead<'_>>,
     ) -> Result<StatusReplay> {
         let log = self.log(Log::Status);
         let _guard = if self.transport.is_offline() {
@@ -292,7 +327,7 @@ impl<'a> Client<'a> {
         {
             return Ok(replay);
         }
-        let mut release_head = release_head.cloned();
+        let mut evidence_head = None;
         let result = log.prove(|objects| {
             replay.advance(
                 &head,
@@ -303,11 +338,16 @@ impl<'a> Client<'a> {
                     let bytes = self
                         .evidence(digest, 1 << 20)
                         .map_err(|_| Error::MissingEvidence)?;
-                    if release_head.is_none() {
-                        release_head =
-                            Some(self.release_checkpoint(now).map_err(verification_error)?);
+                    if evidence_head.is_none() {
+                        evidence_head = Some(
+                            match release_head {
+                                Some(accepted) => accepted(),
+                                None => self.release_checkpoint(now),
+                            }
+                            .map_err(verification_error)?,
+                        );
                     }
-                    let release_head = release_head.as_ref().unwrap();
+                    let release_head = evidence_head.as_ref().unwrap();
                     release_head.check_fresh(now)?;
                     let release = self.evidence_release(release_head, root, &bytes)?;
                     Ok((release, bytes))

@@ -2,7 +2,7 @@
 use crate::package_content::{Binding, Id, Library, Root};
 use crate::package_manifest::{SourceLocation, name::Version};
 use crate::package_resolve::{Libraries, Resolution};
-use crate::package_store::{Entry, PackageStore};
+use crate::package_store::{Entry, PackageStore, REGISTRY_WORKERS};
 use crate::package_workspace::{Edge, Workspace};
 use crate::registry_route::Origin;
 use crate::registry_verify::Release;
@@ -61,6 +61,8 @@ impl Query {
     }
 }
 
+type Pins = BTreeMap<(Origin, String), BTreeSet<(Version, Root)>>;
+
 struct LogState {
     release: Checkpoint,
     statuses: std::sync::Arc<StatusReplay>,
@@ -116,6 +118,7 @@ pub(crate) struct Registry {
     logs: BTreeMap<Origin, LogState>,
     names: BTreeMap<String, BTreeMap<Version, Candidate>>,
     denied: BTreeSet<Root>,
+    proved: Pins,
 }
 
 /// Young replacements participate in graph and authority checks in memory.
@@ -200,6 +203,7 @@ impl Registry {
             logs: BTreeMap::new(),
             names: BTreeMap::new(),
             denied: BTreeSet::new(),
+            proved: Pins::new(),
         })
     }
 
@@ -207,16 +211,34 @@ impl Registry {
         let client = self.store.registry(name, pin)?;
         let origin = client.route().origin().clone();
         if !self.logs.contains_key(&origin) {
-            let release = client.release_checkpoint(self.now).map_err(boxed)?;
+            // Status replay needs this same release head only for advisory evidence.
+            // The two independent checkpoint requests can otherwise run together.
+            let accepted = std::sync::OnceLock::new();
+            let checkpoint = || {
+                accepted
+                    .get_or_init(|| {
+                        client
+                            .release_checkpoint(self.now)
+                            .map_err(|e| e.to_string())
+                    })
+                    .clone()
+                    .map_err(Into::into)
+            };
+            let (release, statuses) = std::thread::scope(|scope| {
+                let worker = scope.spawn(checkpoint);
+                let statuses = self.store.status_for(&client, self.now, Some(&checkpoint));
+                (
+                    worker.join().expect("registry release checkpoint worker"),
+                    statuses,
+                )
+            });
+            let release = release.map_err(boxed)?;
             if release.is_preview() && self.store.transport.is_offline() {
                 return Err(
                     "--frozen cannot verify checkpoint freshness for preview (quorum 0)".into(),
                 );
             }
-            let statuses = self
-                .store
-                .status_for(&client, self.now, Some(&release))
-                .map_err(boxed)?;
+            let statuses = statuses.map_err(boxed)?;
             self.logs
                 .insert(origin.clone(), LogState { release, statuses });
         }
@@ -475,6 +497,117 @@ impl Registry {
         Finding::new(log.release.is_preview(), log.statuses.state(root))
     }
 
+    fn verify_pins(&self, pins: &Pins, workers: usize) -> Result<(), Failure> {
+        let mut checks = Vec::new();
+        for (key @ (origin, name), required) in pins {
+            if self
+                .proved
+                .get(key)
+                .is_some_and(|known| required.is_subset(known))
+            {
+                continue;
+            }
+            if let Some(versions) = self.names.get(name) {
+                if required.iter().any(|(version, root)| {
+                    versions.get(version).is_none_or(|c| c.leaf.root() != *root)
+                }) {
+                    return Err(format!(
+                        "{name} lacks verified release inclusion for its pinned version and root"
+                    )
+                    .into());
+                }
+            } else {
+                checks.push((
+                    self.store.registry(name, Some(origin))?,
+                    &self.logs[origin].release,
+                    name,
+                    required,
+                ));
+            }
+        }
+        for batch in checks.chunks(workers) {
+            std::thread::scope(|scope| {
+                batch
+                    .iter()
+                    .map(|(client, head, name, required)| {
+                        scope.spawn(|| client.verify_pins(head, name, required))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .try_for_each(|job| {
+                        job.join()
+                            .expect("registry inclusion worker")
+                            .map_err(boxed)
+                    })
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_add(
+        &mut self,
+        overlay: Workspace,
+        entries: Libraries,
+        named_root: Option<Root>,
+        fetched: &mut BTreeSet<String>,
+    ) -> Result<Resolution, Failure> {
+        // A named release must prove its direct floor bindings even when the
+        // consumer selects a different effective root. Those claims are known
+        // before resolving the rest of the graph.
+        let mut pins = Pins::new();
+        if let Some(lib) = named_root.and_then(|root| entries.get(&root)) {
+            for (id, binding) in lib.content.bindings.values() {
+                if let Binding::Floor {
+                    tested,
+                    minor,
+                    patch,
+                } = binding
+                {
+                    let client = self.store.registry(&id.name, None)?;
+                    let origin = client.route().origin();
+                    if self.logs.contains_key(origin) {
+                        let version = Version {
+                            major: id.major,
+                            minor: *minor,
+                            patch: *patch,
+                            pre: String::new(),
+                        };
+                        pins.entry((origin.clone(), id.name.clone()))
+                            .or_default()
+                            .insert((version, *tested));
+                    }
+                }
+            }
+        }
+        if pins.is_empty() {
+            return Resolution::resolve_cached(
+                overlay,
+                self.store.clone(),
+                false,
+                entries,
+                fetched,
+            );
+        }
+        let hint_workers = pins.len().min(REGISTRY_WORKERS / 3);
+        let store = self
+            .store
+            .with_frame_workers(REGISTRY_WORKERS - hint_workers);
+        let (trial, proof) = std::thread::scope(|scope| {
+            let proof = scope.spawn(|| {
+                self.verify_pins(&pins, hint_workers)
+                    .map_err(|e| e.to_string())
+            });
+            let trial = Resolution::resolve_cached(overlay, store, false, entries, fetched);
+            (trial, proof.join().expect("registry floor proof worker"))
+        });
+        let trial = trial?;
+        proof?;
+        for (key, checked) in pins {
+            self.proved.entry(key).or_default().extend(checked);
+        }
+        Ok(trial)
+    }
+
     /// Follow the effective roots, retaining the carrier of an unlogged exact child.
     pub(crate) fn graph(
         &mut self,
@@ -500,6 +633,7 @@ impl Registry {
                 _ => None,
             }
         };
+        let mut pins = Pins::new();
         let mut seen = BTreeSet::new();
         let mut result = BTreeMap::new();
         while let Some((id, carrier, logged)) = work.pop() {
@@ -525,13 +659,9 @@ impl Registry {
             if let Some(origin) = &carrier {
                 if logged {
                     self.open(&id.name, Some(origin))?;
-                    self.candidates(&id.name, origin)?;
-                    if !self.names[&id.name]
-                        .get(&lib.content.version)
-                        .is_some_and(|c| c.leaf.root() == root)
-                    {
-                        return Err(format!("{id} {root} lacks verified release inclusion").into());
-                    }
+                    pins.entry((origin.clone(), id.name.clone()))
+                        .or_default()
+                        .insert((lib.content.version.clone(), root));
                 }
                 let finding = self.finding(origin, root)?;
                 result
@@ -551,22 +681,15 @@ impl Registry {
                     && carrier.is_some()
                 {
                     let origin = self.open(&child.name, None)?;
-                    self.candidates(&child.name, &origin)?;
                     let floor = Version {
                         major: child.major,
                         minor: *minor,
                         patch: *patch,
                         pre: String::new(),
                     };
-                    if self.names[&child.name]
-                        .get(&floor)
-                        .is_none_or(|c| c.leaf.root() != *tested)
-                    {
-                        return Err(format!(
-                            "{child}: floor {floor} {tested} lacks verified release inclusion"
-                        )
-                        .into());
-                    }
+                    pins.entry((origin.clone(), child.name.clone()))
+                        .or_default()
+                        .insert((floor, *tested));
                     work.push((child.clone(), Some(origin), true));
                 } else if let Some(explicit) = source(child, None) {
                     work.push((child.clone(), Some(explicit), true));
@@ -575,6 +698,7 @@ impl Registry {
                 }
             }
         }
+        self.verify_pins(&pins, REGISTRY_WORKERS)?;
         Ok(result
             .into_iter()
             .map(|(k, v)| (k, Finding::merge(v)))

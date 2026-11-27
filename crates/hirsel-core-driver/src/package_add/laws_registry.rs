@@ -409,7 +409,14 @@ fn g6_cli_named_add_update_audit() {
         "{crossing}"
     );
     assert_eq!(snapshot(dir), with_floor);
+    server.take();
     run(&["update", "fixture.test/child@0.3.2"], 0);
+    let (requests, _) = server.take();
+    let hints: Vec<_> = requests
+        .iter()
+        .filter(|path| path.contains("/versions/"))
+        .collect();
+    assert_eq!(hints, [&format!("{HOST}/versions/{child_name}")]);
     let text = fs::read_to_string(&manifest).unwrap();
     assert!(
         text.contains("[selections]") && text.contains(&selected.to_string()),
@@ -452,6 +459,64 @@ fn g6_cli_named_add_update_audit() {
             .take()
             .0
             .contains(&format!("{HOST}{}", frame_path(fix)))
+    );
+}
+
+#[test]
+fn cold_floor_proofs_share_connections_with_frame_fetches() {
+    let server = Server::start();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
+    config(dir, false);
+    fs::write(dir.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+    fs::write(dir.join("main.hirsel"), APP).unwrap();
+    let mut catalog = Catalog {
+        server: &server,
+        rows: vec![],
+        hints: BTreeMap::new(),
+    };
+    let mut bindings = BTreeMap::new();
+    for i in 0..24 {
+        let alias = format!("child{i}");
+        let name = format!("fixture.test/{alias}");
+        let root = catalog.publish(&name, "1.0.0", LIB, NOW - WAIT, BTreeMap::new());
+        bindings.insert(
+            alias,
+            (
+                Id { name, major: 1 },
+                Binding::Floor {
+                    tested: root,
+                    minor: 0,
+                    patch: 0,
+                },
+            ),
+        );
+    }
+    catalog.publish(NAME, "1.0.0", LIB, NOW - WAIT, bindings);
+    serve_log(&server, Log::Status, &[], true);
+    invoke(&server, dir, NOW, &["add", "fixture.test/json@1.0.0"], 0);
+    let (requests, connections) = server.take();
+    let hints: Vec<_> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.contains("/versions/fixture.test/child"))
+        .map(|(i, _)| i)
+        .collect();
+    let frames: Vec<_> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.contains("/c/"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hints.len(), 24);
+    assert_eq!(frames.len(), 25);
+    assert!(
+        hints[0] < frames[24],
+        "all frames preceded the first child proof"
+    );
+    assert!(
+        (2..=crate::package_store::REGISTRY_WORKERS).contains(&connections),
+        "{connections} connections"
     );
 }
 

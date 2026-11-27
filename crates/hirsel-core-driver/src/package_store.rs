@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Clone)]
 pub(crate) struct PackageStore {
     path: PathBuf,
+    frame_workers: usize,
     pub(crate) transport: Transport,
     routes: Arc<OnceLock<Result<Routes, String>>>,
     statuses: Arc<Mutex<BTreeMap<Origin, Arc<StatusReplay>>>>,
@@ -36,6 +37,7 @@ impl PackageStore {
 
     pub(crate) fn with_transport(path: Option<PathBuf>, transport: Transport) -> Self {
         Self {
+            frame_workers: REGISTRY_WORKERS,
             transport,
             routes: Arc::new(OnceLock::new()),
             statuses: Default::default(),
@@ -181,7 +183,7 @@ impl PackageStore {
         &self,
         client: &crate::registry_fetch::Client<'_>,
         now: u64,
-        release: Option<&crate::registry_verify::notes::Checkpoint>,
+        release: Option<&crate::registry_fetch::ReleaseHead<'_>>,
     ) -> Result<Arc<StatusReplay>, Box<dyn std::error::Error + Send + Sync>> {
         let mut statuses = self.statuses.lock().expect("registry status lock");
         let origin = client.route().origin();
@@ -214,13 +216,20 @@ impl PackageStore {
         Ok((library, format!("registry:{}", client.route().origin())))
     }
 
+    pub(crate) fn with_frame_workers(&self, frame_workers: usize) -> Self {
+        Self {
+            frame_workers,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn fetch_frames(
         &self,
         frames: &[crate::package_resolve::Frame<'_>],
         fetched: &mut BTreeSet<String>,
     ) -> Result<crate::package_resolve::Libraries, Box<dyn std::error::Error>> {
         let mut libraries = crate::package_resolve::Libraries::new();
-        for batch in frames.chunks(8) {
+        for batch in frames.chunks(self.frame_workers) {
             let results = std::thread::scope(|scope| {
                 let jobs: Vec<_> = batch
                     .iter()
@@ -476,6 +485,8 @@ fn hex_name(name: &std::ffi::OsStr, len: usize) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+pub(crate) const REGISTRY_WORKERS: usize = 8;
+
 /// A request's authority to use HTTP and its lazy connection pool.
 #[derive(Clone)]
 pub(crate) struct Transport(Option<Arc<OnceLock<ureq::Agent>>>);
@@ -518,6 +529,7 @@ fn http_agent() -> ureq::Agent {
         .unversioned_rustls_crypto_provider(rustls::crypto::ring::default_provider().into())
         .build();
     ureq::Agent::config_builder()
+        .max_idle_connections_per_host(REGISTRY_WORKERS)
         .tls_config(tls)
         .timeout_per_read(Some(std::time::Duration::from_secs(60)))
         .build()

@@ -242,3 +242,43 @@ fn has_self_edge(edges: List[Edge], i: u64) -> bool {
     }
     false
 }
+
+pub fn opaque_fingerprint(take rev: Option[Bytes], smallest: u64, empty: bool) -> Option[Bytes] {
+    let Some(take raw) = take rev else {
+        return None
+    }
+    let mut data = take raw
+    list.put_word_le(mut data, smallest)
+    list.push(mut data, if empty {
+        1u8
+    } else {
+        0u8
+    })
+    Some(hash("hirsel.codec-opaque.v1", data))
+}
+
+pub fn opaque_key_fingerprint(take rev: Option[Bytes]) -> Option[Bytes] {
+    let Some(data) = rev else {
+        return None
+    }
+    Some(hash("hirsel.key-opaque.v1", data))
+}
+
+pub fn revisions(encoder: Option[View[Bytes]], decoder: Option[View[Bytes]], describer: Option[View[Bytes]]) -> Option[Bytes] {
+    let (Some(e), Some(d), Some(w)) = (encoder, decoder, describer) else {
+        return None
+    }
+    let mut out: Bytes = list.new()
+    list.append(mut out, e)
+    list.append(mut out, d)
+    list.append(mut out, w)
+    Some(take out)
+}
+
+pub fn finish_optional(graph: Option[Graph]) -> Option[Bytes] {
+    if let Some(g) = graph {
+        finish(g)
+    } else {
+        None
+    }
+}

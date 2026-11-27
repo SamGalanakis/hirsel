@@ -522,7 +522,7 @@ impl<'a> Resolver<'a, '_> {
             return false;
         }
         match operation {
-            "codec" => path.0.name == "storage_make",
+            "codec" => matches!(path.0.name.as_str(), "storage_make" | "storage_checked"),
             "schema" => matches!(
                 path.0.name.as_str(),
                 "storage_mode" | "storage_via" | "storage_to" | "storage_field_end"

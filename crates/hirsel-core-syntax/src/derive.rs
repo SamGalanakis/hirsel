@@ -8,6 +8,7 @@
 //! The text is generated from the syntax alone: field and payload types, default literals
 //! and the declared bounds are copied as written, and each codec a field needs comes from a
 //! typed `let` of `codec.of()`.
+mod field;
 mod least;
 
 use crate::*;
@@ -1253,40 +1254,6 @@ impl<'a> Gen<'a> {
         self.lets.clear();
         let _ = writeln!(out, "{header} {{\n{lets}{body}}}\n");
     }
-    fn put(&mut self, ty: &Ty<'a>, v: &str) -> String {
-        let c = self.c;
-        let mut stmt = match *ty {
-            Ty::Scalar(x, _) => format!("{c}put_{x}({v}, mut out$)"),
-            Ty::List(e, source) => format!("{c}put_list({v}, {}, mut out$)", self.of_at(e, source)),
-            Ty::Option(e) => format!("{c}put_option({v}, {}, mut out$)", self.of(e)),
-            Ty::Map(k, w) => format!("{c}put_map({v}, {}, {}, mut out$)", self.of(k), self.of(w)),
-            Ty::Result(t, e) => format!(
-                "{c}put_result({v}, {}, {}, mut out$)",
-                self.of(t),
-                self.of(e)
-            ),
-            Ty::With(t) => format!("{c}put_with({v}, {}, mut out$)", self.of(t)),
-        };
-        if !matches!(*ty, Ty::Scalar(name, _) if name != "string") {
-            stmt.push('?');
-        }
-        stmt
-    }
-    fn take(&mut self, ty: &Ty<'a>) -> String {
-        let c = self.c;
-        match *ty {
-            Ty::Scalar(x, _) => format!("{c}take_{x}(b$, mut at$)?"),
-            Ty::List(e, source) => format!("{c}take_list(b$, mut at$, {})?", self.of_at(e, source)),
-            Ty::Option(e) => format!("{c}take_option(b$, mut at$, {})?", self.of(e)),
-            Ty::Map(k, w) => format!("{c}take_map(b$, mut at$, {}, {})?", self.of(k), self.of(w)),
-            Ty::Result(t, e) => format!(
-                "{c}take_result(b$, mut at$, {}, {})?",
-                self.of(t),
-                self.of(e)
-            ),
-            Ty::With(t) => format!("{c}take_with(b$, mut at$, {})?", self.of(t)),
-        }
-    }
     fn schema(&mut self, text: &'a str) -> String {
         let c = self.c;
         let codec = self.of(text);
@@ -1362,6 +1329,12 @@ impl<'a> Gen<'a> {
         );
         let empty = empty.as_deref().unwrap_or("false");
         let make = format!("{c}storage_make({args}, {empty})");
+        let make = if self.scalar_record().is_some() {
+            self.validator(out);
+            format!("{c}storage_checked({make}, code.describe({name}$validate))")
+        } else {
+            make
+        };
         let body = format!("{lets}    {make}\n");
         self.function(out, &header, &body);
     }
@@ -1374,7 +1347,12 @@ impl<'a> Gen<'a> {
                 self.mapped.mark(e.source, code)
             })
             .collect();
-        Self::sequence(&steps, "    ")
+        let mut body = String::new();
+        if let Some(size) = self.scalar_record().filter(|&n| n > 0) {
+            // A refused reservation leaves the usual incremental prefix available.
+            writeln!(body, "    let _ = list.try_reserve(mut out$, {size}u64)").unwrap();
+        }
+        body + &Self::sequence(&steps, "    ")
     }
     /// The construction, its fields in declared order, each the value its take returns.
     fn record_decode(&mut self, entries: &'a [Entry<'a>]) -> String {

@@ -1,6 +1,6 @@
 hirsel.laws 1
 hirsel.ai/fleet@1/laws/advisory_k10_lattice_laws src=95888b0f1da025e8 sig=0bbe28368f6edee4 run=5ffc56bae06a36d7 bug=e14b4a927dd5d856 oracle=cc71362f98e760cb rows=pending
-hirsel.ai/fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=71624cdcf7cbca07 sig=169ab69a162c0966 run=5ffc56bae06a36d7 bug=9d01041b06ba1d00 oracle=c260ffd58c319cdc rows=pending
+hirsel.ai/fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=71624cdcf7cbca07 sig=15855db114ad23f4 run=5ffc56bae06a36d7 bug=9d01041b06ba1d00 oracle=c260ffd58c319cdc rows=pending
 hirsel.ai/fleet@1/laws/move_kernel_closes_three_stale_races_and_lost_h src=c5e1ba6ceb58e673 sig=c935f1f6f0a11faf run=5ffc56bae06a36d7 bug=6b0679117cf1e660 oracle=10ef25ab43d64531 rows=pending
 hirsel.ai/fleet@1/laws/origin_wire_49_bytes_and_o3_o4 src=a567a5abbaf3ab0d sig=961be5a8690c5dd1 run=5ffc56bae06a36d7 bug=e470365b53736031 oracle=682b692ae1f95af1 rows=pending
 hirsel.ai/fleet@1/laws/register_model_bfs_and_kernel_conforms src=826b312c1f18aaba sig=c3d4d4ddb1b02634 run=5ffc56bae06a36d7 bug=437f0eef619520c3 oracle=39ab6b876450f5b2 rows=pending
@@ -13,5 +13,5 @@ hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts src=c57f0d7a5146bf89 sig=07869
 hirsel.ai/fleet@1/laws/sim_fleet_scale_50_hosts src=a5b38773e597ebb6 sig=0786978be7f50337 run=b8720e32dc0c26eb bug=00026f91da7ce7d2 oracle=08f576a2f697148b rows=pending
 hirsel.ai/fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=b643483547720542 sig=f2c0ba4838a183b1 run=b8720e32dc0c26eb bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
 hirsel.ai/fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=a80f4f1e9776db6a sig=442898b4c51cd0d7 run=b8720e32dc0c26eb bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending
-hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=3a6a5d92a3329be1 sig=9444cb9341db9ca9 run=9fb8ef06378478a6 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
+hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=3a6a5d92a3329be1 sig=0375e24658e81160 run=9fb8ef06378478a6 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
 hirsel.ai/fleet@1/laws/sim_three_stale_open_races_with_message_hold src=5eff6d296a0c0347 sig=d6f5bc6ec64414de run=b8720e32dc0c26eb bug=a4cdfb4659042089 oracle=0538449336f9c901 rows=pending

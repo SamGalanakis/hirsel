@@ -30,6 +30,7 @@ pub opaque type Codec[T]: shareable + send {
     smallest: u64,
     empty: bool,
     structural: bool,
+    validator: Option[StaticFn[fn(Bytes, mut u64) -> Result[(), DecodeError]]],
 }
 
 /// An opaque codec from its parts.
@@ -40,11 +41,32 @@ pub fn make[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: Stat
 
 /// An opaque codec from its parts, with an explicit empty flag.
 pub fn make_derived[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]], n: u64, empty: bool) -> Codec[T] {
-    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: false)
+    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: false, validator: None)
 }
 
 fn storage_make[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: StaticFn[fn(Bytes, mut u64) -> Result[T, DecodeError]], w: StaticFn[fn(mut Schema, Codec[T]) -> Result[(), EncodeError]], n: u64, empty: bool) -> Codec[T] {
-    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: true)
+    Codec(encoder: e, decoder: d, describer: w, smallest: n, empty: empty, structural: true, validator: None)
+}
+
+fn storage_checked[T](take c: Codec[T], check: StaticFn[fn(Bytes, mut u64) -> Result[(), DecodeError]]) -> Codec[T] {
+    let mut checked = take c
+    checked.validator = Some(check)
+    take checked
+}
+
+/// Checks a whole encoding, including its trailing boundary. A scalar record checks its
+/// fields in wire order without constructing the record. Other codecs run their decoder.
+pub fn validate[T](c: Codec[T], b: Bytes) -> Result[(), DecodeError] {
+    if let Some(check) = c.validator {
+        let mut at = 0u64
+        (code.callable(check))(b, mut at)?
+        if at != list.len(b) {
+            return Error(Trailing(at))
+        }
+        return Ok(())
+    }
+    let _ = decode(c, b)?
+    Ok(())
 }
 
 /// The codec's revision: the code revisions (PROG-9) of its encoder, decoder and
@@ -52,60 +74,32 @@ fn storage_make[T](e: StaticFn[fn(T, mut Bytes) -> Result[(), EncodeError]], d: 
 /// decode bytes to another value: a default literal, a `via` `to` or `from` body, or any
 /// codec they reach (SEM-10). None when the program was assembled without revisions.
 pub fn revision[T](c: Codec[T]) -> Option[Bytes] {
-    revisions(code.revision(c.encoder), code.revision(c.decoder), code.revision(c.describer))
+    codec_storage.revisions(code.revision(c.encoder), code.revision(c.decoder), code.revision(c.describer))
 }
 
 /// A key codec's revision, as `revision` gives a codec's.
 pub fn key_revision[T](k: Key[T]) -> Option[Bytes] {
-    revisions(code.revision(k.encoder), code.revision(k.decoder), code.revision(k.describer))
+    codec_storage.revisions(code.revision(k.encoder), code.revision(k.decoder), code.revision(k.describer))
 }
 
 /// SHA-256 storage identity under SEM-10. Opaque and via parts need code revisions.
 pub fn fingerprint[T](c: Codec[T]) -> Option[Bytes] {
     if !c.structural {
-        return opaque_fingerprint(c)
+        return codec_storage.opaque_fingerprint(revision(c), c.smallest, c.empty)
     }
     let mut s = storage_builder(false)
     result.unwrap(schema_of(mut s, c))
-    storage_finish(s)
+    codec_storage.finish_optional(s.storage)
 }
 
 /// SHA-256 storage identity of a key codec, including its ordering rule.
 pub fn key_fingerprint[T](k: Key[T]) -> Option[Bytes] {
     if !k.structural {
-        return opaque_key_fingerprint(k)
+        return codec_storage.opaque_key_fingerprint(key_revision(k))
     }
     let mut s = storage_builder(true)
     result.unwrap(schema_key(mut s, k))
-    storage_finish(s)
-}
-
-fn opaque_fingerprint[T](c: Codec[T]) -> Option[Bytes] {
-    let Some(take raw) = revision(c) else {
-        return None
-    }
-    let mut data = take raw
-    put_u64(c.smallest, mut data)
-    put_bool(c.empty, mut data)
-    Some(codec_storage.hash("hirsel.codec-opaque.v1", data))
-}
-
-fn opaque_key_fingerprint[T](k: Key[T]) -> Option[Bytes] {
-    let Some(data) = key_revision(k) else {
-        return None
-    }
-    Some(codec_storage.hash("hirsel.key-opaque.v1", data))
-}
-
-fn revisions(encoder: Option[View[Bytes]], decoder: Option[View[Bytes]], describer: Option[View[Bytes]]) -> Option[Bytes] {
-    let (Some(e), Some(d), Some(w)) = (encoder, decoder, describer) else {
-        return None
-    }
-    let mut out: Bytes = list.new()
-    list.append(mut out, e)
-    list.append(mut out, d)
-    list.append(mut out, w)
-    Some(take out)
+    codec_storage.finish_optional(s.storage)
 }
 
 /// Whether a and b decode with the same function (PROG-9 identity); allocates nothing, with or without revisions.
@@ -630,7 +624,7 @@ pub fn of_bytes() -> Codec[Bytes] {
 
 /// The count, then the bytes. out grows as pushing them one by one grows it, by one
 /// growth at a time, so a Capacity leaves the same prefix and the same capacity.
-fn put_bytes(xs: Bytes, mut out: Bytes) -> Result[(), EncodeError] {
+pub fn put_bytes(xs: Bytes, mut out: Bytes) -> Result[(), EncodeError] {
     put_count(list.len(xs), mut out)?
     let n = list.len(xs)
     let mut i: u64 = 0
@@ -654,13 +648,24 @@ fn put_bytes(xs: Bytes, mut out: Bytes) -> Result[(), EncodeError] {
 }
 
 /// The count, Truncated at the count when fewer bytes remain, then exactly that many.
-fn take_bytes(b: Bytes, mut at: u64) -> Result[Bytes, DecodeError] {
+pub fn take_bytes(b: Bytes, mut at: u64) -> Result[Bytes, DecodeError] {
     let n = take_count(b, mut at, 1)?
     let mut xs: Bytes = room(n)
     // Within the exact capacity room admitted, so the append never grows.
     let _ = list.append(mut xs, list.slice(b, at, at + n))
     at += n
     Ok(take xs)
+}
+
+/// Reads a length-prefixed byte field in place. The returned view borrows its input.
+pub fn take_bytes_view(b: Bytes, mut at: u64) -> Result[View[Bytes], DecodeError] in b {
+    if at > list.len(b) {
+        return Error(Truncated(list.len(b)))
+    }
+    let n = take_count(b, mut at, 1)?
+    let start = at
+    at += n
+    Ok(list.slice(b, start, at))
 }
 
 fn describe_bytes(mut s: Schema, _c: Codec[Bytes]) -> Result[(), EncodeError] {
@@ -1017,14 +1022,6 @@ fn storage_mode(s: Schema) -> bool {
     }
 }
 
-fn storage_finish(s: Schema) -> Option[Bytes] {
-    if let Some(g) = s.storage {
-        codec_storage.finish(g)
-    } else {
-        None
-    }
-}
-
 fn storage_type[T](_x: T) {}
 
 fn storage_enter[T](mut s: Schema, marker: StaticFn[fn(T)]) -> Option[(u64, Option[u64])] {
@@ -1230,7 +1227,7 @@ pub fn schema_string(mut s: Schema) {
 pub fn schema_of[T](mut s: Schema, c: Codec[T]) -> Result[(), EncodeError] {
     if storage_mode(s) {
         if !c.structural {
-            storage_external(mut s, opaque_fingerprint(c))
+            storage_external(mut s, codec_storage.opaque_fingerprint(revision(c), c.smallest, c.empty))
             return Ok(())
         }
         let marker: StaticFn[fn(T)] = code.describe(storage_type)
@@ -2687,7 +2684,7 @@ pub fn key_schema[T](k: Key[T]) -> Result[Bytes, EncodeError] {
 pub fn schema_key[T](mut s: Schema, k: Key[T]) -> Result[(), EncodeError] {
     if storage_mode(s) {
         if !k.structural {
-            storage_external(mut s, opaque_key_fingerprint(k))
+            storage_external(mut s, codec_storage.opaque_key_fingerprint(key_revision(k)))
             return Ok(())
         }
         let marker: StaticFn[fn(T)] = code.describe(storage_type)

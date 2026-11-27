@@ -5,6 +5,7 @@ use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
 mod describe;
+mod field;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodecOp {
@@ -391,52 +392,6 @@ impl Derive<'_> {
         let values = PoolRange::push(&mut c.body.pools.values, []);
         c.end(Terminator::Return(values));
     }
-    /// Component `i`'s codec, made by its maker into a new slot.
-    fn part_codec(&mut self, c: &mut Code, i: usize) -> Result<AddressId, String> {
-        let part = self.rows.parts[i];
-        let sig = signature_id(
-            self.module,
-            Signature::new(vec![], vec![], Some(part.codec)),
-        );
-        let maker = if self.rows.format == Format::Value {
-            templates::codec_maker(self.module, self.of, part.ty, sig)?
-        } else {
-            super::ordered_codec::maker(self.module, self.of, part.ty, sig)?
-        };
-        let signature = self.module.functions[maker.index()].signature;
-        let at = Self::slot(c, part.codec);
-        self.call(c, Callee::Direct(maker), signature, &[Arg::Address(at)]);
-        Ok(at)
-    }
-    /// The code of function field `field` (0 encoder, 1 decoder, 2 describer) of the
-    /// codec at `at`: the field is a `StaticFn`, its descriptor's first word the code.
-    fn field_fn(c: &mut Code, at: AddressId, field: u32) -> ValueId {
-        let f = Self::address(
-            c,
-            AddressBase::Address(at),
-            &[Step::Field(field)],
-            PlaceTy::Value(Ty::Ptr),
-        );
-        let descriptor = c.read_at(f, Ty::Ptr);
-        let code = Self::address(
-            c,
-            AddressBase::Value(descriptor),
-            &[],
-            PlaceTy::Value(Ty::Ptr),
-        );
-        c.read_at(code, Ty::Ptr)
-    }
-    fn part_signature(&mut self, i: usize, op: CodecOp) -> SigId {
-        let p = self.rows.parts[i];
-        let format = if self.rows.format == Format::Value {
-            Format::Value
-        } else {
-            Format::Key
-        };
-        let sig = op.sealed(self.module, p.ty, p.codec, p.decoded, self.rows, format);
-        signature_id(self.module, sig)
-    }
-
     fn of_body(&mut self, c: &mut Code, dest: ValueId) -> Result<(), String> {
         let mut least = c.constant(0);
         let mut empty = c.boolean(false);
@@ -528,6 +483,22 @@ impl Derive<'_> {
             Self::returns(c);
             return Ok(());
         }
+        let ShapeBody::Record(fields) = &self.module.types[self.rows.codec.index()].body else {
+            return Err("expected codec record".into());
+        };
+        let FieldTy::Inline(validator) = fields[6].ty else {
+            return Err("expected optional codec validator".into());
+        };
+        let check = Self::address(
+            c,
+            AddressBase::Address(to),
+            &[Step::Field(6)],
+            PlaceTy::Declared(TypeId(validator.0)),
+        );
+        c.inst(Inst::SetCase {
+            address: check,
+            case: 0,
+        });
         let at = Self::address(
             c,
             AddressBase::Address(to),
@@ -598,15 +569,11 @@ impl Derive<'_> {
             return Ok(());
         }
         for i in 0..rows.parts.len() {
-            let codec = self.part_codec(c, i)?;
-            let encoder = Self::field_fn(c, codec, 0);
-            let env = Self::null(c);
             let part = rows.parts[i].ty;
             let mut args = vec![];
             if let Some((_, result)) = outcome {
                 args.push(Arg::Address(result));
             }
-            args.push(Arg::Value(env));
             match self.module.types[part.index()].carried {
                 Carried::Nothing => {}
                 Carried::Value(t) => {
@@ -629,8 +596,7 @@ impl Derive<'_> {
                 }
             }
             args.push(Arg::Address(out));
-            let signature = self.part_signature(i, CodecOp::Encode);
-            self.call(c, Callee::Indirect(encoder), signature, &args);
+            self.call_part(c, i, CodecOp::Encode, args)?;
             if let Some((failed, result)) = outcome {
                 Self::unless_failed(c, result, failed);
             }
@@ -705,22 +671,17 @@ impl Derive<'_> {
         let mut decoded: Vec<AddressId> = vec![];
         for i in 0..rows.parts.len() {
             let part = rows.parts[i];
-            let codec = self.part_codec(c, i)?;
-            let decoder = Self::field_fn(c, codec, 1);
-            let env = Self::null(c);
             let slot = Self::slot(c, part.decoded);
-            let signature = self.part_signature(i, CodecOp::Decode);
-            self.call(
+            self.call_part(
                 c,
-                Callee::Indirect(decoder),
-                signature,
-                &[
+                i,
+                CodecOp::Decode,
+                vec![
                     Arg::Address(slot),
-                    Arg::Value(env),
                     Arg::Address(input),
                     Arg::Address(position),
                 ],
-            );
+            )?;
             let failed = c.block(&[]);
             Self::unless_failed(c, slot, failed);
             let next = c.current();
@@ -845,6 +806,10 @@ impl Derive<'_> {
             arguments,
             dictionaries: vec![],
         };
+        self.function_row(key, sig)
+    }
+
+    fn function_row(&mut self, key: InstanceKey, sig: Signature) -> (FuncId, SigId) {
         if let Some(i) = self
             .module
             .functions

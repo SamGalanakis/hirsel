@@ -1427,9 +1427,9 @@ pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G
 - **`StreamFuture(at)` (v2.88).** `Refusal` tag 8 is a little-endian u32 followed by the little-endian u64 `at`. Store admission samples `at = max(wall_ms, main.at)` and refuses a stream stamp more than 300,000 ms ahead of `at` (STORE-SPEC §1.8). HTTP returns 400 with `{"refused":"stream_future"}` and a `Hirsel-Now` header containing `at` in unsigned decimal milliseconds.
 - **Wire numbers (v2.3, fixed).** `Raised(n)` carries the first cause's kind, and `Bad.kind` the decode error's kind:
 
-  | `Raised(n)` | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
-  |---|---|---|---|---|---|---|---|---|---|
-  | CauseKind | Overflow | Bounds | Division | Unwrap | Fail | Cancelled | Capacity | OutOfTime | retired (was Tape, v2.10) |
+  | `Raised(n)` | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | CauseKind | Overflow | Bounds | Division | Unwrap | Fail | Cancelled | Capacity | OutOfTime | retired (was Tape, v2.10) | Stack (FAIL-17) |
 
   | `Bad.kind` | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
   |---|---|---|---|---|---|---|---|

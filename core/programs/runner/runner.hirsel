@@ -812,7 +812,7 @@ fn raised(cs: Causes) -> u32 {
             Cancelled => 6u32,
             Capacity(_) => 7u32,
             OutOfTime => 8u32,
-            Stack => 9u32,
+            Stack => 10u32,
         }
     }
     0u32

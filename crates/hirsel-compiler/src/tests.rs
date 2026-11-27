@@ -226,9 +226,7 @@ fn c_frame(out: &mut Vec<u8>, bytes: &[u8]) {
 /// Independent Phase 0 canonical C v3 encoder (`docs/spec/packages.md` §1).
 fn encode_c_v3(
     name: &str,
-    major: u32,
-    minor: u32,
-    patch: u32,
+    (major, minor, patch): (u32, u32, u32),
     pre: &str,
     bindings: &[(&str, &str, u32, TestBinding)],
     files: &[(&str, &[&str], &[u8])],
@@ -285,9 +283,7 @@ fn encode_c_v3_exact_size(name: &str, exact_len: usize) -> (ContentHash, Vec<u8>
 
     let (_, mut prefix) = encode_c_v3(
         name,
-        1,
-        0,
-        0,
+        (1, 0, 0),
         "",
         &[],
         &[
@@ -367,23 +363,37 @@ fn g22_check_library_boundary() {
     let worker = real_worker_path();
     let real_service = Service::new(worker, scratch.clone(), Caps::HOST, 1, 0);
 
+    fn req<'a>(
+        root: ContentHash,
+        content: &'a [u8],
+        closure: &'a [LibraryEntry<'a>],
+        history: &'a [HistoryRow],
+    ) -> CheckLibraryRequest<'a> {
+        CheckLibraryRequest {
+            root,
+            content,
+            closure,
+            history,
+        }
+    }
+    fn entry<'a>(root: ContentHash, content: &'a [u8]) -> LibraryEntry<'a> {
+        LibraryEntry { root, content }
+    }
+    fn hist(identity: &str, version: &str, root: ContentHash) -> HistoryRow {
+        HistoryRow {
+            origin: "https://pkg.hirsel.ai".into(),
+            identity: identity.into(),
+            version: version.into(),
+            root,
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // 1. Exact 64 MiB raw C reaches decoding & checks; 64 MiB + 1 refuses
-    //    Limit(Input) before spawning/decoding.
+    // 1. Pre-spawn input caps refuse Limit(Input) on all hosts; hosts without
+    //    OS aggregate memory confinement fail closed with Unavailable before
+    //    spawning. On supported hosts, exact 64 MiB raw C reaches decoding.
     // -----------------------------------------------------------------------
     const SIXTY_FOUR_MIB: usize = 64 << 20;
-    let (exact_64_root, exact_64_bytes) =
-        encode_c_v3_exact_size("github.com/acme/exact64", SIXTY_FOUR_MIB);
-    assert_eq!(exact_64_bytes.len(), SIXTY_FOUR_MIB);
-    let exact_64_result = real_service.check_library(&CheckLibraryRequest {
-        root: exact_64_root,
-        content: &exact_64_bytes,
-        closure: &[],
-        history: &[],
-    });
-    assert_scratch_empty(&scratch);
-
-    // 64 MiB + 1 byte must refuse Limit(Input) BEFORE spawning (even with absent worker).
     let absent_service = Service::new(
         dir.path().join("never-spawned"),
         dir.path().join("never-scratch"),
@@ -391,16 +401,9 @@ fn g22_check_library_boundary() {
         1,
         0,
     );
-    let mut over_64_bytes = exact_64_bytes;
-    over_64_bytes.push(0);
-    assert_eq!(over_64_bytes.len(), SIXTY_FOUR_MIB + 1);
+    let over_64_bytes = vec![0u8; SIXTY_FOUR_MIB + 1];
     assert_eq!(
-        absent_service.check_library(&CheckLibraryRequest {
-            root: ContentHash([0; 32]),
-            content: &over_64_bytes,
-            closure: &[],
-            history: &[],
-        }),
+        absent_service.check_library(&req(ContentHash([0; 32]), &over_64_bytes, &[], &[])),
         Err(Refusal::Limit(Limit::Input))
     );
     drop(over_64_bytes);
@@ -408,18 +411,10 @@ fn g22_check_library_boundary() {
     // >4,096 packages and >64 MiB history metadata also refuse Limit(Input) before spawning.
     let tiny = [0u8; 1];
     let many: Vec<LibraryEntry<'_>> = (0..4096)
-        .map(|_| LibraryEntry {
-            root: ContentHash([1; 32]),
-            content: &tiny,
-        })
+        .map(|_| entry(ContentHash([1; 32]), &tiny))
         .collect();
     assert_eq!(
-        absent_service.check_library(&CheckLibraryRequest {
-            root: ContentHash([0; 32]),
-            content: &tiny,
-            closure: &many,
-            history: &[],
-        }),
+        absent_service.check_library(&req(ContentHash([0; 32]), &tiny, &many, &[])),
         Err(Refusal::Limit(Limit::Input))
     );
     let huge_origin = format!("https://{}.example", "a".repeat(32 << 20));
@@ -438,24 +433,37 @@ fn g22_check_library_boundary() {
         },
     ];
     assert_eq!(
-        absent_service.check_library(&CheckLibraryRequest {
-            root: ContentHash([0; 32]),
-            content: &tiny,
-            closure: &[],
-            history: &huge_history,
-        }),
+        absent_service.check_library(&req(ContentHash([0; 32]), &tiny, &[], &huge_history)),
         Err(Refusal::Limit(Limit::Input))
     );
     assert!(!dir.path().join("never-scratch").exists());
+
+    if !host::CONFINEMENT_SUPPORTED {
+        let unavail = absent_service
+            .check_library(&req(ContentHash([0; 32]), &tiny, &[], &[]))
+            .unwrap_err();
+        assert!(
+            matches!(unavail, Refusal::Unavailable(_)),
+            "host without OS aggregate memory cap must fail closed, got {unavail:?}"
+        );
+        assert_scratch_empty(&dir.path().join("never-scratch"));
+        return;
+    }
+
+    let (exact_64_root, exact_64_bytes) =
+        encode_c_v3_exact_size("github.com/acme/exact64", SIXTY_FOUR_MIB);
+    assert_eq!(exact_64_bytes.len(), SIXTY_FOUR_MIB);
+    let exact_64_result =
+        real_service.check_library(&req(exact_64_root, &exact_64_bytes, &[], &[]));
+    drop(exact_64_bytes);
+    assert_scratch_empty(&scratch);
 
     // -----------------------------------------------------------------------
     // 2 & 3. Independently constructed valid graph + refusal matrix.
     // -----------------------------------------------------------------------
     let (leaf_root, leaf_bytes) = encode_c_v3(
         "github.com/acme/leaf",
-        1,
-        2,
-        3,
+        (1, 2, 3),
         "",
         &[],
         &[(
@@ -466,9 +474,7 @@ fn g22_check_library_boundary() {
     );
     let (exact_root, exact_bytes) = encode_c_v3(
         "github.com/acme/exactdep",
-        0,
-        1,
-        0,
+        (0, 1, 0),
         "alpha.1",
         &[],
         &[(
@@ -479,9 +485,7 @@ fn g22_check_library_boundary() {
     );
     let (head_root, head_bytes) = encode_c_v3(
         "github.com/acme/head",
-        2,
-        0,
-        0,
+        (2, 0, 0),
         "",
         &[
             (
@@ -507,30 +511,6 @@ fn g22_check_library_boundary() {
             b"/// Combine leaf and dep.\npub fn compute(x: u64) -> u64 {\n    leaf.add(x, dep.tag())\n}\n\npub fn with_clock(_c: Clock) -> u64 {\n    1\n}\n",
         )],
     );
-    fn req<'a>(
-        root: ContentHash,
-        content: &'a [u8],
-        closure: &'a [LibraryEntry<'a>],
-        history: &'a [HistoryRow],
-    ) -> CheckLibraryRequest<'a> {
-        CheckLibraryRequest {
-            root,
-            content,
-            closure,
-            history,
-        }
-    }
-    fn entry<'a>(root: ContentHash, content: &'a [u8]) -> LibraryEntry<'a> {
-        LibraryEntry { root, content }
-    }
-    fn hist(identity: &str, version: &str, root: ContentHash) -> HistoryRow {
-        HistoryRow {
-            origin: "https://pkg.hirsel.ai".into(),
-            identity: identity.into(),
-            version: version.into(),
-            root,
-        }
-    }
     let valid_closure = [
         entry(exact_root, &exact_bytes),
         entry(leaf_root, &leaf_bytes),
@@ -619,44 +599,40 @@ fn g22_check_library_boundary() {
     );
     assert_scratch_empty(&scratch);
 
+    let assert_rejected = |r: CheckLibraryRequest<'_>| {
+        assert!(matches!(
+            real_service.check_library(&r),
+            Err(Refusal::Rejected(_))
+        ));
+    };
+
     // 2a. Wrong head root & wrong closure root refuse.
     let mut bad_head_root = head_root;
     bad_head_root.0[0] ^= 1;
-    assert!(matches!(
-        real_service.check_library(&req(
-            bad_head_root,
-            &head_bytes,
-            &valid_closure,
-            &valid_history
-        )),
-        Err(Refusal::Rejected(_))
+    assert_rejected(req(
+        bad_head_root,
+        &head_bytes,
+        &valid_closure,
+        &valid_history,
     ));
     let mut bad_leaf_root = leaf_root;
     bad_leaf_root.0[0] ^= 1;
     let bad_closure = [valid_closure[0], entry(bad_leaf_root, &leaf_bytes)];
-    assert!(matches!(
-        real_service.check_library(&req(head_root, &head_bytes, &bad_closure, &valid_history)),
-        Err(Refusal::Rejected(_))
-    ));
+    assert_rejected(req(head_root, &head_bytes, &bad_closure, &valid_history));
 
     // 2b. Missing logged floor history refuses.
-    assert!(matches!(
-        real_service.check_library(&req(
-            head_root,
-            &head_bytes,
-            &valid_closure,
-            &valid_history[1..]
-        )),
-        Err(Refusal::Rejected(_))
+    assert_rejected(req(
+        head_root,
+        &head_bytes,
+        &valid_closure,
+        &valid_history[1..],
     ));
 
     // 2c. False child version: header claims 1.2.4 while floor binds 1.2.3, and
     //     header claims 1.2.3 while verified history says 1.2.2.
     let (false_leaf_root, false_leaf_bytes) = encode_c_v3(
         "github.com/acme/leaf",
-        1,
-        2,
-        4,
+        (1, 2, 4),
         "",
         &[],
         &[(
@@ -667,9 +643,7 @@ fn g22_check_library_boundary() {
     );
     let (head_fv_root, head_fv_bytes) = encode_c_v3(
         "github.com/acme/head",
-        2,
-        0,
-        0,
+        (2, 0, 0),
         "",
         &[(
             "leaf",
@@ -687,23 +661,17 @@ fn g22_check_library_boundary() {
             b"pub fn f(x: u64) -> u64 { leaf.add(x, 1) }\n",
         )],
     );
-    assert!(matches!(
-        real_service.check_library(&req(
-            head_fv_root,
-            &head_fv_bytes,
-            &[entry(false_leaf_root, &false_leaf_bytes)],
-            &[hist("github.com/acme/leaf@1", "1.2.3", false_leaf_root)],
-        )),
-        Err(Refusal::Rejected(_))
+    assert_rejected(req(
+        head_fv_root,
+        &head_fv_bytes,
+        &[entry(false_leaf_root, &false_leaf_bytes)],
+        &[hist("github.com/acme/leaf@1", "1.2.3", false_leaf_root)],
     ));
-    assert!(matches!(
-        real_service.check_library(&req(
-            head_root,
-            &head_bytes,
-            &valid_closure,
-            &[hist("github.com/acme/leaf@1", "1.2.2", leaf_root)],
-        )),
-        Err(Refusal::Rejected(_))
+    assert_rejected(req(
+        head_root,
+        &head_bytes,
+        &valid_closure,
+        &[hist("github.com/acme/leaf@1", "1.2.2", leaf_root)],
     ));
 
     // 2d. Mismatched exact-child history, missing closure entry, and extra closure entry refuse.
@@ -711,29 +679,16 @@ fn g22_check_library_boundary() {
         valid_history[0].clone(),
         hist("github.com/acme/exactdep@0", "0.1.1", exact_root),
     ];
-    assert!(matches!(
-        real_service.check_library(&req(
-            head_root,
-            &head_bytes,
-            &valid_closure,
-            &bad_exact_hist
-        )),
-        Err(Refusal::Rejected(_))
-    ));
-    assert!(matches!(
-        real_service.check_library(&req(
-            head_root,
-            &head_bytes,
-            &valid_closure[1..],
-            &valid_history[..1]
-        )),
-        Err(Refusal::Rejected(_))
+    assert_rejected(req(head_root, &head_bytes, &valid_closure, &bad_exact_hist));
+    assert_rejected(req(
+        head_root,
+        &head_bytes,
+        &valid_closure[1..],
+        &valid_history[..1],
     ));
     let (extra_root, extra_bytes) = encode_c_v3(
         "github.com/acme/extra",
-        1,
-        0,
-        0,
+        (1, 0, 0),
         "",
         &[],
         &[("extra.hirsel", &["extra"], b"pub fn z() -> u64 { 0 }\n")],
@@ -743,26 +698,19 @@ fn g22_check_library_boundary() {
         valid_closure[1],
         entry(extra_root, &extra_bytes),
     ];
-    assert!(matches!(
-        real_service.check_library(&req(head_root, &head_bytes, &extra_closure, &valid_history)),
-        Err(Refusal::Rejected(_))
-    ));
+    assert_rejected(req(head_root, &head_bytes, &extra_closure, &valid_history));
 
     // 2e. Dependency cycle (A@1 -> B@1 -> A@1) refuses cleanly.
     let (a_leaf_root, a_leaf_bytes) = encode_c_v3(
         "github.com/acme/cyca",
-        1,
-        0,
-        0,
+        (1, 0, 0),
         "",
         &[],
         &[("cyca.hirsel", &["cyca"], b"pub fn base() -> u64 { 1 }\n")],
     );
     let (b_root, b_bytes) = encode_c_v3(
         "github.com/acme/cycb",
-        1,
-        0,
-        0,
+        (1, 0, 0),
         "",
         &[(
             "a",
@@ -778,9 +726,7 @@ fn g22_check_library_boundary() {
     );
     let (a_head_root, a_head_bytes) = encode_c_v3(
         "github.com/acme/cyca",
-        1,
-        0,
-        1,
+        (1, 0, 1),
         "",
         &[("b", "github.com/acme/cycb", 1, TestBinding::Exact(b_root))],
         &[(
@@ -800,29 +746,39 @@ fn g22_check_library_boundary() {
     assert_scratch_empty(&scratch);
 
     // -----------------------------------------------------------------------
-    // 4. Real confined worker fixture: network/socket denial, credential/home/
-    //    env/FD isolation, CPU/wall/memory/output caps, queue busy, and zero
-    //    bytes installed on refusal.
+    // 4. Real confined worker fixtures (single-process, no fork).
     // -----------------------------------------------------------------------
     let fixture_dir = tempfile::tempdir().unwrap();
     let secret_file = fixture_dir.path().join("service-secret.txt");
     std::fs::write(&secret_file, b"TOP_SECRET_CREDENTIAL_DO_NOT_LEAK").unwrap();
 
-    let run_fixture = |script: &str, caps: CheckLibraryCaps| -> Refusal {
-        let fdir = tempfile::tempdir().unwrap();
-        let bin = fdir.path().join("bin");
+    let make_worker = |dir: &Path, shebang: &str, body: &str| -> PathBuf {
+        let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let worker = bin.join("worker");
-        std::fs::write(&worker, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::write(&worker, format!("{shebang}\n{body}\n")).unwrap();
         std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        worker
+    };
+    let run_worker = |shebang: &str, body: &str, caps: CheckLibraryCaps| -> Refusal {
+        let fdir = tempfile::tempdir().unwrap();
         let fscratch = fdir.path().join("scratch");
-        let svc = Service::new(worker, fscratch.clone(), Caps::HOST, 1, 0);
+        let svc = Service::new(
+            make_worker(fdir.path(), shebang, body),
+            fscratch.clone(),
+            Caps::HOST,
+            1,
+            0,
+        );
         let result = svc
             .check_library_with_caps(&req(leaf_root, &leaf_bytes, &[], &[]), caps)
             .unwrap_err();
         assert_scratch_empty(&fscratch);
         result
     };
+    let run_sh = |body: &str, caps: CheckLibraryCaps| run_worker("#!/bin/sh", body, caps);
+    let run_py =
+        |body: &str, caps: CheckLibraryCaps| run_worker("#!/usr/bin/python3 -S", body, caps);
 
     let base_caps = CheckLibraryCaps {
         cpu_seconds: 5,
@@ -832,32 +788,36 @@ fn g22_check_library_boundary() {
         ..CheckLibraryCaps::REGISTRY
     };
 
-    // 4a. Host secret/home/credential file read must be denied by OS confinement.
-    let read_secret_script = format!(
-        "if /bin/cat {:?} >/dev/null 2>&1; then echo 'LEAKED_SECRET' >&2; exit 1; fi\n\
-         echo 'confinement-denied-secret' >&2; exit 1",
-        secret_file.display()
+    // 4a. Host secret file read must be denied by OS confinement (no fork).
+    let read_secret_py = format!(
+        "\
+import errno, sys
+try:
+    open({:?}, 'rb').read(1)
+    sys.stderr.write('LEAKED_SECRET\\n'); sys.exit(1)
+except OSError as e:
+    if e.errno not in (errno.EACCES, errno.EPERM):
+        sys.stderr.write(f'UNEXPECTED_SECRET_ERRNO={{e.errno}}\\n'); sys.exit(1)
+sys.stderr.write('confinement-denied-secret\\n'); sys.exit(1)",
+        secret_file.display().to_string()
     );
     assert_eq!(
-        run_fixture(&read_secret_script, base_caps),
+        run_py(&read_secret_py, base_caps),
         Refusal::Rejected("confinement-denied-secret\n".into())
     );
 
     // 4b. Inherited host env vars must not leak; HOME/XDG must stay in private scratch.
-    let env_script = "\
-        for line in $(/usr/bin/env); do\n\
-            key=${line%%=*}\n\
-            case \"$key\" in\n\
-                HIRSEL_MEMORY_LIMIT|HOME|TMPDIR|XDG_CACHE_HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR|PWD|SHLVL|_) ;;\n\
-                *) echo \"ENV_LEAK:$key\" >&2; exit 1 ;;\n\
-            esac\n\
-        done\n\
-        case \"$HOME\" in\n\
-            */check-*) echo 'env-clean' >&2; exit 1 ;;\n\
-            *) echo \"BAD_HOME=$HOME\" >&2; exit 1 ;;\n\
-        esac";
+    let env_py = "\
+import os, sys
+allowed = {'HIRSEL_MEMORY_LIMIT','HOME','TMPDIR','XDG_CACHE_HOME','XDG_DATA_HOME','XDG_RUNTIME_DIR'}
+extra = sorted(k for k in os.environ if k not in allowed and not (k == 'LC_CTYPE' and os.environ[k] == 'C.UTF-8'))
+if extra:
+    sys.stderr.write(f'ENV_LEAK:{extra}\\n'); sys.exit(1)
+if '/check-' not in os.environ.get('HOME', ''):
+    sys.stderr.write(f'BAD_HOME={os.environ.get(\"HOME\")}\\n'); sys.exit(1)
+sys.stderr.write('env-clean\\n'); sys.exit(1)";
     assert_eq!(
-        run_fixture(env_script, base_caps),
+        run_py(env_py, base_caps),
         Refusal::Rejected("env-clean\n".into())
     );
 
@@ -870,42 +830,50 @@ fn g22_check_library_boundary() {
         unsafe { libc::fcntl(raw, libc::F_SETFD, 0) };
         raw
     };
-    let fd_script = format!(
-        "if {{ /bin/cat <&{raw_secret_fd}; }} >/dev/null 2>&1; then echo 'FD_LEAK' >&2; exit 1; fi\n\
-         echo 'fd-closed' >&2; exit 1"
+    let fd_py = format!(
+        "\
+import errno, os, sys
+try:
+    os.read({raw_secret_fd}, 1)
+    sys.stderr.write('FD_LEAK\\n'); sys.exit(1)
+except OSError as e:
+    if e.errno != errno.EBADF:
+        sys.stderr.write(f'UNEXPECTED_FD_ERRNO={{e.errno}}\\n'); sys.exit(1)
+sys.stderr.write('fd-closed\\n'); sys.exit(1)"
     );
-    let fd_res = run_fixture(&fd_script, base_caps);
+    let fd_res = run_py(&fd_py, base_caps);
     // SAFETY: close the parent test descriptor now.
     unsafe { libc::close(raw_secret_fd) };
     assert_eq!(fd_res, Refusal::Rejected("fd-closed\n".into()));
 
-    // 4d. Network & Unix socket creation must be denied by OS confinement.
-    if Path::new("/usr/bin/python3").is_file() {
-        let socket_script = "\
-/usr/bin/python3 -S -c '
-import errno, socket, sys
+    // 4d. OS confinement denies both network/Unix sockets and process creation (fork).
+    let isolate_py = "\
+import errno, os, socket, sys
 for family in (socket.AF_INET, socket.AF_UNIX):
     try:
         s = socket.socket(family, socket.SOCK_STREAM)
         s.close()
-        sys.stderr.write(f\"SOCKET_ALLOWED_{family}\\n\")
-        sys.exit(1)
+        sys.stderr.write(f'SOCKET_ALLOWED_{family}\\n'); sys.exit(1)
     except OSError as e:
         if e.errno not in (errno.EPERM, errno.EACCES):
-            sys.stderr.write(f\"UNEXPECTED_ERRNO_{e.errno}\\n\")
-            sys.exit(1)
-sys.stderr.write(\"sockets-denied\\n\")
-sys.exit(1)
-'";
-        assert_eq!(
-            run_fixture(socket_script, base_caps),
-            Refusal::Rejected("sockets-denied\n".into())
-        );
-    }
-
-    // 4e. Enforced CPU, wall, memory, output, diagnostics, unsupported, and busy caps.
+            sys.stderr.write(f'UNEXPECTED_SOCK_ERRNO_{e.errno}\\n'); sys.exit(1)
+try:
+    pid = os.fork()
+    if pid == 0: os._exit(0)
+    os.waitpid(pid, 0)
+    sys.stderr.write('FORK_ALLOWED\\n'); sys.exit(1)
+except OSError as e:
+    if e.errno not in (errno.EPERM, errno.EAGAIN):
+        sys.stderr.write(f'UNEXPECTED_FORK_ERRNO_{e.errno}\\n'); sys.exit(1)
+sys.stderr.write('sockets-and-fork-denied\\n'); sys.exit(1)";
     assert_eq!(
-        run_fixture(
+        run_py(isolate_py, base_caps),
+        Refusal::Rejected("sockets-and-fork-denied\n".into())
+    );
+
+    // 4e. Enforced CPU, wall, real OS memory allocation, output, diagnostics, and unsupported caps.
+    assert_eq!(
+        run_sh(
             "while :; do :; done",
             CheckLibraryCaps {
                 cpu_seconds: 1,
@@ -916,8 +884,8 @@ sys.exit(1)
     );
     let wall_start = Instant::now();
     assert_eq!(
-        run_fixture(
-            "/bin/sleep 60",
+        run_sh(
+            "exec /bin/sleep 60",
             CheckLibraryCaps {
                 wall_ms: 250,
                 ..base_caps
@@ -926,15 +894,55 @@ sys.exit(1)
         Refusal::Limit(Limit::Wall)
     );
     assert!(wall_start.elapsed() < Duration::from_secs(10));
+
+    // Real memory-cap allocation: ignores HIRSEL_MEMORY_LIMIT and allocates + faults
+    // 256 MiB via MAP_SHARED|MAP_ANONYMOUS (which bypasses RLIMIT_DATA on Linux).
+    // Proves OS enforcement under both default (cgroup v2 when writable) and RLIMIT_AS fallback.
+    let mem_caps = CheckLibraryCaps {
+        memory_bytes: 64 << 20,
+        ..base_caps
+    };
+    let mem_hog_py = "\
+import errno, mmap, sys
+chunks, chunk = [], 4 << 20
+for _ in range(64):
+    try:
+        m = mmap.mmap(-1, chunk, flags=mmap.MAP_SHARED | mmap.MAP_ANONYMOUS)
+    except OSError as e:
+        if e.errno == errno.ENOMEM:
+            sys.exit(71)
+        sys.stderr.write(f'UNEXPECTED_MMAP_ERRNO={e.errno}\\n'); sys.exit(1)
+    for off in range(0, chunk, 4096):
+        m[off] = 1
+    chunks.append(m)
+sys.stderr.write('MEMORY_CAP_BYPASSED\\n'); sys.exit(1)";
+    assert_eq!(run_py(mem_hog_py, mem_caps), Refusal::Limit(Limit::Memory));
+    {
+        struct RestoreCgroup;
+        impl Drop for RestoreCgroup {
+            fn drop(&mut self) {
+                host::disable_cgroup_for_test(false);
+            }
+        }
+        host::disable_cgroup_for_test(true);
+        let _restore = RestoreCgroup;
+        assert_eq!(run_py(mem_hog_py, mem_caps), Refusal::Limit(Limit::Memory));
+        // Real hirsel worker must also succeed under the RLIMIT_AS + seccomp fallback.
+        let checked_as = real_service
+            .check_library(&req(head_root, &head_bytes, &valid_closure, &valid_history))
+            .expect("real check_library worker must succeed under RLIMIT_AS + seccomp");
+        assert_eq!(checked_as.root, head_root.to_string());
+        assert_scratch_empty(&scratch);
+    }
+
     assert_eq!(
-        run_fixture("exit 71", base_caps),
-        Refusal::Limit(Limit::Memory)
-    );
-    assert_eq!(
-        run_fixture("/usr/bin/printf '%4097s' ''", base_caps),
+        run_sh("exec /usr/bin/printf '%4097s' ''", base_caps),
         Refusal::Limit(Limit::Output)
     );
-    let noisy = run_fixture("/usr/bin/printf '%131072s' '' >&2; exit 1", base_caps);
+    let noisy = run_py(
+        "import sys\nsys.stderr.write('x' * 131072); sys.exit(1)",
+        base_caps,
+    );
     match noisy {
         Refusal::Rejected(msg) => {
             assert_eq!(msg.len(), CheckLibraryCaps::REGISTRY.diagnostics_bytes)
@@ -942,7 +950,7 @@ sys.exit(1)
         other => panic!("expected truncated Refusal::Rejected, got {other:?}"),
     }
     assert_eq!(
-        run_fixture(
+        run_sh(
             "echo 'check_library: unsupported: missing toolchain pkg' >&2; exit 2",
             base_caps
         ),
@@ -951,12 +959,12 @@ sys.exit(1)
 
     // Queue busy law on check_library.
     let busy_dir = tempfile::tempdir().unwrap();
-    let busy_bin = busy_dir.path().join("bin");
-    std::fs::create_dir_all(&busy_bin).unwrap();
-    let busy_worker = busy_bin.join("worker");
     let busy_scratch = busy_dir.path().join("scratch");
-    std::fs::write(&busy_worker, "#!/bin/sh\n/bin/sleep 1\nexit 71\n").unwrap();
-    std::fs::set_permissions(&busy_worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let busy_worker = make_worker(
+        busy_dir.path(),
+        "#!/usr/bin/python3 -S",
+        "import sys, time\ntime.sleep(0.5)\nsys.exit(1)",
+    );
     let busy_service = Service::new(busy_worker, busy_scratch.clone(), Caps::HOST, 1, 0);
     let leaf_req = req(leaf_root, &leaf_bytes, &[], &[]);
     std::thread::scope(|scope| {
@@ -966,11 +974,10 @@ sys.exit(1)
             busy_service.check_library_with_caps(&leaf_req, base_caps),
             Err(Refusal::Busy)
         );
-        assert_eq!(first.join().unwrap(), Err(Refusal::Limit(Limit::Memory)));
+        assert_eq!(first.join().unwrap(), Err(Refusal::Rejected(String::new())));
     });
     assert_scratch_empty(&busy_scratch);
-    let checked_64 =
-        exact_64_result.expect("a well-formed 64 MiB raw C must reach decoding and check");
+    let checked_64 = exact_64_result.expect("64 MiB raw C must reach decoding and check");
     assert_eq!(checked_64.root, exact_64_root.to_string());
     assert_eq!(checked_64.header.identity, "github.com/acme/exact64@1");
     assert_eq!(checked_64.header.version, "1.0.0");

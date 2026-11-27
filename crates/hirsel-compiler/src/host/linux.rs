@@ -1,5 +1,8 @@
-//! Linux: kernel-enforced resource caps, Landlock read-only allowlist + private
-//! scratch confinement, and seccomp-bpf socket/network denial before `exec`.
+//! Linux: kernel-enforced aggregate resource caps (delegated cgroup v2
+//! `memory.max` + `memory.swap.max=0` + `pids.max=1`, or `RLIMIT_AS` +
+//! `RLIMIT_DATA` combined with single-process seccomp confinement), Landlock
+//! read-only allowlist + private scratch confinement, and seccomp-bpf
+//! socket/network/process-creation denial before `exec`.
 
 use super::ConfinementSpec;
 use std::ffi::CString;
@@ -9,11 +12,31 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+pub(crate) const CONFINEMENT_SUPPORTED: bool = true;
 
 const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
 const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
 const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
 const SYS_IO_URING_SETUP: u32 = 425;
+const SYS_CLONE3: u32 = 435;
+
+/// Fixed virtual address space reserve for loader, libc, main stack, and guard
+/// pages when falling back to `RLIMIT_AS` without a delegated cgroup v2.
+const BASE_VIRTUAL_HEADROOM: u64 = 64 << 20;
+
+static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static DISABLE_CGROUP_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn disable_cgroup_for_test(disable: bool) {
+    DISABLE_CGROUP_FOR_TEST.store(disable, Ordering::SeqCst);
+}
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
@@ -106,7 +129,14 @@ const DENIED_SYSCALLS: &[u32] = &[
     libc::SYS_pivot_root as u32,
     libc::SYS_unshare as u32,
     libc::SYS_setns as u32,
+    libc::SYS_clone as u32,
+    SYS_CLONE3,
 ];
+
+#[cfg(target_arch = "x86_64")]
+const ARCH_DENIED_SYSCALLS: &[u32] = &[libc::SYS_fork as u32, libc::SYS_vfork as u32];
+#[cfg(not(target_arch = "x86_64"))]
+const ARCH_DENIED_SYSCALLS: &[u32] = &[];
 
 fn limit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> io::Result<()> {
     let limit = libc::rlimit {
@@ -118,6 +148,24 @@ fn limit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> io::Resul
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn current_limit(resource: libc::__rlimit_resource_t) -> io::Result<libc::rlimit> {
+    let mut current = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one initialized record.
+    if unsafe { libc::getrlimit(resource, &mut current) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(current)
+}
+
+fn lower_limit(resource: libc::__rlimit_resource_t, requested: u64) -> io::Result<()> {
+    let current = current_limit(resource)?;
+    let capped = requested.min(current.rlim_max);
+    limit(resource, capped, capped)
 }
 
 /// Run in the worker between `fork` and `exec`: `cpu` seconds of processor time, no
@@ -133,10 +181,125 @@ pub(crate) fn confine(cpu: u64, file: u64) -> io::Result<()> {
     Ok(())
 }
 
+struct CgroupGuard {
+    dir: PathBuf,
+    procs_fd: OwnedFd,
+}
+
+impl CgroupGuard {
+    fn try_create(memory_bytes: u64) -> Option<Self> {
+        #[cfg(test)]
+        if DISABLE_CGROUP_FOR_TEST.load(Ordering::SeqCst) {
+            return None;
+        }
+        let self_rel = self_cgroup_v2_path()?;
+        let self_dir = Path::new("/sys/fs/cgroup").join(self_rel.trim_start_matches('/'));
+        let candidates = [self_dir.parent().map(Path::to_path_buf), Some(self_dir)];
+        for parent in candidates.into_iter().flatten() {
+            if let Some(guard) = Self::try_create_under(&parent, memory_bytes) {
+                return Some(guard);
+            }
+        }
+        None
+    }
+
+    fn try_create_under(parent: &Path, memory_bytes: u64) -> Option<Self> {
+        let subtree = std::fs::read_to_string(parent.join("cgroup.subtree_control")).ok()?;
+        let has_memory = subtree.split_whitespace().any(|c| c == "memory");
+        let has_pids = subtree.split_whitespace().any(|c| c == "pids");
+        if !has_memory || !has_pids {
+            return None;
+        }
+        // Linux cgroup v2 migration requires write access to the common ancestor's cgroup.procs.
+        if !path_writable(&parent.join("cgroup.procs")) {
+            return None;
+        }
+        let seq = CGROUP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!("hirsel-check-{}-{seq}", std::process::id()));
+        std::fs::create_dir(&dir).ok()?;
+
+        struct DirCleanup(Option<PathBuf>);
+        impl Drop for DirCleanup {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    let _ = std::fs::remove_dir(path);
+                }
+            }
+        }
+        let mut cleanup = DirCleanup(Some(dir.clone()));
+
+        let controllers = std::fs::read_to_string(dir.join("cgroup.controllers")).ok()?;
+        if !controllers.split_whitespace().any(|c| c == "memory")
+            || !controllers.split_whitespace().any(|c| c == "pids")
+        {
+            return None;
+        }
+        std::fs::write(dir.join("memory.max"), memory_bytes.to_string()).ok()?;
+        match std::fs::write(dir.join("memory.swap.max"), "0") {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        let _ = std::fs::write(dir.join("memory.oom.group"), "1");
+        std::fs::write(dir.join("pids.max"), "1").ok()?;
+
+        let procs_path = CString::new(dir.join("cgroup.procs").as_os_str().as_bytes()).ok()?;
+        // SAFETY: procs_path is NUL-terminated.
+        let raw = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        if raw < 0 {
+            return None;
+        }
+        // SAFETY: open returned a fresh owned descriptor.
+        let procs_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        cleanup.0 = None;
+        Some(Self { dir, procs_fd })
+    }
+
+    fn oom_triggered(&self) -> bool {
+        let Ok(events) = std::fs::read_to_string(self.dir.join("memory.events")) else {
+            return false;
+        };
+        events.lines().any(|line| {
+            let mut parts = line.split_whitespace();
+            let Some(key) = parts.next() else {
+                return false;
+            };
+            let Some(val) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+                return false;
+            };
+            matches!(key, "oom" | "oom_kill" | "oom_group_kill") && val > 0
+        })
+    }
+}
+
+impl Drop for CgroupGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.dir.join("cgroup.kill"), "1");
+        for _ in 0..8 {
+            match std::fs::remove_dir(&self.dir) {
+                Ok(()) => return,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+}
+
+enum MemoryCap {
+    /// Delegated cgroup v2 enforcing aggregate `memory.max`, `memory.swap.max=0`,
+    /// and `pids.max=1`.
+    Cgroup(CgroupGuard),
+    /// Per-process `RLIMIT_AS` (bounding heap, anonymous/shared `mmap`, and stacks)
+    /// + `RLIMIT_DATA`, combined with seccomp denial of `fork`/`vfork`/`clone`/`clone3`
+    /// so per-process caps are aggregate.
+    RlimitAs { as_bytes: u64 },
+}
+
 /// Prepared Linux confinement for a `check_library` worker: holds the Landlock
-/// ruleset descriptor until after `spawn` completes.
+/// ruleset descriptor and optional per-job cgroup until after the worker finishes.
 pub(crate) struct Confinement {
     ruleset: OwnedFd,
+    memory_cap: MemoryCap,
     worker: PathBuf,
     cpu_seconds: u64,
     memory_bytes: u64,
@@ -145,13 +308,37 @@ pub(crate) struct Confinement {
 
 impl Confinement {
     pub(crate) fn prepare(spec: &ConfinementSpec<'_>) -> io::Result<Self> {
+        if spec.memory_bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memory cap must be non-zero",
+            ));
+        }
         probe_seccomp()?;
         let abi = probe_landlock()?;
+        current_limit(libc::RLIMIT_DATA)?;
         let worker = std::fs::canonicalize(spec.worker)?;
         let scratch = std::fs::canonicalize(spec.scratch)?;
         let ruleset = build_landlock_ruleset(abi, &worker, &scratch)?;
+        let memory_cap = match CgroupGuard::try_create(spec.memory_bytes) {
+            Some(cgroup) => MemoryCap::Cgroup(cgroup),
+            None => {
+                current_limit(libc::RLIMIT_AS).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("RLIMIT_AS memory confinement unavailable: {error}"),
+                    )
+                })?;
+                MemoryCap::RlimitAs {
+                    as_bytes: spec
+                        .memory_bytes
+                        .saturating_add(worker_virtual_headroom(&worker)),
+                }
+            }
+        };
         Ok(Self {
             ruleset,
+            memory_cap,
             worker,
             cpu_seconds: spec.cpu_seconds,
             memory_bytes: spec.memory_bytes,
@@ -166,25 +353,26 @@ impl Confinement {
         let cpu = self.cpu_seconds;
         let memory = self.memory_bytes;
         let file = self.file_bytes;
+        let (cgroup_procs_fd, rlimit_as) = match &self.memory_cap {
+            MemoryCap::Cgroup(cg) => (Some(cg.procs_fd.as_raw_fd()), None),
+            MemoryCap::RlimitAs { as_bytes } => (None, Some(*as_bytes)),
+        };
         let parent = std::process::id() as libc::pid_t;
         let filter = build_seccomp_filter();
         // SAFETY: closure executes async-signal-safe syscalls only on
         // pre-allocated data before exec.
         unsafe {
             command.pre_exec(move || {
+                if let Some(cg_fd) = cgroup_procs_fd {
+                    join_cgroup(cg_fd)?;
+                }
                 limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
                 limit(libc::RLIMIT_CORE, 0, 0)?;
                 limit(libc::RLIMIT_FSIZE, file, file)?;
-                // Lower RLIMIT_DATA without attempting to exceed an inherited hard limit.
-                let mut current = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(libc::RLIMIT_DATA, &mut current) != 0 {
-                    return Err(io::Error::last_os_error());
+                lower_limit(libc::RLIMIT_DATA, memory)?;
+                if let Some(as_bytes) = rlimit_as {
+                    lower_limit(libc::RLIMIT_AS, as_bytes)?;
                 }
-                let capped = memory.min(current.rlim_max);
-                limit(libc::RLIMIT_DATA, capped, capped)?;
 
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                     return Err(io::Error::last_os_error());
@@ -199,8 +387,8 @@ impl Confinement {
                     return Err(io::Error::last_os_error());
                 }
                 // Mark every descriptor above stderr close-on-exec (including the
-                // ruleset fd and any inherited parent descriptors) while keeping
-                // Rust's internal pre_exec error pipe intact until execve succeeds.
+                // ruleset fd, cgroup fd, and any inherited parent descriptors) while
+                // keeping Rust's internal pre_exec error pipe intact until execve succeeds.
                 cloexec_above_stderr()?;
                 install_seccomp(&filter)?;
                 Ok(())
@@ -208,6 +396,91 @@ impl Confinement {
         }
         command
     }
+
+    /// True if the kernel memory cgroup recorded an OOM event for this job.
+    pub(crate) fn memory_limit_hit(&self) -> bool {
+        match &self.memory_cap {
+            MemoryCap::Cgroup(cg) => cg.oom_triggered(),
+            MemoryCap::RlimitAs { .. } => false,
+        }
+    }
+}
+
+fn self_cgroup_v2_path() -> Option<String> {
+    let text = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+}
+
+fn path_writable(path: &Path) -> bool {
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: c_path is NUL-terminated.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+fn join_cgroup(fd: RawFd) -> io::Result<()> {
+    let payload = b"0\n";
+    let mut written = 0usize;
+    while written < payload.len() {
+        // SAFETY: fd is an open cgroup.procs descriptor and payload slice is valid.
+        let rc = unsafe {
+            libc::write(
+                fd,
+                payload[written..].as_ptr().cast(),
+                payload.len() - written,
+            )
+        };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        }
+        if rc == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short write to cgroup.procs",
+            ));
+        }
+        written += rc as usize;
+    }
+    Ok(())
+}
+
+fn dir_so_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let bytes = name.as_bytes();
+        let is_so = bytes.ends_with(b".so") || bytes.windows(4).any(|w| w == b".so.");
+        if is_so
+            && let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+fn worker_virtual_headroom(worker: &Path) -> u64 {
+    let exe_bytes = std::fs::metadata(worker).map(|m| m.len()).unwrap_or(0);
+    let lib_bytes = if let Some(root) = installed_toolchain_root(worker) {
+        dir_so_bytes(&root.join("lib"))
+    } else if let Some(parent) = worker.parent() {
+        dir_so_bytes(&parent.join("lib"))
+    } else {
+        0
+    };
+    BASE_VIRTUAL_HEADROOM
+        .saturating_add(exe_bytes)
+        .saturating_add(lib_bytes)
 }
 
 fn probe_landlock() -> io::Result<i32> {
@@ -461,7 +734,8 @@ fn cloexec_above_stderr() -> io::Result<()> {
 }
 
 fn build_seccomp_filter() -> Vec<SockFilter> {
-    let mut filter = Vec::with_capacity(DENIED_SYSCALLS.len() + 6);
+    let total = DENIED_SYSCALLS.len() + ARCH_DENIED_SYSCALLS.len();
+    let mut filter = Vec::with_capacity(total + 6);
     // Load seccomp_data.arch (offset 4) and kill on non-native ABI.
     filter.push(SockFilter {
         code: BPF_LD | BPF_W | BPF_ABS,
@@ -488,8 +762,11 @@ fn build_seccomp_filter() -> Vec<SockFilter> {
         jf: 0,
         k: 0,
     });
-    let total = DENIED_SYSCALLS.len();
-    for (index, &nr) in DENIED_SYSCALLS.iter().enumerate() {
+    for (index, &nr) in DENIED_SYSCALLS
+        .iter()
+        .chain(ARCH_DENIED_SYSCALLS.iter())
+        .enumerate()
+    {
         let remaining = (total - index) as u8;
         // On match, jump past remaining checks + ALLOW to the DENY instruction.
         filter.push(SockFilter {

@@ -615,6 +615,7 @@ pub(crate) fn run(
     match (status.code(), status.signal()) {
         (Some(0), _) => {}
         (Some(MEMORY_STATUS), _) => return Err(Refusal::Limit(Limit::Memory)),
+        _ if confinement.memory_limit_hit() => return Err(Refusal::Limit(Limit::Memory)),
         (_, Some(libc::SIGXCPU)) => return Err(Refusal::Limit(Limit::Cpu)),
         (_, Some(libc::SIGXFSZ)) => return Err(Refusal::Limit(Limit::Output)),
         (Some(1), _) => return Err(Refusal::Rejected(said)),

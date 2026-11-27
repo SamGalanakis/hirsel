@@ -153,6 +153,7 @@ std = { major = 1 }
 "store-rounds.hirsel" = "store"
 "store-prepared-transfer.hirsel" = "store"
 "store-tiered-transfer.hirsel" = "store"
+"store-hot-build.hirsel" = "store"
 "store-tiered-transfer-child.hirsel" = "store"
 "store-install.hirsel" = "store"
 "store-object-cut.hirsel" = "store"
@@ -915,7 +916,7 @@ limit = 402653184
 [tests.runs."store@1/store/test_f4_superseded_redefinition_and_tiered_catchup_diff"]
 limit = 536870912
 
-[tests.runs."store@1/store/tiered_hot_migrate_table_refused"]
+[tests.runs."store@1/store/test_l102_hot_migrate_identity"]
 limit = 536870912
 
 [tests.runs."store@1/store/tiered_hot_index_build_refused"]

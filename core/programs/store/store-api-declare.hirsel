@@ -126,7 +126,7 @@ fn read_only_base(source: ReadOnly) -> catalog.DeclarationBase {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(snap.roots), snap.watermark, 0u32, 0u64, 0u64, false, VALUE_LIMIT), store: snap.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(snap.roots), snap.watermark, 0u32, 0u64, 0u64, false, VALUE_LIMIT), store: snap.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(snap.roots.collections))
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 
@@ -164,7 +164,7 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(capture.state.tips[0].roots), capture.watermark, capture.state.next_table, capture.resident, f.slot.plan.options.resident_limit, false, VALUE_LIMIT), store: capture.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(capture.state.tips[0].roots), capture.watermark, capture.state.next_table, capture.resident, f.slot.plan.options.resident_limit, false, VALUE_LIMIT), store: capture.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(capture.state.tips[0].roots.collections))
     new_declaration(Follower, catalog.follower_base(f.capture.store.hi, f.capture.store.lo, f.open, f.capture.state.tips[0].head, f.capture.watermark, f.capture.resident), take plan, true)
 }
 

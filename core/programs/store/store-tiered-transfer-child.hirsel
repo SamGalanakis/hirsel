@@ -761,7 +761,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
                 break
             }
             if !target_tiered {
-                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: ctx.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
+                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: ctx.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(roots.collections))
                 let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, bindings[bind_idx].index, batch, false, false, false)?
                 if let Some(_) = dup {
                     return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))

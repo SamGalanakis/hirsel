@@ -44,10 +44,13 @@ type SchemaPlan: send {
     pending_migrates: List[DeferredMigrate],
     pending_indexes: List[DeferredIndexBuild],
     preview: Option[List[MigrationBackfill]],
+    // The staging head's collection map (a shared root). A hot Tiered build's
+    // publish judges untouched ids against it (§13.10a re-base rule, F3).
+    staged_map: pages.PageTree,
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.resident, db.ceiling, retaining(db), db.limits.value), store: db.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None)
+    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.resident, db.ceiling, retaining(db), db.limits.value), store: db.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {

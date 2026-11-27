@@ -711,7 +711,9 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         return Error(Limit(Value))
     }
     let tiered = table_is_tiered(plan.schema.roots.collections, from.id)?
-    refuse_hot_tiered_build(plan, tiered)?
+    if let Some(_) = plan.preview {
+        refuse_hot_tiered_build(plan, tiered)?
+    }
     let olds = index_catalog_in(plan.schema.roots.catalog, from.id)?
     let id = plan.schema.next_table
     plan.step_drift = true
@@ -753,7 +755,16 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         failure_result_from_rep(catalog.remove_store_row(mut roots.catalog, from.catalog_key, mut ids))?
         roots = failure_result_from_rep(catalog.catalog_insert(mut ids, roots, target, table_raw))?
         plan.schema.next_node = ids
-        keep_schema(mut plan, take roots, live_bytes, id + 1)?
+        // A hot build draws the target's two scratch ids with it (§13.10a).
+        let drawn = if plan.schema.defer_tiered {
+            1u32
+        } else {
+            3u32
+        }
+        let Some(next_table) = int.checked_add(id, drawn) else {
+            return Error(Limit(Ids))
+        }
+        keep_schema(mut plan, take roots, live_bytes, next_table)?
         record_migrate_source(mut plan, from.id, id)?
         let preview_slot: Option[u64] = if let Some(mut backfills) = plan.preview {
             let slot = list.len(backfills)

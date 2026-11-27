@@ -1,0 +1,226 @@
+// §13.10a "Hot Tiered builds" (M3b-S5b): a hot `Migrate` builds every Tiered
+// target off-root under the owner-3 `build` pin, through the writer's own
+// cuts, and the publish grafts the built roots onto main in one schema commit
+// that drops the pin. The build lives only in this call's values, so every
+// error return forgets it; a pin an earlier build cut left is an orphan, which
+// the next holder-free cut drops.
+// The build's working map (F1): the tree the last build cut packed plus every
+// Hot page written since, and the ids built into it.
+type HotBuild {
+    map: pages.PageTree,
+    built: List[u32],
+}
+
+// Runs the plan's hot Tiered builds and grafts them into the plan. Returns the
+// listed build pin's slot, which the publish cut drops.
+fn run_hot_builds(mut db: Db, mut plan: SchemaPlan) -> Result[Option[u64], Error] waits {
+    // F2: the writer takes the plan's stamp counter before the first build
+    // draw. No writer draw runs during staging, so the plan's is the larger.
+    if plan.schema.next_node > pages.holder_next_node(db.holders) {
+        pages.set_next_node(mut db.holders, plan.schema.next_node)
+    }
+    let inline = pages.holder_heads(db.holders)[0u64].roots.collections.inline
+    let mut work = HotBuild(map: pages.new_page_tree(CollectionMap, inline), built: list.new())
+    let pending = replace(mut plan.pending_migrates, list.new())
+    for take job in take pending {
+        hot_build_migrate(mut db, mut work, mut plan, take job)?
+    }
+    hot_graft(mut db, mut plan, work)?
+    plan.schema.next_node = pages.holder_next_node(db.holders)
+    Ok(build_pin_slot(db))
+}
+
+// Reserves `count` stamps from the writer's counter for the builder's next
+// pages. Unused reserved stamps stay consumed (§11.4).
+fn hot_reserve(mut db: Db, mut builder: StreamBuilder, stamps: u64) -> Result[(), Error] {
+    let low = pages.holder_next_node(db.holders)
+    let Some(high) = int.checked_add(low, stamps) else {
+        return Error(Limit(Ids))
+    }
+    if high == 18446744073709551615u64 {
+        return Error(Limit(Ids))
+    }
+    builder.next_stamp = low + 1
+    builder.stamp_high = high
+    pages.set_next_node(mut db.holders, high)
+    Ok(())
+}
+
+// Sorts one run and streams it into the target's builder. A key equal to its
+// neighbour, or to the last key streamed, is a duplicate target key.
+fn hot_stream_run(mut db: Db, mut builder: StreamBuilder, mut map: pages.PageTree, mut pending: List[std.page.Row], mut last_key: Option[Bytes], name: String) -> Result[(), Error] waits {
+    if list.len(pending) == 0 {
+        return Ok(())
+    }
+    let mut rows = replace(mut pending, list.new())
+    sort_bulk_rows(mut rows)?
+    for i in 1u64 .. list.len(rows) {
+        if rows[i - 1u64].key == rows[i].key {
+            return Error(Exists(failure_result_from_rep(catalog.named(name))?))
+        }
+    }
+    if let Some(previous) = last_key {
+        if rows[0u64].key <= previous {
+            if rows[0u64].key == previous {
+                return Error(Exists(failure_result_from_rep(catalog.named(name))?))
+            }
+            return Error(MigrationFault)
+        }
+    }
+    // A leaf holds at least one row and a BLOB takes one stamp; branches
+    // number fewer than the leaves under them.
+    hot_reserve(mut db, mut builder, int.saturating_add(int.saturating_mul(3u64, list.len(rows)), 64u64))?
+    last_key = Some(failure_result_from_rep(types.copied(rows[list.len(rows) - 1u64].key))?)
+    for take row in take rows {
+        stream_push_row(mut db, mut builder, mut map, take row)?
+    }
+    Ok(())
+}
+
+// One Tiered `migrate_table` target: the source is read from main's head as
+// the last cut published it, one chunk at a time, converted into runs of at
+// most `dirty_bytes`, and built bottom up into the working map.
+fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take job: DeferredMigrate) -> Result[(), Error] waits {
+    let dirty = disk_state(db).options.dirty_bytes
+    let target = failure_result_from_rep(catalog.prefix(job.to_id))?
+    let mut builder = new_stream_builder(job.to_id, 1u8, work.map.inline, dirty, 1u64, 0u64, string.from(BUILD_PIN))
+    let mut kept: List[std.page.Row] = list.new()
+    let mut charge = 0u64
+    let mut last_key: Option[Bytes] = None
+    let mut cursor: Option[Bytes] = None
+    loop {
+        let (take rows, done) = tiered_rows_after(db, job.from_id, cursor, INDEX_CHUNK)?
+        for (logical, raw) in rows {
+            let suffix = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
+            if let Some((take key, take value)) = (job.convert)(suffix, raw)? {
+                let mut full = failure_result_from_rep(types.copied(target))?
+                list.append(mut full, key)
+                let row_charge = entry(full, value)
+                charge = int.saturating_add(charge, row_charge + 8u64)
+                list.push(mut kept, std.page.Row(key: take key, value: take value, charge: row_charge))
+                if charge >= dirty {
+                    hot_stream_run(mut db, mut builder, mut work.map, mut kept, mut last_key, job.to_name)?
+                    charge = 0
+                }
+            }
+            cursor = Some(take suffix)
+        }
+        if done {
+            break
+        }
+    }
+    hot_stream_run(mut db, mut builder, mut work.map, mut kept, mut last_key, job.to_name)?
+    let mut pending_nodes = 64u64
+    for nodes in builder.levels {
+        pending_nodes = int.saturating_add(pending_nodes, list.len(nodes))
+    }
+    hot_reserve(mut db, mut builder, pending_nodes)?
+    let finished = stream_finish_range(mut builder)?
+    let private_from = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    let mut draw = private_from
+    match take finished {
+        Some(take node) => {
+            let StreamNode(slot: take node_slot, rows: node_rows, charge: node_charge, ..) = take node
+            put_collection_with_residency(mut work.map, target, Some(take node_slot), node_rows, node_charge, 1u8, ResidentTiered, private_from, mut draw)?
+        },
+        None => put_collection_with_residency(mut work.map, target, None, 0, 0, 1u8, ResidentTiered, private_from, mut draw)?,
+    }
+    failure_result_from_rep(pages.canonical_tree(mut work.map))?
+    pages.set_next_node(mut db.holders, draw - 1)
+    list.push(mut work.built, job.to_id)
+    // The source and its retired indexes leave the plan's map; the graft
+    // supersedes them.
+    let mut ids = pages.holder_next_node(db.holders)
+    let mut removed: List[u32] = list.with_capacity(1 + list.len(job.olds))
+    list.push(mut removed, job.from_id)
+    for old_id in job.olds {
+        list.push(mut removed, old_id)
+    }
+    for gone in removed {
+        let former = failure_result_from_rep(catalog.remove_store_collection(mut plan.schema.roots.collections, gone, mut ids))?
+        if !plan.schema.retained {
+            plan.schema.live = int.saturating_sub(plan.schema.live, former)
+        }
+    }
+    pages.set_next_node(mut db.holders, ids)
+    Ok(())
+}
+
+fn same_edge(a: std.page.Slot, b: std.page.Slot) -> bool {
+    match a {
+        HotPage(x) => match b {
+            HotPage(y) => std.page.stamp(std.page.image_of(x)) == std.page.stamp(std.page.image_of(y)),
+            ColdPage(_) => false,
+        },
+        ColdPage(x) => match b {
+            HotPage(_) => false,
+            ColdPage(y) => x == y,
+        },
+    }
+}
+
+// Whether `key` has the same slot and descriptor in both maps.
+fn same_collection(a: Arc[std.page.Page], b: Arc[std.page.Page], key: Bytes) -> bool {
+    let Some((left, left_descriptor)) = std.page.collection_slot(a, key) else {
+        return false
+    }
+    let Some((right, right_descriptor)) = std.page.collection_slot(b, key) else {
+        return false
+    }
+    left_descriptor == right_descriptor && same_edge(left, right)
+}
+
+// Puts `from`'s entry for `key` into `tree` with its descriptor as it is.
+fn graft_collection(mut tree: pages.PageTree, from: Arc[std.page.Page], key: Bytes, private_from: u64, mut ids: u64) -> Result[(), Error] {
+    let Some((slot, descriptor)) = std.page.collection_slot(from, key) else {
+        return Error(Missing("collection"))
+    }
+    let record = failure_result_from_rep(types.copied(descriptor))?
+    match slot {
+        HotPage(child) => failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(arc.share(child)), tree.inline, private_from, mut ids))),
+        ColdPage(ptr) => {
+            let stand_in = std.page.empty(0, ptr.stamp, Collection)
+            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take stand_in), tree.inline, private_from, mut ids)))?
+            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids)))
+        },
+    }
+}
+
+// Re-base rule (F3): H starts from main's current map, as the last cut
+// published it. Each id the build list names takes the working map's root;
+// any other id the plan changed takes the plan's root (Memory pages never
+// move); an id the plan removed is dropped; every untouched id, judged
+// against the staging head, keeps main's current root.
+fn hot_graft(mut db: Db, mut plan: SchemaPlan, work: HotBuild) -> Result[(), Error] {
+    let mut h = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    let private_from = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    let mut draw = private_from
+    let no_prefix: Bytes = list.new()
+    let plan_root = arc.share(plan.schema.roots.collections.root)
+    let staged = arc.share(plan.staged_map.root)
+    let mut changed = std.page.cursor_open(arc.share(plan_root), None, true, false)
+    while let Some((take key, _)) = std.page.cursor_next_key(mut changed, no_prefix) {
+        if list.contains(work.built, list.word_be(key, 0)) || same_collection(plan_root, staged, key) {
+            continue
+        }
+        graft_collection(mut h, plan_root, key, private_from, mut draw)?
+    }
+    let mut before = std.page.cursor_open(arc.share(staged), None, true, false)
+    while let Some((take key, _)) = std.page.cursor_next_key(mut before, no_prefix) {
+        let id: u32 = list.word_be(key, 0)
+        if list.contains(work.built, id) {
+            continue
+        }
+        if let None = std.page.collection_slot(plan_root, key) {
+            let _ = failure_result_from_rep(catalog.drop_collection(mut h, id, private_from, mut draw))?
+            discard_replayed_collection(mut h, id)?
+        }
+    }
+    for id in work.built {
+        graft_collection(mut h, work.map.root, failure_result_from_rep(catalog.prefix(id))?, private_from, mut draw)?
+    }
+    failure_result_from_rep(pages.canonical_tree(mut h))?
+    pages.set_next_node(mut db.holders, draw - 1)
+    plan.schema.roots.collections = take h
+    Ok(())
+}

@@ -421,16 +421,18 @@ type StreamBuilder {
     leaf_prefix: u64,
     levels: List[List[StreamNode]],
     next_stamp: u64,
-    stamp_high: u64
+    stamp_high: u64,
+    // The owner-3 pin each flush cut sets: `import` or `build`.
+    pin: String
 }
 
-fn new_stream_builder(id: u32, kind: u8, inline: u64, dirty_bytes: u64, first_stamp: u64, stamp_high: u64) -> StreamBuilder {
-    StreamBuilder(id: id, kind: kind, inline: inline, dirty_bytes: dirty_bytes, hot_bytes: 0, leaf_rows: list.new(), leaf_sum: 0, leaf_prefix: 0, levels: list.new(), next_stamp: first_stamp, stamp_high: stamp_high)
+fn new_stream_builder(id: u32, kind: u8, inline: u64, dirty_bytes: u64, first_stamp: u64, stamp_high: u64, take holder: String) -> StreamBuilder {
+    StreamBuilder(id: id, kind: kind, inline: inline, dirty_bytes: dirty_bytes, hot_bytes: 0, leaf_rows: list.new(), leaf_sum: 0, leaf_prefix: 0, levels: list.new(), next_stamp: first_stamp, stamp_high: stamp_high, pin: take holder)
 }
 
-fn stream_draw_stamp(mut cursor: u64, high: u64) -> Result[u64, DeployError] {
+fn stream_draw_stamp(mut cursor: u64, high: u64) -> Result[u64, Error] {
     if cursor > high {
-        return Error(IdBound)
+        return Error(Limit(Ids))
     }
     let drawn = cursor
     cursor += 1
@@ -450,7 +452,7 @@ fn stream_compressed(sum: u64, n: u64, p: u64) -> u64 {
     24 + sum - (n - 1) * p
 }
 
-fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), DeployError] {
+fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), Error] {
     let n = list.len(leaf_rows)
     let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
     let mut blobs: List[std.page.BlobSlot] = list.new()
@@ -463,10 +465,10 @@ fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut curso
     for take row in take leaf_rows {
         let std.page.Row(key: take key, value: take value, charge: row_charge) = take row
         if idx == 0 {
-            first = deploy_result(failure_result_from_rep(types.copied(key)))?
+            first = failure_result_from_rep(types.copied(key))?
         }
         if idx + 1 == n {
-            last_key = deploy_result(failure_result_from_rep(types.copied(key)))?
+            last_key = failure_result_from_rep(types.copied(key))?
         }
         idx += 1
         rows += 1
@@ -485,13 +487,13 @@ fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut curso
         }
     }
     let id = stream_draw_stamp(mut cursor, high)?
-    let image = deploy_result(failure_result_from_rep(pages.page_result(std.page.encode(page_entries, 0u8, id, Collection))))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(page_entries, 0u8, id, Collection)))?
     hot = int.saturating_add(hot, std.page.sealed_size(image))
-    let page = deploy_result(failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), take blobs))))?
+    let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), take blobs)))?
     Ok((StreamNode(slot: HotPage(take page), stamp: id, level: 0u8, first: take first, last: take last_key, rows: rows, charge: charge), hot))
 }
 
-fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), DeployError] {
+fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u64, high: u64) -> Result[(StreamNode, u64), Error] {
     let n = hi - lo
     let mut page_entries: List[std.page.Entry] = list.with_capacity(n)
     let mut kids: List[std.page.Slot] = list.with_capacity(n)
@@ -505,7 +507,7 @@ fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u
         let sep: Bytes = if i == lo {
             list.new()
         } else {
-            deploy_result(failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, node.first))))?
+            failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, node.first)))?
         }
         let ptr = match node.slot {
             ColdPage(place) => place,
@@ -515,15 +517,15 @@ fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u
         list.push(mut kids, clone(node.slot))
     }
     let id = stream_draw_stamp(mut cursor, high)?
-    let image = deploy_result(failure_result_from_rep(pages.page_result(std.page.encode(page_entries, lvl, id, Collection))))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(page_entries, lvl, id, Collection)))?
     let hot = std.page.sealed_size(image)
-    let page = deploy_result(failure_result_from_rep(pages.page_result(std.page.attach(take image, take kids, list.new()))))?
-    let first = deploy_result(failure_result_from_rep(types.copied(nodes[lo].first)))?
-    let last_key = deploy_result(failure_result_from_rep(types.copied(nodes[hi - 1u64].last)))?
+    let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, take kids, list.new())))?
+    let first = failure_result_from_rep(types.copied(nodes[lo].first))?
+    let last_key = failure_result_from_rep(types.copied(nodes[hi - 1u64].last))?
     Ok((StreamNode(slot: HotPage(take page), stamp: id, level: lvl, first: take first, last: take last_key, rows: rows, charge: charge), hot))
 }
 
-fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool, DeployError] {
+fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool, Error] {
     if hi - lo <= 2 {
         return Ok(true)
     }
@@ -531,7 +533,7 @@ fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool,
     let mut first_sep: Bytes = list.new()
     let mut common = 0u64
     for i in lo + 1u64 .. hi {
-        let sep = deploy_result(failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first))))?
+        let sep = failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first)))?
         sum += 4 + 52 + list.len(sep)
         if i == lo + 1u64 {
             common = list.len(sep)
@@ -543,7 +545,7 @@ fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool,
     Ok(stream_compressed(sum, hi - lo, common) <= 4096)
 }
 
-fn stream_push_node(mut builder: StreamBuilder, lvl_idx: u64, take node: StreamNode) -> Result[(), DeployError] {
+fn stream_push_node(mut builder: StreamBuilder, lvl_idx: u64, take node: StreamNode) -> Result[(), Error] {
     while list.len(builder.levels) <= lvl_idx {
         list.push(mut builder.levels, list.new())
     }
@@ -572,7 +574,7 @@ fn clone_stream_node(node: StreamNode) -> StreamNode {
 // Collapses a copy of `tree_levels` into one uniform-height AP3 root for a flush
 // cut (temporary wrapper stamps drawn from `temp_stamp`, never touching the
 // reserved stamp block).
-fn stream_temporary_root_multi(tree_levels: List[List[StreamNode]], mut temp_stamp: u64) -> Result[Option[StreamNode], DeployError] {
+fn stream_temporary_root_multi(tree_levels: List[List[StreamNode]], mut temp_stamp: u64) -> Result[Option[StreamNode], Error] {
     let max_stamp = 18446744073709551614u64
     let mut carry: List[StreamNode] = list.new()
     for idx in 0u64 .. list.len(tree_levels) {
@@ -610,7 +612,7 @@ fn stream_temporary_root_multi(tree_levels: List[List[StreamNode]], mut temp_sta
     }
 }
 
-fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Result[(List[StreamNode], u64), DeployError] {
+fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Result[(List[StreamNode], u64), Error] {
     let n = list.len(nodes)
     let mut out: List[StreamNode] = list.new()
     let mut hot = 0u64
@@ -636,19 +638,19 @@ fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Res
 }
 
 // Flushes every HotPage currently in `builder.levels` into class-3/4 packs via
-// one `hold_import_emitted` cut, replacing each HotPage with its ColdPage(ptr).
-fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree) -> Result[(), DeployError] waits {
-    let mut temp_stamp = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
+// one cut that sets the builder's owner-3 pin, replacing each HotPage with its ColdPage(ptr).
+fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree) -> Result[(), Error] waits {
+    let mut temp_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let Some(take root_node) = stream_temporary_root_multi(builder.levels, mut temp_stamp)? else {
         return Ok(())
     }
     let StreamNode(slot: take root_slot, rows: root_rows, charge: root_charge, ..) = take root_node
-    let key = deploy_result(failure_result_from_rep(catalog.prefix(builder.id)))?
+    let key = failure_result_from_rep(catalog.prefix(builder.id))?
     let private_from = temp_stamp
-    deploy_result(put_collection_with_residency(mut collections, key, Some(take root_slot), root_rows, root_charge, builder.kind, ResidentTiered, private_from, mut temp_stamp))?
-    deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
+    put_collection_with_residency(mut collections, key, Some(take root_slot), root_rows, root_charge, builder.kind, ResidentTiered, private_from, mut temp_stamp)?
+    failure_result_from_rep(pages.canonical_tree(mut collections))?
     pages.set_next_node(mut db.holders, temp_stamp - 1)
-    let (take packed, emitted) = hold_import_emitted(mut db, pages.share_page_tree(collections))?
+    let (take packed, emitted) = hold_owner3_emitted(mut db, builder.pin, pages.share_page_tree(collections))?
     collections = take packed
     for l in 0u64 .. list.len(builder.levels) {
         for j in 0u64 .. list.len(builder.levels[l]) {
@@ -669,7 +671,7 @@ fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: p
     Ok(())
 }
 
-fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree, take row: std.page.Row) -> Result[(), DeployError] waits {
+fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree, take row: std.page.Row) -> Result[(), Error] waits {
     let key_len = list.len(row.key)
     let val_len = list.len(row.value)
     let width = stream_leaf_row_width(key_len, val_len, builder.inline)
@@ -697,7 +699,7 @@ fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: page
     Ok(())
 }
 
-fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode], DeployError] {
+fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode], Error] {
     if list.len(builder.leaf_rows) != 0 {
         let ready_rows = replace(mut builder.leaf_rows, list.new())
         let (take leaf_node, hot) = stream_encode_leaf(take ready_rows, builder.inline, mut builder.next_stamp, builder.stamp_high)?
@@ -783,7 +785,7 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
             }
             continue
         }
-        let mut builder = new_stream_builder(target.id, target.kind, inline, dirty_bytes, stamp_cursor, high)
+        let mut builder = new_stream_builder(target.id, target.kind, inline, dirty_bytes, stamp_cursor, high, string.from(IMPORT_PIN))
         let mut digest = std.check.start()
         for _ in 0u64 .. desc.count {
             let PreparedRow(key: take key, value: take encoded) = prepared_frame(mut input, 0x0084, row_codec)?
@@ -797,12 +799,12 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
             deploy_result(checksum_row(mut digest, key, encoded))?
             let row_charge = entry(key, encoded)
             let suffix = deploy_result(failure_result_from_rep(types.copied(list.slice(key, 4, list.len(key)))))?
-            stream_push_row(mut db, mut builder, mut collections, std.page.Row(key: take suffix, value: take encoded, charge: row_charge))?
+            deploy_result(stream_push_row(mut db, mut builder, mut collections, std.page.Row(key: take suffix, value: take encoded, charge: row_charge)))?
         }
         if std.check.finish(digest) != target.digest {
             return Error(ImportMalformed)
         }
-        let finished = stream_finish_range(mut builder)?
+        let finished = deploy_result(stream_finish_range(mut builder))?
         stamp_cursor = builder.next_stamp
         let key = deploy_result(failure_result_from_rep(catalog.prefix(target.id)))?
         let private_from = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?

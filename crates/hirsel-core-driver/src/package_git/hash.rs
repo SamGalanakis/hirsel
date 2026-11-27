@@ -103,6 +103,12 @@ impl Hasher {
         }
     }
 
+    pub(crate) fn object(format: Format, kind: &str, size: u64) -> Self {
+        let mut hasher = Self::new(format);
+        hasher.update(format!("{kind} {size}\0").as_bytes());
+        hasher
+    }
+
     pub(crate) fn update(&mut self, bytes: &[u8]) {
         match self {
             Self::Sha1(hash) => sha1_checked::Digest::update(hash.as_mut(), bytes),
@@ -128,8 +134,7 @@ impl Hasher {
 
 /// A Git object's id: the hash of `<kind> <size>\0` and its bytes.
 pub(crate) fn object_id(format: Format, kind: &str, bytes: &[u8]) -> Result<Oid, Collision> {
-    let mut hasher = Hasher::new(format);
-    hasher.update(format!("{kind} {}\0", bytes.len()).as_bytes());
+    let mut hasher = Hasher::object(format, kind, bytes.len() as u64);
     hasher.update(bytes);
     hasher.finish()
 }

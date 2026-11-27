@@ -362,13 +362,18 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
     Ok(pack)
 }
 
-fn apply(base: &[u8], delta: &[u8], offset: usize) -> Result<Vec<u8>, Failure> {
+fn apply(
+    base: &[u8],
+    delta: &[u8],
+    offset: usize,
+    mut emit: impl FnMut(&[u8]),
+) -> Result<(), Failure> {
     let refuse = || bad(format!("delta at {offset} does not apply to its base"));
     let (base_size, result_size, mut pos) = delta_sizes(delta).ok_or_else(refuse)?;
     if base_size != base.len() as u64 || result_size > OBJECT_LIMIT {
         return Err(refuse());
     }
-    let mut out = Vec::with_capacity(result_size as usize);
+    let mut written = 0;
     while pos < delta.len() {
         let op = delta[pos];
         pos += 1;
@@ -392,25 +397,27 @@ fn apply(base: &[u8], delta: &[u8], offset: usize) -> Result<Vec<u8>, Failure> {
             }
             let end = at.checked_add(len).filter(|end| *end <= base.len() as u64);
             let end = end.ok_or_else(refuse)?;
-            if out.len() as u64 + len > result_size {
+            if written + len > result_size {
                 return Err(refuse());
             }
-            out.extend_from_slice(&base[at as usize..end as usize]);
+            emit(&base[at as usize..end as usize]);
+            written += len;
         } else if op != 0 {
             let insert = delta.get(pos..pos + op as usize).ok_or_else(refuse)?;
-            if out.len() + insert.len() > result_size as usize {
+            if written + u64::from(op) > result_size {
                 return Err(refuse());
             }
-            out.extend_from_slice(insert);
+            emit(insert);
+            written += u64::from(op);
             pos += op as usize;
         } else {
             return Err(refuse());
         }
     }
-    if out.len() as u64 != result_size {
+    if written != result_size {
         return Err(refuse());
     }
-    Ok(out)
+    Ok(())
 }
 
 impl Pack {
@@ -450,7 +457,11 @@ impl Pack {
         };
         let mut object = start;
         for &delta in chain.iter().rev() {
-            let bytes = apply(&object, &self.inflate(delta), self.entries[delta].offset)?;
+            let entry = &self.entries[delta];
+            let mut bytes = Vec::with_capacity(entry.result as usize);
+            apply(&object, &self.inflate(delta), entry.offset, |slice| {
+                bytes.extend_from_slice(slice);
+            })?;
             object = Arc::new(bytes);
             self.cache.lock().unwrap().insert(delta, object.clone());
         }
@@ -473,10 +484,12 @@ impl Pack {
                 Base::Id(id) => by_id.entry(*id).or_default().push(index),
             }
         }
+        let memo_budget = self.cache.get_mut().unwrap().budget as u64;
+        let mut large_base: Option<(usize, Arc<Vec<u8>>)> = None;
         while let Some(index) = ready.pop_front() {
-            let kind = match &self.entries[index].base {
-                Base::Whole(kind) => *kind,
-                Base::Offset(base) => self.kinds[*base],
+            let (kind, base) = match &self.entries[index].base {
+                Base::Whole(kind) => (*kind, None),
+                Base::Offset(base) => (self.kinds[*base], Some(*base)),
                 Base::Id(id) => {
                     let base = self.ids[id];
                     let depth = self.entries[base].depth + 1;
@@ -484,11 +497,34 @@ impl Pack {
                         return Err(over(&format!("{DEPTH_LIMIT} delta links")));
                     }
                     self.entries[index].depth = depth;
-                    self.kinds[base]
+                    (self.kinds[base], Some(base))
                 }
             };
-            let object = self.materialize(index)?;
-            let id = object_id(self.format, kind.name(), &object).map_err(|collision| {
+            let entry = &self.entries[index];
+            let id = if let Some(base) = base
+                && entry.result > memo_budget
+            {
+                // An uncachable result need only be hashed here. Keep one
+                // base for adjacent deltas so their reads share its allocation.
+                if large_base.as_ref().is_none_or(|(saved, _)| *saved != base) {
+                    drop(large_base.take());
+                    large_base = Some((base, self.materialize(base)?));
+                }
+                let mut hash = Hasher::object(self.format, kind.name(), entry.result);
+                apply(
+                    &large_base.as_ref().unwrap().1,
+                    &self.inflate(index),
+                    entry.offset,
+                    |bytes| {
+                        hash.update(bytes);
+                    },
+                )?;
+                hash.finish()
+            } else {
+                drop(large_base.take());
+                object_id(self.format, kind.name(), &self.materialize(index)?)
+            };
+            let id = id.map_err(|collision| {
                 bad(format!(
                     "object {} is a SHA-1 collision attack",
                     collision.0

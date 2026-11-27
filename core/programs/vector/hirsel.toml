@@ -19,11 +19,16 @@ grants = ["Clock", "Random", "Tasks"]
 [tests.sources]
 "tests.hirsel" = "tests"
 "tests-charges.hirsel" = "tests"
+"tests-tail.hirsel" = "tests"
 
 [tests.runs."vector@1/tests/ivf_tiered_source"]
 limit = 268435456
 dirs = ["."]
 
 [tests.runs."vector@1/tests/ivf_tiered_blocks"]
+limit = 268435456
+dirs = ["."]
+
+[tests.runs."vector@1/tests/ivf_demoted_source"]
 limit = 268435456
 dirs = ["."]

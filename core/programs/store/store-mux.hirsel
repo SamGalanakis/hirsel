@@ -94,12 +94,12 @@ pub fn resume_parked[E: inert](mut db: Db, take p: Parked, env: E, body: fn(mut 
     })
 }
 
-fn call_page_source(db: Db) -> Result[pager.TieredPageSource, Error] {
+fn call_page_source(db: Db, source: u64) -> Result[pager.TieredPageSource, Error] {
     let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = match pager.pager_requests(db.pager) {
         Some(requests) => Some(view requests),
         None => None,
     }
-    failure_result_from_rep(pager.tx_page_source(pager_link, pages.holder_heads(db.holders)[0].roots.collections))
+    capture_page_source(pager_link, pages.holder_heads(db.holders)[0].roots.collections, pages.holder_bases(db.holders), source)
 }
 
 // Abort and rerun for serve (§13.3, §13.3a): each attempt drafts at the head
@@ -113,7 +113,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
         let ci = call_info(db.store, 0, pages.holder_heads(db.holders)[0].head + 1, at, pages.holder_heads(db.holders)[0].at)
         refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
         call.attempts += 1
-        let attempt = pager.call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, pager.pin_partition(db.pager), pager.tiered_window(call.pins))
+        let attempt = pager.call_attempt(call_captures_tiered(db, 0), pager.pin_partition(db.pager), pager.tiered_window(call.pins))
         let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, call.pins.frames, body)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
             return decide_served(mut db, take complete, take rec, ci, take metered)
@@ -132,7 +132,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
                 Error(take problem) => return Error(Before(take problem, None)),
             },
             Some(AttemptMiss(_)) => {
-                let source = serve_before(call_page_source(db))?
+                let source = serve_before(call_page_source(db, state.miss_source))?
                 let root = call_pin_root(db, 0)
                 let room = pager.reserve_parked(mut db.pager)
                 if call.attempts >= 3 || call.crowded || !room {

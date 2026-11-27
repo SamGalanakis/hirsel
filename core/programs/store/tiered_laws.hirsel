@@ -547,8 +547,8 @@ fn test_l62_attempt_touch_order() -> Result[(), Error] {
 
 @test
 fn test_l62_root_scoped_pins() -> Result[(), Error] {
-    let old_root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: 90)
-    let new_root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 2, root_stamp: 90)
+    let old_root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: 90, tails: list.new())
+    let new_root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 2, root_stamp: 90, tails: list.new())
     let mut touched: Map[u64, ()] = map.new()
     map.insert(mut touched, 1, ())
     let mut pins = pager.empty_tiered_pins(old_root, 2098)

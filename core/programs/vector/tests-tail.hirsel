@@ -1,0 +1,50 @@
+// L104's IVF arm (Store §1.15, §13.10a): the published image keeps a Cold
+// source pin after the last Tiered table on main is demoted.
+/// bug: an IVF query over a Memory source refuses, or cannot read, the Cold image pin its projector holds after demotion.
+/// oracle: the changed key 10 is the query itself, so its score is the unique best (distance 0), and the hits equal the same query on a Memory twin.
+@test
+fn ivf_demoted_source(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "ivf-demoted-")
+    let directory = result.unwrap(host.mkdtemp(d, mut name))
+    let mut overrides = store.derived_sizes()
+    overrides.resident_limit = Some(300000000)
+    let options = result.unwrap(store.sized_with(Directory, 2147483648, overrides))
+    let mut disk = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let ordinal = code.describe(row_ordinal)
+    let (points, _, take far) = bind_far(mut disk, Migrate, L2, ordinal, recall_shape())
+    let (take opened, memory_points, _, take memory_far) = open_far(clock, random, L2, ordinal, recall_shape())
+    let mut memory = take opened
+    let q = far_query(0)
+    let mut seed: List[Step] = list.new()
+    for k in 0u64 .. 384 {
+        list.push(mut seed, Put(k, near_centre(k % IVF_CENTRES, k + 1)))
+    }
+    write_rows(mut disk, points, far, clone(seed))
+    write_rows(mut memory, memory_points, memory_far, take seed)
+    let (_, source_id) = store.table_identity(points)
+    result.unwrap(store.set_residency(mut disk, source_id, Tiered))
+    let _ = settle(mut disk, far)
+    let _ = settle(mut memory, memory_far)
+    // Key 10 becomes the query, then the source is demoted while every block
+    // table is Memory: the image's pin is the only Tiered tree.
+    let mut edits: List[Step] = list.new()
+    list.push(mut edits, Put(10, clone(q)))
+    write_rows(mut disk, points, far, clone(edits))
+    write_rows(mut memory, memory_points, memory_far, take edits)
+    result.unwrap(store.set_residency(mut disk, source_id, Memory))
+    result.unwrap(store.close(take disk))
+    let mut reopened = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let (_, _, take reopened_far) = bind_far(mut reopened, Open, L2, ordinal, recall_shape())
+    let found = ivf_disk_result(reopened, reopened_far, q)
+    let Ok(hits) = view found else {
+        fail("IVF demoted source: the query over the Cold image refused")
+    }
+    if list.len(hits) == 0 || hits[0].key != 10 || (list.len(hits) > 1 && hits[1].score == hits[0].score) {
+        fail("IVF demoted source: changed key 10 is the unique best hit")
+    }
+    equal_ivf(found, far_look(memory, memory_far, q, IVF_K, 16))
+    result.unwrap(store.close(take reopened))
+    result.unwrap(store.close(take memory))
+    Ok(())
+}

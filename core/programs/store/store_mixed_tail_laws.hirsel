@@ -1,0 +1,322 @@
+// L104 and L105 (§1.15): a projector image pinned on a Tiered source, read
+// through `read_tail` after the head's last Tiered table became Memory.
+type MixedFixture {
+    decl: ProjectionDecl,
+    source: Table[u64, Bytes]
+}
+
+type MixedRows = List[(u64, Option[Bytes])]
+
+// The image folds each row to its length: the tail compares source rows, so
+// the fold's own output does not matter here.
+fn mixed_apply(mut tx: Tx, image_table: Table[(u32, u64), Slot], delta: Delta[u64, Bytes]) -> Result[(), Error] {
+    let slot = match delta.value {
+        Some(value) => Present(list.len(value)),
+        None => Masked,
+    }
+    put(mut tx, image_table, (delta.generation, delta.key), slot)
+}
+
+fn mixed_fixture(mut db: Db, mode: Mode) -> Result[MixedFixture, Error] waits {
+    let mut d = declare(db, mode)?
+    let cursor = projection(mut d, "fixture")?
+    let source_decl = declare_table(mut d, "mixed_source", std.codec.key_u64(), std.codec.of_bytes())?
+    let source = finish(mut d, take source_decl)?
+    let generation_key: std.codec.Key[(u32, u64)] = std.codec.key_of()
+    let slots: std.codec.Codec[Slot] = std.codec.of()
+    let image_decl = declare_table(mut d, "mixed_image", generation_key, slots)?
+    let image_table = finish(mut d, take image_decl)?
+    let folds: Fold[Table[(u32, u64), Slot], u64, Bytes, Error] = Fold(env: clone(image_table), apply: code.describe(mixed_apply), merge: code.describe(projector_merge_law), drop: code.describe(projector_drop_law))
+    projector(mut d, cursor, source, Local, folds, cadence(), PROJECTOR_LAW_STEPS)?
+    let _ = seal(mut db, take d)?
+    Ok(MixedFixture(decl: take cursor, source: take source))
+}
+
+fn mixed_value(byte: u8, len: u64) -> Bytes {
+    let mut v: Bytes = list.with_capacity(len)
+    list.fill(mut v, len, byte)
+    take v
+}
+
+// 30's value is past the 1,024-byte inline limit, so the image holds it as a
+// Cold BLOB.
+const MIXED_BLOB_BYTES: u64 = 1500
+
+fn mixed_write(mut db: Db, t: Table[u64, Bytes], k: u64, take v: Option[Bytes]) -> Result[(), Error] waits {
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), (copy_env(t), k, take v), fn(mut tx, env) -> Result[(), Error] {
+        match env.2 {
+            Some(value) => put(mut tx, env.0, env.1, clone(value)),
+            None => {
+                let _ = delete(mut tx, env.0, env.1)?
+                Ok(())
+            },
+        }
+    })?
+    let Committed(_) = ran else {
+        fail("mixed tail: a source write commits")
+    }
+    Ok(())
+}
+
+// The tail in one-row pages, and the first page's resume.
+fn mixed_pages(tx: Tx, env: (ProjectionDecl, Table[u64, Bytes])) -> Result[(MixedRows, Option[Bytes]), Error] {
+    let mut rows: MixedRows = list.new()
+    let mut first: Option[Bytes] = None
+    let mut resume: Option[Bytes] = None
+    loop {
+        let Some(take page) = read_tail(tx, env.0, env.1, take resume, Limits(rows: 1, byte_limit: 4096))? else {
+            fail("mixed tail: the published image is a base")
+        }
+        let Tail(rows: take found, next: take after) = take page
+        for row in found {
+            list.push(mut rows, clone(row))
+        }
+        if list.len(rows) == 1 && first == None {
+            first = clone(after)
+        }
+        let Some(take at) = take after else {
+            return Ok((take rows, take first))
+        }
+        resume = Some(take at)
+    }
+}
+
+fn mixed_check(db: Db, fixture: MixedFixture, expected: MixedRows) -> Result[(), Error] waits {
+    let s = snapshot(db)
+    if pages.tiered_collections(s.roots.collections.root) {
+        fail("mixed tail: every table on main is Memory")
+    }
+    let image = tail_image_of(db, fixture.decl)?
+    let Some(bases) = view s.bases else {
+        fail("mixed tail: the published image has no retained pin")
+    }
+    let slot = option.unwrap(pages.tail_base(bases, fixture.decl.name, image.slot, image.position, s.branch))
+    let key = failure_result_from_rep(catalog.prefix(fixture.source.id))?
+    let Some((ColdPage(_), _)) = std.page.collection_slot(bases[slot].roots.collections.root, key) else {
+        fail("mixed tail: the pin must hold a Cold source")
+    }
+    if bases[slot].roots.collections.inline >= MIXED_BLOB_BYTES {
+        fail("mixed tail: 30's value is out of line in the image")
+    }
+    let r = reader(db, VALUE_LIMIT + 1048576)?
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    // The image's Tiered side makes the capture retry-capable (L106).
+    let Error(Missing(_)) = look(r, s, None, copy_env(input), fn(tx, handles) -> Result[(MixedRows, Option[Bytes]), Error] {
+        mixed_pages(tx, handles)
+    }) else {
+        fail("mixed tail: an unbounded look over a Tiered image is refused before its body")
+    }
+    let Seen(Seen(value: Ok((take rows, take first)), ..)) = look(r, s, Some(PROJECTOR_LAW_STEPS), input, mixed_pages)? else {
+        fail("mixed tail: the bounded look reads the tail")
+    }
+    if rows != expected {
+        fail("mixed tail: the tail differs from the hand difference of image and head")
+    }
+    // `next` is a resume in the source's tree keys: its table prefix, then
+    // the key's encoding.
+    let wanted = if list.len(expected) > 1 {
+        let mut at = failure_result_from_rep(catalog.prefix(fixture.source.id))?
+        list.append(mut at, resume_key(expected[1].0))
+        Some(take at)
+    } else {
+        None
+    }
+    if first != wanted {
+        fail("mixed tail: the first page resumes at the next changed key")
+    }
+    Ok(())
+}
+
+fn tail_image_of(db: Db, decl: ProjectionDecl) -> Result[Image, Error] waits {
+    let Some(image) = read_projection(db, decl)?.image else {
+        fail("mixed tail: the projector publishes an image")
+    }
+    Ok(image)
+}
+
+// L104's capture in `directory`: image {10: A, 20: B, 30: C}, C out of line;
+// with `changed`, 10 becomes D and 20 is removed. `image_tiered` makes the
+// source Tiered before the image is published, `head_tiered` leaves it
+// Tiered at the end; L104's case is image Tiered, head Memory. It returns
+// the image and the hand difference of image and head.
+fn mixed_capture(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, image_tiered: bool, head_tiered: bool, changed: bool) -> Result[(Image, MixedRows), Error] waits {
+    let mut db = open(tasks, directory, c, r, options)?
+    let fixture = mixed_fixture(mut db, Migrate)?
+    mixed_write(mut db, fixture.source, 10, Some(mixed_value(65, 1)))?
+    mixed_write(mut db, fixture.source, 20, Some(mixed_value(66, 1)))?
+    mixed_write(mut db, fixture.source, 30, Some(mixed_value(67, MIXED_BLOB_BYTES)))?
+    if image_tiered {
+        set_residency(mut db, fixture.source.id, Tiered)?
+    }
+    project_until_idle(mut db, Limits(rows: 64, byte_limit: 65536))?
+    let image = tail_image_of(db, fixture.decl)?
+    if head_tiered && !image_tiered {
+        set_residency(mut db, fixture.source.id, Tiered)?
+    }
+    let mut expected: MixedRows = list.new()
+    if changed {
+        mixed_write(mut db, fixture.source, 10, Some(mixed_value(68, 1)))?
+        mixed_write(mut db, fixture.source, 20, None)?
+        list.push(mut expected, (10u64, Some(mixed_value(68, 1))))
+        list.push(mut expected, (20u64, None))
+    }
+    if image_tiered && !head_tiered {
+        set_residency(mut db, fixture.source.id, Memory)?
+        mixed_check(db, fixture, expected)?
+    }
+    close(take db)?
+    Ok((image, take expected))
+}
+
+fn mixed_reopen(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, image: Image) -> Result[(Db, MixedFixture), Error] waits {
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let rebound = mixed_fixture(mut reopened, Open)?
+    if tail_image_of(reopened, rebound.decl)? != image {
+        fail("mixed tail: the image survives reopen")
+    }
+    Ok((take reopened, take rebound))
+}
+
+fn mixed_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, changed: bool) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000)?
+    let (image, expected) = mixed_capture(directory, c, r, tasks, options, true, false, changed)?
+    let (reopened, rebound) = mixed_reopen(directory, c, r, tasks, options, image)?
+    mixed_check(reopened, rebound, expected)?
+    mixed_counted(reopened, rebound, expected, tasks)?
+    close(take reopened)
+}
+
+// Forwards every request to the store's pager and counts the point demands
+// it carried: the deliveries a Reader's `look` asked for.
+fn mixed_count_proxy(take link: (Receiver[pager.TieredPagerMessage], Sender[pager.TieredPagerMessage])) -> u64 waits {
+    let (take inbox, take outlet) = take link
+    let mut points = 0u64
+    loop {
+        let Ok(take message) = channel.receive(inbox) else {
+            return points
+        }
+        if let PagerPoint(_, _) = view message {
+            points += 1
+        }
+        let Ok(()) = channel.send(outlet, take message) else {
+            return points
+        }
+    }
+}
+
+// The IVF delivery count (§1.15 L104), store-internal: the public `look`
+// reads the tail through a Reader whose pager link counts each point demand
+// its own loop delivers. A body that drove a copied pager loop would leave it
+// at zero.
+fn mixed_counted(db: Db, fixture: MixedFixture, expected: MixedRows, tasks: Tasks) -> Result[(), Error] waits {
+    let Some(real) = pager.pager_requests(db.pager) else {
+        fail("mixed tail: the store has a pager")
+    }
+    let (proxy, inbox): (Sender[pager.TieredPagerMessage], Receiver[pager.TieredPagerMessage]) = channel.new(1)
+    let counter = task.spawn(tasks, bytes 1048576, (take inbox, channel.sender(real)), mixed_count_proxy)
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    let looked = {
+        let r = open_reader(db.store, open_number(db), Some(take proxy), VALUE_LIMIT + 1048576)?
+        look(r, snapshot(db), Some(PROJECTOR_LAW_STEPS), input, mixed_pages)?
+    }
+    let Ok(points) = task.join(take counter) else {
+        fail("mixed tail: the counting link ends")
+    }
+    let Seen(Seen(value: Ok((take rows, _)), ..)) = take looked else {
+        fail("mixed tail: the counted look reads the tail")
+    }
+    if rows != expected {
+        fail("mixed tail: the counted look reads the hand difference")
+    }
+    if points == 0 {
+        fail("mixed tail: look's own loop delivers the image's Cold pages")
+    }
+    Ok(())
+}
+
+/// bug: a Memory head refuses its Cold image pin (`Tiered(Tail)`), makes no attempt for the image side, serves the image's miss from the inventory-less primary, or reports a residency change as a row change.
+/// oracle: the hand difference of image {10: A, 20: B, 30: C} and head {10: D, 30: C} in one-row pages, resuming at 20; and an empty tail when only the residency changed.
+@test
+fn test_l104_mixed_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    mixed_arm(d, c, r, tasks, true)?
+    mixed_arm(d, c, r, tasks, false)
+}
+
+// The tail in one page of up to 16 rows.
+fn mixed_one_page(tx: Tx, env: (ProjectionDecl, Table[u64, Bytes])) -> Result[MixedRows, Error] {
+    let Some(take page) = read_tail(tx, env.0, env.1, None, Limits(rows: 16, byte_limit: 4096))? else {
+        fail("mixed tail: the published image is a base")
+    }
+    let Tail(rows: take rows, next: None) = take page else {
+        fail("mixed tail: the tail fits one page")
+    }
+    Ok(take rows)
+}
+
+// On the capture, a run puts 10 back to A, then in a nested layer deletes
+// base key 30 and puts then deletes fresh key 40, and reads the tail.
+fn mixed_staged_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, image_tiered: bool, head_tiered: bool) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000)?
+    let (image, _) = mixed_capture(directory, c, r, tasks, options, image_tiered, head_tiered, true)?
+    let (opened, fixture) = mixed_reopen(directory, c, r, tasks, options, image)?
+    let mut db = take opened
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), input, fn(mut tx, env) -> Result[MixedRows, Error] {
+        put(mut tx, env.1, 10, mixed_value(65, 1))?
+        rollback_writes_on_error(mut tx, scoped fn(mut layer: Tx) -> Result[(), Error] {
+            let _ = delete(mut layer, env.1, 30)?
+            put(mut layer, env.1, 40, mixed_value(69, 1))?
+            let _ = delete(mut layer, env.1, 40)?
+            Ok(())
+        })?
+        mixed_one_page(tx, env)
+    })?
+    let Committed(Done(value: take rows, reads: take reads, ..)) = take ran else {
+        fail("mixed tail: the staged run commits")
+    }
+    // Image {10: A, 20: B, 30: C} against the run's view {10: A}.
+    let mut expected: MixedRows = list.new()
+    list.push(mut expected, (20u64, None))
+    list.push(mut expected, (30u64, None))
+    if rows != expected {
+        fail("mixed tail: the staged tail differs from the hand difference")
+    }
+    // The projection row's Point and the whole source Span the one page
+    // covered; the writes read nothing.
+    let mut log: List[Read] = list.new()
+    let row_key = failure_result_from_rep(catalog.encode_key(fixture.decl.rows.key, fixture.decl.name))?
+    list.push(mut log, Point(failure_result_from_rep(catalog.logical_key(fixture.decl.rows.id, row_key))?))
+    list.push(mut log, Span(failure_result_from_rep(catalog.prefix(fixture.source.id))?, failure_result_from_rep(catalog.prefix(fixture.source.id + 1))?))
+    if !mixed_same_reads(reads, log) {
+        fail("mixed tail: the staged run's read log is the row Point and the source Span")
+    }
+    close(take db)
+}
+
+/// bug: an enclosing write lost under an inner layer, raw base rows compared under a replay overlay, or a side read through the other side's residency.
+/// oracle: the hand difference of image {10: A, 20: B, 30: C} and the run's view {10: A}, and the read log the tail's contract names, for image Tiered and head Memory, the reverse, and both Tiered.
+@test
+fn test_l105_mixed_tail_staged(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    mixed_staged_arm(d, c, r, tasks, true, false)?
+    mixed_staged_arm(d, c, r, tasks, false, true)?
+    mixed_staged_arm(d, c, r, tasks, true, true)
+}
+
+fn mixed_same_reads(a: List[Read], b: List[Read]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        let same = match (a[i], b[i]) {
+            (Point(x), Point(y)) => x == y,
+            (Span(x0, x1), Span(y0, y1)) => x0 == y0 && x1 == y1,
+            _ => false,
+        }
+        if !same {
+            return false
+        }
+    }
+    true
+}

@@ -2,7 +2,7 @@ fn read_tiered_point_direct[R](d: Dir, owner: StoreId, inventory: pages.TieredRe
     let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: opened, pin_bytes: pin_bytes)))
     })?
-    let root = pager.TieredPinRoot(domain: opened, branch: branch_id, generation: inventory.generation, root_stamp: pages.tree_stamp(tree))
+    let root = pager.TieredPinRoot(domain: opened, branch: branch_id, generation: inventory.generation, root_stamp: pages.tree_stamp(tree), tails: list.new())
     read_tiered_point_with(PagerDirect(d, store_key_to_rep(owner)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, tree, logical, decode_row)
 }
 

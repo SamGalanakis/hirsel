@@ -9,7 +9,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
-        let attempt = pager.call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, pager.pin_partition(db.pager), pager.tiered_window(pins))
+        let attempt = pager.call_attempt(call_captures_tiered(db, i), pager.pin_partition(db.pager), pager.tiered_window(pins))
         let staged = stage_with(mut db, i, wall, steps, keep_reply, force_frame, attempt, pins.frames, body)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take staged)
@@ -29,22 +29,64 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             Some(AttemptMiss(_)) => {
                 // An inline call is held from its first miss (§13.3a "Inline calls").
                 revoke_parked(mut db)
-                deliver_call_miss(db, pages.holder_heads(db.holders)[i].roots.collections, state, mut pins, mut pending)?
+                deliver_call_miss(db, pages.holder_heads(db.holders)[i].roots.collections, pages.holder_bases(db.holders), state, mut pins, mut pending)?
             },
         }
     }
 }
 
+// §13.3 "The captured read roots": a call at head i reads that head and the
+// tail bases its branch's projector pins carry.
 fn call_pin_root(db: Db, i: u64) -> pager.TieredPinRoot {
-    tiered_pin_root(open_number(db), pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].roots.collections)
+    capture_pin_root(open_number(db), pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].roots.collections, pages.holder_bases(db.holders))
 }
 
-fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> pager.TieredPinRoot {
-    let generation = match tree.paging {
+fn call_captures_tiered(db: Db, i: u64) -> bool {
+    captured_tiered(pages.holder_heads(db.holders)[i].roots.collections, pages.holder_bases(db.holders), pages.holder_heads(db.holders)[i].id)
+}
+
+// Whether a capture is retry-capable (§13.3 "Retry-capable calls are
+// bounded"): its primary or a tail base of its branch holds a Tiered
+// collection. Decided before the body runs, from the capture alone.
+fn captured_tiered(primary: pages.PageTree, bases: pages.TailBases, branch_id: u32) -> bool {
+    if pages.tiered_collections(primary.root) {
+        return true
+    }
+    let Some(held) = view bases else {
+        return false
+    }
+    for k in 0u64 .. list.len(held) {
+        if held[k].branch == branch_id && pages.tiered_collections(held[k].roots.collections.root) {
+            return true
+        }
+    }
+    false
+}
+
+// A capture's identity (§13.3 "A capture change starts an empty map"): its
+// primary and each tail base of its branch, with their generations.
+fn capture_pin_root(opened: u64, branch_id: u32, primary: pages.PageTree, bases: pages.TailBases) -> pager.TieredPinRoot {
+    let mut root = tiered_pin_root(opened, branch_id, primary)
+    if let Some(held) = view bases {
+        for k in 0u64 .. list.len(held) {
+            if held[k].branch == branch_id {
+                let tree = view held[k].roots.collections
+                list.push(mut root.tails, pager.TieredTailRoot(version: held[k].version, generation: tree_generation(tree), root_stamp: pages.tree_stamp(tree)))
+            }
+        }
+    }
+    root
+}
+
+fn tree_generation(tree: pages.PageTree) -> u64 {
+    match tree.paging {
         Some(inventory) => inventory.generation,
         None => 0,
     }
-    pager.TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: pages.tree_stamp(tree))
+}
+
+fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> pager.TieredPinRoot {
+    pager.TieredPinRoot(domain: opened, branch: branch_id, generation: tree_generation(tree), root_stamp: pages.tree_stamp(tree), tails: list.new())
 }
 
 fn refresh_call_pins(mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)], root: pager.TieredPinRoot) {
@@ -54,7 +96,22 @@ fn refresh_call_pins(mut pins: pager.TieredPins, mut pending: Option[(format.Tie
     }
 }
 
-fn deliver_call_miss(db: Db, tree: pages.PageTree, state: pager.TieredTouchSet, mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
+// The inventory a latched miss resolves through (§13.3 "A miss names its
+// source tree"): the primary's, or that of the tail base the miss named.
+fn capture_page_source(requests: Option[View[Sender[pager.TieredPagerMessage]]], primary: pages.PageTree, bases: pages.TailBases, source: u64) -> Result[pager.TieredPageSource, Error] {
+    if source == 0 {
+        return failure_result_from_rep(pager.tx_page_source(requests, primary))
+    }
+    let Some(held) = view bases else {
+        fail("store: a miss names a tail base its capture does not carry")
+    }
+    if source > list.len(held) {
+        fail("store: a miss names a tail base its capture does not carry")
+    }
+    failure_result_from_rep(pager.tx_page_source(requests, held[source - 1].roots.collections))
+}
+
+fn deliver_call_miss(db: Db, primary: pages.PageTree, bases: pages.TailBases, state: pager.TieredTouchSet, mut pins: pager.TieredPins, mut pending: Option[(format.TieredTarget, types.Failure)]) -> Result[(), Error] waits {
     let SeekKey(sought) = view state.seek else {
         fail("store: a call's miss has no seek key")
     }
@@ -62,8 +119,8 @@ fn deliver_call_miss(db: Db, tree: pages.PageTree, state: pager.TieredTouchSet, 
         Some(pager) => Some(view pager),
         None => None,
     }
-    let source = failure_result_from_rep(pager.tx_page_source(requests, tree))?
-    failure_result_from_rep(object_writer.serve_tiered_miss(source, pins.root, state, sought, TieredPoint, None, mut pins, mut pending))
+    let source = capture_page_source(requests, primary, bases, state.miss_source)?
+    failure_result_from_rep(object_writer.serve_tiered_miss(source, clone(pins.root), state, sought, TieredPoint, None, mut pins, mut pending))
 }
 
 // One serve attempt over the pin map `drive_served` holds. A latched
@@ -199,8 +256,9 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
 
 pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
     read_access(r, s)?
+    let tiered = captured_tiered(s.roots.collections, s.bases, s.branch)
     if let None = steps {
-        if pages.tiered_collections(s.roots.collections.root) {
+        if tiered {
             return Error(Missing("steps"))
         }
     }
@@ -208,14 +266,11 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
         Some(grant) => grant.pin_bytes,
         None => 0,
     }
-    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
-        Some(inventory) => inventory.generation,
-        None => 0,
-    }, root_stamp: pages.tree_stamp(s.roots.collections))
+    let root = capture_pin_root(s.open, s.branch, s.roots.collections, s.bases)
     let mut pins = pager.empty_tiered_pins(root, partition)
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
-        let attempt = pager.call_attempt(s.roots.collections.root, partition, pager.tiered_window(pins))
+        let attempt = pager.call_attempt(tiered, partition, pager.tiered_window(pins))
         let looked = look_attempt(s, steps, env, body, attempt, pins.frames)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take looked)
@@ -233,8 +288,8 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
                     return Error(Io(Closed))
                 }
                 let pager_link = read.reader_requests(r.inner)
-                let source = failure_result_from_rep(pager.tx_page_source(pager_link, s.roots.collections))?
-                failure_result_from_rep(object_writer.serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(grant)), mut pins, mut pending))?
+                let source = capture_page_source(pager_link, s.roots.collections, s.bases, state.miss_source)?
+                failure_result_from_rep(object_writer.serve_tiered_miss(source, clone(pins.root), state, sought, TieredPoint, Some(arc.share(grant)), mut pins, mut pending))?
             },
         }
     }

@@ -7,7 +7,7 @@ fn snapshot_tiered_span_step_direct(d: Dir, owner: StoreId, pin_bytes: u64, s: S
     let grant = disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
         Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: s.open, pin_bytes: pin_bytes)))
     })?
-    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections))
+    let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: pages.tree_stamp(s.roots.collections), tails: list.new())
     snapshot_tiered_span_step_with(PagerDirect(d, store_key_to_rep(owner)), std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, take grant, root, s, low, high, previous)
 }
 

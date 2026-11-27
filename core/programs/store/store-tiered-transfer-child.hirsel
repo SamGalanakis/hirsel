@@ -266,7 +266,7 @@ fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, t
             },
             Some(AttemptMiss(_)) => {
                 revoke_parked(mut db)
-                deploy_result(deliver_call_miss(db, tree, state, mut pins, mut pending))?
+                deploy_result(deliver_call_miss(db, tree, pages.no_tail_bases(), state, mut pins, mut pending))?
             },
             Some(AttemptPinLimit(problem)) => return Error(Store(Full(Cache(problem)))),
             Some(AttemptAllocation(problem)) => return Error(Store(Full(Allocation(problem)))),
@@ -377,7 +377,7 @@ fn check_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_bytes
             None => return Error(Io(Closed)),
         },
     }
-    let root = pager.TieredPinRoot(domain: opened, branch: 0u32, generation: inventory.generation, root_stamp: pages.tree_stamp(staged_collections))
+    let root = pager.TieredPinRoot(domain: opened, branch: 0u32, generation: inventory.generation, root_stamp: pages.tree_stamp(staged_collections), tails: list.new())
     let empty_hint: Bytes = list.new()
     retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[(), Error] {
         for qr in staged.queued_rewrites {

@@ -260,11 +260,11 @@ fn rerun_attempt[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
 }
 
 fn rerun[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Result[Rerun[R], Error] waits {
-    let root = tiered_pin_root(open_number(db), ci.id.branch, base.collections)
+    let root = capture_pin_root(open_number(db), ci.id.branch, base.collections, pages.holder_bases(db.holders))
     let mut pins = pager.empty_tiered_pins(root, pager.pin_partition(db.pager))
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
-        let attempt = pager.call_attempt(base.collections.root, pager.pin_partition(db.pager), pager.tiered_window(pins))
+        let attempt = pager.call_attempt(captured_tiered(base.collections, pages.holder_bases(db.holders), ci.id.branch), pager.pin_partition(db.pager), pager.tiered_window(pins))
         let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take reran)
@@ -272,7 +272,7 @@ fn rerun[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: Call
         match state.stopped {
             None => return Ok(take reran),
             Some(AttemptMiss(_)) => {
-                match deliver_call_miss(db, base.collections, state, mut pins, mut pending) {
+                match deliver_call_miss(db, base.collections, pages.holder_bases(db.holders), state, mut pins, mut pending) {
                     Ok(()) => (),
                     Error(Full(_)) => return Ok(RoomRefused),
                     Error(Io(_)) => return Ok(RoomRefused),

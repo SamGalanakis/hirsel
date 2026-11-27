@@ -28,7 +28,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: indexes.Catalog, rows: List[(B
             None => return (take prepared)?,
             Some(AttemptMiss(_)) => {
                 revoke_parked(mut db)
-                deliver_call_miss(db, pages.holder_heads(db.holders)[0].roots.collections, state, mut pins, mut pending)?
+                deliver_call_miss(db, pages.holder_heads(db.holders)[0].roots.collections, pages.no_tail_bases(), state, mut pins, mut pending)?
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),

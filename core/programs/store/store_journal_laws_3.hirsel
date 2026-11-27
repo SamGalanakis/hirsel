@@ -376,7 +376,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(durable(mut db, final_item))
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
-    let attempt = pager.call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, pager.pin_partition(db.pager), 0)
+    let attempt = pager.call_attempt(pages.tiered_collections(pages.holder_heads(db.holders)[0].roots.collections.root), pager.pin_partition(db.pager), 0)
     let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let figure = match stage(mut db, 0, wall, None, keep_reply, attempt, no_pins, fn(mut tx: Tx) -> Result[(), u64] {
         settle_body(mut tx, s)

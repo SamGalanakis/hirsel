@@ -542,7 +542,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
-    let attempt = pager.call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, pager.pin_partition(db.pager), 0)
+    let attempt = pager.call_attempt(pages.tiered_collections(pages.holder_heads(db.holders)[0].roots.collections.root), pager.pin_partition(db.pager), 0)
     let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
         tx.frame_bytes = Some(42)

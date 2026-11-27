@@ -1,6 +1,18 @@
-pub type TieredPinRoot: key {
+// A pin map's scope (§13.3 "A capture change starts an empty map"): the
+// primary's store open, branch, generation and map stamp, and each
+// selectable tail base of the capture with its own.
+pub type TieredPinRoot: key + send {
     domain: u64,
     branch: u32,
+    generation: u64,
+    root_stamp: u64,
+    tails: List[TieredTailRoot]
+}
+
+// One tail base of a capture: its pin version, its inventory generation,
+// which a cut that relocates or seals it changes, and its map stamp.
+pub type TieredTailRoot: key + send {
+    version: u64,
     generation: u64,
     root_stamp: u64
 }
@@ -29,7 +41,7 @@ pub fn tiered_window(pins: TieredPins) -> u64 {
 }
 
 pub fn empty_tiered_pins(root: TieredPinRoot, partition: u64) -> TieredPins {
-    TieredPins(root: root, frames: map.new(), ordered: list.new(), retained: 0, partition: partition, demands: 0)
+    TieredPins(root: clone(root), frames: map.new(), ordered: list.new(), retained: 0, partition: partition, demands: 0)
 }
 
 pub fn tiered_reset_pins(mut pins: TieredPins, root: TieredPinRoot) {

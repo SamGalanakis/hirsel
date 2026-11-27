@@ -1,4 +1,4 @@
-pub type TieredRefusal: shareable + cross = Memory | Export | Install | Authority | Tail
+pub type TieredRefusal: shareable + cross = Memory | Export | Install | Authority
 
 pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
     string.from(match reason {
@@ -6,7 +6,6 @@ pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
         Export => "a store with Tiered collections cannot export",
         Install => "a store with Tiered collections cannot install a release",
         Authority => "archival requires a bucket authority",
-        Tail => "a projector tail cannot read a Tiered source",
     })
 }
 

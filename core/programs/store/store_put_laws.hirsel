@@ -9,7 +9,7 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 // Runs and commits without the I4 settle: the S1 laws' direct entry.
 fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
     let keep_reply: Option[fn(A) -> bool] = None
-    let attempt = pager.call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, pager.pin_partition(db.pager), 0)
+    let attempt = pager.call_attempt(pages.tiered_collections(pages.holder_heads(db.holders)[i].roots.collections.root), pager.pin_partition(db.pager), 0)
     let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     match stage(mut db, i, wall, steps, keep_reply, attempt, no_pins, body) {
         Over(take o) => Ok(take o),

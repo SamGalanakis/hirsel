@@ -297,6 +297,8 @@ dirs = ["."]
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"
 "store_tail_tiered_laws.hirsel" = "store"
+"store_mixed_tail_laws.hirsel" = "store"
+"store_capture_admission_laws.hirsel" = "store"
 "store_diff_laws.hirsel" = "store"
 "store_lookup_laws.hirsel" = "store"
 "store_declare_laws.hirsel" = "store"
@@ -705,7 +707,13 @@ limit = 536870912
 [tests.runs."store@1/store/test_tail_tiered"]
 limit = 268435456
 
-[tests.runs."store@1/store/test_tail_demoted_source"]
+[tests.runs."store@1/store/test_l104_mixed_tail"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l105_mixed_tail_staged"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l106_admission_captured_set"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_l63_parked_rerun_takes_moved_prior"]

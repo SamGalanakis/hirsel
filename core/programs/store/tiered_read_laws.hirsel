@@ -282,7 +282,7 @@ fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePt
     let grant = failure_result_from_rep(pager.pager_reader_grant(source.pager, VALUE_LIMIT + 1048576))?
     let mut tree = l62_replay_read_tree(base)?
     let key = failure_result_from_rep(pager.log_key(9, 1))?
-    let mut root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let mut root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree), tails: list.new())
     for _ in 0u64 .. 2 {
         let Some(value) = l62_read_point_bytes(source, grant, root, tree, key)? else {
             fail("L62: cold and warm lookup must both find the row")
@@ -339,7 +339,7 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
 
 fn l62_check_batch_error_order(source: pager.TieredPageSource, owner: StoreId, base: std.page.PagePtr) -> Result[(), Error] waits {
     let tree = l62_replay_read_tree(base)?
-    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree), tails: list.new())
     let key = failure_result_from_rep(pager.log_key(9, 1))?
     // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
     // header and two 2-byte slots. The 16-byte frame head makes 160.
@@ -757,7 +757,7 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let _ = take receiver
     let source = pager.TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
     let grant = arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
-    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree))
+    let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree), tails: list.new())
     let Ok(None) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 1))?) else {
         fail("L62: a trimmed row must not reach the Cold base")
     }

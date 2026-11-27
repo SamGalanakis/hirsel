@@ -875,7 +875,7 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
     // A retry-capable call is bounded, so a body that loops on a caught
     // Missed ends at its bound and the driver reruns it (§13.3).
     if let None = steps {
-        if pages.tiered_collections(pages.holder_heads(db.holders)[i].roots.collections.root) {
+        if call_captures_tiered(db, i) {
             return Error(Missing("steps"))
         }
     }

@@ -1,0 +1,144 @@
+// L106 (§13.3 "The captured read roots"): retry admission is decided before
+// the body runs, over the primary and the same-branch projector tail bases.
+fn admission_quick(_tx: Tx, _env: u64) -> Result[u64, Error] {
+    Ok(7)
+}
+
+fn admission_quick_write(mut _tx: Tx, _env: u64) -> Result[u64, Error] {
+    Ok(7)
+}
+
+// The tail is read once. A miss the body catches stages sentinel 98 and
+// replies 2; a read that completes stages 99 and replies 1.
+fn admission_catching(mut tx: Tx, env: (ProjectionDecl, Table[u64, Bytes])) -> Result[u64, Error] {
+    match read_tail(tx, env.0, env.1, None, Limits(rows: 16, byte_limit: 4096)) {
+        Ok(_) => {
+            put(mut tx, env.1, 99, mixed_value(1, 1))?
+            Ok(1)
+        },
+        Error(_) => {
+            put(mut tx, env.1, 98, mixed_value(2, 1))?
+            Ok(2)
+        },
+    }
+}
+
+fn admission_row(db: Db, t: Table[u64, Bytes], k: u64) -> Result[Option[Bytes], Error] waits {
+    let r = reader(db, VALUE_LIMIT + 1048576)?
+    let Seen(Seen(value: take found, ..)) = look(r, snapshot(db), Some(PROJECTOR_LAW_STEPS), (copy_env(t), k), fn(tx, env) -> Result[Option[Bytes], Error] {
+        fetch(tx, env.0, env.1)
+    })? else {
+        fail("admission: the row reads")
+    }
+    take found
+}
+
+fn admission_capture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000)?
+    let (image, _) = mixed_capture(directory, c, r, tasks, options, true, false, true)?
+    let (opened, fixture) = mixed_reopen(directory, c, r, tasks, options, image)?
+    let mut db = take opened
+    let s = snapshot(db)
+    let rd = reader(db, VALUE_LIMIT + 1048576)?
+    let Error(Missing(_)) = look(rd, s, None, 0u64, admission_quick) else {
+        fail("admission: an unbounded look on a Tiered image is refused before its body")
+    }
+    let Error(Missing(_)) = run(mut db, None, 0u64, admission_quick_write) else {
+        fail("admission: an unbounded run on a Tiered image is refused before its body")
+    }
+    let main = main_branch(db)
+    let Error(Missing(_)) = run_on(mut db, main, None, 0u64, admission_quick_write) else {
+        fail("admission: an unbounded run_on on a Tiered image is refused before its body")
+    }
+    // A bounded constant body takes an attempt record and makes no demand.
+    let partition = match read.reader_grant(rd.inner) {
+        Some(grant) => grant.pin_bytes,
+        None => fail("admission: the reader has a pool"),
+    }
+    let attempt = pager.call_attempt(captured_tiered(s.roots.collections, s.bases, s.branch), partition, 8)
+    let no_frames: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let _ = look_attempt(s, Some(PROJECTOR_LAW_STEPS), 0u64, admission_quick, attempt, no_frames)
+    let Some(state) = pager.call_attempt_finish(take attempt) else {
+        fail("admission: a bounded call over a Tiered image takes an attempt record")
+    }
+    let stopped = match state.stopped {
+        Some(_) => true,
+        None => false,
+    }
+    if stopped || map.len(state.stamps) != 0 {
+        fail("admission: a constant body makes no demand")
+    }
+    // The first attempt misses in the image and the body catches it; the
+    // deciding attempt reads it. Only that attempt's reply, write and log
+    // are kept, in one commit.
+    let before = snapshot(db).head
+    let input: (ProjectionDecl, Table[u64, Bytes]) = (clone(fixture.decl), clone(fixture.source))
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), input, admission_catching)?
+    let Committed(Done(value: 1u64, reads: take reads, ..)) = take ran else {
+        fail("admission: the caught miss is rerun and the deciding attempt's reply kept")
+    }
+    if snapshot(db).head != before + 1 {
+        fail("admission: the call commits once")
+    }
+    let mut log: List[Read] = list.new()
+    let row_key = failure_result_from_rep(catalog.encode_key(fixture.decl.rows.key, fixture.decl.name))?
+    list.push(mut log, Point(failure_result_from_rep(catalog.logical_key(fixture.decl.rows.id, row_key))?))
+    list.push(mut log, Span(failure_result_from_rep(catalog.prefix(fixture.source.id))?, failure_result_from_rep(catalog.prefix(fixture.source.id + 1))?))
+    if !mixed_same_reads(reads, log) {
+        fail("admission: the read log is the deciding attempt's")
+    }
+    if admission_row(db, fixture.source, 99)? != Some(mixed_value(1, 1)) || admission_row(db, fixture.source, 98)? != None {
+        fail("admission: only the deciding attempt's write commits")
+    }
+    drop(take rd)
+    close(take db)
+}
+
+// No projector image: the Memory primary carries no tail base, while an
+// application pin and a pin on another branch both hold Tiered roots.
+fn admission_memory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, disk_test_directory(d), c, r, l70_open_options(300000000)?)?
+    let fixture = mixed_fixture(mut db, Migrate)?
+    mixed_write(mut db, fixture.source, 10, Some(mixed_value(65, 1)))?
+    set_residency(mut db, fixture.source.id, Tiered)?
+    let here = snapshot(db)
+    let _ = pin(mut db, "app", here)?
+    let from = snapshot(db)
+    let (other, _) = fork(mut db, "other", from)?
+    let on_branch = snapshot_of(db, other)?
+    let _ = pin(mut db, "other_pin", on_branch)?
+    set_residency(mut db, fixture.source.id, Memory)?
+    let Some(app) = pinned(db, "app") else {
+        fail("admission: the application pin is held")
+    }
+    let Some(on_other) = pinned(db, "other_pin") else {
+        fail("admission: the other branch's pin is held")
+    }
+    if !pages.tiered_collections(app.roots.collections.root) || !pages.tiered_collections(on_other.roots.collections.root) {
+        fail("admission: both pins hold Tiered roots")
+    }
+    let s = snapshot(db)
+    if captured_tiered(s.roots.collections, s.bases, s.branch) {
+        fail("admission: a Memory primary with no Tiered tail base takes no attempt record")
+    }
+    let Seen(Seen(value: Ok(7u64), ..)) = look(reader(db, VALUE_LIMIT + 1048576)?, s, None, 0u64, admission_quick)? else {
+        fail("admission: an unbounded look on a Memory capture runs")
+    }
+    let Committed(_) = run(mut db, None, 0u64, admission_quick_write)? else {
+        fail("admission: an unbounded run on a Memory capture runs")
+    }
+    let main = main_branch(db)
+    let Committed(_) = run_on(mut db, main, None, 0u64, admission_quick_write)? else {
+        fail("admission: an unbounded run_on on a Memory capture runs")
+    }
+    close(take db)
+}
+
+/// bug: admission from the primary alone, admission decided at the first miss, a caught miss admitted, or a store-wide "a pager exists" predicate.
+/// oracle: §13.3's rule over the captured set: Missing("steps") on a Memory head carrying a Tiered image, one commit with the deciding attempt's reply 1, row 99 and the tail's row Point and source Span, and None accepted when the only Tiered roots are an application pin and another branch's pin.
+@test
+fn test_l106_admission_captured_set(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    admission_capture(d, c, r, tasks)?
+    admission_memory(d, c, r, tasks)
+}

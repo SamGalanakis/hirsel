@@ -20,7 +20,8 @@ pub type TieredAhead: send = NoAhead | Ahead(u64, bool)
 type TieredIntent: send {
     stamp: u64,
     total: u64,
-    stop: Option[TieredAttemptStop]
+    stop: Option[TieredAttemptStop],
+    source: u64
 }
 
 type TieredTouch {
@@ -62,11 +63,16 @@ pub type TieredTouchSet: send {
     siblings: List[format.TieredTarget],
     gather: TieredGather,
     stopped: Option[TieredAttemptStop],
-    intent: Option[TieredIntent]
+    intent: Option[TieredIntent],
+    // The root of the captured set whose tree a read descends now, and the
+    // one a latched miss named (§13.3 "A miss names its source tree"): 0 is
+    // the primary and k + 1 the capture's tail base k.
+    source: u64,
+    miss_source: u64
 }
 
 fn tiered_touch_set(partition: u64) -> TieredTouchSet {
-    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone, sibling_window: 0, ahead: NoAhead, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()), stopped: None, intent: None)
+    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone, sibling_window: 0, ahead: NoAhead, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()), stopped: None, intent: None, source: 0, miss_source: 0)
 }
 
 pub fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] {
@@ -79,13 +85,16 @@ pub fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] 
 // was reserved before the intent, so a stop here leaves the intent for the
 // next entry to replay.
 pub fn tiered_settle(mut a: TieredTouchSet) {
-    let (stamp, total, stop): (u64, u64, Option[TieredAttemptStop]) = match a.intent {
-        Some(i) => (i.stamp, i.total, clone(i.stop)),
+    let (stamp, total, stop, source): (u64, u64, Option[TieredAttemptStop], u64) = match a.intent {
+        Some(i) => (i.stamp, i.total, clone(i.stop), i.source),
         None => return,
     }
     a.touched_bytes = total
     map.insert(mut a.stamps, stamp, ())
     if let None = a.stopped {
+        if let Some(AttemptMiss(_)) = view stop {
+            a.miss_source = source
+        }
         a.stopped = take stop
     }
     a.intent = None
@@ -98,11 +107,12 @@ pub fn tiered_finish(take attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet 
     take state
 }
 
-// A call reads Tiered rows only from a head with Tiered collections, so only
-// such a call carries an attempt record and a Hot call allocates none. Its
-// scans read ahead by the call's window, as a Reader's do.
-pub fn call_attempt(root: Arc[std.page.Page], partition: u64, window: u64) -> Option[core.Cell[TieredTouchSet]] {
-    if pages.tiered_collections(root) {
+// A call reads Tiered rows only when its captured set holds a Tiered
+// collection (§13.3 "Only a Tiered capture has one"), so only such a call
+// carries an attempt record and a Hot call allocates none. Its scans read
+// ahead by the call's window, as a Reader's do.
+pub fn call_attempt(tiered: bool, partition: u64, window: u64) -> Option[core.Cell[TieredTouchSet]] {
+    if tiered {
         Some(tiered_attempt(partition, window))
     } else {
         None
@@ -149,7 +159,7 @@ fn tiered_touch_entry(mut a: TieredTouchSet, take t: TieredTouch) -> bool {
         Some(_) => false,
         None => true,
     }
-    a.intent = Some(TieredIntent(stamp: stamp, total: total, stop: take stop))
+    a.intent = Some(TieredIntent(stamp: stamp, total: total, stop: take stop, source: a.source))
     tiered_settle(mut a)
     admitted
 }
@@ -191,6 +201,12 @@ fn tiered_gather_touch(mut a: TieredTouchSet, stamp: u64, payload: u64, take mis
         }
         return true
     }
+    // One demand resolves through one source's inventory, so a path that
+    // another root of the capture named waits for its own miss.
+    if a.source != a.miss_source {
+        a.gather.full = true
+        return false
+    }
     if let Error(_) = list.try_reserve(mut a.gather.paths, 1) {
         a.gather.full = true
         return false
@@ -206,6 +222,18 @@ fn tiered_gather_touch(mut a: TieredTouchSet, stamp: u64, payload: u64, take mis
 fn tiered_gather_entry(mut a: TieredTouchSet, take on: bool) {
     tiered_settle(mut a)
     a.gather.on = on
+}
+
+fn tiered_source_entry(mut a: TieredTouchSet, take source: u64) {
+    tiered_settle(mut a)
+    a.source = source
+}
+
+// Names the root of the captured set the next reads descend (§13.3 "A miss
+// names its source tree"); a reader of a tail base names it and then names
+// the primary again.
+pub fn tiered_source(attempt: core.Cell[TieredTouchSet], source: u64) {
+    cell.with(attempt, source, tiered_source_entry)
 }
 
 // Starts or ends `fetch_many`'s batch.

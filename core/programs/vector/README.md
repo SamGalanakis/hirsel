@@ -177,8 +177,9 @@ length is refused with `Dimensions(query length, dims)`. A code of another
 length is refused when a row is folded (`Store(Limit(Value))`) or scored
 (`Dimensions`).
 
-Tiered sources wait on D7. A query on a Tiered source is refused with
-`Store(Tiered(Tail))`.
+A Tiered source is read through the image's own descriptor, also after
+the source is demoted while its published image still pins Cold pages
+(Store §1.14, §13.3).
 
 ### Cost
 

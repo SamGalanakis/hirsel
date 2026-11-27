@@ -158,9 +158,12 @@ pub fn next_tiered_index_row(tree: pages.PageTree, attempt: Option[core.Cell[pag
     next_tiered_in(tree, attempt, pins, id, staged, mut start, mut stop, false)
 }
 
-// A tail uses the deciding attempt for both roots. The published pin is a
-// holder in the same pack inventory as the head. Its tree has no Tx edits.
-pub fn read_tiered_tail[C, T](input: TieredReadInput, base: pages.PageTree, head: pages.PageTree, id: u32, resume: Bytes, high: Bytes, mut out: ChangeOutput[C, T]) -> Result[(), types.Failure] {
+// A tail uses the deciding attempt for both roots (§1.14 "Mixed
+// residency"). Each side is read through its own descriptor, and a miss in
+// the published pin names that tail base, `base_source`, so it resolves
+// through the pin's own inventory (§13.3 "A miss names its source tree").
+// The pin's tree has no Tx edits.
+pub fn read_tiered_tail[C, T](input: TieredReadInput, base: pages.PageTree, base_source: u64, head: pages.PageTree, id: u32, resume: Bytes, high: Bytes, mut out: ChangeOutput[C, T]) -> Result[(), types.Failure] {
     let prefix = catalog.prefix(id)?
     let low = if resume < prefix {
         view prefix
@@ -184,9 +187,9 @@ pub fn read_tiered_tail[C, T](input: TieredReadInput, base: pages.PageTree, head
     }
     let spans = if old_tiered && new_tiered {
         let Some(attempt) = input.attempt else {
-            return Error(Tiered(Tail))
+            fail("store: a Tiered tail without an attempt record")
         }
-        tail_spans(attempt, input.pins, base, head, id, prefix, staged, low, high)?
+        tail_spans(attempt, input.pins, base, base_source, head, id, prefix, staged, low, high)?
     } else {
         let mut span: List[(Bytes, Bytes)] = list.new()
         list.push(mut span, (clone(low), clone(high)))
@@ -199,9 +202,9 @@ pub fn read_tiered_tail[C, T](input: TieredReadInput, base: pages.PageTree, head
         let mut old_row: Option[(Bytes, Arc[Bytes])] = if old.rows == 0 {
             None
         } else {
-            next_tail_row(input, base, id, old_tiered, empty, mut from, span.1)?
+            next_tail_row(input, base, base_source, id, old_tiered, empty, mut from, span.1)?
         }
-        let mut new_row = next_tail_row(input, head, id, new_tiered, staged, mut to, span.1)?
+        let mut new_row = next_tail_row(input, head, 0, id, new_tiered, staged, mut to, span.1)?
         loop {
             let comparison = match view old_row {
                 Some((key, _)) => match view new_row {
@@ -238,28 +241,32 @@ pub fn read_tiered_tail[C, T](input: TieredReadInput, base: pages.PageTree, head
                 }
             }
             if comparison != Greater {
-                old_row = next_tail_row(input, base, id, old_tiered, empty, mut from, span.1)?
+                old_row = next_tail_row(input, base, base_source, id, old_tiered, empty, mut from, span.1)?
             }
             if comparison != Less {
-                new_row = next_tail_row(input, head, id, new_tiered, staged, mut to, span.1)?
+                new_row = next_tail_row(input, head, 0, id, new_tiered, staged, mut to, span.1)?
             }
         }
     }
     Ok(())
 }
 
-fn next_tail_row(input: TieredReadInput, tree: pages.PageTree, id: u32, tiered: bool, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut start: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
+fn next_tail_row(input: TieredReadInput, tree: pages.PageTree, source: u64, id: u32, tiered: bool, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut start: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
     if start >= high {
         return Ok(None)
     }
     if tiered {
-        // A Memory head can still retain a Tiered image pin after demotion.
-        // Its driver cannot serve a Cold miss from that pin.
-        if let None = input.attempt {
-            return Error(Tiered(Tail))
+        // The capture holds this Tiered side, so its driver made an attempt
+        // record (§13.3 "Retry-capable calls are bounded"), even under a
+        // Memory head after demotion (§13.8 "Demotion is local to main").
+        let Some(attempt) = view input.attempt else {
+            fail("store: a Tiered tail side without an attempt record")
         }
         let mut stop = types.copied(high)?
-        return next_tiered_in(tree, input.attempt, input.pins, id, staged, mut start, mut stop, false)
+        pager.tiered_source(attempt, source)
+        let found = next_tiered_in(tree, input.attempt, input.pins, id, staged, mut start, mut stop, false)
+        pager.tiered_source(attempt, 0)
+        return found
     }
     let mut rows = byte_cursor(tree, Included(types.copied(start)?), high)?
     let found = catalog.next_bytes(mut rows)?
@@ -271,7 +278,7 @@ fn next_tail_row(input: TieredReadInput, tree: pages.PageTree, id: u32, tiered: 
 
 // Identical subtrees need no reads. Replay and Tx edits can mask rows
 // under a shared stamp, so add their keys to the differing leaf spans.
-fn tail_spans(attempt: core.Cell[pager.TieredTouchSet], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], base: pages.PageTree, head: pages.PageTree, id: u32, prefix: Bytes, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], low: Bytes, high: Bytes) -> Result[List[(Bytes, Bytes)], types.Failure] {
+fn tail_spans(attempt: core.Cell[pager.TieredTouchSet], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], base: pages.PageTree, base_source: u64, head: pages.PageTree, id: u32, prefix: Bytes, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], low: Bytes, high: Bytes) -> Result[List[(Bytes, Bytes)], types.Failure] {
     let mut left = pager.tiered_diff_root(base, prefix)
     let mut right = pager.tiered_diff_root(head, prefix)
     loop {
@@ -280,8 +287,10 @@ fn tail_spans(attempt: core.Cell[pager.TieredTouchSet], pins: Map[pager.TieredCa
         if top == 0 {
             break
         }
-        let deeper_left = tail_deepen(attempt, pins, take left, top)?
-        left = take deeper_left
+        pager.tiered_source(attempt, base_source)
+        let deeper_left = tail_deepen(attempt, pins, take left, top)
+        pager.tiered_source(attempt, 0)
+        left = (take deeper_left)?
         let deeper_right = tail_deepen(attempt, pins, take right, top)?
         right = take deeper_right
     }

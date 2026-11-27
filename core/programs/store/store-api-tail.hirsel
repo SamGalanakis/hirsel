@@ -46,7 +46,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     let input = read.TieredReadInput(attempt: tx.attempt, pins: tx.pins, below: view tx.below, ops: view tx.ops)
     if low < high {
         if failure_result_from_rep(catalog.tiered_source(tx.roots, source.id))? {
-            failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, tx.roots.collections, source.id, low, high, mut out))?
+            failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, slot + 1, tx.roots.collections, source.id, low, high, mut out))?
         } else {
             let after = if pages.data_row_count(tx.ops.rows) == 0 && list.len(tx.below) == 0 {
                 pages.share_page_tree(tx.roots.collections)
@@ -55,7 +55,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
             }
             walk_page_changes(mut out, Some(view base.roots.collections), after, Some(clone(low)), Some(clone(high)))?
             if let Some(_) = out.deferred {
-                failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, after, source.id, low, high, mut out))?
+                failure_result_from_rep(read.read_tiered_tail(input, base.roots.collections, slot + 1, after, source.id, low, high, mut out))?
             }
         }
     }

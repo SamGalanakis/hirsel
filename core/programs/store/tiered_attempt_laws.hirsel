@@ -195,14 +195,14 @@ fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, 
     let root = pager.TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
         None => 0,
-    }, root_stamp: pages.tree_stamp(s.roots.collections))
+    }, root_stamp: pages.tree_stamp(s.roots.collections), tails: list.new())
     let mut pins = pager.empty_tiered_pins(root, partition)
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     let mut attempts = 0u64
     loop {
         attempts += 1
         let attempt = if prefetch {
-            pager.call_attempt(s.roots.collections.root, partition, pager.tiered_window(pins))
+            pager.call_attempt(pages.tiered_collections(s.roots.collections.root), partition, pager.tiered_window(pins))
         } else {
             Some(pager.tiered_attempt(partition, 0))
         }

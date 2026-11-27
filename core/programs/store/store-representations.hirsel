@@ -260,7 +260,6 @@ fn tiered_refusal_to_rep(take value: TieredRefusal) -> types.TieredRefusalRep {
         Export => Export,
         Install => Install,
         Authority => Authority,
-        Tail => Tail,
     }
 }
 
@@ -270,7 +269,6 @@ fn tiered_refusal_from_rep(take value: types.TieredRefusalRep) -> TieredRefusal 
         Export => Export,
         Install => Install,
         Authority => Authority,
-        Tail => Tail,
     }
 }
 

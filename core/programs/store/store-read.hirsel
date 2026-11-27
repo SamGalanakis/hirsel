@@ -51,7 +51,7 @@ pub fn snapshot_pager(r: ReaderState, inventory: pages.TieredReadInventory, open
         return Error(Io(Closed))
     }
     let source = pager.TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
-    let root = pager.TieredPinRoot(domain: opened, branch, generation: inventory.generation, root_stamp)
+    let root = pager.TieredPinRoot(domain: opened, branch, generation: inventory.generation, root_stamp, tails: list.new())
     Ok((take source, arc.share(pool.grant), root))
 }
 

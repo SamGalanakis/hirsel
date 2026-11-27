@@ -294,9 +294,14 @@ pub(crate) fn leave(context: &mut Context) {
     let window = window_left(context);
     rewindow(context, |context| {
         context.step_slice_tail += window;
-        context.steps -= window as i64;
-        let bound = context.step_bounds.pop().expect("an open step scope");
-        bound.close(window, context.step_bounds.last_mut());
+        if matches!(context.step_bounds, Bounds::One(Bound::Inline { .. })) {
+            // The unpublished root has neither a funder nor another participant.
+            context.step_bounds = Bounds::Empty;
+        } else {
+            context.steps -= window as i64;
+            let bound = context.step_bounds.pop().expect("an open step scope");
+            bound.close(window, context.step_bounds.last_mut());
+        }
     });
     if context.step_bounds.is_empty() {
         context.steps = initial_unbounded_steps();
@@ -328,34 +333,42 @@ pub unsafe extern "C" fn hirsel_core_step_enter_at(
         .as_mut()
         .and_then(|obs| obs.inject.take())
         .unwrap_or(steps);
-    if !context.step_bounds.is_empty() {
-        flush(context);
-        let current = context.step_bounds.last_mut().unwrap();
-        let admitted = current.with_balance(|b| {
-            if b.available() < steps {
-                #[cfg(feature = "prof")]
-                crate::mem_prof::step_remaining(b.available());
-                return false;
-            }
-            b.left -= steps;
-            #[cfg(feature = "prof")]
-            crate::mem_prof::step_remaining(b.left);
-            true
-        });
-        if !admitted {
-            #[cfg(feature = "testing")]
-            if let Some(obs) = &mut context.step_observation {
-                obs.refusal.get_or_insert(_site);
-            }
-            #[cfg(feature = "prof")]
-            crate::mem_prof::scope_enter(1, 0, steps, true);
-            draw(context);
-            return false;
-        }
+    if !context.step_bounds.is_empty() && !fund_nested(context, steps, _site) {
+        return false;
     }
     open_inline(context, steps);
     #[cfg(feature = "prof")]
     crate::mem_prof::scope_enter(1, 0, steps, false);
+    true
+}
+
+/// Debit the parent before opening the inner account. The outermost entry
+/// does not need the shared-account locking or refusal paths.
+#[inline(never)]
+fn fund_nested(context: &mut Context, steps: u64, _site: u64) -> bool {
+    flush(context);
+    let current = context.step_bounds.last_mut().unwrap();
+    let admitted = current.with_balance(|b| {
+        if b.available() < steps {
+            #[cfg(feature = "prof")]
+            crate::mem_prof::step_remaining(b.available());
+            return false;
+        }
+        b.left -= steps;
+        #[cfg(feature = "prof")]
+        crate::mem_prof::step_remaining(b.left);
+        true
+    });
+    if !admitted {
+        #[cfg(feature = "testing")]
+        if let Some(obs) = &mut context.step_observation {
+            obs.refusal.get_or_insert(_site);
+        }
+        #[cfg(feature = "prof")]
+        crate::mem_prof::scope_enter(1, 0, steps, true);
+        draw(context);
+        return false;
+    }
     true
 }
 

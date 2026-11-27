@@ -98,15 +98,19 @@ impl Bounds {
         }
     }
 
+    #[inline]
     pub(super) fn push(&mut self, bound: Bound) {
         match self {
             Self::Empty => *self = Self::One(bound),
             Self::Nested(bounds) => bounds.push(bound),
-            Self::One(_) => {
-                let first = self.pop().unwrap();
-                *self = Self::Nested(vec![first, bound]);
-            }
+            Self::One(_) => self.spill(bound),
         }
+    }
+
+    #[cold]
+    fn spill(&mut self, second: Bound) {
+        let first = self.pop().expect("one inline scope");
+        *self = Self::Nested(vec![first, second]);
     }
 
     pub(super) fn pop(&mut self) -> Option<Bound> {

@@ -149,10 +149,10 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     db.accounting.resident = result.unwrap(pages.state_account(replay.state))
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
-        stage_disk_frame(mut state, size, Some(take frame_bytes))
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        advance_frame_offset(mut state, size)
     })
-    handoff(mut db)?
+    handoff(mut db, Some(take raw))?
     Ok(commit_ticket)
 }
 

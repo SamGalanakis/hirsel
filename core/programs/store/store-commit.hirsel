@@ -108,7 +108,7 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
     }
 }
 
-fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
+fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> (Outcome[R, A], Option[Bytes]) {
     db.call_streams.keyed_credit = txn.draft_credit(db.call_streams.keyed_credit, ran.keyed)
     if i == 0u64 {
         for reply_slot in 0u64 .. pages.data_row_count(ran.replies) {
@@ -145,12 +145,10 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
                 Some(raw) => list.len(raw),
                 None => 0u64
             }
-            stage_disk_frame(mut state, size, take frame)
+            advance_frame_offset(mut state, size)
             db.frame_seq += 1
         },
-        None => {
-            let _ = take frame
-        },
+        None => (),
     }
     if let Some(take candidate) = take roots {
         let old_bytes = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
@@ -173,10 +171,11 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         db.frame_seq
     }
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head))
-    match take value {
+    let outcome: Outcome[R, A] = match take value {
         Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: Some(ci), reads: take seen)),
         Error(take a) => Aborted(Undone(value: take a, ticket: Some(commit_ticket)))
     }
+    (take outcome, take frame)
 }
 
 fn commit_skipped[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> Outcome[R, A] {
@@ -335,7 +334,9 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
             if let Some(problem) = reserve_tiered_freed(mut db, draft) {
                 return Ok(Refused(problem))
             }
-            Ok(commit_prepared(mut db, i, take draft, take publication))
+            let (take outcome, take frame) = commit_prepared(mut db, i, take draft, take publication)
+            handoff(mut db, take frame)?
+            Ok(take outcome)
         },
         OverLimit(_, c) => Ok(Refused(c)),
     }
@@ -397,7 +398,6 @@ fn append_transaction_at_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option
             Ok(Failed(Drift(take name)))
         },
     }
-    handoff(mut db)?
     take outcome
 }
 

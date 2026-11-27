@@ -9,6 +9,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
     let mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64, u64))] = None
+    let group_limit = store.manage_journal_groups(mut head.db)
     head.upkeep.project_checked = store.main_commit_version(head.db)
     loop {
         check_store_health(head.db)?
@@ -16,9 +17,15 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
         if head.cut {
             return Ok(false)
         }
+        if let Some(limit) = group_limit {
+            if list.len(head.group) >= limit {
+                close_group(mut head)
+                release_held(mut head, false)?
+            }
+        }
         if let Some(control) = drain {
             if let Ok(()) = channel.try_receive(control.finish) {
-                release_held(mut head, true)?;
+                gate(mut head)?;
                 return Ok(false)
             }
             if let Some(_) = drain_window(latest.read(control.window)) {
@@ -193,7 +200,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 continue
             },
             Some(HeadFinish) => {
-                release_held(mut head, true)?;
+                gate(mut head)?;
                 return Ok(false)
             },
             Some(SyncWake) => {
@@ -265,6 +272,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
         if none(pause) && !closed && next_waiting(mut head, drain)? {
             continue
         }
+        store.submit_journal_group(mut head.db, false)?
         if list.len(head.group) > 0u64 {
             // The group's sync runs while the head takes later work; its replies wait
             // for that sync (release_held), behind every earlier group's.

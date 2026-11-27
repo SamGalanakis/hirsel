@@ -43,13 +43,10 @@ fn file_end(db: Db) -> u64 {
     }
 }
 
-fn stage_disk_frame(mut state: DiskState, size: u64, take frame: Option[Bytes]) {
+fn advance_frame_offset(mut state: DiskState, size: u64) {
     match state.backend {
-        DirBackend(mut directory) => {
-            journal.advance_offset(mut directory, size)
-            journal.stash_frame(mut directory, take frame)
-        },
-        ObjectBackend(mut queue) => object_writer.stage_frame(mut queue, size, take frame),
+        DirBackend(mut directory) => journal.advance_offset(mut directory, size),
+        ObjectBackend(mut queue) => object_writer.advance_offset(mut queue, size),
     }
 }
 
@@ -70,6 +67,7 @@ fn edit_accounting[R](mut state: DiskState, edit: scoped fn(mut journal.QueueAcc
 fn journal_barrier(state: DiskState) waits {
     match state.backend {
         DirBackend(directory) => {
+            let _ = journal.submit_group(directory, true)
             let _ = channel.send(journal.dir_sender(directory), Barrier)
         },
         ObjectBackend(writer) => {
@@ -136,10 +134,45 @@ fn journal_receive(db: Db) -> JournalAck waits {
     }
 }
 
+pub fn manage_journal_groups(mut db: Db) -> Option[u64] {
+    if let Some(mut state) = db.disk {
+        if let DirBackend(mut directory) = state.backend {
+            journal.manage_groups(mut directory)
+            return Some(int.widen(state.options.group_commits))
+        }
+    }
+    None
+}
+
+fn failed_handoff(mut db: Db) -> Result[(), Error] {
+    // A Directory worker publishes its first I/O failure before dropping
+    // either the command receiver or the buffer return sender.
+    journal_poll(mut db)?
+    journal_ack(mut db, Broken(Closed))
+}
+
+pub fn submit_journal_group(mut db: Db, wait: bool) -> Result[(), Error] waits {
+    let closed = match db.disk {
+        Some(state) => match state.backend {
+            DirBackend(directory) => match journal.submit_group(directory, wait) {
+                Ok(()) => false,
+                Error(_) => true
+            },
+            ObjectBackend(_) => false,
+        },
+        None => false,
+    }
+    if closed {
+        return failed_handoff(mut db)
+    }
+    Ok(())
+}
+
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
     if let Some(raw) = frame {
         let size = list.len(raw)
         while queue_accounting(disk_state(db)).inflight > db.limits.frame - size {
+            submit_journal_group(mut db, true)?
             let acknowledged = journal_receive(db)
             journal_ack(mut db, take acknowledged)?
         }
@@ -174,6 +207,7 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     let mut groups = drained ?=> durable_latch_error
     if is_disk(db) {
         while !covered(db, t.mark) {
+            submit_journal_group(mut db, true)?
             let ack = journal_receive(db)
             journal_ack(mut db, take ack) ?=> durable_latch_error
             groups += 1

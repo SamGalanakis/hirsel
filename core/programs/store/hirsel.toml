@@ -58,6 +58,7 @@ std = { major = 1 }
 "store-journal-support.hirsel" = "journal"
 "store-dir-journal-recover.hirsel" = "journal"
 "store-dir-journal-worker.hirsel" = "journal"
+"store-dir-group.hirsel" = "journal"
 "store-pager-state.hirsel" = "pager"
 "store-api-tiered-cache.hirsel" = "store"
 "store-api-tiered-residency.hirsel" = "store"

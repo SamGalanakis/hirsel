@@ -99,7 +99,7 @@ fn inline_meter_arm(c: Clock, held: bool, neighbours: u64) -> Result[(u64, u64),
     }) {
         return Error(Missing("transfer page copies"))
     }
-    let Committed(_) = commit_prepared(mut db, 0, take accepted, take publication) else {
+    let (Committed(_), _) = commit_prepared(mut db, 0, take accepted, take publication) else {
         return Error(Missing("commit transfer"))
     }
     if let Some(old) = prior {

@@ -12,8 +12,7 @@ pub type JournalWorker: send {
     seq: u64,
     segment: HostFile,
     end_file: HostFile,
-    header: Bytes,
-    group_commits: u32,
+    returned: Sender[Bytes],
     group_bytes: u32,
     clock: Clock,
     cadence: JournalCadence,
@@ -26,7 +25,6 @@ pub type JournalWorker: send {
 }
 
 type JournalBuffers {
-    group: Bytes,
     end_bytes: Bytes,
     binding: Bytes
 }
@@ -45,13 +43,12 @@ fn journal_fixed_check(schema_binding: Bytes, raw: Bytes, at: u64, length: u64) 
     std.check.finish(state)
 }
 
-pub fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
-    let group: Bytes = list.with_capacity_aligned(journal_group_room(reserve), 4096)
+pub fn journal_buffers() -> Result[JournalBuffers, Capacity] {
     let mut end_bytes: Bytes = list.with_capacity(96)
     list.fill(mut end_bytes, 96, 0u8)
     let mut schema_binding: Bytes = list.with_capacity(33)
     list.fill(mut schema_binding, 33, 0u8)
-    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take schema_binding))
+    Ok(JournalBuffers(end_bytes: take end_bytes, binding: take schema_binding))
 }
 
 // END's bytes and checksum binding reuse storage admitted at spawn. The END
@@ -135,7 +132,17 @@ fn journal_write_oversized(mut segment: HostFile, block_at: u64, frame: Bytes, m
 }
 
 pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), types.Failure] waits {
-    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, header: take first_header, group_commits: max_frames, group_bytes: max_bytes, clock: clock, cadence: cadence_spec, zero_extension: zero_extension, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, returned: take returned, group_bytes: max_bytes, clock: clock, cadence: cadence_spec, zero_extension: zero_extension, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
+    let result = journal_run(id, initial_seq, take segment, take end_file, returned, max_bytes, clock, cadence_spec, zero_extension, receive, send, notices, synced, take scratch)
+    if let Error(Io(e)) = result {
+        let _ = channel.try_send(notices, WriteFailed(e))
+        let _ = channel.send(send, DirBroken(e))
+        let _ = channel.try_send(synced, ())
+    }
+    take result
+}
+
+fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, take end_file: HostFile, returned: Sender[Bytes], max_bytes: u32, clock: Clock, cadence_spec: JournalCadence, zero_extension: bool, receive: Receiver[DirJournalMsg], send: Sender[DirAck], notices: Sender[WriteNotice], synced: Sender[()], take scratch: JournalBuffers) -> Result[(), types.Failure] waits {
     let mut segment_file = take segment
     let mut end_handle = take end_file
     let mut seq = initial_seq
@@ -147,10 +154,7 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
     let mut groups = 0u64
     let interval_ns = int.saturating_mul(cadence_spec.end_interval_ms, 1000000u64)
     let mut end_due: Option[u64] = None
-    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
-    let mut buffer = take reserved
-    list.append(mut buffer, first_header)
-    drop(take first_header)
+    let JournalBuffers(end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut end_bytes = take initial_end
     let mut schema_binding = take initial_binding
     let group_limit: u64 = int.widen(max_bytes)
@@ -163,153 +167,106 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
     // group that large amortizes its own extension, so zero steps wait until
     // 64 smaller groups in a row (§3.3a Bulk).
     let mut small_groups = 64u64
-    let mut deferred: Option[DirJournalMsg] = None
     loop {
-        let mut next_message = replace(mut deferred, None)
+        let mut next_message: Option[DirJournalMsg] = None
         let mut closing = false
-        if let None = next_message {
-            if groups != 0 {
-                // P2 services an already due END even when control messages
-                // keep the queue readable without producing another group.
-                let pending: Result[DirJournalMsg, ReceiveError] = if let Some(due) = end_due {
-                    if host.mono_ns(clock) >= due {
-                        Error(Empty)
-                    } else {
-                        channel.receive_until(receive, At(clock, due))
-                    }
+        if groups != 0 {
+            // P2 services an already due END even when control messages
+            // keep the queue readable without producing another group.
+            let pending: Result[DirJournalMsg, ReceiveError] = if let Some(due) = end_due {
+                if host.mono_ns(clock) >= due {
+                    Error(Empty)
                 } else {
-                    // In immediate mode a cap or Barrier still probes first.
-                    channel.try_receive(receive)
+                    channel.receive_until(receive, At(clock, due))
                 }
-                match take pending {
-                    Ok(take msg) => {
-                        next_message = Some(take msg)
-                    },
-                    Error(Empty) => {
-                        if end != end_named {
-                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
-                            end_named = end
-                        }
-                        groups = 0
-                        end_due = None
-                    },
-                    Error(Closed) => {
-                        closing = interval_ns != 0
-                    },
-                }
+            } else {
+                // In immediate mode a cap or Barrier still probes first.
+                channel.try_receive(receive)
             }
-            if let None = next_message {
-                let target = if end == end_named && small_groups >= 64 {
-                    journal_window_target(end, window_limit)
-                } else {
-                    0u64
-                }
-                while window - end < target / 2 {
-                    match channel.try_receive(receive) {
-                        Ok(take msg) => {
-                            next_message = Some(take msg)
-                            break
-                        },
-                        Error(Empty) => {
-                            let width = order.min(JOURNAL_WINDOW_STEP, journal_align_up(end + target) - window)
-                            journal_window_step(mut segment_file, window, width)?
-                            window += width
-                        },
-                        Error(Closed) => break,
-                    }
-                }
-            }
-            if let None = next_message {
-                if !closing {
-                    if end != end_named {
-                        journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
-                        end_named = end
-                        groups = 0
-                        end_due = None
-                    }
-                    next_message = match channel.receive(receive) {
-                        Ok(take msg) => Some(take msg),
-                        Error(_) => None
-                    }
-                }
-            }
-        }
-        list.truncate(mut buffer, end % 4096)
-        let mut oversized: Option[Bytes] = None
-        let mut frames = 0u64
-        let mut group_bytes = 0u64
-        let mut last_frame = 0u64
-        let mut idle = false
-        let mut rotating: Option[(HostFile, HostFile, Bytes)] = None
-        let mut answering = false
-        loop {
-            let selected = replace(mut next_message, None)
-            match take selected {
-                None => {
-                    closing = true;
-                    break
-                },
-                Some(Frame(take raw, number)) => {
-                    let length = list.len(raw)
-                    if frames != 0 && group_bytes + length > group_limit {
-                        deferred = Some(Frame(take raw, number))
-                        break
-                    }
-                    if length > group_limit {
-                        oversized = Some(take raw)
-                    } else {
-                        list.append(mut buffer, raw)
-                    }
-                    group_bytes += length
-                    last_frame = number
-                    frames += 1
-                    if frames >= int.widen(max_frames) || group_bytes >= group_limit {
-                        break
-                    }
-                },
-                Some(Rotate(take file, take rotated_end, take header)) => {
-                    rotating = Some((take file, take rotated_end, take header));
-                    break
-                },
-                Some(Barrier) => {
-                    answering = true;
-                    break
-                },
-            }
-            let pending = channel.try_receive(receive)
             match take pending {
                 Ok(take msg) => {
                     next_message = Some(take msg)
                 },
                 Error(Empty) => {
-                    idle = true
-                    break
+                    if end != end_named {
+                        journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
+                        end_named = end
+                    }
+                    groups = 0
+                    end_due = None
                 },
                 Error(Closed) => {
-                    closing = true;
-                    break
+                    closing = interval_ns != 0
+                },
+            }
+        }
+        if let None = next_message {
+            let target = if end == end_named && small_groups >= 64 {
+                journal_window_target(end, window_limit)
+            } else {
+                0u64
+            }
+            while window - end < target / 2 {
+                match channel.try_receive(receive) {
+                    Ok(take msg) => {
+                        next_message = Some(take msg)
+                        break
+                    },
+                    Error(Empty) => {
+                        let width = order.min(JOURNAL_WINDOW_STEP, journal_align_up(end + target) - window)
+                        journal_window_step(mut segment_file, window, width)?
+                        window += width
+                    },
+                    Error(Closed) => break,
                 }
             }
         }
-        if frames != 0 {
-            let block_at = end - (end % 4096)
-            match take oversized {
-                Some(take frame) => journal_write_oversized(mut segment_file, block_at, frame, mut buffer)?,
-                None => journal_write_aligned(mut segment_file, block_at, mut buffer)?,
+        if let None = next_message {
+            if !closing {
+                if end != end_named {
+                    journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
+                    end_named = end
+                    groups = 0
+                    end_due = None
+                }
+                next_message = match channel.receive(receive) {
+                    Ok(take msg) => Some(take msg),
+                    Error(_) => None
+                }
             }
+        }
+        let mut rotating: Option[(HostFile, HostFile)] = None
+        let mut group_bytes = 0u64
+        let mut last_frame = 0u64
+        let block_at = end - end % 4096
+        match take next_message {
+            Some(Group(take raw, number, size)) => {
+                let mut buffer = take raw
+                journal_write_aligned(mut segment_file, block_at, mut buffer)?
+                let _ = channel.try_send(returned, take buffer)
+                group_bytes = size
+                last_frame = number
+            },
+            Some(Oversized(take raw, take frame, number)) => {
+                let mut buffer = take raw
+                journal_write_oversized(mut segment_file, block_at, frame, mut buffer)?
+                let _ = channel.try_send(returned, take buffer)
+                group_bytes = list.len(frame)
+                last_frame = number
+            },
+            Some(Rotate(take file, take rotated_end)) => {
+                rotating = Some((take file, take rotated_end))
+            },
+            Some(Barrier) => {
+                let _ = channel.try_send(notices, Written)
+            },
+            None => {
+                closing = true
+            },
+        }
+        if group_bytes != 0 {
             end += group_bytes
             window = order.max(window, journal_align_up(end))
-            let tail = end % 4096
-            if tail != 0 {
-                let tail_at = list.len(buffer) - 4096
-                list.copy_within(mut buffer, tail_at, 0, tail)
-            }
-            list.truncate(mut buffer, tail)
-        }
-        if answering {
-            let _ = channel.try_send(notices, Written)
-        }
-        if frames != 0 {
             written += group_bytes
             if let Error(_) = channel.send(send, DirJournaled(last_frame, written)) {
                 return Ok(())
@@ -333,8 +290,8 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
         // An END that would repeat the d already named writes nothing.
         let load_end = groups >= int.widen(cadence_spec.end_groups)
         let time_end = match end_due {
-            Some(due) => frames != 0 && host.mono_ns(clock) >= due,
-            None => interval_ns == 0 && idle,
+            Some(due) => group_bytes != 0 && host.mono_ns(clock) >= due,
+            None => false,
         }
         if (time_end || closing || rotate_now || load_end) && end != end_named {
             journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
@@ -348,7 +305,7 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
                 window += width
             }
         }
-        if let Some((take new_file, take new_end, take next_header)) = take rotating {
+        if let Some((take new_file, take new_end)) = take rotating {
             manifest.disk_io(host.close(take segment_file))?
             manifest.disk_io(host.close(replace(mut end_handle, take new_end)))?
             segment_file = take new_file
@@ -356,8 +313,6 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
             end = 72
             window = 4096
             end_named = 72
-            list.clear(mut buffer)
-            list.append(mut buffer, next_header)
         }
         if closing {
             manifest.disk_io(host.close(take segment_file))?
@@ -368,7 +323,7 @@ pub fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> 
 }
 
 pub fn journal_worker(take input: JournalWorker) -> Result[(), types.Failure] waits {
-    let allocation = journal_buffers(int.widen(input.group_bytes))
+    let allocation = journal_buffers()
     let reserved = match take allocation {
         Ok(take buffer) => take buffer,
         Error(c) => {
@@ -379,16 +334,7 @@ pub fn journal_worker(take input: JournalWorker) -> Result[(), types.Failure] wa
     if let Error(_) = channel.send(input.ready, Ok(())) {
         return Ok(())
     }
-    let send = channel.sender(input.send)
-    let written = channel.sender(input.written)
-    let synced = channel.sender(input.synced)
-    let result = journal_loop(take input, take reserved)
-    if let Error(Io(e)) = result {
-        let _ = channel.try_send(written, WriteFailed(e))
-        let _ = channel.send(send, DirBroken(e))
-        let _ = channel.try_send(synced, ())
-    }
-    take result
+    journal_loop(take input, take reserved)
 }
 
 // A new segment: its Direct creation block (header and zeros to 4096) and

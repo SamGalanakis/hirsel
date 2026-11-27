@@ -486,6 +486,7 @@ fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
 // so it writes no END. The END file is opened only when its segment is created.
 fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[(), Error] waits {
     let mut owned = take db
+    let _ = manage_journal_groups(mut owned)
     result.unwrap(stdout.write(out, "ARM"))
     journal_frameless_wakes(owned, 8)?
     let mut final_item = journal_put_ticket(mut owned, t, 0)?

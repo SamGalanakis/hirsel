@@ -366,8 +366,8 @@ fn journal_ready_bytes() -> u64 {
     option.unwrap(charge.channel(bytes[Result[(), Capacity]], 1))
 }
 
-fn journal_channel_bytes(group_count: u64) -> u64 {
-    journal_channel_charge(group_count, bytes[journal.DirJournalMsg], bytes[journal.DirAck], journal_ready_bytes())
+fn journal_channel_bytes() -> u64 {
+    option.unwrap(charge.channel(bytes[journal.DirJournalMsg], 1)) + option.unwrap(charge.channel(bytes[journal.DirAck], 4)) + journal_ready_bytes() + option.unwrap(charge.channel(bytes[journal.WriteNotice], 2)) + option.unwrap(charge.channel(bytes[()], 1)) + option.unwrap(charge.channel(bytes[Bytes], 1))
 }
 
 fn journal_channel_charge(group_count: u64, message_bytes: u64, ack_bytes: u64, ready_bytes: u64) -> u64 {
@@ -459,9 +459,9 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         recovery = order.max(fetched_entry + frame, history.size_or(checkpoint_read, unbounded))
         cut_parts = bucket_cut_parts(pack, l)
     } else {
-        let aligned_room = journal.journal_group_room(order.min(group, 4294967295u64))
-        let worker = charge.task(bytes[Result[(), types.Failure]], aligned_room + journal.JOURNAL_WORKER_SLACK)
-        writer_add(mut parts, "journal_worker", history.size_or(worker, unbounded))
+        let buffers = journal.group_storage(order.min(group, 4294967295u64))
+        let worker = charge.task(bytes[Result[(), types.Failure]], journal.JOURNAL_WORKER_SLACK)
+        writer_add(mut parts, "journal_worker", history.size_or(worker, unbounded) + buffers)
         writer_add(mut parts, "journal_creation", option.unwrap(charge.seq(bytes[u8], 4096)))
         // The output buffer is a byte sequence, charged rounded up to 8.
         writer_add(mut cut_parts, "cut_output", history.size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
@@ -469,7 +469,7 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
     let channels = if let Bucket(_) = kind {
         journal_channel_charge(int.widen(commits), bytes[object_writer.JournalMsg], bytes[object_writer.ObjectAck], option.unwrap(charge.channel(bytes[object_writer.ObjectJournalStart], 1)))
     } else {
-        journal_channel_bytes(int.widen(commits))
+        journal_channel_bytes()
     }
     writer_add(mut parts, "journal_channels", channels)
     writer_add(mut parts, "writer_state", writer_state_bytes())

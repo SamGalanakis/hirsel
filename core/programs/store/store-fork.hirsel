@@ -83,10 +83,10 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let exact = !retaining(db) || db.accounting.changes == db.accounting.settled
     let sequence = if let Some(take raw) = take frame {
         db.frame_seq += 1
-        write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
-            stage_disk_frame(mut state, size, Some(take frame_bytes))
+        edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+            advance_frame_offset(mut state, size)
         })
-        handoff(mut db)?
+        handoff(mut db, Some(take raw))?
         db.frame_seq
     } else {
         db.accounting.changes + 1

@@ -1,7 +1,10 @@
 fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] {
     let checked = prepare_run_commit(mut db, i, take ran)?
     match take checked {
-        Ready(take draft, take publication) => Ok(commit_prepared(mut db, i, take draft, take publication)),
+        Ready(take draft, take publication) => {
+            let (take outcome, _) = commit_prepared(mut db, i, take draft, take publication)
+            Ok(take outcome)
+        },
         OverLimit(_, c) => Ok(Refused(c))
     }
 }

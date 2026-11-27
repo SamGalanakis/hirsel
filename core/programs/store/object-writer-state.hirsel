@@ -191,9 +191,8 @@ pub fn segment_end(writer: ObjectWriterState) -> u64 {
     writer.draft_offset
 }
 
-pub fn stage_frame(mut writer: ObjectWriterState, size: u64, take frame: Option[Bytes]) {
+pub fn advance_offset(mut writer: ObjectWriterState, size: u64) {
     writer.draft_offset += size
-    writer.accounting.pending = take frame
 }
 
 pub fn queue_accounting(writer: ObjectWriterState) -> View[journal.QueueAccounting] in writer {

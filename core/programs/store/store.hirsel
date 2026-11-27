@@ -700,8 +700,8 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
             if let Some(problem) = reserve_tiered_freed(mut db, accepted) {
                 return Ok(NoRoom(take pending_run, problem))
             }
-            let committed = commit_prepared(mut db, 0, take accepted, take publication)
-            serve_after(handoff(mut db))?
+            let (take committed, take frame) = commit_prepared(mut db, 0, take accepted, take publication)
+            serve_after(handoff(mut db, take frame))?
             serve_after(maybe_checkpoint(mut db))?
             match take committed {
                 Committed(Done(value: take output, ticket: committed_at, ..)) => Ok(Committed(Receipt(ticket: committed_at, reply: take output))),
@@ -804,35 +804,31 @@ fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Optio
     store_body_at(mut db, i, wall, steps, keep_reply, body)
 }
 
-fn handoff(mut db: Db) -> Result[(), Error] waits {
-    if let Some(mut state) = db.disk {
-        let pending = edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) -> Option[Bytes] {
-            replace(mut queue.pending, None)
-        })
-        if let Some(take raw) = take pending {
-            let sent = list.len(raw)
-            let closed = match state.backend {
-                DirBackend(directory) => match channel.send(journal.dir_sender(directory), Frame(take raw, db.frame_seq)) {
-                    Ok(()) => false,
-                    Error(_) => true,
-                },
-                ObjectBackend(writer) => match channel.send(object_writer.sender(writer), Frame(take raw, db.frame_seq)) {
-                    Ok(()) => false,
-                    Error(_) => true,
-                },
-            }
-            return edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) -> Result[(), Error] {
-                if closed {
-                    queue.poison = Some(Closed)
-                    return Error(Poisoned(Closed))
-                }
-                queue.inflight += sent
-                queue.uncovered += sent
-                queue.since_cut += sent
-                Ok(())
-            })
-        }
+fn handoff(mut db: Db, take frame: Option[Bytes]) -> Result[(), Error] waits {
+    let Some(take raw) = take frame else {
+        return Ok(())
     }
+    let sent = list.len(raw)
+    let closed = match disk_state(db).backend {
+        DirBackend(directory) => match journal.queue_frame(directory, take raw, db.frame_seq) {
+            Ok(()) => false,
+            Error(_) => true,
+        },
+        ObjectBackend(writer) => match channel.send(object_writer.sender(writer), Frame(take raw, db.frame_seq)) {
+            Ok(()) => false,
+            Error(_) => true,
+        },
+    }
+    if closed {
+        return failed_handoff(mut db)
+    }
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        edit_accounting(mut state, scoped fn(mut queue: journal.QueueAccounting) {
+            queue.inflight += sent
+            queue.uncovered += sent
+            queue.since_cut += sent
+        })
+    })
     Ok(())
 }
 

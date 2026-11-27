@@ -454,9 +454,10 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     if object_writer_open(db) {
         return begin_object_export_copy(mut db, take into, take attempt, activation)
     }
-    // An import pin here is an orphan (a kept import needs a lease): cut it
-    // away so the copied MANIFEST never carries it (§3.5a "The kept import").
-    if let Some(_) = orphan_import_pin(db) {
+    // An owner-3 pin here is an orphan (a kept import needs a lease, and a hot
+    // build holds `mut db`): cut every one away so the copied MANIFEST never
+    // carries one (§3.5a "Orphans").
+    if list.len(orphan_owner3_pins(db)) != 0 {
         let _ = deploy_result(checkpoint(mut db))?
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))

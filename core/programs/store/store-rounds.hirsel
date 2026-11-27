@@ -67,25 +67,50 @@ pub opaque type ValidatedRound: send {
 
 const ROUND_ROLE: u8 = 9
 
-fn import_pin_slot(db: Db) -> Option[u64] {
+// Owner 3 is a pin role keyed by name (§13.10a "Owner 3 is a pin role"):
+// `import` holds a kept import, `build` a hot Tiered build.
+const IMPORT_PIN: String = "import"
+
+const BUILD_PIN: String = "build"
+
+fn owner3_pin_slot(db: Db, name: String) -> Option[u64] {
     for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
-        if pages.holder_pins(db.holders)[slot].owner == ImportPin {
+        let held = pages.holder_pins(db.holders)[slot]
+        if held.owner == ImportPin && held.name == name {
             return Some(slot)
         }
     }
     None
 }
 
-// An import pin no kept import owns: the deploy that kept it crashed, aborted,
-// installed without its cut, or renewed its export.
-fn orphan_import_pin(db: Db) -> Option[u64] {
+fn import_pin_slot(db: Db) -> Option[u64] {
+    owner3_pin_slot(db, IMPORT_PIN)
+}
+
+fn build_pin_slot(db: Db) -> Option[u64] {
+    owner3_pin_slot(db, BUILD_PIN)
+}
+
+// Every owner-3 pin no in-memory owner holds, ascending by slot (§3.5a
+// "Orphans"): the import pin when no kept import owns it (the deploy that kept
+// it crashed, aborted, installed without its cut, or renewed its export), and
+// any other owner-3 pin, since a hot build runs no holder-free cut.
+fn orphan_owner3_pins(db: Db) -> List[u64] {
+    let mut out: List[u64] = list.new()
     if !is_disk(db) {
-        return None
+        return take out
     }
-    if let Some(_) = disk_state(db).imported {
-        return None
+    let kept_import = match disk_state(db).imported {
+        Some(_) => true,
+        None => false,
     }
-    import_pin_slot(db)
+    for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
+        let held = pages.holder_pins(db.holders)[slot]
+        if held.owner == ImportPin && !(kept_import && held.name == IMPORT_PIN) {
+            list.push(mut out, slot)
+        }
+    }
+    take out
 }
 
 fn same_stamp(a: ExportStamp, b: ExportStamp) -> bool {
@@ -161,22 +186,30 @@ fn hold_import(mut db: Db, take collections: pages.PageTree) -> Result[pages.Pag
 }
 
 fn hold_import_emitted(mut db: Db, take collections: pages.PageTree) -> Result[(pages.PageTree, Map[u64, std.page.PagePtr]), DeployError] waits {
+    deploy_result(hold_owner3_emitted(mut db, IMPORT_PIN, take collections))
+}
+
+// Sets the owner-3 pin `name` to `collections` (ReplacePin over a listed one,
+// an orphan included; AddPin otherwise) in one writer cut, and returns the
+// packed tree with the stamps the cut emitted. A kept import's keep and round
+// cuts and a hot build's build cuts are this cut.
+fn hold_owner3_emitted(mut db: Db, name: String, take collections: pages.PageTree) -> Result[(pages.PageTree, Map[u64, std.page.PagePtr]), Error] waits {
     let mut held = pages.empty_roots()
     held.collections = take collections
-    let watermark = deploy_result(failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders))))?
+    let watermark = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let Some(following) = int.checked_add(pages.holder_next_pin(db.holders), 1) else {
-        return Error(Store(Limit(Ids)))
+        return Error(Limit(Ids))
     }
-    let held_pin = pages.Pin(owner: ImportPin, name: string.from("import"), branch: 0u32, version: pages.holder_heads(db.holders)[0u64].head, serial: pages.holder_next_pin(db.holders), roots: take held, watermark: watermark)
+    let held_pin = pages.Pin(owner: ImportPin, name: string.from(name), branch: 0u32, version: pages.holder_heads(db.holders)[0u64].head, serial: pages.holder_next_pin(db.holders), roots: take held, watermark: watermark)
     pages.set_next_pin(mut db.holders, following)
-    let change = match import_pin_slot(db) {
+    let change = match owner3_pin_slot(db, name) {
         Some(stale) => ReplacePin(stale, take held_pin),
         None => AddPin(take held_pin),
     }
     let mut emitted: Option[Map[u64, std.page.PagePtr]] = Some(map.new())
-    let _ = deploy_result(cut_install_emitted(mut db, take change, mut emitted))?
-    let Some(slot) = import_pin_slot(db) else {
-        return Error(Store(Missing("import pin")))
+    let _ = cut_install_emitted(mut db, take change, mut emitted)?
+    let Some(slot) = owner3_pin_slot(db, name) else {
+        return Error(Missing("owner-3 pin"))
     }
     let stamps = match take emitted {
         Some(take out) => take out,
@@ -570,22 +603,53 @@ fn range_rows(tree: pages.PageTree, id: u32) -> Result[u64, Error] {
     }
 }
 
-// The pin slot a cut drops: a RemovePin, or the import pin an install removes.
-fn removed_pin(delta: HolderDelta) -> Option[u64] {
-    match delta {
-        RemovePin(slot) => Some(slot),
-        ReplaceMain(main, _) => main.drop_pin,
-        _ => None,
+// A holder-free cut's delta: every orphan owner-3 pin goes in this one cut.
+fn orphan_owner3_delta(db: Db) -> HolderDelta {
+    let orphans = orphan_owner3_pins(db)
+    if list.len(orphans) == 0 {
+        return NoHolderChange
+    }
+    RemovePins(take orphans)
+}
+
+// Drops `slots` (ascending) in descending order, so each slot still names
+// its pin when it goes.
+fn drop_pin_slots(mut db: Db, slots: List[u64]) {
+    let mut at = list.len(slots)
+    while at > 0 {
+        at -= 1
+        let slot = slots[at]
+        let count_bytes = manifest.pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots)
+        pages.drop_pin(mut db.holders, slot, count_bytes)
     }
 }
 
-// The installed state's account: the import pin the install cut drops holds
-// nothing main will not.
-fn install_account(db: Db, roots: pages.Roots) -> Result[u64, DeployError] {
+fn one_slot(slot: u64) -> List[u64] {
+    let mut out: List[u64] = list.with_capacity(1)
+    list.push(mut out, slot)
+    take out
+}
+
+// The pin slots a cut drops, ascending: a RemovePins, or the owner-3 pin a
+// publish removes.
+fn removed_pins(delta: HolderDelta) -> List[u64] {
+    match delta {
+        RemovePins(slots) => clone(slots),
+        ReplaceMain(main, _) => match main.drop_pin {
+            Some(slot) => one_slot(slot),
+            None => list.new(),
+        },
+        _ => list.new(),
+    }
+}
+
+// The installed state's account: the owner-3 pin the publish drops holds
+// nothing main will not. Every other pin stays in the account.
+fn install_account(db: Db, roots: pages.Roots, dropped: Option[u64]) -> Result[u64, DeployError] {
     let mut s = deploy_result(failure_result_from_rep(types.capacity(current_state(db))))?
     s.tips[0].roots = pages.share_roots(roots)
-    list.retain(mut s.pins, scoped fn(held: pages.Pin) -> bool {
-        held.owner != ImportPin
-    })
+    if let Some(slot) = dropped {
+        let _ = list.remove(mut s.pins, slot)
+    }
     deploy_result(failure_result_from_rep(types.capacity(pages.state_account(s))))
 }

@@ -80,7 +80,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     }
     let tiered_reserve = tiered_plan_reserve(disk_state(db).options)
     schema_change.schema.next_table = staged.meta.next_table
-    schema_change.schema.live = install_account(db, schema_change.schema.roots)?
+    schema_change.schema.live = install_account(db, schema_change.schema.roots, import_pin_slot(db))?
     let admitted_before = if has_tiered {
         int.saturating_add(schema_change.schema.live, tiered_reserve)
     } else {
@@ -102,7 +102,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let prior = deploy_result(failure_result_from_rep(types.copied(old_describe)))?
     let release = release_from(target, request.digest)?
     deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
-    installation.plan.schema.live = install_account(db, installation.plan.schema.roots)?
+    installation.plan.schema.live = install_account(db, installation.plan.schema.roots, import_pin_slot(db))?
     let admitted_after = if has_tiered {
         int.saturating_add(installation.plan.schema.live, tiered_reserve)
     } else {

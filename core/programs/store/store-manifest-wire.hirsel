@@ -388,7 +388,13 @@ pub fn cut_manifest_size[in installed, in proposed](input: CutInput[in installed
             input.record_bytes - removed - unpinned - keyed_root_record_bytes(input.heads[0u64].roots.keyed) + keyed_root_record_bytes(roots.keyed)
         },
         CutAddPin(held, _) => input.record_bytes + pin_root_bytes(held.name, held.roots),
-        CutRemovePin(slot) => input.record_bytes - pin_root_bytes(input.pins[slot].name, input.pins[slot].roots),
+        CutRemovePins(slots) => {
+            let mut left = input.record_bytes
+            for slot in slots {
+                left -= pin_root_bytes(input.pins[slot].name, input.pins[slot].roots)
+            }
+            left
+        },
         CutReplacePin(slot, held, _) => input.record_bytes - pin_root_bytes(input.pins[slot].name, input.pins[slot].roots) + pin_root_bytes(held.name, held.roots),
         _ => input.record_bytes,
     }

@@ -1,4 +1,4 @@
-pub scoped type CutChange = CutUnchanged | CutAddHead(View[pages.Head]) | CutRemoveHead(u64) | CutAddPin(View[pages.Pin], bool) | CutRemovePin(u64) | CutReplacePin(u64, View[pages.Pin], bool) | CutReplaceMain(View[pages.Roots], u64, u64, u32, Option[u64], Option[u64])
+pub scoped type CutChange = CutUnchanged | CutAddHead(View[pages.Head]) | CutRemoveHead(u64) | CutAddPin(View[pages.Pin], bool) | CutRemovePins(View[List[u64]]) | CutReplacePin(u64, View[pages.Pin], bool) | CutReplaceMain(View[pages.Roots], u64, u64, u32, Option[u64], Option[u64])
 
 pub scoped type CutInput[in installed, in proposed] {
     heads: View[List[pages.Head]] in installed,
@@ -13,11 +13,21 @@ pub scoped type CutInput[in installed, in proposed] {
     next_table: u32
 }
 
-fn cut_removed_pin(change: CutChange) -> Option[u64] {
+// Whether the cut drops the pin at `slot`: one of a CutRemovePins, or the
+// owner-3 pin a publish removes.
+fn cut_drops_pin(change: CutChange, slot: u64) -> bool {
     match change {
-        CutRemovePin(slot) => Some(slot),
-        CutReplaceMain(_, _, _, _, _, slot) => slot,
-        _ => None,
+        CutRemovePins(slots) => list.contains(slots, slot),
+        CutReplaceMain(_, _, _, _, _, dropped) => dropped == Some(slot),
+        _ => false,
+    }
+}
+
+fn cut_dropped_pins(change: CutChange) -> u64 {
+    match change {
+        CutRemovePins(slots) => list.len(slots),
+        CutReplaceMain(_, _, _, _, _, Some(_)) => 1,
+        _ => 0,
     }
 }
 
@@ -57,10 +67,9 @@ pub fn visit_cut_heads[T, E, in installed, in proposed](input: CutInput[in insta
 }
 
 pub fn visit_cut_pins[T, E, in installed, in proposed](input: CutInput[in installed, in proposed], mut output: T, visit: scoped fn(mut T, pages.Pin) -> Result[(), E]) -> Result[(), E] {
-    let removed = cut_removed_pin(input.change)
     let mut inserted = false
     for slot in 0u64 .. list.len(input.pins) {
-        if removed == Some(slot) {
+        if cut_drops_pin(input.change, slot) {
             continue
         }
         if let CutReplacePin(at, replacement, _) = input.change {
@@ -163,11 +172,7 @@ pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutIn
     let pins = list.len(input.pins)
     let pin_count = match input.change {
         CutAddPin(_, _) => pins + 1,
-        _ => if let Some(_) = cut_removed_pin(input.change) {
-            pins - 1
-        } else {
-            pins
-        }
+        _ => pins - cut_dropped_pins(input.change),
     }
     types.capacity(format.le(mut raw, pin_count, 4))?
     visit_cut_pins(input, mut raw, scoped fn(mut buffer: Bytes, held: pages.Pin) -> Result[(), types.Failure] {

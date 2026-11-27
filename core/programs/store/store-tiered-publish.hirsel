@@ -434,11 +434,11 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
     if let AddHead(mut added, _) = delta {
         added.roots.collections = take_sealed(mut sealed_roots, mut at)
     }
-    let dropped = removed_pin(delta)
+    let dropped = removed_pins(delta)
     let mut inserted = false
     let pin_count = list.len(pages.holder_pins(db.holders))
     for slot in 0u64 .. pin_count {
-        if dropped == Some(slot) {
+        if list.contains(dropped, slot) {
             continue
         }
         if let ReplacePin(pin_slot, mut replacement) = delta {

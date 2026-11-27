@@ -936,5 +936,5 @@ fn remove_pin(mut db: Db, owner: pages.PinOwner, name: String) -> Result[Ticket,
     if k == list.len(pages.holder_pins(db.holders)) {
         return Error(Missing(failure_result_from_rep(catalog.named(name))?))
     }
-    cut_install(mut db, RemovePin(k))
+    cut_install(mut db, RemovePins(one_slot(k)))
 }

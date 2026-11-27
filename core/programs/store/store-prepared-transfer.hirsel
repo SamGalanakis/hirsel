@@ -366,7 +366,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     }
     let current = disk_state(db).options.resident_limit
     // An import pin still held is stale: this import's keep replaces it.
-    let exact = install_account(db, pages.share_roots(pages.holder_heads(db.holders)[0u64].roots))?
+    let exact = install_account(db, pages.share_roots(pages.holder_heads(db.holders)[0u64].roots), import_pin_slot(db))?
     let reserve_delta = if has_tiered && !store_has_tiered(db) {
         tiered_plan_reserve(disk_state(db).options)
     } else {

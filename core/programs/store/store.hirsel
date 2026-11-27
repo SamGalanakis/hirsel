@@ -81,7 +81,7 @@ pub type Branch {
 
 // I4: while a pin or another branch exists, an old row may stay reachable, so
 // commits charge conservatively until the next cut settles the account.
-// An import pin's pages are its own (§3.5a "The kept import"), so it retains nothing.
+// An owner-3 pin's pages are its own (§3.5a, §13.10a), so it retains nothing.
 fn retaining(db: Db) -> bool {
     list.len(pages.holder_heads(db.holders)) > 1 || std.list.any(pages.holder_pins(db.holders), fn(held: pages.Pin) -> bool {
         held.owner != ImportPin
@@ -118,9 +118,9 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[pages.State, Capacity]
     if let AddHead(added, _) = delta {
         list.push(mut tips, pages.tip_of(added))
     }
-    let dropped = removed_pin(delta)
+    let dropped = removed_pins(delta)
     for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
-        if dropped == Some(slot) {
+        if list.contains(dropped, slot) {
             continue
         }
         let held = if let ReplacePin(at, replacement) = delta {
@@ -182,10 +182,7 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
             }
             pages.add_pin(mut db.holders, slot, take added, count_bytes)
         },
-        RemovePin(slot) => {
-            let count_bytes = manifest.pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots)
-            pages.drop_pin(mut db.holders, slot, count_bytes)
-        },
+        RemovePins(take slots) => drop_pin_slots(mut db, slots),
         ReplacePin(slot, take replacement) => {
             let old_bytes = manifest.pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots)
             let count_bytes = manifest.pin_root_bytes(replacement.name, replacement.roots)
@@ -2618,9 +2615,7 @@ fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scop
 fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits, target: Option[manifest.TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming], mut emitted_out: Option[Map[u64, std.page.PagePtr]]) -> Result[Ticket, Error] waits {
     let mut delta = take requested
     if let NoHolderChange = delta {
-        if let Some(slot) = orphan_import_pin(db) {
-            delta = RemovePin(slot)
-        }
+        delta = orphan_owner3_delta(db)
     }
     healthy(db)?
     if object_writer_open(db) {

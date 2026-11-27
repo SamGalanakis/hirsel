@@ -4,8 +4,9 @@ type ProposedMain {
     at: u64,
     tables: u32,
     activation: Option[HistoryActivation],
-    // The import pin slot an installing cut removes with the replacement
-    // (§3.5a "The kept import").
+    // The owner-3 pin slot a publishing cut removes with the replacement:
+    // the import pin at install (§3.5a "The kept import"), the build pin at a
+    // hot build's publish (§13.10a "Hot Tiered builds").
     drop_pin: Option[u64],
     superseded: List[u32],
     chunk_freed: Option[TieredFreed],
@@ -15,7 +16,7 @@ type ProposedMain {
     step_drift: bool
 }
 
-type HolderDelta = NoHolderChange | AddHead(pages.Head, String) | RemoveHead(u64) | AddPin(pages.Pin) | RemovePin(u64) | ReplacePin(u64, pages.Pin) | ReplaceMain(ProposedMain, Option[u64])
+type HolderDelta = NoHolderChange | AddHead(pages.Head, String) | RemoveHead(u64) | AddPin(pages.Pin) | RemovePins(List[u64]) | ReplacePin(u64, pages.Pin) | ReplaceMain(ProposedMain, Option[u64])
 
 fn cut_input(db: Db, delta: HolderDelta) -> manifest.CutInput[in db, in delta] {
     let change: manifest.CutChange = match delta {
@@ -23,7 +24,7 @@ fn cut_input(db: Db, delta: HolderDelta) -> manifest.CutInput[in db, in delta] {
         AddHead(head, _) => CutAddHead(view head),
         RemoveHead(slot) => CutRemoveHead(slot),
         AddPin(held) => CutAddPin(view held, held.owner != ImportPin && !pin_shares_head(db, held)),
-        RemovePin(slot) => CutRemovePin(slot),
+        RemovePins(slots) => CutRemovePins(view slots),
         ReplacePin(slot, held) => CutReplacePin(slot, view held, held.owner != ImportPin && !pin_shares_head(db, held)),
         ReplaceMain(main, removed) => CutReplaceMain(view main.roots, main.head, main.at, main.tables, removed, main.drop_pin),
     }

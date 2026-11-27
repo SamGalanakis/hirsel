@@ -2,6 +2,8 @@
 
 The [Store spec](STORE-SPEC.md) defines the contract. This document records version changes, review decisions, and the original Store summary. Status labels describe the versions in which they were written.
 
+v2.179 (metal-tps-phase4-inplace-3313): §11.7 AP10 specifies as-if-alone metering for page edits. Each call has the same byte and step charge at its commit position across batch and snapshot choices.
+
 v2.178 (store-d7-s6-resident-3295, D7-S6): built. **Tiered lookup resident gate and IVF attempt counts** (§13.10a). Lane 3279's public IVF `look` took 2 / 1, 2 / 1, and 5 / 4 attempts / deliveries on a Tiered source and 2 / 1 and 2 / 1 on a Memory source with Tiered blocks. Both cases checked the exact hits and scores. The Tiered table and Tiered `Many` index had `account_memory` of 784 B at 1,000, 10,000, and 100,000 rows. Lane 3295 built both collections to 100,000,000 durable rows in 6,630.9 s. The reopen and three exact lookups used 8,912 KiB peak RSS by GNU `time -v`, passing the 1 GiB gate.
 
 §13.10a gives the full commands. Lane 3279 ran `gdb -nx --batch --return-child-result -x "$lane/ivf-attempts.gdb" --args "$lane/bin/ivf" tiered-source` and the same command with `tiered-blocks` in 2 GiB scopes. Both lanes built the resident probe with `bash "$lane/build-probe.sh" resident store@1/store/resident_probe llvm 2147483648 "$lane/data" --release --cc "$PWD/tools/buck2/toolchains/llvm-files/bin/clang"` and ran `systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 -- python3 "$lane/run-large.py"`. Lane 3295 ran `python3 "$lane/run-serve.py"`, which timed `resident serve 100000000` in a 2 GiB scope with swap disabled.

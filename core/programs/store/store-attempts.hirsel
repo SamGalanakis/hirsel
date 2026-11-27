@@ -245,7 +245,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
             let registry = indexes.empty_index_registry()
             let scope = txn.TxViews(indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
             let start = txn.TxStart(store: types.StoreKey(hi: s.store.hi, lo: s.store.lo), ids: 0, resident: 0, retain_old: false, journaled: false, limits: types.default_limits())
-            let tx = Tx(inner: txn.begin_tx(scope, s.roots, s.bases, start), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
+            let tx = Tx(inner: txn.begin_tx(scope, s.roots, s.bases, start, false), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
             body(tx, env)
         }
         match steps {
@@ -277,7 +277,7 @@ fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
     } else {
         false
     }, limits: types.LimitsRep(frame: db.limits.frame, value: db.limits.value, meta: db.limits.meta))
-    let mut tx = Tx(inner: txn.begin_tx(scope, base, pages.holder_bases(db.holders), start), info: ci)
+    let mut tx = Tx(inner: txn.begin_tx(scope, base, pages.holder_bases(db.holders), start, true), info: ci)
     let outcome = body(mut tx)
     let Tx(inner: take state, ..) = take tx
     match txn.finish_body(take state, take outcome, keep_reply, base, db.accounting.resident, db.accounting.tiered, if let Some(_) = attempt {

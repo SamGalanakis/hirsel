@@ -1,4 +1,4 @@
-# Store spec v2.178
+# Store spec v2.179
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -2907,6 +2907,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
 - For F2 (H13), a typed error after a kept reply publishes only stream edits and the CALL. The head's data and catalog roots remain unchanged (§1.3).
 
 **AP10. In-place edits across commits (H4).**
+- **Call metering (S3).** Charge the call's page edits in bytes and steps as if the call ran alone against the tree at its commit position. The charge depends only on its rows and that tree. Batch neighbours and references held by snapshots, subscribers, followers or pins cannot change either charge or the call's `OutOfBytes` boundary. AP15 separately admits the resident account across the retained roots.
 - The isolated body can edit only the private pages it materializes. It stages changes to the head through AP9.
 - An edit across commits is allowed only for a writer-side apply that runs outside `isolate`. Its condition is **path uniqueness held continuously**: it takes `with_unique` on the root holder's Arc, and inside that on each Arc of the path down to the page, and holds every level until the edit and the re-stamping of the path are done. A failed check at any level copies that page and everything below it on the path, with new stamps, and the edit continues on the copies. No live Snapshot, pin, branch, follower root or other Tx then reaches an edited page, because each of those would hold a share on the path.
 - The edit re-stamps the page and its path, including the map leaf and map path above a collection root (AP6).

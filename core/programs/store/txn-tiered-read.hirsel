@@ -1,3 +1,41 @@
+// The base prior and write height found by a fetch of a resident table row.
+type FetchedRow {
+    stamp: u64,
+    height: u64,
+    charge: u64,
+    prior: u32
+}
+
+fn fetch_base[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
+    if let Some(_) = tx.attempt {
+        return tx_page_row(tx, key)
+    }
+    let tree = view tx.roots.collections
+    if list.len(key) < 4 {
+        return Ok(None)
+    }
+    let Some((root, descriptor)) = std.page.collection_entry(tree.root, list.slice(key, 0, 4)) else {
+        return Ok(None)
+    }
+    if pages.collection_descriptor(descriptor).kind == CellCollection {
+        return Ok(pages.get_page_row(tree, key))
+    }
+    let value = std.page.lookup(root, list.slice(key, 4, list.len(key)))
+    if let Some(cache) = view tx.fetched {
+        let kind = pages.collection_descriptor(descriptor).kind
+        if kind == TableCollection || kind == IndexCollection {
+            let row = FetchedRow(stamp: pages.tree_stamp(tree), height: tree_height(tree) + int.widen(std.page.level(std.page.image_of(root))) + 1, charge: match value {
+                Some(raw) => entry(key, raw),
+                None => 0u64,
+            }, prior: format.stored_prior(value))
+            let mut entries = cell.replace(cache, map.new())
+            map.insert(mut entries, types.copied(key)?, take row)
+            cell.set(cache, take entries)
+        }
+    }
+    Ok(value)
+}
+
 fn tx_page_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) -> Result[Option[View[Bytes]], types.Failure] in tx {
     let tree = view tx.roots.collections
     if list.len(key) < 4 {

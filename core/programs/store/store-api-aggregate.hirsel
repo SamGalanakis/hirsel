@@ -81,7 +81,7 @@ pub fn rebuild_aggregate[G](mut db: Db, a: Aggregate[G]) -> Result[(), Error] wa
     if record.id != a.id {
         return Error(Stale(a.id))
     }
-    demote_index(mut plan, a.catalog_key)?
+    failure_result_from_rep(maintenance.demote_index(mut plan.schema, a.catalog_key))?
     if plan.schema.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     }
@@ -114,47 +114,4 @@ fn extract_aggregate[G, K, V](extractor: AggregateExtractor[G, K, V], raw: Bytes
     }
     let (take keys, _, take sums) = failure_result_from_rep(indexes.merged_groups(take parts))?
     Ok(indexes.IndexValue(keys: take keys, payload: list.new(), sums: take sums))
-}
-
-// A build chunk's totals: each row's groups and values, gathered and
-// sorted by group, then added to each group's totals in one write.
-fn add_chunk_totals(mut collections: pages.PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64, extractor: indexes.RegisteredIndex, rows: List[(Bytes, Bytes)], mut written_ops: Option[List[transfer.StepOp]]) -> Result[(), Error] {
-    let mut parts: List[indexes.GroupPart] = list.new()
-    for (logical, raw) in rows {
-        let primary = list.slice(logical, 4, list.len(logical))
-        let indexes.IndexValue(keys: take keys, sums: take sums, ..) = extract_index(extractor, raw, primary)?
-        let mut at = 0u64
-        for take group in take keys {
-            list.push(mut parts, indexes.GroupPart(key: take group, value: sums[at]))
-            at += 1
-        }
-    }
-    let (take groups, take counts, take added_sums) = failure_result_from_rep(indexes.merged_groups(take parts))?
-    for at in 0u64 .. list.len(groups) {
-        let group = view groups[at]
-        let added = counts[at]
-        let total = added_sums[at]
-        let prior_width = format.stored_prior(pages.get_page_row(collections, group))
-        let (members, sum) = match pages.get_page_row(collections, group) {
-            Some(prior) => {
-                if !retained {
-                    live_bytes = int.saturating_sub(live_bytes, txn.entry(group, prior))
-                }
-                group_totals(prior)?
-            },
-            None => (0u64, 0u64),
-        }
-        let Some(next_sum) = int.checked_add(sum, total) else {
-            return Error(Limit(Value))
-        }
-        let value = totals_bytes(members + added, next_sum)?
-        live_bytes = int.saturating_add(live_bytes, txn.entry(group, value))
-        failure_result_from_rep(catalog.over_ceiling(live_bytes, ceiling))?
-        failure_result_from_rep(pages.put_page_row(mut collections, group, value, first, mut next_stamp))?
-        if let Some(mut step_rows) = written_ops {
-            failure_result_from_rep(types.capacity(list.try_reserve(mut step_rows, 1)))?
-            list.push(mut step_rows, transfer.StepOp(key: failure_result_from_rep(types.copied(group))?, value: Some(failure_result_from_rep(types.copied(value))?), prior: prior_width))
-        }
-    }
-    Ok(())
 }

@@ -1,0 +1,72 @@
+// Row expiry (STORE-SPEC §1.2 "Expiry", Store 4.1). A table declares an
+// expiry extractor; the store keeps it as an ordinary Many index on the
+// expiry time, named `hirsel.expiry`, so the index states, the builder, the
+// walker and catch-up treat it as any other index. A row with no expiry has
+// no entry. The runner's head deletes due rows with `sweep_expired`, in
+// bounded commits on the head's clock. No read consults a clock: an expired
+// row is visible until the commit that deletes it.
+pub const EXPIRY_INDEX: String = "hirsel.expiry"
+
+// One due row: its table, the value schema its extractors are bound for,
+// and its primary key.
+pub type DueRow {
+    table: u32,
+    schema: u16,
+    primary: Bytes
+}
+
+// The due rows of the first expiry indexes in catalog order, up to the limits.
+pub fn due_rows(roots: pages.Roots, owner: indexes.IndexOwner, now: u64, rows: u64, byte_limit: u64) -> Result[List[DueRow], types.Failure] {
+    let mut out: List[DueRow] = list.new()
+    let mut taken = 0u64
+    let mut low: Bytes = list.new()
+    list.push(mut low, 2u8)
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = read.byte_cursor(roots.catalog, Included(take low), end_key)?
+    while let Some((take key, raw)) = catalog.next_bytes(mut records)? {
+        if !catalog.record_public(raw) || catalog.declaration_index_name(key)? != EXPIRY_INDEX {
+            continue
+        }
+        let record = indexes.decode_catalog(raw)?
+        let Some(extractor) = indexes.bound_extractor(owner, record) else {
+            continue
+        }
+        let high = if now == 18446744073709551615u64 {
+            catalog.prefix(record.id + 1)?
+        } else {
+            let mut k = catalog.prefix(record.id)?
+            std.codec.encode_key(std.codec.key_u64(), now + 1, mut k)
+            take k
+        }
+        let mut due = read.byte_cursor(roots.collections, Included(catalog.prefix(record.id)?), high)?
+        while let Some((take entry_key, _)) = catalog.next_bytes(mut due)? {
+            let primary = types.copied(list.slice(entry_key, 12, list.len(entry_key)))?
+            let size = match pages.get_page_row(roots.collections, catalog.logical_key(record.owner, primary)?) {
+                Some(row) => list.len(row),
+                None => 0u64,
+            }
+            if list.len(out) != 0 && (list.len(out) == rows || int.saturating_add(taken, size) > byte_limit) {
+                return Ok(take out)
+            }
+            taken = int.saturating_add(taken, size)
+            list.push(mut out, DueRow(table: record.owner, schema: indexes.value_schema(extractor), primary: take primary))
+        }
+    }
+    Ok(take out)
+}
+
+// A row's one entry `id ‖ at u64 BE ‖ primary`, or none.
+pub fn expiry_entries(id: u32, at: Option[u64], primary: Bytes) -> Result[indexes.IndexValue, types.Failure] {
+    let mut keys: List[Bytes] = list.new()
+    if let Some(time) = at {
+        let mut row = catalog.prefix(id)?
+        std.codec.encode_key(std.codec.key_u64(), time, mut row)
+        list.append(mut row, primary)
+        if list.len(row) > 4096 {
+            return Error(Limit(Key))
+        }
+        list.push(mut keys, take row)
+    }
+    Ok(indexes.IndexValue(keys: take keys, payload: list.new(), sums: list.new()))
+}

@@ -188,7 +188,7 @@ fn hot_target(db: Db, map: pages.PageTree, id: u32, scratch_id: u32, kind: u8, n
 // Sorts one run and settles its rows of one key by the target's rule.
 fn hot_settle(take pending: List[std.page.Row], keys: HotKeys, name: String) -> Result[List[std.page.Row], Error] {
     let mut rows = take pending
-    sort_bulk_rows(mut rows)?
+    failure_result_from_rep(maintenance.sort_bulk_rows(mut rows))?
     let mut kept: List[std.page.Row] = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut kept, list.len(rows))))?
     for take row in take rows {
@@ -450,13 +450,13 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
     let mut previous: Option[Bytes] = None
     loop {
         let (take rows, done) = if from_work {
-            work_rows(db, work.map, low, high, clone(previous), INDEX_CHUNK)?
+            work_rows(db, work.map, low, high, clone(previous), maintenance.INDEX_CHUNK)?
         } else {
             let cursor: Option[Bytes] = match previous {
                 Some(seen) => Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?),
                 None => None,
             }
-            tiered_rows_after(db, job.from_id, cursor, INDEX_CHUNK)?
+            tiered_rows_after(db, job.from_id, cursor, maintenance.INDEX_CHUNK)?
         }
         for (logical, raw) in rows {
             let suffix = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
@@ -531,13 +531,13 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
     let mut charge = 0u64
     loop {
         let (take rows, done) = if from_work {
-            work_rows(db, work.map, low, high, clone(previous), INDEX_CHUNK)?
+            work_rows(db, work.map, low, high, clone(previous), maintenance.INDEX_CHUNK)?
         } else {
             let cursor: Option[Bytes] = match previous {
                 Some(seen) => Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?),
                 None => None,
             }
-            tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+            tiered_rows_after(db, record.owner, cursor, maintenance.INDEX_CHUNK)?
         }
         for (logical, raw) in rows {
             let primary = list.slice(logical, 4, list.len(logical))
@@ -571,10 +571,10 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
     hot_run(mut db, mut work.map, mut target, mut kept)?
     hot_finish(mut db, mut work, take target)?
     plan.bindings = take bindings
-    let mut published = copied_record(record)?
+    let mut published = failure_result_from_rep(maintenance.copied_record(record))?
     failure_result_from_rep(indexes.set_index_state(mut published, Public))?
     plan.schema.next_node = pages.holder_next_node(db.holders)
-    put_index_record(mut plan, job.catalog_key, published)?
+    failure_result_from_rep(maintenance.put_index_record(mut plan.schema, job.catalog_key, published))?
     pages.set_next_node(mut db.holders, plan.schema.next_node)
     if let Some(_) = std.page.collection_slot(plan.staged_map.root, failure_result_from_rep(catalog.prefix(record.id))?) {
         if !list.contains(plan.schema.superseded, record.id) {
@@ -591,7 +591,7 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
 // head, which no build cut has moved yet. An entry index is built bottom up;
 // an aggregate chunk by chunk from an empty tree.
 fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: transfer.DeferredIndexBuild) -> Result[(), Error] waits {
-    let _ = demote_index(mut plan, job.catalog_key)?
+    let _ = failure_result_from_rep(maintenance.demote_index(mut plan.schema, job.catalog_key))?
     let record = catalog_entry_in(plan.schema.roots.catalog, job.catalog_key)?
     let bindings = replace(mut plan.bindings, indexes.empty_bindings())
     let slot = find_binding_index(bindings, record.owner, record.id)?
@@ -603,11 +603,11 @@ fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: transfer.Deferre
             if let Public = catalog_index(current)?.state {
                 break
             }
-            let (take rows, done) = tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+            let (take rows, done) = tiered_rows_after(db, record.owner, cursor, maintenance.INDEX_CHUNK)?
             if let Some((seen, _)) = list.last(rows) {
                 cursor = Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?)
             }
-            if let Some(_) = index_chunk(mut plan, job.catalog_key, take current, indexes.binding_at(bindings, slot), rows, done, false, false)? {
+            if let Some(_) = failure_result_from_rep(maintenance.index_chunk(mut plan.schema, job.catalog_key, take current, indexes.binding_at(bindings, slot), rows, done, false, false, mut plan.step_rows))? {
                 return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
             }
         }
@@ -623,17 +623,17 @@ fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: transfer.Deferre
     let mut workspace = plan.schema.live
     let mut read = 0u64
     loop {
-        let (take rows, done) = tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
+        let (take rows, done) = tiered_rows_after(db, record.owner, cursor, maintenance.INDEX_CHUNK)?
         for (logical, raw) in rows {
             read += 1
-            extract_entries(mut extracted, mut workspace, plan.schema.ceiling, indexes.binding_at(bindings, slot), logical, raw)?
+            failure_result_from_rep(maintenance.extract_entries(mut extracted, mut workspace, plan.schema.ceiling, indexes.binding_at(bindings, slot), logical, raw))?
             cursor = Some(failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?)
         }
         if done {
             break
         }
     }
-    let (take duplicate, _, _) = bulk_declared_index(mut plan, job.catalog_key, record, unique, take extracted, read, false)?
+    let (take duplicate, _, _) = failure_result_from_rep(maintenance.bulk_declared_index(mut plan.schema, job.catalog_key, record, unique, take extracted, read, false))?
     plan.bindings = take bindings
     if let Some(_) = duplicate {
         return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))

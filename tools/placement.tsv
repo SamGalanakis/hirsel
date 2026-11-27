@@ -116,7 +116,7 @@ extract_aggregate	store-aggregate.hirsel	indexes	store	-	Public root type bounda
 group_totals	store-aggregate.hirsel	indexes	indexes	L10
 totals_bytes	store-aggregate.hirsel	indexes	indexes	L10
 plan_aggregate_edit	store-aggregate.hirsel	indexes	txn	L12	L12 neutral inputs and transaction state
-add_chunk_totals	store-aggregate.hirsel	indexes	store	-	L12 root boundary: writes the root StepOp list for the schema coordinator
+add_chunk_totals	maintenance-index-build.hirsel	indexes	maintenance	L14	L14: uses neutral catalog, index and transfer representations
 staged_until_decided	store-attempts.hirsel	store	store	-
 call_pin_root	store-attempts.hirsel	store	store	-
 tiered_pin_root	store-attempts.hirsel	txn	txn	L12
@@ -450,13 +450,13 @@ edge_delete	store-edge.hirsel	store	store	-
 edge_out	store-edge.hirsel	store	store	-
 edge_out_prefix	store-edge.hirsel	store	store	-
 edge_in	store-edge.hirsel	store	store	-
-EXPIRY_INDEX	store-expiry.hirsel	maintenance	maintenance	L14
-ExpiryExtractor	store-expiry.hirsel	maintenance	maintenance	L14
+EXPIRY_INDEX	maintenance-expiry.hirsel	maintenance	maintenance	L14
+ExpiryExtractor	store-expiry.hirsel	maintenance	store	-	L14: holds public Table
 expire_rows	store-expiry.hirsel	store	store	-
-expiry_binding	store-expiry.hirsel	maintenance	maintenance	L14
-extract_expiry	store-expiry.hirsel	maintenance	maintenance	L14
+expiry_binding	store-expiry.hirsel	maintenance	store	-	L14: takes public Table and binds the typed decoder
+extract_expiry	store-expiry.hirsel	maintenance	store	-	L14: uses the root Readers decoder and delegates entry encoding
 Swept	store-expiry.hirsel	store	store	-
-DueRow	store-expiry.hirsel	maintenance	maintenance	L14
+DueRow	maintenance-expiry.hirsel	maintenance	maintenance	L14
 sweep_expired	store-expiry.hirsel	store	store	-
 expiry_drift	store-expiry.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
 due_rows	store-expiry.hirsel	store	store	-
@@ -577,7 +577,7 @@ follower_deadline	store-followers.hirsel	object_writer	store	-	L9 standing rulin
 at_least	store-followers.hirsel	store	store	-
 read_only_checkpoint	store-followers.hirsel	object_writer	store	-	L9 standing ruling: root Directory validation and Cold walk
 log_floor	store-followers.hirsel	object_writer	store	-	L9 standing ruling: root Directory validation and Cold walk
-follower_floor	store-followers.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
+follower_floor	store-followers.hirsel	store	store	-	L14: takes the live Follower and returns Snapshot
 ForkPlan	store-fork.hirsel	txn	store	-	push-up txn -> store (refs at layer 12)
 fork	store-fork.hirsel	store	store	-
 plan_fork	store-fork.hirsel	store	store	-
@@ -683,29 +683,28 @@ history_config_bytes	store-history.hirsel	history	history	L7
 history_encode_head	store-history.hirsel	history	history	L7
 history_claim_head	store-history.hirsel	history	store	-	public ClaimAuth argument keeps the declaration at the root
 object_history_config	store-history.hirsel	history	history	L7
-INDEX_CHUNK	store-index-build.hirsel	maintenance	maintenance	L14
-resident_rows_after	store-index-build.hirsel	maintenance	maintenance	L14
-table_is_tiered	store-index-build.hirsel	maintenance	maintenance	L14
+INDEX_CHUNK	maintenance-index-build.hirsel	maintenance	maintenance	L14
+resident_rows_after	maintenance-index-build.hirsel	maintenance	maintenance	L14
 tiered_rows_after	store-index-build.hirsel	store	store	-
 tiered_rows_after_mode	store-index-build.hirsel	store	store	-
-index_chunk	store-index-build.hirsel	maintenance	maintenance	L14
-build_declared_index	store-index-build.hirsel	maintenance	maintenance	L14
-chunked_declared_index	store-index-build.hirsel	maintenance	maintenance	L14
-copied_record	store-index-build.hirsel	maintenance	maintenance	L14
-building_index	store-index-build.hirsel	store	store	-
-unready_index	store-index-build.hirsel	maintenance	maintenance	L14
-bound_extractor	store-index-build.hirsel	maintenance	maintenance	L14
+index_chunk	maintenance-index-build.hirsel	maintenance	maintenance	L14
+build_declared_index	maintenance-index-build.hirsel	maintenance	maintenance	L14
+chunked_declared_index	maintenance-index-build.hirsel	maintenance	maintenance	L14
+copied_record	maintenance-index-build.hirsel	maintenance	maintenance	L14
+building_index	maintenance-index-build.hirsel	store	maintenance	L14	L14: uses neutral catalog, index and transfer representations
+unready_index	maintenance-index-build.hirsel	maintenance	maintenance	L14
+bound_extractor	store-index-registry.hirsel	maintenance	indexes	L10	L14: uses the existing IndexOwner binding
 index_build_step	store-index-build.hirsel	store	store	-
-put_index_record	store-index-build.hirsel	maintenance	maintenance	L14
-demote_index	store-index-build.hirsel	maintenance	maintenance	L14
+put_index_record	maintenance-index-build.hirsel	maintenance	maintenance	L14
+demote_index	maintenance-index-build.hirsel	maintenance	maintenance	L14
 demote_drifted	store-index-build.hirsel	store	store	-
 rebuild_index	store-index-build.hirsel	store	store	-
-stage_index_build	store-index-build.hirsel	maintenance	maintenance	L14
+stage_index_build	store-index-build.hirsel	maintenance	store	-	L14: takes public Table and root SchemaPlan
 IndexStop	store-index-build.hirsel	maintenance	txn	L12	pull-down maintenance -> txn (used by Drafted)
-index_stop_error	store-index-build.hirsel	maintenance	maintenance	L14
+index_stop_error	store-index-build.hirsel	maintenance	store	-	L14: converts to public Error
 take_drift	store-index-build.hirsel	maintenance	txn	L12	pull-down maintenance -> txn (used by draft_body)
-key_word_at	store-index-build.hirsel	maintenance	maintenance	L14
-sort_bulk_rows	store-index-build.hirsel	maintenance	maintenance	L14
+key_word_at	maintenance-index-build.hirsel	maintenance	maintenance	L14
+sort_bulk_rows	maintenance-index-build.hirsel	maintenance	maintenance	L14
 IndexValue	store-index-registry.hirsel	indexes	indexes	L10
 RegisteredIndex	store-index-registry.hirsel	indexes	indexes	L10
 IndexRegistration	store-index-registry.hirsel	indexes	indexes	L10
@@ -1438,12 +1437,12 @@ Delta	store-projector.hirsel	store	store	-
 Fold	store-projector.hirsel	store	store	-
 Stepped	store-projector.hirsel	store	store	-
 ProjectError	store-projector.hirsel	store	store	-
-projection_empty	store-projector.hirsel	maintenance	maintenance	L14
+projection_empty	store-projector.hirsel	maintenance	store	-	L14: constructs public Projection
 projector_pin_name	store-projector.hirsel	maintenance	pages	L2	pull-down maintenance -> pages (used by tail_base)
 projection	store-projector.hirsel	store	store	-
-ProjectorState	store-projector.hirsel	maintenance	maintenance	L14
+ProjectorState	store-projector.hirsel	maintenance	store	-	L14: holds ProjectionDecl, Source, Cadence, Snapshot and Projection
 DeclaredProjector	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
-PROJECTOR_READ_PINS	store-projector.hirsel	maintenance	maintenance	L14
+PROJECTOR_READ_PINS	maintenance-projector.hirsel	maintenance	maintenance	L14
 projector	store-projector.hirsel	store	store	-
 projector_run	store-projector.hirsel	store	store	-
 source_reader	store-projector.hirsel	store	store	-
@@ -1458,19 +1457,19 @@ projection_row	store-projector.hirsel	store	store	-
 read_projection	store-projector.hirsel	store	store	-
 project_target	store-projector.hirsel	store	store	-
 project_binding	store-projector.hirsel	store	store	-
-same_project_snapshot	store-projector.hirsel	maintenance	maintenance	L14
+same_project_snapshot	maintenance-projector.hirsel	maintenance	maintenance	L14
 borrowed_projection_base	store-projector.hirsel	store	store	-
 held_projection_target	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
-exact_follower_checkpoint	store-projector.hirsel	maintenance	maintenance	L14
+exact_follower_checkpoint	store-projector.hirsel	maintenance	store	-	L14: takes the live Follower and returns Snapshot
 projection_page	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
 pin_projection_target	store-projector.hirsel	store	store	-
-generations_contiguous	store-projector.hirsel	maintenance	maintenance	L14
-merge_start	store-projector.hirsel	maintenance	maintenance	L14
-publish_merge	store-projector.hirsel	maintenance	maintenance	L14
-without_generation	store-projector.hirsel	maintenance	maintenance	L14
-ProjectionAction	store-projector.hirsel	maintenance	maintenance	L14
-ProjectionWork	store-projector.hirsel	maintenance	maintenance	L14
-ProjectionAbort	store-projector.hirsel	maintenance	maintenance	L14
+generations_contiguous	maintenance-projector.hirsel	maintenance	maintenance	L14
+merge_start	maintenance-projector.hirsel	maintenance	maintenance	L14
+publish_merge	store-projector.hirsel	maintenance	store	-	L14: mutates public Projection using public Merge and delegates generation checks
+without_generation	maintenance-projector.hirsel	maintenance	maintenance	L14
+ProjectionAction	store-projector.hirsel	maintenance	store	-	L14: holds public Change and Limits
+ProjectionWork	store-projector.hirsel	maintenance	store	-	L14: holds public Table, Fold and Projection
+ProjectionAbort	store-projector.hirsel	maintenance	store	-	L14: holds public ProjectError
 apply_projection_change	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
 write_projection	store-projector.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
 project_commit	store-projector.hirsel	store	store	-
@@ -1495,8 +1494,8 @@ pinned	store-projector.hirsel	store	store	-
 owned_pin	store-projector.hirsel	store	store	-
 pin	store-projector.hirsel	store	store	-
 replace_projector_pin	store-projector.hirsel	store	store	-
-capture_matches_head	store-projector.hirsel	maintenance	maintenance	L14
-roots_match_head	store-projector.hirsel	maintenance	maintenance	L14
+capture_matches_head	store-projector.hirsel	maintenance	store	-	L14: takes public Snapshot and calls maintenance with its fields
+roots_match_head	maintenance-projector.hirsel	maintenance	maintenance	L14
 pin_shares_head	store-projector.hirsel	store	store	-
 change_pin	store-projector.hirsel	store	store	-
 pin_delta	store-projector.hirsel	store	store	-
@@ -2624,30 +2623,29 @@ WalkFault	store-verify.hirsel	store	store	-
 WalkFinding	store-verify.hirsel	store	store	-
 WalkReport	store-verify.hirsel	store	store	-
 WalkMode	store-verify.hirsel	store	store	-
-WalkSums	store-verify.hirsel	maintenance	maintenance	L14
+WalkSums	maintenance-verify.hirsel	maintenance	maintenance	L14
 IndexWalk	store-verify.hirsel	store	store	-
 begin_verify	store-verify.hirsel	store	store	-
 WalkCoverage	store-verify.hirsel	store	store	-
 IndexCoverage	store-verify.hirsel	store	store	-
 walk_coverage	store-verify.hirsel	store	store	-
-walk_index	store-verify.hirsel	store	store	-
+walk_index	maintenance-verify.hirsel	store	maintenance	L14	L14: uses neutral catalog, index and transfer representations
 verify_step	store-verify.hirsel	store	store	-
 verify_step_read	store-verify.hirsel	store	store	-
-walk_past	store-verify.hirsel	maintenance	maintenance	L14
-walk_finding	store-verify.hirsel	maintenance	maintenance	L14
+walk_past	maintenance-verify.hirsel	maintenance	maintenance	L14
+walk_finding	store-verify.hirsel	maintenance	store	-	L14: collects the public WalkFinding and WalkFault
 walk_sums	store-verify.hirsel	store	store	-
-fold_sum_row	store-verify.hirsel	maintenance	maintenance	L14
+fold_sum_row	maintenance-verify.hirsel	maintenance	maintenance	L14
 walk_sum_entries	store-verify.hirsel	store	store	-
 walk_rows	store-verify.hirsel	store	store	-
 walk_entries	store-verify.hirsel	store	store	-
-walk_check_entry_row	store-verify.hirsel	maintenance	maintenance	L14
+walk_check_entry_row	maintenance-verify.hirsel	maintenance	maintenance	L14
 teardown_hook	store-verify.hirsel	store	store	-
 allow_unverified_teardown	store-verify.hirsel	store	store	-
-teardown_opted_out	store-verify.hirsel	maintenance	maintenance	L14
-teardown_fault_name	store-verify.hirsel	maintenance	maintenance	L14
-teardown_fail_corrupt	store-verify.hirsel	maintenance	maintenance	L14
+teardown_fault_name	store-verify.hirsel	maintenance	store	-	L14: takes public WalkFault
+teardown_fail_corrupt	maintenance-verify.hirsel	maintenance	maintenance	L14
 teardown_check_bucket	store-verify.hirsel	store	store	-
-teardown_validate_bucket_checkpoint	store-verify.hirsel	maintenance	maintenance	L14
+teardown_validate_bucket_checkpoint	object-writer-history-packs.hirsel	maintenance	object_writer	L14	L14: already validates a paused journal checkpoint in object_writer
 verify_teardown	store-verify.hirsel	store	store	-
 StoreId	store.hirsel	store	store	-
 StorageKind	store.hirsel	store	store	-
@@ -2744,7 +2742,7 @@ pin_root_bytes	store-manifest-support.hirsel	pages	manifest	L4	push-up pages -> 
 check_manifest_addition	store.hirsel	store	store	-
 adopt	store.hirsel	store	store	-
 delete_branch	store.hirsel	store	store	-
-version	store.hirsel	store	maintenance	L14	A-split body to maintenance (used by exact_follower_checkpoint)
+version	store.hirsel	store	store	-	L14: returns the version of a public Snapshot
 follow	store.hirsel	store	store	-
 Publication	store.hirsel	store	store	-	L12 root boundary: carries Latest of root Snapshot
 prepare_publication	store.hirsel	store	store	-
@@ -2865,10 +2863,10 @@ stage_drop_table_key	store.hirsel	catalog	store	-	L12 root boundary: edits the r
 Built	store.hirsel	catalog	catalog	L3
 over_ceiling	store.hirsel	catalog	catalog	L3
 insert_row	store.hirsel	catalog	catalog	L3
-migrate_build	store.hirsel	catalog	maintenance	L14	push-up catalog -> maintenance (refs at layer 11)
+migrate_build	store.hirsel	catalog	store	-	L14: takes public Table and calls the typed Readers decoder
 same_bytes	store.hirsel	catalog	catalog	L3
 catalog_insert	store.hirsel	catalog	catalog	L3
-stage_migrate	store.hirsel	catalog	maintenance	L14	push-up catalog -> maintenance (refs at layer 11)
+stage_migrate	store.hirsel	catalog	store	-	L14: takes public Table and the root SchemaPlan
 bucket	store.hirsel	tests	tests	-
 typed_put	store.hirsel	store	store	-
 check_table_write	store.hirsel	txn	store	-	push-up txn -> store (refs at layer 11)
@@ -3195,3 +3193,30 @@ prepared_read_input	transfer-frames.hirsel	transfer	transfer	L13	L13 transfer mo
 PreparedTargetRep	transfer-prepared.hirsel	transfer	transfer	L13	L13 transfer module
 step_collections_covered	transfer-steps.hirsel	transfer	transfer	L13	L13 transfer module
 discard_replayed_collection	transfer-steps.hirsel	transfer	transfer	L13	L13 transfer module
+IndexWalk	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+begin_verify	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+walk_checked	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+walk_repairs	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+walking_entries	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+walk_cursor	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+copy_walk_cursor	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+clear_walk_position	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+reset_walk_row	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+skip_demoted	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+set_walk_cursor	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+count_checked	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+finish_rows	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+begin_sum_walk	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+fold_sum_rows	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+sum_groups	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+sum_payload_matches	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+VerifyEntries	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+next_verify_entry	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+EntryFault	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+entry_primary_range	maintenance-verify.hirsel	maintenance	maintenance	L14	L14 maintenance module
+collection_rows	maintenance-index-build.hirsel	maintenance	maintenance	L14	L14 maintenance module
+extract_entries	maintenance-index-build.hirsel	maintenance	maintenance	L14	L14 maintenance module
+bulk_declared_index	maintenance-index-build.hirsel	maintenance	maintenance	L14	L14 maintenance module
+define_empty_tiered_index	maintenance-index-build.hirsel	maintenance	maintenance	L14	L14 maintenance module
+due_rows	maintenance-expiry.hirsel	maintenance	maintenance	L14	L14 maintenance module
+expiry_entries	maintenance-expiry.hirsel	maintenance	maintenance	L14	L14 maintenance module

@@ -1,0 +1,248 @@
+type WalkSums: send {
+    head: u64,
+    groups: std.omap.OMap[Bytes, (u64, u64)],
+    ids: u64
+}
+
+pub opaque type IndexWalk: send {
+    repair: bool,
+    // The catalog key and id of the index being walked.
+    at: Option[(Bytes, u32)],
+    entries: bool,
+    // The last primary key (rows) or entry key after the id (entries) checked.
+    cursor: Option[Bytes],
+    sums: Option[WalkSums],
+    checked: u64
+}
+
+pub fn begin_verify(repair: bool) -> IndexWalk {
+    IndexWalk(repair: repair, at: None, entries: false, cursor: None, sums: None, checked: 0)
+}
+
+pub fn walk_checked(walk: IndexWalk) -> u64 {
+    walk.checked
+}
+
+pub fn walk_repairs(walk: IndexWalk) -> bool {
+    walk.repair
+}
+
+pub fn walking_entries(walk: IndexWalk) -> bool {
+    walk.entries
+}
+
+pub fn walk_cursor(walk: IndexWalk) -> Option[View[Bytes]] in walk {
+    match view walk.cursor {
+        Some(key) => Some(key),
+        None => None,
+    }
+}
+
+pub fn copy_walk_cursor(walk: IndexWalk) -> Option[Bytes] {
+    clone(walk.cursor)
+}
+
+pub fn clear_walk_position(mut walk: IndexWalk) {
+    walk.at = None
+    reset_walk_row(mut walk)
+}
+
+fn reset_walk_row(mut walk: IndexWalk) {
+    walk.entries = false
+    walk.cursor = None
+    walk.sums = None
+}
+
+pub fn skip_demoted(mut walk: IndexWalk, id: u32) -> Result[(), types.Failure] {
+    if let Some((_, at_id)) = walk.at {
+        if at_id == id {
+            return walk_past(mut walk)
+        }
+    }
+    Ok(())
+}
+
+pub fn set_walk_cursor(mut walk: IndexWalk, take key: Bytes) {
+    walk.cursor = Some(take key)
+}
+
+pub fn count_checked(mut walk: IndexWalk, rows: u64) {
+    walk.checked = int.saturating_add(walk.checked, rows)
+}
+
+pub fn finish_rows(mut walk: IndexWalk, done: bool, rows: u64) {
+    count_checked(mut walk, rows)
+    if done {
+        walk.entries = true
+        walk.cursor = None
+    }
+}
+
+// The index the walk is on: its current one while that record is still the
+// same Public index, else the next Public index after it that this release
+// binds, from its first row.
+pub fn walk_index(tree: pages.PageTree, owner: indexes.IndexOwner, mut walk: IndexWalk) -> Result[Option[(Bytes, indexes.Catalog)], types.Failure] {
+    let mut low: Bytes = list.new()
+    list.push(mut low, 2u8)
+    if let Some((key, _)) = view walk.at {
+        low = types.copied(key)?
+    }
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = read.byte_cursor(tree, Included(take low), end_key)?
+    while let Some((take key, raw)) = catalog.next_bytes(mut records)? {
+        if !catalog.record_public(raw) {
+            continue
+        }
+        let record = indexes.decode_catalog(raw)?
+        if let None = indexes.bound_extractor(owner, record) {
+            continue
+        }
+        let same_index = match view walk.at {
+            Some((at_key, id)) => at_key == key && id == record.id,
+            None => false,
+        }
+        if !same_index {
+            walk.at = Some((types.copied(key)?, record.id))
+            reset_walk_row(mut walk)
+        }
+        return Ok(Some((take key, take record)))
+    }
+    Ok(None)
+}
+
+// Moves the walk to the first index after the one it is on.
+pub fn walk_past(mut walk: IndexWalk) -> Result[(), types.Failure] {
+    let past = match walk.at {
+        Some((at_key, _)) => {
+            let mut k = types.copied(at_key)?
+            list.push(mut k, 0u8)
+            Some((take k, 0u32))
+        },
+        None => None,
+    }
+    walk.at = take past
+    reset_walk_row(mut walk)
+    Ok(())
+}
+
+// Restart the fold if a commit changed the head between slices.
+pub fn begin_sum_walk(mut walk: IndexWalk, head: u64) {
+    match walk.sums {
+        Some(fold) if fold.head == head => (),
+        _ => {
+            walk.sums = Some(WalkSums(head: head, groups: std.omap.new(), ids: 0))
+            walk.entries = false
+            walk.cursor = None
+        },
+    }
+}
+
+pub fn fold_sum_rows(mut walk: IndexWalk, extractor: indexes.RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool) -> Result[(), types.Failure] {
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let values = indexes.extract_row(extractor, raw, primary)?
+        let next_key = types.copied(primary)?
+        match walk.sums {
+            Some(mut fold) => fold_sum_row(mut fold, values)?,
+            None => fail("aggregate walk has no fold"),
+        }
+        walk.cursor = Some(take next_key)
+        walk.checked = int.saturating_add(walk.checked, 1)
+    }
+    finish_rows(mut walk, done, 0)
+    Ok(())
+}
+
+fn fold_sum_row(mut fold: WalkSums, values: indexes.IndexValue) -> Result[(), types.Failure] {
+    let (take updated, issued) = manifest.disk_allocation(scoped fn() -> Result[(std.omap.OMap[Bytes, (u64, u64)], u64), types.Failure] {
+        let mut ids = fold.ids
+        let mut groups: std.omap.OMap[Bytes, (u64, u64)] = clone(fold.groups)
+        for slot in 0u64 .. list.len(values.keys) {
+            let key = view values.keys[slot]
+            let (members, sum) = match std.omap.get(groups, key) {
+                Some(prior) => (prior.0, prior.1),
+                None => (0u64, 0u64),
+            }
+            let Some(total) = int.checked_add(sum, values.sums[slot]) else {
+                return Error(Limit(Value))
+            }
+            let prior = replace(mut groups, std.omap.new())
+            let (take merged, _) = std.omap.insert_owned(mut ids, take prior, types.copied(key)?, (members + 1, total))
+            groups = take merged
+        }
+        Ok((take groups, ids))
+    })?
+    fold.groups = take updated
+    fold.ids = issued
+    Ok(())
+}
+
+pub fn sum_groups(walk: IndexWalk) -> Result[std.omap.Cursor[Bytes, (u64, u64)], types.Failure] {
+    let folded: std.omap.OMap[Bytes, (u64, u64)] = match walk.sums {
+        Some(fold) => clone(fold.groups),
+        None => fail("aggregate walk has no fold"),
+    }
+    let lower: std.omap.Bound[Bytes] = match walk.cursor {
+        Some(final_key) => Excluded(types.copied(final_key)?),
+        None => Unbounded,
+    }
+    Ok(std.omap.range(folded, lower, Unbounded))
+}
+
+pub fn sum_payload_matches(raw: Bytes, expected: (u64, u64)) -> Result[bool, types.Failure] {
+    Ok(list.len(raw) == 16 && indexes.group_totals(raw)? == expected)
+}
+
+pub type VerifyEntries = VerifyMemoryEntries(pages.PageRange) | VerifyTieredEntries(List[(Bytes, Bytes)], u64)
+
+pub fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {
+    match walk {
+        VerifyMemoryEntries(mut cursor) => catalog.next_bytes(mut cursor),
+        VerifyTieredEntries(rows, mut at) => {
+            if at == list.len(rows) {
+                return Ok(None)
+            }
+            let (key, raw) = view rows[at]
+            at += 1
+            Ok(Some((types.copied(key)?, arc.new(types.copied(raw)?))))
+        },
+    }
+}
+
+pub type EntryFault = Extra | Payload
+
+pub fn entry_primary_range(record: indexes.Catalog, extractor: indexes.RegisteredIndex, entry_key: Bytes, raw: Bytes) -> Result[(bool, u64, u64), types.Failure] {
+    if let Entries(UniqueEntry) = indexes.catalog_index(record)?.shape {
+        return Ok((true, 4, indexes.unique_owner_end(raw)?))
+    }
+    Ok((false, indexes.entry_primary_offset(extractor, entry_key)?, list.len(entry_key)))
+}
+
+pub fn walk_check_entry_row(extractor: indexes.RegisteredIndex, entry_key: Bytes, raw: Bytes, primary: Bytes, stored: Option[View[Bytes]]) -> Result[Option[EntryFault], types.Failure] {
+    let Some(row) = stored else {
+        return Ok(Some(Extra))
+    }
+    let values = indexes.extract_row(extractor, row, primary)?
+    for produced in values.keys {
+        if produced == entry_key {
+            return Ok(if catalog.same_bytes(values.payload, raw) {
+                None
+            } else {
+                Some(Payload)
+            })
+        }
+    }
+    Ok(Some(Extra))
+}
+
+pub fn teardown_fail_corrupt(scope: String, file: String, offset: u64) -> Never {
+    let mut msg = string.with_capacity(96)
+    string.push(mut msg, "store trust teardown (")
+    string.push(mut msg, scope)
+    string.push(mut msg, "): Corrupt ")
+    string.push(mut msg, file)
+    string.push(mut msg, " @")
+    string.push_u64(mut msg, offset)
+    fail(take msg)
+}

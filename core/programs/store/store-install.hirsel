@@ -73,7 +73,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(take problem)
     }
     // STORE-SPEC §1.2: a release activates only over Public indexes.
-    if let Some(take name) = deploy_result(unready_index(schema_change.schema.roots.catalog))? {
+    if let Some(take name) = deploy_result(failure_result_from_rep(maintenance.unready_index(schema_change.schema.roots.catalog)))? {
         if started_pager {
             stop_residency_pager(mut db)
         }

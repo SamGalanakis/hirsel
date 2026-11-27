@@ -28,25 +28,17 @@ pub type WalkReport: send {
 /// are only reported, every one of them, and the walk never commits.
 pub type WalkMode: send = Repair | Report
 
-type WalkSums: send {
-    head: u64,
-    groups: std.omap.OMap[Bytes, Totals],
-    ids: u64
-}
-
 pub opaque type IndexWalk: send {
-    mode: WalkMode,
-    // The catalog key and id of the index being walked.
-    at: Option[(Bytes, u32)],
-    entries: bool,
-    // The last primary key (rows) or entry key after the id (entries) checked.
-    cursor: Option[Bytes],
-    sums: Option[WalkSums],
-    checked: u64
+    inner: maintenance.IndexWalk
 }
 
 pub fn begin_verify(mode: WalkMode) -> IndexWalk {
-    IndexWalk(mode: mode, at: None, entries: false, cursor: None, sums: None, checked: 0)
+    let repair = if let Repair = mode {
+        true
+    } else {
+        false
+    }
+    IndexWalk(inner: maintenance.begin_verify(repair))
 }
 
 /// Why a walk passes an index by: it checks Walked ones only.
@@ -72,7 +64,7 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
         let record = decode_catalog(raw)?
         let coverage = if !catalog.record_public(raw) {
             NotPublic
-        } else if let None = bound_extractor(db.indexes, record) {
+        } else if let None = indexes.bound_extractor(db.indexes, record) {
             Unbound
         } else {
             Walked
@@ -81,41 +73,6 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
         list.push(mut out, IndexCoverage(table: record.owner, index: failure_result_from_rep(catalog.declaration_index_name(key))?, coverage: coverage))
     }
     Ok(take out)
-}
-
-// The index the walk is on: its current one while that record is still the
-// same Public index, else the next Public index after it that this release
-// binds, from its first row.
-fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, indexes.Catalog)], Error] {
-    let mut low: Bytes = list.new()
-    list.push(mut low, 2u8)
-    if let Some((key, _)) = view walk.at {
-        low = failure_result_from_rep(types.copied(key))?
-    }
-    let mut end_key: Bytes = list.new()
-    list.push(mut end_key, 3u8)
-    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take low), end_key)?
-    while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
-        if !catalog.record_public(raw) {
-            continue
-        }
-        let record = decode_catalog(raw)?
-        if let None = bound_extractor(db.indexes, record) {
-            continue
-        }
-        let same_index = match view walk.at {
-            Some((at_key, id)) => at_key == key && id == record.id,
-            None => false,
-        }
-        if !same_index {
-            walk.at = Some((failure_result_from_rep(types.copied(key))?, record.id))
-            walk.entries = false
-            walk.cursor = None
-            walk.sums = None
-        }
-        return Ok(Some((take key, take record)))
-    }
-    Ok(None)
 }
 
 // One slice of at most `limit` rows or entries of the index the walk is on.
@@ -128,11 +85,7 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
         let mut seen: List[(u32, u32)] = list.new()
         list.push(mut seen, (owner, id))
         trip_drift(mut db, 0, seen)?
-        if let Some((_, at_id)) = walk.at {
-            if at_id == id {
-                walk_past(mut walk)?
-            }
-        }
+        failure_result_from_rep(maintenance.skip_demoted(mut walk.inner, id))?
     }
     Ok(take report)
 }
@@ -142,50 +95,25 @@ fn verify_step_read(db: Db, mut walk: IndexWalk, limit: u64, direct: bool) -> Re
     if limit == 0 {
         return Error(Limit(Transaction))
     }
-    let Some((take key, take record)) = walk_index(db, mut walk)? else {
-        walk.at = None
-        walk.entries = false
-        walk.cursor = None
-        walk.sums = None
-        return Ok((WalkReport(checked: walk.checked, done: true, findings: list.new()), None))
+    let Some((take key, take record)) = failure_result_from_rep(maintenance.walk_index(pages.holder_heads(db.holders)[0].roots.catalog, db.indexes, mut walk.inner))? else {
+        maintenance.clear_walk_position(mut walk.inner)
+        return Ok((WalkReport(checked: maintenance.walk_checked(walk.inner), done: true, findings: list.new()), None))
     }
     let name = failure_result_from_rep(catalog.declaration_index_name(key))?
     let mut findings: List[WalkFinding] = list.new()
     if let Sums = catalog_index(record)?.shape {
         walk_sums(db, mut walk, record, name, limit, mut findings, direct)?
-    } else if walk.entries {
+    } else if maintenance.walking_entries(walk.inner) {
         walk_entries(db, mut walk, record, name, limit, mut findings, direct)?
     } else {
         walk_rows(db, mut walk, record, name, limit, mut findings, direct)?
     }
-    let repair = if let Repair = walk.mode {
-        true
-    } else {
-        false
-    }
-    let demote = if repair && list.len(findings) != 0 {
+    let demote = if maintenance.walk_repairs(walk.inner) && list.len(findings) != 0 {
         Some((record.owner, record.id))
     } else {
         None
     }
-    Ok((WalkReport(checked: walk.checked, done: false, findings: take findings), demote))
-}
-
-// Moves the walk to the first index after the one it is on.
-fn walk_past(mut walk: IndexWalk) -> Result[(), Error] {
-    let past = match walk.at {
-        Some((at_key, _)) => {
-            let mut k = failure_result_from_rep(types.copied(at_key))?
-            list.push(mut k, 0u8)
-            Some((take k, 0u32))
-        },
-        None => None,
-    }
-    walk.at = take past
-    walk.entries = false
-    walk.cursor = None
-    walk.sums = None
-    Ok(())
+    Ok((WalkReport(checked: maintenance.walk_checked(walk.inner), done: false, findings: take findings), demote))
 }
 
 fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes, fault: WalkFault) -> Result[(), Error] {
@@ -194,70 +122,29 @@ fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes,
     Ok(())
 }
 
+fn walk_resume(walk: IndexWalk) -> Result[Option[Bytes], Error] {
+    match maintenance.walk_cursor(walk.inner) {
+        Some(key) => Ok(Some(failure_result_from_rep(types.copied(key))?)),
+        None => Ok(None),
+    }
+}
+
 // The fold may span slices. Restart it if a commit changed the head,
 // so comparisons and repair never use totals from different versions.
 fn walk_sums(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
     let head = pages.holder_heads(db.holders)[0].head
-    match walk.sums {
-        Some(fold) if fold.head == head => (),
-        _ => {
-            walk.sums = Some(WalkSums(head: head, groups: std.omap.new(), ids: 0))
-            walk.entries = false
-            walk.cursor = None
-        },
-    }
-    if walk.entries {
+    maintenance.begin_sum_walk(mut walk.inner, head)
+    if maintenance.walking_entries(walk.inner) {
         return walk_sum_entries(db, mut walk, record, name, limit, mut findings, direct)
     }
-    let Some(extractor) = bound_extractor(db.indexes, record) else {
+    let Some(extractor) = indexes.bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
-    let (take rows, done) = tiered_rows_after_mode(db, record.owner, clone(walk.cursor), limit, direct)?
-    for (logical, raw) in rows {
-        let primary = list.slice(logical, 4, list.len(logical))
-        let values = extract_index(extractor, raw, primary)?
-        let next_key = failure_result_from_rep(types.copied(primary))?
-        match walk.sums {
-            Some(mut fold) => fold_sum_row(mut fold, values)?,
-            None => fail("aggregate walk has no fold"),
-        }
-        walk.cursor = Some(take next_key)
-        walk.checked = int.saturating_add(walk.checked, 1)
-    }
-    if done {
-        walk.entries = true
-        walk.cursor = None
-    }
-    Ok(())
+    let (take rows, done) = tiered_rows_after_mode(db, record.owner, maintenance.copy_walk_cursor(walk.inner), limit, direct)?
+    failure_result_from_rep(maintenance.fold_sum_rows(mut walk.inner, extractor, rows, done))
 }
 
-fn fold_sum_row(mut fold: WalkSums, values: indexes.IndexValue) -> Result[(), Error] {
-    let (take updated, issued) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[Bytes, Totals], u64), Error] {
-        let mut ids = fold.ids
-        let mut groups: std.omap.OMap[Bytes, Totals] = clone(fold.groups)
-        for slot in 0u64 .. list.len(values.keys) {
-            let key = view values.keys[slot]
-            let (members, sum) = match std.omap.get(groups, key) {
-                Some(prior) => (prior.count, prior.sum),
-                None => (0u64, 0u64),
-            }
-            let Some(total) = int.checked_add(sum, values.sums[slot]) else {
-                return Error(Limit(Value))
-            }
-            let prior = replace(mut groups, std.omap.new())
-            let (take merged, _) = std.omap.insert_owned(mut ids, take prior, failure_result_from_rep(types.copied(key))?, Totals(count: members + 1, sum: total))
-            groups = take merged
-        }
-        Ok((take groups, ids))
-    })?
-    fold.groups = take updated
-    fold.ids = issued
-    Ok(())
-}
-
-type VerifyEntries = VerifyMemoryEntries(pages.PageRange) | VerifyTieredEntries(List[(Bytes, Bytes)], u64)
-
-fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[VerifyEntries, Error] waits {
+fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[maintenance.VerifyEntries, Error] waits {
     let data = pages.holder_heads(db.holders)[0].roots.collections
     if failure_result_from_rep(transfer.table_is_tiered(data, id))? {
         let (take rows, _) = tiered_rows_after_mode(db, id, clone(cursor), limit, direct)?
@@ -268,20 +155,6 @@ fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direc
         None => Included(failure_result_from_rep(catalog.prefix(id))?),
     }
     Ok(VerifyMemoryEntries(byte_cursor(data, take start, failure_result_from_rep(catalog.prefix(id + 1))?)?))
-}
-
-fn next_verify_entry(mut walk: VerifyEntries) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    match walk {
-        VerifyMemoryEntries(mut cursor) => failure_result_from_rep(catalog.next_bytes(mut cursor)),
-        VerifyTieredEntries(rows, mut at) => {
-            if at == list.len(rows) {
-                return Ok(None)
-            }
-            let (key, raw) = view rows[at]
-            at += 1
-            Ok(Some((failure_result_from_rep(types.copied(key))?, arc.new(failure_result_from_rep(types.copied(raw))?))))
-        },
-    }
 }
 
 type WalkPoint = WalkResident | WalkReader(Reader) | WalkDirect(Dir)
@@ -320,22 +193,14 @@ fn walk_point[R](db: Db, s: Snapshot, source: WalkPoint, key: Bytes, visit: scop
 // Merge the sorted expected groups and stored entries so a missing group
 // is found even when the aggregate has no entries.
 fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
-    let folded: std.omap.OMap[Bytes, Totals] = match walk.sums {
-        Some(fold) => clone(fold.groups),
-        None => fail("aggregate walk has no fold"),
-    }
-    let lower: std.omap.Bound[Bytes] = match walk.cursor {
-        Some(final_key) => Excluded(failure_result_from_rep(types.copied(final_key))?),
-        None => Unbounded,
-    }
-    let after = match walk.cursor {
+    let mut groups = failure_result_from_rep(maintenance.sum_groups(walk.inner))?
+    let after = match maintenance.walk_cursor(walk.inner) {
         Some(final_key) => Some(failure_result_from_rep(types.copied(list.slice(final_key, 4, list.len(final_key))))?),
         None => None,
     }
-    let mut groups = std.omap.range(folded, lower, Unbounded)
     let mut indexed = open_verify_entries(db, record.id, after, limit, direct)?
     let mut expected = std.omap.next(mut groups)
-    let mut actual = next_verify_entry(mut indexed)?
+    let mut actual = failure_result_from_rep(maintenance.next_verify_entry(mut indexed))?
     for step in 0u64 .. limit {
         let relation = match expected {
             Some((want, _)) => match actual {
@@ -344,32 +209,32 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: 
             },
             None => match actual {
                 Some(_) => Greater,
-                None => return walk_past(mut walk),
+                None => return failure_result_from_rep(maintenance.walk_past(mut walk.inner)),
             },
         }
         if relation == Less {
             let (take key, _) = option.unwrap(replace(mut expected, None))
             walk_finding(mut findings, name, key, Missing)?
-            walk.cursor = Some(take key)
+            maintenance.set_walk_cursor(mut walk.inner, take key)
         } else {
             let (take key, raw) = option.unwrap(replace(mut actual, None))
             if relation == Greater {
                 walk_finding(mut findings, name, key, Extra)?
             } else {
                 let (_, wanted) = option.unwrap(replace(mut expected, None))
-                if list.len(raw) != 16 || group_totals(raw)? != (wanted.count, wanted.sum) {
+                if !failure_result_from_rep(maintenance.sum_payload_matches(raw, wanted))? {
                     walk_finding(mut findings, name, key, Payload)?
                 }
             }
-            walk.cursor = Some(take key)
+            maintenance.set_walk_cursor(mut walk.inner, take key)
         }
-        walk.checked = int.saturating_add(walk.checked, 1)
+        maintenance.count_checked(mut walk.inner, 1)
         if step + 1 < limit {
             if relation != Greater {
                 expected = std.omap.next(mut groups)
             }
             if relation != Less {
-                actual = next_verify_entry(mut indexed)?
+                actual = failure_result_from_rep(maintenance.next_verify_entry(mut indexed))?
             }
         }
     }
@@ -379,14 +244,11 @@ fn walk_sum_entries(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: 
 // Rows phase: up to `limit` rows after the cursor, each extracted with the
 // bound extractor and looked up by the index collection's residency.
 fn walk_rows(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
-    let cursor = match walk.cursor {
-        Some(final_key) => Some(failure_result_from_rep(types.copied(final_key))?),
-        None => None,
-    }
+    let cursor = walk_resume(walk)?
     let (take rows, done) = tiered_rows_after_mode(db, record.owner, cursor, limit, direct)?
     let s = snapshot(db)
     let source = walk_point_source(db, s, record.id, direct)?
-    let Some(extractor) = bound_extractor(db.indexes, record) else {
+    let Some(extractor) = indexes.bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
     for (logical, raw) in rows {
@@ -404,13 +266,9 @@ fn walk_rows(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: String,
                 walk_finding(mut findings, name, entry_key, found)?
             }
         }
-        walk.cursor = Some(failure_result_from_rep(types.copied(primary))?)
+        maintenance.set_walk_cursor(mut walk.inner, failure_result_from_rep(types.copied(primary))?)
     }
-    walk.checked = int.saturating_add(walk.checked, list.len(rows))
-    if done {
-        walk.entries = true
-        walk.cursor = None
-    }
+    maintenance.finish_rows(mut walk.inner, done, list.len(rows))
     Ok(())
 }
 
@@ -422,52 +280,40 @@ fn walk_entries(db: Db, mut walk: IndexWalk, record: indexes.Catalog, name: Stri
     // A Tiered index's entries come back as a list, so its scan Reader is
     // returned before the owner's point Reader is reserved: both take the one
     // Reader partition the derived plan funds.
-    let mut indexed = open_verify_entries(db, record.id, clone(walk.cursor), limit, direct)?
+    let mut indexed = open_verify_entries(db, record.id, maintenance.copy_walk_cursor(walk.inner), limit, direct)?
     let source = walk_point_source(db, s, record.owner, direct)?
-    let Some(extractor) = bound_extractor(db.indexes, record) else {
+    let Some(extractor) = indexes.bound_extractor(db.indexes, record) else {
         return Error(Stale(record.id))
     }
     let mut read = 0u64
     while read < limit {
-        let Some((take entry_key, raw)) = next_verify_entry(mut indexed)? else {
-            walk_past(mut walk)?
+        let Some((take entry_key, raw)) = failure_result_from_rep(maintenance.next_verify_entry(mut indexed))? else {
+            failure_result_from_rep(maintenance.walk_past(mut walk.inner))?
             break
         }
-        let primary = if let Entries(UniqueEntry) = catalog_index(record)?.shape {
-            list.slice(raw, 4, failure_result_from_rep(indexes.unique_owner_end(raw))?)
+        let (unique, start, end) = failure_result_from_rep(maintenance.entry_primary_range(record, extractor, entry_key, raw))?
+        let primary = if unique {
+            list.slice(raw, start, end)
         } else {
-            list.slice(entry_key, failure_result_from_rep(indexes.entry_primary_offset(extractor, entry_key))?, list.len(entry_key))
+            list.slice(entry_key, start, end)
         }
         let mut logical = failure_result_from_rep(catalog.prefix(record.owner))?
         list.append(mut logical, primary)
         let fault = walk_point(db, s, source, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
-            walk_check_entry_row(extractor, entry_key, raw, primary, stored)
+            Ok(match failure_result_from_rep(maintenance.walk_check_entry_row(extractor, entry_key, raw, primary, stored))? {
+                Some(Extra) => Some(Extra),
+                Some(Payload) => Some(Payload),
+                None => None,
+            })
         })?
         if let Some(found) = fault {
             walk_finding(mut findings, name, entry_key, found)?
         }
-        walk.cursor = Some(failure_result_from_rep(types.copied(list.slice(entry_key, 4, list.len(entry_key))))?)
+        maintenance.set_walk_cursor(mut walk.inner, failure_result_from_rep(types.copied(list.slice(entry_key, 4, list.len(entry_key))))?)
         read += 1
     }
-    walk.checked = int.saturating_add(walk.checked, read)
+    maintenance.count_checked(mut walk.inner, read)
     Ok(())
-}
-
-fn walk_check_entry_row(extractor: indexes.RegisteredIndex, entry_key: Bytes, raw: Bytes, primary: Bytes, stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
-    let Some(row) = stored else {
-        return Ok(Some(Extra))
-    }
-    let values = extract_index(extractor, row, primary)?
-    for produced in values.keys {
-        if produced == entry_key {
-            return Ok(if catalog.same_bytes(values.payload, raw) {
-                None
-            } else {
-                Some(Payload)
-            })
-        }
-    }
-    Ok(Some(Extra))
 }
 
 // The compiler inserts the verifier call in test builds.
@@ -497,17 +343,6 @@ fn teardown_fault_name(fault: WalkFault) -> String {
         Extra => "Extra",
         Payload => "Payload",
     }
-}
-
-fn teardown_fail_corrupt(scope: String, fault: Fault) -> Never {
-    let mut msg = string.with_capacity(96)
-    string.push(mut msg, "store trust teardown (")
-    string.push(mut msg, scope)
-    string.push(mut msg, "): Corrupt ")
-    string.push(mut msg, fault.file)
-    string.push(mut msg, " @")
-    string.push_u64(mut msg, fault.offset)
-    fail(take msg)
 }
 
 fn teardown_check_bucket(db: Db) -> Result[(), Error] waits {
@@ -569,11 +404,11 @@ fn verify_teardown(db: Db) waits {
             match failure_result_from_rep(capture.read_only_manifest(d)) {
                 Ok((_, id, take manifest)) => match validate_directory_graph(d, store_key_from_rep(id), take manifest, true) {
                     Ok(_) => (),
-                    Error(Corrupt(fault)) => teardown_fail_corrupt("directory", fault),
+                    Error(Corrupt(fault)) => maintenance.teardown_fail_corrupt("directory", fault.file, fault.offset),
                     Error(Poisoned(_)) => fail("store trust teardown (directory): Poisoned"),
                     Error(_) => (),
                 },
-                Error(Corrupt(fault)) => teardown_fail_corrupt("directory", fault),
+                Error(Corrupt(fault)) => maintenance.teardown_fail_corrupt("directory", fault.file, fault.offset),
                 Error(Poisoned(_)) => fail("store trust teardown (directory): Poisoned"),
                 Error(_) => (),
             }
@@ -581,14 +416,14 @@ fn verify_teardown(db: Db) waits {
         if let ObjectBackend(ow) = view state.backend {
             if let Some(problem) = object_writer.terminal_failure(ow) {
                 match problem {
-                    Corrupt(fault) => teardown_fail_corrupt("bucket", fault_from_rep(clone(fault))),
+                    Corrupt(fault) => maintenance.teardown_fail_corrupt("bucket", fault.file, fault.offset),
                     Poisoned(_) => fail("store trust teardown (bucket): Poisoned"),
                     _ => (),
                 }
             }
             match failure_result_from_rep(object_writer.health_result(object_writer.health(ow))) {
                 Ok(()) => (),
-                Error(Corrupt(fault)) => teardown_fail_corrupt("bucket", fault),
+                Error(Corrupt(fault)) => maintenance.teardown_fail_corrupt("bucket", fault.file, fault.offset),
                 Error(Poisoned(_)) => fail("store trust teardown (bucket): Poisoned"),
                 Error(_) => (),
             }
@@ -611,7 +446,7 @@ fn verify_teardown(db: Db) waits {
                     return
                 }
             },
-            Error(Corrupt(fault)) => teardown_fail_corrupt("index walk", fault),
+            Error(Corrupt(fault)) => maintenance.teardown_fail_corrupt("index walk", fault.file, fault.offset),
             Error(Poisoned(_)) => fail("store trust teardown (index walk): Poisoned"),
             // Fenced/Lost/Closed (e.g. a mock pager or fenced Bucket writer): stop cleanly.
             Error(_) => return,

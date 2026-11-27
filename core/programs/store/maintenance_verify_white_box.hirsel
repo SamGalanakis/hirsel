@@ -1,0 +1,6 @@
+pub fn has_sum_fold(walk: IndexWalk) -> bool {
+    if let Some(_) = walk.sums {
+        return true
+    }
+    false
+}

@@ -655,7 +655,7 @@ fn walk_all(mut db: Db, rows: Table[u64, u64], mode: WalkMode, limit: u64, betwe
         if slices > 1000 {
             fail("§1.2 walker: the walk never ended")
         }
-        if let None = walk.sums {
+        if !maintenance.has_sum_fold(walk.inner) {
             between(mut db, rows, slices)?
         }
         let report = verify_step(mut db, mut walk, limit)?
@@ -805,7 +805,7 @@ fn walk_sum_across_commit(mut db: Db, rows: Table[u64, u64]) -> Result[(), Error
             return Ok(())
         }
         if !changed {
-            if let Some(_) = walk.sums {
+            if maintenance.has_sum_fold(walk.inner) {
                 // Change the first row after the fold has already counted it.
                 if !typed_put(mut db, rows, 1, 3010) {
                     return Error(Foreign)

@@ -303,7 +303,7 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
 // Seal the real demotion candidate through the same cut used by rebuild.
 fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] waits {
     let mut plan = schema_plan(db)
-    if !demote_index(mut plan, schema.by_v.catalog_key)? {
+    if !failure_result_from_rep(maintenance.demote_index(mut plan.schema, schema.by_v.catalog_key))? {
         fail("L68(f): the fixture must start with a Public index")
     }
     let SchemaPlan(schema: catalog.SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..), ..) = take plan

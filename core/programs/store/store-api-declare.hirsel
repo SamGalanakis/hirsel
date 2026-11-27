@@ -477,7 +477,7 @@ fn build_declared_record[K, V](mut d: Declare, t: Table[K, V], lookup_key: Bytes
         Some(take why) => take why,
         None => string.from("unfinished build"),
     }
-    match stage_index_build(mut d.plan, t, lookup_key, name, copied_record(proposed)?, extractor, needs_rebuild, take cause) {
+    match stage_index_build(mut d.plan, t, lookup_key, name, failure_result_from_rep(maintenance.copied_record(proposed))?, extractor, needs_rebuild, take cause) {
         Error(Conflict(take conflict)) => {
             d.conflict = Some(clone(conflict))
             Error(Conflict(take conflict))

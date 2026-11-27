@@ -11,7 +11,7 @@ const PROJECTOR_LAW_STEPS: u64 = 16777216
 
 fn projector_reader(db: Db) -> Result[Reader, Error] waits {
     let pins = match pager.pager_requests(db.pager) {
-        Some(_) => PROJECTOR_READ_PINS,
+        Some(_) => maintenance.PROJECTOR_READ_PINS,
         None => 0,
     }
     reader(db, pins)

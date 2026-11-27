@@ -442,7 +442,7 @@ fn run_deferred_migrates(mut ctx: transfer.ChildCutContext, opened: u64, mut pla
                 let Some(inventory) = view plan.schema.roots.collections.paging else {
                     return Error(Io(Closed))
                 }
-                while list.len(batch) < INDEX_CHUNK {
+                while list.len(batch) < maintenance.INDEX_CHUNK {
                     let Some((take k, v, take res)) = snapshot_tiered_span_step_direct(ctx.dir, store_key_from_rep(ctx.store), ctx.writer_pin_bytes, snap, inventory, low, high, previous)? else {
                         break
                     }
@@ -529,7 +529,7 @@ fn run_deferred_index_builds_roots(mut ctx: transfer.ChildCutContext, opened: u6
                 let Some(inventory) = view roots.collections.paging else {
                     return Error(Io(Closed))
                 }
-                while list.len(batch) < INDEX_CHUNK {
+                while list.len(batch) < maintenance.INDEX_CHUNK {
                     let Some((take k, v, take res)) = snapshot_tiered_span_step_direct(ctx.dir, store_key_from_rep(ctx.store), ctx.writer_pin_bytes, snap, inventory, low, high, previous)? else {
                         break
                     }
@@ -541,7 +541,7 @@ fn run_deferred_index_builds_roots(mut ctx: transfer.ChildCutContext, opened: u6
                     Some(prev) => Some(failure_result_from_rep(types.copied(list.slice(prev, 4, list.len(prev))))?),
                     None => None,
                 }
-                let (take mem_rows, _) = resident_rows_after(roots, record.owner, cursor, INDEX_CHUNK)?
+                let (take mem_rows, _) = failure_result_from_rep(maintenance.resident_rows_after(roots, record.owner, cursor, maintenance.INDEX_CHUNK))?
                 if let Some((last_k, _)) = list.last(mem_rows) {
                     previous = Some(failure_result_from_rep(types.copied(last_k))?)
                 }
@@ -551,13 +551,14 @@ fn run_deferred_index_builds_roots(mut ctx: transfer.ChildCutContext, opened: u6
                 break
             }
             if !target_tiered {
-                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: store_key_from_rep(ctx.store), bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(roots.collections))
-                let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, indexes.binding_at(bindings, bind_idx), batch, false, false, false)?
+                let mut tmp = catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT)
+                let mut no_steps: List[transfer.StepOp] = list.new()
+                let dup = failure_result_from_rep(maintenance.index_chunk(mut tmp, job.catalog_key, failure_result_from_rep(maintenance.copied_record(record))?, indexes.binding_at(bindings, bind_idx), batch, false, false, false, mut no_steps))?
                 if let Some(_) = dup {
                     return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
                 }
-                roots = pages.share_roots(tmp.schema.roots)
-                next_node = tmp.schema.next_node
+                roots = pages.share_roots(tmp.roots)
+                next_node = tmp.next_node
                 continue
             }
             let private_from = failure_result_from_rep(catalog.stamp_after(next_node))?
@@ -607,7 +608,7 @@ fn run_deferred_index_builds_roots(mut ctx: transfer.ChildCutContext, opened: u6
                 failure_result_from_rep(transfer.child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_node))?
             }
         }
-        let mut published = copied_record(record)?
+        let mut published = failure_result_from_rep(maintenance.copied_record(record))?
         failure_result_from_rep(indexes.set_index_state(mut published, Public))?
         let raw_cat = encode_catalog(published)?
         roots = failure_result_from_rep(catalog.catalog_insert(mut next_node, roots, job.catalog_key, raw_cat))?

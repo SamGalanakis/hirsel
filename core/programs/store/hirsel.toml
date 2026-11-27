@@ -97,7 +97,6 @@ std = { major = 1 }
 "store-read-tail.hirsel" = "read"
 "store-api-layout.hirsel" = "store"
 "store-page-inventory.hirsel" = "pages"
-"store-page-work.hirsel" = "store"
 "store-page-ops.hirsel" = "pages"
 "store-page-state.hirsel" = "pages"
 "store-representations.hirsel" = "store"
@@ -257,7 +256,11 @@ std = { major = 1 }
 "store-verify.hirsel" = "store"
 "store-expiry.hirsel" = "store"
 "store-inspect.hirsel" = "store"
+"maintenance-verify.hirsel" = "maintenance"
 "maintenance-inspect.hirsel" = "maintenance"
+"maintenance-index-build.hirsel" = "maintenance"
+"maintenance-expiry.hirsel" = "maintenance"
+"maintenance-projector.hirsel" = "maintenance"
 "store-handle-check.hirsel" = "catalog"
 "store-declare.hirsel" = "catalog"
 "store-migration.hirsel" = "catalog"
@@ -281,6 +284,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"maintenance_verify_white_box.hirsel" = "maintenance"
 "txn-white-box.hirsel" = "txn"
 "object_writer_law_helpers.hirsel" = "object_writer"
 "history-white-box.hirsel" = "history"

@@ -28,7 +28,7 @@
     "lines": 1936
   },
   "core/programs/store/store.hirsel": {
-    "lines": 3974,
+    "lines": 2347,
     "raise_revision": 21,
     "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
   },

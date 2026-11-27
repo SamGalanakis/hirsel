@@ -305,7 +305,7 @@ fn test_aggregate_write_at_cursor(c: Clock) -> Result[(), Error] waits {
 fn test_aggregate_declared_over_chunks(c: Clock) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     let key = std.codec.key_u64()
-    let rows = INDEX_CHUNK + 905
+    let rows = maintenance.INDEX_CHUNK + 905
     let mut first = declare(db, Migrate)?
     let rows_decl = declare_table(mut first, "rows", key, std.codec.of_u64())?
     let t = finish(mut first, take rows_decl)?

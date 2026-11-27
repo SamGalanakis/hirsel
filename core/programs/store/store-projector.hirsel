@@ -155,10 +155,6 @@ type DeclaredProjector {
     run: own[send] fn(mut ProjectorState, mut Db, Limits) -> Result[Stepped, ProjectError[Error]] waits
 }
 
-// The pin budget of a step's Reader on a store with a pager: one value and
-// a page run (§1.14 "Driving").
-const PROJECTOR_READ_PINS: u64 = VALUE_LIMIT + 1048576
-
 // Registers `decl` as the projection of `source` by `fold`, at cadence `c`,
 // every commit that runs the fold bounded at `steps` (§1.14 "The bound").
 // The store's head steps it on idle turns; `project_step` runs the same step.
@@ -190,11 +186,11 @@ fn projector_run[K, V, E: inert + send](take source: Table[K, V], take fold: Fol
 fn source_reader(db: Db, from: Source) -> Result[Reader, Error] waits {
     match from {
         Local => reader(db, match pager.pager_requests(db.pager) {
-            Some(_) => PROJECTOR_READ_PINS,
+            Some(_) => maintenance.PROJECTOR_READ_PINS,
             None => 0u64
         }),
         Follower(remote) => follower_reader(remote, match remote.pager {
-            Some(_) => PROJECTOR_READ_PINS,
+            Some(_) => maintenance.PROJECTOR_READ_PINS,
             None => 0u64
         }),
     }
@@ -297,7 +293,7 @@ fn project_binding[K, V](p: Projector[K, V], db: Db) -> Result[Binding, Error] {
 }
 
 fn same_project_snapshot(s: Snapshot, b: Binding, head: u64) -> bool {
-    types.same(s.store.hi, s.store.lo, b.store.hi, b.store.lo) && s.branch == b.branch && version(s) == head
+    maintenance.same_project_snapshot(store_key_to_rep(s.store), s.branch, version(s), store_key_to_rep(b.store), b.branch, head)
 }
 
 fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, image: Image) -> Result[Option[Snapshot], Error] waits {
@@ -373,42 +369,20 @@ fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, 
     }
 }
 
-// The generations cover (0, image] without a gap or an overlap: each starts
-// where the one before it ends, the oldest at 0 (§1.14).
 fn generations_contiguous(row: Projection) -> bool {
-    let Some(image) = row.image else {
-        return list.len(row.generations) == 0
+    let image_position = match row.image {
+        Some(image) => Some(image.position),
+        None => None,
     }
-    let mut at = 0u64
-    for k in 0u64 .. list.len(row.generations) {
-        let g = row.generations[k]
-        if g.from != at || g.to < g.from {
-            return false
-        }
-        at = g.to
-    }
-    list.len(row.generations) > 0 && at == image.position
+    maintenance.generations_contiguous(list.len(row.generations), image_position, scoped fn(slot: u64) -> (u64, u64) {
+        (row.generations[slot].from, row.generations[slot].to)
+    })
 }
 
-// The oldest generation whose rows are at most `ratio` times the rows of the
-// generations after it starts the run to merge; the run ends at the newest.
-// So each generation holds more than `ratio` times the rows of all newer ones
-// together, and the count stays logarithmic in the rows folded (§1.14).
 fn merge_start(generations: List[Generation], ratio: u64) -> Option[u64] {
-    let m = list.len(generations)
-    if m < 2 {
-        return None
-    }
-    let mut newer = 0u64
-    let mut found: Option[u64] = None
-    for j in 0u64 .. m - 1 {
-        let k = m - 2 - j
-        newer = int.saturating_add(newer, generations[k + 1].rows)
-        if generations[k].rows <= int.saturating_mul(ratio, newer) {
-            found = Some(k)
-        }
-    }
-    found
+    maintenance.merge_start(list.len(generations), ratio, scoped fn(slot: u64) -> u64 {
+        generations[slot].rows
+    })
 }
 
 // Replaces a finished merge's inputs, a contiguous span of the generations, by
@@ -455,19 +429,6 @@ fn publish_merge(mut row: Projection, merge: Merge) -> Result[(), Error] {
         return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(())
-}
-
-fn without_generation(retiring: List[u32], generation: u32) -> List[u32] {
-    let mut kept: List[u32] = list.new()
-    let mut found = false
-    for k in 0u64 .. list.len(retiring) {
-        if !found && retiring[k] == generation {
-            found = true
-        } else {
-            list.push(mut kept, retiring[k])
-        }
-    }
-    take kept
 }
 
 type ProjectionAction = SetProjection | ApplyPage(u32, u64, List[Change]) | MergePage(Limits) | DropGeneration(u32, Limits)
@@ -523,7 +484,7 @@ fn write_projection[K, V, E: inert + send, A](mut tx: Tx, work: ProjectionWork[K
         DropGeneration(generation, limits) => {
             let remaining = (code.callable(work.fold.drop))(mut tx, work.fold.env, generation, limits) ?=> |problem| ProjectionFailed(Apply(take problem))
             if !remaining {
-                replacement.retiring = without_generation(replacement.retiring, generation)
+                replacement.retiring = maintenance.without_generation(replacement.retiring, generation)
             }
         },
     }
@@ -863,26 +824,14 @@ fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket
 }
 
 fn capture_matches_head(from: Snapshot, head: pages.Head) -> bool {
-    roots_match_head(from.head, from.roots, head)
-}
-
-fn roots_match_head(at_version: u64, roots: pages.Roots, head: pages.Head) -> bool {
-    if !(head.head == at_version && pages.tree_stamp(head.roots.collections) == pages.tree_stamp(roots.collections) && pages.tree_stamp(head.roots.streams) == pages.tree_stamp(roots.streams) && pages.tree_stamp(head.roots.catalog) == pages.tree_stamp(roots.catalog) && list.len(head.roots.keyed) == list.len(roots.keyed)) {
-        return false
-    }
-    for slot in 0u64 .. list.len(head.roots.keyed) {
-        if pages.tree_stamp(head.roots.keyed[slot]) != pages.tree_stamp(roots.keyed[slot]) {
-            return false
-        }
-    }
-    true
+    maintenance.roots_match_head(from.head, from.roots, head)
 }
 
 // A pin `change_pin` gave the head's shares needs no promotion (§13.5
 // "Pinning the live head"); any other pin is historical.
 fn pin_shares_head(db: Db, held: pages.Pin) -> bool {
     match branch_slot(db, held.branch) {
-        Ok(slot) => roots_match_head(held.version, held.roots, pages.holder_heads(db.holders)[slot]),
+        Ok(slot) => maintenance.roots_match_head(held.version, held.roots, pages.holder_heads(db.holders)[slot]),
         Error(_) => false,
     }
 }

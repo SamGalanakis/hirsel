@@ -1379,7 +1379,7 @@ fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, m
             list.push(mut new_rows, std.page.Row(key: take encoded, value: take raw, charge: charge))
         }
     }
-    sort_bulk_rows(mut new_rows)?
+    failure_result_from_rep(maintenance.sort_bulk_rows(mut new_rows))?
     for slot in 1u64 .. list.len(new_rows) {
         if new_rows[slot - 1].key == new_rows[slot].key {
             return Error(Exists(failure_result_from_rep(catalog.named(to_name))?))

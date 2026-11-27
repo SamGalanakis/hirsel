@@ -17,7 +17,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: indexes.Catalog, rows: List[(B
     loop {
         let attempt = pager.tiered_attempt(pager.pin_partition(db.pager), pager.tiered_window(pins))
         let prepared = disk_allocation(scoped fn() -> Result[Result[TieredIndexChunk, Error], Error] {
-            let Some(extractor) = bound_extractor(db.indexes, record) else {
+            let Some(extractor) = indexes.bound_extractor(db.indexes, record) else {
                 return Error(Stale(record.id))
             }
             let first = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?

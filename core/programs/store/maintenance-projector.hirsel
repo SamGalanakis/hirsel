@@ -1,0 +1,67 @@
+// The pin budget of a step's Reader on a store with a pager: one value and
+// a page run (§1.14 "Driving").
+pub const PROJECTOR_READ_PINS: u64 = types.VALUE_LIMIT + 1048576
+
+pub fn roots_match_head(at_version: u64, roots: pages.Roots, head: pages.Head) -> bool {
+    if !(head.head == at_version && pages.tree_stamp(head.roots.collections) == pages.tree_stamp(roots.collections) && pages.tree_stamp(head.roots.streams) == pages.tree_stamp(roots.streams) && pages.tree_stamp(head.roots.catalog) == pages.tree_stamp(roots.catalog) && list.len(head.roots.keyed) == list.len(roots.keyed)) {
+        return false
+    }
+    for slot in 0u64 .. list.len(head.roots.keyed) {
+        if pages.tree_stamp(head.roots.keyed[slot]) != pages.tree_stamp(roots.keyed[slot]) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn without_generation(retiring: List[u32], generation: u32) -> List[u32] {
+    let mut kept: List[u32] = list.new()
+    let mut found = false
+    for k in 0u64 .. list.len(retiring) {
+        if !found && retiring[k] == generation {
+            found = true
+        } else {
+            list.push(mut kept, retiring[k])
+        }
+    }
+    take kept
+}
+
+pub fn same_project_snapshot(store: types.StoreKey, branch: u32, version: u64, expected_store: types.StoreKey, expected_branch: u32, expected_version: u64) -> bool {
+    types.same(store.hi, store.lo, expected_store.hi, expected_store.lo) && branch == expected_branch && version == expected_version
+}
+
+pub fn generations_contiguous(count: u64, position: Option[u64], bounds: scoped[view] fn(u64) -> (u64, u64)) -> bool {
+    let Some(end) = position else {
+        return count == 0
+    }
+    let mut at = 0u64
+    for slot in 0u64 .. count {
+        let (first, last) = bounds(slot)
+        if first != at || last < first {
+            return false
+        }
+        at = last
+    }
+    count > 0 && at == end
+}
+
+// The oldest generation whose rows are at most `ratio` times the rows of the
+// generations after it starts the run to merge; the run ends at the newest.
+// So each generation holds more than `ratio` times the rows of all newer ones
+// together, and the count stays logarithmic in the rows folded (§1.14).
+pub fn merge_start(m: u64, ratio: u64, rows: scoped[view] fn(u64) -> u64) -> Option[u64] {
+    if m < 2 {
+        return None
+    }
+    let mut newer = 0u64
+    let mut found: Option[u64] = None
+    for j in 0u64 .. m - 1 {
+        let k = m - 2 - j
+        newer = int.saturating_add(newer, rows(k + 1))
+        if rows(k) <= int.saturating_mul(ratio, newer) {
+            found = Some(k)
+        }
+    }
+    found
+}

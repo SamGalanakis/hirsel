@@ -1,8 +1,8 @@
-pub // `hirsel store verify --release EXE` and `hirsel store repair` (STORE-SPEC
+// `hirsel store verify --release EXE` and `hirsel store repair` (STORE-SPEC
 // §15.6) run in the release's own process, which binds its extractors. A
 // verify reads a cloned image and writes nothing; a repair runs in place.
 // Rows or entries a walk or build slice reads, and bytes a scrub slice reads.
 // The operator commands own the store, so slices only bound memory.
-const OPERATOR_ROWS: u64 = 1024u64
+pub const OPERATOR_ROWS: u64 = 1024u64
 
 pub const OPERATOR_SCRUB_BYTES: u64 = 16777216u64

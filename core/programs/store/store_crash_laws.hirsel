@@ -876,10 +876,10 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
     // The first chunk reads rows 0 to 4095: it fails on a pair inside it,
     // ends the build when no row follows, and otherwise leaves the cursor
     // at row 4095, the last key it covered.
-    let _ = index_build_step(mut db, INDEX_CHUNK)?
+    let _ = index_build_step(mut db, maintenance.INDEX_CHUNK)?
     let first_chunk = match lix_state(db, "unique")? {
         Public => 0u64,
-        Backfilling(Some(cursor)) => if list.len(cursor) == 8 && list.word_be(cursor, 0) == INDEX_CHUNK - 1 {
+        Backfilling(Some(cursor)) => if list.len(cursor) == 8 && list.word_be(cursor, 0) == maintenance.INDEX_CHUNK - 1 {
             1u64
         } else {
             9u64
@@ -888,8 +888,8 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         Backfilling(None) => 9u64,
     }
     let expected_chunk = match duplicate {
-        Some(d) if d < INDEX_CHUNK => 2u64,
-        _ => if rows > INDEX_CHUNK {
+        Some(d) if d < maintenance.INDEX_CHUNK => 2u64,
+        _ => if rows > maintenance.INDEX_CHUNK {
             1u64
         } else {
             0u64
@@ -898,7 +898,7 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
     if first_chunk != expected_chunk {
         fail("L-IX: attention reports the first chunk's state and cursor")
     }
-    while let Some(_) = index_build_step(mut db, INDEX_CHUNK)? {}
+    while let Some(_) = index_build_step(mut db, maintenance.INDEX_CHUNK)? {}
     let failed = match lix_state(db, "unique")? {
         Failed(first, second) => {
             let owner: u64 = list.word_be(first, 0)

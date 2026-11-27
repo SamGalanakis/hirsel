@@ -62,10 +62,10 @@ fn test_f4_superseded_redefinition_and_tiered_catchup_diff(d: Dir, c: Clock, r: 
         let mut plan = schema_plan(db)
         {
             let record = deploy_result(catalog_entry_in(plan.schema.roots.catalog, ix.catalog_key))?
-            let Some(extractor) = bound_extractor(db.indexes, record) else {
+            let Some(extractor) = indexes.bound_extractor(db.indexes, record) else {
                 fail("F4 case A: expected bound extractor")
             }
-            let _ = deploy_result(build_declared_index(mut plan, ix.catalog_key, record, extractor, false))?
+            let _ = deploy_result(failure_result_from_rep(maintenance.build_declared_index(mut plan.schema, ix.catalog_key, record, extractor, false)))?
         }
         let _ = deploy_result(publish_schema_plan(mut db, take plan))?
         match advance_export(mut db, scratch_a, attempt) {

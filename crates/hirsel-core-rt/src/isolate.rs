@@ -8,7 +8,7 @@ pub const ISOLATE_CELL: u64 = 32;
 
 pub struct Reservation {
     payer: crate::limit::ReservedPayer,
-    storage: Box<std::mem::MaybeUninit<Cell>>,
+    storage: causes::ReservedStorage,
     pub(crate) saved: Causes,
     pub(crate) obligation: *mut causes::Resource,
     pub(crate) used: bool,
@@ -34,7 +34,7 @@ pub struct IsolateCatch {
 fn release_unused(
     context: &mut Context,
     payer: crate::limit::ReservedPayer,
-    storage: Box<std::mem::MaybeUninit<Cell>>,
+    storage: causes::ReservedStorage,
 ) {
     payer.refund(&context.current);
     context.spare_isolate_cell.get_or_insert(storage);
@@ -59,7 +59,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
         let storage = context
             .spare_isolate_cell
             .take()
-            .unwrap_or_else(Box::new_uninit);
+            .unwrap_or_else(causes::ReservedStorage::new_uninit);
         let reservation = Reservation {
             payer,
             storage,
@@ -121,10 +121,9 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
         }
         let used = reservation.used;
         if used {
-            let cell = Box::write(
-                reservation.storage,
-                Cell::reserved(reservation.payer.into_cell()),
-            );
+            let cell = reservation
+                .storage
+                .write(Cell::reserved(reservation.payer.into_cell()));
             if context.active_resource.is_null() {
                 context.primary = Some(cell);
             } else {

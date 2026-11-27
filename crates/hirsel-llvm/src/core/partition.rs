@@ -160,6 +160,7 @@ impl Analyses {
             pending: Default::default(),
             release_sites: None,
             direct: BTreeSet::new(),
+            track_site_owner: false,
         }
     }
 

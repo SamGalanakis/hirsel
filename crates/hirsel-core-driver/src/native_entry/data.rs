@@ -287,6 +287,19 @@ pub(super) fn write(
     })
 }
 
+/// Encode a module's `SourceMap` into `.hirsel-mod` section 8 (`sites`), using
+/// the same self-contained `SourceFile` directory format as standalone binaries.
+pub(crate) fn encode_module_sources(sources: &SourceMap) -> Result<Vec<u8>> {
+    let (files, count) = source_files(sources, None)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(8 + files.len());
+    out.extend_from_slice(&(count as u64).to_le_bytes());
+    out.extend_from_slice(&files);
+    Ok(out)
+}
+
 /// One 40-byte row per retained file. File starts use the original site space.
 fn source_files(
     sources: &SourceMap,

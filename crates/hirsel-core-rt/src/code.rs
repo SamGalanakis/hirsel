@@ -14,16 +14,33 @@ pub struct Hit {
     pub offset: u32,
 }
 
-/// A pack host's text band and its PC lookup.
+/// Result of resolving a static literal pointer inside a loaded image's data band.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiteralOwner {
+    /// Retained reference to the release's [`crate::causes::CauseData`]; the
+    /// caller receives one owned count.
+    pub owner: *const crate::causes::CauseData,
+    /// Corresponding byte address inside `owner`'s independent R/NX mapping.
+    pub relocated: *const u8,
+}
+
+/// A pack host's text and data bands and its lock-free lookups.
 pub struct Band {
-    /// The band is `[low, high)`.
+    /// The text band is `[low, high)`.
     pub low: usize,
     pub high: usize,
-    /// The loader `resolve` is called with.
+    /// The data band is `[data_low, data_high)`.
+    pub data_low: usize,
+    pub data_high: usize,
+    /// The loader `resolve` and `resolve_literal` are called with.
     pub loader: *const (),
     /// The image whose text holds a code address. It must be async-signal-safe: the
     /// fault handler calls it.
     pub resolve: unsafe fn(*const (), usize) -> Option<Hit>,
+    /// The independent data owner for a static literal `[ptr, ptr + len)` inside
+    /// `[data_low, data_high)`, retaining one count while pinned. Allocates and
+    /// admits nothing.
+    pub resolve_literal: unsafe fn(*const (), usize, usize) -> Option<LiteralOwner>,
 }
 
 // SAFETY: a registered band is never changed, and `resolve` is async-signal-safe, so it
@@ -70,6 +87,23 @@ pub(crate) fn locate(pc: usize) -> Option<Option<Hit>> {
     }
     // SAFETY: `resolve` takes the loader it was registered with.
     Some(unsafe { (band.resolve)(band.loader, pc) })
+}
+
+/// Resolve a non-empty static literal `[ptr, ptr + len)` against the registered
+/// loader's data band (PACK-9.7). Returns `None` for host/immortal literals or
+/// when no loader is registered. Allocates and admits nothing.
+pub(crate) fn locate_literal(ptr: usize, len: usize) -> Option<LiteralOwner> {
+    let band = BAND.load(Ordering::Acquire);
+    if band.is_null() {
+        return None;
+    }
+    // SAFETY: a registered band is `'static`.
+    let band = unsafe { &*band };
+    if ptr < band.data_low || ptr >= band.data_high {
+        return None;
+    }
+    // SAFETY: `resolve_literal` takes the loader it was registered with.
+    unsafe { (band.resolve_literal)(band.loader, ptr, len) }
 }
 
 /// For each of `pcs` that an image owns, its index in `pcs`, its text offset and the

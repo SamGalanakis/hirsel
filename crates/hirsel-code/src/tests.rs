@@ -125,6 +125,7 @@ fn config() -> Config {
         row: Box::new(|_| Some(double as *const () as usize)),
         instance: Box::new(|_| None),
         prelinked: &[],
+        cause_data: None,
     }
 }
 

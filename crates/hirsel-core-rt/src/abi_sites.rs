@@ -109,3 +109,23 @@ pub(crate) unsafe fn format_cause(cause: &Cause, sources: *const SourceTable) ->
         }
     }
 }
+
+/// Format a recorded [`crate::causes::Cell`] using its own recorded site data
+/// owner when present, falling back to `host_sources` for host/immortal sites
+/// (PACK-9.7). Never looks up live code or active slots.
+///
+/// # Safety
+/// `cell` is live and pins its message and any recorded `CauseData` owner.
+/// If `cell.site_owner()` is null, `host_sources` follows `set_sources`.
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
+pub unsafe fn format_cell(cell: &crate::causes::Cell, host_sources: *const SourceTable) -> String {
+    let site_owner = cell.site_owner();
+    // SAFETY: when non-null, `cell` pins `site_owner` and its immutable `SourceTable`.
+    let sources = if !site_owner.is_null() {
+        unsafe { (*site_owner).source_table() }
+    } else {
+        host_sources
+    };
+    // SAFETY: `cell` pins its message and `sources` is live for this call.
+    unsafe { format_cause(&cell.cause, sources) }
+}

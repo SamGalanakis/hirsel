@@ -21,6 +21,7 @@ mod abi;
 pub use abi::{Signature as NativeSignature, c_param};
 mod calls;
 mod case;
+mod cfg;
 mod contain;
 mod coverage;
 pub use coverage::place_record as place_coverage_record;

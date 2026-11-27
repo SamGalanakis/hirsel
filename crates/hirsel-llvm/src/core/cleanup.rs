@@ -191,9 +191,10 @@ pub(super) fn glue_emitter<'a>(
         aliases: None,
         pointer_origins: Box::default(),
         caller_site,
+        caller_site_owner: int(0),
         debug_location: None,
         anchor: None,
-        relocatable_sites: false,
+        relocatable_sites: items.track_site_owner,
         fixed_sites: &[],
         test_hooks: cfg!(test),
         value_slots: Vec::new(),
@@ -356,6 +357,7 @@ pub(super) fn drop_glue(
             &mut *sink,
             &mut *items,
         );
+        e.capture_caller_site_owner();
         // Nothing direct cleanup reaches can fail; flat fields' glue still
         // takes a status word.
         let status = e.temp(Type::I8);
@@ -410,6 +412,7 @@ pub(super) fn drop_glue(
                 &mut *sink,
                 &mut *items,
             );
+            e.capture_caller_site_owner();
             if module.types[t].repr == Repr::Resource {
                 // LANG-19: a resource is released through the drain by its recipe.
                 let resource = e.load(&Type::Ptr, &payload, 1);
@@ -1213,12 +1216,6 @@ impl FunctionEmitter<'_> {
                 &[ptr(CONTEXT), ptr(base.clone())],
             );
         }
-    }
-    /// Recipes clean under the site their release was called with.
-    pub(super) fn release_site(&mut self) {
-        let list = Value::Local(Local::WORKLIST);
-        let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
-        self.caller_site = self.load(&Type::I64, &at, 8);
     }
     /// Whether cleaning `field` frees at most terminal storage and yields nothing.
     fn flat(&self, field: &FieldTy) -> bool {

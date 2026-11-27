@@ -49,6 +49,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub task_entries: &'c task_entry::Glues,
     pub context: Value,
     pub caller_site: Value,
+    pub caller_site_owner: Value,
     pub anchor: Option<Anchor>,
     pub srcloc: ir::SourceLoc,
     pub site_symbols:
@@ -65,6 +66,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub raise_blocks: Vec<PendingRaise>,
     pub raise_lookup: std::collections::HashMap<(u8, Option<BlockId>, Option<Anchor>), ir::Block>,
     pub site_reference: Option<ir::GlobalValue>,
+    pub cause_owner_reference: Option<ir::GlobalValue>,
     pub propagation: Option<ir::Block>,
     pub cause_slot: Option<ir::StackSlot>,
     pub calls: calls::Calls<'c>,
@@ -93,7 +95,7 @@ pub(super) fn emit(
         tables.statics,
     );
     let blocks: Vec<_> = body.blocks.iter().map(|_| b.create_block()).collect();
-    for (i, cold) in cold_blocks(body).into_iter().enumerate() {
+    for (i, cold) in super::cfg::cold_blocks(body).into_iter().enumerate() {
         if cold {
             b.set_cold_block(blocks[i]);
         }
@@ -229,6 +231,11 @@ pub(super) fn emit(
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
     let caller_site = *params.last().unwrap();
+    let caller_site_owner = sites::caller_site_owner(
+        &mut b,
+        c::source::inherits_site(&input.instances[function.instance.index()]),
+        context,
+    );
     let record_dest = signature
         .record
         .map(|record| abi::record_place(&mut b, record));
@@ -281,6 +288,7 @@ pub(super) fn emit(
         signatures,
         context,
         caller_site,
+        caller_site_owner,
         anchor: None,
         srcloc: ir::SourceLoc::default(),
         site_symbols: &tables.site_symbols,
@@ -296,6 +304,7 @@ pub(super) fn emit(
         raise_blocks: Vec::with_capacity(4),
         raise_lookup: Default::default(),
         site_reference: None,
+        cause_owner_reference: None,
         propagation: None,
         cause_slot: None,
         testing: tables.trace_drops,
@@ -891,62 +900,6 @@ impl Function<'_, '_, '_> {
             _ => self.memory(inst)?,
         }
         Ok(())
-    }
-}
-
-/// Blocks entered only through edges the front marked cold (core-ir Edge::cold)
-/// or from blocks that are cold themselves; Cranelift lays them out last.
-fn cold_blocks(body: &Body) -> Vec<bool> {
-    let n = body.blocks.len();
-    // Each block's predecessors, with whether that entry is a cold edge.
-    let mut incoming: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
-    for b in 0..n {
-        let mut edges = Vec::new();
-        match &body.terminators[b] {
-            Terminator::Jump(e) => edges.push(*e),
-            Terminator::Branch { yes, no, .. } => edges.extend([*yes, *no]),
-            Terminator::Switch {
-                arms, otherwise, ..
-            } => {
-                edges.push(*otherwise);
-                edges.extend(
-                    arms.get(&body.pools.arms)
-                        .unwrap()
-                        .iter()
-                        .map(|arm| arm.edge),
-                );
-            }
-            Terminator::Raise {
-                cleanup: Some(block),
-                ..
-            } => incoming[block.index()].push((b, false)),
-            _ => {}
-        }
-        for e in edges {
-            let e = &body.edges[e.index()];
-            incoming[e.target.index()].push((b, e.cold));
-        }
-        for inst in body.blocks[b].insts.get(&body.insts).unwrap() {
-            if let Some(block) = inst.fail(body) {
-                incoming[block.index()].push((b, false));
-            }
-        }
-    }
-    let mut cold = vec![false; n];
-    loop {
-        let mut changed = false;
-        for b in 1..n {
-            if !cold[b]
-                && !incoming[b].is_empty()
-                && incoming[b].iter().all(|&(from, edge)| edge || cold[from])
-            {
-                cold[b] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            return cold;
-        }
     }
 }
 

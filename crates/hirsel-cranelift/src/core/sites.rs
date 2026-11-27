@@ -9,10 +9,21 @@ use cranelift_codegen::ir::{MemFlagsData, Value};
 #[derive(Default)]
 pub(super) struct Constants {
     data: Option<cranelift_module::DataId>,
+    cause_owner: Option<cranelift_module::DataId>,
     offsets: std::collections::HashMap<(ItemId, u32), u32>,
     words: Vec<(cranelift_module::DataId, u32)>,
 }
 impl Constants {
+    fn cause_owner(&mut self, object: &mut ObjectModule) -> Result<cranelift_module::DataId> {
+        if let Some(id) = self.cause_owner {
+            return Ok(id);
+        }
+        let id = object
+            .declare_data("hirsel_core_cause_owner", Linkage::Import, false, false)
+            .map_err(error)?;
+        self.cause_owner = Some(id);
+        Ok(id)
+    }
     fn get(
         &mut self,
         object: &mut ObjectModule,
@@ -117,6 +128,52 @@ impl Constants {
     }
 }
 
+pub(super) fn caller_site_owner(
+    b: &mut FunctionBuilder<'_>,
+    inherits: bool,
+    context: Value,
+) -> Value {
+    if inherits {
+        context_site_owner(b, context)
+    } else {
+        b.ins().iconst(types::I64, 0)
+    }
+}
+
+pub(super) fn context_site_owner(b: &mut FunctionBuilder<'_>, context: Value) -> Value {
+    b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        context,
+        memory_layout::CONTEXT_SITE_OWNER as i32,
+    )
+}
+
+pub(super) fn store_site_owner(b: &mut FunctionBuilder<'_>, context: Value, owner: Value) {
+    b.ins().store(
+        MemFlagsData::trusted(),
+        owner,
+        context,
+        memory_layout::CONTEXT_SITE_OWNER as i32,
+    );
+}
+
+pub(super) fn worklist_site(b: &mut FunctionBuilder<'_>, list: Value) -> (Value, Value) {
+    let site = b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        list,
+        memory_layout::WORKLIST_SITE as i32,
+    );
+    let owner = b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        list,
+        memory_layout::WORKLIST_SITE_OWNER as i32,
+    );
+    (site, owner)
+}
+
 impl Function<'_, '_, '_> {
     pub fn at_anchor(&mut self, anchor: Option<Anchor>, index: u32) {
         self.anchor = anchor;
@@ -132,12 +189,41 @@ impl Function<'_, '_, '_> {
             .anchor
             .filter(|a| !self.input.items[a.item.index()].package_is("core", "1"))
         else {
-            return Ok(if c::source::inherits_site(self.instance) {
-                self.caller_site
-            } else {
-                self.b.ins().iconst(types::I64, 0)
-            });
+            if c::source::inherits_site(self.instance) {
+                self.b.ins().store(
+                    MemFlagsData::trusted(),
+                    self.caller_site_owner,
+                    self.context,
+                    memory_layout::CONTEXT_SITE_OWNER as i32,
+                );
+                return Ok(self.caller_site);
+            }
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.ins().store(
+                MemFlagsData::trusted(),
+                zero,
+                self.context,
+                memory_layout::CONTEXT_SITE_OWNER as i32,
+            );
+            return Ok(zero);
         };
+        let owner_data = self.site_constants.borrow_mut().cause_owner(self.object)?;
+        let owner_global = *self
+            .cause_owner_reference
+            .get_or_insert_with(|| self.object.declare_data_in_func(owner_data, self.b.func));
+        let owner_slot = self.b.ins().symbol_value(types::I64, owner_global);
+        let owner = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted().with_readonly(),
+            owner_slot,
+            0,
+        );
+        self.b.ins().store(
+            MemFlagsData::trusted(),
+            owner,
+            self.context,
+            memory_layout::CONTEXT_SITE_OWNER as i32,
+        );
         let mut symbols = self.site_symbols.borrow_mut();
         let data = if let Some(&data) = symbols.get(&anchor.item) {
             data

@@ -1212,7 +1212,7 @@ fn helper_main(
         };
         let ended = Ended {
             failed: failed != 0,
-            causes: context.causes.iter().map(CrossedCause::pack).collect(),
+            causes: CrossedCause::pack_chain(&context.causes),
             result: if failed == 0 {
                 item_charge(result.as_ptr(), &rl)
             } else {
@@ -1308,8 +1308,8 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>)
             }
         } else if dest.is_some() {
             for cause in ended.causes {
-                let mut cell = Cell::prepaid(held.partition(charge::CAUSE_CELL));
-                cell.cause = cause.unpack(&*context, &mut held);
+                let cell = Cell::prepaid(held.partition(charge::CAUSE_CELL));
+                cause.unpack_into(&*context, &mut held, cell.as_ptr());
                 chain.append(cell);
             }
         }

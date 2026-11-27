@@ -72,8 +72,10 @@ pub(super) fn pack(
                 signature: entry.signature()?,
                 waits: false,
             }];
-            let image = link::link(header, &inputs, &roots, crate::encode(&*sources)?)
-                .map_err(NativeStop::Module)?;
+            let site_bytes =
+                crate::native_entry::encode_module_sources(&sources).map_err(build_error)?;
+            let image =
+                link::link(header, &inputs, &roots, site_bytes).map_err(NativeStop::Module)?;
             let bytes = image.encode();
             hirsel_mod::Module::parse(&bytes)
                 .map_err(|e| build_error(format_args!("the linked image is {e:?}")))?;

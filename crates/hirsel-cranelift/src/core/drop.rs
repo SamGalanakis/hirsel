@@ -458,15 +458,10 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = if resource {
-            b.ins().load(
-                types::I64,
-                MemFlagsData::trusted(),
-                args[3],
-                memory_layout::WORKLIST_SITE as i32,
-            )
+        let (caller_site, caller_site_owner) = if resource {
+            sites::worklist_site(&mut b, args[3])
         } else {
-            b.ins().iconst(types::I64, 0)
+            (b.ins().iconst(types::I64, 0), b.ins().iconst(types::I64, 0))
         };
         let mut g = Glue {
             b,
@@ -475,6 +470,7 @@ impl Glues {
             glues: self,
             ctx: args[0],
             caller_site,
+            caller_site_owner,
             failed,
             calls: calls::Calls::new(tables, 0),
             point: None,
@@ -517,12 +513,7 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            args[3],
-            memory_layout::WORKLIST_SITE as i32,
-        );
+        let (caller_site, caller_site_owner) = sites::worklist_site(&mut b, args[3]);
         let mut g = Glue {
             b,
             object,
@@ -530,6 +521,7 @@ impl Glues {
             glues: self,
             ctx: args[0],
             caller_site,
+            caller_site_owner,
             failed,
             calls: calls::Calls::new(tables, 0),
             point: None,
@@ -569,15 +561,10 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = if resume {
-            b.ins().load(
-                types::I64,
-                MemFlagsData::trusted(),
-                args[3],
-                memory_layout::WORKLIST_SITE as i32,
-            )
+        let (caller_site, caller_site_owner) = if resume {
+            sites::worklist_site(&mut b, args[3])
         } else {
-            args[2]
+            (args[2], sites::context_site_owner(&mut b, args[0]))
         };
         let mut g = Glue {
             b,
@@ -586,6 +573,7 @@ impl Glues {
             glues: self,
             ctx: args[0],
             caller_site,
+            caller_site_owner,
             failed,
             calls: calls::Calls::new(tables, 0),
             point: resume.then(Vec::new),
@@ -626,6 +614,7 @@ impl Glues {
                 // LANG-19: a resource is released through the drain by its recipe.
                 let p = g.load(args[1], 0);
                 let (recipe, storage) = g.resource_recipe(index);
+                g.store_caller_site_owner();
                 let status = g.call(
                     "hirsel_core_resource_release",
                     &[P, P, P, U, U],
@@ -654,6 +643,7 @@ pub(super) struct Glue<'a, 'b, 'c> {
     glues: &'c Glues,
     pub(super) ctx: Value,
     pub(super) caller_site: Value,
+    pub(super) caller_site_owner: Value,
     failed: Value,
     calls: calls::Calls<'c>,
     /// In fixed resume glue, the cursor after each suspension point numbered
@@ -668,6 +658,9 @@ pub(super) struct Glue<'a, 'b, 'c> {
     list: Option<Value>,
 }
 impl Glue<'_, '_, '_> {
+    fn store_caller_site_owner(&mut self) {
+        sites::store_site_owner(&mut self.b, self.ctx, self.caller_site_owner);
+    }
     fn icon(&mut self, n: u64) -> Value {
         self.b.ins().iconst(types::I64, n as i64)
     }
@@ -748,6 +741,7 @@ impl Glue<'_, '_, '_> {
         let function = &self.tables.input.functions[finalizer.0 as usize];
         let site =
             if c::source::inherits_site(&self.tables.input.instances[function.instance.index()]) {
+                self.store_caller_site_owner();
                 self.caller_site
             } else {
                 self.ctx
@@ -786,6 +780,7 @@ impl Glue<'_, '_, '_> {
     }
     fn drop_type(&mut self, at: Value, t: TypeRef) {
         if let Some(f) = self.glues.drops[t.index()] {
+            self.store_caller_site_owner();
             let status = self.direct(f, &[self.ctx, at, self.caller_site]);
             self.merge(status);
         }
@@ -847,6 +842,7 @@ impl Glue<'_, '_, '_> {
             {
                 let p = self.load(at, 0);
                 let descriptor = self.descriptor(*b, false);
+                self.store_caller_site_owner();
                 let status = self.call(
                     "hirsel_core_release",
                     &[P, P, P, U],
@@ -964,6 +960,7 @@ impl Glue<'_, '_, '_> {
                 // LANG-19: the environment is a drained block; word 0 names
                 // its fixed descriptor.
                 let descriptor = self.load(env, 0);
+                self.store_caller_site_owner();
                 let status = self.call(
                     "hirsel_core_release",
                     &[P, P, P, U],
@@ -1040,6 +1037,7 @@ impl Glue<'_, '_, '_> {
         let function = self.glues.buffers.iter().find(|(b, _)| b == t).unwrap().1;
         let reference = self.calls.reference(self.object, &mut self.b, function);
         let recipe = self.b.ins().func_addr(types::I64, reference);
+        self.store_caller_site_owner();
         let status = self.call(
             "hirsel_core_release_buffer",
             &[P, P, U, P, P, U],

@@ -7,9 +7,13 @@
 
 use std::sync::Mutex;
 
-use hirsel_code::{Config, Loader, Refusal};
+use hirsel_code::{CauseDataHandle, CauseDataOps, Config, Loader, Refusal};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_rt::{code, run_stop::Execution};
+use hirsel_core_rt::{
+    causes::{CauseData, CauseDataRef},
+    code,
+    run_stop::Execution,
+};
 use hirsel_mod::Mask;
 
 pub mod rows;
@@ -19,9 +23,33 @@ hirsel_guard::install!();
 #[cfg(test)]
 mod tests;
 
+fn create_cause_data(literals: &[u8], sites: &[u8]) -> Option<CauseDataHandle> {
+    let data = CauseData::new(literals, sites)?;
+    let slot_addr = data.slot_addr();
+    let (ro_ptr, ro_len) = data.literals();
+    let owner = CauseDataRef::into_raw(data).addr();
+    Some(CauseDataHandle {
+        owner,
+        slot_addr,
+        ro_literals_base: ro_ptr.addr(),
+        ro_literals_len: ro_len,
+    })
+}
+
+unsafe fn retain_cause_data(owner: usize) {
+    // SAFETY: `hirsel-code` calls this under hazard protection while the owner is live.
+    unsafe { CauseData::retain(std::ptr::with_exposed_provenance(owner)) };
+}
+
+unsafe fn release_cause_data(owner: usize) {
+    // SAFETY: `hirsel-code` transfers the image's owned count after hazard drain.
+    unsafe { CauseData::release(std::ptr::with_exposed_provenance(owner)) };
+}
+
 /// A loader configuration for this host image: this build's runtime ABI, its row
-/// addresses, no prelinked images and the default batch and retired budget. `policy` is
-/// the pool's policy bits (PACK-2): a module loads only when its own are equal.
+/// addresses, no prelinked images, independent R/NX cause data owners (PACK-9.7),
+/// and the default batch and retired budget. `policy` is the pool's policy bits
+/// (PACK-2): a module loads only when its own are equal.
 pub fn config(policy: u64, mask: Mask, band_bytes: usize, installed_bytes: u64) -> Config {
     Config {
         abi: hirsel_mod::abi(),
@@ -34,6 +62,11 @@ pub fn config(policy: u64, mask: Mask, band_bytes: usize, installed_bytes: u64) 
         row: Box::new(rows::address),
         instance: Box::new(|_| None),
         prelinked: &[],
+        cause_data: Some(CauseDataOps {
+            create: create_cause_data,
+            retain: retain_cause_data,
+            release: release_cause_data,
+        }),
     }
 }
 
@@ -48,9 +81,9 @@ pub enum Refused {
 
 static LOADER: Mutex<Option<&'static Loader>> = Mutex::new(None);
 
-/// Make this process's loader and register its text band with the runtime, so that the
-/// fault handler and the profile sampler resolve code addresses through it. The loader
-/// lives as long as the process.
+/// Make this process's loader and register its text and data bands with the runtime,
+/// so that the fault handler, profile sampler, and cause recorder resolve addresses
+/// through it. The loader lives as long as the process.
 pub fn start(config: Config) -> Result<&'static Loader, Refused> {
     let mut slot = LOADER.lock().unwrap();
     if slot.is_some() {
@@ -59,11 +92,15 @@ pub fn start(config: Config) -> Result<&'static Loader, Refused> {
     let loader: &'static Loader =
         Box::leak(Box::new(Loader::new(config).map_err(Refused::Loader)?));
     let (low, high) = loader.text_band();
+    let (data_low, data_high) = loader.data_band();
     code::register(Box::leak(Box::new(code::Band {
         low,
         high,
+        data_low,
+        data_high,
         loader: std::ptr::from_ref(loader).cast(),
         resolve,
+        resolve_literal,
     })))
     .map_err(Refused::Runtime)?;
     *slot = Some(loader);
@@ -80,6 +117,19 @@ unsafe fn resolve(loader: *const (), pc: usize) -> Option<code::Hit> {
     Some(code::Hit {
         digest: hit.digest,
         offset: hit.offset,
+    })
+}
+
+/// The loader's lock-free data-band literal lookup in the shape the runtime calls.
+///
+/// # Safety
+/// `loader` is the process's loader.
+unsafe fn resolve_literal(loader: *const (), ptr: usize, len: usize) -> Option<code::LiteralOwner> {
+    // SAFETY: the caller passes the loader `start` registered, which is never dropped.
+    let (owner, relocated) = unsafe { &*loader.cast::<Loader>() }.resolve_literal(ptr, len)?;
+    Some(code::LiteralOwner {
+        owner: std::ptr::with_exposed_provenance(owner),
+        relocated: std::ptr::with_exposed_provenance(relocated),
     })
 }
 

@@ -1,7 +1,7 @@
 //! What the loader does with dead code (PACK-4 step 5): retiring a dead image and
 //! recycling a dead cohort.
 
-use super::{ContentHash, Image, Refusal, Shared, Slab, State, host};
+use super::{CauseDataHandle, ContentHash, Image, Refusal, Shared, Slab, State, host};
 use host::Access;
 use std::ptr::null_mut;
 use std::sync::Weak;
@@ -19,9 +19,13 @@ pub(super) struct Retire {
     pub(super) text: (usize, usize),
     /// Includes the private tail of a partial final AArch64 instruction.
     pub(super) owned: usize,
+    /// Its literal range `(offset, length)` in the data band (0, 0 when none).
+    pub(super) data: (usize, usize),
     pub(super) bytes: u64,
     /// Whether its bytes counted against the retired-code budget when it died.
     pub(super) retired: bool,
+    /// Independent R/NX cause data owner held by this image (released at reclaim).
+    pub(super) cause_data: Option<CauseDataHandle>,
 }
 
 // SAFETY: `next` is read only by the thread that took the whole pending list.
@@ -34,7 +38,12 @@ impl Drop for Shared {
         let mut next = *self.pending.get_mut();
         while !next.is_null() {
             // SAFETY: the list owns each record on it and nothing else reaches the list.
-            next = unsafe { Box::from_raw(next) }.next;
+            let record = unsafe { Box::from_raw(next) };
+            next = record.next;
+            if let (Some(handle), Some(ops)) = (record.cause_data, &self.config.cause_data) {
+                // SAFETY: `Shared` is being dropped so no lookup can observe this owner.
+                unsafe { (ops.release)(handle.owner) };
+            }
         }
         if self.config.band_bytes > 0 {
             host::release(self.base, 2 * self.config.band_bytes);
@@ -121,6 +130,23 @@ impl Shared {
             if cohort.state == State::Published {
                 self.table.change((at, at + length), &[]);
             }
+            if record.data.1 != 0 {
+                if let Some(pos) = cohort.data_owners.iter().position(|r| {
+                    r.start as usize == record.data.0 && r.length as usize == record.data.1
+                }) {
+                    cohort.data_owners.swap_remove(pos);
+                }
+                if cohort.state == State::Published {
+                    // Removes the row and waits for all hazard slots before releasing `cause_data`.
+                    self.data_table
+                        .change((record.data.0, record.data.0 + record.data.1), &[]);
+                }
+            }
+            if let (Some(handle), Some(ops)) = (record.cause_data, &self.config.cause_data) {
+                // SAFETY: image's data-table row is gone and no hazard reader holds it;
+                // release the image's one count (surviving causes retain their own).
+                unsafe { (ops.release)(handle.owner) };
+            }
             if record.owned != 0 {
                 self.trap(at, at + record.owned);
                 if self.synchronize(at, at + record.owned).is_err() {
@@ -142,8 +168,9 @@ impl Shared {
     /// Return a dead cohort’s runs after the last successful trap fill (PACK-4 step 5).
     pub(super) fn recycle(&self, slab: &mut Slab, id: u64) {
         let cohort = slab.cohorts.remove(&id).unwrap();
-        // No reader of the PC table names the cohort once this returns.
+        // No reader of the PC table or data table names the cohort once this returns.
         self.table.change(cohort.text, &[]);
+        self.data_table.change(cohort.data, &[]);
         // Keep the file-backed trap bytes intact until the first overwrite for reuse.
         slab.text.give(cohort.text.0, cohort.text.1 - cohort.text.0);
         let (start, end) = cohort.data;

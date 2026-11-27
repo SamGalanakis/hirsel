@@ -304,3 +304,558 @@ fn a_sampled_stack_resolves_its_loaded_code_frames() {
     let high = u64::from_le_bytes(digest[8..16].try_into().unwrap());
     assert_eq!(out, [1, 2, low, high, 3, 0, low, high]);
 }
+
+/// Entry that records a cause using its own `hirsel_core_cause_owner` import slot
+/// and a literal stored in its own data band (or a caller-supplied literal pointer):
+/// `fn(ctx, site_ordinal, foreign_lit_ptr_or_null, foreign_lit_len)`.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct RaiseEntry(unsafe extern "C" fn(*mut hirsel_core_rt::Context, u64, *const u8, u64));
+// SAFETY: every L2 law module with this signature implements the C ABI above.
+unsafe impl Signature for RaiseEntry {
+    const DIGEST: ContentHash = ContentHash([0x2b; 32]);
+}
+
+/// Build an L2 law module whose entry:
+/// 1. Loads `*hirsel_core_cause_owner` (import 0) and writes it to `[ctx + CONTEXT_SITE_OWNER]`.
+/// 2. If `rdx/x2` (`foreign_lit_ptr`) is null, loads the module's own literal pointer
+///    and length from `data` after the import slots; otherwise uses `(foreign_lit_ptr, foreign_lit_len)`.
+/// 3. Tail-calls `hirsel_core_raise_string(ctx, site_ordinal, data_ptr, len, 0)` (import 1).
+fn cause_module(seed: u64, literal: &[u8], sites: Vec<u8>) -> Vec<u8> {
+    let owner_row = hirsel_mod::row("hirsel_core_cause_owner").unwrap();
+    let raise_row = hirsel_mod::row("hirsel_core_raise_string").unwrap();
+    let imports = vec![Import::Row(owner_row), Import::Row(raise_row)];
+    // `Image::encode` prepends `8 * imports.len()` = 16 bytes of import slots.
+    // Our `data` layout after the 16-byte import slots:
+    //   data_offset 16..24: literal length (u64 LE)
+    //   data_offset 24..24 + literal.len(): literal UTF-8 bytes
+    let mut data = Vec::with_capacity(8 + literal.len());
+    data.extend_from_slice(&(literal.len() as u64).to_le_bytes());
+    data.extend_from_slice(literal);
+
+    let site_owner_off = hirsel_core_rt::abi_layout::CONTEXT_SITE_OWNER as u32;
+    let (text, text_fixups) = if x86() {
+        // SysV x86-64: rdi=ctx, rsi=site, rdx=foreign_ptr, rcx=foreign_len
+        // Call hirsel_core_raise_string(rdi=ctx, rsi=site, rdx=ptr, rcx=len, r8=0)
+        let mut t = Vec::new();
+        let mut fx = Vec::new();
+        // mov rax, [rip + slot 0]  ; &cause_owner_slot
+        t.extend_from_slice(&[0x48, 0x8b, 0x05, 0, 0, 0, 0]);
+        fx.push(Fixup {
+            site: 3,
+            kind: Kind::Rel32Data,
+            bias: 4,
+            addend: 0,
+        });
+        // mov rax, [rax]           ; CauseData*
+        t.extend_from_slice(&[0x48, 0x8b, 0x00]);
+        // mov [rdi + CONTEXT_SITE_OWNER], rax  (disp32)
+        t.extend_from_slice(&[0x48, 0x89, 0x87]);
+        t.extend_from_slice(&site_owner_off.to_le_bytes());
+        // test rdx, rdx ; jnz +14 (skip own-literal load: 7-byte lea + 7-byte mov)
+        t.extend_from_slice(&[0x48, 0x85, 0xd2, 0x75, 14]);
+        // lea rdx, [rip + data_offset 24]
+        let lea_site = t.len() as u32 + 3;
+        t.extend_from_slice(&[0x48, 0x8d, 0x15, 0, 0, 0, 0]);
+        fx.push(Fixup {
+            site: lea_site,
+            kind: Kind::Rel32Data,
+            bias: 4,
+            addend: 24,
+        });
+        // mov rcx, [rip + data_offset 16]
+        let len_site = t.len() as u32 + 3;
+        t.extend_from_slice(&[0x48, 0x8b, 0x0d, 0, 0, 0, 0]);
+        fx.push(Fixup {
+            site: len_site,
+            kind: Kind::Rel32Data,
+            bias: 4,
+            addend: 16,
+        });
+        // xor r8d, r8d             ; capacity = 0
+        t.extend_from_slice(&[0x45, 0x31, 0xc0]);
+        // jmp [rip + slot 1]       ; hirsel_core_raise_string
+        let jmp_site = t.len() as u32 + 2;
+        t.extend_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
+        fx.push(Fixup {
+            site: jmp_site,
+            kind: Kind::Rel32Data,
+            bias: 4,
+            addend: 8,
+        });
+        (t, fx)
+    } else {
+        // AAPCS64: x0=ctx, x1=site, x2=foreign_ptr, x3=foreign_len
+        // Call hirsel_core_raise_string(x0=ctx, x1=site, x2=ptr, x3=len, x4=0)
+        assert_eq!(site_owner_off % 8, 0);
+        let imm12 = (site_owner_off / 8) & 0xfff;
+        let str_x9_ctx = 0xf900_0009 | (imm12 << 10); // str x9, [x0, #CONTEXT_SITE_OWNER]
+        let insts: [u32; 12] = [
+            0x9000_0009, //  0: adrp x9, slot 0
+            0xf940_0129, //  4: ldr  x9, [x9, lo12(slot 0)]
+            0xf940_0129, //  8: ldr  x9, [x9]
+            str_x9_ctx,  // 12: str  x9, [x0, #CONTEXT_SITE_OWNER]
+            0xb500_00a2, // 16: cbnz x2, +20 (skip 4 insts -> offset 36)
+            0x9000_0002, // 20: adrp x2, data+24
+            0x9100_0042, // 24: add  x2, x2, lo12(data+24)
+            0x9000_0003, // 28: adrp x3, data+16
+            0xf940_0063, // 32: ldr  x3, [x3, lo12(data+16)]
+            0xd280_0004, // 36: mov  x4, #0
+            0x9000_0010, // 40: adrp x16, slot 1
+            0xf940_0210, // 44: ldr  x16, [x16, lo12(slot 1)]
+        ];
+        let mut all = insts.to_vec();
+        all.push(0xd61f_0200); // 48: br x16
+        let fx = vec![
+            Fixup {
+                site: 0,
+                kind: Kind::PageData,
+                bias: 0,
+                addend: 0,
+            },
+            Fixup {
+                site: 4,
+                kind: Kind::Low12LoadData,
+                bias: 0,
+                addend: 0,
+            },
+            Fixup {
+                site: 20,
+                kind: Kind::PageData,
+                bias: 0,
+                addend: 24,
+            },
+            Fixup {
+                site: 24,
+                kind: Kind::Low12AddData,
+                bias: 0,
+                addend: 24,
+            },
+            Fixup {
+                site: 28,
+                kind: Kind::PageData,
+                bias: 0,
+                addend: 16,
+            },
+            Fixup {
+                site: 32,
+                kind: Kind::Low12LoadData,
+                bias: 0,
+                addend: 16,
+            },
+            Fixup {
+                site: 40,
+                kind: Kind::PageData,
+                bias: 0,
+                addend: 8,
+            },
+            Fixup {
+                site: 44,
+                kind: Kind::Low12LoadData,
+                bias: 0,
+                addend: 8,
+            },
+        ];
+        (words(&all), fx)
+    };
+
+    let mut coreir = [0u8; 32];
+    coreir[..8].copy_from_slice(&seed.to_le_bytes());
+    hirsel_mod::Image {
+        header: Header {
+            target: hirsel_code::TARGET,
+            backend: Backend::Cranelift,
+            policy: 0,
+            abi: hirsel_mod::abi(),
+            compiler: ContentHash([2; 32]),
+            coreir: ContentHash(coreir),
+            text_align: 64,
+            data_align: 64,
+        },
+        spans: vec![Span {
+            start: 0,
+            length: text.len() as u32,
+        }],
+        names: vec!["raise_entry".into()],
+        text,
+        data,
+        imports,
+        text_fixups,
+        data_fixups: vec![],
+        cfi: vec![],
+        sites,
+        entries: vec![Entry {
+            identity: IDENTITY,
+            signature: RaiseEntry::DIGEST,
+            text: 0,
+            descriptor: NO_DESCRIPTOR,
+            waits: false,
+        }],
+    }
+    .encode()
+}
+
+/// Shared host `core`-style helper that inherits its caller's `(site, site_owner)`.
+/// Even if an unrelated active slot changes before it raises, it must restore the
+/// captured `caller_site_owner` and never infer from the active slot or ordinal.
+unsafe fn shared_core_inheriting_helper(
+    ctx: *mut hirsel_core_rt::Context,
+    caller_site: u64,
+    between: impl FnOnce(),
+) {
+    // SAFETY: mirrors Cranelift/LLVM inheriting function entry capture + restore.
+    unsafe {
+        let saved_owner = (*ctx).site_owner;
+        between();
+        (*ctx).site_owner = saved_owner;
+        hirsel_core_rt::abi::hirsel_core_raise(
+            ctx,
+            hirsel_core_rt::causes::Cause::new(hirsel_core_rt::causes::BOUNDS, caller_site),
+        );
+    }
+}
+
+/// PACK-9.7 (L2): one cause chain containing causes from two releases with the
+/// same site ordinal, a foreign literal at the other release's site, a full long
+/// literal (FAIL-10 zero truncation), a moved heap string, a shared-core inherited
+/// site, and a failing finalizer. Exhausts the payer before recording, unloads and
+/// reclaims 100% of RX while the chain survives, reuses the addresses, then formats
+/// and drops the chain verifying exact bytes, ordinals, order, and payer refund.
+#[test]
+fn l2_owned_cause_metadata_survives_full_rx_reclaim_and_address_reuse() {
+    use hirsel_core_layout::source_positions;
+    use hirsel_core_rt::{
+        Context,
+        abi::*,
+        abi_sites,
+        block::Block,
+        causes::{self, Cause, Causes},
+    };
+
+    let _alone = alone();
+    let loader = loader();
+    let _ = loader.reclaim();
+    assert_eq!(loader.installed(), 0);
+
+    // Release A and Release B share the EXACT SAME site ordinal `SAME_ORDINAL = 15`,
+    // mapping to completely different source files and line:column positions.
+    const SAME_ORDINAL: u64 = 15;
+    const FIN_ORDINAL: u64 = 12;
+    let src_a = "fn alpha()\n  fail(\"long\")\n"; // byte 14 (site 1+14=15) => line 2, col 4
+    let src_b_main = "a\nb\nc\nd\ne\nf\n  fail(msg)\n"; // byte 14 (site 1+14=15) => line 7, col 3
+    let src_b_fin = "fn fin()\n  1/0\n"; // starts after src_b_main (1 + 25 = 26); wait: put fin at start 1? No, use byte 11 => line 2, col 3!
+    let enc_a = source_positions::encode(src_a);
+    let enc_b = source_positions::encode(src_b_main);
+    let enc_b_fin = source_positions::encode(src_b_fin);
+    let sites_a = source_positions::encode_source_table(&[("alpha/mod.hirsel", 1, &enc_a)]);
+    let fin_start = 1 + src_b_main.len() as u64 + 1;
+    let fin_site = fin_start + FIN_ORDINAL - 1;
+    let sites_b = source_positions::encode_source_table(&[
+        ("beta/service.hirsel", 1, &enc_b),
+        ("beta/finalizer.hirsel", fin_start, &enc_b_fin),
+    ]);
+
+    // Full >8 KiB literal in Release A to prove FAIL-10 zero truncation.
+    let long_lit_a: String = (0..300)
+        .map(|i| format!("[A-chunk-{i:03}:0123456789abcdef]"))
+        .collect();
+    assert!(long_lit_a.len() > 8192);
+    let lit_b = "release-b-own-literal";
+
+    let mod_a = cause_module(101, long_lit_a.as_bytes(), sites_a);
+    let mod_b = cause_module(102, lit_b.as_bytes(), sites_b);
+    let code_a = load::<RaiseEntry>(&mod_a).unwrap();
+    let code_b = load::<RaiseEntry>(&mod_b).unwrap();
+    let text_a = code_a.text();
+    let data_a_lit_ptr = (code_a.data() + 24) as *const u8;
+    let owner_a_ptr = code_a.cause_owner().unwrap() as *const causes::CauseData;
+    let owner_b_ptr = code_b.cause_owner().unwrap() as *const causes::CauseData;
+    assert_ne!(owner_a_ptr, owner_b_ptr);
+    assert!(loader.installed() > 0);
+
+    // Put Release A in a slot so we can swap the active slot to Release B mid-flight
+    // (proving inherited sites never infer from the currently active slot).
+    let slot = loader.slot::<RaiseEntry>();
+    assert_eq!(slot.activate(0, code_a.clone()), Ok(1));
+
+    // Set up a task context with 5 prepaid cells (1 primary + 4 resources whose
+    // finalizer cells let us build one multi-cause chain cleanly under zero payer room).
+    let mut ctx = Context::new(8192);
+    causes::task_start(&mut ctx).unwrap();
+    let after_task_start = ctx.available();
+
+    // Allocate a moved heap String BEFORE exhausting the payer.
+    let heap_msg = b"moved-heap-string-survives-unload-and-refunds";
+    let heap_cap = 64u64;
+    let heap_block = Block::new(&ctx, Some(heap_cap), heap_cap as usize, 8).unwrap();
+    let heap_ptr = heap_block.into_raw().as_ptr();
+    // SAFETY: `heap_ptr` is an exclusively owned 64-byte buffer.
+    unsafe {
+        std::ptr::copy_nonoverlapping(heap_msg.as_ptr(), heap_ptr, heap_msg.len());
+    }
+
+    // Reserve 4 resource cells (for causes 2..=5 in the single chain).
+    let resources: Vec<_> = (0..4)
+        .map(|_| unsafe { causes::resource_new(&ctx, 8, 0, 8, 8) }.unwrap())
+        .collect();
+
+    // EXHAUST the payer to 0 available bytes BEFORE recording ANY cause!
+    let leftover = ctx.available();
+    let drain = Block::new(&ctx, Some(leftover), leftover as usize, 8).unwrap();
+    assert_eq!(ctx.available(), 0);
+    assert!(Block::new(&ctx, Some(8), 8, 8).is_err());
+
+    // 1. Primary cause: Release A raises its full >8 KiB literal at SAME_ORDINAL.
+    code_a.with_entry(|f| unsafe { (f.0)(&mut ctx, SAME_ORDINAL, std::ptr::null(), 0) });
+
+    // 2. Foreign literal at the other release's site: Release B raises Release A's
+    //    literal (pointing into Release A's data band while A is pinned) at SAME_ORDINAL!
+    unsafe {
+        causes::finalizer_begin(&mut ctx, resources[0]);
+        code_b.with_entry(|f| {
+            (f.0)(
+                &mut ctx,
+                SAME_ORDINAL,
+                data_a_lit_ptr,
+                long_lit_a.len() as u64,
+            )
+        });
+        causes::finalizer_end(&mut ctx, resources[0]);
+        causes::resource_free(resources[0], 8);
+    }
+
+    // 3. Shared host `core`-style helper inheriting Release A's site while an active
+    //    slot concurrently swaps from Release A to Release B and clobbers ctx.site_owner!
+    unsafe {
+        causes::finalizer_begin(&mut ctx, resources[1]);
+        ctx.site_owner = owner_a_ptr;
+        shared_core_inheriting_helper(&mut ctx, SAME_ORDINAL, || {
+            assert_eq!(slot.activate(1, code_b.clone()), Ok(2));
+            ctx.site_owner = owner_b_ptr; // Simulate an inner call touching Release B.
+        });
+        causes::finalizer_end(&mut ctx, resources[1]);
+        causes::resource_free(resources[1], 8);
+    }
+
+    // 4. Moved heap string raised at Release B's site (capacity > 0 -> moved buffer).
+    unsafe {
+        causes::finalizer_begin(&mut ctx, resources[2]);
+        ctx.site_owner = owner_b_ptr;
+        hirsel_core_raise_string(
+            &mut ctx,
+            SAME_ORDINAL,
+            heap_ptr,
+            heap_msg.len() as u64,
+            heap_cap,
+        );
+        causes::finalizer_end(&mut ctx, resources[2]);
+        causes::resource_free(resources[2], 8);
+    }
+
+    // 5. Failing finalizer from Release B at `fin_site`.
+    unsafe {
+        causes::finalizer_begin(&mut ctx, resources[3]);
+        ctx.site_owner = owner_b_ptr;
+        hirsel_core_raise(&mut ctx, Cause::new(causes::DIVISION, fin_site));
+        causes::finalizer_end(&mut ctx, resources[3]);
+        causes::resource_free(resources[3], 8);
+    }
+
+    // Take the chain out (simulating splice/catch/join delivery) and drop `drain`.
+    // SAFETY: `ctx` owns this complete chain.
+    let raw_chain = unsafe { hirsel_core_causes_take(&mut ctx) };
+    drop(drain);
+    // While the 5-cause chain survives, 4 extra resource cells (4 * 32) + 64-byte heap
+    // string + the primary cell (already charged in `after_task_start`) remain charged.
+    assert_eq!(ctx.available(), after_task_start - 4 * 32 - heap_cap);
+
+    // UNLOAD & RECLAIM 100% of RX while the cause chain survives!
+    drop(slot);
+    drop(code_a);
+    drop(code_b);
+    loader.reclaim().unwrap();
+    assert_eq!(
+        loader.installed(),
+        0,
+        "100% of RX must reclaim while causes survive"
+    );
+    assert_eq!(loader.retired(), 0);
+
+    // REUSE the dead text & data addresses with fresh modules!
+    let mut reused_text = false;
+    let mut churn_kept = Vec::new();
+    for k in 200..280u64 {
+        let replacement = cause_module(k, b"OVERWRITTEN-REUSED-DATA-BYTES", vec![]);
+        let handle = load::<RaiseEntry>(&replacement).unwrap();
+        if handle.text() == text_a {
+            reused_text = true;
+        }
+        churn_kept.push(handle);
+        if reused_text {
+            break;
+        }
+    }
+    assert!(
+        reused_text,
+        "recycled text range must be reused before formatting"
+    );
+    drop(churn_kept);
+    loader.reclaim().unwrap();
+    assert_eq!(loader.installed(), 0);
+
+    // Now format and verify EVERY cause in the surviving chain!
+    // SAFETY: `raw_chain` is exclusively owned.
+    let chain = unsafe { Causes::from_raw(raw_chain) };
+    let cells: Vec<&causes::Cell> = chain.iter_cells().collect();
+    assert_eq!(cells.len(), 5);
+
+    // Exact unchanged release-local site ordinals (zero address, owner tag, or prefix).
+    let ordinals: Vec<u64> = cells.iter().map(|c| c.cause().site).collect();
+    assert_eq!(
+        ordinals,
+        vec![
+            SAME_ORDINAL,
+            SAME_ORDINAL,
+            SAME_ORDINAL,
+            SAME_ORDINAL,
+            fin_site
+        ]
+    );
+
+    // Cell 1 (foreign literal at B's site) must be a tagged pair (B, A); cell 0 single A.
+    assert_eq!(cells[0].owner_word() & 1, 0);
+    assert_eq!(cells[1].owner_word() & 1, 1);
+
+    // Exact formatted diagnostics against source fixtures!
+    let formatted: Vec<String> = cells
+        .iter()
+        .map(|cell| unsafe { abi_sites::format_cell(cell, std::ptr::null()) })
+        .collect();
+    assert_eq!(
+        formatted[0],
+        format!("Fail({long_lit_a:?}) at alpha/mod.hirsel:2:4")
+    );
+    assert_eq!(
+        formatted[1],
+        format!("Fail({long_lit_a:?}) at beta/service.hirsel:7:3")
+    );
+    assert_eq!(formatted[2], "Bounds at alpha/mod.hirsel:2:4");
+    assert_eq!(
+        formatted[3],
+        "Fail(\"moved-heap-string-survives-unload-and-refunds\") at beta/service.hirsel:7:3"
+    );
+    assert_eq!(formatted[4], "Division at beta/finalizer.hirsel:2:3");
+
+    // Detached message bytes copy owns its backing and survives chain drop.
+    let detached = cells[1].detached_message_bytes().unwrap();
+    assert_eq!(detached, long_lit_a.as_bytes());
+
+    // Drop the chain -> releases CauseData owners + moved heap string + all 5 cells!
+    drop(chain);
+    assert_eq!(detached, long_lit_a.as_bytes());
+    // All 5 cells (including primary cell's 32 bytes) + 64-byte moved heap string refunded!
+    assert_eq!(
+        ctx.available(),
+        after_task_start + 32,
+        "full payer refund after dropping cause chain"
+    );
+    drop(ctx);
+    assert_eq!(loader.installed(), 0);
+}
+
+/// PACK-9.7 (L2): 10^5 cause-surviving unload/reclaim/reuse/format/drop rounds
+/// with zero RX retention and bounded resident memory.
+#[test]
+fn l2_cause_surviving_reuse_churn_100k() {
+    use hirsel_core_layout::source_positions;
+    use hirsel_core_rt::{
+        Context,
+        abi::hirsel_core_causes_take,
+        abi_sites,
+        causes::{self, Causes},
+    };
+
+    let _alone = alone();
+    let loader = loader();
+    let _ = loader.reclaim();
+    assert_eq!(loader.installed(), 0);
+
+    const ROUNDS: usize = 100_000;
+    // Build a small ring of distinct modules with distinct source paths & literals
+    // so every round unloads, reclaims 100% RX, and recycles slab cohorts.
+    let templates: Vec<(Vec<u8>, String)> = (0..4usize)
+        .map(|i| {
+            let path = format!("churn/r{i}.hirsel");
+            let lit = format!("churn-literal-{i}-payload");
+            let enc = source_positions::encode("header\n  fail(x)\n");
+            let sites = source_positions::encode_source_table(&[(&path, 1, &enc)]);
+            let bytes = cause_module(10_000 + i as u64, lit.as_bytes(), sites);
+            let parsed = hirsel_mod::Module::parse(&bytes).unwrap();
+            loader.admit(parsed.header.key(), hirsel_mod::digest(&bytes));
+            let expected = format!("Fail({lit:?}) at {path}:2:3");
+            (bytes, expected)
+        })
+        .collect();
+
+    let mut ctx = Context::new(4096);
+    causes::task_start(&mut ctx).unwrap();
+    let baseline_avail = ctx.available();
+
+    // Warm up a few rounds before sampling RSS baseline (resident KiB via host seam).
+    let mut rss_after_warmup = 0u64;
+    let read_rss_kib = hirsel_core_rt::host::resident_kib;
+
+    let mut first_text = 0usize;
+    let mut reused_count = 0usize;
+    for round in 0..ROUNDS {
+        let (bytes, expected) = &templates[round % templates.len()];
+        let code = loader.load::<RaiseEntry>(bytes, &IDENTITY, true).unwrap();
+        if round == 0 {
+            first_text = code.text();
+        } else if code.text() == first_text {
+            reused_count += 1;
+        }
+        // Record a cause using `isolate` so the task keeps its primary cell across all 10^5 rounds.
+        let entered = unsafe { hirsel_core_rt::isolate::hirsel_core_isolate_enter(&mut ctx) };
+        assert!(entered.entered);
+        code.with_entry(|f| unsafe { (f.0)(&mut ctx, 10, std::ptr::null(), 0) });
+        let caught = unsafe { hirsel_core_rt::isolate::hirsel_core_isolate_catch(&mut ctx) };
+        assert_eq!(caught.status, 0);
+
+        // Unload & reclaim 100% of RX while the caught cause survives!
+        drop(code);
+        loader.reclaim().unwrap();
+        assert_eq!(loader.installed(), 0);
+
+        // Format and drop the surviving cause after RX is gone.
+        // SAFETY: `caught.causes` is exclusively owned.
+        let chain = unsafe { Causes::from_raw(caught.causes) };
+        let cell = chain.iter_cells().next().unwrap();
+        assert_eq!(cell.cause().site, 10);
+        assert_eq!(
+            unsafe { abi_sites::format_cell(cell, std::ptr::null()) },
+            *expected
+        );
+        drop(chain);
+
+        if round == 500 {
+            rss_after_warmup = read_rss_kib();
+        }
+    }
+    let rss_end = read_rss_kib();
+    let raw_left = unsafe { hirsel_core_causes_take(&mut ctx) };
+    assert!(raw_left.is_null());
+    assert_eq!(ctx.available(), baseline_avail);
+    drop(ctx);
+    assert_eq!(loader.installed(), 0);
+    assert!(
+        reused_count > 0,
+        "slab text addresses must be recycled across 10^5 rounds"
+    );
+    // Ensure no unbounded memory leak across 10^5 rounds (< 32 MiB RSS growth after warmup).
+    assert!(
+        rss_end.saturating_sub(rss_after_warmup) < 32 * 1024,
+        "RSS grew by {} KiB across {ROUNDS} rounds (warmup={rss_after_warmup}, end={rss_end})",
+        rss_end.saturating_sub(rss_after_warmup)
+    );
+}

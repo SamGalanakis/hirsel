@@ -19,13 +19,15 @@ mod fixup;
 mod host;
 mod retire;
 mod runs;
+mod slot;
 mod table;
 
 use host::Access;
 use retire::Retire;
 use runs::Runs;
+pub use slot::{Slot, Worker};
 pub use table::Hit;
-use table::{Owner, Table};
+use table::{DataRow, DataTable, Owner, Table};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -72,6 +74,32 @@ pub unsafe trait Signature: Copy {
     const DIGEST: ContentHash;
 }
 
+/// Opaque handle to one image's independent R/NX cause data owner (PACK-9.7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CauseDataHandle {
+    /// Non-zero aligned pointer to the host's native `CauseData`.
+    pub owner: usize,
+    /// Address of the immutable 8-byte word holding `owner`, bound to
+    /// `hirsel_core_cause_owner` in the image's import table.
+    pub slot_addr: usize,
+    /// Base address of the copied RO literal bytes inside `owner`'s mapping.
+    pub ro_literals_base: usize,
+    /// Byte length of the copied RO literal bytes.
+    pub ro_literals_len: usize,
+}
+
+/// Host callbacks managing per-image independent R/NX cause data owners (PACK-9.7).
+/// `hirsel-code` does not link `hirsel-core-rt`; `hirsel-pack` supplies these.
+#[derive(Clone, Copy)]
+pub struct CauseDataOps {
+    /// Establish an independent R/NX data owner before publishing an entry.
+    pub create: fn(literals: &[u8], sites: &[u8]) -> Option<CauseDataHandle>,
+    /// Retain one count on `owner` while pinned under hazard protection.
+    pub retain: unsafe fn(owner: usize),
+    /// Release the image's count on `owner` after its data-table row is gone.
+    pub release: unsafe fn(owner: usize),
+}
+
 /// What a loader admits and how much it may hold.
 pub struct Config {
     pub abi: ContentHash,
@@ -90,6 +118,8 @@ pub struct Config {
     pub instance: Box<dyn Fn(&ContentHash) -> Option<usize> + Send + Sync>,
     /// The images compiled into the host image (PACK-5).
     pub prelinked: &'static [Prelinked],
+    /// Independent R/NX cause data owner callbacks (PACK-9.7).
+    pub cause_data: Option<CauseDataOps>,
 }
 
 /// An image that was compiled ahead of time and linked into the host image.
@@ -127,6 +157,8 @@ struct Cohort {
     retired: u64,
     /// Every live image installed in it: its PC table row and its module digest.
     images: Vec<(Owner, ContentHash)>,
+    /// Every live image's literal-range row in the data band (PACK-9.7).
+    data_owners: Vec<DataRow>,
     /// A failed retirement permanently withholds both runs.
     withheld: bool,
 }
@@ -165,6 +197,8 @@ struct Shared {
     retired: Mutex<u64>,
     updates: AtomicU64,
     table: Table,
+    /// Lock-free lookup from data-band literal addresses to independent `CauseData` owners.
+    data_table: DataTable,
     /// The dead images whose retirement the loader has not done yet.
     pending: AtomicPtr<Retire>,
     /// Retired instruction bytes whose post-write synchronization failed.
@@ -178,7 +212,9 @@ struct Image {
     /// Its cohort; a prelinked image has none.
     cohort: Option<u64>,
     text: usize,
+    data: usize,
     bytes: u64,
+    cause_data: Option<CauseDataHandle>,
     /// Each entry's identity, signature and address.
     entries: Vec<(ContentHash, ContentHash, usize)>,
     /// How many slots name this image, and whether none does after one did. Both
@@ -224,6 +260,9 @@ impl Shared {
             Ok(()) => {
                 let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| *row).collect();
                 self.table.change(text, &rows);
+                if !cohort.data_owners.is_empty() {
+                    self.data_table.change(data, &cohort.data_owners);
+                }
                 State::Published
             }
             Err(_) => State::Failed,
@@ -285,6 +324,7 @@ impl Shared {
                                     bytes: 0,
                                     retired: 0,
                                     images: Vec::new(),
+                                    data_owners: Vec::new(),
                                     withheld: false,
                                 },
                             );
@@ -385,6 +425,7 @@ impl Loader {
             (base, writer) = host::reserve(config.band_bytes).map_err(|_| Refusal::Unsupported)?;
         }
         let table = Table::new(base, config.band_bytes);
+        let data_table = DataTable::new(base + config.band_bytes, config.band_bytes);
         let slab = Slab {
             text: Runs::new(config.band_bytes),
             data: Runs::new(config.band_bytes),
@@ -408,6 +449,7 @@ impl Loader {
             retired: Mutex::new(0),
             updates: AtomicU64::new(0),
             table,
+            data_table,
             pending: AtomicPtr::new(null_mut()),
             unrevoked: AtomicU64::new(0),
         })))
@@ -428,10 +470,24 @@ impl Loader {
         (self.0.base, self.0.base + self.0.config.band_bytes)
     }
 
+    /// The data band `[low, high)`: every loaded module's data slice is in it.
+    pub fn data_band(&self) -> (usize, usize) {
+        let low = self.0.base + self.0.config.band_bytes;
+        (low, low + self.0.config.band_bytes)
+    }
+
     /// The image whose text holds the code address `pc` and the address's offset in
     /// that text (PACK-9). Async-signal-safe: a fault or a sampling handler calls it.
     pub fn resolve(&self, pc: usize) -> Option<Hit> {
         self.0.table.resolve(pc)
+    }
+
+    /// Resolve a static literal range `[ptr, ptr + len)` inside the data band to its
+    /// independent `CauseData` owner (retaining one count while pinned) and its
+    /// corresponding byte address inside that owner's R/NX mapping (PACK-9.7).
+    pub fn resolve_literal(&self, ptr: usize, len: usize) -> Option<(usize, usize)> {
+        let ops = self.0.config.cause_data?;
+        self.0.data_table.resolve_with(ptr, len, ops.retain)
     }
 
     /// Record a hardware fault in the image `hit` names, as the fault handler resolved
@@ -562,7 +618,9 @@ impl Loader {
                     digest: held.digest,
                     cohort: None,
                     text: held.text,
+                    data: 0,
                     bytes: 0,
+                    cause_data: None,
                     entries: held.entries.to_vec(),
                     slots: AtomicU32::new(0),
                     retired: AtomicBool::new(false),
@@ -573,8 +631,10 @@ impl Loader {
                         cohort: None,
                         text: (0, 0),
                         owned: 0,
+                        data: (0, 0),
                         bytes: 0,
                         retired: false,
+                        cause_data: None,
                     })),
                 });
                 let serial = slab.installs;
@@ -598,14 +658,21 @@ impl Loader {
     ) -> Result<(bool, Arc<Image>), Refusal> {
         let shared = &*self.0;
         let config = &shared.config;
+        let cause_owner_row = hirsel_mod::row("hirsel_core_cause_owner");
+        let mut cause_owner_slots = Vec::new();
         let mut slots = Vec::with_capacity(module.imports().len());
-        for import in module.imports() {
+        for (slot_index, import) in module.imports().enumerate() {
             slots.push(match import {
-                Import::Row(row) => hirsel_mod::ROWS
-                    .get(row as usize)
-                    .filter(|(_, class)| config.mask.admits(*class))
-                    .and_then(|_| (config.row)(row))
-                    .ok_or(Refusal::Import(row))?,
+                Import::Row(row) => {
+                    if cause_owner_row == Some(row) {
+                        cause_owner_slots.push(slot_index);
+                    }
+                    hirsel_mod::ROWS
+                        .get(row as usize)
+                        .filter(|(_, class)| config.mask.admits(*class))
+                        .and_then(|_| (config.row)(row))
+                        .ok_or(Refusal::Import(row))?
+                }
                 Import::Instance(instance) => {
                     (config.instance)(&instance).ok_or(Refusal::Unbound(instance))?
                 }
@@ -666,6 +733,26 @@ impl Loader {
             }
             return Err(Refusal::Fixup(index));
         }
+        // Establish independent R/NX cause data ownership before publishing any
+        // entry (PACK-9.7). Skip allocation for synthetic fixup-only modules
+        // with no sites and no literal bytes.
+        let imports_bytes = 8 * slots.len();
+        let literals = &data[imports_bytes..];
+        let fixup_bytes = module.data_fixups().len() * 8;
+        let needs_cause_data = !module.sites().is_empty() || literals.len() > fixup_bytes;
+        let cause_data = if needs_cause_data {
+            config
+                .cause_data
+                .and_then(|ops| (ops.create)(literals, module.sites()))
+        } else {
+            None
+        };
+        if let Some(handle) = cause_data {
+            for slot_index in cause_owner_slots {
+                let at = 8 * slot_index;
+                data[at..at + 8].copy_from_slice(&(handle.slot_addr as u64).to_le_bytes());
+            }
+        }
         text.resize(owned, 0);
         // SAFETY: `place` gave this image these writable ranges and nothing else holds them.
         host::write(&mut || unsafe {
@@ -681,6 +768,24 @@ impl Loader {
             length: logical as u32,
             digest: digest.0[..16].try_into().unwrap(),
         };
+        let data_range = if let Some(handle) = cause_data
+            && handle.ro_literals_len != 0
+        {
+            let range = (words + imports_bytes, handle.ro_literals_len);
+            slab.cohorts
+                .get_mut(&cohort)
+                .unwrap()
+                .data_owners
+                .push(DataRow {
+                    start: range.0 as u32,
+                    length: range.1 as u32,
+                    owner: handle.owner,
+                    ro_base: handle.ro_literals_base,
+                });
+            range
+        } else {
+            (0, 0)
+        };
         slab.cohorts
             .get_mut(&cohort)
             .unwrap()
@@ -691,7 +796,9 @@ impl Loader {
             digest,
             cohort: Some(cohort),
             text: t,
+            data: d,
             bytes,
+            cause_data,
             entries: module
                 .entries()
                 .map(|entry| (entry.identity, entry.signature, t + entry.text as usize))
@@ -705,8 +812,10 @@ impl Loader {
                 cohort: Some(cohort),
                 text: (at, logical),
                 owned: text.len(),
+                data: data_range,
                 bytes,
                 retired: false,
+                cause_data,
             })),
         });
         let serial = slab.installs;
@@ -721,24 +830,12 @@ impl Loader {
 
     /// An empty slot at version 0.
     pub fn slot<F: Signature>(&self) -> Slot<F> {
-        Slot {
-            cell: Arc::new(Cell {
-                shared: self.0.clone(),
-                version: AtomicU64::new(0),
-                current: Mutex::new(None),
-            }),
-            callable: PhantomData,
-        }
+        Slot::new(self.0.clone())
     }
 
     /// An empty worker table.
     pub fn worker(&self) -> Worker {
-        Worker {
-            shared: self.0.clone(),
-            rows: Vec::with_capacity(Worker::ROWS),
-            clock: 0,
-            seen: 0,
-        }
+        Worker::new(self.0.clone())
     }
 }
 
@@ -811,176 +908,14 @@ impl<F> Code<F> {
     pub fn text(&self) -> usize {
         self.image.text
     }
-}
 
-type Raw = (Arc<Image>, usize);
-
-struct Cell {
-    shared: Arc<Shared>,
-    version: AtomicU64,
-    current: Mutex<Option<Raw>>,
-}
-
-impl Drop for Cell {
-    fn drop(&mut self) {
-        let Some((image, _)) = self.current.get_mut().unwrap().take() else {
-            return;
-        };
-        {
-            let mut retired = self.shared.retired.lock().unwrap();
-            if image.slots.fetch_sub(1, Ordering::Relaxed) == 1 {
-                image.retired.store(true, Ordering::Relaxed);
-                *retired += image.bytes;
-            }
-        }
-        drop(image);
-    }
-}
-
-/// A shared `(version, Code)` that workers dispatch through (PACK-6).
-pub struct Slot<F> {
-    cell: Arc<Cell>,
-    callable: PhantomData<fn() -> F>,
-}
-
-impl<F> Clone for Slot<F> {
-    fn clone(&self) -> Self {
-        Self {
-            cell: self.cell.clone(),
-            callable: PhantomData,
-        }
-    }
-}
-
-impl<F: Signature> Slot<F> {
-    pub fn version(&self) -> u64 {
-        self.cell.version.load(Ordering::Acquire)
+    /// The address of the image's `data[0]` in the data band (0 for prelinked).
+    pub fn data(&self) -> usize {
+        self.image.data
     }
 
-    /// Store `code` when the slot is at version `expected`, and return the new version.
-    /// It waits for no call, worker or unit that still uses the old code.
-    pub fn activate(&self, expected: u64, code: Code<F>) -> Result<u64, Stop> {
-        let cell = &*self.cell;
-        let new = code.image.clone();
-        let old;
-        {
-            let mut current = cell.current.lock().unwrap();
-            let version = cell.version.load(Ordering::Relaxed);
-            if version != expected {
-                return Err(Stop::Stale(version));
-            }
-            let same = current
-                .as_ref()
-                .is_some_and(|(held, _)| Arc::ptr_eq(held, &new));
-            if !same {
-                let mut retired = cell.shared.retired.lock().unwrap();
-                let returns = new.retired.load(Ordering::Relaxed);
-                let leaves = current
-                    .as_ref()
-                    .map(|(held, _)| held)
-                    .filter(|held| held.slots.load(Ordering::Relaxed) == 1);
-                let after = *retired - if returns { new.bytes } else { 0 }
-                    + leaves.map_or(0, |held| held.bytes);
-                if leaves.is_some() && after > cell.shared.config.retired_bytes {
-                    return Err(Stop::Capacity);
-                }
-                new.slots.fetch_add(1, Ordering::Relaxed);
-                new.retired.store(false, Ordering::Relaxed);
-                if let Some((held, _)) = &*current {
-                    held.slots.fetch_sub(1, Ordering::Relaxed);
-                }
-                if let Some(held) = leaves {
-                    held.retired.store(true, Ordering::Relaxed);
-                }
-                *retired = after;
-            }
-            old = current.replace((new, code.entry));
-            cell.version.store(version + 1, Ordering::Release);
-            cell.shared.updates.fetch_add(1, Ordering::Release);
-        }
-        // The old code's count is given up outside every lock.
-        drop(old);
-        Ok(expected + 1)
-    }
-}
-
-struct Row {
-    cell: Arc<Cell>,
-    version: u64,
-    code: Raw,
-    used: u64,
-}
-
-/// One worker's private table of the code it dispatches to (PACK-6).
-pub struct Worker {
-    shared: Arc<Shared>,
-    rows: Vec<Row>,
-    clock: u64,
-    seen: u64,
-}
-
-impl Worker {
-    pub const ROWS: usize = 64;
-
-    /// Call `with` on the slot's current entry, or return `None` for an empty slot. A
-    /// hit reads the slot's version and writes nothing another thread reads.
-    pub fn dispatch<F: Signature, R>(
-        &mut self,
-        slot: &Slot<F>,
-        with: impl FnOnce(F) -> R,
-    ) -> Option<R> {
-        let updates = self.shared.updates.load(Ordering::Relaxed);
-        if updates != self.seen {
-            self.seen = updates;
-            self.park();
-        }
-        self.clock += 1;
-        let cell = &slot.cell;
-        let version = cell.version.load(Ordering::Relaxed);
-        let at = self
-            .rows
-            .iter()
-            .position(|row| Arc::ptr_eq(&row.cell, cell));
-        let entry = match at {
-            Some(at) if self.rows[at].version == version => {
-                self.rows[at].used = self.clock;
-                self.rows[at].code.1
-            }
-            _ => {
-                let (version, code) = {
-                    let current = cell.current.lock().unwrap();
-                    (cell.version.load(Ordering::Relaxed), current.clone()?)
-                };
-                let entry = code.1;
-                let row = Row {
-                    cell: cell.clone(),
-                    version,
-                    code,
-                    used: self.clock,
-                };
-                // The replaced row's count is given up after the slot's lock.
-                match at {
-                    Some(at) => self.rows[at] = row,
-                    None if self.rows.len() < Self::ROWS => self.rows.push(row),
-                    None => {
-                        let least = (0..Self::ROWS)
-                            .min_by_key(|at| self.rows[*at].used)
-                            .unwrap();
-                        self.rows[least] = row;
-                    }
-                }
-                entry
-            }
-        };
-        // SAFETY: as `Code::entry`; this worker's row owns a count while `with` runs.
-        Some(host::execute(|| {
-            with(unsafe { std::mem::transmute_copy(&entry) })
-        }))
-    }
-
-    /// Drop every row whose slot has moved on. A worker calls this before it parks.
-    pub fn park(&mut self) {
-        self.rows
-            .retain(|row| row.cell.version.load(Ordering::Relaxed) == row.version);
+    /// The image's independent R/NX cause data owner pointer, if established.
+    pub fn cause_owner(&self) -> Option<usize> {
+        self.image.cause_data.map(|handle| handle.owner)
     }
 }

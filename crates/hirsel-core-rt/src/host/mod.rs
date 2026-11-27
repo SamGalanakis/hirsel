@@ -86,3 +86,39 @@ pub(crate) fn terminal_size(fd: i32) -> u64 {
     }
     u64::from(size.ws_col) | u64::from(size.ws_row) << 16
 }
+
+/// Current process resident set size in KiB on Linux, or 0 where unavailable.
+pub fn resident_kib() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let page_kib = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64).max(4096) / 1024;
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map_or(0, |pages| pages * page_kib)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+/// Mapping permission string (e.g. `"r--p"`) containing `addr` on Linux, or `None`.
+pub fn mapping_perms(addr: usize) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        maps.lines().find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (lo, hi) = parts.next()?.split_once('-')?;
+            let lo = usize::from_str_radix(lo, 16).ok()?;
+            let hi = usize::from_str_radix(hi, 16).ok()?;
+            (lo <= addr && addr < hi).then(|| parts.next().unwrap_or("").to_string())
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = addr;
+        None
+    }
+}

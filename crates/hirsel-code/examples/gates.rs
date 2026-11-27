@@ -289,6 +289,7 @@ fn main() {
         row: Box::new(|_| Some(stub as *const () as usize)),
         instance: Box::new(|_| None),
         prelinked: &[],
+        cause_data: None,
     };
     // SAFETY: direct calls and dispatches run within the executor gate on their invoking thread.
     let loader = unsafe { Loader::with_gated_executors(config) }.expect("a gated loader");

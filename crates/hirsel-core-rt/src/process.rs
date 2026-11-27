@@ -631,8 +631,14 @@ unsafe fn run_config_inner(
         crate::fiber::set_stop_fd(previous_fd);
         let text = result.take_text();
         let status = if failed != 0 {
-            for cause in context.causes.iter() {
-                if let Some(describe) = config.describe {
+            for cell in context.causes.iter_cells() {
+                let cause = cell.cause();
+                if !cell.site_owner().is_null() {
+                    diagnostic(
+                        config,
+                        crate::abi_sites::format_cell(cell, std::ptr::null()).as_bytes(),
+                    );
+                } else if let Some(describe) = config.describe {
                     let line = describe(config.state, cause);
                     (config.diagnostic)(config.state, line.data, line.len);
                 } else {

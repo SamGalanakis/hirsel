@@ -27,6 +27,7 @@ macro_rules! rows {
             hirsel_core_call_word Provider,
             hirsel_core_cancel Task,
             hirsel_core_cause_next Metered,
+            hirsel_core_cause_owner Pure,
             hirsel_core_cause_value Metered,
             hirsel_core_causes_drop Metered,
             hirsel_core_channel_new Task,

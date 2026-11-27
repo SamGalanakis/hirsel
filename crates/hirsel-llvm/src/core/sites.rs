@@ -11,8 +11,135 @@ impl FunctionEmitter<'_> {
         self.site_word()
     }
 
+    /// Record the site owner (`*const CauseData`, or null for host/immortal) into
+    /// `context.site_owner` before a call or raise that supplies a site ordinal.
+    pub(super) fn store_site_owner(&mut self, own: bool) {
+        if !self.relocatable_sites {
+            return;
+        }
+        let owner = if own {
+            self.items.global(Global {
+                name: "hirsel_core_cause_owner".into(),
+                linkage: Linkage::External,
+                constant: true,
+                externally_initialized: false,
+                ty: Type::I64,
+                init: None,
+                align: 8,
+                absolute_symbol: false,
+                section: None,
+            });
+            self.load(&Type::I64, &Value::global("hirsel_core_cause_owner"), 8)
+        } else if self.function.is_none_or(|f| {
+            let function = &self.module.functions[f.index()];
+            hirsel_core_ir::source::inherits_site(&self.module.instances[function.instance.index()])
+        }) {
+            self.caller_site_owner.clone()
+        } else {
+            int(0)
+        };
+        let slot = self.offset(&CONTEXT, memory_layout::CONTEXT_SITE_OWNER as u64);
+        self.store(&Type::I64, &owner, &slot, 8);
+    }
+
+    /// Capture the caller's site owner at entry to a function or glue that inherits
+    /// its caller's site (`PACK-9.7`).
+    pub(super) fn capture_caller_site_owner(&mut self) {
+        if !self.relocatable_sites {
+            return;
+        }
+        let slot = self.offset(&CONTEXT, memory_layout::CONTEXT_SITE_OWNER as u64);
+        self.caller_site_owner = self.load(&Type::I64, &slot, 8);
+    }
+
+    /// Recipes clean under the site and site owner their release was called with.
+    pub(super) fn release_site(&mut self) {
+        let list = Value::Local(Local::WORKLIST);
+        let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
+        self.caller_site = self.load(&Type::I64, &at, 8);
+        if self.relocatable_sites {
+            let owner_at = self.offset(&list, memory_layout::WORKLIST_SITE_OWNER as u64);
+            self.caller_site_owner = self.load(&Type::I64, &owner_at, 8);
+        }
+    }
+
+    pub(super) fn raise(&mut self, kind: u8) {
+        let fixed_site = self.fixed_site_word();
+        let fixed = fixed_site.is_some();
+        if fixed {
+            self.store_site_owner(true);
+        }
+        let site = fixed_site.unwrap_or_else(|| self.site_word());
+        let fixed = fixed || site == int(0);
+        let shape = Type::bytes(memory_layout::CAUSE_BYTES as u64);
+        let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
+        // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
+        // AAPCS64 needs an explicit private copy before passing its pointer.
+        // Neither convention lets the callee mutate the shared constant.
+        let relocated = fixed && self.relocatable_sites && site != int(0);
+        let suffix = if relocated {
+            if let Some(sites) = &self.items.release_sites {
+                let anchor = self.anchor.unwrap();
+                sites.names[&(anchor.item, anchor.start)].clone()
+            } else {
+                let anchor = self.anchor.unwrap();
+                format!("{}_{}", anchor.item.0, anchor.start)
+            }
+        } else {
+            match site {
+                Value::Int(n) => n.to_string(),
+                _ => "0".into(),
+            }
+        };
+        let name = format!("hirsel_cause_{kind}_{suffix}");
+        let prefix = Type::bytes(memory_layout::CAUSE_KIND as u64);
+        let word = memory_layout::cause_kind_word(kind) as i64;
+        // A relocated word in a cause needs the same materialization as a
+        // standalone site word.
+        let initialized = relocated && self.keep_site_in_data();
+        self.items.global(Global {
+            name: name.clone().into(),
+            linkage: Linkage::Private,
+            constant: true,
+            externally_initialized: initialized,
+            ty: Type::Struct(vec![prefix.clone(), Type::I64, Type::I64], true),
+            init: Some(Value::Struct {
+                packed: true,
+                fields: vec![
+                    (prefix, Value::Zero),
+                    (Type::I64, int(word)),
+                    (Type::I64, if fixed { site.clone() } else { int(0) }),
+                ],
+            }),
+            align: 8,
+            absolute_symbol: false,
+            section: None,
+        });
+        let pointer = if argument.byval.is_none() || !fixed {
+            let pointer = self.temp(shape);
+            let words = Type::words(memory_layout::CAUSE_BYTES as u64 / 8);
+            let value = self.load(&words, &Value::global(name), 8);
+            self.store(&words, &value, &pointer, 8);
+            if !fixed {
+                let at = self.offset(&pointer, memory_layout::CAUSE_SITE as i128);
+                self.store(&Type::I64, &site, &at, 8);
+            }
+            pointer
+        } else {
+            Value::global(name)
+        };
+        self.call_declared(
+            "hirsel_core_raise",
+            Type::Void,
+            &[ptr(CONTEXT), (argument, pointer)],
+            FnAttrs::default(),
+            &CallAttrs::default(),
+        );
+    }
+
     pub(super) fn site_word(&mut self) -> Value {
         let Some(word) = self.fixed_site_word() else {
+            self.store_site_owner(false);
             return if self.function.is_none_or(|f| {
                 let function = &self.module.functions[f.index()];
                 hirsel_core_ir::source::inherits_site(
@@ -24,6 +151,7 @@ impl FunctionEmitter<'_> {
                 int(0)
             };
         };
+        self.store_site_owner(true);
         if self.keep_site_in_data() {
             // AArch64 selects a GOT reference even with !absolute_symbol.
             // X86 can fold item site words into PC-relative LEAs.

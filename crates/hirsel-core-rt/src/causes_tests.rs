@@ -435,3 +435,168 @@ fn causes_and_resources_c_abi_preserve_complete_chain_and_container_refunds() {
         assert_eq!(payer.available(), 1024);
     }
 }
+
+#[test]
+fn cause_cell_owner_prefix_handles_single_pair_host_exhausted_payer_and_drop_order() {
+    use crate::abi_sites;
+    use hirsel_core_layout::source_positions;
+
+    // PACK-9.7 exact cell prefix offsets and fixed 32-byte logical charge.
+    assert_eq!(std::mem::offset_of!(causes::Cell, cause), 0);
+    assert_eq!(std::mem::offset_of!(causes::Cell, next), 32);
+    assert_eq!(std::mem::offset_of!(causes::Cell, owner), 40);
+    assert_eq!(hirsel_core_layout::charge::CAUSE_CELL, 32);
+
+    let enc_a = source_positions::encode("alpha_header\nalpha_fail_here");
+    let enc_b = source_positions::encode("beta_1\nbeta_2\nbeta_fail_here");
+    let sites_a = source_positions::encode_source_table(&[("alpha/mod.hirsel", 1, &enc_a)]);
+    let sites_b = source_positions::encode_source_table(&[("beta/svc.hirsel", 1, &enc_b)]);
+    let lit_a = b"literal-from-release-a";
+    let lit_b = b"literal-from-release-b";
+
+    let owner_a = causes::CauseData::new(lit_a, &sites_a).unwrap();
+    let owner_b = causes::CauseData::new(lit_b, &sites_b).unwrap();
+    assert_eq!((owner_a.ref_count(), owner_b.ref_count()), (1, 1));
+
+    // Verify the data mapping is hardware R/NX (`r--p`) on hosts exposing mapping permissions.
+    // SAFETY: `owner_a` is live.
+    let addr = unsafe { (*owner_a.as_ptr()).mapped_addr() };
+    if let Some(perms) = crate::host::mapping_perms(addr) {
+        assert_eq!(perms, "r--p", "CauseData pages must be strictly R/NX");
+    }
+
+    // Reserve a primary cell and a resource cell, then exhaust the payer to 0 bytes
+    // before recording a mixed two-origin cause (must admit and allocate nothing).
+    let mut ctx = Context::new(512);
+    let root = ctx.current.clone();
+    causes::task_start(&mut ctx).unwrap();
+    // SAFETY: resource is finalized and freed below.
+    let res = unsafe { causes::resource_new(&ctx, 8, 0, 8, 8) }.unwrap();
+    // Drain all remaining available bytes into one block so payer available == 0.
+    let drain_bytes = ctx.available();
+    let drain = Block::new(&ctx, Some(drain_bytes), drain_bytes as usize, 8).unwrap();
+    assert_eq!(ctx.available(), 0);
+    let attempts_before = root.attempts();
+
+    // Record mixed-origin cause: Release B's site ordinal 15 + Release A's literal!
+    let (lit_a_ptr, lit_a_len) = owner_a.literals();
+    // SAFETY: primary cell is unused and both owners are live.
+    unsafe {
+        causes::record_with_owners(
+            &mut ctx,
+            Cause::fail(
+                causes::StringMessage {
+                    data: lit_a_ptr.cast_mut(),
+                    len: lit_a_len as u64,
+                    capacity: 0,
+                },
+                15,
+            ),
+            owner_b.as_ptr(),
+            owner_a.as_ptr(),
+        );
+    }
+    // Zero admissions on recording even for the two-origin pair!
+    assert_eq!(root.attempts(), attempts_before);
+    assert_eq!((owner_a.ref_count(), owner_b.ref_count()), (2, 2));
+
+    // Failing finalizer with single origin (same release B for site and literal):
+    // must take exactly ONE count on owner_b.
+    let (lit_b_ptr, lit_b_len) = owner_b.literals();
+    // SAFETY: finalize resource with unused prepaid cell.
+    unsafe {
+        causes::finalizer_begin(&mut ctx, res);
+        causes::record_with_owners(
+            &mut ctx,
+            Cause::fail(
+                causes::StringMessage {
+                    data: lit_b_ptr.cast_mut(),
+                    len: lit_b_len as u64,
+                    capacity: 0,
+                },
+                15,
+            ),
+            owner_b.as_ptr(),
+            owner_b.as_ptr(),
+        );
+        causes::finalizer_end(&mut ctx, res);
+        causes::resource_free(res, 8);
+    }
+    assert_eq!(root.attempts(), attempts_before);
+    assert_eq!((owner_a.ref_count(), owner_b.ref_count()), (2, 3));
+
+    // Also test host site + unloadable literal (owner_a): site_owner must stay null!
+    let mut host_ctx = Context::new(512);
+    causes::task_start(&mut host_ctx).unwrap();
+    // SAFETY: fresh primary cell, owner_a is live.
+    unsafe {
+        causes::record_with_owners(
+            &mut host_ctx,
+            Cause::fail(
+                causes::StringMessage {
+                    data: lit_a_ptr.cast_mut(),
+                    len: lit_a_len as u64,
+                    capacity: 0,
+                },
+                15,
+            ),
+            ptr::null(),
+            owner_a.as_ptr(),
+        );
+    }
+    assert_eq!(owner_a.ref_count(), 3);
+
+    // Drop the external owner handles; only the recorded cause cells keep them alive.
+    let raw_a = owner_a.as_ptr();
+    let raw_b = owner_b.as_ptr();
+    drop(owner_a);
+    drop(owner_b);
+    // SAFETY: surviving cause cells still hold counts on both owners.
+    unsafe {
+        assert_eq!(causes::CauseData::ref_count(raw_a), 2);
+        assert_eq!(causes::CauseData::ref_count(raw_b), 2);
+    }
+
+    let cells: Vec<&causes::Cell> = ctx.causes.iter_cells().collect();
+    assert_eq!(cells.len(), 2);
+    // Mixed-origin cell uses tagged pair word (low bit 1).
+    assert_eq!(cells[0].owner_word() & 1, 1);
+    assert_eq!(cells[0].site_owner(), raw_b);
+    assert_eq!(cells[0].literal_owner(), raw_a);
+    // Single-origin cell uses direct owner word (low bit 0).
+    assert_eq!(cells[1].owner_word() & 1, 0);
+    assert_eq!(cells[1].site_owner(), raw_b);
+    assert_eq!(cells[1].literal_owner(), raw_b);
+    // Exact formatted strings and unchanged site ordinals.
+    // SAFETY: cells pin their owners and messages.
+    unsafe {
+        assert_eq!(
+            abi_sites::format_cell(cells[0], ptr::null()),
+            "Fail(\"literal-from-release-a\") at beta/svc.hirsel:3:1"
+        );
+        assert_eq!(
+            abi_sites::format_cell(cells[1], ptr::null()),
+            "Fail(\"literal-from-release-b\") at beta/svc.hirsel:3:1"
+        );
+    }
+    assert_eq!(cells[0].cause().site, 15);
+    assert_eq!(cells[1].cause().site, 15);
+
+    // Host site + unloadable literal formats site with host fallback (numeric 15), NOT owner_a!
+    let host_cell = host_ctx.causes.iter_cells().next().unwrap();
+    assert!(host_cell.site_owner().is_null());
+    assert_eq!(host_cell.literal_owner(), raw_a);
+    // SAFETY: cell pins owner_a.
+    assert_eq!(
+        unsafe { abi_sites::format_cell(host_cell, ptr::null()) },
+        "Fail(\"literal-from-release-a\") at 15"
+    );
+
+    // Detached copy survives dropping all causes.
+    let detached = cells[0].detached_message_bytes().unwrap();
+    drop(host_ctx);
+    drop(drain);
+    drop(ctx);
+    assert_eq!(detached, lit_a);
+    assert_eq!(root.available(), 512);
+}

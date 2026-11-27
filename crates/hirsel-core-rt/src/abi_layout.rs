@@ -102,6 +102,9 @@ pub const CONTEXT_EXECUTION: usize = 56;
 pub const CONTEXT_LINE: usize = 64;
 pub const CONTEXT_MAP_HASH_KEY: usize = 64;
 pub const CONTEXT_MAP_STRONG_KEY: usize = 96;
+// PACK-9.7: current site owner (`*const CauseData`, null for host/immortal).
+// Outside the 64-byte hot cache line; changed layout bumps PACK-2 ABI revision.
+pub const CONTEXT_SITE_OWNER: usize = 128;
 // MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
 // most one slice; with none current it starts at 2^62. A larger word means no
 // bound is current.
@@ -161,6 +164,7 @@ pub const WORKLIST_DESCRIPTOR: usize = 16;
 pub const WORKLIST_POINT: usize = 24;
 pub const WORKLIST_SITE: usize = 32;
 pub const WORKLIST_FAILED: usize = 40;
+pub const WORKLIST_SITE_OWNER: usize = 48;
 /// Byte offset of point `k` (1-based) from its descriptor.
 pub const fn fixed_point(k: u64) -> usize {
     FIXED_DESCRIPTOR_BYTES + FIXED_POINT_BYTES * (k as usize - 1)
@@ -214,6 +218,7 @@ pub const CAUSE_FAIL: u8 = 4;
 pub const CAUSE_SITE: usize = 24;
 pub const CAUSE_CELL_VALUE: usize = 0;
 pub const CAUSE_CELL_NEXT: usize = 32;
+pub const CAUSE_CELL_OWNER: usize = 40;
 /// The word at CAUSE_KIND of a cause of `kind`, which is not Fail.
 pub const fn cause_kind_word(kind: u8) -> u64 {
     CAUSE_KIND_START + kind as u64

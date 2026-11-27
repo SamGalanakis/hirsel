@@ -26,6 +26,7 @@ mod report;
 mod sites;
 mod start;
 use code::{Code, I8, I32, I64};
+pub(crate) use data::encode_module_sources;
 pub(crate) use data::source_site;
 pub(crate) use sites::{Referenced, check_linked_sites, live_site_words, runtime_sources};
 type Result<T> = std::result::Result<T, String>;

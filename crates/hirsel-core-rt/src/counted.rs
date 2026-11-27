@@ -55,6 +55,8 @@ pub struct Worklist {
     /// Nonzero once a finalizer or handle cleaned by this drain has failed;
     /// recipes OR into it and continue (FAIL-10).
     failed: u8,
+    /// PACK-9.7: data owner for `site`, restored before every inherited step.
+    site_owner: *const crate::causes::CauseData,
 }
 const _: () = assert!(std::mem::offset_of!(Worklist, head) == crate::abi_layout::WORKLIST_HEAD);
 const _: () = assert!(std::mem::offset_of!(Worklist, node) == crate::abi_layout::WORKLIST_NODE);
@@ -63,6 +65,8 @@ const _: () =
 const _: () = assert!(std::mem::offset_of!(Worklist, point) == crate::abi_layout::WORKLIST_POINT);
 const _: () = assert!(std::mem::offset_of!(Worklist, site) == crate::abi_layout::WORKLIST_SITE);
 const _: () = assert!(std::mem::offset_of!(Worklist, failed) == crate::abi_layout::WORKLIST_FAILED);
+const _: () =
+    assert!(std::mem::offset_of!(Worklist, site_owner) == crate::abi_layout::WORKLIST_SITE_OWNER);
 
 type Fixed = (NonNull<u8>, *const Descriptor, u64);
 
@@ -228,10 +232,13 @@ pub(crate) unsafe fn drain(
     descriptor: *const Descriptor,
     site: u64,
 ) -> bool {
-    let mut list = Worklist::new(site);
+    // SAFETY: `context` is live and exclusively owned by this task.
+    let saved = unsafe { (*context).site_owner };
+    let mut list = Worklist::new(site, saved);
     // SAFETY: as this function's contract; the new list's head is empty.
     unsafe {
         clean_fixed(context, &mut list, node, descriptor, 0);
+        (*context).site_owner = saved;
         list.failed != 0
     }
 }
@@ -261,7 +268,11 @@ unsafe fn clean_fixed(
         let d = &*descriptor;
         let payload = node.as_ptr().add(d.payload_offset as usize);
         let mut cursor = 0;
-        while !(d.recipe)(context, payload, &mut cursor, list) {
+        loop {
+            (*context).site_owner = list.site_owner;
+            if (d.recipe)(context, payload, &mut cursor, list) {
+                break;
+            }
             if !list.staged() {
                 continue;
             }
@@ -304,12 +315,16 @@ pub(crate) unsafe fn drain_buffer(
     carrier: *mut u8,
     site: u64,
 ) -> bool {
-    let mut list = Worklist::new(site);
+    // SAFETY: `context` is live and exclusively owned by this task.
+    let saved = unsafe { (*context).site_owner };
+    let mut list = Worklist::new(site, saved);
     // SAFETY: as this function's contract.
     unsafe {
         list.stage_buffer(buffer, charge, recipe, carrier, 0);
         let current = list.take();
-        run(context, &mut list, current)
+        let failed = run(context, &mut list, current);
+        (*context).site_owner = saved;
+        failed
     }
 }
 
@@ -324,30 +339,41 @@ pub(crate) unsafe fn drain_holder(
     step: Step,
     site: u64,
 ) -> bool {
-    let mut list = Worklist::new(site);
+    // SAFETY: `context` is live and exclusively owned by this task.
+    let saved = unsafe { (*context).site_owner };
+    let mut list = Worklist::new(site, saved);
     // SAFETY: as this function's contract.
     unsafe {
         list.stage_holder(holder, step, 0);
         let current = list.take();
-        run(context, &mut list, current)
+        let failed = run(context, &mut list, current);
+        (*context).site_owner = saved;
+        failed
     }
 }
 
 /// Clean a live value in a stack slot, using its ordinary resumable recipe.
 pub(crate) unsafe fn drain_place(context: *mut Context, place: *mut u8, recipe: Recipe) {
-    let mut list = Worklist::new(0);
+    // SAFETY: `context` is live and exclusively owned by this task.
+    let saved = unsafe { (*context).site_owner };
+    let mut list = Worklist::new(0, std::ptr::null());
     let mut cursor = 0;
     // SAFETY: the caller owns the slot until its exact recipe completes.
     unsafe {
-        while !recipe(context, place, &mut cursor, &mut list) {
+        loop {
+            (*context).site_owner = list.site_owner;
+            if recipe(context, place, &mut cursor, &mut list) {
+                break;
+            }
             let current = list.take();
             run(context, &mut list, current);
         }
+        (*context).site_owner = saved;
     }
 }
 
 impl Worklist {
-    fn new(site: u64) -> Self {
+    fn new(site: u64, site_owner: *const crate::causes::CauseData) -> Self {
         Worklist {
             head: 0,
             node: std::ptr::null_mut(),
@@ -355,6 +381,7 @@ impl Worklist {
             point: 0,
             site,
             failed: 0,
+            site_owner,
         }
     }
 }
@@ -369,6 +396,7 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
             if let Some((node, descriptor, mut cursor)) = current.take() {
                 let d = &*descriptor;
                 let payload = node.as_ptr().add(d.payload_offset as usize);
+                (*context).site_owner = list.site_owner;
                 if (d.recipe)(context, payload, &mut cursor, list) {
                     debug_assert!(!list.staged());
                     block::free_dead_in(&*context, node, d.charge);
@@ -420,6 +448,7 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
                 let holder = (list.head & !2) as *mut Holder;
                 // Read first: a finished step may have freed the holder.
                 let next = (*holder).next;
+                (*context).site_owner = list.site_owner;
                 if ((*holder).step)(context, holder, list) {
                     debug_assert!(!list.staged());
                     list.head = next;
@@ -429,6 +458,7 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
             } else {
                 let buffer = NonNull::new_unchecked(list.head as *mut u8);
                 let frame = &mut *block::dead(buffer);
+                (*context).site_owner = list.site_owner;
                 if (frame.recipe)(context, frame.payload, &mut frame.cursor, list) {
                     list.head = frame.next;
                     block::free_dead_in(&*context, buffer, frame.charge);

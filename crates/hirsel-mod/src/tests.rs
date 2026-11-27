@@ -235,3 +235,45 @@ fn truncated_and_corrupted_modules_are_refused_without_a_panic() {
 fn the_row_table_is_strictly_sorted_for_lookup() {
     assert!(ROWS.windows(2).all(|pair| pair[0].0 < pair[1].0));
 }
+
+#[test]
+fn abi_revision_is_bumped_and_sites_section_is_validated() {
+    use hirsel_core_layout::source_positions;
+
+    assert_eq!(crate::ABI, 3);
+    let owner_row = crate::row("hirsel_core_cause_owner").expect("cause owner row");
+    assert_eq!(ROWS[owner_row as usize].1, crate::Class::Pure);
+
+    // Valid section-8 sites table passes parsing.
+    let encoded = source_positions::encode("line1\nline2\nfail");
+    let sites = source_positions::encode_source_table(&[("app/main.hirsel", 1, &encoded)]);
+    let mut good = image();
+    good.sites = sites.clone();
+    let raw = good.encode();
+    let parsed = Module::parse(&raw).unwrap();
+    assert_eq!(parsed.sites(), &sites[..]);
+
+    // Malformed section-8 sites tables are refused with Malformed::Sites.
+    for bad_sites in [
+        vec![1, 2, 3], // truncated header
+        {
+            let mut v = 1u64.to_le_bytes().to_vec();
+            v.extend_from_slice(&[0; 20]); // truncated row
+            v
+        },
+        source_positions::encode_source_table(&[
+            ("a.hirsel", 20, &encoded),
+            ("b.hirsel", 10, &encoded), // unsorted starts
+        ]),
+        {
+            let mut v = source_positions::encode_source_table(&[("a.hirsel", 1, &encoded)]);
+            // Corrupt path bytes to invalid UTF-8.
+            v[8 + 40] = 0xff;
+            v
+        },
+    ] {
+        let mut bad = image();
+        bad.sites = bad_sites;
+        assert_eq!(Module::parse(&bad.encode()).err(), Some(Malformed::Sites));
+    }
+}

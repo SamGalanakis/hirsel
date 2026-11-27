@@ -159,6 +159,9 @@ pub struct Context {
     pub(crate) execution: *const run_stop::Execution,
     pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) map_strong_key: hirsel_core_layout::map_hash::PreparedKey,
+    /// PACK-9.7: data owner for the current release's sites (`*const CauseData`,
+    /// null for host/immortal sites), at the frozen offset CONTEXT_SITE_OWNER.
+    pub site_owner: *const causes::CauseData,
     pub(crate) run: *const crate::process::Config,
     /// The limit `stack_limit` returns to when the cleanup margin is restored.
     pub(crate) stack_floor: usize,
@@ -168,7 +171,7 @@ pub struct Context {
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
     pub(crate) bound_depth: usize,
-    pub(crate) primary: Option<Box<causes::Cell>>,
+    pub(crate) primary: Option<causes::OwnedCell>,
     pub(crate) causes: causes::Causes,
     pub(crate) task_record: Option<block::Block>,
     pub(crate) active_resource: *mut causes::Resource,
@@ -183,7 +186,7 @@ pub struct Context {
     pub(crate) regions: region::RegionCache,
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
     pub(crate) frame_lists: frame_list::FrameLists,
-    pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
+    pub(crate) spare_isolate_cell: Option<causes::ReservedStorage>,
     pub(crate) foreign: *const foreign::Run,
     /// The task's contained instances (FFI-13), dropped at its end.
     pub(crate) contained: foreign::contained::Instances,
@@ -219,6 +222,7 @@ const _: () = {
     assert!(std::mem::offset_of!(Context, execution) == abi_layout::CONTEXT_EXECUTION);
     assert!(std::mem::align_of::<Context>() == abi_layout::CONTEXT_LINE);
     assert!(std::mem::offset_of!(Context, map_strong_key) == abi_layout::CONTEXT_MAP_STRONG_KEY);
+    assert!(std::mem::offset_of!(Context, site_owner) == abi_layout::CONTEXT_SITE_OWNER);
 };
 
 impl Context {
@@ -283,6 +287,7 @@ impl Context {
             map_hash_key,
             map_fast_salt,
             map_strong_key,
+            site_owner: std::ptr::null(),
             cancel_requested: AtomicBool::new(false),
             owns_heap: true,
             cancel_shield: 0,

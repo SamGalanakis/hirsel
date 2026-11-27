@@ -18,6 +18,7 @@ pub enum Malformed {
     DataFixups,
     Entries,
     Spans,
+    Sites,
     Names,
 }
 
@@ -190,6 +191,10 @@ impl<'a> Module<'a> {
                 return Err(Malformed::Entries);
             }
             last = Some(entry.identity);
+        }
+
+        if hirsel_core_layout::source_positions::validate_source_table(self.sections[8]).is_err() {
+            return Err(Malformed::Sites);
         }
 
         let names = self.sections[9];

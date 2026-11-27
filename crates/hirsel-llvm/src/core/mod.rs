@@ -286,6 +286,8 @@ struct Items {
     release_sites: Option<ReleaseSites>,
     /// The types ordinary glue cleans with `core_direct_T` (cleanup::direct_types).
     direct: BTreeSet<usize>,
+    /// Whether this compilation tracks `context.site_owner` (`PACK-9.7`).
+    track_site_owner: bool,
 }
 #[derive(Default)]
 struct ReleaseSites {
@@ -313,6 +315,7 @@ impl Items {
             pending: Default::default(),
             release_sites: None,
             direct: BTreeSet::new(),
+            track_site_owner: false,
         }
     }
     fn is_versioned(&self, function: FuncId) -> bool {
@@ -481,6 +484,7 @@ fn emit_prepared(
         });
     }
     items.release_sites = release_sites.take();
+    items.track_site_owner = source.relocatable_sites;
     let batch_steps = source.batch_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
@@ -758,6 +762,7 @@ fn emit_prepared(
                 append_fast,
                 shadow_callee,
                 caller_site: Value::Local(Local::CALLER_SITE),
+                caller_site_owner: int(0),
                 debug_location: function_debug.map(|d| d.location(None)),
                 anchor: None,
                 relocatable_sites: source.relocatable_sites,
@@ -829,6 +834,9 @@ fn emit_prepared(
             let signature = e.abi.signature(signature_params);
             e.sink
                 .begin_function(&body_name, &signature, &locals, &attrs);
+            if hirsel_core_ir::source::inherits_site(&module.instances[f.instance.index()]) {
+                e.capture_caller_site_owner();
+            }
             if body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
                 let counter = Local::Named("hirsel.step.counter");
                 e.sink.alloca(counter, &Type::I64, 8);
@@ -1494,6 +1502,7 @@ struct FunctionEmitter<'a> {
     aliases: Option<alias::Scopes>,
     pointer_origins: Box<[Option<storage::PointerOrigin>]>,
     caller_site: Value,
+    caller_site_owner: Value,
     debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
@@ -1899,76 +1908,6 @@ impl FunctionEmitter<'_> {
         } else {
             self.return_failure();
         }
-    }
-    fn raise(&mut self, kind: u8) {
-        let fixed_site = self.fixed_site_word();
-        let fixed = fixed_site.is_some();
-        let site = fixed_site.unwrap_or_else(|| self.site_word());
-        let fixed = fixed || site == int(0);
-        let shape = Type::bytes(memory_layout::CAUSE_BYTES as u64);
-        let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
-        // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
-        // AAPCS64 needs an explicit private copy before passing its pointer.
-        // Neither convention lets the callee mutate the shared constant.
-        let relocated = fixed && self.relocatable_sites && site != int(0);
-        let suffix = if relocated {
-            if let Some(sites) = &self.items.release_sites {
-                let anchor = self.anchor.unwrap();
-                sites.names[&(anchor.item, anchor.start)].clone()
-            } else {
-                let anchor = self.anchor.unwrap();
-                format!("{}_{}", anchor.item.0, anchor.start)
-            }
-        } else {
-            match site {
-                Value::Int(n) => n.to_string(),
-                _ => "0".into(),
-            }
-        };
-        let name = format!("hirsel_cause_{kind}_{suffix}");
-        let prefix = Type::bytes(memory_layout::CAUSE_KIND as u64);
-        let word = memory_layout::cause_kind_word(kind) as i64;
-        // A relocated word in a cause needs the same materialization as a
-        // standalone site word.
-        let initialized = relocated && self.keep_site_in_data();
-        self.items.global(Global {
-            name: name.clone().into(),
-            linkage: Linkage::Private,
-            constant: true,
-            externally_initialized: initialized,
-            ty: Type::Struct(vec![prefix.clone(), Type::I64, Type::I64], true),
-            init: Some(Value::Struct {
-                packed: true,
-                fields: vec![
-                    (prefix, Value::Zero),
-                    (Type::I64, int(word)),
-                    (Type::I64, if fixed { site.clone() } else { int(0) }),
-                ],
-            }),
-            align: 8,
-            absolute_symbol: false,
-            section: None,
-        });
-        let pointer = if argument.byval.is_none() || !fixed {
-            let pointer = self.temp(shape);
-            let words = Type::words(memory_layout::CAUSE_BYTES as u64 / 8);
-            let value = self.load(&words, &Value::global(name), 8);
-            self.store(&words, &value, &pointer, 8);
-            if !fixed {
-                let at = self.offset(&pointer, memory_layout::CAUSE_SITE as i128);
-                self.store(&Type::I64, &site, &at, 8);
-            }
-            pointer
-        } else {
-            Value::global(name)
-        };
-        self.call_declared(
-            "hirsel_core_raise",
-            Type::Void,
-            &[ptr(CONTEXT), (argument, pointer)],
-            FnAttrs::default(),
-            &CallAttrs::default(),
-        );
     }
 
     /// Starts tracking which slots may be live at `block`'s entry, and ends

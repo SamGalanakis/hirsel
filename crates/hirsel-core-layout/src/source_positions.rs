@@ -4,6 +4,8 @@
 //! event, so an offset landing on a newline is still on its original line.
 pub const TAG: u8 = 0xff;
 pub const POINTS_TAG: u8 = 0xfe;
+/// Size of one `SourceFile` directory row in bytes (`path: (u64, u64)`, `source: (u64, u64)`, `start: u64`).
+pub const SOURCE_ROW_BYTES: usize = 40;
 /// The linked entry checks the native runtime ABI through its source table decoder.
 pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v6";
 pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v3";
@@ -172,6 +174,162 @@ fn take_uleb(bytes: &mut &[u8]) -> u64 {
         }
         shift += 7;
     }
+}
+
+fn try_take_uleb(bytes: &mut &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let (&byte, remaining) = bytes.split_first()?;
+        *bytes = remaining;
+        if shift >= 64 || (shift == 63 && byte > 1) {
+            return None;
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+}
+
+/// Encode `(path, start, encoded_positions_or_utf8_source)` rows into the
+/// self-contained binary format carried by `.hirsel-mod` section 8 (`sites`).
+/// Empty slice encodes to an empty vector.
+pub fn encode_source_table(rows: &[(&str, u64, &[u8])]) -> Vec<u8> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let count = rows.len();
+    let mut body = vec![0u8; SOURCE_ROW_BYTES * count];
+    for (index, &(path, start, positions)) in rows.iter().enumerate() {
+        let row = SOURCE_ROW_BYTES * index;
+        body[row + 32..row + SOURCE_ROW_BYTES].copy_from_slice(&start.to_le_bytes());
+        for (view, content) in [path.as_bytes(), positions].into_iter().enumerate() {
+            let field = row + 16 * view;
+            let offset = body.len() as u64;
+            body[field..field + 8].copy_from_slice(&offset.to_le_bytes());
+            body[field + 8..field + 16].copy_from_slice(&(content.len() as u64).to_le_bytes());
+            body.extend_from_slice(content);
+        }
+    }
+    let mut out = Vec::with_capacity(8 + body.len());
+    out.extend_from_slice(&(count as u64).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Validate `.hirsel-mod` section 8 (`sites`), returning `(file_count, body_bytes)`
+/// where `body_bytes` begins with `file_count` 40-byte `SourceFile` rows whose
+/// offsets are relative to the start of `body_bytes`.
+pub fn validate_source_table(bytes: &[u8]) -> Result<(usize, &[u8]), &'static str> {
+    if bytes.is_empty() {
+        return Ok((0, &[]));
+    }
+    if bytes.len() < 8 {
+        return Err("truncated source table header");
+    }
+    let count = usize::try_from(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+        .map_err(|_| "source file count overflow")?;
+    let body = &bytes[8..];
+    if count == 0 {
+        return if body.is_empty() {
+            Ok((0, &[]))
+        } else {
+            Err("trailing bytes in empty source table")
+        };
+    }
+    let rows_bytes = count
+        .checked_mul(SOURCE_ROW_BYTES)
+        .ok_or("source row table overflow")?;
+    if body.len() < rows_bytes {
+        return Err("truncated source file rows");
+    }
+    let word = |slice: &[u8], at: usize| u64::from_le_bytes(slice[at..at + 8].try_into().unwrap());
+    let mut prev_start = 0u64;
+    for i in 0..count {
+        let row = &body[i * SOURCE_ROW_BYTES..(i + 1) * SOURCE_ROW_BYTES];
+        let path_off = usize::try_from(word(row, 0)).map_err(|_| "path offset overflow")?;
+        let path_len = usize::try_from(word(row, 8)).map_err(|_| "path length overflow")?;
+        let src_off = usize::try_from(word(row, 16)).map_err(|_| "source offset overflow")?;
+        let src_len = usize::try_from(word(row, 24)).map_err(|_| "source length overflow")?;
+        let start = word(row, 32);
+        if start == 0 || start >= SITE_END || (i > 0 && start <= prev_start) {
+            return Err("invalid or unsorted source site start");
+        }
+        prev_start = start;
+        let path_end = path_off
+            .checked_add(path_len)
+            .ok_or("path range overflow")?;
+        if path_off < rows_bytes || path_end > body.len() {
+            return Err("path range outside source table");
+        }
+        if std::str::from_utf8(&body[path_off..path_end]).is_err() {
+            return Err("non-utf8 source path");
+        }
+        let src_end = src_off
+            .checked_add(src_len)
+            .ok_or("source range overflow")?;
+        if src_off < rows_bytes || src_end > body.len() {
+            return Err("source range outside source table");
+        }
+        let src = &body[src_off..src_end];
+        if let Some(mut markers) = src.strip_prefix(&[TAG]) {
+            while !markers.is_empty() {
+                try_take_uleb(&mut markers).ok_or("malformed line markers")?;
+            }
+        } else if let Some(points) = src.strip_prefix(&[POINTS_TAG]) {
+            validate_points(points)?;
+        } else if std::str::from_utf8(src).is_err() {
+            return Err("non-utf8 raw source text");
+        }
+    }
+    Ok((count, body))
+}
+
+fn validate_points(points: &[u8]) -> Result<(), &'static str> {
+    if points.len() < 4 {
+        return Err("truncated point table header");
+    }
+    let count = u32::from_le_bytes(points[..4].try_into().unwrap()) as usize;
+    let dir_end = 4usize
+        .checked_add(
+            count
+                .checked_mul(BLOCK_ROW_BYTES)
+                .ok_or("point directory overflow")?,
+        )
+        .ok_or("point directory overflow")?;
+    if points.len() < dir_end {
+        return Err("truncated point directory");
+    }
+    let (rows, _) = points[4..dir_end].as_chunks::<BLOCK_ROW_BYTES>();
+    let mut prev_block = None;
+    for row in rows {
+        let block = u32::from_le_bytes(row[..4].try_into().unwrap());
+        if prev_block.is_some_and(|prev| block <= prev) {
+            return Err("unsorted point blocks");
+        }
+        prev_block = Some(block);
+        let offset = usize::try_from(u64::from_le_bytes(row[4..].try_into().unwrap()))
+            .map_err(|_| "point block offset overflow")?;
+        let mask_end = offset.checked_add(8).ok_or("point block mask overflow")?;
+        if offset < dir_end || mask_end > points.len() {
+            return Err("point block outside table");
+        }
+        let mask = u64::from_le_bytes(points[offset..mask_end].try_into().unwrap());
+        let mut rest = &points[mask_end..];
+        for _ in 0..mask.count_ones() {
+            let (&code, tail) = rest.split_first().ok_or("truncated point block stream")?;
+            rest = tail;
+            if code == 0 {
+                let marker = try_take_uleb(&mut rest).ok_or("malformed point delta")?;
+                if marker & 1 == 1 {
+                    try_take_uleb(&mut rest).ok_or("malformed point column")?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

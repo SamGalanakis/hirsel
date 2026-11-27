@@ -70,6 +70,7 @@ mod package_update;
 mod package_workspace;
 mod prebuild;
 mod prof_command;
+mod registry_verify;
 mod release_manifest;
 mod unsupported_reach;
 pub use prebuild::Prebuilt;
@@ -125,7 +126,6 @@ hirsel_guard::install!();
 mod closure_laws;
 #[cfg(test)]
 mod tests;
-
 pub fn package(name: &str) -> PackageId {
     PackageId {
         name: name.into(),

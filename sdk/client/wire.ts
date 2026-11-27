@@ -2,7 +2,7 @@ import type {Caller, StreamId} from './persistence.js';
 
 // The wire frames and the values they carry (hirsel.4).
 export type Option<T> = {tag: 'None'} | {tag: 'Some'; value: T};
-export interface Want { identity: Uint8Array; args_fp: bigint; result_fp: bigint }
+export interface Want { readonly identity: Uint8Array; readonly args_fp: bigint; readonly result_fp: bigint }
 export interface Room { requested: bigint; available: bigint }
 export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: Room}
   | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'} | {tag: 'Conflict'; value: string};

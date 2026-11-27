@@ -307,10 +307,10 @@ A type expression is an array starting with its codec schema opcode.
 ## Shared client runtime
 
 The generated directory includes the shared client runtime in `client.ts`,
-`persistence.ts`, `browser.ts` and `node.ts`. Compile these sources with your
-TypeScript app or bundle them with your browser app. Include the generated
-`codec.js`, `entries.js` and `frame.js` beside the compiled runtime. The SDK
-needs no runtime npm dependencies.
+`persistence.ts`, `browser.ts`, `memory.ts` and `node.ts`. Compile these sources
+with your TypeScript app or bundle them with your browser app. Include the
+generated `codec.js`, `entries.js` and `frame.js` beside the compiled runtime.
+The SDK needs no runtime npm dependencies.
 
 ```text
 import {Client} from './generated/client.js';
@@ -335,6 +335,11 @@ a private local state directory to its constructor. Processes sharing a state
 directory must share a PID namespace. The adapter needs Node type declarations
 when you type-check it.
 
+For stateless or ephemeral callers, use `MemoryStorage` from
+`./generated/memory.js`. It keeps in-session reconnect idempotency with zero
+disk syncs. Its state lasts only as long as the owning process or tab; a
+restart or reload starts empty.
+
 `Client.open` requires the ingress WebSocket `url`, the generated `frame`
 codec, `wants` and their `kinds`, and a `storage` adapter. Pass the generated `identity` to
 check the launch digest, target and `n_place`. The optional `credential` is an
@@ -347,7 +352,9 @@ state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
 Locks. Node storage uses durable file replacement and exclusive filesystem
-claims for its leases. A claim records the owner's PID and a unique token.
+claims for its leases. Memory storage keeps the same mutual exclusion in the
+owning process and commits state snapshots atomically with no disk I/O. A
+NodeStorage claim records the owner's PID and a unique token.
 After the PID exits, contenders advance to a new claim without deleting the
 old one. A PID that has been reused can delay recovery until it exits.
 Stop all clients using the old `flock` adapter before opening the same

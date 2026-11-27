@@ -1,22 +1,26 @@
 import type {Outcome, Want} from './client.js';
 
-export interface Caller { issuer: number; subject: Uint8Array }
-export interface HttpRequest { path: string; body?: string }
-export interface StreamId { t: bigint; n: bigint }
+export interface Caller { readonly issuer: number; readonly subject: Uint8Array }
+export interface HttpRequest { readonly path: string; readonly body?: string }
+export interface StreamId { readonly t: bigint; readonly n: bigint }
 export interface Pending {
-  p: bigint; want: Want; args: Uint8Array; slot: number; http?: HttpRequest;
+  p: bigint; readonly want: Want; readonly args: Uint8Array; slot: number; readonly http?: HttpRequest;
   inflight: boolean; untouched: boolean; remintsLeft: 0 | 1;
 }
 export interface StreamRecord {
-  caller: Caller | null; next: bigint; pending?: Pending; terminal?: {p: bigint; outcome: Outcome<Uint8Array>}; retired: boolean;
-  id?: StreamId; minter: bigint | null; sent: boolean;
+  readonly caller: Caller | null; next: bigint; pending?: Pending;
+  terminal?: {readonly p: bigint; readonly outcome: Outcome<Uint8Array>}; retired: boolean;
+  readonly id?: StreamId; minter: bigint | null; sent: boolean;
 }
 export const RECOVERY_VERSION = 4;
 export interface Installation {
-  version: typeof RECOVERY_VERSION; installation: bigint; generation: bigint;
+  readonly version: typeof RECOVERY_VERSION; readonly installation: bigint; readonly generation: bigint;
   directory: string[]; streams: Record<string, StreamRecord>;
 }
 export interface Lease { release(): Promise<void>; lost: Promise<void> }
+// The installation shell, directory, stream records and pending records are mutable working
+// state between read and write. Nested caller, want, args, http, stream id and terminal outcome
+// values are immutable once stored.
 export interface Storage {
   lock(name: string, wait: boolean): Promise<Lease | null>;
   read(): Promise<Installation | null>;

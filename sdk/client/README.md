@@ -1,8 +1,9 @@
 # Shared client runtime
 
 Build with `npm install && npm run build` in this directory. The output is
-`dist/client.js` and its declarations, with `browser.js` and `node.js` adapters.
-Build outputs stay untracked. There are no runtime npm dependencies.
+`dist/client.js` and its declarations, with `browser.js`, `memory.js` and
+`node.js` adapters. Build outputs stay untracked. There are no runtime npm
+dependencies.
 
 ```ts
 import {Client} from '@hirsel/client';
@@ -36,6 +37,12 @@ same PID namespace. The Node adapter takes installation and stream leases
 through exclusive filesystem claims. State replacement writes a private
 temporary file, syncs it, renames it and syncs the directory. The state
 directory holds pending arguments and replies.
+
+For stateless Node, server and ephemeral browser callers, pass
+`new MemoryStorage()` from `@hirsel/client/memory`. It keeps in-session
+reconnect idempotency with zero disk syncs: a dropped connection replays each
+pending call under its key. Its state lasts only as long as the owning process
+or tab (and the adapter object within it); a restart or reload starts empty.
 
 When upgrading from the `flock` adapter, stop all old clients before opening
 the same directory with the new SDK. The new adapter reads the existing state.

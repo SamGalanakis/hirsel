@@ -48,7 +48,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         exports = json.loads((installed / 'package.json').read_text())['exports']
         # TypeScript can fall back to a declaration beside the JavaScript when
         # the explicit `types` target is missing. Check that advertised path too.
-        for subpath in ('.', './node'):
+        for subpath in ('.', './memory', './node'):
             declaration = exports[subpath]['types']
             if not declaration.startswith('./') or not (installed / declaration).is_file():
                 raise ValueError(f'@hirsel/client export {subpath!r} has a missing types target: {declaration}')

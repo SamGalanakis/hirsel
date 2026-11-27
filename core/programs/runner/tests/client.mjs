@@ -118,7 +118,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','delivery','image','lanes','persistence','browser','node','room','state','wire']) {
+    for(const name of ['client','delivery','image','lanes','persistence','browser','memory','node','room','state','wire']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -127,7 +127,8 @@ export async function loadRuntime(mutant) {
     const node=await import(pathToFileURL(join(dir,'node.js')).href);
     const persistence=await import(pathToFileURL(join(dir,'persistence.js')).href);
     const browser=await import(pathToFileURL(join(dir,'browser.js')).href);
-    return {...client,...node,...persistence,...browser,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
+    const memory=await import(pathToFileURL(join(dir,'memory.js')).href);
+    return {...client,...node,...persistence,...browser,...memory,dir,dispose:()=>rm(dir,{recursive:true,force:true})};
   }catch(error){
     await rm(dir,{recursive:true,force:true});
     throw error;
@@ -1131,6 +1132,70 @@ export async function laws(codec, only, mutant, entries, http) {
       assert(!savedStream(h.storage.raw).pending.untouched);
     }
     h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();await a;h.server.check();
+  };
+  tests.memory_storage_in_session_reconnect_recovers_outbox=async()=>{
+    class ObservedMemory {
+      constructor() { this.inner=new runtime.MemoryStorage();this.raw=null; }
+      lock(name,wait) { return this.inner.lock(name,wait); }
+      read() { return this.inner.read(); }
+      async write(state) { await this.inner.write(state);this.raw=structuredClone(state); }
+    }
+    const store=new Ledger(),storage=new ObservedMemory();
+    let answer=false;
+    const h=await setup(storage,{prepare:server=>{server.onCall=(f,s)=>{
+      const outcome=store.attempt(s.principal,f);
+      if(answer)server.answer(s,f.values[0],f.values[1],outcome);
+    };}});await ready(h);
+    const calls=[7,8,9].map(n=>h.client.call(want,bytes(n),x=>x));await settle();
+    const before=h.server.calls.map(({frame})=>frame);
+    assert.equal(before.length,3);
+    h.server.close(h.server.sockets[0],1001);answer=true;await settle();await h.time.advance(50);await settle();
+    const replayed=h.server.calls.slice(3).map(({frame})=>frame);
+    assert.equal(replayed.length,3);
+    const byArg=(x,y)=>x.values[4][0]-y.values[4][0];
+    assert.deepEqual(replayed.sort(byArg),before.sort(byArg),'each outbox key is replayed once');
+    assert.deepEqual(await Promise.all(calls),[returned(7),returned(8),returned(9)]);
+    assert.equal(store.effects,3);
+    assert.deepEqual([...store.byValue.entries()].sort((a,b)=>a[0]-b[0]),[[7,1],[8,1],[9,1]]);
+    h.server.check();
+  };
+  tests.memory_storage_lock_mutual_exclusion=async()=>{
+    const storage=new runtime.MemoryStorage();
+    const first=await storage.lock('install',false);assert(first);
+    assert.equal(await storage.lock('install',false),null);
+    let acquired=false;
+    const waiting=storage.lock('install',true).then(lease=>{acquired=true;return lease;});
+    await settle();assert.equal(acquired,false);
+    await first.release();
+    const second=await waiting;assert(second);assert.equal(acquired,true);
+    assert.equal(await storage.lock('install',false),null);
+    await second.release();
+    const third=await storage.lock('install',false);assert(third);await third.release();
+  };
+  tests.memory_storage_aborted_write_keeps_committed_state=async()=>{
+    const storage=new runtime.MemoryStorage(),key='pending-'+'0'.repeat(32);
+    const passed=initial();
+    await storage.write(passed);
+    passed.directory.push(key);
+    assert.deepEqual(await storage.read(),initial(),'mutating the passed object after write must not commit');
+
+    const working=await storage.read();
+    working.directory.push(key);
+    working.streams[key]=runtime.emptyStream();
+    await storage.write(working);
+    const expected={...initial(),directory:[key],streams:{[key]:runtime.emptyStream()}};
+    assert.deepEqual(await storage.read(),expected);
+
+    const abandoned=await storage.read();
+    abandoned.streams[key].next=9n;
+    assert.deepEqual(await storage.read(),expected,'mutating a read copy without write must not commit');
+
+    const committed=await storage.read();
+    committed.streams[key].next=1n;
+    await storage.write(committed);
+    committed.streams[key].next=2n;
+    assert.deepEqual(await storage.read(),{...expected,streams:{[key]:{...runtime.emptyStream(),next:1n}}},
+      'mutating a written object while a later write is aborted must keep the last commit');
   };
   tests.browser_lock_lifetime_and_strict_commit=async()=>{
     const originalNavigator=Object.getOwnPropertyDescriptor(globalThis,'navigator');

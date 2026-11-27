@@ -599,6 +599,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             include_str!("../../../sdk/client/browser.ts").into(),
         ),
         (
+            "memory.ts".into(),
+            include_str!("../../../sdk/client/memory.ts").into(),
+        ),
+        (
             "node.ts".into(),
             include_str!("../../../sdk/client/node.ts").into(),
         ),

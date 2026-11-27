@@ -292,6 +292,7 @@ dirs = ["."]
 "store_catchup_laws.hirsel" = "store"
 "store_catchup_f4_laws.hirsel" = "store"
 "tiered_hot_migrate_laws.hirsel" = "store"
+"tiered_hot_memory_laws.hirsel" = "store"
 "store_crash_install_laws.hirsel" = "store"
 "store_law_schema.hirsel" = "store"
 "store_claim_crash_laws.hirsel" = "store"
@@ -967,6 +968,9 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_l102_hot_index_build"]
 limit = 536870912
+
+[tests.runs."store@1/store/test_l102_hot_memory_index"]
+limit = 1073741824
 
 [tests.runs."store@1/store/test_l102_hot_unique_conflict"]
 limit = 536870912

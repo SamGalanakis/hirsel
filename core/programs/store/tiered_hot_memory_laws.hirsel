@@ -1,0 +1,157 @@
+// L102 (g) (§13.10a "Hot Tiered builds", v2.171 F3): a `Backfilling` Memory
+// index on a table made Tiered, rebuilt by a hot Migrate whose source read
+// goes through the pager. The shared fixtures are in tiered_hot_migrate_laws.
+// L102 (g) fixture: `wide` holds L102_G_ROWS values of L102_G_VALUE bytes,
+// so its rows alone pass the Tiered Memory room L102_G_ROOM.
+const L102_G_ROWS: u64 = 20000
+
+const L102_G_VALUE: u64 = 4000
+
+const L102_G_ROOM: u64 = 67108864
+
+fn l102_g_options() -> Result[Options, Error] {
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(268435456u64)
+    overrides.writer_pin_bytes = Some(34471936u64)
+    overrides.cache_bytes = Some(56u64 * 1048576u64)
+    overrides.dirty_bytes = Some(262144u64)
+    let first = sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("L102 (g) sizing")
+    overrides.pager_task_bytes = Some(first.pager_task_bytes)
+    overrides.resident_limit = Some(tiered_plan_reserve(first) + L102_G_ROOM)
+    Ok(sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("L102 (g) sizing"))
+}
+
+// `by_s`: every 64th key under `k % 7`, a Memory index of 313 entries.
+fn l102_sparse(k: u64, _v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    if k % 64u64 == 0u64 {
+        list.push(mut keys, k % 7u64)
+    }
+    Ok(take keys)
+}
+
+// `by_w`: every key under `k % 97`, the (b) shape on `wide`.
+fn l102_wide(k: u64, _v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, k % 97u64)
+    Ok(take keys)
+}
+
+fn l102_g_declare(mut db: Db, mode: Mode, with_wide: bool) -> Result[(Index[u64, u64, Bytes, ()], Option[Index[u64, u64, Bytes, ()]]), Error] waits {
+    let mut decl = declare(db, mode)?
+    let mut wide_decl = declare_table(mut decl, "wide", std.codec.key_u64(), std.codec.of_bytes())?
+    let sparse = index(mut decl, mut wide_decl, "by_s", Many, code.describe(l102_sparse), std.codec.key_u64())?
+    let dense: Option[Index[u64, u64, Bytes, ()]] = if with_wide {
+        Some(index(mut decl, mut wide_decl, "by_w", Many, code.describe(l102_wide), std.codec.key_u64())?)
+    } else {
+        None
+    }
+    let _ = finish(mut decl, take wide_decl)?
+    let _ = seal(mut db, take decl)?
+    Ok((sparse, dense))
+}
+
+fn l102_g_put(mut db: Db, t: Table[u64, Bytes], from: u64, to: u64) -> Result[(), Error] waits {
+    let fixture: Table[u64, Bytes] = clone(t)
+    let Committed(_) = run(mut db, Some(100000000u64), copy_env((fixture, from, to)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
+        for k in env.1 .. env.2 {
+            put(mut tx, env.0, k, install_fixture_bytes(L102_G_VALUE, 120u8))?
+        }
+        Ok(())
+    })? else {
+        fail("L102 (g): a seed write did not commit")
+    }
+    Ok(())
+}
+
+// `name` is Public, still Memory, and holds exactly the model's extraction.
+fn l102_g_index(db: Db, ix: Index[u64, u64, Bytes, ()], name: String, sparse: bool) -> Result[(), Error] waits {
+    let Public = lix_state(db, name)? else {
+        fail("L102 (g): the index is not Public")
+    }
+    let mut model: List[(u64, u64)] = list.new()
+    for k in 0u64 .. L102_G_ROWS {
+        if !sparse {
+            list.push(mut model, (k % 97u64, k))
+        } else if k % 64u64 == 0u64 {
+            list.push(mut model, (k % 7u64, k))
+        }
+    }
+    let Seen(Seen(value: Ok(true), ..)) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(100000000u64), (copy_env(ix), take model), fn(tx: Tx, input: (Index[u64, u64, Bytes, ()], List[(u64, u64)])) -> Result[bool, Error] {
+        exact_index_entries(tx, input.0, clone(input.1))
+    })? else {
+        fail("L102 (g): the index differs from the model's extraction")
+    }
+    Ok(())
+}
+
+// A `Backfilling` Memory `by_s` on `wide`, kept Memory when `wide` is made
+// Tiered (D-D7-2), with `wide` then filled past the Memory room.
+fn l102_g_seed(mut db: Db) -> Result[Index[u64, u64, Bytes, ()], Error] waits {
+    if L102_G_ROWS * L102_G_VALUE <= tiered_memory_room(disk_state(db).options) {
+        fail("L102 (g): the seeded values must pass the Memory room")
+    }
+    let (sparse, _) = l102_g_declare(mut db, Migrate, false)?
+    let t = table(mut db, "wide", std.codec.key_u64(), std.codec.of_bytes())?
+    l102_g_put(mut db, t, 0u64, 64u64)?
+    rebuild_index(mut db, sparse)?
+    set_residency(mut db, t.id, Tiered)?
+    let mut k = 64u64
+    while k < L102_G_ROWS {
+        let to = order.min(k + 256u64, L102_G_ROWS)
+        l102_g_put(mut db, t, k, to)?
+        k = to
+    }
+    let _ = checkpoint(mut db)?
+    let Backfilling(_) = lix_state(db, "by_s")? else {
+        fail("L102 (g): the fixture must leave by_s Backfilling")
+    }
+    if table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, sparse.id)? {
+        fail("L102 (g): by_s must stay Memory when wide is made Tiered")
+    }
+    Ok(sparse)
+}
+
+// L102 (g): the hot Migrate rebuilds the `Backfilling` Memory `by_s` on the
+// Tiered `wide`, whose 80 MB of values pass the 64 MiB Memory room, reading
+// its source a chunk at a time: `by_s` is Public, Memory and equal to the
+// model's extraction, with no `Full(Resident)`. The second row rebuilds it in
+// one declaration with the new Tiered `by_w`, past `by_w`'s first build cut:
+// `by_s` is still Public and equal (F3), as is `by_w`, before and after
+// reopen. Red on main: `Tiered(Migrate)` at the declaration.
+@test
+fn test_l102_hot_memory_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let alone = disk_test_directory(d)
+    let mut db = open(tasks, alone, c, r, l102_g_options()?)?
+    let _ = l102_g_seed(mut db)?
+    let (rebuilt, _) = l102_g_declare(mut db, Migrate, false)?
+    l102_g_index(db, rebuilt, string.from("by_s"), true)?
+    if table_is_tiered(pages.holder_heads(db.holders)[0].roots.collections, rebuilt.id)? {
+        fail("L102 (g): the rebuild made by_s Tiered")
+    }
+    close(take db)?
+    let both = disk_test_directory(d)
+    let mut paired = open(tasks, both, c, r, l102_g_options()?)?
+    let _ = l102_g_seed(mut paired)?
+    let before = paired.checkpointed
+    let (sparse, dense) = l102_g_declare(mut paired, Migrate, true)?
+    if paired.checkpointed - before < 2 {
+        fail("L102 (g): the paired build must run a build cut before its publish")
+    }
+    let Some(wide_ix) = dense else {
+        fail("L102 (g): by_w was declared")
+    }
+    l102_g_index(paired, sparse, string.from("by_s"), true)?
+    l102_g_index(paired, wide_ix, string.from("by_w"), false)?
+    let _ = checkpoint(mut paired)?
+    close(take paired)?
+    let mut again = open(tasks, both, c, r, l102_g_options()?)?
+    let (reopened, reopened_dense) = l102_g_declare(mut again, Open, true)?
+    let Some(reopened_wide) = reopened_dense else {
+        fail("L102 (g): by_w was declared at reopen")
+    }
+    l102_g_index(again, reopened, string.from("by_s"), true)?
+    l102_g_index(again, reopened_wide, string.from("by_w"), false)?
+    l102_stamps(both, again, reopened_wide.id)?
+    close(take again)
+}

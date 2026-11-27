@@ -304,6 +304,7 @@ store@1/store/test_l100_zero_live_pin_survives_probe_memory_main src=052a4420ab2
 store@1/store/test_l102_hot_build_two_orphans src=9bdec6e55d61c14f sig=f0bfee0ebdd5fd8b run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_chain src=6668d75716fbff7e sig=150500682fd42151 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_index_build src=116b8c3fe66630e7 sig=bbb4316480400082 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_l102_hot_memory_index src=c49effb246274d77 sig=b844091a3023e0f8 run=680435cdaaab738e bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_identity src=9b6a817513a5b585 sig=cdbfc6c6f596318c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_merge src=5b8f3e3c1f11a124 sig=cdbfc6c6f596318c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l102_hot_migrate_untouched src=5403a4fe09226db0 sig=a7efb7b2f71c17a8 run=aa75ab2775f5e821 bug=- oracle=- rows=pending

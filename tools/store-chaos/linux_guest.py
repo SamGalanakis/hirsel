@@ -17,7 +17,7 @@ import time
 from linux_devices import Volume, run
 
 HERE = Path(__file__).resolve().parent
-FIXTURE = HERE / 'fixture'
+FIXTURE = Path(os.environ.get('HIRSEL_CHAOS_FIXTURE', str(HERE / 'fixture')))
 
 
 def pack(path):
@@ -46,8 +46,8 @@ class Guest:
         self.vol = Volume(fs, fault, self.stack)
         self.trace = self.vol.root / 'syscalls'
         init = run(FIXTURE, 'init', cwd=self.vol.store).decode()
-        env = dict(os.environ, HIRSEL_NET_REACTOR='auto' if fault == 'ring' else 'epoll',
-                   HIRSEL_UNTIED='2')
+        reactor = os.environ.get('HIRSEL_CHAOS_REACTOR', 'auto' if fault == 'ring' else 'epoll')
+        env = dict(os.environ, HIRSEL_NET_REACTOR=reactor, HIRSEL_UNTIED='2')
         cmd = [str(FIXTURE), 'serve']
         if fault.startswith('space-'):
             run('cc', '-shared', '-O2', '-fPIC', HERE / 'fill.c', '-ldl', '-o', self.vol.root / 'fill.so')
@@ -116,17 +116,21 @@ class Guest:
             time.sleep(0.05)
         if self.fault == 'ring':
             self.ring.start(self.writer.pid)
-            # Leave one block for a natural short WRITEV when extension crosses it.
+            # Fill to 4 KiB granularity and leave one block free so the next
+            # extending io_uring write either short-writes or hits -ENOSPC.
             file = self.vol.mount / 'fill'
             with file.open('wb', buffering=0) as f:
-                while True:
-                    try:
-                        f.write(bytes(65536))
-                    except OSError as exc:
-                        if exc.errno != errno.ENOSPC:
-                            raise
-                        break
+                for chunk in (65536, 16384, 4096):
+                    while True:
+                        try:
+                            f.write(bytes(chunk))
+                        except OSError as exc:
+                            if exc.errno != errno.ENOSPC:
+                                raise
+                            break
+                os.fsync(f.fileno())
                 os.ftruncate(f.fileno(), max(0, f.tell() - 4096))
+                os.fsync(f.fileno())
         return {}
 
     def cold(self):

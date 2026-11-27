@@ -24,29 +24,29 @@ pub fn expire_rows[K, V](mut d: Declare, mut t: TableDecl[K, V], by: StaticFn[fn
     let key = std.codec.key_u64()
     let lookup_key = failure_result_from_rep(catalog.catalog_index_key(t.handle.id, EXPIRY_INDEX))?
     let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
-    let mut proposed = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.schema.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
+    let mut proposed = indexes.Catalog(record: CatalogIndex(indexes.IndexRecord(shape: Entries(ManyEntry), payload_schemas: list.new(), projection: None, state: Backfilling(None))), id: d.plan.schema.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: failure_result_from_rep(types.copied(code.identity(by)))?, revision: take revision)
     let existing = existing_index_record(d, lookup_key, EXPIRY_INDEX)?
     let rebuilt_for = settle_index_record(mut d, lookup_key, EXPIRY_INDEX, take existing, mut proposed, ends)?
     let schema_binding = expiry_binding(t.handle, proposed, by)
-    build_declared_record(mut d, t.handle, lookup_key, EXPIRY_INDEX, proposed, schema_binding.index, take rebuilt_for)?
+    build_declared_record(mut d, t.handle, lookup_key, EXPIRY_INDEX, proposed, indexes.binding_extractor(schema_binding), take rebuilt_for)?
     if let Follower = d.mode {} else {
-        list.push(mut d.plan.bindings, take schema_binding)
+        indexes.add_binding(mut d.plan.bindings, take schema_binding)
     }
     map.insert(mut d.indexes, proposed.id, ())
     d.failed = false
     Ok(())
 }
 
-fn expiry_binding[K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Option[u64]]) -> IndexRegistration {
+fn expiry_binding[K, V](t: Table[K, V], record: indexes.Catalog, by: StaticFn[fn(K, V) -> Option[u64]]) -> indexes.IndexRegistration {
     let extractor: ExpiryExtractor[K, V] = ExpiryExtractor(table: clone(t), id: record.id, by: by)
-    let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
-        extract_expiry(extractor, raw, primary)
+    let extract: own[send] fn(Bytes, Bytes) -> Result[indexes.IndexValue, types.Failure] = fn(raw: Bytes, primary: Bytes) -> Result[indexes.IndexValue, types.Failure] {
+        failure_result_to_rep(extract_expiry(extractor, raw, primary))
     }
-    index_registration(t, record, take extract, entry_key_end(std.codec.key_u64()))
+    indexes.index_registration(t.id, t.readers.current, record, take extract, indexes.entry_key_end(std.codec.key_u64()))
 }
 
 // A row's one entry `id ‖ at u64 BE ‖ primary`, or none.
-fn extract_expiry[K, V](extractor: ExpiryExtractor[K, V], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
+fn extract_expiry[K, V](extractor: ExpiryExtractor[K, V], raw: Bytes, primary: Bytes) -> Result[indexes.IndexValue, Error] {
     let t = view extractor.table
     let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(t.key, primary)))?
     let v = row_value(t.readers, t.id, raw)?
@@ -60,7 +60,7 @@ fn extract_expiry[K, V](extractor: ExpiryExtractor[K, V], raw: Bytes, primary: B
         }
         list.push(mut keys, take row)
     }
-    Ok(IndexValue(keys: take keys, payload: list.new(), sums: list.new()))
+    Ok(indexes.IndexValue(keys: take keys, payload: list.new(), sums: list.new()))
 }
 
 /// What one sweep did: the rows it deleted, and its commit when it made one.
@@ -162,7 +162,7 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
                 return Ok(take out)
             }
             taken = int.saturating_add(taken, size)
-            list.push(mut out, DueRow(table: record.owner, schema: extractor.schema, primary: take primary))
+            list.push(mut out, DueRow(table: record.owner, schema: indexes.value_schema(extractor), primary: take primary))
         }
     }
     Ok(take out)

@@ -32,7 +32,7 @@ pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
 type SchemaPlan: send {
     schema: catalog.SchemaPlan,
     store: StoreId,
-    bindings: List[IndexRegistration],
+    bindings: indexes.IndexBindings,
     chunk_freed: Option[pager.TieredFreed],
     // D-CU-1: rows this schema commit itself wrote, and whether the commit is
     // non-replayable under an export lease (`Drift`).
@@ -50,7 +50,7 @@ type SchemaPlan: send {
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.resident, db.ceiling, retaining(db), db.limits.value), store: db.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
+    SchemaPlan(schema: catalog.schema_plan(pages.share_roots(pages.holder_heads(db.holders)[0].roots), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.resident, db.ceiling, retaining(db), db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections))
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
@@ -138,9 +138,7 @@ pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrat
         let _ = publish_schema_plan(mut db, take plan)?
     } else {
         let SchemaPlan(bindings: take bindings, ..) = take plan
-        for take schema_binding in take bindings {
-            register_index(mut db.indexes, take schema_binding)
-        }
+        indexes.install_bindings(mut db.indexes, take bindings)
     }
     Ok(())
 }
@@ -203,7 +201,7 @@ fn catalog_descriptions(catalog_tree: pages.PageTree) -> Result[List[DeclaredCol
     let mut descriptions: List[DeclaredCollection] = list.new()
     while let Some((key, raw)) = failure_result_from_rep(catalog.next_page_range(mut rows))? {
         let stored = decode_catalog(raw)?
-        let kind = pages.descriptor_kind_byte(catalog_kind(stored.record))
+        let kind = pages.descriptor_kind_byte(indexes.catalog_kind(stored.record))
         let name = failure_result_from_rep(catalog.catalog_collection_name(key, kind))?
         list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind))
     }

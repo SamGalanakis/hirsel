@@ -11,7 +11,7 @@ fn index_build_has_overlay(tree: pages.PageTree, id: u32) -> bool {
 
 // A schema chunk uses the writer's attempt partition. Its prepared roots
 // and replacements belong to the cut candidate until MANIFEST publication.
-fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, Bytes)]) -> Result[TieredIndexChunk, Error] waits {
+fn prepare_tiered_index_chunk(mut db: Db, record: indexes.Catalog, rows: List[(Bytes, Bytes)]) -> Result[TieredIndexChunk, Error] waits {
     let mut pins = pager.empty_tiered_pins(call_pin_root(db, 0), pager.pin_partition(db.pager))
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
@@ -37,7 +37,7 @@ fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, By
     }
 }
 
-fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
+fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, record: indexes.Catalog, extractor: indexes.RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
     let shape = catalog_index(record)?.shape
     let Some((edge, _)) = std.page.collection_slot(tree.root, failure_result_from_rep(catalog.prefix(record.id))?) else {
         return Error(Stale(record.id))
@@ -47,28 +47,28 @@ fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: M
     let mut row_count = 0u64
     for (logical, raw) in rows {
         let primary = list.slice(logical, 4, list.len(logical))
-        let IndexValue(keys: take keys, payload: take payload, sums: sums) = (extractor.extract)(raw, primary)?
+        let indexes.IndexValue(keys: take keys, payload: take payload, sums: sums) = extract_index(extractor, raw, primary)?
         let mut part = 0u64
         for take key in take keys {
             if list.len(key) > 4096 {
                 return Error(Limit(Key))
             }
-            let prior: Option[Arc[Bytes]] = if let Entries(Many) = shape {
+            let prior: Option[Arc[Bytes]] = if let Entries(ManyEntry) = shape {
                 None
             } else {
                 tiered_chunk_prior(attempt, visible, edge, operations, key)?
             }
             let value = match shape {
-                Entries(Unique) => {
+                Entries(UniqueEntry) => {
                     if let Some(value) = view prior {
-                        let owner = list.slice(value, 4, unique_owner_end(value)?)
+                        let owner = list.slice(value, 4, failure_result_from_rep(indexes.unique_owner_end(value))?)
                         if owner != primary {
                             return Ok(ChunkDuplicate(failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(primary))?))
                         }
                     }
                     failure_result_from_rep(types.copied(payload))?
                 },
-                Entries(Many) => failure_result_from_rep(types.copied(payload))?,
+                Entries(ManyEntry) => failure_result_from_rep(types.copied(payload))?,
                 Sums => {
                     let (members, sum) = match prior {
                         Some(body) => group_totals(body)?,

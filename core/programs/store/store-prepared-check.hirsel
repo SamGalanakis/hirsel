@@ -1,8 +1,8 @@
 // OLD's checks of a PREPARED file's catalog delta (STORE-SPEC §3.5a, M1-M3):
 // each changed record is well formed and keeps its identity, and only ids at
 // or above the export's next_table are new.
-fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
-    let is_index = catalog_kind(c.record) == IndexCollection
+fn validate_catalog_key(key: Bytes, c: indexes.Catalog) -> bool {
+    let is_index = indexes.catalog_kind(c.record) == IndexCollection
     let prefix_tag = if is_index {
         2u8
     } else {
@@ -67,7 +67,7 @@ fn validate_delta(change: CatalogChange, initial: u32) -> Result[(), DeployError
         }
         if let Some(before) = old {
             if c.id == before.id {
-                if catalog_kind(c.record) != catalog_kind(before.record) || c.owner != before.owner || c.epoch < before.epoch || c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision || list.len(c.schemas) < list.len(before.schemas) {
+                if indexes.catalog_kind(c.record) != indexes.catalog_kind(before.record) || c.owner != before.owner || c.epoch < before.epoch || c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision || list.len(c.schemas) < list.len(before.schemas) {
                     return Error(ImportMalformed)
                 }
                 for i in 0u64 .. list.len(before.schemas) {

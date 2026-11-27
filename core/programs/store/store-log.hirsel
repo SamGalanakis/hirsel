@@ -33,14 +33,7 @@ pub fn declare_log[V](mut d: Declare, name: String, take value: std.codec.Codec[
 // The store's retention is a whole declaration's (`seal`, an activation's
 // install): every Log it declares `Keep(n)`, and no other.
 fn bind_retention(mut db: Db, take declared: List[catalog.LogRetention]) {
-    let mut held: Map[u32, catalog.LogRetention] = map.new()
-    for take r in take declared {
-        let id = r.id
-        if let Some(_) = r.keep {
-            map.insert(mut held, id, take r)
-        }
-    }
-    db.indexes.retention = take held
+    indexes.bind_retention(mut db.indexes, take declared)
 }
 
 // One slice of the retention sweep (§14.4a): one commit on main that trims
@@ -55,20 +48,14 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
     if limit == 0 {
         return Error(Limit(Transaction))
     }
-    let mut ids: List[u32] = list.new()
-    for (id, _) in db.indexes.retention {
-        list.push(mut ids, id)
-    }
-    list.sort(mut ids, fn(a: u32, b: u32) -> Order {
-        order.compare(a, b)
-    })
+    let ids = indexes.retention_ids(db.indexes)
     let mut floors: List[(u32, u64)] = list.new()
     let mut budget = limit
     for id in ids {
         if budget == 0 {
             break
         }
-        let Some(r) = map.get(db.indexes.retention, id) else {
+        let Some(r) = indexes.retention(db.indexes, id) else {
             continue
         }
         let Some(keep) = r.keep else {

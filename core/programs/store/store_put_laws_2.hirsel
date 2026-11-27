@@ -552,7 +552,7 @@ fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
-    let Prepared(take candidate) = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
+    let Prepared(take candidate) = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
         let _ = append(mut tx, events, types.key_word(3))?
         trim_before(mut tx, events, 1)?
         put_bytes(mut tx, 1, types.key_word(1), types.key_word(11))?

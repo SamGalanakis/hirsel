@@ -1,0 +1,3 @@
+fn forge_index_owner() -> store.indexes.IndexOwner {
+    store.indexes.IndexOwner()
+}

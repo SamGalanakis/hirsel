@@ -81,8 +81,9 @@ pub type Attention: codec + shareable + send {
 
 pub fn attention(db: Db) -> Result[Attention, Error] {
     let mut drift: List[IndexDrift] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut drift, list.len(db.drift))))?
-    for seen in db.drift {
+    let seen_drift = indexes.drift_rows(db.indexes)
+    failure_result_from_rep(types.capacity(list.try_reserve(mut drift, list.len(seen_drift))))?
+    for seen in seen_drift {
         list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: failure_result_from_rep(catalog.named(seen.index))?, count: seen.count, demoted: seen.demoted))
     }
     let reclaims = reclaim_state(db)
@@ -108,7 +109,7 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
     let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take first_key), end_key)?
     while let Some((take key, raw)) = failure_result_from_rep(catalog.next_bytes(mut records))? {
         let record = decode_catalog(raw)?
-        let state = copied_state(catalog_index(record)?.state)?
+        let state = public_index_state(catalog_index(record)?.state)?
         failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, IndexReport(table: record.owner, id: record.id, index: failure_result_from_rep(catalog.declaration_index_name(key))?, state: take state))
     }
@@ -117,24 +118,9 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
 
 // Counts the drift a staged draft saw, by index, under the names its base
 // catalog gives them.
-fn count_drift(mut db: Db, catalog: pages.PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
+fn count_drift(mut db: Db, tree: pages.PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
     db.attention_seq = int.saturating_add(db.attention_seq, 1)
-    for (owner, id) in seen {
-        let mut found = false
-        for at in 0u64 .. list.len(db.drift) {
-            if db.drift[at].table == owner && db.drift[at].id == id {
-                db.drift[at].count = int.saturating_add(db.drift[at].count, 1)
-                found = true
-                break
-            }
-        }
-        if !found {
-            let name = find_index_name(catalog, owner, id)?
-            failure_result_from_rep(types.capacity(list.try_reserve(mut db.drift, 1)))?
-            list.push(mut db.drift, IndexDrift(table: owner, id: id, index: take name, count: 1, demoted: 0))
-        }
-    }
-    Ok(())
+    failure_result_from_rep(indexes.count_drift(mut db.indexes, tree, seen))
 }
 
 // A call a proven-wrong index failed (§I.3): counts the drift and, on main,
@@ -152,13 +138,6 @@ fn trip_drift(mut db: Db, i: u64, seen: List[(u32, u32)]) -> Result[(), Error] w
 // already made its entry.
 fn count_demotions(mut db: Db, demoted: List[(u32, u32)]) -> Result[(), Error] {
     db.attention_seq = int.saturating_add(db.attention_seq, 1)
-    for (owner, id) in demoted {
-        for at in 0u64 .. list.len(db.drift) {
-            if db.drift[at].table == owner && db.drift[at].id == id {
-                db.drift[at].demoted = int.saturating_add(db.drift[at].demoted, 1)
-                break
-            }
-        }
-    }
+    indexes.count_demotions(mut db.indexes, demoted)
     Ok(())
 }

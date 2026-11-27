@@ -135,7 +135,7 @@ fn snapshot_rows_after(db: Db, s: Snapshot, inventory: pages.TieredReadInventory
 // returns the first two primary keys found under one Unique key. Outside a
 // preview that ends the chunk with `plan` untouched; a preview skips the
 // later row and keeps building, as the scratch index keeps one row per key.
-fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool, preview: bool, record_steps: bool) -> Result[Option[(Bytes, Bytes)], Error] {
+fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: indexes.Catalog, extractor: indexes.RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool, preview: bool, record_steps: bool) -> Result[Option[(Bytes, Bytes)], Error] {
     let mut record = take chunk_record
     let mut roots = pages.share_roots(plan.schema.roots)
     let mut live_bytes = plan.schema.live
@@ -156,15 +156,15 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     } else {
         for (logical, raw) in rows {
             let primary = list.slice(logical, 4, list.len(logical))
-            let values = (extractor.extract)(raw, primary)?
+            let values = extract_index(extractor, raw, primary)?
             for row in values.keys {
                 if list.len(row) > 4096 {
                     return Error(Limit(Key))
                 }
                 let prior_width = format.stored_prior(pages.get_page_row(roots.collections, row))
                 if let Some(prior) = pages.get_page_row(roots.collections, row) {
-                    if let Entries(Unique) = catalog_index(record)?.shape {
-                        let owner = list.slice(prior, 4, unique_owner_end(prior)?)
+                    if let Entries(UniqueEntry) = catalog_index(record)?.shape {
+                        let owner = list.slice(prior, 4, failure_result_from_rep(indexes.unique_owner_end(prior))?)
                         if owner != primary {
                             if let None = duplicate {
                                 duplicate = Some((failure_result_from_rep(types.copied(owner))?, failure_result_from_rep(types.copied(primary))?))
@@ -193,9 +193,9 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
     plan.schema.next_node = next_stamp - 1
     if done {
-        set_index_state(mut record, Public)?
+        failure_result_from_rep(indexes.set_index_state(mut record, Public))?
     } else if let Some(take final_key) = take cursor {
-        set_index_state(mut record, Backfilling(Some(take final_key)))?
+        failure_result_from_rep(indexes.set_index_state(mut record, Backfilling(Some(take final_key))))?
     }
     let raw = encode_catalog(record)?
     live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
@@ -221,11 +221,11 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
 // Inserting chunk by chunk copied every page a chunk touched once per chunk,
 // and grew faster than the rows (store-child-build-2660). An aggregate keeps
 // the chunked builder: its group rows add up parts, which a sort does not.
-fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extractor: RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
+fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog, extractor: indexes.RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
     if let Sums = catalog_index(record)?.shape {
         return chunked_declared_index(mut plan, key, record, extractor, preview)
     }
-    let unique = if let Entries(Unique) = catalog_index(record)?.shape {
+    let unique = if let Entries(UniqueEntry) = catalog_index(record)?.shape {
         true
     } else {
         false
@@ -245,9 +245,9 @@ fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extra
 
 // One row's entries for a bottom-up build, each charged to `workspace` as it
 // is kept.
-fn extract_entries(mut extracted: List[std.page.Row], mut workspace: u64, ceiling: u64, extractor: RegisteredIndex, logical: Bytes, raw: Bytes) -> Result[(), Error] {
+fn extract_entries(mut extracted: List[std.page.Row], mut workspace: u64, ceiling: u64, extractor: indexes.RegisteredIndex, logical: Bytes, raw: Bytes) -> Result[(), Error] {
     let primary = list.slice(logical, 4, list.len(logical))
-    let values = (extractor.extract)(raw, primary)?
+    let values = extract_index(extractor, raw, primary)?
     for row in values.keys {
         if list.len(row) > 4096 {
             return Error(Limit(Key))
@@ -263,7 +263,7 @@ fn extract_entries(mut extracted: List[std.page.Row], mut workspace: u64, ceilin
 
 // Sorts the extracted entries and builds the collection from them, which
 // replaces the one the record had (AP13).
-fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, unique: bool, take found: List[std.page.Row], read: u64, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
+fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog, unique: bool, take found: List[std.page.Row], read: u64, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
     let mut extracted = take found
     // The sort keeps rows of one key in primary order, so the first is the
     // owner the chunked builder kept. The pair reported is the one a scan in
@@ -276,8 +276,8 @@ fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, unique
         if let Some(previous) = list.last(kept) {
             if previous.key == row.key {
                 if unique {
-                    let owner = list.slice(previous.value, 4, unique_owner_end(previous.value)?)
-                    let second = list.slice(row.value, 4, unique_owner_end(row.value)?)
+                    let owner = list.slice(previous.value, 4, failure_result_from_rep(indexes.unique_owner_end(previous.value))?)
+                    let second = list.slice(row.value, 4, failure_result_from_rep(indexes.unique_owner_end(row.value))?)
                     let earlier = match view duplicate {
                         Some((_, met)) => second < met,
                         None => true,
@@ -314,7 +314,7 @@ fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, unique
     // redefinition under an export lease is caught as Drift at the cut.
     failure_result_from_rep(types.capacity(list.try_reserve(mut plan.schema.superseded, 1)))?
     list.push(mut plan.schema.superseded, current.id)
-    set_index_state(mut current, Public)?
+    failure_result_from_rep(indexes.set_index_state(mut current, Public))?
     let raw = encode_catalog(current)?
     live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.schema.retained)
     roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, roots, key, raw))?
@@ -324,7 +324,7 @@ fn bulk_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, unique
 }
 
 // An aggregate's declared build: every chunk runs in the declaration's plan.
-fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extractor: RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
+fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog, extractor: indexes.RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
     let mut current = copied_record(record)?
     let mut read = 0u64
     let mut duplicate: Option[(Bytes, Bytes)] = None
@@ -359,14 +359,14 @@ fn chunked_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, ext
     Ok((take duplicate, read, written))
 }
 
-fn copied_record(record: Catalog) -> Result[Catalog, Error] {
+fn copied_record(record: indexes.Catalog) -> Result[indexes.Catalog, Error] {
     decode_catalog(encode_catalog(record)?)
 }
 
 // The first index on main's head whose record is Backfilling and whose
 // extractor this release binds, with its catalog key and record. An index
 // this release does not bind waits for the release that declares it.
-fn building_index(db: Db) -> Result[Option[(Bytes, Catalog)], Error] {
+fn building_index(db: Db) -> Result[Option[(Bytes, indexes.Catalog)], Error] {
     let mut first_key: Bytes = list.new()
     list.push(mut first_key, 2u8)
     let mut end_key: Bytes = list.new()
@@ -406,13 +406,8 @@ fn unready_index(catalog_tree: pages.PageTree) -> Result[Option[String], Error] 
     Ok(None)
 }
 
-fn bound_extractor(registry: IndexRegistry, record: Catalog) -> Option[View[RegisteredIndex]] in registry {
-    for ((table_id, index_id, _), extractor) in registry.entries {
-        if table_id == record.owner && index_id == record.id && extractor.by == record.by && extractor.key == record.key {
-            return Some(extractor)
-        }
-    }
-    None
+fn bound_extractor(owner: indexes.IndexOwner, record: indexes.Catalog) -> Option[View[indexes.RegisteredIndex]] in owner {
+    indexes.bound_extractor(owner, record)
 }
 
 // One chunk of the first Backfilling index on main, in one schema commit
@@ -451,10 +446,10 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
                 plan.step_rows = take step_ops
                 let mut published = copied_record(record)?
                 if done {
-                    set_index_state(mut published, Public)?
+                    failure_result_from_rep(indexes.set_index_state(mut published, Public))?
                 } else if let Some((logical, _)) = list.last(rows) {
                     let after = failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?
-                    set_index_state(mut published, Backfilling(Some(take after)))?
+                    failure_result_from_rep(indexes.set_index_state(mut published, Backfilling(Some(take after))))?
                 }
                 put_index_record(mut plan, key, published)?
                 None
@@ -468,14 +463,14 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
     }
     if let Some((take first, take second)) = take found {
         let mut failed = copied_record(record)?
-        set_index_state(mut failed, Failed(take first, take second))?
+        failure_result_from_rep(indexes.set_index_state(mut failed, Failed(take first, take second)))?
         put_index_record(mut plan, key, failed)?
     }
     let _ = publish_schema_plan(mut db, take plan)?
     Ok(Some(take name))
 }
 
-fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
+fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog) -> Result[(), Error] {
     let raw = encode_catalog(record)?
     let live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained)
     let roots = failure_result_from_rep(catalog.catalog_insert(mut plan.schema.next_node, plan.schema.roots, key, raw))?
@@ -512,7 +507,7 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
     live_bytes = int.saturating_add(live_bytes, 126)
     let next_table = plan.schema.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
-    set_index_state(mut record, Backfilling(None))?
+    failure_result_from_rep(indexes.set_index_state(mut record, Backfilling(None)))?
     put_index_record(mut plan, key, record)?
     Ok(true)
 }
@@ -561,7 +556,7 @@ pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[()
 // record as Backfilling(None) over an empty collection; an existing entry
 // index is rebuilt whole, an aggregate resumes from its cursor, and a Failed
 // one restarts from an empty index.
-fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: Catalog, extractor: RegisteredIndex, new_index: bool, take cause: String) -> Result[(), Error] {
+fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: indexes.Catalog, extractor: indexes.RegisteredIndex, new_index: bool, take cause: String) -> Result[(), Error] {
     if !types.same(plan.store.hi, plan.store.lo, t.store.hi, t.store.lo) {
         return Error(Foreign)
     }
@@ -584,7 +579,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
             return Error(Limit(Ids))
         }
         scratch = proposed.id + 1u32
-        set_index_state(mut proposed, Backfilling(None))?
+        failure_result_from_rep(indexes.set_index_state(mut proposed, Backfilling(None)))?
         let raw = encode_catalog(proposed)?
         let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.schema.live, plan.schema.roots, key, raw, plan.schema.retained))
         meta.epoch += 1
@@ -778,7 +773,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         let fp = std.codec.fingerprint_of(schema)
         let mut schemas: List[catalog.ValueSchema] = list.new()
         list.push(mut schemas, catalog.ValueSchema(number: meta.next, fingerprint: fp, schema: take schema))
-        let table_raw = encode_catalog(Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: meta.next + 1, by: list.new(), revision: list.new()))?
+        let table_raw = encode_catalog(indexes.Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: meta.next + 1, by: list.new(), revision: list.new()))?
         let mut live_bytes = int.saturating_add(plan.schema.live, 126 + entry(target, table_raw))
         define_empty_tiered_collection(mut roots.collections, id, 1, mut ids)?
         let mut old_ids: List[u32] = list.with_capacity(list.len(olds))

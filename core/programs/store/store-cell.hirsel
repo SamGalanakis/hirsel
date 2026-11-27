@@ -27,7 +27,7 @@ pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec
     Ok(Cell(binding: take cell_binding, key: take key))
 }
 
-fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogRecord, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
+fn declare_value_collection[V](mut d: Declare, name: String, take form: indexes.CatalogRecord, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
     if d.failed {
         return Error(MigrationFault)
     }
@@ -39,7 +39,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
     let (take selected, created) = match pages.get_page_row(d.plan.schema.roots.catalog, key) {
         Some(raw) => {
             let existing = decode_catalog(raw)?
-            if catalog_kind(existing.record) != catalog_kind(form) {
+            if indexes.catalog_kind(existing.record) != indexes.catalog_kind(form) {
                 if let Migrate = d.mode {
                     return Error(Exists(failure_result_from_rep(catalog.named(name))?))
                 }
@@ -54,7 +54,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
             let Migrate = d.mode else {
                 return Error(Missing(failure_result_from_rep(catalog.named(name))?))
             }
-            let initial = Catalog(record: take form, id: d.plan.schema.next_table, owner: 0, epoch: 1, key: failure_result_from_rep(types.copied(key_schema))?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
+            let initial = indexes.Catalog(record: take form, id: d.plan.schema.next_table, owner: 0, epoch: 1, key: failure_result_from_rep(types.copied(key_schema))?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
             (take initial, true)
         },
     }
@@ -84,7 +84,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: CatalogR
     Ok(ValueCollection(store: d.plan.store, id: record.id, catalog_key: failure_result_from_rep(catalog.catalog_key_handle(take key))?, catalog_page: failure_result_from_rep(catalog.catalog_page(d.plan.schema.roots.catalog))?, readers: take resolved))
 }
 
-fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: Catalog, created: bool) -> Result[(), Error] {
+fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: indexes.Catalog, created: bool) -> Result[(), Error] {
     let wire = encode_catalog(record)?
     let mut live_bytes = catalog_recharge(plan.schema.live, plan.schema.roots, key, wire, plan.schema.retained)
     let base = pages.share_roots(plan.schema.roots)
@@ -94,7 +94,7 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: Catalog, cre
         if next_id == 4294967295 {
             return Error(Limit(Ids))
         }
-        failure_result_from_rep(catalog.define_store_collection(mut roots.collections, record.id, pages.descriptor_kind_byte(catalog_kind(record.record)), mut plan.schema.next_node))?
+        failure_result_from_rep(catalog.define_store_collection(mut roots.collections, record.id, pages.descriptor_kind_byte(indexes.catalog_kind(record.record)), mut plan.schema.next_node))?
         live_bytes = int.saturating_add(live_bytes, 126)
         next_id += 1
     }

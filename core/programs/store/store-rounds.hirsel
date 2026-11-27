@@ -225,7 +225,7 @@ fn shipped_ranges(collections: pages.PageTree, ranges: List[RangeChange]) -> Res
     for shipped_range in ranges {
         let (kind, residency) = match shipped_range.catalog {
             Some(raw) => {
-                let k = pages.descriptor_kind_byte(catalog_kind(decode_catalog(raw)?.record))
+                let k = pages.descriptor_kind_byte(indexes.catalog_kind(decode_catalog(raw)?.record))
                 let res = match std.page.lookup(collections.root, failure_result_from_rep(catalog.prefix(shipped_range.id))?) {
                     Some(desc) => pages.collection_descriptor(desc).residency,
                     None => ResidentMemory,

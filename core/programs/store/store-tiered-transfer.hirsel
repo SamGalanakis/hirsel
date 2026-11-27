@@ -113,7 +113,7 @@ fn export_source_map(delta: List[CatalogChange], base_next_table: u32, sources: 
     for change in delta {
         if let Some(raw) = view change.after {
             let record = decode_catalog(raw)?
-            if catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+            if indexes.catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
                 map.insert(mut new_tables, record.id, ())
             }
         }
@@ -141,7 +141,7 @@ fn validate_source_map(source_map: List[MigrateSource], delta: List[CatalogChang
     for change in delta {
         if let Some(raw) = view change.after {
             let record = deploy_result(decode_catalog(raw))?
-            if catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
+            if indexes.catalog_kind(record.record) == TableCollection && record.id >= base_next_table {
                 map.insert(mut new_tables, record.id, ())
             }
         }
@@ -299,7 +299,7 @@ fn derive_range_residencies(base: Map[u32, (std.page_descriptor.CollectionKind, 
             continue
         }
         let record = deploy_result(decode_catalog(raw))?
-        let kind = catalog_kind(record.record)
+        let kind = indexes.catalog_kind(record.record)
         if kind == IndexCollection {
             continue
         }
@@ -333,7 +333,7 @@ fn derive_range_residencies(base: Map[u32, (std.page_descriptor.CollectionKind, 
                 Some((_, old_res)) => old_res,
                 None => ResidentMemory,
             }
-        } else if catalog_kind(record.record) == IndexCollection {
+        } else if indexes.catalog_kind(record.record) == IndexCollection {
             match map.get(target_residency, record.owner) {
                 Some(owner_res) => owner_res,
                 None => ResidentMemory,

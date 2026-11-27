@@ -80,14 +80,14 @@ fn capture_test_catalog(mut m: manifest.PageManifest, id: StoreId, d: Dir) -> Re
     for i in 1u32 .. 16 {
         let mut name = string.from("table-")
         string.push_u64(mut name, int.widen(i + 10))
-        let record = Catalog(record: CatalogTable, id: i, owner: 0, epoch: 1, key: list.new(), schemas: list.new(), next: 1, by: list.new(), revision: list.new())
+        let record = indexes.Catalog(record: CatalogTable, id: i, owner: 0, epoch: 1, key: list.new(), schemas: list.new(), next: 1, by: list.new(), revision: list.new())
         list.push(mut catalog_rows, std.page.Entry(key: failure_result_from_rep(catalog.table_key(name))?, cell: InlineValue(encode_catalog(record)?)))
     }
     let mut schemas: List[catalog.ValueSchema] = list.with_capacity(32)
     for i in 1u16 .. 33 {
         list.push(mut schemas, catalog.ValueSchema(number: i, fingerprint: 0, schema: capture_test_fill(4096, 17)))
     }
-    let index_record = Catalog(record: CatalogIndex(IndexRecord(shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(capture.CATALOG_REVISION_MAX, 19))
+    let index_record = indexes.Catalog(record: CatalogIndex(indexes.IndexRecord(shape: Entries(UniqueEntry), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))), id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(capture.CATALOG_REVISION_MAX, 19))
     let large_value = encode_catalog(index_record)?
     if list.len(large_value) <= journal.JOURNAL_CHUNK_BYTES {
         fail("catalog BLOB fixture did not cross a chunk boundary")

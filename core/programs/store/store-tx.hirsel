@@ -301,7 +301,7 @@ fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
     // The evidence of a proven-wrong index stays however the callback
     // ended, as its abort-only flag does.
     if let Some(take seen) = take drift {
-        stage_drift(mut tx.drift, take seen)
+        indexes.stage_drift(mut tx.drift, take seen)
     }
     take result
 }
@@ -401,21 +401,6 @@ fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: Option[u64]) -> Result[Opt
     edit_frame(tx.ops, tx.below, tx.extra_bytes, key, Some(size), frame, types.transaction_limit(limits_to_rep(tx.limits)))
 }
 
-fn edit_frame(ops: pages.DataOps, below: List[Arc[pages.Staged]], extra: u64, key: Bytes, value_size: Option[u64], frame: Option[u64], transaction: u64) -> Result[Option[u64], Error] {
-    let Some(current) = frame else {
-        return Ok(None)
-    }
-    let width = match value_size {
-        Some(size) => 13 + size,
-        None => 9u64,
-    } + list.len(key)
-    let after = int.saturating_add(current - pages.old_data_op_size(ops, below, false, key), width)
-    if int.saturating_add(after, extra) - 16 > transaction {
-        return Error(Limit(Transaction))
-    }
-    Ok(Some(after))
-}
-
 fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
     let charge = memory_data_charge(tx, p, val)
     let (old_charge, height, prior) = put_charge(mut tx, p)?
@@ -508,12 +493,7 @@ fn put_charge(mut tx: Tx, key: Bytes) -> Result[(u64, u64, Option[u32]), Error] 
     Ok((old, cached_write_height(tx, held), prior))
 }
 
-type DataRefund {
-    charge: u64,
-    prior: Option[u32]
-}
-
-fn row_refund(tx: Tx, key: Bytes, value: Bytes) -> DataRefund {
+fn row_refund(tx: Tx, key: Bytes, value: Bytes) -> indexes.DataRefund {
     // Both retention modes take the same steps, as in put_charge.
     let previous = memory_data_charge(tx, key, value)
     let prior: Option[u32] = if let Some(_) = tx.attempt {
@@ -523,25 +503,25 @@ fn row_refund(tx: Tx, key: Bytes, value: Bytes) -> DataRefund {
     } else {
         Some(format.stored_prior(Some(view value)))
     }
-    DataRefund(charge: if tx.retain_old {
+    indexes.DataRefund(charge: if tx.retain_old {
         0u64
     } else {
         previous
     }, prior: prior)
 }
 
-fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[DataRefund], Error] {
+fn delete_refund(tx: Tx, key: Bytes) -> Result[Option[indexes.DataRefund], Error] {
     Ok(match transaction_row(tx, key)? {
         Some(value) => Some(row_refund(tx, key, value)),
         None => None
     })
 }
 
-fn apply_delete(mut tx: Tx, take p: Bytes, refund: DataRefund) -> Result[(), Error] {
+fn apply_delete(mut tx: Tx, take p: Bytes, refund: indexes.DataRefund) -> Result[(), Error] {
     stage_delete(mut tx, take p, refund, false)
 }
 
-fn stage_delete(mut tx: Tx, take p: Bytes, refund: DataRefund, popped: bool) -> Result[(), Error] {
+fn stage_delete(mut tx: Tx, take p: Bytes, refund: indexes.DataRefund, popped: bool) -> Result[(), Error] {
     let height = transaction_write_height(tx, p)?
     let _ = reserve_ids(mut tx, height)?
     let (_, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None, refund.prior)

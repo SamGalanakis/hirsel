@@ -147,7 +147,7 @@ fn hot_combine(keys: HotKeys, name: String, take kept: Bytes, again: Bytes) -> R
     match keys {
         MigrateKeys => Error(Exists(failure_result_from_rep(catalog.named(name))?)),
         EntryKeys(unique) => {
-            if unique && list.slice(kept, 4, unique_owner_end(kept)?) != list.slice(again, 4, unique_owner_end(again)?) {
+            if unique && list.slice(kept, 4, failure_result_from_rep(indexes.unique_owner_end(kept))?) != list.slice(again, 4, failure_result_from_rep(indexes.unique_owner_end(again))?) {
                 return Error(Conflict(failure_result_from_rep(catalog.named(name))?))
             }
             Ok(take kept)
@@ -514,11 +514,11 @@ fn hot_build_migrate(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take 
 // one member; a rebuilt index's old id is superseded.
 fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take job: DeferredIndexBuild) -> Result[(), Error] waits {
     let record = decode_catalog(job.record_raw)?
-    let bindings = replace(mut plan.bindings, list.new())
+    let bindings = replace(mut plan.bindings, indexes.empty_bindings())
     let slot = find_binding_index(bindings, record.owner, record.id)?
     let keys = match catalog_index(record)?.shape {
-        Entries(Unique) => EntryKeys(true),
-        Entries(Many) => EntryKeys(false),
+        Entries(UniqueEntry) => EntryKeys(true),
+        Entries(ManyEntry) => EntryKeys(false),
         Sums => GroupKeys,
     }
     let dirty = disk_state(db).options.dirty_bytes
@@ -541,7 +541,7 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
         }
         for (logical, raw) in rows {
             let primary = list.slice(logical, 4, list.len(logical))
-            let IndexValue(keys: take entry_keys, payload: take payload, sums: sums) = (bindings[slot].index.extract)(raw, primary)?
+            let indexes.IndexValue(keys: take entry_keys, payload: take payload, sums: sums) = extract_index(indexes.binding_at(bindings, slot), raw, primary)?
             let mut part = 0u64
             for take entry_key in take entry_keys {
                 if list.len(entry_key) > 4096 {
@@ -572,7 +572,7 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
     hot_finish(mut db, mut work, take target)?
     plan.bindings = take bindings
     let mut published = copied_record(record)?
-    set_index_state(mut published, Public)?
+    failure_result_from_rep(indexes.set_index_state(mut published, Public))?
     plan.schema.next_node = pages.holder_next_node(db.holders)
     put_index_record(mut plan, job.catalog_key, published)?
     pages.set_next_node(mut db.holders, plan.schema.next_node)
@@ -593,7 +593,7 @@ fn hot_build_index(mut db: Db, mut work: HotBuild, mut plan: SchemaPlan, take jo
 fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: DeferredIndexBuild) -> Result[(), Error] waits {
     let _ = demote_index(mut plan, job.catalog_key)?
     let record = catalog_entry_in(plan.schema.roots.catalog, job.catalog_key)?
-    let bindings = replace(mut plan.bindings, list.new())
+    let bindings = replace(mut plan.bindings, indexes.empty_bindings())
     let slot = find_binding_index(bindings, record.owner, record.id)?
     let shape = catalog_index(record)?.shape
     let mut cursor: Option[Bytes] = None
@@ -607,14 +607,14 @@ fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: DeferredIndexBui
             if let Some((seen, _)) = list.last(rows) {
                 cursor = Some(failure_result_from_rep(types.copied(list.slice(seen, 4, list.len(seen))))?)
             }
-            if let Some(_) = index_chunk(mut plan, job.catalog_key, take current, bindings[slot].index, rows, done, false, false)? {
+            if let Some(_) = index_chunk(mut plan, job.catalog_key, take current, indexes.binding_at(bindings, slot), rows, done, false, false)? {
                 return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
             }
         }
         plan.bindings = take bindings
         return Ok(())
     }
-    let unique = if let Entries(Unique) = shape {
+    let unique = if let Entries(UniqueEntry) = shape {
         true
     } else {
         false
@@ -626,7 +626,7 @@ fn hot_memory_index(mut db: Db, mut plan: SchemaPlan, take job: DeferredIndexBui
         let (take rows, done) = tiered_rows_after(db, record.owner, cursor, INDEX_CHUNK)?
         for (logical, raw) in rows {
             read += 1
-            extract_entries(mut extracted, mut workspace, plan.schema.ceiling, bindings[slot].index, logical, raw)?
+            extract_entries(mut extracted, mut workspace, plan.schema.ceiling, indexes.binding_at(bindings, slot), logical, raw)?
             cursor = Some(failure_result_from_rep(types.copied(list.slice(logical, 4, list.len(logical))))?)
         }
         if done {

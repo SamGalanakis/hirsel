@@ -134,7 +134,7 @@ fn collection_catalog_cases() -> bool {
     let log = collection_catalog_fixture(4, key_u64)
     let cell_meta = result.unwrap(decode_catalog(cell))
     let log_meta = result.unwrap(decode_catalog(log))
-    if catalog_kind(cell_meta.record) != CellCollection || cell_meta.id != 7 || catalog_kind(log_meta.record) != LogCollection || log_meta.id != 7 || log_meta.key != key_u64 || result.unwrap(encode_catalog(cell_meta)) != cell || result.unwrap(encode_catalog(log_meta)) != log {
+    if indexes.catalog_kind(cell_meta.record) != CellCollection || cell_meta.id != 7 || indexes.catalog_kind(log_meta.record) != LogCollection || log_meta.id != 7 || log_meta.key != key_u64 || result.unwrap(encode_catalog(cell_meta)) != cell || result.unwrap(encode_catalog(log_meta)) != log {
         return false
     }
     match (decode_catalog(collection_catalog_fixture(3, key_u64)), decode_catalog(collection_catalog_fixture(4, list.new()))) {

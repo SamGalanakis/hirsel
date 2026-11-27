@@ -11,7 +11,7 @@
 // the position of the extractor its declaration bound in the plan's bindings.
 type CatchUpIndex {
     name: String,
-    record: Catalog,
+    record: indexes.Catalog,
     kind: IndexKind,
     binding: u64
 }
@@ -164,17 +164,10 @@ fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[Ca
             let Entries(kind) = index_meta.shape else {
                 return Error(Drift)
             }
-            kind
+            public_index_kind(kind)
         }
         let index_name = deploy_result(failure_result_from_rep(catalog.declaration_index_name(key)))?
-        let mut found_at: Option[u64] = None
-        for i in 0u64 .. list.len(plan.bindings) {
-            let registration = view plan.bindings[i]
-            if registration.table == record.owner && registration.index.id == record.id && registration.index.by == record.by && registration.index.key == record.key {
-                found_at = Some(i)
-            }
-        }
-        let Some(slot) = found_at else {
+        let Some(slot) = indexes.matching_binding_index(plan.bindings, record) else {
             return Error(Drift)
         }
         list.push(mut found, CatchUpIndex(name: take index_name, record: take record, kind: kind, binding: slot))
@@ -191,7 +184,7 @@ fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPla
     if list.len(shipped) == 0 || list.len(rows) == 0 {
         return Ok(())
     }
-    let bindings = replace(mut plan.bindings, list.new())
+    let bindings = replace(mut plan.bindings, indexes.empty_bindings())
     let patched = patch_entries(mut ctx, opened, plan, bindings, before, shipped, rows, mut touched)
     plan.bindings = take bindings
     let (take roots, live_bytes, next_node) = patched?
@@ -200,7 +193,7 @@ fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPla
     keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
-fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: List[IndexRegistration], before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(pages.Roots, u64, u64), Error] waits {
+fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: indexes.IndexBindings, before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(pages.Roots, u64, u64), Error] waits {
     let mut roots = pages.share_roots(plan.schema.roots)
     let mut live_bytes = plan.schema.live
     let mut first = failure_result_from_rep(catalog.stamp_after(plan.schema.next_node))?
@@ -209,7 +202,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
     for i in 0u64 .. list.len(shipped) {
         let target = view shipped[i]
         let target_tiered = table_is_tiered(roots.collections, target.record.id)?
-        let extractor = view bindings[target.binding].index
+        let extractor = indexes.binding_at(bindings, target.binding)
         for row in rows {
             if list.len(row.tree_key) < 4 {
                 continue
@@ -221,19 +214,19 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
             let primary = list.slice(row.tree_key, 4, list.len(row.tree_key))
             let old_keys: List[Bytes] = match view row.before {
                 Some(raw) => {
-                    let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
+                    let indexes.IndexValue(keys: take keys, ..) = extract_index(extractor, raw, primary)?
                     take keys
                 },
                 None => match pages.get_page_row(before, row.tree_key) {
                     Some(raw) => {
-                        let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
+                        let indexes.IndexValue(keys: take keys, ..) = extract_index(extractor, raw, primary)?
                         take keys
                     },
                     None => list.new(),
                 },
             }
-            let current: Option[IndexValue] = match row.after {
-                Some(raw) => Some((extractor.extract)(raw, primary)?),
+            let current: Option[indexes.IndexValue] = match row.after {
+                Some(raw) => Some(extract_index(extractor, raw, primary)?),
                 None => None,
             }
             for key in old_keys {
@@ -264,7 +257,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
                 }
             }
             if let Some(take value) = take current {
-                let IndexValue(keys: take keys, payload: take payload, ..) = take value
+                let indexes.IndexValue(keys: take keys, payload: take payload, ..) = take value
                 for take key in take keys {
                     list.push(mut additions, (i, take key, failure_result_from_rep(types.copied(payload))?, failure_result_from_rep(types.copied(primary))?))
                 }
@@ -276,7 +269,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
         let target_tiered = table_is_tiered(roots.collections, target.record.id)?
         if let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, roots.collections, key)? {
             if let Unique = target.kind {
-                if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+                if list.slice(prior, 4, failure_result_from_rep(indexes.unique_owner_end(prior))?) != primary {
                     return Error(Conflict(failure_result_from_rep(catalog.named(target.name))?))
                 }
             }
@@ -312,7 +305,7 @@ fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: pages.PageTree, k
         return Ok(None)
     }
     if let Unique = kind {
-        if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+        if list.slice(prior, 4, failure_result_from_rep(indexes.unique_owner_end(prior))?) != primary {
             return Ok(None)
         }
     }

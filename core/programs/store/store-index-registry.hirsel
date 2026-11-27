@@ -1,123 +1,50 @@
 // A row's index values: its sorted, distinct keys and the payload each
 // carries; an aggregate's `sums` give each group's value, by position.
-type IndexValue {
+pub type IndexValue {
     keys: List[Bytes],
     payload: Bytes,
     sums: List[u64]
 }
 
-type RegisteredIndex: send {
+pub opaque type RegisteredIndex: send {
     id: u32,
     schema: u16,
     ordinal: u64,
     by: Bytes,
     key: Bytes,
-    extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error],
+    extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, types.Failure],
     // Where a Many entry's primary key starts in the entry key: after the
     // four-byte id and the index key. The verify walker reads it (§1.2a).
-    key_end: own[send] fn(Bytes) -> Result[u64, Error]
+    key_end: own[send] fn(Bytes) -> Result[u64, types.Failure]
 }
 
-type IndexRegistration: send {
+pub opaque type IndexRegistration: send {
     table: u32,
     index: RegisteredIndex
 }
 
-type IndexRegistry: send {
+pub opaque type IndexRegistry: send {
     entries: Map[(u32, u32, u16), RegisteredIndex],
     next_ordinal: u64,
     // Each Log the declaration keeps to its newest n (§14.4a), by id.
     retention: Map[u32, catalog.LogRetention]
 }
 
-fn empty_index_registry() -> IndexRegistry {
+pub fn empty_index_registry() -> IndexRegistry {
     IndexRegistry(entries: map.new(), next_ordinal: 0, retention: map.new())
 }
 
-fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegistry {
-    let mut registry = empty_index_registry()
-    for take schema_binding in take bindings {
-        register_index(mut registry, take schema_binding)
-    }
-    take registry
-}
-
-fn entry_key_end[J](key: std.codec.Key[J]) -> own[send] fn(Bytes) -> Result[u64, Error] {
-    let end: own[send] fn(Bytes) -> Result[u64, Error] = fn(raw: Bytes) -> Result[u64, Error] {
+pub fn entry_key_end[J](key: std.codec.Key[J]) -> own[send] fn(Bytes) -> Result[u64, types.Failure] {
+    let end: own[send] fn(Bytes) -> Result[u64, types.Failure] = fn(raw: Bytes) -> Result[u64, types.Failure] {
         let mut at = 4u64
-        let _ = failure_result_from_rep(catalog.decoded(std.codec.take_key_with(raw, mut at, key)))?
+        let _ = catalog.decoded(std.codec.take_key_with(raw, mut at, key))?
         Ok(at)
     }
     take end
 }
 
-type DeclaredExtractor[J, K, V, P]: send {
-    table: Table[K, V],
-    kind: IndexKind,
-    id: u32,
-    key: std.codec.Key[J],
-    by: StaticFn[fn(K, V) -> Result[List[J], Capacity]],
-    project: Option[catalog.IndexProjection[K, V, P]],
-    cover_row: bool
-}
-
-fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
-    let t = view extractor.table
-    let k = failure_result_from_rep(catalog.decoded(std.codec.decode_key(t.key, primary)))?
-    let v = row_value(t.readers, t.id, raw)?
-    let js = failure_result_from_rep(types.capacity((code.callable(extractor.by))(k, v)))?
-    let mut encoded: List[Bytes] = list.new()
-    for j in js {
-        let mut row = failure_result_from_rep(catalog.prefix(extractor.id))?
-        std.codec.encode_key(extractor.key, j, mut row)
-        if let Many = extractor.kind {
-            list.append(mut row, primary)
-        }
-        if list.len(row) > 4096 {
-            return Error(Limit(Key))
-        }
-        list.push(mut encoded, take row)
-    }
-    if list.len(encoded) == 0 {
-        return Ok(IndexValue(keys: take encoded, payload: list.new(), sums: list.new()))
-    }
-    list.sort_stable(mut encoded, list.compare_bytes)
-    let mut keys: List[Bytes] = list.new()
-    for take row in take encoded {
-        let n = list.len(keys)
-        if n == 0 || keys[n - 1] != row {
-            list.push(mut keys, take row)
-        }
-    }
-    let mut payload: Bytes = list.new()
-    if let Unique = extractor.kind {
-        failure_result_from_rep(types.capacity(format.blob(mut payload, primary)))?
-    }
-    if extractor.cover_row {
-        list.append(mut payload, raw)
-    } else if let Some(project) = extractor.project {
-        let value = failure_result_from_rep(types.capacity((code.callable(project.by))(k, v)))?
-        if let Some(number) = project.number {
-            list.put_word_le(mut payload, number)
-            std.codec.encode(project.codec, value, mut payload) ?=> |_| Limit(Value)
-        }
-    }
-    if list.len(payload) > VALUE_LIMIT {
-        return Error(Limit(Value))
-    }
-    Ok(IndexValue(keys: take keys, payload: take payload, sums: list.new()))
-}
-
-fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J], take project: Option[catalog.IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
-    let extractor: DeclaredExtractor[J, K, V, P] = DeclaredExtractor(table: clone(t), kind: kind, id: record.id, key: key, by: by, project: take project, cover_row: cover_row)
-    let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
-        extract_declared(extractor, raw, primary)
-    }
-    index_registration(t, record, take extract, entry_key_end(key))
-}
-
-fn index_registration[K, V](t: Table[K, V], record: Catalog, take extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error], take key_end: own[send] fn(Bytes) -> Result[u64, Error]) -> IndexRegistration {
-    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract, key_end: take key_end))
+pub fn index_registration(table: u32, schema: u16, record: Catalog, take extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, types.Failure], take key_end: own[send] fn(Bytes) -> Result[u64, types.Failure]) -> IndexRegistration {
+    IndexRegistration(table: table, index: RegisteredIndex(id: record.id, schema: schema, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract, key_end: take key_end))
 }
 
 fn register_index(mut registry: IndexRegistry, take schema_binding: IndexRegistration) {
@@ -129,105 +56,26 @@ fn register_index(mut registry: IndexRegistry, take schema_binding: IndexRegistr
     map.insert(mut registry.entries, key, take bound_index)
 }
 
-fn registered_index(tx: Tx, table_id: u32, schema: u16, record: Catalog) -> Result[View[RegisteredIndex], Error] in tx {
-    let registry = tx.indexes
-    if let Some(bound_index) = map.get(registry.entries, (table_id, record.id, schema)) {
-        if bound_index.by == record.by && bound_index.key == record.key {
-            return Ok(bound_index)
-        }
-    }
-    Error(Stale(table_id))
-}
-
-fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
+pub fn unique_owner_end(raw: Bytes) -> Result[u64, types.Failure] {
     let mut at = 0u64
     let width = take_le(raw, mut at, 4)?
     if width > list.len(raw) - at {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     Ok(at + width)
 }
 
-fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
-    let IndexValue(keys: take keys, payload: take payload, ..) = take incoming
-    let mut old = 0u64
-    for take key in take keys {
-        while old < list.len(old_keys) && old_keys[old] < key {
-            append_index_remove(tx, mut edits, record, primary, failure_result_from_rep(types.copied(old_keys[old]))?, mut frame)?
-            old += 1
-        }
-        let unchanged = old < list.len(old_keys) && old_keys[old] == key
-        let stored = transaction_row(tx, key)?
-        if unchanged {
-            old += 1
-        } else if let Entries(Unique) = catalog_index(record)?.shape {
-            list.push(mut edits.probes, (record.id, failure_result_from_rep(types.copied(key))?))
-        }
-        if let Some(prior) = stored {
-            if prior == payload {
-                continue
-            }
-        }
-        frame = put_frame(tx, key, payload, frame)?
-        push_index_edit(mut edits, StoreRow(take key, failure_result_from_rep(types.copied(payload))?))
-    }
-    while old < list.len(old_keys) {
-        append_index_remove(tx, mut edits, record, primary, failure_result_from_rep(types.copied(old_keys[old]))?, mut frame)?
-        old += 1
-    }
-    Ok(())
-}
-
-fn probe_index_keys(tx: Tx, table_id: u32, primary: Bytes, probes: List[(u32, Bytes)]) -> Result[(), Error] {
-    for (index_id, key) in probes {
-        if let Some(prior) = transaction_row(tx, key)? {
-            if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
-                return Error(Conflict(find_index_name(tx.roots.catalog, table_id, index_id)?))
-            }
-        }
-    }
-    Ok(())
-}
-
-fn edit_stamp_cost(tx: Tx, edit: DataEdit) -> Result[u64, Error] {
-    match edit {
-        StoreRow(key, _) => write_stamp_cost(tx, key),
-        RemoveRow(key, _) => Ok(6 * transaction_write_height(tx, key)? + 2),
-    }
-}
-
-fn write_stamp_cost(tx: Tx, key: Bytes) -> Result[u64, Error] {
-    if let None = std.page.collection_slot(tx.roots.collections.root, list.slice(key, 0, 4)) {
-        return Error(Stale(list.word_be(key, 0)))
-    }
-    Ok(6 * transaction_write_height(tx, key)? + 2)
-}
-
-fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[(), Error] {
-    let mut stamps = write_stamp_cost(tx, primary)?
-    if let Some(edit) = edits.first {
-        stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
-    }
-    for edit in edits.rest {
-        stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
-    }
-    if let None = int.checked_add(tx.ids, stamps) {
-        return Error(Limit(Ids))
-    }
-    Ok(())
-}
-
-fn find_index_name(catalog_tree: pages.PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
-    let mut cursor = byte_cursor(catalog_tree, Included(failure_result_from_rep(catalog.index_prefix(table_id))?), failure_result_from_rep(catalog.index_prefix(table_id + 1))?)?
-    while let Some((key, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
+pub fn find_index_name(catalog_tree: pages.PageTree, table_id: u32, index_id: u32) -> Result[String, types.Failure] {
+    let mut cursor = pages.open_page_range(catalog_tree, Some(catalog.index_prefix(table_id)?), true, false, Some(types.copied(catalog.index_prefix(table_id + 1)?)?))?
+    while let Some((key, raw)) = catalog.next_bytes(mut cursor)? {
         if format.read_le(raw, 1, 4) == int.widen(index_id) {
-            return failure_result_from_rep(catalog.declaration_index_name(key))
+            return catalog.declaration_index_name(key)
         }
     }
     Error(Stale(index_id))
 }
 
-type Catalog {
+pub type Catalog {
     record: CatalogRecord,
     id: u32,
     owner: u32,
@@ -240,16 +88,16 @@ type Catalog {
     revision: Bytes
 }
 
-type CatalogRecord = CatalogTable | CatalogCell | CatalogLog | CatalogIndex(IndexRecord)
+pub type CatalogRecord = CatalogTable | CatalogCell | CatalogLog | CatalogIndex(IndexRecord)
 
-type IndexRecord {
+pub type IndexRecord {
     shape: IndexShape,
     payload_schemas: List[Bytes],
     projection: Option[(Bytes, Bytes)],
-    state: IndexState
+    state: BuildState
 }
 
-fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind {
+pub fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind {
     match record {
         CatalogTable => TableCollection,
         CatalogIndex(_) => IndexCollection,
@@ -258,36 +106,51 @@ fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind {
     }
 }
 
-fn catalog_index(catalog: Catalog) -> Result[View[IndexRecord], Error] in catalog {
+pub fn catalog_index(catalog: Catalog) -> Result[View[IndexRecord], types.Failure] in catalog {
     let CatalogIndex(index_record) = view catalog.record else {
-        return Error(failure_from_rep(pages.malformed(0)))
+        return Error(pages.malformed(0))
     }
     Ok(view index_record)
 }
 
-fn set_index_state(mut catalog: Catalog, take state: IndexState) -> Result[(), Error] {
+pub fn set_index_state(mut catalog: Catalog, take state: BuildState) -> Result[(), types.Failure] {
     if let CatalogIndex(mut index_record) = catalog.record {
         index_record.state = take state
         return Ok(())
     }
-    Error(failure_from_rep(pages.malformed(0)))
+    Error(pages.malformed(0))
 }
 
 // What an index record's collection holds (§1.2): the entries of a Many or
 // Unique index, or an aggregate's one count-and-sum row per group.
-type IndexShape: send = Entries(IndexKind) | Sums
+pub type IndexShape: send = Entries(EntryKind) | Sums
+
+pub type EntryKind: send = ManyEntry | UniqueEntry
+
+// The build state tag is the last catalog byte, so a read can check Public
+// without decoding the record.
+pub type BuildState: shareable + send = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
+
+pub fn copy_build_state(state: BuildState) -> Result[BuildState, types.Failure] {
+    Ok(match state {
+        Public => Public,
+        Backfilling(None) => Backfilling(None),
+        Backfilling(Some(cursor)) => Backfilling(Some(types.copied(cursor)?)),
+        Failed(first, second) => Failed(types.copied(first)?, types.copied(second)?),
+    })
+}
 
 // The shape's catalog byte, which also compares two shapes.
-fn shape_byte(shape: IndexShape) -> u64 {
+pub fn shape_byte(shape: IndexShape) -> u64 {
     match shape {
-        Entries(Many) => 0,
-        Entries(Unique) => 1,
+        Entries(ManyEntry) => 0,
+        Entries(UniqueEntry) => 1,
         Sums => 2,
     }
 }
 
 // The kind an entry-index handle reads with. An aggregate has no entries.
-fn entry_kind(shape: IndexShape) -> Result[IndexKind, Error] {
+pub fn entry_kind(shape: IndexShape) -> Result[EntryKind, types.Failure] {
     match shape {
         Entries(kind) => Ok(kind),
         Sums => Error(Schema(0)),
@@ -297,7 +160,7 @@ fn entry_kind(shape: IndexShape) -> Result[IndexKind, Error] {
 // Whether the index holds a row's values: every row of a Public index, and
 // the rows at or before a building index's cursor. A Failed index is
 // incomplete and claims none.
-fn index_claims(state: IndexState, primary: Bytes) -> bool {
+pub fn index_claims(state: BuildState, primary: Bytes) -> bool {
     match state {
         Public => true,
         Backfilling(Some(cursor)) => primary <= cursor,
@@ -305,60 +168,43 @@ fn index_claims(state: IndexState, primary: Bytes) -> bool {
     }
 }
 
-/// An index's build state (STORE-SPEC §1.2). Backfilling's cursor is the
-/// last primary key whose entries are complete, None before the first
-/// chunk. Failed keeps the two primary keys a chunk found under one Unique
-/// key. Only Public serves reads. `attention` reports it per index.
-pub type IndexState: codec + shareable + send = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
-
-// The state tag is an index record's last byte, so a read checks Public
-// without decoding the record.
-fn copied_state(state: IndexState) -> Result[IndexState, Error] {
-    Ok(match state {
-        Public => Public,
-        Backfilling(None) => Backfilling(None),
-        Backfilling(Some(cursor)) => Backfilling(Some(failure_result_from_rep(types.copied(cursor))?)),
-        Failed(first, second) => Failed(failure_result_from_rep(types.copied(first))?, failure_result_from_rep(types.copied(second))?),
-    })
-}
-
-fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
+pub fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, types.Failure] {
     if at > list.len(raw) || width > list.len(raw) - at {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     let n = format.read_le(raw, at, width)
     at += width
     Ok(n)
 }
 
-fn take_blob(raw: Bytes, mut at: u64) -> Result[Bytes, Error] {
+fn take_blob(raw: Bytes, mut at: u64) -> Result[Bytes, types.Failure] {
     let n = take_le(raw, mut at, 4)?
     if n > list.len(raw) - at {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     let data = list.slice(raw, at, at + n)
-    let out = failure_result_from_rep(types.copied(data))?
+    let out = types.copied(data)?
     at += n
     Ok(take out)
 }
 
-fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
+pub fn decode_catalog(raw: Bytes) -> Result[Catalog, types.Failure] {
     let mut at: u64 = 0
     let kind: u8 = int.truncate(take_le(raw, mut at, 1)?)
     let id: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let owner: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let epoch = take_le(raw, mut at, 8)?
     if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
-        return Error(failure_from_rep(pages.malformed(0)))
+        return Error(pages.malformed(0))
     }
     let key = take_blob(raw, mut at)?
     if kind == 3 && list.len(key) != 0 {
-        return Error(failure_from_rep(pages.malformed(17)))
+        return Error(pages.malformed(17))
     }
     if kind == 4 {
-        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| failure_from_rep(pages.malformed(17))
+        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| pages.malformed(17)
         if key != expected {
-            return Error(failure_from_rep(pages.malformed(17)))
+            return Error(pages.malformed(17))
         }
     }
     let schema_count = take_le(raw, mut at, 2)?
@@ -377,20 +223,20 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         2 => CatalogIndex(decode_index_record(raw, mut at)?),
         3 => CatalogCell,
         4 => CatalogLog,
-        _ => return Error(failure_from_rep(pages.malformed(0))),
+        _ => return Error(pages.malformed(0)),
     }
     if at != list.len(raw) {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     Ok(Catalog(record: take record, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision))
 }
 
-fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
+fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, types.Failure] {
     let shape: IndexShape = match take_le(raw, mut at, 1)? {
-        0 => Entries(Many),
-        1 => Entries(Unique),
+        0 => Entries(ManyEntry),
+        1 => Entries(UniqueEntry),
         2 => Sums,
-        _ => return Error(failure_from_rep(pages.malformed(at - 1))),
+        _ => return Error(pages.malformed(at - 1)),
     }
     let mut payload_schemas: List[Bytes] = list.new()
     let payload_count = take_le(raw, mut at, 2)?
@@ -403,7 +249,7 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
         Some((take project_id, take project_revision))
     } else {
         if list.len(project_revision) > 0 {
-            return Error(failure_from_rep(pages.malformed(at)))
+            return Error(pages.malformed(at))
         }
         None
     }
@@ -415,14 +261,14 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
             false
         }
         if payload_count != 0 || projected {
-            return Error(failure_from_rep(pages.malformed(at)))
+            return Error(pages.malformed(at))
         }
     }
     if at >= list.len(raw) {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     let tag_at = list.len(raw) - 1
-    let state: IndexState = match raw[tag_at] {
+    let state: BuildState = match raw[tag_at] {
         0 => Public,
         1 => Backfilling(None),
         2 => Backfilling(Some(take_blob(raw, mut at)?)),
@@ -430,55 +276,55 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
             let first = take_blob(raw, mut at)?
             Failed(take first, take_blob(raw, mut at)?)
         },
-        _ => return Error(failure_from_rep(pages.malformed(tag_at))),
+        _ => return Error(pages.malformed(tag_at)),
     }
     if at != tag_at {
-        return Error(failure_from_rep(pages.malformed(at)))
+        return Error(pages.malformed(at))
     }
     at += 1
     Ok(IndexRecord(shape, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
 }
 
-fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
+pub fn encode_catalog(c: Catalog) -> Result[Bytes, types.Failure] {
     let mut raw: Bytes = list.new()
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(pages.descriptor_kind_byte(catalog_kind(c.record))), 1)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.id), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.owner), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, c.epoch, 8)))?
-    failure_result_from_rep(types.capacity(format.blob(mut raw, c.key)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, list.len(c.schemas), 2)))?
+    types.capacity(format.le(mut raw, int.widen(pages.descriptor_kind_byte(catalog_kind(c.record))), 1))?
+    types.capacity(format.le(mut raw, int.widen(c.id), 4))?
+    types.capacity(format.le(mut raw, int.widen(c.owner), 4))?
+    types.capacity(format.le(mut raw, c.epoch, 8))?
+    types.capacity(format.blob(mut raw, c.key))?
+    types.capacity(format.le(mut raw, list.len(c.schemas), 2))?
     for schema in c.schemas {
-        failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(schema.number), 2)))?
-        failure_result_from_rep(types.capacity(format.le(mut raw, schema.fingerprint, 8)))?
-        failure_result_from_rep(types.capacity(format.blob(mut raw, schema.schema)))?
+        types.capacity(format.le(mut raw, int.widen(schema.number), 2))?
+        types.capacity(format.le(mut raw, schema.fingerprint, 8))?
+        types.capacity(format.blob(mut raw, schema.schema))?
     }
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.next), 2)))?
-    failure_result_from_rep(types.capacity(format.blob(mut raw, c.by)))?
-    failure_result_from_rep(types.capacity(format.blob(mut raw, c.revision)))?
+    types.capacity(format.le(mut raw, int.widen(c.next), 2))?
+    types.capacity(format.blob(mut raw, c.by))?
+    types.capacity(format.blob(mut raw, c.revision))?
     if let CatalogIndex(index_meta) = view c.record {
-        failure_result_from_rep(types.capacity(format.le(mut raw, shape_byte(index_meta.shape), 1)))?
-        failure_result_from_rep(types.capacity(format.le(mut raw, list.len(index_meta.payload_schemas), 2)))?
+        types.capacity(format.le(mut raw, shape_byte(index_meta.shape), 1))?
+        types.capacity(format.le(mut raw, list.len(index_meta.payload_schemas), 2))?
         for schema in index_meta.payload_schemas {
-            failure_result_from_rep(types.capacity(format.blob(mut raw, schema)))?
+            types.capacity(format.blob(mut raw, schema))?
         }
         match index_meta.projection {
             Some((project_id, revision)) => {
-                failure_result_from_rep(types.capacity(format.blob(mut raw, project_id)))?
-                failure_result_from_rep(types.capacity(format.blob(mut raw, revision)))?
+                types.capacity(format.blob(mut raw, project_id))?
+                types.capacity(format.blob(mut raw, revision))?
             },
-            None => failure_result_from_rep(types.capacity(format.le(mut raw, 0, 8)))?,
+            None => types.capacity(format.le(mut raw, 0, 8))?,
         }
         match index_meta.state {
-            Public => failure_result_from_rep(types.capacity(format.le(mut raw, 0, 1)))?,
-            Backfilling(None) => failure_result_from_rep(types.capacity(format.le(mut raw, 1, 1)))?,
+            Public => types.capacity(format.le(mut raw, 0, 1))?,
+            Backfilling(None) => types.capacity(format.le(mut raw, 1, 1))?,
             Backfilling(Some(cursor)) => {
-                failure_result_from_rep(types.capacity(format.blob(mut raw, cursor)))?
-                failure_result_from_rep(types.capacity(format.le(mut raw, 2, 1)))?
+                types.capacity(format.blob(mut raw, cursor))?
+                types.capacity(format.le(mut raw, 2, 1))?
             },
             Failed(first, second) => {
-                failure_result_from_rep(types.capacity(format.blob(mut raw, first)))?
-                failure_result_from_rep(types.capacity(format.blob(mut raw, second)))?
-                failure_result_from_rep(types.capacity(format.le(mut raw, 3, 1)))?
+                types.capacity(format.blob(mut raw, first))?
+                types.capacity(format.blob(mut raw, second))?
+                types.capacity(format.le(mut raw, 3, 1))?
             },
         }
     }
@@ -488,16 +334,16 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     Ok(take raw)
 }
 
-type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, DataRefund)
+pub type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, DataRefund)
 
-type IndexEdits {
+pub type IndexEdits {
     probes: List[(u32, Bytes)],
     drift: Option[List[(u32, u32)]],
     first: Option[DataEdit],
     rest: List[DataEdit]
 }
 
-fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
+pub fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
     if let None = edits.first {
         edits.first = Some(take edit)
     } else {
@@ -505,42 +351,13 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
     }
 }
 
-// An absent target is drift (§I.3) where the index claims the row's
-// entries: a Public index, or a Backfilling one at or before its cursor.
-// A building index has no entries past its cursor yet, and a Failed one
-// is incomplete, so a remove there may find nothing.
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
-    if let Some(refund) = delete_refund(tx, key)? {
-        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
-        push_index_edit(mut edits, RemoveRow(take key, refund))
-        return Ok(())
-    }
-    if index_claims(catalog_index(record)?.state, primary) {
-        stage_index_drift(mut edits, record)
-    }
-    Ok(())
-}
-
-fn stage_index_drift(mut edits: IndexEdits, record: Catalog) {
+pub fn stage_index_drift(mut edits: IndexEdits, record: Catalog) {
     let mut seen: List[(u32, u32)] = list.new()
     list.push(mut seen, (record.owner, record.id))
     stage_drift(mut edits.drift, take seen)
 }
 
-// Makes the transaction abort-only with `Drift`, keeping the evidence its
-// driver counts and demotes by.
-fn drift_stop(mut tx: Tx, take seen: List[(u32, u32)]) -> Error {
-    let (owner, id) = seen[0u64]
-    let name = match find_index_name(tx.roots.catalog, owner, id) {
-        Ok(take name) => take name,
-        Error(take problem) => return take problem,
-    }
-    tx.index_conflict = Some(Drifted(clone(name)))
-    stage_drift(mut tx.drift, take seen)
-    Drift(take name)
-}
-
-fn stage_drift(mut into: Option[List[(u32, u32)]], take seen: List[(u32, u32)]) {
+pub fn stage_drift(mut into: Option[List[(u32, u32)]], take seen: List[(u32, u32)]) {
     if let Some(mut held) = into {
         for (owner, id) in seen {
             list.push(mut held, (owner, id))
@@ -550,183 +367,301 @@ fn stage_drift(mut into: Option[List[(u32, u32)]], take seen: List[(u32, u32)]) 
     }
 }
 
-fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
-    match take edit {
-        StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw, false),
-        RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund),
-    }
-}
-
-fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
-    let IndexEdits(probes: take probes, first: take first, rest: take rest, ..) = take edits
-    if let Some(take edit) = take first {
-        apply_edit(mut tx, take edit)?
-    }
-    for take edit in take rest {
-        apply_edit(mut tx, take edit)?
-    }
-    for take (_, take key) in take probes {
-        log.append(tx.reads, Point(take key))
-    }
-    Ok(())
-}
-
-// Index IDs are distinct from the table ID and each other. Within one index,
-// a delete and put are emitted only for distinct keys. Each planned edit can
-// therefore check the original op table while carrying the cumulative frame size.
-// A returned Error leaves all roots, accounting and issued IDs untouched.
-fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
-    // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
-    let mut raw: Bytes = list.new()
-    let least = 2 + std.codec.least(t.readers.codec)
-    let hint = if least <= 32 {
-        least * 2
-    } else {
-        least
-    }
-    failure_result_from_rep(types.capacity(bytebuf.try_reserve_hint(mut raw, least, hint)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(t.readers.current), 2)))?
-    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
-    if list.len(indexes) == 0 {
-        apply_put(mut tx, take p, take raw, tail)?
-    } else {
-        let mut edits = {
-            let previous = transaction_row(tx, p)?
-            let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
-            let primary = list.slice(p, 4, list.len(p))
-            for (_, ix) in indexes {
-                let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-                let incoming = (bound_index.extract)(raw, primary)?
-                if list.len(incoming.payload) > tx.limits.value {
-                    return Error(Limit(Value))
-                }
-                if let Sums = catalog_index(ix)?.shape {
-                    let old = match previous {
-                        Some(value) => Some((bound_index.extract)(value, primary)?),
-                        None => None,
-                    }
-                    plan_aggregate_edit(tx, mut pending, mut frame, ix, primary, take old, Some(take incoming))?
-                    continue
-                }
-                let old_keys = match previous {
-                    Some(value) => {
-                        let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
-                        take keys
-                    },
-                    None => list.new(),
-                }
-                plan_index_put(tx, mut pending, mut frame, ix, primary, old_keys, take incoming)?
-            }
-            take pending
-        }
-        if let Some(take seen) = replace(mut edits.drift, None) {
-            return Error(drift_stop(mut tx, take seen))
-        }
-        preflight_index_edits(tx, edits, p)?
-        let probed = {
-            let primary = list.slice(p, 4, list.len(p))
-            probe_index_keys(tx, t.id, primary, edits.probes)
-        }
-        match take probed {
-            Error(Conflict(take name)) => {
-                tx.index_conflict = Some(Duplicate(clone(name)))
-                return Error(Conflict(take name))
-            },
-            Error(take problem) => return Error(take problem),
-            Ok(()) => (),
-        }
-        apply_put(mut tx, take p, take raw, tail)?
-        apply_edits(mut tx, take edits)?
-    }
-    tx.frame_bytes = frame
-    Ok(())
-}
-
-fn index_catalog_in(catalog_tree: pages.PageTree, id: u32) -> Result[List[Catalog], Error] {
-    let low = failure_result_from_rep(catalog.index_prefix(id))?
-    let high = failure_result_from_rep(catalog.index_prefix(id + 1))?
+pub fn index_catalog_in(catalog_tree: pages.PageTree, id: u32) -> Result[List[Catalog], types.Failure] {
+    let low = catalog.index_prefix(id)?
+    let high = catalog.index_prefix(id + 1)?
     // The catalog is resident and flat, so its ranks count the table's index
     // records without a cursor; a table with none, the common case, opens none.
     if std.page.rank(catalog_tree.root, high, false) == std.page.rank(catalog_tree.root, low, false) {
         return Ok(list.new())
     }
-    let mut cursor = byte_cursor(catalog_tree, Included(take low), high)?
+    let mut cursor = pages.open_page_range(catalog_tree, Some(take low), true, false, Some(types.copied(high)?))?
     let mut out: List[Catalog] = list.new()
-    while let Some((_, raw)) = failure_result_from_rep(catalog.next_bytes(mut cursor))? {
+    while let Some((_, raw)) = catalog.next_bytes(mut cursor)? {
         list.push(mut out, decode_catalog(raw)?)
     }
     Ok(take out)
 }
 
-// Every index on table `table_id`, with the extractors bound for value
-// schema `schema`, in declaration order.
-fn bound_indexes(tx: Tx, table_id: u32, schema: u16) -> Result[List[(u64, Catalog)], Error] {
-    let records = index_catalog_in(tx.roots.catalog, table_id)?
-    let mut indexes: List[(u64, Catalog)] = list.new()
-    for take record in take records {
-        let bound_index = registered_index(tx, table_id, schema, record)?
-        list.push(mut indexes, (bound_index.ordinal, take record))
-    }
-    list.sort(mut indexes, fn(a: (u64, Catalog), b: (u64, Catalog)) -> Order {
-        order.compare(a.0, b.0)
-    })
-    Ok(take indexes)
-}
-
-// `schema` is the table's current value schema, which names the extractors
-// bound for it. The expiry sweep deletes through here by table id (§1.2).
-fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
-    let p = failure_result_from_rep(catalog.logical_key(table_id, key))?
-    let plan = {
-        let Some(old) = transaction_row(tx, p)? else {
-            return Ok(false)
-        }
-        plan_delete(tx, table_id, schema, indexes, p, old)?
-    }
-    apply_delete_plan(mut tx, take p, take plan, false)?
-    Ok(true)
-}
-
-type DeletePlan {
+pub type DeletePlan {
     edits: IndexEdits,
     refund: DataRefund,
     frame: Option[u64],
     indexed: bool
 }
 
-fn plan_delete(tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], p: Bytes, old: Bytes) -> Result[DeletePlan, Error] {
-    let key = list.slice(p, 4, list.len(p))
-    let mut frame = tx.frame_bytes
-    let refund = row_refund(tx, p, old)
-    let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
-    for (_, ix) in indexes {
-        let bound_index = registered_index(tx, table_id, schema, ix)?
-        let removed = (bound_index.extract)(old, key)?
-        if let Sums = catalog_index(ix)?.shape {
-            plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
-            continue
-        }
-        let IndexValue(keys: take keys, ..) = take removed
-        for take row in take keys {
-            append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
+// The composite identity is the extractor revision, then the storage fingerprints
+// of the table key, row, index key and payload codecs. The ends name each part
+// for dry-run. Memory stores omit the composite.
+pub const INDEX_IDENTITY_BYTES: u64 = 160
+
+// Why a declared index differs from its stored record (`hirsel dry-run`'s
+// rebuild report): the catalog changes and the parts of the composite identity.
+// Older identities lack comparable storage fingerprints.
+pub fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[String, types.Failure] {
+    let old_index = catalog_index(old)?
+    let proposed_index = catalog_index(proposed)?
+    let mut out = string.new()
+    if shape_byte(old_index.shape) != shape_byte(proposed_index.shape) {
+        catalog.note_cause(mut out, "shape")
+    }
+    if old.by != proposed.by {
+        catalog.note_cause(mut out, "extractor")
+    }
+    if old.key != proposed.key {
+        catalog.note_cause(mut out, "index key schema")
+    }
+    if old_index.payload_schemas != proposed_index.payload_schemas {
+        catalog.note_cause(mut out, "payload schema")
+    }
+    if old_index.projection != proposed_index.projection {
+        catalog.note_cause(mut out, "projection")
+    }
+    if old.revision != proposed.revision {
+        if list.len(old.revision) != INDEX_IDENTITY_BYTES || list.len(proposed.revision) != INDEX_IDENTITY_BYTES {
+            catalog.note_cause(mut out, "revision layout")
+        } else {
+            let mut from = 0u64
+            for i in 0u64 .. list.len(ends) {
+                let end = ends[i]
+                if list.slice(old.revision, from, end) != list.slice(proposed.revision, from, end) {
+                    catalog.note_cause(mut out, catalog.revision_part(i))
+                }
+                from = end
+            }
         }
     }
-    Ok(DeletePlan(edits: take pending, refund: refund, frame: frame, indexed: list.len(indexes) != 0))
+    Ok(take out)
 }
 
-fn apply_delete_plan(mut tx: Tx, take p: Bytes, take plan: DeletePlan, popped: bool) -> Result[(), Error] {
-    let DeletePlan(edits: take edits, refund: refund, frame: frame, indexed: indexed) = take plan
-    let mut edit_plan = take edits
-    if let Some(take seen) = replace(mut edit_plan.drift, None) {
-        return Error(drift_stop(mut tx, take seen))
+pub fn edit_frame(ops: pages.DataOps, below: List[Arc[pages.Staged]], extra: u64, key: Bytes, value_size: Option[u64], frame: Option[u64], transaction: u64) -> Result[Option[u64], types.Failure] {
+    let Some(current) = frame else {
+        return Ok(None)
     }
-    let next_frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame, types.transaction_limit(limits_to_rep(tx.limits)))?
-    if indexed {
-        preflight_index_edits(tx, edit_plan, p)?
+    let width = match value_size {
+        Some(size) => 13 + size,
+        None => 9u64,
+    } + list.len(key)
+    let after = int.saturating_add(current - pages.old_data_op_size(ops, below, false, key), width)
+    if int.saturating_add(after, extra) - 16 > transaction {
+        return Error(Limit(Transaction))
     }
-    apply_edits(mut tx, take edit_plan)?
-    stage_delete(mut tx, take p, refund, popped)?
-    tx.frame_bytes = next_frame
+    Ok(Some(after))
+}
+
+pub type DataRefund {
+    charge: u64,
+    prior: Option[u32]
+}
+
+pub fn catalog_entry_in(catalog_tree: pages.PageTree, k: Bytes) -> Result[Catalog, types.Failure] {
+    match pages.get_page_row(catalog_tree, k) {
+        Some(raw) => decode_catalog(raw),
+        None => Error(Stale(0))
+    }
+}
+
+pub opaque type IndexBindings: send {
+    items: List[IndexRegistration]
+}
+
+pub fn empty_bindings() -> IndexBindings {
+    IndexBindings(items: list.new())
+}
+
+pub fn add_binding(mut bindings: IndexBindings, take binding: IndexRegistration) {
+    list.push(mut bindings.items, take binding)
+}
+
+pub fn binding_extractor(binding: IndexRegistration) -> View[RegisteredIndex] in binding {
+    view binding.index
+}
+
+pub fn binding_at(bindings: IndexBindings, slot: u64) -> View[RegisteredIndex] in bindings {
+    view bindings.items[slot].index
+}
+
+pub fn find_binding_index(bindings: IndexBindings, table_id: u32, index_id: u32) -> Option[u64] {
+    let n = list.len(bindings.items)
+    for i in 0u64 .. n {
+        let slot = n - 1 - i
+        let binding = view bindings.items[slot]
+        if binding.table == table_id && binding.index.id == index_id {
+            return Some(slot)
+        }
+    }
+    None
+}
+
+fn matches_record(index: RegisteredIndex, record: Catalog) -> bool {
+    index.id == record.id && index.by == record.by && index.key == record.key
+}
+
+pub fn matching_binding_index(bindings: IndexBindings, record: Catalog) -> Option[u64] {
+    let n = list.len(bindings.items)
+    for i in 0u64 .. n {
+        let slot = n - 1 - i
+        let binding = view bindings.items[slot]
+        if binding.table == record.owner && matches_record(binding.index, record) {
+            return Some(slot)
+        }
+    }
+    None
+}
+
+pub fn binding_for_schema(bindings: IndexBindings, table_id: u32, schema: u16, record: Catalog) -> Option[View[RegisteredIndex]] in bindings {
+    let n = list.len(bindings.items)
+    for i in 0u64 .. n {
+        let binding = view bindings.items[n - 1 - i]
+        let held = view binding.index
+        if binding.table == table_id && held.schema == schema && matches_record(held, record) {
+            return Some(held)
+        }
+    }
+    None
+}
+
+pub opaque type IndexOwner: send {
+    registry: IndexRegistry,
+    drift: List[DriftRep]
+}
+
+pub fn empty_index_owner() -> IndexOwner {
+    IndexOwner(registry: empty_index_registry(), drift: list.new())
+}
+
+pub fn index_registry(owner: IndexOwner) -> View[IndexRegistry] in owner {
+    view owner.registry
+}
+
+pub fn take_registry(mut owner: IndexOwner) -> IndexRegistry {
+    replace(mut owner.registry, empty_index_registry())
+}
+
+pub fn restore_registry(mut owner: IndexOwner, take registry: IndexRegistry) {
+    owner.registry = take registry
+}
+
+pub fn declared_index_registry(take bindings: IndexBindings) -> IndexRegistry {
+    let mut registry = empty_index_registry()
+    register_bindings(mut registry, take bindings)
+    take registry
+}
+
+pub fn install_declaration(mut owner: IndexOwner, take bindings: IndexBindings) {
+    owner.registry = declared_index_registry(take bindings)
+}
+
+pub fn install_bindings(mut owner: IndexOwner, take bindings: IndexBindings) {
+    register_bindings(mut owner.registry, take bindings)
+}
+
+fn register_bindings(mut registry: IndexRegistry, take bindings: IndexBindings) {
+    let IndexBindings(items: take items) = take bindings
+    for take binding in take items {
+        register_index(mut registry, take binding)
+    }
+}
+
+pub fn registered_index(registry: IndexRegistry, table_id: u32, schema: u16, record: Catalog) -> Option[View[RegisteredIndex]] in registry {
+    if let Some(held) = map.get(registry.entries, (table_id, record.id, schema)) {
+        if matches_record(held, record) {
+            return Some(held)
+        }
+    }
+    None
+}
+
+pub fn bound_extractor(owner: IndexOwner, record: Catalog) -> Option[View[RegisteredIndex]] in owner {
+    for ((table_id, index_id, _), held) in owner.registry.entries {
+        if table_id == record.owner && index_id == record.id && held.by == record.by && held.key == record.key {
+            return Some(held)
+        }
+    }
+    None
+}
+
+pub fn ordinal(extractor: RegisteredIndex) -> u64 {
+    extractor.ordinal
+}
+
+pub fn extract_row(extractor: RegisteredIndex, raw: Bytes, primary: Bytes) -> Result[IndexValue, types.Failure] {
+    (extractor.extract)(raw, primary)
+}
+
+pub fn entry_primary_offset(extractor: RegisteredIndex, raw: Bytes) -> Result[u64, types.Failure] {
+    (extractor.key_end)(raw)
+}
+
+// The whole declaration supplies the Logs retained by the installed registry.
+pub fn bind_retention(mut owner: IndexOwner, take declared: List[catalog.LogRetention]) {
+    let mut held: Map[u32, catalog.LogRetention] = map.new()
+    for take r in take declared {
+        let id = r.id
+        if let Some(_) = r.keep {
+            map.insert(mut held, id, take r)
+        }
+    }
+    owner.registry.retention = take held
+}
+
+pub fn retention_ids(owner: IndexOwner) -> List[u32] {
+    let mut ids: List[u32] = list.new()
+    for (id, _) in owner.registry.retention {
+        list.push(mut ids, id)
+    }
+    list.sort(mut ids, fn(a: u32, b: u32) -> Order {
+        order.compare(a, b)
+    })
+    take ids
+}
+
+pub fn retention(owner: IndexOwner, id: u32) -> Option[View[catalog.LogRetention]] in owner {
+    map.get(owner.registry.retention, id)
+}
+
+pub type DriftRep: send {
+    table: u32,
+    id: u32,
+    index: String,
+    count: u64,
+    demoted: u64
+}
+
+pub fn drift_rows(owner: IndexOwner) -> View[List[DriftRep]] in owner {
+    view owner.drift
+}
+
+fn drift_slot(owner: IndexOwner, table: u32, id: u32) -> Option[u64] {
+    for at in 0u64 .. list.len(owner.drift) {
+        if owner.drift[at].table == table && owner.drift[at].id == id {
+            return Some(at)
+        }
+    }
+    None
+}
+
+pub fn count_drift(mut owner: IndexOwner, tree: pages.PageTree, seen: List[(u32, u32)]) -> Result[(), types.Failure] {
+    for (table, id) in seen {
+        if let Some(at) = drift_slot(owner, table, id) {
+            owner.drift[at].count = int.saturating_add(owner.drift[at].count, 1)
+        } else {
+            let name = find_index_name(tree, table, id)?
+            types.capacity(list.try_reserve(mut owner.drift, 1))?
+            list.push(mut owner.drift, DriftRep(table: table, id: id, index: take name, count: 1, demoted: 0))
+        }
+    }
     Ok(())
+}
+
+pub fn count_demotions(mut owner: IndexOwner, demoted: List[(u32, u32)]) {
+    for (table, id) in demoted {
+        if let Some(at) = drift_slot(owner, table, id) {
+            owner.drift[at].demoted = int.saturating_add(owner.drift[at].demoted, 1)
+        }
+    }
+}
+
+pub fn value_schema(extractor: RegisteredIndex) -> u16 {
+    extractor.schema
 }

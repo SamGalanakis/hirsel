@@ -107,12 +107,12 @@ Totals	store-aggregate.hirsel	store	store	-
 GroupPart	store-aggregate.hirsel	indexes	indexes	L10
 by_group	store-aggregate.hirsel	indexes	indexes	L10
 merged_groups	store-aggregate.hirsel	indexes	indexes	L10
-AggregateExtractor	store-aggregate.hirsel	indexes	indexes	L10
+AggregateExtractor	store-aggregate.hirsel	indexes	store	-	Public root type boundary (L10)
 aggregate	store-aggregate.hirsel	store	store	-
 totals	store-aggregate.hirsel	store	store	-
 rebuild_aggregate	store-aggregate.hirsel	store	store	-
-aggregate_binding	store-aggregate.hirsel	indexes	indexes	L10
-extract_aggregate	store-aggregate.hirsel	indexes	indexes	L10
+aggregate_binding	store-aggregate.hirsel	indexes	store	-	Public root type boundary (L10)
+extract_aggregate	store-aggregate.hirsel	indexes	store	-	Public root type boundary (L10)
 group_totals	store-aggregate.hirsel	indexes	indexes	L10
 totals_bytes	store-aggregate.hirsel	indexes	indexes	L10
 plan_aggregate_edit	store-aggregate.hirsel	indexes	store	-	push-up indexes -> store (refs at layer 12)
@@ -714,9 +714,9 @@ empty_index_registry	store-index-registry.hirsel	indexes	indexes	L10
 declared_index_registry	store-index-registry.hirsel	indexes	indexes	L10
 entry_key_end	store-index-registry.hirsel	indexes	indexes	L10
 IndexProjection	store-index-registry.hirsel	indexes	catalog	L3	pull-down indexes -> catalog (used by define_index)
-DeclaredExtractor	store-index-registry.hirsel	indexes	indexes	L10
-extract_declared	store-index-registry.hirsel	indexes	indexes	L10
-declare_binding	store-index-registry.hirsel	indexes	indexes	L10
+DeclaredExtractor	store-index-registry.hirsel	indexes	store	-	Public root type boundary (L10)
+extract_declared	store-index-registry.hirsel	indexes	store	-	Public root type boundary (L10)
+declare_binding	store-index-registry.hirsel	indexes	store	-	Public root type boundary (L10)
 index_registration	store-index-registry.hirsel	indexes	indexes	L10
 register_index	store-index-registry.hirsel	indexes	indexes	L10
 registered_index	store-index-registry.hirsel	store	store	-
@@ -1140,9 +1140,9 @@ CollectionKind	store-migration.hirsel	store	store	-
 CollectionInfo	store-migration.hirsel	store	store	-
 list_collections	store-migration.hirsel	store	store	-
 top_level_catalog	store-migration.hirsel	catalog	catalog	L3
-SchemaPlan	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+SchemaPlan	store-migration.hirsel	catalog	store	-	Root migration plan and Tiered orchestration (L10 ruling 3284)
 schema_plan	store-migration.hirsel	store	store	-
-keep_schema	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+keep_schema	store-migration.hirsel	catalog	store	-	Root migration plan and Tiered orchestration (L10 ruling 3284)
 MigrationJob	store-migration.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
 prepare_migration	store-migration.hirsel	catalog	store	-	push-up catalog -> store (refs at layer 12)
 stage_migration	store-migration.hirsel	store	store	-
@@ -1155,9 +1155,9 @@ MigrationChange	store-migration.hirsel	store	store	-
 MigrationPreview	store-migration.hirsel	store	store	-
 preview_migration	store-migration.hirsel	store	store	-
 catalog_collection_name	store-migration.hirsel	catalog	catalog	L3
-catalog_descriptions	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+catalog_descriptions	store-migration.hirsel	catalog	store	-	Public root type boundary (L10)
 catalog_positions	store-migration.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
-preview_catalog_changes	store-migration.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+preview_catalog_changes	store-migration.hirsel	catalog	store	-	Public root type boundary (L10)
 ParkEntry	store-mux.hirsel	pager	pager	L5
 ParkQueue	store-mux.hirsel	pager	pager	L5
 Parked	store-mux.hirsel	store	store	-
@@ -2859,8 +2859,8 @@ stage_create_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at 
 readers	store.hirsel	catalog	store	-	Root types at the catalog boundary (L3)
 table	store.hirsel	store	store	-
 stage_table	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
-catalog_handle	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
-catalog_index_handle	store.hirsel	catalog	indexes	L10	push-up catalog -> indexes (refs at layer 4)
+catalog_handle	store.hirsel	catalog	store	-	Public root type boundary (L10)
+catalog_index_handle	store.hirsel	catalog	store	-	Public root type boundary (L10)
 stage_drop_table_key	store.hirsel	catalog	txn	L12	push-up catalog -> txn (refs at layer 10)
 Built	store.hirsel	catalog	catalog	L3
 over_ceiling	store.hirsel	catalog	catalog	L3

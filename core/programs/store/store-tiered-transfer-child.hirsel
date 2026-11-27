@@ -705,21 +705,17 @@ fn run_deferred_migrates(mut ctx: ChildCutContext, opened: u64, mut plan: Schema
     Ok(())
 }
 
-fn find_binding_index(bindings: List[IndexRegistration], table_id: u32, index_id: u32) -> Result[u64, Error] {
-    let n = list.len(bindings)
-    for i in 0u64 .. n {
-        let idx = n - 1 - i
-        if bindings[idx].table == table_id && bindings[idx].index.id == index_id {
-            return Ok(idx)
-        }
+fn find_binding_index(bindings: indexes.IndexBindings, table_id: u32, index_id: u32) -> Result[u64, Error] {
+    match indexes.find_binding_index(bindings, table_id, index_id) {
+        Some(slot) => Ok(slot),
+        None => Error(MigrationFault),
     }
-    Error(MigrationFault)
 }
 
 // Runs every deferred Tiered index build queued in `pending` in chunks against
 // `roots` / `next_node`, reading source rows via `snapshot_tiered_span_step_direct`
 // (or resident cursor if Memory table + Tiered index) and cutting at `dirty_bytes`.
-fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pending: List[DeferredIndexBuild], bindings: List[IndexRegistration], mut roots: pages.Roots, mut next_node: u64, live_bytes: u64, ceiling: u64, retained: bool) -> Result[(), Error] waits {
+fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pending: List[DeferredIndexBuild], bindings: indexes.IndexBindings, mut roots: pages.Roots, mut next_node: u64, live_bytes: u64, ceiling: u64, retained: bool) -> Result[(), Error] waits {
     if list.len(pending) == 0 {
         return Ok(())
     }
@@ -761,8 +757,8 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
                 break
             }
             if !target_tiered {
-                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: ctx.store, bindings: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(roots.collections))
-                let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, bindings[bind_idx].index, batch, false, false, false)?
+                let mut tmp = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(roots), next_node, 0u32, live_bytes, ceiling, retained, VALUE_LIMIT), store: ctx.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(roots.collections))
+                let dup = index_chunk(mut tmp, job.catalog_key, copied_record(record)?, indexes.binding_at(bindings, bind_idx), batch, false, false, false)?
                 if let Some(_) = dup {
                     return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
                 }
@@ -774,28 +770,28 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
             let mut draw = private_from
             for (logical, raw) in batch {
                 let primary = list.slice(logical, 4, list.len(logical))
-                let IndexValue(keys: take keys, payload: take payload, sums: sums) = (bindings[bind_idx].index.extract)(raw, primary)?
+                let indexes.IndexValue(keys: take keys, payload: take payload, sums: sums) = extract_index(indexes.binding_at(bindings, bind_idx), raw, primary)?
                 let mut part = 0u64
                 for take entry_key in take keys {
                     if list.len(entry_key) > 4096 {
                         return Error(Limit(Key))
                     }
-                    let prior: Option[Bytes] = if let Entries(Many) = shape {
+                    let prior: Option[Bytes] = if let Entries(ManyEntry) = shape {
                         None
                     } else {
                         child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, roots.collections, entry_key)?
                     }
                     let val = match shape {
-                        Entries(Unique) => {
+                        Entries(UniqueEntry) => {
                             if let Some(existing) = view prior {
-                                let owner = list.slice(existing, 4, unique_owner_end(existing)?)
+                                let owner = list.slice(existing, 4, failure_result_from_rep(indexes.unique_owner_end(existing))?)
                                 if owner != primary {
                                     return Error(Conflict(failure_result_from_rep(catalog.named(job.name))?))
                                 }
                             }
                             failure_result_from_rep(types.copied(payload))?
                         },
-                        Entries(Many) => failure_result_from_rep(types.copied(payload))?,
+                        Entries(ManyEntry) => failure_result_from_rep(types.copied(payload))?,
                         Sums => {
                             let (members, sum) = match prior {
                                 Some(body) => group_totals(body)?,
@@ -818,7 +814,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
             }
         }
         let mut published = copied_record(record)?
-        set_index_state(mut published, Public)?
+        failure_result_from_rep(indexes.set_index_state(mut published, Public))?
         let raw_cat = encode_catalog(published)?
         roots = failure_result_from_rep(catalog.catalog_insert(mut next_node, roots, job.catalog_key, raw_cat))?
     }

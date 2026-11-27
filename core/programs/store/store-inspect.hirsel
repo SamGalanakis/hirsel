@@ -43,12 +43,12 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
                 None => return Error(failure_from_rep(pages.malformed(0))),
             }
             let form = match index_meta.shape {
-                Entries(kind) => IndexForm(kind),
+                Entries(kind) => IndexForm(public_index_kind(kind)),
                 Sums => AggregateForm,
             }
-            (take index_name, take table_name, form, copied_state(index_meta.state)?)
+            (take index_name, take table_name, form, public_index_state(index_meta.state)?)
         } else {
-            let own = failure_result_from_rep(catalog.catalog_collection_name(key, pages.descriptor_kind_byte(catalog_kind(record.record))))?
+            let own = failure_result_from_rep(catalog.catalog_collection_name(key, pages.descriptor_kind_byte(indexes.catalog_kind(record.record))))?
             map.insert(mut names, record.id, string.from(own))
             let form: EntryForm = match record.record {
                 CatalogCell => CellForm,

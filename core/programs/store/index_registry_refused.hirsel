@@ -1,0 +1,3 @@
+fn forge_index_registry() -> store.indexes.IndexRegistry {
+    store.indexes.IndexRegistry()
+}

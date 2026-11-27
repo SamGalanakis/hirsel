@@ -123,10 +123,10 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
         Some(raw) => {
             let meta = deploy_result(decode_catalog(raw))?
             let unique = match meta.record {
-                CatalogIndex(IndexRecord(shape: Entries(Unique), ..)) => true,
+                CatalogIndex(indexes.IndexRecord(shape: Entries(UniqueEntry), ..)) => true,
                 _ => false,
             }
-            (pages.descriptor_kind_byte(catalog_kind(meta.record)), meta.next, unique)
+            (pages.descriptor_kind_byte(indexes.catalog_kind(meta.record)), meta.next, unique)
         },
         None => {
             if desc.count != 0u64 {
@@ -170,7 +170,7 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             // An index entry carries its payload: a Unique entry starts with
             // its owner's primary, and either kind may carry a projection.
             if unique {
-                let owner_end = unique_owner_end(encoded) ?=> |_| ImportMalformed
+                let owner_end = failure_result_from_rep(indexes.unique_owner_end(encoded)) ?=> |_| ImportMalformed
                 if owner_end == 4 {
                     return Error(ImportMalformed)
                 }

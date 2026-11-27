@@ -75,7 +75,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let draft = bound bytes plan.n_e {
                 let reads: core.Log[Read] = log.new()
                 let issued: core.Cell[u64] = cell.new(0)
-                let staged = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, keyed_completion_credit(db, complete), body)
                 })
                 let finished = match prepare_metered_pages(issued, attempt, pins, take staged) {
@@ -246,7 +246,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     let observed_info: core.Cell[bool] = cell.new(false)
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let registry = empty_index_registry()
+            let registry = indexes.empty_index_registry()
             let tx = Tx(store: s.store, indexes: view registry, roots: pages.share_roots(s.roots), base_collection: None, bases: pages.share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: pages.NO_FRAME_TAIL, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
             body(tx, env)
         }

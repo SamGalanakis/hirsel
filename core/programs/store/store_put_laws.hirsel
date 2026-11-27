@@ -753,7 +753,7 @@ fn test_node_ids(c: Clock) -> Result[(), ()] {
     }
 }
 
-fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
+fn catalog_entry(db: Db, k: Bytes) -> Result[indexes.Catalog, Error] {
     healthy(db)?
     catalog_entry_in(pages.holder_heads(db.holders)[0].roots.catalog, k)
 }
@@ -764,7 +764,7 @@ fn catalog_put(mut db: Db, roots: pages.Roots, k: Bytes, v: Bytes) -> Result[pag
     })
 }
 
-fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
+fn index_catalog(db: Db, id: u32) -> Result[List[indexes.Catalog], Error] {
     index_catalog_in(pages.holder_heads(db.holders)[0].roots.catalog, id)
 }
 

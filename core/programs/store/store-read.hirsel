@@ -245,7 +245,7 @@ fn decode_row_key[K, V](r: RowDecoder[K, V], row_key: Bytes, raw: Bytes) -> Resu
         }
     }
     let key = if r.unique {
-        list.slice(raw, 4, unique_owner_end(raw)?)
+        list.slice(raw, 4, failure_result_from_rep(indexes.unique_owner_end(raw))?)
     } else {
         list.slice(row_key, at, list.len(row_key))
     }
@@ -778,7 +778,7 @@ fn entry_parts[J, K](kind: IndexKind, index_key: std.codec.Key[J], primary_codec
         if at != list.len(key) {
             return Error(failure_from_rep(pages.malformed(at)))
         }
-        unique_owner_end(raw)?
+        failure_result_from_rep(indexes.unique_owner_end(raw))?
     } else {
         0u64
     }

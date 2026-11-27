@@ -74,17 +74,30 @@ Values of unrelated parameters are skipped.
 `header_at(request, index)` borrows the actual header name and value at a
 zero-based index in receipt order. Repeated fields retain their own positions.
 
+```
+pub fn http.peer_ip(r: Request) -> Ip
+pub fn http.relay_fields(r: Request) -> List[(Bytes, Bytes)]
+```
+
+`peer_ip` returns the transport peer's address before trusted ingress
+applies any forwarded field. `relay_fields` copies end-to-end request fields
+in receipt order and preserves repetitions. It removes hop-by-hop fields,
+names nominated by any `Connection` field and fields owned by the upstream
+request writer, including `Host`, `Content-Length` and `Expect`.
+
 `inline_body` borrows a short fixed-length body already in the read buffer.
-Otherwise `read(mut body, mut buffer)` copies decoded body bytes into the
-buffer's spare capacity and returns zero at EOF. The first read of a pending
+`read(mut body, mut buffer)` copies decoded body bytes, including buffered
+bytes, into the buffer's spare capacity and returns zero at EOF. Borrowing the
+inline body leaves the read position unchanged. The first read of a pending
 `Expect: 100-continue` sends 100 before receiving more body data. The
 connection remembers body framing errors even when the handler catches them.
 
 The writer owns one fixed buffer and advances through an output unit by the
 number of bytes the socket accepted. Write failures and expired deadlines
-close the connection. Unread body bytes are drained under the request's drain
-budget and deadline before the next head is parsed. A response without a
-body still sends a complete head.
+close the connection. After the handler returns, the connection skips any
+unread inline bytes already in the buffer. It drains other unread body bytes
+under the request's drain budget and deadline before parsing the next head.
+A response without a body still sends a complete head.
 
 `response(status, take body, close)` builds a final response for status 200
 through 599. `response_typed(status, format, value)` sends

@@ -55,6 +55,47 @@ fn read_grows(d: Dir) -> u64 waits {
     list.len(b)
 }
 
+// expect: run bounded_read_boundary(dir) = true
+fn bounded_read_boundary(d: Dir) -> bool waits {
+    let limit = 4097u64
+    let mut data: Bytes = list.with_capacity(limit + 1)
+    list.fill(mut data, limit - 2, b'a')
+    list.append(mut data, b"\x00\xff")
+    result.unwrap(file.write(d, "exact", data))
+    let exact = result.unwrap(file.read_bounded(d, "exact", limit))
+    if exact != data {
+        return false
+    }
+    list.push(mut data, b'b')
+    result.unwrap(file.write(d, "over", data))
+    if let Error(TooLarge(n)) = file.read_bounded(d, "over", limit) {
+        n == limit
+    } else {
+        false
+    }
+}
+
+// expect: run bounded_read_string_boundary(dir) = true
+fn bounded_read_string_boundary(d: Dir) -> bool waits {
+    result.unwrap(file.write(d, "empty", b""))
+    result.unwrap(file.write(d, "text", b"\xc3\xa9"))
+    result.unwrap(file.write(d, "bad", b"\xff"))
+    if result.unwrap(file.read_bounded(d, "empty", 0)) != b"" || result.unwrap(file.read_string_bounded(d, "text", 2)) != "é" {
+        return false
+    }
+    if result.unwrap(file.read_string_bounded(d, "text", 18446744073709551615u64)) != "é" {
+        return false
+    }
+    if let Error(TooLarge(0)) = file.read_string_bounded(d, "bad", 0) {} else {
+        return false
+    }
+    if let Error(ReadError(NotUtf8)) = file.read_string_bounded(d, "bad", 1) {
+        true
+    } else {
+        false
+    }
+}
+
 // expect: run read_missing(dir) = 1
 fn read_missing(d: Dir) -> u64 waits {
     match file.read(d, "absent") {

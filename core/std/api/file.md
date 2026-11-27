@@ -12,6 +12,21 @@ Each operation's `Prefix:` clause names effects that survive error or cancellati
 `file.stat(mut f)` reports the open file's kind, size and modification time
 ([Dir, Metadata](dir.md#metadata)).
 
+## Bounded reads
+
+```
+pub type BoundedReadError = ReadError(Error) | TooLarge(u64)
+pub fn file.read_bounded(d: Dir, p: String, max_bytes: u64) -> Result[Bytes, BoundedReadError] waits
+pub fn file.read_string_bounded(d: Dir, p: String, max_bytes: u64) -> Result[String, BoundedReadError] waits
+```
+
+The readers grow the buffer as needed and return the whole file through
+`max_bytes` bytes, inclusive. The first excess byte causes
+`Error(TooLarge(max_bytes))`. Other errors wrap the existing `file.Error` in
+`ReadError`. The string reader checks the byte limit before decoding. Invalid
+text within the limit gives `ReadError(NotUtf8)`. A refused allocation raises
+`Capacity`.
+
 ## ReadWrite
 
 `OpenMode` gains `ReadWrite`. It opens a file for reading and writing, creates it when it

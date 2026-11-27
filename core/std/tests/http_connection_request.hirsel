@@ -1,0 +1,168 @@
+type RequestServer: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    config: http.Config,
+    routes: router.Router[()]
+}
+
+fn drive_clock(take world: sim.world.World) waits {
+    let mut driver = take world
+    sim.world.run(mut driver)
+}
+
+fn serve_coalesced_net(take job: (Served[NetOp], Clock)) waits {
+    let (take port, clock) = take job
+    let config = sim.net.Config(queue_bytes: 1024, fragment_bytes: 1024, latency_ns: 0)
+    // Maximum draws keep each send and receive whole.
+    let mut draws: List[u64] = list.with_capacity(128)
+    list.fill(mut draws, 128, 18446744073709551615u64)
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take draws)
+    let mut plan = sim.world.plan_from(sim.world.Script(tail_seed: 0, streams: take streams), 0)
+    let _ = sim.net.serve(sim.net.new(config), mut plan, clock, take port)
+}
+
+fn coalesced_wire(tasks: Tasks, law: fn(Net, Clock, Tasks) -> bool waits) -> bool waits {
+    let (take world, clock) = sim.world.new(1, 0, 0)
+    let (net, take port) = provide.net(bytes 65536)
+    let driver = task.spawn(tasks, bytes 65536, take world, drive_clock)
+    let provider = task.spawn(tasks, bytes 4194304, (take port, clock), serve_coalesced_net)
+    let passed = law(net, clock, tasks)
+    result.unwrap(task.join(take provider))
+    result.unwrap(task.join(take driver))
+    passed
+}
+
+fn serve_requests(take job: RequestServer) waits {
+    let RequestServer(listener: take listener, clock, tasks, config: take config, routes: take routes) = take job
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take listener)
+    result.unwrap(http.serve(take listeners, clock, tasks, take config, take routes, ()))
+}
+
+fn request_config() -> http.Config {
+    let mut config = http.defaults()
+    config.sockets_max = 2
+    config.http_max = 2
+    config.conns_max = 2
+    config.ip_sockets_max = 2
+    config.refuse_max = 0
+    config.head_max = 8192
+    config.handler_bytes = 4096
+    config.drain_max = 16
+    take config
+}
+
+fn listen_requests(n: Net, c: Clock, tasks: Tasks, take config: http.Config, take routes: router.Builder[()]) -> (Task[()], Addr) waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let job = RequestServer(listener: take listener, clock: c, tasks, config: take config, routes: result.unwrap(router.build(take routes)))
+    (task.spawn(tasks, bytes 262144, take job, serve_requests), addr)
+}
+
+fn exchange(n: Net, c: Clock, addr: Addr, head: Bytes, tail: Bytes) -> Bytes waits {
+    let until = At(c, clock.deadline_after_ms(host.mono_ns(c), 1000))
+    let (take r, take w) = net.split(result.unwrap(host.connect(n, addr, until)))
+    let mut input = take r
+    let mut output = take w
+    let size = list.len(head) + list.len(tail)
+    let mut wire: Bytes = list.with_capacity(size)
+    list.append(mut wire, head)
+    list.append(mut wire, tail)
+    let n_sent = result.unwrap(host.send_pair(mut output, wire, b"", until))
+    if n_sent != size {
+        let mut detail = string.from("single write sent ")
+        string.push_u64(mut detail, n_sent)
+        string.push(mut detail, " of ")
+        string.push_u64(mut detail, size)
+        fail(take detail)
+    }
+    let mut received: Bytes = list.with_capacity(512)
+    while result.unwrap(host.recv_bounded(mut input, mut received, 512, until)) != 0 {}
+    take received
+}
+
+fn read_buffered_post(req: http.Request, scratch: Region, mut body: http.Body, state: ()) -> Result[http.Outcome, http.HandlerError] waits {
+    if http.inline_body(req) == None {
+        return Ok(Reply(http.response(400, b"body was not buffered with the head", true)?))
+    }
+    let mut first: Bytes = list.with_capacity(2)
+    let mut rest: Bytes = list.with_capacity(4)
+    if http.read(mut body, mut first) != Ok(2) || http.read(mut body, mut rest) != Ok(3) || http.read(mut body, mut rest) != Ok(0) {
+        return Ok(Reply(http.response(500, b"unexpected body read", true)?))
+    }
+    list.append(mut first, rest)
+    Ok(Reply(http.response(200, take first, false)?))
+}
+
+fn skip_body(req: http.Request, scratch: Region, mut body: http.Body, state: ()) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(204, b"", false)?))
+}
+
+// expect: run http_buffered_binary_post(tasks) = true
+fn http_buffered_binary_post(tasks: Tasks) -> bool waits {
+    coalesced_wire(tasks, buffered_binary_post)
+}
+
+fn buffered_binary_post(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut routes: router.Builder[()] = router.builder()
+    result.unwrap(router.add(mut routes, "POST", "/echo", router.raw(read_buffered_post)))
+    result.unwrap(router.add(mut routes, "POST", "/skip", router.raw(skip_body)))
+    result.unwrap(router.add(mut routes, "GET", "/", router.raw(skip_body)))
+    let (_server, addr) = listen_requests(n, c, tasks, request_config(), take routes)
+    let head = b"POST /echo HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Length: 5\r\n\r\n"
+    let body = b"\x00\xffh\r\n"
+    let received = exchange(n, c, addr, head, body)
+    let mut reply = http1.head()
+    if http1.response(received, mut reply) != Complete {
+        fail("missing response to buffered POST")
+    }
+    if reply.status != 200 {
+        let mut detail = string.from("buffered POST returned HTTP ")
+        string.push_u64(mut detail, int.widen(reply.status))
+        fail(take detail)
+    }
+    if list.slice(received, reply.end, list.len(received)) != body {
+        return false
+    }
+    // The fully buffered body exceeds the drain budget but needs no socket reads.
+    let pipeline = b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 17\r\n\r\nabcdefghijklmnopqGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+    let replies = exchange(n, c, addr, pipeline, b"")
+    if http1.response(replies, mut reply) != Complete || reply.status != 204 {
+        return false
+    }
+    let second = list.slice(replies, reply.end, list.len(replies))
+    http1.response(second, mut reply) == Complete && reply.status == 204 && reply.end == list.len(second)
+}
+
+fn request_relay_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: ()) -> Result[http.Outcome, http.HandlerError] {
+    let fields = http.relay_fields(req)
+    let mut expected: List[(Bytes, Bytes)] = list.with_capacity(4)
+    list.push(mut expected, (b"X-Repeat", b"one"))
+    list.push(mut expected, (b"X-Forwarded-For", b"192.0.2.1"))
+    list.push(mut expected, (b"x-repeat", b"two"))
+    list.push(mut expected, (b"Content-Type", b"application/octet-stream"))
+    let status: u16 = if http.peer_ip(req) == V4(2130706433) && fields == expected {
+        204
+    } else {
+        500
+    }
+    Ok(Reply(http.response(status, b"", false)?))
+}
+
+// expect: run http_peer_and_relay_fields(tasks) = true
+fn http_peer_and_relay_fields(tasks: Tasks) -> bool waits {
+    coalesced_wire(tasks, peer_and_relay_fields)
+}
+
+fn peer_and_relay_fields(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = request_config()
+    list.push(mut cfg.ingress, ingress_policy.Prefix(ip: V4(2130706433), bits: 32))
+    let mut routes: router.Builder[()] = router.builder()
+    result.unwrap(router.add(mut routes, "POST", "/relay", router.raw(request_relay_reply)))
+    let (_server, addr) = listen_requests(n, c, tasks, take cfg, take routes)
+    let wire = b"POST /relay HTTP/1.1\r\nHost: a\r\nX-Repeat: one\r\nX-Forwarded-For: 192.0.2.1\r\nX-First: drop\r\nConnection: x-FIRST, \tkeep-alive\r\nKeep-Alive: timeout=1\r\nProxy-Authorization: Basic drop\r\nTE: trailers\r\nContent-Length: 0\r\nx-repeat: two\r\nX-Second: drop\r\ncOnNeCtIoN: close, X-SECOND\r\nContent-Type: application/octet-stream\r\n\r\n"
+    let response = exchange(n, c, addr, wire, b"")
+    let mut head = http1.head()
+    http1.response(response, mut head) == Complete && head.status == 204 && head.end == list.len(response)
+}

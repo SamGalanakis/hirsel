@@ -1,0 +1,152 @@
+fn unreserved(x: u8) -> bool {
+    int.is_ascii_alpha(x) || int.is_ascii_digit(x) || x == b'-' || x == b'.' || x == b'_' || x == b'~'
+}
+
+fn sub_delim(x: u8) -> bool {
+    x == b'!' || x == b'$' || x == b'&' || x == 39 || x == b'(' || x == b')' || x == b'*' || x == b'+' || x == b',' || x == b';' || x == b'='
+}
+
+// RFC 3986 IP-literal accepts every IPv6 spelling (including an embedded
+// IPv4 tail) and the IPvFuture grammar. It has no scope ID or DNS step.
+fn ip_literal(b: Bytes) -> bool {
+    let n = list.len(b)
+    if n == 0 {
+        return false
+    }
+    if int.to_ascii_lower(b[0]) == b'v' {
+        let mut at: u64 = 1
+        while at < n && int.ascii_digit(b[at], 16) != None {
+            at += 1
+        }
+        if at == 1 || at + 1 >= n || b[at] != b'.' {
+            return false
+        }
+        for i in at + 1 .. n {
+            if !(unreserved(b[i]) || sub_delim(b[i]) || b[i] == b':') {
+                return false
+            }
+        }
+        return true
+    }
+    match net.parse_ip(b) {
+        Ok(V6(_, _)) => true,
+        _ => false,
+    }
+}
+
+/// Copies relayable fields from a complete request head and its source bytes.
+pub fn relay_fields(input: Bytes, head: View[http1.Head]) -> List[(Bytes, Bytes)] {
+    let mut connections = 0u64
+    for i in 0u64 .. head.count {
+        let span = head.fields[i].name
+        if http1.equal_ascii(list.slice(input, span.start, span.end), b"connection") {
+            connections |= int.wrapping_shl(1u64, int.narrow(i))
+        }
+    }
+    let mut fields: List[(Bytes, Bytes)] = list.with_capacity(head.count)
+    for i in 0u64 .. head.count {
+        let field = head.fields[i]
+        let name = list.slice(input, field.name.start, field.name.end)
+        if http_request.reserved(name) || hop_by_hop(name) || connection_names(input, head, connections, name) {
+            continue
+        }
+        let value = list.slice(input, field.value.start, field.value.end)
+        list.push(mut fields, (http.copy_bytes(name), http.copy_bytes(value)))
+    }
+    take fields
+}
+
+fn hop_by_hop(name: Bytes) -> bool {
+    http1.equal_ascii(name, b"connection") || http1.equal_ascii(name, b"keep-alive") || http1.equal_ascii(name, b"proxy-connection") || http1.equal_ascii(name, b"te") || http1.equal_ascii(name, b"proxy-authenticate") || http1.equal_ascii(name, b"proxy-authorization")
+}
+
+fn connection_names(input: Bytes, head: View[http1.Head], connections: u64, name: Bytes) -> bool {
+    let mut fields = connections
+    while fields != 0 {
+        let i: u64 = int.widen(int.trailing_zeros(fields))
+        let span = head.fields[i].value
+        let mut lo = span.start
+        while lo < span.end {
+            let comma = match list.find_byte(input, lo, span.end, b',') {
+                Some(at) => at,
+                None => span.end,
+            }
+            let mut hi = comma
+            while lo < hi && whitespace(input[lo]) {
+                lo += 1
+            }
+            while lo < hi && whitespace(input[hi - 1]) {
+                hi -= 1
+            }
+            if http1.equal_ascii(list.slice(input, lo, hi), name) {
+                return true
+            }
+            lo = comma + 1
+        }
+        fields &= fields - 1
+    }
+    false
+}
+
+fn whitespace(c: u8) -> bool {
+    c == b' ' || c == b'\t'
+}
+
+/// Validates the HTTP Host field authority, including an optional numeric port.
+pub fn valid_authority(b: Bytes) -> bool {
+    let n = list.len(b)
+    if n == 0 {
+        return false
+    }
+    let mut at: u64 = 0
+    if b[0] == b'[' {
+        let Some(close) = list.find_byte(b, 1, n, b']') else {
+            return false
+        }
+        if !ip_literal(list.slice(b, 1, close)) {
+            return false
+        }
+        at = close + 1
+    } else {
+        let high_bits: u64 = 0x8080808080808080
+        while at + 8 <= n {
+            let folded = list.word_le(b, at) | 0x2020202020202020
+            let ascii = folded & ~high_bits
+            // With bit seven clear, the additions cannot carry between bytes.
+            // That bit marks a byte at or above 'a', or past 'z', respectively.
+            let at_least_a = int.wrapping_add(ascii, 0x1f1f1f1f1f1f1f1f)
+            let past_z = int.wrapping_add(ascii, 0x0505050505050505)
+            if (at_least_a & ~(past_z | folded) & high_bits) != high_bits {
+                break
+            }
+            at += 8
+        }
+        while at < n && b[at] != b':' {
+            let c = b[at]
+            if c == b'%' {
+                if n - at < 3 || int.ascii_digit(b[at + 1], 16) == None || int.ascii_digit(b[at + 2], 16) == None {
+                    return false
+                }
+                at += 3
+            } else {
+                if !(unreserved(c) || sub_delim(c)) {
+                    return false
+                }
+                at += 1
+            }
+        }
+        if at == 0 {
+            return false
+        }
+    }
+    if at == n {
+        return true
+    }
+    if b[at] != b':' || n - at < 2 || n - at > 6 {
+        return false
+    }
+    match int.parse_decimal_span(b, at + 1, n, 65535) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}

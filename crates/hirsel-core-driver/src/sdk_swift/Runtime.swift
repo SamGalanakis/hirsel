@@ -118,7 +118,7 @@ public struct Runtime: @unchecked Sendable {
                                 abi: embedABI, manifest_fp: fingerprint, digest: digest,
                                 n_place: nPlace, client_bytes: clientBytes,
                                 start_timeout_ms: startTimeoutMs, grants: grants,
-                                dir_bases: bases, store_dir: store,
+                                dir_bases: bases, store_dir: store, exec_helper: hirsel_bytes(),
                                 context: context.toOpaque(),
                                 ended: { context, _, reason in
                                     if let context {

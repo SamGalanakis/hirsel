@@ -81,7 +81,7 @@ pub opaque type Endpoint
 pub opaque type Connection
 pub type ConnectionHandle: key = ConnectionHandle(u32)
 pub type StreamId: key = StreamId(u64)
-pub type EndpointConfig {
+pub type EndpointConfig: cross {
     member: u16,
     members: u16,
     cid_len: u8,
@@ -91,7 +91,7 @@ pub type EndpointConfig {
     token_key: Secret,
     limits: EndpointLimits
 }
-pub type EndpointLimits {
+pub type EndpointLimits: cross {
     connections: u32,
     unvalidated: u32,
     datagram_bytes: u32
@@ -110,7 +110,7 @@ pub type TransportConfig {
     client_pins: Option[List[handshake.Pin]]
 }
 pub type Controller = NewReno | Cubic
-pub type RetryPolicy = Never | Always | Above(u32)
+pub type RetryPolicy: cross = Never | Always | Above(u32)
 pub type Priority: key {
     urgency: u8,
     order: u64,

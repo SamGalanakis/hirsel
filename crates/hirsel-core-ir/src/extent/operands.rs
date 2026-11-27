@@ -120,7 +120,7 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         }
         Inst::Call { call } => {
             if let Some(site) = b.calls.get(call.index()) {
-                if let Callee::Indirect(x) = site.callee {
+                if let Callee::Indirect(x) | Callee::PackExport(x) = site.callee {
                     uses.push(v(x));
                 }
                 for arg in site.args.get(&b.pools.args).unwrap_or_default() {

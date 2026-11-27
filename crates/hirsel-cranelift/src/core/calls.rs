@@ -21,6 +21,7 @@ pub(super) struct Calls<'a> {
     c_abi: CAbi,
     references: HashMap<cranelift_module::FuncId, FuncRef>,
     indirect: HashMap<usize, SigRef>,
+    pack_indirect: HashMap<usize, SigRef>,
     pub args: Vec<Value>,
     pub results: Vec<Value>,
     pub edges: [Vec<BlockArg>; 2],
@@ -47,6 +48,7 @@ impl<'a> Calls<'a> {
             c_abi: tables.c_abi,
             references: HashMap::new(),
             indirect: HashMap::new(),
+            pack_indirect: HashMap::new(),
             args: Vec::with_capacity(args),
             results: Vec::with_capacity(results),
             edges: std::array::from_fn(|_| Vec::with_capacity(edge_arity)),
@@ -73,6 +75,17 @@ impl<'a> Calls<'a> {
     ) -> SigRef {
         *self
             .indirect
+            .entry(key)
+            .or_insert_with(|| b.import_signature(signature.clone()))
+    }
+    pub fn pack_indirect(
+        &mut self,
+        b: &mut FunctionBuilder<'_>,
+        key: usize,
+        signature: &ir::Signature,
+    ) -> SigRef {
+        *self
+            .pack_indirect
             .entry(key)
             .or_insert_with(|| b.import_signature(signature.clone()))
     }

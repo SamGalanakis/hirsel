@@ -6,6 +6,17 @@
 
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
+#[path = "code_ops.rs"]
+mod ops;
+pub use ops::{
+    CodeOps, CodePin, hirsel_core_code_activate, hirsel_core_code_bind,
+    hirsel_core_code_dispatch_begin, hirsel_core_code_dispatch_end, hirsel_core_code_drop,
+    hirsel_core_code_identity, hirsel_core_code_load, hirsel_core_code_revision,
+    hirsel_core_code_share, hirsel_core_code_slot_drop, hirsel_core_code_slot_new, register_ops,
+    worker_park,
+};
+pub(crate) use ops::{pin_pc, promote_worker_borrows};
+
 /// The image that owns a code address: the first 16 bytes of its module digest and the
 /// address's offset in the image's text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

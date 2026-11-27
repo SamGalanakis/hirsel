@@ -211,6 +211,17 @@ impl RtOp {
             RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
             RtOp::IsolateCatch => (vec![], vec![p]),
+            RtOp::CodeBind | RtOp::CodeShare => (vec![V(p)], vec![p]),
+            RtOp::CodeSlotNew => (vec![V(u64_)], vec![p]),
+            RtOp::CodeLoad => (
+                vec![V(u64_), V(p), V(p), V(p), V(u8_), V(p), V(p), V(p)],
+                vec![u8_],
+            ),
+            RtOp::CodeActivate => (vec![V(p), V(u64_), V(p), V(p)], vec![u8_]),
+            RtOp::CodeDispatchBegin => (vec![V(p), V(p)], vec![p]),
+            RtOp::CodeDispatchEnd => (vec![V(u64_)], vec![]),
+            RtOp::CodeIdentity => (vec![V(p), V(p)], vec![]),
+            RtOp::CodeRevision => (vec![V(p), V(p)], vec![u8_]),
             RtOp::Host(op) => op.operand_signature(),
         };
         Signature::new(params, results, None)
@@ -300,7 +311,16 @@ impl RtOp {
             | RtOp::StepLeave
             | RtOp::StepCatch
             | RtOp::WorkSteps
-            | RtOp::Closed(_) => vec![],
+            | RtOp::Closed(_)
+            | RtOp::CodeBind
+            | RtOp::CodeLoad
+            | RtOp::CodeShare
+            | RtOp::CodeSlotNew
+            | RtOp::CodeActivate
+            | RtOp::CodeDispatchBegin
+            | RtOp::CodeDispatchEnd
+            | RtOp::CodeIdentity
+            | RtOp::CodeRevision => vec![],
         }
     }
 

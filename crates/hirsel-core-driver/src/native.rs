@@ -205,26 +205,40 @@ fn emit_unit(
             options.logical_charge_report.is_some(),
         )
         .map_err(|e| e.to_string()),
-        Backend::Llvm => hirsel_llvm_lazy::core::emit_object_relocatable_for_target(
-            module,
-            hirsel_core_layout::Target::from_triple(&options.target)
-                .ok_or_else(|| format!("unsupported LLVM target {}", options.target))?,
-            if options.optimize {
+        Backend::Llvm => {
+            let target = hirsel_core_layout::Target::from_triple(&options.target)
+                .ok_or_else(|| format!("unsupported LLVM target {}", options.target))?;
+            let opt = if options.optimize {
                 hirsel_llvm_lazy::core::Optimization::Speed
             } else {
                 hirsel_llvm_lazy::core::Optimization::None
-            },
-            options.logical_charge_report.is_some(),
-            true,
-        )
-        .map_err(|e| e.to_string())
-        .and_then(|bytes| {
-            let coverage = hirsel_core_ir::coverage::fragment(module).map_err(|m| m.to_string())?;
-            // The object key names the libLLVM file; the alias a link keeps
-            // for the rows derives from the instance instead.
-            let alias = debug_alias(&encode(instance).map_err(|e| e.to_string())?);
-            hirsel_llvm_lazy::core::finish_native_object(bytes, alias, true, coverage)
-        }),
+            };
+            let emitted = if options.output_kind == OutputKind::Module {
+                hirsel_llvm_lazy::core::emit_object_module_for_target(
+                    module,
+                    target,
+                    opt,
+                    options.logical_charge_report.is_some(),
+                    true,
+                )
+            } else {
+                hirsel_llvm_lazy::core::emit_object_relocatable_for_target(
+                    module,
+                    target,
+                    opt,
+                    options.logical_charge_report.is_some(),
+                    true,
+                )
+            };
+            emitted.map_err(|e| e.to_string()).and_then(|bytes| {
+                let coverage =
+                    hirsel_core_ir::coverage::fragment(module).map_err(|m| m.to_string())?;
+                // The object key names the libLLVM file; the alias a link keeps
+                // for the rows derives from the instance instead.
+                let alias = debug_alias(&encode(instance).map_err(|e| e.to_string())?);
+                hirsel_llvm_lazy::core::finish_native_object(bytes, alias, true, coverage)
+            })
+        }
     }
 }
 
@@ -251,6 +265,9 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
     }
     if options.store_teardown {
         environment.extend(encode(&"hirsel.store-teardown.v1")?);
+    }
+    if matches!(options.backend, Backend::Llvm) && options.output_kind == OutputKind::Module {
+        environment.extend(encode(&"hirsel.pack-module-llvm.v1")?);
     }
     Ok(environment)
 }
@@ -280,6 +297,9 @@ pub(crate) fn native_inputs(
 ) -> io::Result<NativeInputs> {
     let (toolchain, recipe) = match &options.observed {
         Some(observed) => observed.as_ref().clone(),
+        None if options.output_kind == OutputKind::Module => {
+            crate::tool_inputs::module_toolchain(&options.target)
+        }
         None => crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?,
     };
     let library = (product.image.as_ref())
@@ -883,8 +903,23 @@ impl CheckProduct {
         ))
         .with_store_teardown(options.store_teardown, instances.iter())
         .with_foreign(foreign_modules.values(), Some(&link_archives));
+        let module_exports: Vec<&crate::PackExportDecl> =
+            if options.output_kind == OutputKind::Module {
+                if options.module_exports.is_empty() {
+                    self.pack_exports.get(entry).into_iter().collect()
+                } else {
+                    options
+                        .module_exports
+                        .iter()
+                        .filter_map(|p| self.pack_exports.get(p))
+                        .collect()
+                }
+            } else {
+                vec![]
+            };
         link_objects(
             &entry_plan,
+            &module_exports,
             &objects,
             &link_archives,
             inputs.library.as_ref(),
@@ -1326,6 +1361,7 @@ thread_local! {
 #[allow(clippy::too_many_arguments)]
 fn link_objects(
     entry_plan: &crate::native_entry::Plan<'_>,
+    module_exports: &[&crate::PackExportDecl],
     objects: &[ObjectProduct],
     link_archives: &crate::foreign_archive::LinkArchives,
     image: Option<&Store>,
@@ -1372,12 +1408,14 @@ fn link_objects(
     );
     let store = Store::cas(&options.cas)?;
     if options.output_kind == OutputKind::Module {
+        let export_sigs: Vec<ContentHash> = module_exports.iter().map(|e| e.signature).collect();
         return module::pack(
             entry_plan,
+            module_exports,
             objects,
             options,
             sources,
-            key("hirsel.core-module.v1", &(build, entry_plan))?,
+            key("hirsel.core-module.v2", &(build, entry_plan, &export_sigs))?,
             &store,
             counters,
             address,
@@ -1925,6 +1963,7 @@ pub(crate) mod tests {
             cas: dir.join("cas"),
             output: dir.join("program"),
             output_kind: OutputKind::Executable,
+            module_exports: vec![],
             root_limit: 1_048_576,
             // Glue operations are instances of their own: a program's walk counts each.
             instance_limit: 256,

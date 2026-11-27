@@ -437,7 +437,7 @@ impl FunctionEmitter<'_> {
                 Value::global(name)
             }
             Callee::Indirect(v) => self.numeric(v),
-            Callee::Runtime(_) => unreachable!(),
+            Callee::Runtime(_) | Callee::PackExport(_) => unreachable!(),
         }
     }
     pub(super) fn return_call(
@@ -446,7 +446,11 @@ impl FunctionEmitter<'_> {
         ending: &super::forward::Ending,
         layouts: &CallLayouts,
     ) -> bool {
-        if matches!(site.callee, Callee::Runtime(_)) {
+        if matches!(site.callee, Callee::Runtime(_) | Callee::PackExport(_))
+            || self
+                .function
+                .is_some_and(|f| self.module.functions[f.index()].pack_export)
+        {
             return false;
         }
         let sig = &self.module.signatures[site.signature.index()];
@@ -656,6 +660,9 @@ impl FunctionEmitter<'_> {
     pub(super) fn call_site(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
             return self.runtime_call(op, site);
+        }
+        if let Callee::PackExport(v) = site.callee {
+            return self.pack_export_call(v, site);
         }
         let sig = &self.module.signatures[site.signature.index()];
         let layouts = self.call_layouts.unwrap();
@@ -913,7 +920,7 @@ pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
 /// cold and not inlined, so the inliner keeps the growth body out of the hot
 /// caller; the branch into its block is weighted unlikely (`cold_edge`).
 impl FunctionEmitter<'_> {
-    fn site_attrs(&self, site: &CallSite) -> CallAttrs {
+    pub(super) fn site_attrs(&self, site: &CallSite) -> CallAttrs {
         CallAttrs {
             cold: site.cold,
             inline: if site.cold {

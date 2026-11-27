@@ -1309,11 +1309,14 @@ name = "hirsel-pack"
 version = "0.1.0"
 dependencies = [
  "hirsel-code",
+ "hirsel-core-driver",
  "hirsel-core-ids",
  "hirsel-core-layout",
+ "hirsel-core-resolve",
  "hirsel-core-rt",
  "hirsel-guard",
  "hirsel-mod",
+ "tempfile",
 ]
 
 [[package]]

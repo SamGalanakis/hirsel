@@ -550,7 +550,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             result
         };
         if let Some(entry) = entry {
-            return self.finish_pack_call(entry, dispatch, result, n);
+            return self.finish_pack_call(value, entry, dispatch, result, n, scratch);
         }
         let (code, environment) = if callable == Callable::Plain {
             (value, self.konst(Ty::Ptr, 0, n))

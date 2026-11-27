@@ -2,6 +2,7 @@ use crate::{
     CheckProduct, CheckRequest, ContentHash, CorpusManifest, Driver, Meter, reachability,
     request_record,
 };
+use hirsel_core_ids::DefPath;
 use std::io;
 use std::sync::Arc;
 
@@ -72,6 +73,18 @@ impl Driver {
     ) -> io::Result<Arc<CheckProduct>> {
         self.check_recorded(request, meter, None)?.product()
     }
+    /// Check `request` and seal PACK-14/15 export adapters for the named closed `exports`.
+    pub fn check_pack_exports(
+        &mut self,
+        request: CheckRequest,
+        exports: &[DefPath],
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        hirsel_core_ids::published::catch_io(|| {
+            self.check_inner::<false>(request, meter, None, false, exports)?
+                .product()
+        })
+    }
     /// Check `request`, answered from its request record when `record` names
     /// one that holds its answer.
     pub(crate) fn check_recorded(
@@ -82,11 +95,11 @@ impl Driver {
     ) -> io::Result<Checked> {
         if meter.enabled() {
             hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<true>(request, meter, record, false)
+                self.check_inner::<true>(request, meter, record, false, &[])
             })
         } else {
             hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<false>(request, meter, record, false)
+                self.check_inner::<false>(request, meter, record, false, &[])
             })
         }
     }
@@ -95,7 +108,7 @@ impl Driver {
         request: CheckRequest,
     ) -> io::Result<Arc<CheckProduct>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.check_inner::<false>(request, &mut Meter::new(false), None, true)?
+            self.check_inner::<false>(request, &mut Meter::new(false), None, true, &[])?
                 .product()
         })
     }

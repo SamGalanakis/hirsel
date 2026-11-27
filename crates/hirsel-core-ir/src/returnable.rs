@@ -467,7 +467,7 @@ fn forwarded(body: &Body) -> Body {
         *inst = map_uses(inst, &mut f);
     }
     for call in &mut b.calls {
-        if let Callee::Indirect(v) = &mut call.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = &mut call.callee {
             *v = f(*v);
         }
     }
@@ -1621,6 +1621,7 @@ fn build(
                 let old_call = &old.calls[call.index()];
                 let callee = match old_call.callee {
                     Callee::Indirect(v) => Callee::Indirect(b.get(v)),
+                    Callee::PackExport(v) => Callee::PackExport(b.get(v)),
                     c => c,
                 };
                 let args: Vec<Arg> = old_call
@@ -2202,6 +2203,7 @@ pub fn apply(module: &mut Module) -> Applied {
             body: None,
             versioned,
             cold,
+            pack_export: false,
         });
         module.code_variants.insert(
             id,
@@ -2244,6 +2246,7 @@ pub fn apply(module: &mut Module) -> Applied {
             body: None,
             versioned,
             cold,
+            pack_export: false,
         });
         module.code_variants.insert(
             id,
@@ -2322,6 +2325,7 @@ pub fn apply(module: &mut Module) -> Applied {
                             )),
                             versioned: canonical.versioned,
                             cold: canonical.cold,
+                            pack_export: canonical.pack_export,
                         },
                         ContentHash::of_parts(
                             "hirsel.returnable.root.v1",

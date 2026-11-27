@@ -507,7 +507,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
         let r = match c.callee {
             Callee::Direct(f) => self.call(t, f, &args),
-            Callee::Indirect(v) => self.call(t, FuncId((get(vals, v.0) - FN_BASE) as u32), &args),
+            Callee::Indirect(v) | Callee::PackExport(v) => {
+                self.call(t, FuncId((get(vals, v.0) - FN_BASE) as u32), &args)
+            }
             Callee::Runtime(op) => self.rt(t, op, &args).map(|r| {
                 self.results.clear();
                 self.results.extend_from_slice(&r);

@@ -90,7 +90,10 @@ pub(super) fn fail_modelled(inst: &Inst, body: &IrBody) -> bool {
     match inst {
         // A call fails as its callee does: an extracted callee is translated with its causes, a
         // prelude store/codec call is total by S4, a builtin is translated by its checked form.
-        Inst::Call { call } => !matches!(body.calls[call.index()].callee, Callee::Indirect(_)),
+        Inst::Call { call } => !matches!(
+            body.calls[call.index()].callee,
+            Callee::Indirect(_) | Callee::PackExport(_)
+        ),
         // The reverse join demands a matching arithmetic or index expression.
         Inst::Binary { .. } | Inst::Address { .. } => true,
         // Freeing memory, charging steps and the stack check fail only on resource limits, which
@@ -134,7 +137,9 @@ fn exclusions(name: &str, ir: &Module, body: &IrBody, stats: &mut JoinStats) {
         }
         match inst {
             Inst::Call { call } => match &body.calls[call.index()].callee {
-                Callee::Indirect(_) => stats.refused.push(format!("{name}: indirect call at {at}")),
+                Callee::Indirect(_) | Callee::PackExport(_) => {
+                    stats.refused.push(format!("{name}: indirect call at {at}"))
+                }
                 Callee::Runtime(op) if !pure_runtime(op) => stats
                     .refused
                     .push(format!("{name}: runtime operation {op:?} at {at}")),

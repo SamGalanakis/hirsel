@@ -539,8 +539,7 @@ fn link_weak_adapter_order(
     let inputs = reached.native.as_ref().unwrap();
     let [a, b] = owners.map(|owner| instances.iter().position(|i| i == owner).unwrap());
     assert!(a < b);
-    // The reach walk keeps its sorted table. Reverse just the inputs to the
-    // native object link.
+    // The reach walk keeps its sorted table; reverse just the link inputs.
     let (mut objects, _) = product.emit_reached(entry, &reached, options).unwrap();
     assert_eq!(&objects[a].instance, owners[0]);
     assert_eq!(&objects[b].instance, owners[1]);
@@ -567,6 +566,7 @@ fn link_weak_adapter_order(
     objects.extend(cleanup);
     let linked = link_objects(
         &plan,
+        &[],
         &objects,
         &crate::foreign_archive::LinkArchives::default(),
         None,

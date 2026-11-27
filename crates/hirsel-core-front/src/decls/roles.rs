@@ -44,6 +44,8 @@ pub enum Role {
     Causes,
     Cell,
     StaticFn,
+    Code,
+    CodeSlot,
     Socket,
     Flow,
     FlowEndpoint,
@@ -113,6 +115,8 @@ impl Role {
             "Causes" => Role::Causes,
             "Cell" => Role::Cell,
             "StaticFn" => Role::StaticFn,
+            "Code" => Role::Code,
+            "CodeSlot" => Role::CodeSlot,
             "Flow" => Role::Flow,
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
@@ -159,6 +163,8 @@ impl Role {
             | Role::Client
             | Role::Inbox
             | Role::Flow
+            | Role::Code
+            | Role::CodeSlot
             | Role::Secret
             | Role::Media => Kind::Resource,
         }
@@ -178,6 +184,8 @@ impl Role {
             Self::HostFile => Handle::HostFile,
             Self::Socket => Handle::Socket,
             Self::Flow => Handle::Flow,
+            Self::Code => Handle::Code,
+            Self::CodeSlot => Handle::CodeSlot,
             Self::Secret => Handle::Secret,
             Self::Media => Handle::Media,
             Self::Causes => Handle::Causes,
@@ -216,7 +224,15 @@ pub(super) fn nominal_bounds(
         // CONC-15: a holder crosses as its pointer; the payload stays put.
         Some(Role::Shared) => SHAREABLE | SEND | CROSS | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
-        Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
+        Some(
+            Role::Sender
+            | Role::Receiver
+            | Role::HostFile
+            | Role::Latest
+            | Role::Inbox
+            | Role::Code
+            | Role::CodeSlot,
+        ) => SEND,
         Some(Role::Client | Role::Secret | Role::Media) => SEND | CROSS,
         Some(Role::Socket) => match decl.path.0.name.as_str() {
             "Socket" | "Listener" | "UdpSocket" => SEND | CROSS,

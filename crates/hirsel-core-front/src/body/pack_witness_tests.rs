@@ -539,7 +539,7 @@ fn unbuilt_packing_operations_explicitly_refuse_execution_while_static_fn_stays_
             .collect()
     };
     assert!(
-        calls_of("run_bind")
+        !calls_of("run_bind")
             .iter()
             .any(|s| s.ends_with("export_unbuilt"))
     );
@@ -549,7 +549,7 @@ fn unbuilt_packing_operations_explicitly_refuse_execution_while_static_fn_stays_
             .any(|s| s.ends_with("held_unbuilt"))
     );
     assert!(
-        calls_of("run_id")
+        !calls_of("run_id")
             .iter()
             .any(|s| s.ends_with("loaded_identity"))
     );

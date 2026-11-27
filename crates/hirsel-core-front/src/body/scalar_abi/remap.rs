@@ -296,7 +296,7 @@ fn mark_values(body: &mut Body, aliases: &[ValueId], used: &mut [bool]) {
         }
     }
     for call in &body.calls {
-        if let Callee::Indirect(v) = call.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = call.callee {
             use_value(v)
         }
         for arg in call.args.get(&body.pools.args).unwrap() {
@@ -614,7 +614,7 @@ pub(super) fn compact(
         }
     }
     for call in &mut body.calls {
-        if let Callee::Indirect(v) = &mut call.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = &mut call.callee {
             map(v)
         }
     }

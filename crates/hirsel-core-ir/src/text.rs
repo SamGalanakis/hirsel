@@ -282,6 +282,9 @@ impl Printer {
             if f.cold {
                 head += " cold";
             }
+            if f.pack_export {
+                head += " pack_export";
+            }
             match &f.body {
                 None => self.line(&format!("{head} extern")),
                 Some(body) => {
@@ -545,6 +548,7 @@ impl Printer {
                         let callee = match c.callee {
                             Callee::Direct(f) => format!("f{}", f.0),
                             Callee::Indirect(v) => format!("v{}", v.0),
+                            Callee::PackExport(v) => format!("export.v{}", v.0),
                             Callee::Runtime(op) => rt(op),
                         };
                         let args =
@@ -1745,6 +1749,8 @@ impl BodyParser {
             Callee::Direct(FuncId(f.parse().map_err(|_| format!("bad callee `{t}`"))?))
         } else if let Some(v) = t.strip_prefix('v') {
             Callee::Indirect(ValueId(v.parse().map_err(|_| format!("bad callee `{t}`"))?))
+        } else if let Some(v) = t.strip_prefix("export.v") {
+            Callee::PackExport(ValueId(v.parse().map_err(|_| format!("bad callee `{t}`"))?))
         } else if let Some(name) = t.strip_prefix("rt.") {
             let mut tys = |n: usize| -> R<Vec<TypeId>> {
                 let ts = l.seq("[", "]", |l| Ok(TypeId(l.id('t')?)))?;
@@ -1841,6 +1847,15 @@ impl BodyParser {
                 "step_leave" => RtOp::StepLeave,
                 "step_catch" => RtOp::StepCatch,
                 "work_steps" => RtOp::WorkSteps,
+                "code_bind" => RtOp::CodeBind,
+                "code_load" => RtOp::CodeLoad,
+                "code_share" => RtOp::CodeShare,
+                "code_slot_new" => RtOp::CodeSlotNew,
+                "code_activate" => RtOp::CodeActivate,
+                "code_dispatch_begin" => RtOp::CodeDispatchBegin,
+                "code_dispatch_end" => RtOp::CodeDispatchEnd,
+                "code_identity" => RtOp::CodeIdentity,
+                "code_revision" => RtOp::CodeRevision,
                 name if let Some(op) = hirsel_core_layout::flow::Op::ALL
                     .iter()
                     .copied()
@@ -2143,7 +2158,7 @@ impl Parser {
 
     fn function(&mut self) -> R<()> {
         let n = self.module.functions.len() as u32;
-        let (instance, signature, code, versioned, cold, external) = {
+        let (instance, signature, code, versioned, cold, pack_export, external) = {
             let mut l = self.line().unwrap();
             l.next()?;
             expect_index(&mut l, 'f', n)?;
@@ -2165,12 +2180,21 @@ impl Parser {
             };
             let versioned = l.eat("versioned");
             let cold = l.eat("cold");
+            let pack_export = l.eat("pack_export");
             let external = l.eat("extern");
             if !external {
                 l.expect("{")?;
             }
             l.end()?;
-            (instance, signature, code, versioned, cold, external)
+            (
+                instance,
+                signature,
+                code,
+                versioned,
+                cold,
+                pack_export,
+                external,
+            )
         };
         let body = if external { None } else { Some(self.body()?) };
         if let Some(hash) = code {
@@ -2182,6 +2206,7 @@ impl Parser {
             body,
             versioned,
             cold,
+            pack_export,
         });
         Ok(())
     }

@@ -17,15 +17,17 @@ use std::time::{Duration, Instant};
 
 mod fixup;
 mod host;
+mod raw;
 mod retire;
 mod runs;
 mod slot;
 mod table;
 
 use host::Access;
+pub use raw::RawCode;
 use retire::Retire;
 use runs::Runs;
-pub use slot::{Slot, Worker};
+pub use slot::{BorrowToken, CodePin, RawSlot, Slot, Worker};
 pub use table::Hit;
 use table::{DataRow, DataTable, Owner, Table};
 
@@ -56,9 +58,10 @@ pub enum Refusal {
     Unsupported,
 }
 
-/// Why an `activate` changed nothing (PACK-6).
+/// Why an `activate` changed nothing (PACK-6, PACK-14).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stop {
+    WrongPool,
     Stale(u64),
     Capacity,
 }
@@ -67,11 +70,12 @@ pub enum Stop {
 ///
 /// # Safety
 /// `Self` is a function pointer type or a transparent wrapper of one, and every entry
-/// whose signature is `DIGEST` can be called through it. Invoking a copied pointer
-/// must require unsafe code: it may run only under a live image count and the
-/// host's executor gate.
+/// whose signature is `DIGEST` and `waits == WAITS` can be called through it. Invoking
+/// a copied pointer must require unsafe code: it may run only under a live image count
+/// and the host's executor gate.
 pub unsafe trait Signature: Copy {
     const DIGEST: ContentHash;
+    const WAITS: bool = false;
 }
 
 /// Opaque handle to one image's independent R/NX cause data owner (PACK-9.7).
@@ -180,6 +184,8 @@ struct Slab {
     images: HashMap<ContentHash, (u64, Weak<Image>)>,
     installs: u64,
     admitted: HashMap<ContentHash, ContentHash>,
+    /// Optional local module bytes registered for admitted digests (`code.load` by key).
+    admitted_bytes: HashMap<ContentHash, Arc<[u8]>>,
     quarantined: HashSet<ContentHash>,
     installed: u64,
 }
@@ -205,6 +211,15 @@ struct Shared {
     unrevoked: AtomicU64,
 }
 
+/// One published entry of an installed image.
+pub(crate) struct ImageEntry {
+    pub(crate) identity: ContentHash,
+    pub(crate) signature: ContentHash,
+    pub(crate) waits: bool,
+    pub(crate) entry: usize,
+    pub(crate) descriptor: usize,
+}
+
 /// One installed module.
 struct Image {
     shared: Arc<Shared>,
@@ -215,8 +230,8 @@ struct Image {
     data: usize,
     bytes: u64,
     cause_data: Option<CauseDataHandle>,
-    /// Each entry's identity, signature and address.
-    entries: Vec<(ContentHash, ContentHash, usize)>,
+    /// Each entry's identity, signature, waits flag, address, and optional descriptor.
+    entries: Vec<ImageEntry>,
     /// How many slots name this image, and whether none does after one did. Both
     /// change only under the retired lock.
     slots: AtomicU32,
@@ -436,6 +451,7 @@ impl Loader {
             images: HashMap::new(),
             installs: 0,
             admitted: HashMap::new(),
+            admitted_bytes: HashMap::new(),
             quarantined: HashSet::new(),
             installed: 0,
         };
@@ -538,16 +554,23 @@ impl Loader {
         self.0.unrevoked.load(Ordering::Relaxed)
     }
 
-    /// The `Code` of the entry `identity` of the module `bytes`, installing the module
-    /// unless its digest is installed already. `flush` publishes at once instead of
-    /// when the batch closes.
+    /// The `Code` of the entry `identity` of the module `bytes`, validating the entry
+    /// identity, typed signature, and `waits` flag before publishing any image (PACK-14).
+    /// `flush` publishes at once instead of when the batch closes.
     pub fn load<F: Signature>(
         &self,
         bytes: &[u8],
         identity: &ContentHash,
         flush: bool,
     ) -> Result<Code<F>, Refusal> {
-        self.image(bytes, flush)?.code(identity)
+        const { assert!(size_of::<F>() == size_of::<usize>()) };
+        let raw = self.load_entry_raw(bytes, identity, &F::DIGEST, F::WAITS, flush)?;
+        Ok(Code {
+            image: raw.image.expect("loaded image"),
+            entry: raw.entry,
+            descriptor: raw.descriptor,
+            callable: PhantomData,
+        })
     }
 
     /// The image of the module `bytes`, installed and published.
@@ -621,7 +644,17 @@ impl Loader {
                     data: 0,
                     bytes: 0,
                     cause_data: None,
-                    entries: held.entries.to_vec(),
+                    entries: held
+                        .entries
+                        .iter()
+                        .map(|&(identity, signature, entry)| ImageEntry {
+                            identity,
+                            signature,
+                            waits: false,
+                            entry,
+                            descriptor: 0,
+                        })
+                        .collect(),
                     slots: AtomicU32::new(0),
                     retired: AtomicBool::new(false),
                     retire: Some(Box::new(Retire {
@@ -801,7 +834,17 @@ impl Loader {
             cause_data,
             entries: module
                 .entries()
-                .map(|entry| (entry.identity, entry.signature, t + entry.text as usize))
+                .map(|entry| ImageEntry {
+                    identity: entry.identity,
+                    signature: entry.signature,
+                    waits: entry.waits,
+                    entry: t + entry.text as usize,
+                    descriptor: if entry.descriptor == hirsel_mod::NO_DESCRIPTOR {
+                        0
+                    } else {
+                        d + entry.descriptor as usize
+                    },
+                })
                 .collect(),
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
@@ -849,17 +892,17 @@ impl Installed {
         self.0.digest
     }
 
-    /// The `Code` of the entry `identity`, when its signature is `F`'s.
+    /// The `Code` of the entry `identity`, when its signature and `waits` flag match `F`.
     pub fn code<F: Signature>(&self, identity: &ContentHash) -> Result<Code<F>, Refusal> {
         const { assert!(size_of::<F>() == size_of::<usize>()) };
-        let found = self
-            .0
-            .entries
-            .iter()
-            .find(|(named, signature, _)| named == identity && *signature == F::DIGEST);
+        let found = self.0.entries.iter().find(|entry| {
+            entry.identity == *identity && entry.signature == F::DIGEST && entry.waits == F::WAITS
+        });
+        let found = found.ok_or(Refusal::NoEntry)?;
         Ok(Code {
             image: self.0.clone(),
-            entry: found.ok_or(Refusal::NoEntry)?.2,
+            entry: found.entry,
+            descriptor: found.descriptor,
             callable: PhantomData,
         })
     }
@@ -869,6 +912,7 @@ impl Installed {
 pub struct Code<F> {
     image: Arc<Image>,
     entry: usize,
+    descriptor: usize,
     callable: PhantomData<fn() -> F>,
 }
 
@@ -877,6 +921,7 @@ impl<F> Clone for Code<F> {
         Self {
             image: self.image.clone(),
             entry: self.entry,
+            descriptor: self.descriptor,
             callable: PhantomData,
         }
     }

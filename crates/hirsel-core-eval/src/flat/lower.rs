@@ -194,7 +194,7 @@ pub(super) fn verify(l: &Lowered, b: &Body, consts: &[u32]) {
         }
     }
     for c in &l.calls {
-        if let Callee::Indirect(v) = c.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = c.callee {
             value(v.0);
         }
     }

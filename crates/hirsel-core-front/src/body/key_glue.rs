@@ -562,6 +562,7 @@ impl Derive<'_> {
         module.functions.push(Function {
             versioned: false,
             cold: false,
+            pack_export: false,
             instance,
             signature,
             body: None,

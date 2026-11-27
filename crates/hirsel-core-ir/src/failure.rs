@@ -33,7 +33,7 @@ impl Failures {
                 match *inst {
                     Inst::Call { call } => match body.calls[call.index()].callee {
                         Callee::Direct(f) => callers[f.index()].push(i),
-                        Callee::Indirect(_) => fails = true,
+                        Callee::Indirect(_) | Callee::PackExport(_) => fails = true,
                         Callee::Runtime(op) => fails |= op.fails(),
                     },
                     Inst::Binary {

@@ -36,6 +36,7 @@ pub(super) struct Analyses {
     /// Read from every body before the first partition, which a later
     /// partition may no longer hold.
     pub(super) descriptors: Descriptors,
+    no_jump_tables: bool,
 }
 
 impl Analyses {
@@ -54,13 +55,15 @@ impl Analyses {
                     .iter()
                     .enumerate()
                     .map(|(i, f)| {
-                        f.versioned || known.contains(&module.code_identity(FuncId(i as u32)))
+                        !f.pack_export
+                            && (f.versioned
+                                || known.contains(&module.code_identity(FuncId(i as u32))))
                     })
                     .collect(),
             );
         }
         for (&f, free) in &module.step_free {
-            if free.dispatch && !items.is_versioned(f) {
+            if free.dispatch && !items.is_versioned(f) && !module.functions[f.index()].pack_export {
                 items.step_dispatch[f.index()] = Some(free.body);
             }
         }
@@ -146,6 +149,7 @@ impl Analyses {
             local_roles: (facts && provided.roles.is_none())
                 .then(|| hirsel_core_ir::roles::Facts::new(module)),
             descriptors,
+            no_jump_tables: provided.no_jump_tables,
         }
     }
 
@@ -184,14 +188,19 @@ impl Analyses {
             // Core and the runtime ABI report failure as a status, without unwinding.
             nounwind: facts,
             map_probe: definition == "core@1/map/probe",
-            carriers: carriers(
-                module,
-                recipes,
-                roles,
-                function,
-                &module.signatures[f.signature.index()],
-                locals,
-            ),
+            no_jump_tables: self.no_jump_tables,
+            carriers: if f.pack_export {
+                String::new()
+            } else {
+                carriers(
+                    module,
+                    recipes,
+                    roles,
+                    function,
+                    &module.signatures[f.signature.index()],
+                    locals,
+                )
+            },
             ..FnAttrs::default()
         }
     }
@@ -449,6 +458,7 @@ pub(crate) fn emit_release_unit(
         prepay_step_trees: true,
         release_sites: number_sites,
         versions: versions.as_ref(),
+        no_jump_tables: false,
     };
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let debug_items = number_sites.then(|| std::rc::Rc::<[_]>::from(module.items.clone()));

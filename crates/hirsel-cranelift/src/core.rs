@@ -105,6 +105,7 @@ pub(super) struct Tables<'a> {
     input: &'a c::Module,
     layouts: &'a [hirsel_core_layout::RecipeRow],
     signatures: &'a [abi::Signature],
+    pack_signatures: &'a [Option<abi::Signature>],
     call_layouts: &'a c::native_layout::CallLayouts,
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
@@ -422,18 +423,49 @@ fn emit(
     let mut object = ObjectModule::new(builder);
     drop(object_setup);
     let call_layouts = c::native_layout::CallLayouts::new(&input.types, layouts);
-    let signatures = {
+    let (signatures, pack_signatures) = {
         let _span = observer.enter("signature_setup");
-        input
+        let signatures = input
             .signatures
             .iter()
             .map(|s| abi::Signature::new(s, &object, &call_layouts, c_abi))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        let mut pack_signatures: Vec<Option<abi::Signature>> =
+            (0..input.signatures.len()).map(|_| None).collect();
+        for f in &input.functions {
+            if f.pack_export && pack_signatures[f.signature.index()].is_none() {
+                pack_signatures[f.signature.index()] = Some(abi::Signature::pack_export(
+                    &input.signatures[f.signature.index()],
+                    &object,
+                    c_abi,
+                ));
+            }
+            if let Some(body) = &f.body {
+                for call in &body.calls {
+                    if matches!(call.callee, Callee::PackExport(_))
+                        && pack_signatures[call.signature.index()].is_none()
+                    {
+                        pack_signatures[call.signature.index()] =
+                            Some(abi::Signature::pack_export(
+                                &input.signatures[call.signature.index()],
+                                &object,
+                                c_abi,
+                            ));
+                    }
+                }
+            }
+        }
+        (signatures, pack_signatures)
     };
     let declarations = observer.enter("declarations");
     let mut functions = Vec::with_capacity(input.functions.len());
     debug_assert_eq!(symbols.len(), input.functions.len());
     for (f, name) in input.functions.iter().zip(symbols) {
+        let sig = if f.pack_export {
+            pack_signatures[f.signature.index()].as_ref().unwrap()
+        } else {
+            &signatures[f.signature.index()]
+        };
         functions.push(
             object
                 .declare_function(
@@ -445,7 +477,7 @@ fn emit(
                     } else {
                         Linkage::Import
                     },
-                    &signatures[f.signature.index()].clif,
+                    &sig.clif,
                 )
                 .map_err(error)?,
         );
@@ -486,6 +518,7 @@ fn emit(
         input,
         layouts,
         signatures: &signatures,
+        pack_signatures: &pack_signatures,
         call_layouts: &call_layouts,
         functions: &functions,
         statics: &statics,
@@ -514,7 +547,11 @@ fn emit(
             continue;
         }
         let build = observer.enter("build_clif");
-        let sig = &signatures[f.signature.index()];
+        let sig = if f.pack_export {
+            pack_signatures[f.signature.index()].as_ref().unwrap()
+        } else {
+            &signatures[f.signature.index()]
+        };
         let context = &mut scratch.codegen;
         let builder_context = &mut scratch.frontend;
         object.clear_context(context);

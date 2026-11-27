@@ -488,15 +488,24 @@ impl Plan<'_> {
         sources: &SourceMap,
         revisions: &[(String, [u8; 32])],
     ) -> Result<Vec<u8>> {
-        let mut object = object(target)?;
-        for (symbol, revision) in revisions {
-            data::carrier(&mut object, symbol, revision)?;
-        }
-        let mut product = object.finish();
-        sites::define(&mut product.object, sources)?;
-        sites::define_release(&mut product.object, sources, self.release_sites)?;
-        product.object.write().map_err(error)
+        emit_module_support_with_sites(target, sources, self.release_sites, revisions)
     }
+}
+
+pub(crate) fn emit_module_support_with_sites(
+    target: Target,
+    sources: &SourceMap,
+    release_sites: &[hirsel_core_ir::source::ReleaseSite],
+    revisions: &[(String, [u8; 32])],
+) -> Result<Vec<u8>> {
+    let mut object = object(target)?;
+    for (symbol, revision) in revisions {
+        data::carrier(&mut object, symbol, revision)?;
+    }
+    let mut product = object.finish();
+    sites::define(&mut product.object, sources)?;
+    sites::define_release(&mut product.object, sources, release_sites)?;
+    product.object.write().map_err(error)
 }
 
 fn object(target: Target) -> Result<ObjectModule> {

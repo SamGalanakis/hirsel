@@ -318,6 +318,35 @@ pub(crate) fn toolchain(
     }
 }
 
+/// Pure in-process toolchain identity for `--emit module` / `build_pack_module` (PACK-2),
+/// which links with no C driver and no runtime archive.
+pub(crate) fn module_toolchain(target: &str) -> (Toolchain, LinkRecipe) {
+    let abi = hirsel_mod::abi();
+    let image = ContentHash::of_parts("hirsel.module-toolchain.v1", [target.as_bytes(), &abi.0]);
+    let runtime = runtime_identity(abi);
+    let environment = ContentHash::of_parts("hirsel.module-environment.v1", [target.as_bytes()]);
+    let recipe = LinkRecipe {
+        schema: LINK_RECIPE_SCHEMA,
+        target: target.to_owned(),
+        linker: PathBuf::new(),
+        args: Vec::new(),
+        files: Vec::new(),
+        source_files: Vec::new(),
+        absent: Vec::new(),
+        directories: Vec::new(),
+        binaries: Vec::new(),
+        identity: image,
+    };
+    (
+        Toolchain {
+            image,
+            runtime,
+            environment,
+        },
+        recipe,
+    )
+}
+
 /// Hash the installed argv, resolved bundle files, and runtime. Resolve
 /// relative paths only for the link so the key survives relocation.
 fn installed_toolchain(

@@ -554,6 +554,7 @@ impl Work<'_, '_> {
         m.functions.push(Function {
             versioned: false,
             cold: false,
+            pack_export: false,
             instance: row,
             signature,
             body: None,
@@ -605,7 +606,7 @@ impl Work<'_, '_> {
                             Some(b) => (b, false),
                             None => continue,
                         },
-                        Callee::Runtime(..) => continue,
+                        Callee::Runtime(..) | Callee::PackExport(..) => continue,
                     };
                     let eligible = !devirtualized && self.eligible.contains(&self.instance(to));
                     let args = call.args.get(&body.pools.args).unwrap();
@@ -988,7 +989,7 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                                     .definition
                                     .to_string(),
                             )),
-                            Callee::Indirect(_) => Some(None),
+                            Callee::Indirect(_) | Callee::PackExport(_) => Some(None),
                             Callee::Runtime(..) => None,
                         })
                         .collect(),

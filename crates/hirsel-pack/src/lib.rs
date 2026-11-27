@@ -17,6 +17,7 @@ use hirsel_core_rt::{
 use hirsel_mod::Mask;
 
 pub mod rows;
+pub mod runtime;
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -81,6 +82,13 @@ pub enum Refused {
 
 static LOADER: Mutex<Option<&'static Loader>> = Mutex::new(None);
 
+/// Register `loader` with the PACK-14 runtime pool table (if not already registered)
+/// and return its host-issued `Loader` capability handle for Hirsel code.
+pub fn loader_handle(loader: &'static Loader) -> u64 {
+    runtime::install_ops();
+    runtime::register_pool(loader)
+}
+
 /// Make this process's loader and register its text and data bands with the runtime,
 /// so that the fault handler, profile sampler, and cause recorder resolve addresses
 /// through it. The loader lives as long as the process.
@@ -103,6 +111,8 @@ pub fn start(config: Config) -> Result<&'static Loader, Refused> {
         resolve_literal,
     })))
     .map_err(Refused::Runtime)?;
+    runtime::install_ops();
+    let _ = runtime::register_pool(loader);
     *slot = Some(loader);
     Ok(loader)
 }

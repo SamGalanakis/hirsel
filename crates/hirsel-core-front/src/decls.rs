@@ -2186,7 +2186,9 @@ impl Program<'_> {
                     | Role::Latest
                     | Role::Client
                     | Role::Inbox
-                    | Role::Flow,
+                    | Role::Flow
+                    | Role::Code
+                    | Role::CodeSlot,
                 ) => H_RESOURCE,
                 Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
                 Some(

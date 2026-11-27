@@ -95,7 +95,13 @@ impl Module {
         }
         let f = &self.functions[function.index()];
         let identity = self.identity(f.instance);
-        let Some((source, _)) = identity.definition.0.name.split_once("$callable[") else {
+        let Some((source, _)) = identity
+            .definition
+            .0
+            .name
+            .split_once("$callable[")
+            .or_else(|| identity.definition.0.name.split_once("$pack_export"))
+        else {
             return RevisionRoot::Item(identity);
         };
         let mut item = identity.definition.clone();

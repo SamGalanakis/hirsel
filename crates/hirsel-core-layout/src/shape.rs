@@ -264,6 +264,10 @@ pub enum Handle {
     Secret,
     /// A move-only media resource (TLS-8).
     Media,
+    /// A counted handle to one typed entry of a code image (`Code[F]`, PACK-14).
+    Code,
+    /// A versioned activation slot (`CodeSlot[F]`, PACK-14).
+    CodeSlot,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

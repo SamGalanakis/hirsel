@@ -380,7 +380,7 @@ impl Cell {
         }
     }
 
-    unsafe fn release_owner(&mut self) {
+    pub(crate) unsafe fn release_owner(&mut self) {
         let word = self.owner;
         if word == 0 {
             return;

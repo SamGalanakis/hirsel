@@ -1370,6 +1370,14 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 Callee::Indirect(v) => need(c.ty(v)? == Ty::Ptr, || {
                     "indirect callee is not a pointer".into()
                 })?,
+                Callee::PackExport(v) => {
+                    need(c.ty(v)? == Ty::Ptr, || {
+                        "pack_export callee is not a pointer".into()
+                    })?;
+                    need(sig.results.is_empty(), || {
+                        "pack_export call must have empty immediate results".into()
+                    })?;
+                }
                 Callee::Runtime(op) => {
                     for t in op.types() {
                         c.tid(t)?;

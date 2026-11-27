@@ -459,6 +459,7 @@ fn failure_sites_discarded_by_linker() {
     objects.extend(cleanup);
     let linked = link_objects(
         &plan,
+        &[],
         &objects,
         &crate::foreign_archive::LinkArchives::default(),
         None,

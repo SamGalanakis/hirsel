@@ -14,6 +14,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
             .map(|f| Function {
                 versioned: f.versioned,
                 cold: f.cold,
+                pack_export: f.pack_export,
                 instance: f.instance,
                 signature: f.signature,
                 body: None,
@@ -40,6 +41,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
     module.functions.push(Function {
         versioned: false,
         cold: false,
+        pack_export: false,
         instance,
         signature,
         body: Some(Body {

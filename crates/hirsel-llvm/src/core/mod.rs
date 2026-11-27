@@ -36,6 +36,7 @@ mod law;
 mod optimized_ir;
 #[cfg(hirsel_lazy_core)]
 mod oracle;
+mod pack_code;
 mod partition;
 pub use optimized_ir::*;
 #[cfg(hirsel_lazy_core)]
@@ -395,6 +396,7 @@ struct EmissionFacts<'a> {
     prepay_step_trees: bool,
     release_sites: bool,
     versions: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
+    no_jump_tables: bool,
 }
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn versioned_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
@@ -627,18 +629,31 @@ fn emit_prepared(
         .filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
-        let has_status = failures.may_fail[i];
-        let abi = abi::Return::private(target, sig, call_layouts, has_status, f.body.is_some());
+        let has_status = f.pack_export || failures.may_fail[i];
+        let abi = if f.pack_export {
+            abi::Return::pack_export(target)
+        } else {
+            abi::Return::private(target, sig, call_layouts, has_status, f.body.is_some())
+        };
         // A body whose convention differs from the public one keeps it under a
         // suffixed private symbol, behind a public wrapper of the same name.
+        // PACK-15 exports always use their fixed C-ABI signature directly.
         let ok = abi.ok.is_some();
-        let private = ok || !has_status;
-        let suffix = abi::private_suffix(has_status, ok);
+        let private = !f.pack_export && (ok || !has_status);
+        let suffix = if f.pack_export {
+            ""
+        } else {
+            abi::private_suffix(has_status, ok)
+        };
         let mut name = items.function_symbols[i].clone();
-        let versioned = items.is_versioned(FuncId(i as u32));
-        let (mut params, locals) = abi.parameters(sig, call_layouts, facts, |place| {
-            place_size(module, recipes, place)
-        });
+        let versioned = !f.pack_export && items.is_versioned(FuncId(i as u32));
+        let (mut params, locals) = if f.pack_export {
+            abi.pack_export_parameters(sig, facts, |place| place_size(module, recipes, place))
+        } else {
+            abi.parameters(sig, call_layouts, facts, |place| {
+                place_size(module, recipes, place)
+            })
+        };
         let Some(body) = &f.body else {
             let signature = abi.signature(params);
             if !versioned || !sig.has_vectors() {
@@ -761,7 +776,11 @@ fn emit_prepared(
                 call_layouts: Some(call_layouts),
                 append_fast,
                 shadow_callee,
-                caller_site: Value::Local(Local::CALLER_SITE),
+                caller_site: if f.pack_export {
+                    int(0)
+                } else {
+                    Value::Local(Local::CALLER_SITE)
+                },
                 caller_site_owner: int(0),
                 debug_location: function_debug.map(|d| d.location(None)),
                 anchor: None,
@@ -922,7 +941,9 @@ fn emit_prepared(
                     Local::DEST.into()
                 } else {
                     let index = i - usize::from(sig.dest.is_some());
-                    if let Some(record) = call_layouts.parameter(sig.params[index]) {
+                    if !f.pack_export
+                        && let Some(record) = call_layouts.parameter(sig.params[index])
+                    {
                         let place = e.temp(Type::bytes(record.size));
                         let values: Vec<_> = (0..record.fields().len())
                             .map(|j| Local::ParamField(index, j).into())
@@ -1161,6 +1182,7 @@ pub(crate) fn emit_native_module_in_context(
             prepay_step_trees: true,
             release_sites: false,
             versions,
+            no_jump_tables: false,
         },
     )
 }
@@ -1176,6 +1198,7 @@ fn native_module(
 ) -> Result<crate::construction::NativeModule> {
     let facts = facts_enabled();
     let mut native = sink::native::NativeSink::new(context);
+    native.no_jump_tables = provided.no_jump_tables;
     emit_module(
         Cow::Borrowed(module),
         target,
@@ -1294,6 +1317,7 @@ pub fn emit_object_for_target(
             debug_lines: false,
             fixed_sites: sites,
         },
+        EmissionFacts::default(),
     )
 }
 
@@ -1319,6 +1343,35 @@ pub fn emit_object_relocatable_for_target(
             debug_lines,
             fixed_sites: &[],
         },
+        EmissionFacts::default(),
+    )
+}
+
+/// Compile a PACK-2 `.hirsel-mod` unit with relocatable sites and `"no-jump-tables"="true"`
+/// so LLVM never emits `.rodata -> .text` PC32 jump-table relocations across separate bands.
+pub fn emit_object_module_for_target(
+    module: &Module,
+    target: Target,
+    opt: Optimization,
+    observe_charge: bool,
+    debug_lines: bool,
+) -> Result<Vec<u8>> {
+    emit_object_site_binding(
+        module,
+        target,
+        opt,
+        observe_charge,
+        SourceEmission {
+            batch_steps: true,
+            test_hooks: cfg!(test),
+            relocatable_sites: true,
+            debug_lines,
+            fixed_sites: &[],
+        },
+        EmissionFacts {
+            no_jump_tables: true,
+            ..EmissionFacts::default()
+        },
     )
 }
 
@@ -1328,23 +1381,18 @@ fn emit_object_site_binding(
     opt: Optimization,
     observe_charge: bool,
     source: SourceEmission,
+    provided: EmissionFacts<'_>,
 ) -> Result<Vec<u8>> {
     #[cfg(not(hirsel_lazy_core))]
     {
+        let _ = provided;
         compile_observation(module, target, opt, observe_charge, source, |_| (), |_| ())
             .map(|(bytes, ())| bytes)
     }
     #[cfg(hirsel_lazy_core)]
     {
         let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
-        let native = native_module(
-            module,
-            target,
-            context,
-            observe_charge,
-            source,
-            EmissionFacts::default(),
-        )?;
+        let native = native_module(module, target, context, observe_charge, source, provided)?;
         crate::loader::compile_module(native, matches!(opt, Optimization::Speed), target)
             .map_err(Error::Llvm)
     }
@@ -2467,5 +2515,6 @@ pub fn emit_object_for_test(
             debug_lines,
             fixed_sites: &[],
         },
+        EmissionFacts::default(),
     )
 }

@@ -217,6 +217,9 @@ pub struct Task {
     holder: std::mem::MaybeUninit<crate::counted::Holder>,
     /// How far the result's cleanup has got.
     cursor: u64,
+    /// Owning pins on loaded code generations promoted when this task leaves
+    /// worker custody (PACK-14). Must be last so it drops after frame/result cleanup.
+    pub(crate) code_pins: Vec<(u64, crate::code::CodePin)>,
 }
 #[derive(Clone, Copy, Eq)]
 struct ReadyToken(u64);
@@ -3030,9 +3033,13 @@ pub(crate) unsafe fn checkpoint_at(now: u64) {
 /// one call each: both run on the unit's stack between switches.
 #[inline(never)]
 fn leave_task_tls() {
+    let task = CURRENT.get();
+    // PACK-14: promote any borrowed worker rows into owning continuation pins
+    // before the task leaves worker custody.
+    // SAFETY: CURRENT pins the outgoing task.
+    unsafe { crate::code::promote_worker_borrows(task) };
     #[cfg(feature = "prof")]
     {
-        let task = CURRENT.get();
         // SAFETY: CURRENT pins the outgoing task.
         unsafe { prof_dispatch(task, false) };
     }
@@ -3726,6 +3733,7 @@ unsafe fn run_root_scheduler(
         transfer: None,
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
+        code_pins: Vec::new(),
     });
     // A recorded helper's root task runs in its own tape group.
     #[cfg(feature = "record")]
@@ -3888,6 +3896,9 @@ impl RunPtr {
                 let prev_idle = crate::run_stop::set_idle_ptr(idle);
                 crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
                 hirsel_stack::switch(idle, (*task).sp);
+                if (*task).state != State::Ended {
+                    crate::code::promote_worker_borrows(task);
+                }
                 #[cfg(feature = "prof")]
                 prof_dispatch(task, false);
                 crate::fiber::guard((0, 0, 0));
@@ -4002,6 +4013,7 @@ unsafe fn spawn_in(
             transfer: None,
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
+            code_pins: Vec::new(),
         });
         // The scheduler's published task now owns the allocation until retire.
         std::mem::forget(storage);

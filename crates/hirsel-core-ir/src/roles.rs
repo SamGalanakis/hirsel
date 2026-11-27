@@ -847,7 +847,7 @@ impl<'a> Seal<'a> {
             Inst::Call { call } => {
                 let site = &b.calls[call.index()];
                 let sig = &self.m.signatures[site.signature.index()];
-                if let crate::Callee::Indirect(v) = site.callee {
+                if let crate::Callee::Indirect(v) | crate::Callee::PackExport(v) = site.callee {
                     self.used(v, Use::Other);
                 }
                 let skip = usize::from(sig.dest.is_some());

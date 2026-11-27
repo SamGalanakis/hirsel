@@ -45,6 +45,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub statics: &'c [cranelift_module::DataId],
     pub descriptors: &'c [Option<cranelift_module::DataId>],
     pub signatures: &'c [abi::Signature],
+    pub pack_signatures: &'c [Option<abi::Signature>],
     pub glues: &'c drop::Glues,
     pub task_entries: &'c task_entry::Glues,
     pub context: Value,
@@ -230,7 +231,11 @@ pub(super) fn emit(
     let params = b.block_params(blocks[0]).to_vec();
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
-    let caller_site = *params.last().unwrap();
+    let caller_site = if signature.pack_export {
+        b.ins().iconst(types::I64, 0)
+    } else {
+        *params.last().unwrap()
+    };
     let caller_site_owner = sites::caller_site_owner(
         &mut b,
         c::source::inherits_site(&input.instances[function.instance.index()]),
@@ -247,7 +252,12 @@ pub(super) fn emit(
         .get(&body.pools.values)
         .unwrap()
         .iter();
-    if signature.dest || signature.record.is_some() {
+    if signature.pack_export {
+        let result_place = physical.next().unwrap();
+        if signature.dest {
+            values[logical.next().unwrap().index()] = result_place;
+        }
+    } else if signature.dest || signature.record.is_some() {
         values[logical.next().unwrap().index()] =
             record_dest.unwrap_or_else(|| physical.next().unwrap());
     }
@@ -286,6 +296,7 @@ pub(super) fn emit(
         statics,
         descriptors: tables.descriptors,
         signatures,
+        pack_signatures: tables.pack_signatures,
         context,
         caller_site,
         caller_site_owner,
@@ -787,6 +798,42 @@ impl Function<'_, '_, '_> {
                 if let Callee::Runtime(op) = call.callee {
                     return self.runtime_call(op, call);
                 }
+                if let Callee::PackExport(v) = call.callee {
+                    let signature = self.pack_signatures[call.signature.index()]
+                        .as_ref()
+                        .unwrap();
+                    let mut args = std::mem::take(&mut self.calls.args);
+                    args.clear();
+                    args.push(self.context);
+                    let actual = call.args.get(&self.body.pools.args).unwrap();
+                    let rest = if signature.dest {
+                        let Arg::Address(dest) = actual[0] else {
+                            unreachable!()
+                        };
+                        args.push(self.addr(dest));
+                        &actual[1..]
+                    } else {
+                        args.push(self.b.ins().iconst(types::I64, 0));
+                        actual
+                    };
+                    for &arg in rest {
+                        match arg {
+                            Arg::Value(v) => args.extend(self.parts(v)),
+                            Arg::Address(a) => args.push(self.addr(a)),
+                        }
+                    }
+                    let target = self.get(v);
+                    let sig = self.calls.pack_indirect(
+                        &mut self.b,
+                        call.signature.index(),
+                        &signature.clif,
+                    );
+                    let inst = self.b.ins().call_indirect(sig, target, &args);
+                    self.calls.args = args;
+                    let status = self.b.inst_results(inst)[0];
+                    self.call_failure(status, call.fail)?;
+                    return Ok(());
+                }
                 let signature = &self.signatures[call.signature.index()];
                 let storage = signature
                     .indirect
@@ -848,7 +895,7 @@ impl Function<'_, '_, '_> {
                         );
                         self.b.ins().call_indirect(sig, v, &args)
                     }
-                    Callee::Runtime(_) => unreachable!(),
+                    Callee::Runtime(_) | Callee::PackExport(_) => unreachable!(),
                 };
                 self.calls.args = args;
                 let mut returned = [Value::from_u32(0); 3];

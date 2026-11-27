@@ -739,3 +739,148 @@ fn a_loader_without_a_slab_gives_prelinked_code_and_refuses_every_other_key() {
         Some(Refusal::Quarantined)
     );
 }
+
+/// PACK-14: validate requested entry identity, typed signature, and `waits` BEFORE
+/// publishing any new image. Refusals leave installed bytes and live images unchanged.
+#[test]
+fn validate_before_publication_refuses_without_changing_installed_bytes_or_images() {
+    if !host::slab() {
+        return;
+    }
+    let loader = loader_for_law(config()).unwrap();
+    let sync_bytes = image(101).encode();
+    let (sync_key, _) = loader.admit_module(&sync_bytes).unwrap();
+    assert_eq!((loader.installed(), loader.live_images()), (0, 0));
+
+    // Wrong signature digest refuses with NoEntry and publishes nothing.
+    assert_eq!(
+        loader
+            .load_by_key(&sync_key, &IDENTITY, &Other::DIGEST, false, true)
+            .err(),
+        Some(Refusal::NoEntry)
+    );
+    assert_eq!((loader.installed(), loader.live_images()), (0, 0));
+
+    // `waits` mismatch refuses with NoEntry and publishes nothing.
+    assert_eq!(
+        loader
+            .load_by_key(&sync_key, &IDENTITY, &Leaf::DIGEST, true, true)
+            .err(),
+        Some(Refusal::NoEntry)
+    );
+    assert_eq!((loader.installed(), loader.live_images()), (0, 0));
+
+    // Absent identity refuses with NoEntry and publishes nothing.
+    let absent = ContentHash([0xcd; 32]);
+    assert_eq!(
+        loader
+            .load_by_key(&sync_key, &absent, &Leaf::DIGEST, false, true)
+            .err(),
+        Some(Refusal::NoEntry)
+    );
+    assert_eq!((loader.installed(), loader.live_images()), (0, 0));
+
+    // Matching (identity, signature, waits=false) publishes exactly one image.
+    let loaded_sync = loader
+        .load_by_key(&sync_key, &IDENTITY, &Leaf::DIGEST, false, true)
+        .unwrap();
+    assert_eq!((loader.installed(), loader.live_images()), (size(), 1));
+
+    // A second module whose entry has `waits = true` is refused for `waits = false`
+    // without publishing a second image.
+    let mut waits_img = image(202);
+    waits_img.entries[0].waits = true;
+    let waits_bytes = waits_img.encode();
+    let (waits_key, _) = loader.admit_module(&waits_bytes).unwrap();
+    assert_eq!(
+        loader
+            .load_by_key(&waits_key, &IDENTITY, &Leaf::DIGEST, false, true)
+            .err(),
+        Some(Refusal::NoEntry)
+    );
+    assert_eq!((loader.installed(), loader.live_images()), (size(), 1));
+
+    let loaded_waits = loader
+        .load_by_key(&waits_key, &IDENTITY, &Leaf::DIGEST, true, true)
+        .unwrap();
+    assert_eq!((loader.installed(), loader.live_images()), (2 * size(), 2));
+    drop(loaded_sync);
+    drop(loaded_waits);
+    loader.reclaim().unwrap();
+    assert_eq!((loader.installed(), loader.live_images()), (0, 0));
+}
+
+/// PACK-14 / PACK-6: `WrongPool` refusal, nested worker-row borrows pinned across
+/// concurrent slot swap and `worker.park()`, and `promote()` moving pin custody to a
+/// continuation before the worker releases its row.
+#[test]
+fn wrong_pool_and_worker_borrow_pinning_across_nested_calls_swap_park_and_promotion() {
+    if !host::slab() {
+        return;
+    }
+    let loader_a = loader_for_law(config()).unwrap();
+    let loader_b = loader_for_law(config()).unwrap();
+    let b_bytes = image(55).encode();
+    let b_code = load(&loader_b, &b_bytes).unwrap();
+    let slot_a = loader_a.slot::<Leaf>();
+    assert_eq!(slot_a.activate(0, b_code), Err(Stop::WrongPool));
+    assert_eq!(slot_a.version(), 0);
+
+    let v1_bytes = image(10).encode();
+    let v2_bytes = image(20).encode();
+    let (k1, _) = loader_a.admit_module(&v1_bytes).unwrap();
+    let (k2, _) = loader_a.admit_module(&v2_bytes).unwrap();
+    let v1 = loader_a
+        .load_by_key(&k1, &IDENTITY, &Leaf::DIGEST, false, true)
+        .unwrap();
+    let v2 = loader_a
+        .load_by_key(&k2, &IDENTITY, &Leaf::DIGEST, false, true)
+        .unwrap();
+    let raw_slot = loader_a.raw_slot();
+    assert_eq!(raw_slot.activate(0, &v1), Ok(1));
+
+    let mut worker = loader_a.worker();
+    let (entry1, mut tok_outer) = worker.begin_dispatch(&raw_slot).expect("v1 entry");
+    assert_eq!(worker.active_borrows(), 1);
+    // Nested call hits the same worker row with zero shared-line writes.
+    let (entry1_nested, tok_inner) = worker.begin_dispatch(&raw_slot).expect("v1 hit");
+    assert_eq!(entry1_nested, entry1);
+    assert_eq!(worker.active_borrows(), 2);
+
+    // Swap the slot to v2 and drop the caller's v1 handle while both borrows are active.
+    assert_eq!(raw_slot.activate(1, &v2), Ok(2));
+    drop(v1);
+    worker.park();
+    loader_a.reclaim().unwrap();
+    // Both borrows keep v1 pinned even after swap + park + reclaim.
+    assert_eq!(loader_a.retired(), size());
+    let f1: Leaf = unsafe { std::mem::transmute(entry1) };
+    assert_eq!(Loader::on_executor(|| unsafe { f1(1) }), 12);
+
+    // End inner borrow; outer borrow still pins v1.
+    worker.end_dispatch(tok_inner);
+    assert_eq!(worker.active_borrows(), 1);
+    worker.park();
+    loader_a.reclaim().unwrap();
+    assert_eq!(loader_a.retired(), size());
+
+    // Promote outer borrow to an owning continuation pin (simulating suspension / worker
+    // migration): worker drops its row immediately, while `pin` keeps v1 alive.
+    let pin = worker.promote(&mut tok_outer);
+    assert_eq!(worker.active_borrows(), 0);
+    worker.park();
+    loader_a.reclaim().unwrap();
+    assert_eq!(loader_a.retired(), size());
+    assert_eq!(Loader::on_executor(|| unsafe { f1(2) }), 14);
+
+    // Ending a promoted token is a no-op; dropping `pin` releases the last owner of v1.
+    worker.end_dispatch(tok_outer);
+    drop(pin);
+    loader_a.reclaim().unwrap();
+    assert_eq!(loader_a.retired(), 0);
+    drop(v2);
+    drop(raw_slot);
+    worker.park();
+    loader_a.reclaim().unwrap();
+    assert_eq!(loader_a.installed(), 0);
+}

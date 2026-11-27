@@ -53,6 +53,7 @@ pub(crate) struct NativeSink {
     blocks: HashMap<Label, Raw>,
     name: String,
     release_debug: Option<ReleaseDebug>,
+    pub(crate) no_jump_tables: bool,
 }
 impl Drop for NativeSink {
     fn drop(&mut self) {
@@ -77,6 +78,7 @@ impl NativeSink {
             blocks: HashMap::new(),
             name: String::new(),
             release_debug: None,
+            no_jump_tables: false,
         }
     }
 
@@ -402,6 +404,9 @@ impl NativeSink {
         }
         if attrs.map_probe {
             string(f, "hirsel-map-probe", "");
+        }
+        if self.no_jump_tables || attrs.no_jump_tables {
+            string(f, "no-jump-tables", "true");
         }
         if let Some(level) = attrs.level {
             string(f, "target-features", &level.llvm_features());

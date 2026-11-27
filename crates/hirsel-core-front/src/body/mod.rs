@@ -62,6 +62,8 @@ mod constants;
 mod control;
 mod depth_steps;
 mod exits;
+mod pack_export;
+mod pack_export_ops;
 mod pack_witness;
 use exits::{Frame, FrameKind};
 pub(crate) mod core_ops;
@@ -505,6 +507,7 @@ impl Emitter {
             body: None,
             versioned: false,
             cold: false,
+            pack_export: false,
         });
         self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);
@@ -531,6 +534,7 @@ impl Emitter {
             body: None,
             versioned,
             cold: false,
+            pack_export: false,
         });
         self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);

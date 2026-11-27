@@ -522,6 +522,8 @@ pub(super) struct FnAttrs {
     pub nounwind: bool,
     pub argmem_read: bool,
     pub map_probe: bool,
+    /// Disable PIC jump tables in `.rodata` (PACK-2 modules forbid `.rodata -> .text` PC32).
+    pub no_jump_tables: bool,
     /// `"hirsel-carriers"`: the LLVM parameters that point to a lent sequence
     /// header, and whether the callee may change it (the bridge passes them as
     /// words on direct calls).
@@ -539,6 +541,7 @@ impl Default for FnAttrs {
             nounwind: false,
             argmem_read: false,
             map_probe: false,
+            no_jump_tables: false,
             carriers: String::new(),
             subprogram: None,
             level: None,

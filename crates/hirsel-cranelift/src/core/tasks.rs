@@ -3,6 +3,7 @@ mod argon2;
 mod glue;
 mod host;
 mod map_placement;
+mod pack_code;
 mod signature;
 
 use super::{abi::op_signature, function::Function, *};
@@ -972,6 +973,15 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
+            RtOp::CodeBind
+            | RtOp::CodeLoad
+            | RtOp::CodeShare
+            | RtOp::CodeSlotNew
+            | RtOp::CodeActivate
+            | RtOp::CodeDispatchBegin
+            | RtOp::CodeDispatchEnd
+            | RtOp::CodeIdentity
+            | RtOp::CodeRevision => self.pack_code_op(op, &args, &mut outputs)?,
         };
         for (&id, &value) in call
             .results

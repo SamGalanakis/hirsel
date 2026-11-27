@@ -402,7 +402,7 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: Loans)
             Inst::Address { .. } | Inst::Pointer { .. } => {}
             Inst::Call { call } => {
                 let site = &b.calls[call.index()];
-                if let Callee::Indirect(x) = site.callee {
+                if let Callee::Indirect(x) | Callee::PackExport(x) = site.callee {
                     mark(x.index());
                 }
                 let sig = signatures.get(site.signature.index());

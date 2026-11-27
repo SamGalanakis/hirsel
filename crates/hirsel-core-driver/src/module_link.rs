@@ -21,10 +21,13 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "module_link/tests.rs"]
 mod tests;
 
-/// An entry the image exports: its function's symbol, the digest of its lowered
-/// signature, and whether it waits.
+/// An entry the image exports: optional explicit entry identity (else derived from
+/// `symbol`), its exported function symbol, optional PROG-9 descriptor symbol, the
+/// PACK-14 `hirsel.pack-export.v1` signature digest, and whether it waits.
 pub(crate) struct Root<'a> {
+    pub identity: Option<ContentHash>,
     pub symbol: &'a str,
+    pub descriptor: Option<&'a str>,
     pub signature: ContentHash,
     pub waits: bool,
 }
@@ -71,7 +74,7 @@ fn elf_type(flags: RelocationFlags) -> Result<u32, String> {
 }
 
 /// How a relocation type uses its target.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Use {
     /// A call or branch to code in the image.
     Branch,
@@ -301,7 +304,10 @@ pub(crate) fn link(
             return refuse(format_args!("entry {} is not code", root.symbol));
         };
         pending.push(part);
-        let descriptor = format!("{}$static", root.symbol);
+        let descriptor = root
+            .descriptor
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}$static", root.symbol));
         if let Some(&(object, symbol)) = link.globals.get(descriptor.as_bytes())
             && let Target::Place(part, _) = link.resolve(object, symbol, 0)?
         {
@@ -310,6 +316,7 @@ pub(crate) fn link(
         entries.push((root, (object, symbol)));
     }
     let mut uses = Vec::new();
+    let mut row_stubs: BTreeMap<u32, u64> = BTreeMap::new();
     while let Some(part) = pending.pop() {
         if link.bands.contains_key(&part) {
             continue;
@@ -341,6 +348,10 @@ pub(crate) fn link(
             match (kind, band, target) {
                 (Use::Word, Band::Data, Target::Place(..) | Target::Absolute(_)) => {}
                 (Use::Branch, Band::Text, Target::Place(..)) => {}
+                (Use::Branch, Band::Text, Target::Row(row)) => {
+                    link.rows.insert(row, 0);
+                    row_stubs.insert(row, 0);
+                }
                 (Use::Pointer | Use::PointerLow, Band::Text, Target::Row(row)) => {
                     link.rows.insert(row, 0);
                 }
@@ -351,7 +362,7 @@ pub(crate) fn link(
                 }
                 _ => {
                     return refuse(format_args!(
-                        "relocation type {} at {site:#x} of {}",
+                        "relocation type {} ({kind:?} in {band:?} -> {target:?}) at {site:#x} of {}",
                         elf_type(relocation.flags())?,
                         section.name().unwrap_or("?")
                     ));
@@ -415,6 +426,44 @@ pub(crate) fn link(
 
     let mut text_fixups = Vec::new();
     let mut data_fixups = Vec::new();
+    // Emit one indirect-jump stub in `.text` for each runtime row called through a
+    // direct PLT/PC-relative branch (e.g. LLVM PIC calls / synthesized libcalls).
+    for (&row, stub_offset) in &mut row_stubs {
+        let start = text.len().next_multiple_of(16);
+        trap(arch, &mut text, start);
+        *stub_offset = start as u64;
+        let slot_off = 8 * i64::from(link.rows[&row]);
+        match arch {
+            Arch::X86_64 => {
+                // `jmp qword ptr [rip + slot]`
+                text.extend_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
+                text_fixups.push(Fixup {
+                    site: offset32(start as u64 + 2, "text")?,
+                    kind: Kind::Rel32Data,
+                    bias: 4,
+                    addend: slot_off,
+                });
+            }
+            Arch::Aarch64 => {
+                // `adrp x16, slot; ldr x16, [x16, lo12(slot)]; br x16`
+                for word in [0x9000_0010u32, 0xf940_0210, 0xd61f_0200] {
+                    text.extend_from_slice(&word.to_le_bytes());
+                }
+                text_fixups.push(Fixup {
+                    site: offset32(start as u64, "text")?,
+                    kind: Kind::PageData,
+                    bias: 0,
+                    addend: slot_off,
+                });
+                text_fixups.push(Fixup {
+                    site: offset32(start as u64 + 4, "text")?,
+                    kind: Kind::Low12LoadData,
+                    bias: 0,
+                    addend: slot_off,
+                });
+            }
+        }
+    }
     for (target, slot) in &link.pointers {
         let site = offset32(slots + 8 * u64::from(*slot), "data")?;
         match *target {
@@ -465,19 +514,37 @@ pub(crate) fn link(
                 }
             },
             Use::Branch => {
-                let (to, offset) = link.place(target)?;
-                if to != Band::Text {
-                    return refuse("a branch into data");
-                }
-                let distance = offset as i64 + addend - at as i64;
-                match arch {
-                    Arch::X86_64 => {
+                let (to, offset) = match target {
+                    Target::Row(row) => (Band::Text, row_stubs[&row]),
+                    other => link.place(other)?,
+                };
+                match (to, arch) {
+                    (Band::Data, Arch::X86_64) => {
+                        // x86-64 PIC `R_X86_64_PC32` addressing local data (`[rip + disp32]`).
+                        // `S + A - P = (D + offset + addend + bias) - (T + at + bias)`.
+                        let bias = if offset as i64 + addend + 4 >= 0 {
+                            4u8
+                        } else {
+                            (-(offset as i64 + addend)).clamp(4, 8) as u8
+                        };
+                        text_fixups.push(Fixup {
+                            site: offset32(at, "text")?,
+                            kind: Kind::Rel32Data,
+                            bias,
+                            addend: offset as i64 + addend + i64::from(bias),
+                        });
+                        continue;
+                    }
+                    (Band::Data, Arch::Aarch64) => return refuse("a branch into data"),
+                    (Band::Text, Arch::X86_64) => {
+                        let distance = offset as i64 + addend - at as i64;
                         let Ok(value) = i32::try_from(distance) else {
                             return refuse("a branch farther than 2 GiB");
                         };
                         text[field..field + 4].copy_from_slice(&value.to_le_bytes());
                     }
-                    Arch::Aarch64 => {
+                    (Band::Text, Arch::Aarch64) => {
+                        let distance = offset as i64 + addend - at as i64;
                         if distance % 4 != 0 || !(-(1 << 27)..1 << 27).contains(&distance) {
                             return refuse("a branch farther than 128 MiB");
                         }
@@ -568,14 +635,17 @@ pub(crate) fn link(
         }
     }
     for (root, (object, symbol)) in entries {
-        let Some(identity) = identity(root.symbol) else {
+        let Some(identity) = root.identity.or_else(|| identity(root.symbol)) else {
             return refuse(format_args!("entry {} has no code identity", root.symbol));
         };
         let (band, offset) = link.place(link.resolve(object, symbol, 0)?)?;
         if band != Band::Text {
             return refuse(format_args!("entry {} is not code", root.symbol));
         }
-        let descriptor = format!("{}$static", root.symbol);
+        let descriptor = root
+            .descriptor
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}$static", root.symbol));
         let descriptor = match link.globals.get(descriptor.as_bytes()) {
             Some(&(object, symbol)) => link.place(link.resolve(object, symbol, 0)?)?.1 as u32,
             None => NO_DESCRIPTOR,

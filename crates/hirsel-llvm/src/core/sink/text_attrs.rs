@@ -49,6 +49,9 @@ pub(super) fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     if attrs.map_probe {
         out.push_str(" \"hirsel-map-probe\"");
     }
+    if attrs.no_jump_tables {
+        out.push_str(" \"no-jump-tables\"=\"true\"");
+    }
     if !attrs.carriers.is_empty() {
         write!(out, " \"hirsel-carriers\"=\"{}\"", attrs.carriers).unwrap();
     }

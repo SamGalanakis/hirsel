@@ -227,7 +227,7 @@ pub(super) fn promote(
         }
     }
     for call in &body.calls {
-        if let Callee::Indirect(v) = call.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = call.callee {
             escape_value(v)
         }
         for &arg in call.args.get(&body.pools.args).unwrap() {

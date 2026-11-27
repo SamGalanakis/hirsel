@@ -102,5 +102,14 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::StepLeave => "rt.step_leave".into(),
         RtOp::StepCatch => "rt.step_catch".into(),
         RtOp::WorkSteps => "rt.work_steps".into(),
+        RtOp::CodeBind => "rt.code_bind".into(),
+        RtOp::CodeLoad => "rt.code_load".into(),
+        RtOp::CodeShare => "rt.code_share".into(),
+        RtOp::CodeSlotNew => "rt.code_slot_new".into(),
+        RtOp::CodeActivate => "rt.code_activate".into(),
+        RtOp::CodeDispatchBegin => "rt.code_dispatch_begin".into(),
+        RtOp::CodeDispatchEnd => "rt.code_dispatch_end".into(),
+        RtOp::CodeIdentity => "rt.code_identity".into(),
+        RtOp::CodeRevision => "rt.code_revision".into(),
     }
 }

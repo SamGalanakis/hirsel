@@ -65,6 +65,8 @@ tags!(Handle {
     11 => Inbox,
     12 => Secret,
     13 => Media,
+    14 => Code,
+    15 => CodeSlot,
 });
 
 tags!(Repr {
@@ -420,6 +422,15 @@ tags!(RtOp {
     87 => GluePush,
     88 => GluePop,
     89 => GlueCut,
+    90 => CodeBind,
+    91 => CodeLoad,
+    92 => CodeShare,
+    93 => CodeSlotNew,
+    94 => CodeActivate,
+    95 => CodeDispatchBegin,
+    96 => CodeDispatchEnd,
+    97 => CodeIdentity,
+    98 => CodeRevision,
 });
 
 tags!(Wait {
@@ -606,6 +617,7 @@ tags!(Callee {
     0 => Direct(part0),
     1 => Indirect(part0),
     2 => Runtime(part0),
+    3 => PackExport(part0),
 });
 
 tags!(Arg {

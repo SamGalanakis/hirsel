@@ -131,7 +131,7 @@ impl Remap {
                     }
                     _ => {}
                 },
-                Callee::Indirect(_) => {}
+                Callee::Indirect(_) | Callee::PackExport(_) => {}
             }
         }
     }
@@ -219,6 +219,7 @@ pub fn join_units(
                 out.functions.push(Function {
                     versioned: function.versioned,
                     cold: function.cold,
+                    pack_export: function.pack_export,
                     instance: instance_ids[function.instance.index()],
                     signature: map.signatures[function.signature.index()],
                     body: None,

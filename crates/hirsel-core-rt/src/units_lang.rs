@@ -1059,6 +1059,18 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             .map_or_else(crate::host_file::Registry::default, |files| {
                 files.registry.for_unit()
             });
+        // PACK-14: a Unit owns its loaded code generation from spawn through end
+        // publication. Pin the bridge and the entry's code word if in the slab.
+        let mut unit_pins = Vec::new();
+        if let Some(pin) = crate::code::pin_pc(body as usize) {
+            unit_pins.push(pin);
+        }
+        if x.bytes >= 8 {
+            let code_word = input.cast::<usize>().read_unaligned();
+            if let Some(pin) = crate::code::pin_pc(code_word) {
+                unit_pins.push(pin);
+            }
+        }
         let job = SendPtr((
             hctx,
             data,
@@ -1077,6 +1089,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             steps,
             shared,
             tape,
+            unit_pins,
         ));
         let start = move || {
             let job = job;
@@ -1098,11 +1111,13 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 steps,
                 shared,
                 tape,
+                unit_pins,
             ) = job.0;
             helper_main(
                 hctx, data, sockets, xb, xo, rb, ro, run, foreign, map_keys, registry, body,
                 layout, n, steps, shared, tape,
             );
+            drop(unit_pins);
         };
         // On the pool the helper is a unit beside its owner; without one it
         // has a thread of its own.

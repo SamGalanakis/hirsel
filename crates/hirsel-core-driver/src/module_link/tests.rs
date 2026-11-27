@@ -83,7 +83,9 @@ fn x86() -> Object<'static> {
 
 fn root() -> [Root<'static>; 1] {
     [Root {
+        identity: None,
         symbol: ENTRY,
+        descriptor: None,
         signature: ContentHash([9; 32]),
         waits: false,
     }]

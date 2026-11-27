@@ -84,7 +84,8 @@ pub fn rows_digest() -> ContentHash {
 
 /// The runtime ABI revision: the layouts and calling rules loaded code shares with the
 /// runtime. A change to either adds one.
-pub const ABI: u32 = 3;
+/// Revision 4 introduces PACK-14/15 typed export adapters (distinct from program-root ABI).
+pub const ABI: u32 = 4;
 
 /// The runtime ABI digest of this build: [`ABI`] and the row table.
 pub fn abi() -> ContentHash {

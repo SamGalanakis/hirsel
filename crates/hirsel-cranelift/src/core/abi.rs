@@ -17,6 +17,7 @@ pub struct Signature {
     pub param_records: Vec<Option<ScalarRecord>>,
     pub record: Option<ScalarRecord>,
     pub dest: bool,
+    pub pack_export: bool,
 }
 impl Signature {
     pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts, abi: CAbi) -> Self {
@@ -26,6 +27,43 @@ impl Signature {
     /// Scalars, pointers and a destination follow the same ABI as unit code.
     pub fn foreign(s: &c::Signature, object: &ObjectModule, abi: CAbi) -> Self {
         Self::build(s, None, object, true, abi)
+    }
+    /// PACK-15 typed export ABI: `(ctx, result_place, lowered_args...) -> u8`,
+    /// using target C scalar extensions, with no scalar-record rewrites,
+    /// no struct-return pointer, and no trailing caller site.
+    pub fn pack_export(s: &c::Signature, object: &ObjectModule, abi: CAbi) -> Self {
+        debug_assert!(
+            s.results.is_empty(),
+            "PACK-15 export signatures carry non-ZST results through dest"
+        );
+        let mut clif = ir::Signature::new(object.isa().default_call_conv());
+        clif.params.push(AbiParam::new(types::I64));
+        clif.params.push(AbiParam::new(types::I64));
+        for &p in &s.params {
+            match p {
+                Param::Value(t) => {
+                    clif.params.push(c_param(abi, t));
+                    if simd::two_halves(t) {
+                        clif.params.push(c_param(abi, t));
+                    }
+                }
+                Param::Address { .. } => clif.params.push(AbiParam::new(types::I64)),
+            }
+        }
+        clif.returns.push(c_param(abi, Ty::Scalar(Scalar::U8)));
+        Self {
+            clif,
+            offsets: vec![0],
+            results: vec![Ty::Scalar(Scalar::U8)],
+            size: 1,
+            indirect: false,
+            aggregate: false,
+            homogeneous: false,
+            param_records: vec![None; s.params.len()],
+            record: None,
+            dest: s.dest.is_some(),
+            pack_export: true,
+        }
     }
     pub fn c(object: &ObjectModule, abi: CAbi, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -168,6 +206,7 @@ impl Signature {
             param_records,
             record,
             dest,
+            pack_export: false,
         }
     }
     pub fn unpack(

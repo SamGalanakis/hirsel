@@ -1602,6 +1602,7 @@ impl Publication {
         .with_manifest(manifest);
         let result = link_objects(
             &plan,
+            &[],
             &objects,
             &self.link_archives,
             None,

@@ -998,6 +998,24 @@ pub enum RtOp {
     /// index. It does nothing at run time. A constant's initialiser that
     /// reaches it stops there, and the constant is refused.
     Closed(u8),
+    /// `code.bind(f)`: bind a PROG-9 descriptor to a `Code[F]` handle (PACK-14).
+    CodeBind,
+    /// `code.load[F](loader, key, entry_id)`: validate and load a typed entry (PACK-14).
+    CodeLoad,
+    /// `code.share(c)`: retain one more counted `Code[F]` handle (PACK-14).
+    CodeShare,
+    /// `code.slot[F](loader)`: create an empty version-0 `CodeSlot[F]` (PACK-14).
+    CodeSlotNew,
+    /// `code.activate(mut s, expected, c)`: linearised slot swap (PACK-14).
+    CodeActivate,
+    /// `code.dispatch` entry: borrow worker-cached generation, or null if empty (PACK-14).
+    CodeDispatchBegin,
+    /// `code.dispatch` exit: release worker borrow or promoted continuation pin (PACK-14).
+    CodeDispatchEnd,
+    /// `code.identity(c)`: PROG-9 identity bytes view anchored in `c` (PACK-14).
+    CodeIdentity,
+    /// `code.revision(c)`: optional PROG-9 revision bytes view anchored in `c` (PACK-14).
+    CodeRevision,
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -1022,6 +1040,8 @@ pub enum Callee {
     Direct(FuncId),
     /// A code pointer value, called with the call site's signature.
     Indirect(ValueId),
+    /// A PACK-15 typed export adapter pointer, called with `(ctx, result_place, args...) -> u8`.
+    PackExport(ValueId),
     /// An engine operation.
     Runtime(RtOp),
 }
@@ -1323,6 +1343,9 @@ pub struct Function {
     /// LANG-8 `cold fn`: kept out of line; calls to it are cold sites. A hint only.
     #[serde(default)]
     pub cold: bool,
+    /// PACK-15 typed export adapter: C-ABI `(ctx, result_place, lowered_args...) -> u8`.
+    #[serde(default)]
+    pub pack_export: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

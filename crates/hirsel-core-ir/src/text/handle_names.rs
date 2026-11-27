@@ -14,4 +14,6 @@ pub(super) const HANDLE_NAMES: &[(&str, Handle)] = &[
     ("flow", Handle::Flow),
     ("secret", Handle::Secret),
     ("media", Handle::Media),
+    ("code", Handle::Code),
+    ("codeslot", Handle::CodeSlot),
 ];

@@ -419,6 +419,36 @@ impl Machine<'_> {
                 self.event(TRY_RECEIVE, self.chan_id(i), status);
                 vec![status]
             }
+            RtOp::CodeBind => vec![a[0] | 1],
+            RtOp::CodeShare => vec![a[0]],
+            RtOp::CodeIdentity => {
+                let d = a[0] & !1;
+                let len = if d == 0 { 0 } else { self.load(d + 8, 8) };
+                let data = if len == 0 { 0 } else { d + 24 };
+                self.store(a[1], 8, data);
+                self.store(a[1] + 8, 8, len);
+                self.store(a[1] + 16, 8, 0);
+                vec![]
+            }
+            RtOp::CodeRevision => {
+                let d = a[0] & !1;
+                let rev = if d == 0 { 0 } else { self.load(d + 16, 8) };
+                let len = if rev == 0 { 0 } else { self.load(rev + 8, 8) };
+                if len == 0 {
+                    vec![0]
+                } else {
+                    let data = self.load(rev, 8);
+                    self.store(a[1], 8, data);
+                    self.store(a[1] + 8, 8, len);
+                    self.store(a[1] + 16, 8, 0);
+                    vec![1]
+                }
+            }
+            RtOp::CodeLoad => vec![11],
+            RtOp::CodeSlotNew => vec![0],
+            RtOp::CodeActivate => vec![3],
+            RtOp::CodeDispatchBegin => vec![0],
+            RtOp::CodeDispatchEnd => vec![],
             _ => unreachable!("{op:?} is a core engine operation"),
         })
     }
@@ -564,6 +594,7 @@ impl Machine<'_> {
                 t.shield -= 1;
                 failed
             }
+            Handle::Code | Handle::CodeSlot => false,
             _ => unreachable!("{h:?} is a core handle"),
         }
     }

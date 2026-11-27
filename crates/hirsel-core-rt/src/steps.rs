@@ -421,6 +421,8 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
         };
         if obligation.is_none() {
             let mut cell = chain.take_first().expect("a caught chain's primary cell");
+            // SAFETY: cell is exclusively owned and being recycled into an empty obligation.
+            unsafe { cell.release_owner() };
             cell.cause = causes::Cause::default();
             *obligation = Some(cell);
         }

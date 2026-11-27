@@ -131,9 +131,9 @@
     "lines": 1334
   },
   "crates/hirsel-core-driver/src/callable_variants.rs": {
-    "lines": 1077,
-    "raise_revision": 1,
-    "reason": "ds-cold-fn-2520"
+    "lines": 1066,
+    "raise_revision": 2,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
     "lines": 1127,
@@ -155,14 +155,14 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1475,
-    "raise_revision": 8,
-    "reason": "atomic-write-durability-2912"
+    "lines": 1461,
+    "raise_revision": 9,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2456,
-    "raise_revision": 14,
-    "reason": "http-server-https-2884"
+    "lines": 2385,
+    "raise_revision": 15,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1132,
@@ -173,9 +173,9 @@
     "lines": 1136
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 1800,
-    "raise_revision": 9,
-    "reason": "fixfwd-place-comptime-unbound-2845"
+    "lines": 1702,
+    "raise_revision": 10,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4044,
@@ -213,14 +213,14 @@
     "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
-    "lines": 1569,
-    "raise_revision": 3,
-    "reason": "macos-s5-macho-2582"
+    "lines": 1096,
+    "raise_revision": 4,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 5777,
-    "raise_revision": 14,
-    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
+    "lines": 5692,
+    "raise_revision": 15,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2596,
@@ -234,14 +234,14 @@
     "lines": 1168
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 3240,
-    "raise_revision": 11,
-    "reason": "cli-s4-secret-2713"
+    "lines": 3216,
+    "raise_revision": 12,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2874,
-    "raise_revision": 5,
-    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
+    "lines": 2875,
+    "raise_revision": 6,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2295,
@@ -252,9 +252,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3061,
-    "raise_revision": 9,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "lines": 3053,
+    "raise_revision": 10,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2530,
@@ -267,9 +267,9 @@
     "reason": "dod-columns-soa-2533"
   },
   "crates/hirsel-core-front/src/body/templates.rs": {
-    "lines": 1349,
-    "raise_revision": 4,
-    "reason": "dod-columns-soa-2533"
+    "lines": 1300,
+    "raise_revision": 5,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
     "lines": 1170,
@@ -282,9 +282,9 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3684,
-    "raise_revision": 5,
-    "reason": "dod-columns-soa-2533"
+    "lines": 3528,
+    "raise_revision": 6,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-front/src/layout.rs": {
     "lines": 1011,
@@ -303,9 +303,9 @@
     "lines": 1167
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1533,
-    "raise_revision": 18,
-    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
+    "lines": 1556,
+    "raise_revision": 19,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1157,
@@ -313,24 +313,24 @@
     "reason": "packing-p2-hot-abi-3281"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
-    "lines": 1171,
-    "raise_revision": 6,
-    "reason": "fixfwd-place-comptime-unbound-2845"
+    "lines": 1162,
+    "raise_revision": 7,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2451,
-    "raise_revision": 4,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "lines": 2455,
+    "raise_revision": 5,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2333,
-    "raise_revision": 14,
-    "reason": "fail17-stack-build-3208: constant-stack Equal/Order/Fold glue walk on the glue worklist (FAIL-17)"
+    "lines": 2351,
+    "raise_revision": 15,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
-    "lines": 1845,
-    "raise_revision": 3,
-    "reason": "coverage-gen-anchors-2579"
+    "lines": 1842,
+    "raise_revision": 4,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-layout/src/recipe.rs": {
     "lines": 1965,
@@ -423,9 +423,9 @@
     "lines": 2478
   },
   "crates/hirsel-core-rt/src/tasks.rs": {
-    "lines": 4378,
-    "raise_revision": 2,
-    "reason": "fail17-stack-build-3208: FAIL-17 Stack cause, entry stack check and root stack teardown"
+    "lines": 4380,
+    "raise_revision": 3,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-rt/src/tasks_tests.rs": {
     "lines": 1088
@@ -447,9 +447,9 @@
     "reason": "packing-p2-hot-abi-3281"
   },
   "crates/hirsel-core-rt/src/units_lang.rs": {
-    "lines": 1369,
-    "raise_revision": 4,
-    "reason": "run-budget-grant-accounting-3203: TURN frames and helper residuals"
+    "lines": 1384,
+    "raise_revision": 5,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
     "lines": 1655,
@@ -470,9 +470,9 @@
     "lines": 1094
   },
   "crates/hirsel-cranelift/src/core/drop.rs": {
-    "lines": 1128,
-    "raise_revision": 1,
-    "reason": "dod-columns-soa-2533"
+    "lines": 1110,
+    "raise_revision": 2,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-cranelift/tests/core_native.rs": {
     "lines": 1602
@@ -486,19 +486,19 @@
     "lines": 1897
   },
   "crates/hirsel-llvm/src/core/cleanup.rs": {
-    "lines": 1578,
-    "raise_revision": 4,
-    "reason": "packing-p2-hot-abi-3281"
+    "lines": 1585,
+    "raise_revision": 5,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2532,
-    "raise_revision": 7,
-    "reason": "packing-p2-hot-abi-3281"
+    "lines": 2520,
+    "raise_revision": 8,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
-    "lines": 1145,
-    "raise_revision": 3,
-    "reason": "release-foreign-decl-attrs-2999"
+    "lines": 1148,
+    "raise_revision": 4,
+    "reason": "packing-p2b-s3-typed-export-loader-3340"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
     "lines": 1048,

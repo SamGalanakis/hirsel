@@ -408,7 +408,7 @@ pub(super) fn neutral_inst(module: &Module, body: &Body, inst: &Inst, neutral: &
         Inst::Call { call } => match body.calls[call.index()].callee {
             Callee::Direct(f) => neutral[f.index()],
             Callee::Runtime(op) => neutral_runtime(op),
-            Callee::Indirect(_) => false,
+            Callee::Indirect(_) | Callee::PackExport(_) => false,
         },
         _ => true,
     }

@@ -113,7 +113,7 @@ pub fn self_contained_over(module: &Module, external: &BTreeMap<ContentHash, Sum
                     }
                     Inst::Call { call } => match body.calls[call.index()].callee {
                         Callee::Direct(function) => defined(function),
-                        Callee::Indirect(_) | Callee::Runtime(_) => true,
+                        Callee::Indirect(_) | Callee::PackExport(_) | Callee::Runtime(_) => true,
                     },
                     _ => true,
                 })
@@ -197,6 +197,11 @@ fn contexts(
     for f in module.types.iter().filter_map(|shape| shape.finalizer) {
         named[f.0 as usize] += 1;
     }
+    for (i, func) in module.functions.iter().enumerate() {
+        if func.pack_export {
+            named[i] += 1;
+        }
+    }
     let spawns = crate::returnable::spawns(module);
     let mut spawned: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for spawn in &spawns {
@@ -277,7 +282,7 @@ fn contexts(
                         new_bits |= s.calls_values;
                     }
                 }
-                Callee::Indirect(_) => match spawned.get(&f) {
+                Callee::Indirect(_) | Callee::PackExport(_) => match spawned.get(&f) {
                     Some(callees) => pending.extend(callees.iter().map(|&g| (g, context))),
                     None if context == CHECKED => {
                         let key = convention_of(site.signature);
@@ -552,6 +557,7 @@ fn split(
             body: None,
             versioned: canonical.versioned,
             cold: canonical.cold,
+            pack_export: canonical.pack_export,
         };
         let identity = module.code_identity(FuncId(f as u32));
         module.functions.push(function);

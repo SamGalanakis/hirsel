@@ -675,6 +675,16 @@ impl FunctionEmitter<'_> {
                 None
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Capability) => None,
+            FieldTy::Handle(hirsel_core_layout::Handle::Code) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_code_drop", &[ptr(handle)]);
+                None
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::CodeSlot) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_code_slot_drop", &[ptr(handle)]);
+                None
+            }
             other => return Err(Error::Unsupported(format!("drop field {other:?}"))),
         };
         if let Some(failed) = failed {

@@ -609,7 +609,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(output)
     }
 
-    fn runtime_handle(&mut self, value: ValueId, n: NodeId) -> ValueId {
+    pub(super) fn runtime_handle(&mut self, value: ValueId, n: NodeId) -> ValueId {
         let field = self.address(AddressBase::Value(value), &[], PlaceTy::Value(Ty::Ptr), n);
         self.read_bits(field, Ty::Ptr, n)
     }
@@ -653,7 +653,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some((id, place))
     }
 
-    fn runtime_field(
+    pub(super) fn runtime_field(
         &mut self,
         to: AddressId,
         steps: &[Step],
@@ -682,7 +682,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    fn runtime_store(&mut self, to: AddressId, steps: &[Step], ty: Ty, value: ValueId, n: NodeId) {
+    pub(super) fn runtime_store(
+        &mut self,
+        to: AddressId,
+        steps: &[Step],
+        ty: Ty,
+        value: ValueId,
+        n: NodeId,
+    ) {
         let address = self.address(AddressBase::Address(to), steps, PlaceTy::Value(ty), n);
         self.inst(Inst::Store { address, value }, n);
     }
@@ -697,7 +704,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    fn runtime_carrier(&mut self, ty: TyId, handle: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn runtime_carrier(
+        &mut self,
+        ty: TyId,
+        handle: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let id = self.runtime_type(ty, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.runtime_store(to, &[Step::Field(0)], Ty::Ptr, handle, n);
@@ -706,7 +718,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    fn runtime_compare(&mut self, ty: Ty, value: ValueId, bits: u64, n: NodeId) -> Option<ValueId> {
+    pub(super) fn runtime_compare(
+        &mut self,
+        ty: Ty,
+        value: ValueId,
+        bits: u64,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let right = self.konst(ty, bits, n)?;
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(

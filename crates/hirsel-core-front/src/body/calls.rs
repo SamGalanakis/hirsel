@@ -797,7 +797,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !(g.path.is_core("list.prefetch") || g.path.is_core("inline.prefetch")) {
             self.source_step(n);
         }
-        if !undetermined && let Some(pack) = self.pack_named_call(f, tys, args, result, n) {
+        if !undetermined && let Some(pack) = self.pack_named_call(f, tys, args, vals, result, n) {
             return pack;
         }
         let v = if f != source_function && reflect && !undetermined {

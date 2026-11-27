@@ -159,6 +159,7 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
                     transfer: None,
                     holder: std::mem::MaybeUninit::uninit(),
                     cursor: 0,
+                    code_pins: Vec::new(),
                 })
             })
             .collect();

@@ -220,7 +220,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::TryUnwrap { node, .. } => read(node),
                 Inst::Call { call } => {
                     let call = &body.calls[call.index()];
-                    if let Callee::Indirect(value) = call.callee {
+                    if let Callee::Indirect(value) | Callee::PackExport(value) = call.callee {
                         read(value);
                     }
                     for arg in call.args.get(&body.pools.args).unwrap() {

@@ -248,7 +248,7 @@ pub(super) fn scalar_views(module: &Module, body: &mut Body, aliases: &mut Vec<V
         }
     }
     for call in &body.calls {
-        if let Callee::Indirect(v) = call.callee {
+        if let Callee::Indirect(v) | Callee::PackExport(v) = call.callee {
             escape(v)
         }
         for &a in call.args.get(&body.pools.args).unwrap() {

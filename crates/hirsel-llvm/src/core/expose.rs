@@ -334,8 +334,10 @@ fn expand(
     }
     for c in &callee.calls {
         let mut c = c.clone();
-        if let Callee::Indirect(v) = c.callee {
-            c.callee = Callee::Indirect(rename.v(v));
+        match c.callee {
+            Callee::Indirect(v) => c.callee = Callee::Indirect(rename.v(v)),
+            Callee::PackExport(v) => c.callee = Callee::PackExport(rename.v(v)),
+            _ => {}
         }
         c.args = PoolRange::push(
             &mut body.pools.args,
@@ -508,7 +510,9 @@ fn isolated_step_bodies(module: &Module) -> Vec<bool> {
             for call in &body.calls {
                 match call.callee {
                     Callee::Direct(callee) => callers[callee.index()].push(i),
-                    Callee::Indirect(_) | Callee::Runtime(_) => isolated[i] = false,
+                    Callee::Indirect(_) | Callee::PackExport(_) | Callee::Runtime(_) => {
+                        isolated[i] = false
+                    }
                 }
             }
         }

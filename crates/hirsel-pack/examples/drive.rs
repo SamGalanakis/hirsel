@@ -16,13 +16,12 @@ use hirsel_mod::Mask;
 
 hirsel_guard::install!();
 
-/// `main(context, result, 0) -> failed`, as `--emit module` lowers a program's `main`
-/// that takes no provider.
+/// `main(context, result_place) -> failed` (PACK-15 typed export ABI).
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-struct Main(unsafe extern "C" fn(*mut Context, *mut u8, u64) -> u8);
+struct Main(unsafe extern "C" fn(*mut Context, *mut u8) -> u8);
 // SAFETY: the driver's module is checked to have this signature digest, which is the
-// compiler's for `main() -> Result[(), Exit]`.
+// compiler's PACK-14 `hirsel.pack-export.v1` for `main() -> Result[(), Exit]`.
 unsafe impl Signature for Main {
     const DIGEST: ContentHash = ContentHash([
         90, 130, 168, 22, 134, 2, 110, 130, 136, 95, 75, 141, 3, 203, 123, 214, 37, 80, 251, 187,
@@ -39,7 +38,7 @@ unsafe extern "C" fn root(context: *mut Context, config: *const Config, _: *mut 
     // SAFETY: `state` is the `Main` the driver put there, live for the run.
     unsafe {
         let main = *(*config).state.cast::<Main>();
-        (main.0)(context, room.0.as_mut_ptr(), 0)
+        (main.0)(context, room.0.as_mut_ptr())
     }
 }
 

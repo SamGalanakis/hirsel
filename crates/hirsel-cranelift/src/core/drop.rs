@@ -949,6 +949,14 @@ impl Glue<'_, '_, '_> {
                 )?[0];
                 self.merge(status);
             }
+            FieldTy::Handle(hirsel_core_layout::Handle::Code) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_code_drop", &[U], &[], &[handle])?;
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::CodeSlot) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_code_slot_drop", &[U], &[], &[handle])?;
+            }
             FieldTy::OwnFn => {
                 let env = self.load(at, 8);
                 let yes = self.b.create_block();

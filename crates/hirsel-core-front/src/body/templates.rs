@@ -118,6 +118,7 @@ pub fn materialize(
             module.functions.push(Function {
                 versioned: false,
                 cold: false,
+                pack_export: false,
                 instance,
                 signature,
                 body: None,
@@ -317,6 +318,7 @@ fn import_hook(module: &mut Module, rows: &[TypeId], hook: &ClosureHook) -> Func
     module.functions.push(Function {
         versioned: false,
         cold: false,
+        pack_export: false,
         instance,
         signature,
         body: None,
@@ -370,6 +372,7 @@ pub(super) fn codec_maker_row(
     module.functions.push(Function {
         versioned: false,
         cold: false,
+        pack_export: false,
         instance,
         signature,
         body: None,
@@ -553,6 +556,7 @@ impl Substitution<'_> {
                 self.module.functions.push(Function {
                     versioned: false,
                     cold: false,
+                    pack_export: false,
                     instance,
                     signature,
                     body: None,
@@ -708,6 +712,7 @@ impl Substitution<'_> {
             self.module.functions.push(Function {
                 versioned: function.versioned,
                 cold: function.cold,
+                pack_export: function.pack_export,
                 instance,
                 signature: function.signature,
                 body: None,
@@ -769,6 +774,7 @@ impl Substitution<'_> {
         self.module.functions.push(Function {
             versioned: false,
             cold: false,
+            pack_export: false,
             instance,
             signature,
             body: None,

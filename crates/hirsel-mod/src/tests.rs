@@ -240,9 +240,25 @@ fn the_row_table_is_strictly_sorted_for_lookup() {
 fn abi_revision_is_bumped_and_sites_section_is_validated() {
     use hirsel_core_layout::source_positions;
 
-    assert_eq!(crate::ABI, 3);
+    assert_eq!(crate::ABI, 4);
     let owner_row = crate::row("hirsel_core_cause_owner").expect("cause owner row");
     assert_eq!(ROWS[owner_row as usize].1, crate::Class::Pure);
+    for code_sym in [
+        "hirsel_core_code_activate",
+        "hirsel_core_code_bind",
+        "hirsel_core_code_dispatch_begin",
+        "hirsel_core_code_dispatch_end",
+        "hirsel_core_code_drop",
+        "hirsel_core_code_identity",
+        "hirsel_core_code_load",
+        "hirsel_core_code_revision",
+        "hirsel_core_code_share",
+        "hirsel_core_code_slot_drop",
+        "hirsel_core_code_slot_new",
+    ] {
+        let idx = crate::row(code_sym).expect(code_sym);
+        assert_eq!(ROWS[idx as usize].1, crate::Class::Metered);
+    }
 
     // Valid section-8 sites table passes parsing.
     let encoded = source_positions::encode("line1\nline2\nfail");

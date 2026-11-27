@@ -19,7 +19,7 @@ impl Inst {
             }),
             Inst::Call { call } => b.calls.get(call.index()).is_none_or(|c| match c.callee {
                 Callee::Runtime(op) => op.fails(),
-                Callee::Direct(_) | Callee::Indirect(_) => true,
+                Callee::Direct(_) | Callee::Indirect(_) | Callee::PackExport(_) => true,
             }),
             Inst::Step { .. } | Inst::StackCheck { .. } | Inst::Drop { .. } => true,
             _ => false,

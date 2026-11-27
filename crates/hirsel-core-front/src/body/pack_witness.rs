@@ -138,52 +138,8 @@ impl Emitter {
         t: &mut impl TyRead,
         callable: TyId,
     ) -> Option<ContentHash> {
-        let TyKind::Fn(parameters, result, _, Callable::Plain) = t.kind(callable).clone() else {
-            return None;
-        };
-        let spelling = closed_type_text(&p.decls, t, callable)?;
-        let mut parts = Vec::with_capacity(parameters.len() + 2);
-        let mut params = Vec::new();
-        for (mode, ty) in parameters {
-            parts.push(self.held_type_hash(p, t, ty)?);
-            let rep = self.rep(p, t, ty).ok()?;
-            match (mode, rep) {
-                (Mode::Mut, Rep::Place(row)) => params.push(Param::Address {
-                    place: scalar_abi::mut_place(&self.module.types, row),
-                    loan: Loan::Mut,
-                }),
-                (Mode::Mut, _) => params.push(Param::Address {
-                    place: self.mut_place(p, t, ty, rep)?,
-                    loan: Loan::Mut,
-                }),
-                (_, Rep::None) => {}
-                (_, Rep::Scalar(value)) => params.push(Param::Value(value)),
-                (_, Rep::Place(row)) => match self.module.types[row.index()].carried {
-                    Carried::Value(value) => params.push(Param::Value(value)),
-                    Carried::Nothing => {}
-                    Carried::Address => params.push(Param::Address {
-                        place: PlaceTy::Declared(row),
-                        loan: loan(mode),
-                    }),
-                },
-            }
-        }
-        parts.push(self.held_type_hash(p, t, result)?);
-        let dest = if self.rep(p, t, result).ok()? == Rep::None {
-            None
-        } else {
-            Some(self.type_row(p, t, result)?)
-        };
-        let mut adapter = Signature::new(params, vec![], dest);
-        adapter.never = result == NEVER;
-        parts.push(hirsel_core_ir::normal::abi_signature(
-            &self.module,
-            &adapter,
-        ));
-        Some(ContentHash::of_parts(
-            "hirsel.pack-export.v1",
-            std::iter::once(spelling.as_bytes()).chain(parts.iter().map(|h| h.0.as_slice())),
-        ))
+        self.pack_export_signature(p, t, callable)
+            .map(|(_, digest, _)| digest)
     }
 }
 
@@ -315,7 +271,7 @@ impl Cx<'_, '_, '_> {
         let ty = subst(&mut self.t, callable, &args);
         let result = subst(&mut self.t, self.p.fns[f].result, &[ty]);
         self.builtin_use(f, n);
-        (result, self.pack_witness_call(ty, true, result, n))
+        (result, self.lower_code_bind(item, &args, ty, result, n))
     }
 
     pub(super) fn pack_named_call(
@@ -323,6 +279,7 @@ impl Cx<'_, '_, '_> {
         f: usize,
         tys: &[TyId],
         args: &[NodeId],
+        vals: &[Option<ValueId>],
         result: TyId,
         n: NodeId,
     ) -> Option<(TyId, Option<ValueId>)> {
@@ -331,9 +288,21 @@ impl Cx<'_, '_, '_> {
             return None;
         }
         match g.path.0.name.as_str() {
-            "load" | "slot" | "activate" | "share" => {
+            "load" => {
                 self.builtin_use(f, n);
-                Some((result, self.pack_witness_call(tys[0], true, result, n)))
+                Some((result, self.lower_code_load(tys[0], vals, result, n)))
+            }
+            "slot" => {
+                self.builtin_use(f, n);
+                Some((result, self.lower_code_slot(tys[0], vals[0], result, n)))
+            }
+            "activate" => {
+                self.builtin_use(f, n);
+                Some((result, self.lower_code_activate(tys[0], vals, result, n)))
+            }
+            "share" => {
+                self.builtin_use(f, n);
+                Some((result, self.lower_code_share(tys[0], vals[0], result, n)))
             }
             "hold" | "take_as" | "hold_send" => {
                 if g.path.0.name == "take_as"
@@ -358,7 +327,7 @@ impl Cx<'_, '_, '_> {
     pub(super) fn pack_reflect_call(
         &mut self,
         source_function: usize,
-        f: usize,
+        _f: usize,
         tys: &[TyId],
         vals: &[Option<ValueId>],
         arg: NodeId,
@@ -370,7 +339,11 @@ impl Cx<'_, '_, '_> {
                 self.emit_call(source_function, &a, vals, result, n)
             }
             TyKind::Adt(id, _) if self.p.decls[id.index()].path.is_core("core.Code") => {
-                self.emit_call(f, tys, vals, result, n)
+                if self.p.fns[source_function].path.is_core("code.identity") {
+                    self.lower_code_identity(vals[0], result, n)
+                } else {
+                    self.lower_code_revision(vals[0], result, n)
+                }
             }
             TyKind::Error => None,
             _ => {
@@ -430,28 +403,14 @@ impl Cx<'_, '_, '_> {
 
     pub(super) fn finish_pack_call(
         &mut self,
+        callee_val: Option<ValueId>,
         entry: TyId,
         dispatch: bool,
         result: TyId,
         n: NodeId,
+        scratch: &mut super::calls::CallScratch,
     ) -> (TyId, Option<ValueId>) {
-        let result = if dispatch {
-            let Some(Def::Type(error)) = self.p.def(&DefPath::core("code.DispatchError")) else {
-                return self.gap_ty(n, "code dispatch error type is unavailable");
-            };
-            let error = self.t.mk(TyKind::Adt(error, vec![]));
-            self.t.mk(TyKind::Adt(
-                self.p.core_decl("Result").unwrap(),
-                vec![result, error],
-            ))
-        } else {
-            result
-        };
-        let value = self.pack_witness_call(entry, true, result, n);
-        if result == NEVER {
-            self.dead = true;
-        }
-        (result, value)
+        self.lower_pack_call(callee_val, entry, dispatch, result, n, scratch)
     }
 
     pub(super) fn pack_witness_call(

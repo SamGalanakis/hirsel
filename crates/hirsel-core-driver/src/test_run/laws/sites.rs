@@ -35,7 +35,7 @@ impl Sites {
                             &module.instances[module.functions[id.index()].instance.index()]
                                 .definition,
                         ),
-                        Callee::Indirect(_) => {
+                        Callee::Indirect(_) | Callee::PackExport(_) => {
                             indirect(module, &module.signatures[call.signature.index()])
                         }
                         Callee::Runtime(_) => None,

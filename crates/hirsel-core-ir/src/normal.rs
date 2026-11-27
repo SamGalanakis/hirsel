@@ -727,7 +727,9 @@ fn write_function<'m>(
     function.instance.write(&mut out);
     function.signature.write(&mut out);
     // Bit 0 marks a live versioned row, bit 1 a cold one (LANG-8).
-    (u8::from(out.module.live_functions[row] && function.versioned) | u8::from(function.cold) << 1)
+    (u8::from(out.module.live_functions[row] && function.versioned)
+        | u8::from(function.cold) << 1
+        | u8::from(function.pack_export) << 2)
         .write(&mut out);
     body_order.is_some().write(&mut out);
     let Some(body_order) = body_order else {
@@ -1102,7 +1104,7 @@ fn read_function(input: &mut Read<'_, '_>) -> DecodeResult<Function> {
     let instance = Wire::read(input)?;
     let signature = Wire::read(input)?;
     let flags = u8::read(input)?;
-    if flags > 3 {
+    if flags > 7 {
         return Err(wire::invalid("invalid function flags"));
     }
     let body = bool::read(input)?.then(|| read_body(input)).transpose()?;
@@ -1111,6 +1113,7 @@ fn read_function(input: &mut Read<'_, '_>) -> DecodeResult<Function> {
         signature,
         versioned: flags & 1 != 0,
         cold: flags & 2 != 0,
+        pack_export: flags & 4 != 0,
         body,
     })
 }

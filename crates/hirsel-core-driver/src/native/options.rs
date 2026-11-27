@@ -18,6 +18,8 @@ pub struct NativeOptions {
     pub cas: PathBuf,
     pub output: PathBuf,
     pub output_kind: OutputKind,
+    /// Optional explicit list of closed function exports for `OutputKind::Module` (PACK-14/15).
+    pub module_exports: Vec<DefPath>,
     pub root_limit: u64,
     pub instance_limit: usize,
     pub directories: Vec<String>,
@@ -78,6 +80,7 @@ impl NativeOptions {
             cas: crate::store::collect::user(),
             output,
             output_kind: OutputKind::Executable,
+            module_exports: vec![],
             root_limit: DEFAULT_ROOT_LIMIT,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
             recording: false,

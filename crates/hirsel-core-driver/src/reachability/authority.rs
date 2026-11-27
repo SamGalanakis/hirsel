@@ -126,6 +126,15 @@ impl Node {
             | RtOp::GluePush
             | RtOp::GluePop
             | RtOp::GlueCut
+            | RtOp::CodeBind
+            | RtOp::CodeLoad
+            | RtOp::CodeShare
+            | RtOp::CodeSlotNew
+            | RtOp::CodeActivate
+            | RtOp::CodeDispatchBegin
+            | RtOp::CodeDispatchEnd
+            | RtOp::CodeIdentity
+            | RtOp::CodeRevision
             | RtOp::Closed(_) => &[],
         };
         for kind in kinds {
@@ -341,7 +350,7 @@ impl Walk<'_> {
                     }
                     Inst::Call { call } => match body.calls[call.index()].callee {
                         Callee::Direct(f) => f,
-                        Callee::Indirect(_) => continue,
+                        Callee::Indirect(_) | Callee::PackExport(_) => continue,
                         Callee::Runtime(op) => {
                             node.runtime(op);
                             continue;

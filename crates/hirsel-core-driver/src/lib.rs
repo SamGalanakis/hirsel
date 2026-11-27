@@ -87,6 +87,7 @@ mod request_record;
 mod test_run;
 mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
+pub use hirsel_core_layout::OutputKind;
 pub use native::recipe_build::{AssemblyRecord, Publication};
 pub use native::{
     Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, ReplayPlan, grant_kind,
@@ -264,6 +265,18 @@ pub struct ResourceRefusal {
     pub message: String,
 }
 
+/// PACK-14/15 export metadata and sealed adapter CoreIR for a closed top-level function.
+#[derive(Clone)]
+pub struct PackExportDecl {
+    pub path: DefPath,
+    pub adapter_symbol: String,
+    pub entry_identity: ContentHash,
+    pub descriptor_symbol: Option<String>,
+    pub signature: ContentHash,
+    pub waits: bool,
+    pub module: Arc<hirsel_core_ir::Module>,
+}
+
 pub use body::DefinitionProduct;
 mod body;
 #[derive(Clone)]
@@ -291,6 +304,8 @@ pub struct CheckProduct {
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryDecl, String>>,
+    /// Closed `pub fn` and entry PACK-14/15 exports captured during check.
+    pub pack_exports: BTreeMap<DefPath, PackExportDecl>,
     headers: Arc<reuse::Headers>,
     /// Each computed constant's evaluation, by path and target (LANG-20).
     constant_values: Arc<comptime::Values>,
@@ -319,6 +334,7 @@ impl CheckProduct {
             library: None,
             native_entry: None,
             test_entries: BTreeMap::new(),
+            pack_exports: BTreeMap::new(),
             headers: Arc::default(),
             constant_values: Arc::default(),
         }
@@ -475,6 +491,7 @@ impl Driver {
         meter: &mut Meter,
         record: Option<&request_record::Request>,
         report_authority: bool,
+        pack_exports: &[DefPath],
     ) -> io::Result<Checked> {
         request.inputs.normalise(request.manifest.as_deref());
         #[cfg(test)]
@@ -1097,6 +1114,34 @@ impl Driver {
                     let path = p.fns[f].path.clone();
                     let (path, decl) = native::bind_entry(&mut p, &path);
                     result.test_entries.insert(path, decl);
+                }
+                let fd = &p.fns[f];
+                let want_export =
+                    request.entry.as_ref() == Some(&fd.path) || pack_exports.contains(&fd.path);
+                if want_export
+                    && fd.body.is_some()
+                    && !fd.is_test
+                    && fd.drop_of.is_none()
+                    && fd.clone_of.is_none()
+                    && !fd.has_region_parameters
+                    && !fd.generics.iter().any(|g| !g.region)
+                {
+                    let mut em = Emitter::new();
+                    if let Some(meta) = em.emit_pack_export(&p, f, &[]) {
+                        em.seal();
+                        result.pack_exports.insert(
+                            fd.path.clone(),
+                            PackExportDecl {
+                                path: fd.path.clone(),
+                                adapter_symbol: meta.adapter_symbol,
+                                entry_identity: meta.entry_identity,
+                                descriptor_symbol: meta.descriptor_symbol,
+                                signature: meta.signature,
+                                waits: meta.waits,
+                                module: Arc::new(em.module),
+                            },
+                        );
+                    }
                 }
             }
             diagnostics::resolve_method_edits(&p, &mut result.diagnostics);

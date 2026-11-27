@@ -1,0 +1,116 @@
+// L110 (§13.10a, §13.12): OLD validates rewrites and takes settlement rows
+// from the export's leased base, read through the pager when the leased
+// table is Tiered, whatever main did to it afterwards.
+fn leased_schema(mut db: Db, mode: Mode) -> Result[Table[u64, u64], Error] waits {
+    let mut d = declare(db, mode)?
+    let declared = declare_table(mut d, "leased", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok(take rows)
+}
+
+// Rows {1: 10, 2: 20, 3: 30}, made Tiered, and the store reopened so the
+// table is Cold.
+fn leased_open(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(Db, Table[u64, u64]), Error] waits {
+    let mut db = open(tasks, directory, c, r, options)?
+    let rows = leased_schema(mut db, Migrate)?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        for k in 1u64 .. 4u64 {
+            put(mut tx, t, k, k * 10u64)?
+        }
+        Ok(())
+    })? else {
+        fail("L110: the leased rows commit")
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    close(take db)?
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let rebound = leased_schema(mut reopened, Open)?
+    Ok((take reopened, take rebound))
+}
+
+fn leased_unchanged(mut _migration: Migration) -> Result[(), Error] {
+    Ok(())
+}
+
+// An activation installed over the unchanged schema, so the export is fenced.
+fn leased_activate(mut db: Db, tasks: Tasks) -> Result[(), Error] waits {
+    let mut d = declare_migration(db, tasks, code.describe(leased_unchanged))?
+    let declared = declare_table(mut d, "leased", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take declared)?
+    let staged = finish_migration(db, take d)?
+    install_activation(mut db, take staged)
+}
+
+// The release redeclares `leased` unchanged and rewrites 1 to 11 and 3 to 33.
+fn leased_stage(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
+    let mut d = declare_export(source, tasks, None)?
+    let declared = declare_table(mut d, "leased", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take declared)?
+    let mut staged = finish_export_declaration(source, take d)?
+    let rows = catalog_handle(source.db.store, staged.plan.schema.roots.catalog, "leased", std.codec.key_u64(), std.codec.of_u64())?
+    stage_rewrite(mut staged, rows, 1, 11u64)?
+    stage_rewrite(mut staged, rows, 3, 33u64)?
+    Ok(take staged)
+}
+
+// `seen` must be exactly `expected`: each key as its 8 big-endian bytes and
+// each value decoded through the table's codec.
+fn leased_rows_are(t: Table[u64, u64], seen: List[(Bytes, Bytes)], expected: List[(u64, u64)]) -> Result[bool, Error] {
+    if list.len(seen) != list.len(expected) {
+        return Ok(false)
+    }
+    for i in 0u64 .. list.len(seen) {
+        let mut key: Bytes = list.new()
+        list.put_word_be(mut key, expected[i].0)
+        if seen[i].0 != key || row_value(t.readers, t.id, seen[i].1)? != expected[i].1 {
+            return Ok(false)
+        }
+    }
+    Ok(true)
+}
+
+/// bug: import_settlement walks a leased Tiered table with a resident cursor, so OLD cannot settle once its pending table is Tiered; or it reads main's demoted and edited head instead of the leased base.
+/// oracle: the leased base {1: 10, 2: 20, 3: 30} written before the export, against main's later {1: 10, 2: 21}, and the release's literal rewrites {1: 11, 3: 33}.
+@test
+fn test_l110_leased_old_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let options = deploy_result(l70_open_options(300000000))?
+    let (opened, rows) = deploy_result(leased_open(disk_test_directory(d), c, r, tasks, options))?
+    let mut db = take opened
+    deploy_result(leased_activate(mut db, tasks))?
+    let attempt = install_fixture_bytes(16, 7)
+    let (scratch, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    // Main demotes the leased table, then overwrites 2 and removes 3.
+    deploy_result(set_residency(mut db, rows.id, Memory))?
+    let Committed(_) = deploy_result(run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        put(mut tx, t, 2, 21u64)?
+        let _ = delete(mut tx, t, 3)?
+        Ok(())
+    }))? else {
+        fail("L110: main's writes commit")
+    }
+    let mut source = open_export(scratch, c, attempt, options)?
+    let staged = deploy_result(leased_stage(source, tasks))?
+    write_prepared(mut source, staged, scratch, rewrite_law_target())?
+    let validated = validate_prepared(scratch)?
+    let settled = import_settlement(db, validated, "leased")?
+    let mut base: List[(u64, u64)] = list.new()
+    list.push(mut base, (1u64, 10u64))
+    list.push(mut base, (2u64, 20u64))
+    list.push(mut base, (3u64, 30u64))
+    let mut rewrites: List[(u64, u64)] = list.new()
+    list.push(mut rewrites, (1u64, 11u64))
+    list.push(mut rewrites, (3u64, 33u64))
+    if !deploy_result(leased_rows_are(rows, settled.base, base))? {
+        fail("L110: the settlement's base rows are the leased base's")
+    }
+    if !deploy_result(leased_rows_are(rows, settled.rewrites, rewrites))? {
+        fail("L110: the settlement's rewrites are the release's")
+    }
+    // Rewrite membership is the leased base's: 3 is still there, though
+    // main removed it.
+    let work = reserve_import(mut db, take validated)?
+    let ready = import_trees(take work)?
+    keep_import(mut db, take ready)?
+    deploy_result(close(take db))
+}

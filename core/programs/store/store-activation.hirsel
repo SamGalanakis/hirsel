@@ -469,7 +469,51 @@ pub type ImportSettlement: send {
 
 /// `ImportSettlement` for `imported` over OLD's export lease. A rewrite of any other table
 /// is `Unsettled`.
-pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Result[ImportSettlement, DeployError] {
+// The leased base's rows of collection `id`, each as (row key, stored
+// value), read by the collection's own descriptor in `lease.collections`
+// (§13.10a, L110): a Memory table from its resident pages, a Tiered one
+// through the pager from the lease's own inventory, one row per attempt on
+// OLD's writer partition.
+fn leased_table_rows(db: Db, tree: pages.PageTree, id: u32) -> Result[List[(Bytes, Bytes)], DeployError] waits {
+    let low = deploy_result(failure_result_from_rep(catalog.prefix(id)))?
+    let high = deploy_result(failure_result_from_rep(catalog.prefix(id + 1)))?
+    let mut base: List[(Bytes, Bytes)] = list.new()
+    let Some((_, desc)) = std.page.collection_slot(tree.root, low) else {
+        return Ok(take base)
+    }
+    if pages.collection_descriptor(desc).residency == ResidentMemory {
+        let mut rows = deploy_result(byte_cursor(tree, Included(low), high))?
+        while let Some((take logical, raw)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut rows)))? {
+            list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(failure_result_from_rep(types.copied(raw)))?))
+        }
+        return Ok(take base)
+    }
+    let Some(inventory) = view tree.paging else {
+        return Error(ImportMalformed)
+    }
+    let grant = deploy_result(disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], Error] {
+        Ok(arc.new(pager.TieredReaderGrant(store: store_key_to_rep(db.store), opened: open_number(db), pin_bytes: pager.pin_partition(db.pager))))
+    }))?
+    let root = tiered_pin_root(open_number(db), 0u32, tree)
+    let mut from = low
+    loop {
+        let backend: pager.TieredPageBackend = match pager.pager_requests(db.pager) {
+            Some(sender) => PagerTask(channel.sender(sender)),
+            None => PagerDirect(deploy_result(log_directory(db))?, store_key_to_rep(db.store)),
+        }
+        let empty_hint: Bytes = list.new()
+        let step = deploy_result(retry_tiered_read_with(take backend, std.omap.snapshot(inventory.packs), inventory.next_stamp, 0, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+            failure_result_from_rep(pager.tiered_span_row(attempt, visible, tree, from, high))
+        }))?
+        let Some((take logical, take raw)) = take step else {
+            return Ok(take base)
+        }
+        from = deploy_result(failure_result_from_rep(pager.scan_page_after(logical)))?
+        list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(failure_result_from_rep(types.copied(raw)))?))
+    }
+}
+
+pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Result[ImportSettlement, DeployError] waits {
     let Some(lease) = disk_state(db).lease else {
         return Error(ExportMismatch)
     }
@@ -481,13 +525,10 @@ pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Res
             old = record.id
         }
     }
-    let mut base: List[(Bytes, Bytes)] = list.new()
-    if old != 0 {
-        let tree = view lease.collections
-        let mut rows = deploy_result(byte_cursor(tree, Included(deploy_result(failure_result_from_rep(catalog.prefix(old)))?), deploy_result(failure_result_from_rep(catalog.prefix(old + 1)))?))?
-        while let Some((take logical, raw)) = deploy_result(failure_result_from_rep(catalog.next_bytes(mut rows)))? {
-            list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(failure_result_from_rep(types.copied(raw)))?))
-        }
+    let base = if old != 0 {
+        leased_table_rows(db, lease.collections, old)?
+    } else {
+        list.new()
     }
     let mut rewrites: List[(Bytes, Bytes)] = list.new()
     for row in imported.rewrites {

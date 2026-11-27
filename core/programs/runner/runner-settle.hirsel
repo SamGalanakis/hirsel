@@ -68,7 +68,7 @@ fn import_image(description: Bytes) -> Result[Bytes, store.DeployError] {
 // refuses the import `Unsettled` unless PREPARED applies exactly those values: as its
 // 0x0085 rewrites, or folded into the range it ships for the pending table. With no fate
 // for a held row there is no settlement, so a PREPARED that settles it is refused.
-fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes, f: fate.Fates) -> Result[(), store.DeployError] {
+fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes, f: fate.Fates) -> Result[(), store.DeployError] waits {
     let applied = store.import_settlement(db, imported, "store.triggers.pending")?
     let Some(expected) = fate.expected_settlement(applied.base, image, f) else {
         return Error(Unsettled)

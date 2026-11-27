@@ -324,6 +324,7 @@ store@1/store/test_l104_mixed_tail src=440b58bc366b50f3 sig=476d0cfdb8145119 run
 store@1/store/test_l105_mixed_tail_staged src=d49129d7a3b5c8d4 sig=25325098fc4e11af run=0fbf0f9c200aa0aa bug=a8c2c5371f0b5b9b oracle=63f48baa2798763d rows=pending
 store@1/store/test_l106_admission_captured_set src=a028724a6548b75e sig=36dbb037b3f1503c run=0fbf0f9c200aa0aa bug=f4036c24a8b19a68 oracle=c956a1c607c9fcaf rows=pending
 store@1/store/test_l109_differences_across_residency src=4dad5b4cea4c237f sig=ff8aaf5a7ccc83c8 run=0fbf0f9c200aa0aa bug=9f7d5630cb1de1b6 oracle=f4d1e2ab61f00bd4 rows=pending
+store@1/store/test_l110_leased_old_rows src=2c3693337306d9d4 sig=a745057682554c0c run=0fbf0f9c200aa0aa bug=1ce3e5813315e82a oracle=104785d892ee8f4e rows=pending
 store@1/store/test_l62_attempt_touch_order src=946681123adf6327 sig=13facea7c6181136 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_batch_error_follows_touch src=e953c86ac0b48b84 sig=5b28e2fd409330f8 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_initial_change_pages_resolve_tiered_rows src=1d83c7a9c92f1707 sig=bfb6b21990093280 run=a6b003f729117be3 bug=- oracle=- rows=pending

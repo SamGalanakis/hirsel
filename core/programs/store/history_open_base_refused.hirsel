@@ -1,3 +1,3 @@
 fn forge_open_base(take packs: store.manifest.PackDiskState, sweep: store.manifest.SweepCursor) -> store.history.HistoryOpenBase {
-    store.history.HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep, archive_on: 0, pages: take packs)
+    store.history.HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep, pages: take packs)
 }

@@ -119,7 +119,6 @@ fn capture_measure_pages(mut packs: CapturePacks, page_record: manifest.PageMani
 
 fn capture_measure(d: Dir, locked: Option[Clock]) -> Result[CaptureSelection, types.Failure] waits {
     let (take raw, id, take page_record) = read_only_manifest(d)?
-    manifest.require_unarchived_manifest(page_record)?
     let mut packs = capture_packs(d, id, page_record, false, 0)
     let measured: Result[(CaptureListCount, u64, u64), types.Failure] = if let Some(_) = locked {
         match capture_lists(mut packs, page_record) {

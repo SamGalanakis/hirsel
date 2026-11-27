@@ -14,22 +14,22 @@ fn publish_page_manifest(d: Dir, id: StoreId, m: manifest.PageManifest, target: 
     failure_result_from_rep(manifest.publish_page_manifest_bytes(d, scratch))
 }
 
-// Independently encoded from AP3, AP14 (Format 12, no `retired` root), AP20 and §13.1
+// Independently encoded from AP3, AP14 (Format 13), AP20 and §13.1
 // using libxxhash.
 // The 29-byte pack row has a zero index offset. Both live PAGEs start at byte 72.
 fn page_manifest_vector() -> Bytes {
-    let words: Inline[u64, 65] =[
+    let words: Inline[u64, 59] =[
         0x0000003800010001,
-        0xefe8d888afc8637d,
+        0x385c623e93bae484,
         0x45524f5453524948,
-        0x000000010000000c,
+        0x000000010000000d,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
         0x0000000000000001,
         0x0000000000000000,
-        0x000001ab00010031,
-        0xdbb751b234869054,
+        0x0000017f00010031,
+        0xb01017707c6c2840,
         0x0000000000000001,
         0x0100000000ff0000,
         0x0100004000000400,
@@ -54,18 +54,13 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000200000000,
-        0x0000004800000000,
-        0x0000004400000000,
-        0xc222e9723fa736a5,
         0x0000000000000002,
-        0x0000000000000001,
-        0x00006e69616d0004,
+        0x0000000000000048,
+        0x3fa736a500000044,
+        0x00000002c222e972,
+        0x0000000100000000,
+        0x616d000400000000,
+        0x0000000000006e69,
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
@@ -73,11 +68,10 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
-        0x0001000000000000,
-        0x0048000000000000,
-        0x0021000000000000,
-        0x8df641cc33c60000,
-        0x000000000001222e,
+        0x0000000000010000,
+        0x0000000000480000,
+        0x33c6000000210000,
+        0x0001222e8df641cc,
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
@@ -85,11 +79,11 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000000,
         0x0000000000000000,
     ]
-    let mut raw: Bytes = list.with_capacity(520)
+    let mut raw: Bytes = list.with_capacity(472)
     for word in words {
         list.put_word_le(mut raw, word)
     }
-    list.truncate(mut raw, 515)
+    list.truncate(mut raw, 471)
     take raw
 }
 
@@ -103,14 +97,14 @@ fn page_list_pack_vector() -> Bytes {
         0,
         0,
         0,
-        171,
-        27,
-        222,
-        73,
-        191,
-        126,
-        65,
-        249,
+        31,
+        121,
+        18,
+        12,
+        244,
+        117,
+        150,
+        121,
         72,
         73,
         82,
@@ -119,7 +113,7 @@ fn page_list_pack_vector() -> Bytes {
         79,
         82,
         69,
-        12,
+        13,
         0,
         0,
         0,
@@ -269,14 +263,14 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         0,
-        171,
-        27,
-        222,
-        73,
-        191,
-        126,
-        65,
-        249,
+        31,
+        121,
+        18,
+        12,
+        244,
+        117,
+        150,
+        121,
         72,
         73,
         82,
@@ -285,7 +279,7 @@ fn page_planted_pack_vector() -> Bytes {
         79,
         82,
         69,
-        12,
+        13,
         0,
         0,
         0,
@@ -443,8 +437,8 @@ fn page_planted_pack_vector() -> Bytes {
 
 fn page_planted_manifest_vector() -> Bytes {
     let mut raw = page_manifest_vector()
-    // The pack-list PagePtr's offset is at byte 88 + 236 + 8.
-    list.set_word_le(mut raw, 332, 88u64)
-    list.set_word_le(mut raw, 80, 0x7d1ea689eab5fc73u64)
+    // The pack-list PagePtr's offset is at byte 88 + 192 + 8.
+    list.set_word_le(mut raw, 288, 88u64)
+    list.set_word_le(mut raw, 80, 0x6e7e59fe9364fb25u64)
     take raw
 }

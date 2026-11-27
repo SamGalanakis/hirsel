@@ -10,7 +10,7 @@ pub fn group_law_worker(tasks: Tasks) -> (Sender[ObjectJournalStart], Sender[Jou
 }
 
 pub fn start_group_law_worker(init: Sender[ObjectJournalStart], take requests: std.object.Requests, take held: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64) waits {
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep: sweep_start(), archive_on: 0, issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None, stream: None)
     result.unwrap(channel.send(init, take opened))
 }
 

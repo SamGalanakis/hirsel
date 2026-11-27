@@ -52,9 +52,6 @@ pub type PageManifest: shareable + send {
     lineage: std.page.PagePtr,
     deferred_frees: std.page.PagePtr,
     deferred_next: u64,
-    archive_on: u64,
-    archive: std.page.PagePtr,
-    archive_drop: u64,
     sweep: SweepCursor,
     pack_root: std.page.PagePtr,
     branches: List[LocatedBranch],
@@ -66,7 +63,7 @@ pub fn page_manifest_empty(limits: types.LimitsRep) -> PageManifest {
     let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
     list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
-    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
+    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
 }
 
 pub fn page_manifest_size(m: PageManifest) -> u64 {
@@ -119,9 +116,8 @@ pub fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[()
     put_page_ptr(mut raw, m.lineage)
     put_page_ptr(mut raw, m.deferred_frees)
     types.capacity(format.le(mut raw, m.deferred_next, 8))?
-    types.capacity(format.le(mut raw, m.archive_on, 8))?
-    put_page_ptr(mut raw, m.archive)
-    types.capacity(format.le(mut raw, m.archive_drop, 8))?
+    // The format-13 archive binding is zero until source holds are implemented.
+    types.capacity(format.le(mut raw, 0, 8))?
     types.capacity(format.le(mut raw, m.sweep.position, 8))?
     types.capacity(format.le(mut raw, m.sweep.epoch, 8))?
     types.capacity(format.le(mut raw, m.sweep.digest, 8))?
@@ -255,9 +251,9 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
     let lineage = read_page_ptr(file, raw, mut at)?
     let deferred_frees = read_page_ptr(file, raw, mut at)?
     let deferred_next = format.disk_number(file, raw, mut at, 8)?
-    let archive_on = format.disk_number(file, raw, mut at, 8)?
-    let archive_ptr = read_page_ptr(file, raw, mut at)?
-    let archive_drop = format.disk_number(file, raw, mut at, 8)?
+    if format.disk_number(file, raw, mut at, 8)? != 0 {
+        return Error(Unsupported(0x0031))
+    }
     let sweep_position = format.disk_number(file, raw, mut at, 8)?
     let epoch = format.disk_number(file, raw, mut at, 8)?
     let digest = format.disk_number(file, raw, mut at, 8)?
@@ -313,7 +309,7 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive_ptr, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
+    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
 }
 
 pub fn manifest_account(m: PageManifest) -> u64 {
@@ -330,46 +326,6 @@ pub fn require_object_memory_manifest(m: PageManifest) -> Result[(), types.Failu
         return Error(Unsupported(0x0031))
     }
     Ok(())
-}
-
-// The archive plan (M3 S7) has no reader yet.
-pub fn require_unarchived_manifest(m: PageManifest) -> Result[(), types.Failure] {
-    if m.archive.stamp != 0 || m.archive_on != 0 || m.archive_drop != 0 {
-        return Error(Unsupported(0x0031))
-    }
-    Ok(())
-}
-
-pub type ArchiveRange {
-    start: u64,
-    end: u64,
-    segment: pages.HistoryRef
-}
-
-pub fn encode_archive_range(row: ArchiveRange) -> std.page.Entry {
-    let mut key: Bytes = list.with_capacity(8)
-    list.put_word_be(mut key, row.start)
-    let mut value: Bytes = list.with_capacity(40)
-    list.put_word_le(mut value, row.end)
-    list.put_word_le(mut value, row.segment.seq)
-    list.put_word_le(mut value, row.segment.epoch)
-    list.put_word_le(mut value, row.segment.digest)
-    list.put_word_le(mut value, row.segment.len)
-    std.page.Entry(key: take key, cell: InlineValue(take value))
-}
-
-pub fn decode_archive_range(file: String, at: u64, key: Bytes, value: Bytes, previous_end: u64) -> Result[ArchiveRange, types.Failure] {
-    if list.len(key) != 8 || list.len(value) != 40 {
-        return Error(format.disk_fault(file, at, Malformed))
-    }
-    let start: u64 = list.word_be(key, 0)
-    let end: u64 = list.word_le(value, 0)
-    let segment_position: u64 = list.word_le(value, 8)
-    if start < previous_end || start >= end || segment_position != end {
-        return Error(format.disk_fault(file, at, Malformed))
-    }
-    let segment = pages.HistoryRef(seq: segment_position, epoch: list.word_le(value, 16), len: list.word_le(value, 32), digest: list.word_le(value, 24))
-    Ok(ArchiveRange(start: start, end: end, segment: segment))
 }
 
 pub fn cut_manifest_size[in installed, in proposed](input: CutInput[in installed, in proposed]) -> u64 {

@@ -52,7 +52,6 @@ std = { major = 1 }
 "object-writer-export.hirsel" = "object_writer"
 "object-writer-journal.hirsel" = "object_writer"
 "object-writer-settle.hirsel" = "object_writer"
-"object-writer-archive.hirsel" = "object_writer"
 "object-writer-queue.hirsel" = "object_writer"
 "store-journal-state.hirsel" = "journal"
 "store-journal-support.hirsel" = "journal"
@@ -203,7 +202,7 @@ std = { major = 1 }
 "host-stream-janitor.hirsel" = "host_stream"
 "store-stream-follow.hirsel" = "store"
 "host-stream-follow.hirsel" = "host_stream"
-"host-stream-archive.hirsel" = "host_stream"
+"host-stream-sealed.hirsel" = "host_stream"
 "store-history-read.hirsel" = "store"
 "history-read.hirsel" = "history"
 "store-history-witness.hirsel" = "history"
@@ -363,7 +362,7 @@ dirs = ["."]
 "store_journal_laws_5.hirsel" = "store"
 "store_backup_laws.hirsel" = "store"
 "store_corpus_laws.hirsel" = "store"
-"store_corpus_format12.hirsel" = "store"
+"store_corpus_format13.hirsel" = "store"
 "store_ace_crash_laws.hirsel" = "store"
 "store_journal_laws_6.hirsel" = "store"
 "store_journal_laws_7.hirsel" = "store"
@@ -397,7 +396,7 @@ dirs = ["."]
 "store_tiered_backup_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
-"store_format12_laws.hirsel" = "store"
+"store_format13_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "manifest"
@@ -938,7 +937,7 @@ limit = 536870912
 [tests.runs."store@1/store/bucket_stream_blast_radius"]
 limit = 1073741824
 
-[tests.runs."store@1/store/bucket_stream_exits_and_archival"]
+[tests.runs."store@1/store/bucket_stream_exits_and_sealed_cursor"]
 limit = 536870912
 
 [tests.runs."store@1/store/check_detects"]

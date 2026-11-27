@@ -1,6 +1,6 @@
 // STORE L60. Little-endian fields and XXH3 frame checks were derived
 // independently of the store encoder.
-// L60 wire vectors use §2.1, the current-format (12) §2.3 HEADER, §12.2 and libxxhash.
+// L60 wire vectors use §2.1, the current-format (13) §2.3 HEADER, §12.2 and libxxhash.
 @test
 fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     let config = history.object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
@@ -67,11 +67,11 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     if !history.history_pair_matches(recovered.head.pair, fourth.pair) || history.history_key("e-", recovered.head.entry) != "e-00000000000000000003-00000000000000000002-0000000000002702" || o4.epoch != 4 || o4.class != 2 || o4.permit_epoch != 2 || !history.history_origin_same_bytes(o4.permit_attempt, o2.attempt) {
         fail("a claim changed the inherited entry's name or ORIGIN")
     }
-    // Format 10 head is refused with Unsupported(10) (no-shims clean cutover).
-    let format10 = option.unwrap(std.base64.decode(string.as_bytes("AQABADgAAADYzCuQlMXpP0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")))
-    match failure_result_from_rep(history.history_decode_head(format10)) {
-        Error(Unsupported(10)) => (),
-        _ => fail("Format 10 head was not refused with Unsupported(10)"),
+    // Format 12 head is refused with Unsupported(12) (no-shims clean cutover).
+    let format12 = option.unwrap(std.base64.decode(string.as_bytes("AQABADgAAAAFgl+6ta57yEhJUlNUT1JFDAAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")))
+    match failure_result_from_rep(history.history_decode_head(format12)) {
+        Error(Unsupported(12)) => (),
+        _ => fail("Format 12 head was not refused with Unsupported(12)"),
     }
     // Current-format malformed heads: entry from future epoch, equal positions with
     // different refs, unknown authority style, and retired AUTHORITY kind 0x0050.

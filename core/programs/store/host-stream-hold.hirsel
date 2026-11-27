@@ -291,7 +291,7 @@ fn hold_resolve(mut guard: HoldGuard, take attempted: HoldIssue, deadline: u64) 
     Unknown(take why)
 }
 
-pub fn stream_claim_live[T](take client: std.object.Client, take side: ClaimStream, store: types.StoreKey, epoch: u64, inc: u64, no_hold: bool, token: types.StoreKey, cleanup_ms: u64, deadline: u64, take replay: pager.JournalReplay, mut link: SlotLink, archive_on: u64, group_bytes: u64, group_commits: u64, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, ClaimStream, ClaimStep[T]) waits {
+pub fn stream_claim_live[T](take client: std.object.Client, take side: ClaimStream, store: types.StoreKey, epoch: u64, inc: u64, no_hold: bool, token: types.StoreKey, cleanup_ms: u64, deadline: u64, take replay: pager.JournalReplay, mut link: SlotLink, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, ClaimStream, ClaimStep[T]) waits {
     let ClaimStream(lane: take lane, buffers: take buffers, granted) = take side
     let created: Result[ClaimMachine[T], (Capacity, ClaimPhase[T])] = ClaimMachine(phase: Init)
     let mut machine = match take created {
@@ -303,11 +303,11 @@ pub fn stream_claim_live[T](take client: std.object.Client, take side: ClaimStre
     } else if let Error((take transport, take register_lane, take scratch, take step)) = claim_acquire(mut machine, take client, take lane, take buffers, token, store, epoch, inc, cleanup_ms, deadline) {
         return (take transport, ClaimStream(lane: take register_lane, buffers: take scratch, granted), take step)
     }
-    let (take transport, take register_lane, take scratch, take step) = claim_build_and_publish(mut machine, take replay, mut link, archive_on, cleanup_ms, group_bytes, group_commits, deadline, mut work, build)
+    let (take transport, take register_lane, take scratch, take step) = claim_build_and_publish(mut machine, take replay, mut link, deadline, mut work, build)
     (take transport, ClaimStream(lane: take register_lane, buffers: take scratch, granted), take step)
 }
 
-fn claim_build_and_publish[T](mut machine: ClaimMachine[T], take replay: pager.JournalReplay, mut link: SlotLink, archive_on: u64, op_ms: u64, group_bytes: u64, group_commits: u64, deadline: u64, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) waits {
+fn claim_build_and_publish[T](mut machine: ClaimMachine[T], take replay: pager.JournalReplay, mut link: SlotLink, deadline: u64, mut work: history.HistoryBuffers, build: scoped fn(mut std.object.Client, mut StreamLane, mut TailBuffers, Option[u64], mut pager.JournalReplay, mut history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits) -> (std.object.Client, StreamLane, TailBuffers, ClaimStep[T]) waits {
     let next: ClaimPhase[T] = match replace(mut machine.phase, Init) {
         Held(take guard, rev_hold) => ReadyToBuild(Guarded(take guard), Some(rev_hold)),
         NoHold(take client, take lane, take buffers) => ReadyToBuild(Unguarded(take client, take lane, take buffers), None),
@@ -357,7 +357,7 @@ fn claim_build_and_publish[T](mut machine: ClaimMachine[T], take replay: pager.J
     let Disarmed(client: take returned, lane: take lane, buffers: take buffers, ..) = take transport
     let mut client = take returned
     let completed = match machine.phase {
-        HeadPublished(mut published) => claim_publish(mut client, mut published, mut link, archive_on, op_ms, group_bytes, group_commits, deadline, mut work),
+        HeadPublished(mut published) => claim_publish(mut client, mut published, mut link, deadline, mut work),
         _ => fail("claim lost the published phase"),
     }
     if let Error(take problem) = take completed {
@@ -380,20 +380,13 @@ fn claim_ambiguous[T](mut machine: ClaimMachine[T], take transport: Disarmed, ta
     (take client, take lane, take buffers, ClaimFailed(take problem))
 }
 
-fn claim_publish[T](mut client: std.object.Client, mut published: ClaimPublished[T], mut link: SlotLink, archive_on: u64, op_ms: u64, group_bytes: u64, group_commits: u64, deadline: u64, mut work: history.HistoryBuffers) -> Result[(), types.Failure] waits {
+fn claim_publish[T](mut client: std.object.Client, mut published: ClaimPublished[T], mut link: SlotLink, deadline: u64, mut work: history.HistoryBuffers) -> Result[(), types.Failure] waits {
     if let Some(_) = published.live {
         slot_claim_frame(mut work.packet, published.head.pair.epoch, published.head.pair.holder)
         slot_send(link, work.packet, 0)?
         return match slot_wait(mut link, 0) {
             Error(Fenced(_)) => Error(Lost),
             other => take other,
-        }
-    }
-    if archive_on != 0 {
-        match stream_settle_sealed_core(mut client, mut published.reg, published.authority, mut work, link.root, op_ms, group_bytes, group_commits)? {
-            SettleApplied => (),
-            SettleFenced(_, _) => return Error(Lost),
-            SettleNotApplied => return Error(Undecided),
         }
     }
     history_advance_claim(mut client, mut published.reg, published.authority, mut work, deadline)

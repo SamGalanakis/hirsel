@@ -259,7 +259,6 @@ fn tiered_refusal_to_rep(take value: TieredRefusal) -> types.TieredRefusalRep {
         Memory => Memory,
         Export => Export,
         Install => Install,
-        Authority => Authority,
     }
 }
 
@@ -268,7 +267,6 @@ fn tiered_refusal_from_rep(take value: types.TieredRefusalRep) -> TieredRefusal 
         Memory => Memory,
         Export => Export,
         Install => Install,
-        Authority => Authority,
     }
 }
 

@@ -160,10 +160,7 @@ fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mar
 fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, deadline: u64) -> Result[ReclaimPass, types.Failure] waits {
     let at = fixed.head
     let (take selected_mark, take selected_bytes) = history.history_checkpoint(mut client, at, deadline)?
-    let page_record = history.history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline)?
-    if page_record.archive_on != 0 || page_record.archive.stamp != 0 {
-        return Error(Unsupported(1))
-    }
+    let _ = history.history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline)?
     let (after, take exact_names) = reclaim_chain(mut client, fixed, selected_mark, deadline)?
     let mut keep: Map[String, ()] = map.new()
     live_reclaim_checkpoint(mut client, at, at.checkpoint, selected_mark, selected_bytes, mut keep, deadline)?

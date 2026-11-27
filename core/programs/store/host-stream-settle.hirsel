@@ -34,7 +34,6 @@ pub opaque type SettleView {
     register: history.HistoryRegister,
     authority: Bytes,
     buffers: history.HistoryBuffers,
-    archive_on: u64,
     op_ms: u64,
     slot: Option[(types.HostStreamIdRep, u64)],
     root: String,
@@ -44,12 +43,12 @@ pub opaque type SettleView {
     cursor_frame: u32
 }
 
-pub fn settle_view(take client: std.object.Client, take register: history.HistoryRegister, take authority: Bytes, take buffers: history.HistoryBuffers, archive_on: u64, op_ms: u64, mut stream: Option[SlotLink]) -> SettleView {
+pub fn settle_view(take client: std.object.Client, take register: history.HistoryRegister, take authority: Bytes, take buffers: history.HistoryBuffers, op_ms: u64, mut stream: Option[SlotLink]) -> SettleView {
     let (slot, take root, last_acked, take known_batches) = match stream {
         Some(mut link) => (Some((link.sid, link.inc)), replace(mut link.root, string.new()), link.last_batch_seq, replace(mut link.commit_batches, list.new())),
         None => (None, string.new(), 0u64, list.new()),
     }
-    SettleView(client: take client, register: take register, authority: take authority, buffers: take buffers, archive_on, op_ms, slot, root: take root, last_acked, known_batches: take known_batches, cursor_seq: 0, cursor_frame: 0)
+    SettleView(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, slot, root: take root, last_acked, known_batches: take known_batches, cursor_seq: 0, cursor_frame: 0)
 }
 
 pub fn return_settle_view(take settled: SettleView, mut stream: Option[SlotLink]) -> (std.object.Client, history.HistoryRegister, Bytes, history.HistoryBuffers) {
@@ -126,20 +125,6 @@ fn stream_settle_publish(mut lane: SettleView, sid: types.HostStreamIdRep, inc: 
 // `live.from = (max(next_seq, live.from_seq), 0)`. On a close settle
 // (`drop_attach == true`), the final head write drops ATTACH.
 pub fn stream_settle(mut lane: SettleView, through_seq: u64, next_seq: u64, drop_attach: bool, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, types.Failure] waits {
-    // Under archival (§12.11.11 M6), no entry is written above `sealed[0].at`
-    // until all sealed tails are rewritten in order via the sealed cursor.
-    if lane.archive_on != 0 {
-        let has_sealed = match history.register_attach(lane.register) {
-            Some(a) => list.len(a.sealed) != 0,
-            None => false,
-        }
-        if has_sealed {
-            match stream_settle_sealed(mut lane, group_bytes, group_commits)? {
-                SettleApplied => (),
-                other => return Ok(other),
-            }
-        }
-    }
     if let None = lane.slot {
         return Ok(SettleApplied)
     }

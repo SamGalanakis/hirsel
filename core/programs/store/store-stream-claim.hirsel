@@ -406,17 +406,6 @@ fn stream_claim_prepare[T](mut read_source: history.ObjectPackRead, mut link: ho
             RegisterClaimRefused(take problem) => return Error(Remote(take problem)),
             RegisterClaimUndecided => return Error(Undecided),
         }
-        let archive_on = match view read_source.admitted_base {
-            Some(base) => history.open_base_archive_on(base),
-            None => 0u64,
-        }
-        if archive_on != 0 {
-            match failure_result_from_rep(host_stream.stream_settle_sealed_core(mut read_source.client, mut reg, authority, mut workspace, host_stream.slot_root(link), options.claim_ms, int.widen(options.group_bytes), int.widen(options.group_commits)))? {
-                SettleApplied => (),
-                SettleFenced(_, _) => return Error(Lost),
-                SettleNotApplied => return Error(Undecided),
-            }
-        }
         failure_result_from_rep(host_stream.history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline))?
         return Ok(ClaimFinished((take reg, take replay, take admitted, take authority)))
     }
@@ -486,13 +475,7 @@ fn stream_claim_live_attempt[T](take input: history.ObjectPackRead, take side: h
         Error(take problem) => return (take input, take side, Error(failure_from_rep(take problem))),
     }
     let history.ObjectPackRead(authority_kind, client: take transport, locator: take locator, deadline, admitted_base: take base, stream_root: take stream_root, cache) = take input
-    let archive_on = match base {
-        Some(opened) => history.open_base_archive_on(opened),
-        None => 0u64,
-    }
-    let group_bytes: u64 = int.widen(options.group_bytes)
-    let group_commits: u64 = int.widen(options.group_commits)
-    let (take client, take reused, take step) = host_stream.stream_claim_live(take transport, take side, head.store, head.pair.epoch, tail.inc, no_hold, token, cleanup_ms, deadline, take replay, mut link, archive_on, group_bytes, group_commits, mut work, scoped fn(mut c: std.object.Client, mut lane: host_stream.StreamLane, mut buffers: host_stream.TailBuffers, rev_hold: Option[u64], mut replayed: pager.JournalReplay, mut buffers_h: history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits {
+    let (take client, take reused, take step) = host_stream.stream_claim_live(take transport, take side, head.store, head.pair.epoch, tail.inc, no_hold, token, cleanup_ms, deadline, take replay, mut link, mut work, scoped fn(mut c: std.object.Client, mut lane: host_stream.StreamLane, mut buffers: host_stream.TailBuffers, rev_hold: Option[u64], mut replayed: pager.JournalReplay, mut buffers_h: history.HistoryBuffers) -> Result[Option[(std.object.ETag, history.HistoryHead, Option[format.StreamRef], history.PreparedRegisterHead, Bytes, T)], types.Failure] waits {
         let mut tail_scan = cursor
         let delta_ok = host_stream.stream_at_root(mut c, scoped fn(mut stream_client: std.object.Client) -> Result[bool, Error] waits {
             match rev_hold {

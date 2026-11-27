@@ -1,3 +1,3 @@
 fn forge_published_cut(take locator: store.history.HistoryLocator) -> store.object_writer.PublishedCut {
-    store.object_writer.PublishedCut(seq: 1, locator: take locator, sid: None, archive_on: 0, dropped_attach: false)
+    store.object_writer.PublishedCut(seq: 1, locator: take locator, sid: None, dropped_attach: false)
 }

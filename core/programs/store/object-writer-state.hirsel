@@ -19,8 +19,6 @@ pub opaque type ObjectWriterState {
     attached: bool,
     has_sealed: bool,
     drop_attach_on_cut: bool,
-    archive_on: u64,
-    pending_archive_on: Option[bool],
     cache: Option[pager.ObjectsCache],
     head_entry_seq: u64,
     draft_offset: u64,
@@ -119,7 +117,7 @@ pub fn start_slot_relay(mut worker: ObjectWorkerOpen, tasks: Tasks, take answers
     Ok(())
 }
 
-pub fn activate_worker(take opening: ObjectWorkerOpen, take requests: std.object.Requests, take workers: Option[std.object.Workers], take register: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64, sweep: manifest.SweepCursor, archive_on: u64, generation: u64, next_pack: u64, take names_in_order: List[String], take locator: history.HistoryLocator, cache: Option[pager.ObjectsCache], take link: Option[host_stream.SlotLink]) -> Result[(ObjectWriterState, bool), (std.object.Requests, Option[std.object.Workers])] waits {
+pub fn activate_worker(take opening: ObjectWorkerOpen, take requests: std.object.Requests, take workers: Option[std.object.Workers], take register: history.HistoryRegister, take metadata: Bytes, take workspace: history.HistoryBuffers, op_ms: u64, sweep: manifest.SweepCursor, generation: u64, next_pack: u64, take names_in_order: List[String], take locator: history.HistoryLocator, cache: Option[pager.ObjectsCache], take link: Option[host_stream.SlotLink]) -> Result[(ObjectWriterState, bool), (std.object.Requests, Option[std.object.Workers])] waits {
     let ObjectWorkerOpen(start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, weak: take weak) = take opening
     let head = history.register_head(register)
     let (attached, attached_sid, has_sealed, force_open_cut) = match history.register_attach(register) {
@@ -151,12 +149,12 @@ pub fn activate_worker(take opening: ObjectWorkerOpen, take requests: std.object
         Some(WeakWriterOpen(publisher: take publisher, waiters: take waiters)) => (Some(take publisher), Some(take waiters)),
         None => (None, None),
     }
-    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, archive_on, issued_generation: generation, next_pack, export_lease: None, reclaim: None, weak: take publisher, stream: take link)
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, issued_generation: generation, next_pack, export_lease: None, reclaim: None, weak: take publisher, stream: take link)
     if let Error(Closed(take unsent)) = channel.send(start, take startup) {
         let ObjectJournalStart(requests: take returned, ..) = take unsent
         return Error((take returned, take workers))
     }
-    let object = ObjectWriterState(workers: take workers, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache, head_entry_seq: head.entry.seq, draft_offset: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
+    let object = ObjectWriterState(workers: take workers, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, cache, head_entry_seq: head.entry.seq, draft_offset: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
     Ok((take object, force_open_cut))
 }
 
@@ -296,14 +294,6 @@ pub fn set_drop_attach(mut writer: ObjectWriterState, drop_attach: bool) {
     writer.drop_attach_on_cut = drop_attach
 }
 
-pub fn archive_request(writer: ObjectWriterState) -> Option[bool] {
-    writer.pending_archive_on
-}
-
-pub fn set_archive_request(mut writer: ObjectWriterState, request: Option[bool]) {
-    writer.pending_archive_on = request
-}
-
 pub fn cache_directory(writer: ObjectWriterState) -> Option[pager.ObjectsCache] waits {
     history.pack_cache_directory(writer.cache)
 }
@@ -328,16 +318,14 @@ pub fn set_export_lifetime(mut writer: ObjectWriterState, take lifetime: Option[
     writer.export_lifetime = take lifetime
 }
 
-pub fn install_cut(mut writer: ObjectWriterState, mut lane: ObjectJournalSession, take cut: PublishedCut) {
-    let PublishedCut(seq, locator: take locator, sid, archive_on, dropped_attach) = take cut
-    lane.archive_on = archive_on
+pub fn install_cut(mut writer: ObjectWriterState, take cut: PublishedCut) {
+    let PublishedCut(seq, locator: take locator, sid, dropped_attach) = take cut
     writer.accounting.uncovered = 0
     writer.accounting.since_cut = 0
     writer.entries = 0
     writer.locator = take locator
     writer.has_sealed = false
     writer.stream = sid
-    writer.archive_on = archive_on
     if dropped_attach {
         writer.attached = false
     }

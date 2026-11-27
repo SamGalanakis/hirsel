@@ -454,7 +454,7 @@ fn s4_account_key(id: u32) -> Bytes {
     take key
 }
 
-// S4's transfer, as its archived Place registers it: a 65,536 B body budget,
+// S4's transfer, as its Place registers it: a 65,536 B body budget,
 // two reads and two puts on one resident table of 100,000 accounts. Before
 // 2135031b these transfers were red at that budget: rebuilding the touched
 // leaf for the two sorted puts materialized a second 44,040 B List[PageSlot].

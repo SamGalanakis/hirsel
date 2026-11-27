@@ -49,11 +49,10 @@ pub opaque type PublishedCut {
     seq: u64,
     locator: history.HistoryLocator,
     sid: Option[types.HostStreamIdRep],
-    archive_on: u64,
     dropped_attach: bool
 }
 
-fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, retained: history.HistoryRetention, locate_root: history.HistoryLocateRoot, activation: Option[history.HistoryActivation], take candidate_locator: history.HistoryLocator, drop_on_cut: bool, next_archive_on: u64, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, retained: history.HistoryRetention, locate_root: history.HistoryLocateRoot, activation: Option[history.HistoryActivation], take candidate_locator: history.HistoryLocator, drop_on_cut: bool, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
     let old = history.register_head(lane.register)
     // A cut of an attached Place consumes every sealed tail and the live
     // tail into the checkpoint (§12.11.11): a normal cut resets ATTACH to
@@ -87,7 +86,7 @@ fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, reta
                 None => None,
             }
             let seq = history.register_head(lane.register).checkpoint.seq
-            Ok(PublishedCut(seq, locator: take candidate_locator, sid, archive_on: next_archive_on, dropped_attach: drop_on_cut))
+            Ok(PublishedCut(seq, locator: take candidate_locator, sid, dropped_attach: drop_on_cut))
         },
         Ok(_) => Error(Undecided),
         Error(take problem) => Error(take problem),
@@ -111,13 +110,9 @@ pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead,
     Ok((generation, take layout, take refs))
 }
 
-pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead, seq: u64, take candidate: manifest.PageManifest, retained: history.HistoryRetention, take refs: List[pages.HistoryRef], inherited: history.HistoryLocator, check_target: bool, activation: Option[history.HistoryActivation], drop_on_cut: bool, was_archived: bool, next_archive_on: u64, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead, seq: u64, take candidate: manifest.PageManifest, retained: history.HistoryRetention, take refs: List[pages.HistoryRef], inherited: history.HistoryLocator, check_target: bool, activation: Option[history.HistoryActivation], drop_on_cut: bool, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
     let mut page_record = take candidate
     page_record.sweep = lane.sweep
-    page_record.archive_on = next_archive_on
-    if was_archived {
-        let _ = host_stream.history_write_archive_segment(mut lane.client, old, seq, old.pair.epoch, old.authority_kind, mut workspace, now)?
-    }
     let mut candidate_locator = manifest.disk_allocation(scoped fn() -> Result[history.HistoryLocator, types.Failure] {
         history.locator_for_cut(refs)
     })?
@@ -136,5 +131,5 @@ pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead
     }
     let locate_root = history.history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, inherited, mut candidate_locator, mut workspace, now)?
     let installed = history.history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, page_record, mut workspace, now)?
-    publish_cut(mut lane, installed, retained, locate_root, activation, take candidate_locator, drop_on_cut, next_archive_on, mut workspace, now, mut observed, mut completion)
+    publish_cut(mut lane, installed, retained, locate_root, activation, take candidate_locator, drop_on_cut, mut workspace, now, mut observed, mut completion)
 }

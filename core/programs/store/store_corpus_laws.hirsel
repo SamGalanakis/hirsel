@@ -2,7 +2,7 @@
 // Bucket prefix with a canonical logical dump, and verifies that the current
 // build opens both cleanly (walker + verify + exact dump match + post-open
 // write and checkpoint). The Directory store holds the Many index `by_tag` as
-// Tiered (Format 12, §13.10a): its checkpointed root is Cold and the tail commit
+// Tiered (Format 13, §13.10a): its checkpointed root is Cold and the tail commit
 // replays index edits over it on reopen.
 type CorpusSchema {
     items: Table[u64, Bytes],

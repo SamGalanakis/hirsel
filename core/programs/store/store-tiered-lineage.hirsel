@@ -125,7 +125,7 @@ fn note_fork_dependent(mut counts: Map[u32, u64], branch_id: u32) {
     })
 }
 
-pub fn prune_lineage_forks(mut forks: Map[u32, LineageFork], live_heads: List[u32], pins: List[(u32, u64)], anchors: List[(u32, u64)], queued: List[DeferredFree]) {
+pub fn prune_lineage_forks(mut forks: Map[u32, LineageFork], live_heads: List[u32], pins: List[(u32, u64)], queued: List[DeferredFree]) {
     let mut counts: Map[u32, u64] = map.new()
     for (child, _) in forks {
         map.insert(mut counts, child, 0u64)
@@ -134,9 +134,6 @@ pub fn prune_lineage_forks(mut forks: Map[u32, LineageFork], live_heads: List[u3
         note_fork_dependent(mut counts, head)
     }
     for (branch_id, _) in pins {
-        note_fork_dependent(mut counts, branch_id)
-    }
-    for (branch_id, _) in anchors {
         note_fork_dependent(mut counts, branch_id)
     }
     for item in queued {
@@ -188,7 +185,7 @@ fn add_lineage_holder(mut holders: LineageHolders, forks: Map[u32, LineageFork],
     })
 }
 
-pub fn lineage_holders(forks: Map[u32, LineageFork], pins: List[(u32, u64)], anchors: List[(u32, u64)]) -> LineageHolders {
+pub fn lineage_holders(forks: Map[u32, LineageFork], pins: List[(u32, u64)]) -> LineageHolders {
     let mut holders = LineageHolders(watermarks: map.new())
     for (_, fork_row) in forks {
         if !fork_row.adopted {
@@ -196,9 +193,6 @@ pub fn lineage_holders(forks: Map[u32, LineageFork], pins: List[(u32, u64)], anc
         }
     }
     for (branch_id, watermark) in pins {
-        add_lineage_holder(mut holders, forks, branch_id, watermark)
-    }
-    for (branch_id, watermark) in anchors {
         add_lineage_holder(mut holders, forks, branch_id, watermark)
     }
     let mut chains: List[u32] = list.with_capacity(map.len(holders.watermarks))
@@ -459,16 +453,15 @@ pub fn cut_lineage_rows[in installed, in proposed](state: PackDiskState, input: 
         list.push(mut dependents, branch_id)
     }
     queued_branch_ids(pack_lists(state).deferred, mut dependents)?
-    prune_lineage_forks(mut rows.forks, dependents, list.new(), list.new(), queued)
+    prune_lineage_forks(mut rows.forks, dependents, list.new(), queued)
     Ok(take rows)
 }
 
 // T8 steps 1, 2 and 5 against B_new (T7), derived from the pruned fork rows
 // and this cut's pins: `adopt`'s re-keying, then each live replaced-list row
 // and each frame the fold replaced filed as a kill on chain(branch), then the
-// drain's kills (step 4), then the drops. Anchors are empty until the archive
-// is published. `packs` is the cut's base inventory, settled once ahead of
-// retries.
+// drain's kills (step 4), then the drops. `packs` is the cut's base inventory,
+// settled once ahead of retries.
 pub fn settle_lineage_kills[in installed, in proposed](take settled: Lineage, input: CutInput[in installed, in proposed], replacements: List[BranchReplacements], queue: CutQueue, mut packs: DiskIndex[u64, pages.PagePack]) -> Result[Lineage, types.Failure] {
     let mut rows = take settled
     let mut pin_marks: List[(u32, u64)] = list.new()
@@ -477,7 +470,7 @@ pub fn settle_lineage_kills[in installed, in proposed](take settled: Lineage, in
         list.push(mut out, (held.branch, held.watermark))
         Ok(())
     })?
-    let chain_holders = lineage_holders(rows.forks, pin_marks, list.new())
+    let chain_holders = lineage_holders(rows.forks, pin_marks)
     if let CutReplaceMain(_, _, _, _, Some(slot), _) = input.change {
         adopt_lineage_cells(mut rows, chain_holders, mut packs, input.heads[slot].id)?
     }

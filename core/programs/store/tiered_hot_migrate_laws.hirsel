@@ -904,15 +904,9 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if let Error(Tiered(Memory)) = require_tiered_storage(memory_db) {} else {
         fail("L70(c): expected Tiered(Memory) for memory residency")
     }
-    if let Error(Tiered(Authority)) = require_archive_authority(memory_db) {} else {
-        fail("L70(c): expected Tiered(Authority) for memory archive")
-    }
     close(take memory_db)?
     let mut db = open(tasks, store_dir, c, r, hot_options(0)?)?
     let _ = hot_seed(mut db, 300)?
-    if let Error(Tiered(Authority)) = require_archive_authority(db) {} else {
-        fail("L70(c): expected Tiered(Authority) for log archive")
-    }
     run_migration(mut db, tasks, code.describe(l70_rename))?
     hot_rows(mut db, string.from("renamed"), 300)?
     let export_attempt = b"l70-export-lift!"

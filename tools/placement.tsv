@@ -1067,10 +1067,6 @@ read_keyed_roots	store-manifest-wire.hirsel	manifest	manifest	L4
 decode_page_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
 manifest_account	store-manifest-wire.hirsel	manifest	manifest	L4
 require_object_memory_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
-require_unarchived_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
-ArchiveRange	store-manifest-wire.hirsel	manifest	manifest	L4
-encode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
-decode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
 cut_manifest_size	store-manifest-wire.hirsel	manifest	manifest	L4	neutral cut input
 META_LIMIT	store-manifest.hirsel	manifest	types	L1	pull-down manifest -> types (used by limits_valid)
 MANIFEST_FIXED_BYTES	store-manifest.hirsel	manifest	manifest	L4
@@ -1306,7 +1302,6 @@ take_object_journal_with	store-object-writer.hirsel	store	store	-
 return_object_journal	store-object-writer.hirsel	object_writer	object_writer	L9
 object_cut_state	store-object-writer.hirsel	store	store	-
 object_cut_work	store-object-writer.hirsel	store	store	-
-archive	store-object-writer.hirsel	store	store	-
 fresh_snapshot	store-object-writer.hirsel	store	store	-
 object_skip_fence	store-object-writer.hirsel	store	store	-
 PACK_INDEX_KIND	store-pack-index.hirsel	manifest	manifest	L4
@@ -1583,7 +1578,7 @@ read_only_get	store-read.hirsel	store	store	-
 read_only_snapshot	store-read.hirsel	store	store	-
 HistoryRetention	store-reclaim.hirsel	object_writer	history	L7	pull-down object_writer -> history (used by history_checkpoint_packet)
 history_retain	store-reclaim.hirsel	object_writer	object_writer	L9
-HistoryName	store-reclaim.hirsel	object_writer	host_stream	L8	pull-down object_writer -> host_stream (used by history_parse_archive_name)
+HistoryName	host-reclaim.hirsel	object_writer	host_stream	L8	Shared with Bucket reclaim
 history_parse_name	store-reclaim.hirsel	object_writer	object_writer	L9
 ReclaimPass	store-reclaim.hirsel	object_writer	object_writer	L9
 history_dead_key	store-reclaim.hirsel	object_writer	object_writer	L9
@@ -1785,18 +1780,12 @@ weak_publisher	store-sim-levels.hirsel	object_writer	object_writer	L9
 weak_notice_senders	store-sim-levels.hirsel	object_writer	object_writer	L9
 weak_notify_strong	store-sim-levels.hirsel	object_writer	object_writer	L9
 weak_publish	store-sim-levels.hirsel	object_writer	object_writer	L9
-ROLE_ARCHIVE	store-stream-archive.hirsel	host_stream	host_stream	L8
-KIND_ARCHIVE_ROWS	store-stream-archive.hirsel	host_stream	host_stream	L8
-ARCHIVE_ROWS_PER_FRAME	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_sealed_publish	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_sealed_step_attach	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_sealed_tail_epoch	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_sealed_fetch_slice	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_settle_sealed_core	store-stream-archive.hirsel	host_stream	host_stream	L8
-stream_settle_sealed	store-stream-archive.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
-history_write_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
-history_parse_archive_name	store-stream-archive.hirsel	host_stream	host_stream	L8
-history_decode_archive_segment	store-stream-archive.hirsel	host_stream	host_stream	L8
+stream_sealed_publish	host-stream-sealed.hirsel	host_stream	host_stream	L8
+stream_sealed_step_attach	host-stream-sealed.hirsel	host_stream	host_stream	L8
+stream_sealed_tail_epoch	host-stream-sealed.hirsel	host_stream	host_stream	L8
+stream_sealed_fetch_slice	host-stream-sealed.hirsel	host_stream	host_stream	L8
+stream_settle_sealed_core	host-stream-sealed.hirsel	host_stream	host_stream	L8
+stream_settle_sealed	host-stream-settle.hirsel	host_stream	host_stream	L8	L9 ruling: accesses the opaque host_stream settle view
 TailBatch	store-stream-claim.hirsel	host_stream	host_stream	L8
 TailStop	store-stream-claim.hirsel	host_stream	host_stream	L8
 TailBuffers	store-stream-claim.hirsel	host_stream	host_stream	L8
@@ -2505,7 +2494,6 @@ holders_tiered	store-tiered-refusals.hirsel	types	pages	L2	push-up types -> page
 store_has_tiered	store-tiered-refusals.hirsel	store	store	-
 require_memory_collections	store-tiered-refusals.hirsel	types	types	L1
 require_tiered_storage	store-tiered-refusals.hirsel	store	store	-
-require_archive_authority	store-tiered-refusals.hirsel	store	store	-
 ReplayBranch	store-tiered-replay.hirsel	pager	pages	L2
 ReplayTieredAccount	store-tiered-replay.hirsel	pager	pager	L5
 journal_replay_manifest	store-tiered-replay.hirsel	pager	pager	L5
@@ -3094,7 +3082,7 @@ ObjectWorkerOpen	object-writer-state.hirsel	object_writer	object_writer	L9	L9 Ob
 PublishedCut	object-writer-cut.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
 with_object_settle	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
 settle_object_stream	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
-settle_worker_sealed	object-writer-archive.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
+settle_object_sealed	object-writer-settle.hirsel	object_writer	object_writer	L9	L9 Object worker and paused session
 ReaderState	store-read.hirsel	read	read	L11	L11 read implementation
 ReaderInput	store-read.hirsel	read	read	L11	L11 read implementation
 ReadOnlyState	store-read.hirsel	read	read	L11	L11 read implementation

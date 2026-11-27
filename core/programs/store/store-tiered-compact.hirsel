@@ -423,7 +423,7 @@ pub fn settle_queue_moves(mut queue: manifest.CutQueue, moving: Map[u64, TieredQ
 // §13.6 "Tiered-idle cuts" (v2.157, v2.161 D-TI-1): a candidate generation is
 // Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
 // collection descriptor, the candidate queue (installed and added rows) is
-// empty, and there is no anchor (anchors are empty until archival lands).
+// empty.
 pub fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[manifest.DeferredFree]) -> bool {
     !pages.holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
 }

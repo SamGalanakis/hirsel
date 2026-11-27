@@ -151,8 +151,7 @@ pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutIn
         CutReplaceMain(_, _, _, tables, _, _) => tables,
         _ => input.next_table
     }
-    let zero = std.page.unlocated(0)
-    let manifest = PageManifest(generation: generation, fence: input.fence, inline: input.heads[0u64].roots.collections.inline, limits: input.limits, next_stamp: next_stamp, next_branch: input.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
+    let manifest = PageManifest(generation: generation, fence: input.fence, inline: input.heads[0u64].roots.collections.inline, limits: input.limits, next_stamp: next_stamp, next_branch: input.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
     let context = format.DiskContext(store: input.store, role: 1, seq: generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?

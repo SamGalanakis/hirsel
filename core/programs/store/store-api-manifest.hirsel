@@ -1,6 +1,5 @@
 fn validate_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
     failure_result_from_rep(manifest.require_object_memory_manifest(page_record))?
-    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
     validate_directory_graph(d, id, take page_record, false)
 }
 
@@ -10,7 +9,6 @@ fn validate_directory_graph(d: Dir, id: StoreId, take page_record: manifest.Page
 }
 
 fn validate_export_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool) -> Result[manifest.ValidatedPageManifest, Error] waits {
-    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
     let none = manifest.new_page_locations()
     walk_directory_graph(d, id, take page_record, allow_tiered, walk_cold, manifest.SettledPacks(below: 0, locations: view none))
 }
@@ -81,7 +79,6 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
 // the collection map and the pack list, never a Cold page (§13.8). Whether the
 // open can fund them is checked once the holders are attached.
 fn validate_store_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
-    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
     validate_directory_graph(d, id, take page_record, true)
 }
 
@@ -103,7 +100,6 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: manifest.
         return Error(failure_from_rep(format.disk_fault("MANIFEST.tmp", 0, Header)))
     }
     let requested = page_record.account_memory
-    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
     let validated = walk_directory_graph(d, id, take page_record, true, true, settled)?
     let admitted = if validated.manifest.account_tiered != 0 || target.has_tiered {
         int.saturating_add(requested, target.tiered_reserve)
@@ -120,7 +116,6 @@ fn validate_leased_cut(d: Dir, id: StoreId, raw: Bytes, settled: manifest.Settle
     let (_, take page_record) = disk_allocation(scoped fn() -> Result[(StoreId, manifest.PageManifest), Error] {
         disk_read_page_manifest("MANIFEST.tmp", raw)
     })?
-    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
     let _ = walk_directory_graph(d, id, take page_record, true, true, settled)?
     Ok(())
 }

@@ -5,7 +5,7 @@ use crate::package_files::{FileId, open_directory, walk};
 use crate::package_manifest::SourceLocation;
 use bytes::BytesMut;
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -41,15 +41,33 @@ impl PackageStore {
     }
 
     pub(crate) fn read(&self, root: Root) -> io::Result<Entry> {
-        self.reader().read(root, 1)
+        self.read_batch(&[root])
+            .remove(&root)
+            .expect("requested entry")
     }
 
-    pub(crate) fn reader(&self) -> StoreReader<'_> {
-        StoreReader {
-            path: &self.path,
-            directory: None,
-            buffer: BytesMut::new(),
+    /// Independent captures may finish out of order. The resolver consumes their results
+    /// in graph order, including I/O and validation errors.
+    pub(crate) fn read_batch(&self, roots: &[Root]) -> BTreeMap<Root, io::Result<Entry>> {
+        let workers = if roots.len() < 4 {
+            1
+        } else {
+            hirsel_guard::jobs().min(4)
+        };
+        let chunk = roots.len().div_ceil(workers).max(4);
+        if roots.len() <= chunk {
+            return read_entries(&self.path, roots);
         }
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = roots
+                .chunks(chunk)
+                .map(|roots| scope.spawn(|| read_entries(&self.path, roots)))
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("package store reader panicked"))
+                .collect()
+        })
     }
 
     pub(crate) fn install(&self, archive: &PackageArchive) -> io::Result<()> {
@@ -182,67 +200,117 @@ impl PackageStore {
     }
 }
 
-/// One resolution round reads from the same directory, before any missing entries are fetched.
-pub(crate) struct StoreReader<'a> {
-    path: &'a Path,
-    directory: Option<File>,
-    buffer: BytesMut,
+enum StoreFile {
+    Readable(File, usize),
+    Missing,
+    Damaged,
 }
 
-impl StoreReader<'_> {
-    pub(crate) fn read(&mut self, root: Root, remaining: usize) -> io::Result<Entry> {
-        let directory = match &self.directory {
-            Some(directory) => directory,
-            None => match open_directory(self.path) {
-                Ok(file) => self.directory.insert(file),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
-                Err(error) => return Err(error),
-            },
-        };
-        let path = entry_path(root);
-        let shard = path.parent().unwrap();
-        let name = path.file_name().unwrap();
-        let file = match open_shard(directory, shard).and_then(|shard| open_entry(&shard, name)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
-            Err(_) => return Ok(Entry::Damaged),
-        };
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > CONTENT_LIMIT as u64 {
-            return Ok(Entry::Damaged);
+fn open_store_file(path: &Path, directory: &mut Option<File>, root: Root) -> io::Result<StoreFile> {
+    let directory = match directory {
+        Some(file) => file,
+        None => match open_directory(path) {
+            Ok(file) => directory.insert(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(StoreFile::Missing),
+            Err(error) => return Err(error),
+        },
+    };
+    let path = entry_path(root);
+    let file = match open_shard(directory, path.parent().unwrap())
+        .and_then(|shard| open_entry(&shard, path.file_name().unwrap()))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(StoreFile::Missing),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) => {
+            return Err(error);
         }
-        let length = metadata.len() as usize;
-        let needed = length + 1;
-        let buffer = &mut self.buffer;
-        if buffer.capacity() < needed {
-            // Share allocation across this round. Only the current file is faulted in.
-            let batch = needed.saturating_mul(remaining).min(8 << 20);
-            *buffer = BytesMut::with_capacity(needed.max(batch));
+        Err(_) => return Ok(StoreFile::Damaged),
+    };
+    let metadata = file.metadata()?;
+    if metadata.is_file() && metadata.len() <= CONTENT_LIMIT as u64 {
+        Ok(StoreFile::Readable(file, metadata.len() as usize))
+    } else {
+        Ok(StoreFile::Damaged)
+    }
+}
+
+fn read_entries(path: &Path, roots: &[Root]) -> BTreeMap<Root, io::Result<Entry>> {
+    let mut results = BTreeMap::new();
+    let mut directory = None;
+    let mut files = Vec::new();
+    let mut total = 0;
+    for &root in roots {
+        let mut opened = open_store_file(path, &mut directory, root);
+        if opened
+            .as_ref()
+            .is_err_and(|error| matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)))
+            && !files.is_empty()
+        {
+            capture_entries(&mut files, total, &mut results);
+            total = 0;
+            opened = open_store_file(path, &mut directory, root);
         }
-        let spare = &mut buffer.spare_capacity_mut()[..needed];
-        crate::host::prefault_capture(spare);
-        let mut read = 0;
-        while read < needed {
-            match rustix::io::read(&file, &mut spare[read..]) {
-                Ok(([], _)) => break,
-                Ok((filled, _)) => read += filled.len(),
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(_) => return Ok(Entry::Damaged),
+        let result = match opened {
+            Ok(StoreFile::Readable(file, length)) => {
+                if total + length + 1 > 8 << 20 {
+                    capture_entries(&mut files, total, &mut results);
+                    total = 0;
+                }
+                files.push((root, file, length));
+                total += length + 1;
+                continue;
             }
+            Ok(StoreFile::Missing) => Ok(Entry::Missing),
+            Ok(StoreFile::Damaged) => Ok(Entry::Damaged),
+            Err(error) => Err(error),
+        };
+        results.insert(root, result);
+    }
+    capture_entries(&mut files, total, &mut results);
+    results
+}
+
+fn capture_entries(
+    files: &mut Vec<(Root, File, usize)>,
+    total: usize,
+    results: &mut BTreeMap<Root, io::Result<Entry>>,
+) {
+    if files.is_empty() {
+        return;
+    }
+    let mut buffer = BytesMut::with_capacity(total);
+    crate::host::prefault_capture(&mut buffer.spare_capacity_mut()[..total]);
+    for (root, file, length) in files.drain(..) {
+        let tail = buffer.split_off(length + 1);
+        results.insert(root, Ok(capture(file, length, root, buffer)));
+        buffer = tail;
+    }
+}
+
+fn capture(file: File, length: usize, root: Root, mut buffer: BytesMut) -> Entry {
+    let needed = length + 1;
+    let spare = &mut buffer.spare_capacity_mut()[..needed];
+    let mut read = 0;
+    while read < needed {
+        match rustix::io::read(&file, &mut spare[read..]) {
+            Ok(([], _)) => break,
+            Ok((filled, _)) => read += filled.len(),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return Entry::Damaged,
         }
-        if read != length {
-            return Ok(Entry::Damaged);
-        }
-        // SAFETY: read initialized exactly the first length bytes, leaving the EOF probe.
-        unsafe { buffer.set_len(length) };
-        let encoded = buffer.split().freeze();
-        if Root::of(&encoded) != root {
-            return Ok(Entry::Damaged);
-        }
-        match Content::decode_as(&encoded, false) {
-            Ok(content) => Ok(Entry::Present(Library { content, encoded })),
-            Err(_) => Ok(Entry::Damaged),
-        }
+    }
+    if read != length {
+        return Entry::Damaged;
+    }
+    // SAFETY: read initialized exactly the first length bytes, leaving the EOF probe.
+    unsafe { buffer.set_len(length) };
+    let encoded = buffer.freeze();
+    if Root::of(&encoded) != root {
+        return Entry::Damaged;
+    }
+    match Content::decode_as(&encoded, false) {
+        Ok(content) => Entry::Present(Library { content, encoded }),
+        Err(_) => Entry::Damaged,
     }
 }
 

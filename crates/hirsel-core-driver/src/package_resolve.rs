@@ -257,36 +257,51 @@ fn acquire(
             .into_iter()
             .map(|(id, root)| graph.destination(&id, root))
             .collect();
-        let mut reader = store.reader();
-        let mut reached = reached.into_iter();
-        while let Some(node) = reached.next() {
-            let Node::Published(id, root) = node else {
-                continue;
-            };
-            if let Some((_, Some(source))) = graph.selections.get(&id) {
-                declared
-                    .entry(root)
-                    .or_insert_with(|| (id.clone(), source.clone()));
-            }
-            if let Some(library) = libraries.get(&root) {
-                check_identity(&id, root, &library.content.id)?;
-                continue;
-            }
-            if !seen.insert(root) {
-                continue;
-            }
-            let entry = match cached.remove(&root) {
-                Some(library) => Entry::Present(library),
-                None => reader.read(root, reached.len() + 1)?,
-            };
-            match entry {
-                Entry::Present(library) => {
-                    check_identity(&id, root, &library.content.id)?;
-                    libraries.insert(root, library);
-                    opened = true;
+        let reached: Vec<_> = reached.into_iter().collect();
+        for nodes in reached.chunks(32) {
+            let roots: Vec<_> = nodes
+                .iter()
+                .filter_map(|node| match node {
+                    Node::Published(_, root)
+                        if !libraries.contains_key(root)
+                            && !cached.contains_key(root)
+                            && seen.insert(*root) =>
+                    {
+                        Some(*root)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut entries = store.read_batch(&roots);
+            for node in nodes.iter().cloned() {
+                let Node::Published(id, root) = node else {
+                    continue;
+                };
+                if let Some((_, Some(source))) = graph.selections.get(&id) {
+                    declared
+                        .entry(root)
+                        .or_insert_with(|| (id.clone(), source.clone()));
                 }
-                Entry::Missing => pending.push((id, root, "is not in")),
-                Entry::Damaged => pending.push((id, root, "is damaged in")),
+                if let Some(library) = libraries.get(&root) {
+                    check_identity(&id, root, &library.content.id)?;
+                    continue;
+                }
+                let entry = match cached.remove(&root) {
+                    Some(library) => Entry::Present(library),
+                    None => match entries.remove(&root) {
+                        Some(entry) => entry?,
+                        None => continue,
+                    },
+                };
+                match entry {
+                    Entry::Present(library) => {
+                        check_identity(&id, root, &library.content.id)?;
+                        libraries.insert(root, library);
+                        opened = true;
+                    }
+                    Entry::Missing => pending.push((id, root, "is not in")),
+                    Entry::Damaged => pending.push((id, root, "is damaged in")),
+                }
             }
         }
         if frozen {

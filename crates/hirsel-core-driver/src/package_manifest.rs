@@ -57,6 +57,7 @@ struct DependencyTable {
     root: Option<String>,
     url: Option<String>,
     archive: Option<String>,
+    registry: Option<String>,
     git: Option<String>,
     rev: Option<String>,
     #[serde(rename = "ref")]
@@ -103,6 +104,7 @@ struct WorkspacePackage {
 pub(crate) enum SourceLocation {
     Archive(String),
     Url(String),
+    Registry(crate::registry_route::Origin),
     Git(GitSource),
 }
 
@@ -128,6 +130,7 @@ impl std::fmt::Display for SourceLocation {
         match self {
             Self::Archive(path) => write!(f, "archive:{path}"),
             Self::Url(url) => write!(f, "url:{url}"),
+            Self::Registry(origin) => write!(f, "registry:{origin}"),
             Self::Git(git) => {
                 write!(f, "{}", git.commit())?;
                 match &git.dir {
@@ -572,9 +575,16 @@ fn published(
 ) -> Result<(Root, Option<SourceLocation>), String> {
     let root = Root::parse(binding.root.as_deref().unwrap_or(""))
         .ok_or_else(|| format!("{field}.root: expected sha256: and 64 lower-case hex digits"))?;
-    let sources = [&binding.url, &binding.archive, &binding.git];
+    let sources = [
+        &binding.url,
+        &binding.archive,
+        &binding.git,
+        &binding.registry,
+    ];
     if sources.iter().filter(|source| source.is_some()).count() > 1 {
-        return Err(format!("{field}: give at most one of url, archive or git"));
+        return Err(format!(
+            "{field}: give at most one of url, archive, git or registry"
+        ));
     }
     if binding.git.is_none() {
         for (key, value) in [
@@ -586,6 +596,11 @@ fn published(
                 return Err(format!("{field}: {key} needs git"));
             }
         }
+    }
+    if let Some(origin) = binding.registry {
+        let origin = crate::registry_route::Origin::parse(&origin)
+            .map_err(|error| format!("{field}.registry: {error}"))?;
+        return Ok((root, Some(SourceLocation::Registry(origin))));
     }
     let source = match (binding.url, binding.archive, binding.git) {
         (Some(url), _, _) if !url.starts_with("https://") => {
@@ -662,6 +677,7 @@ fn dependencies(
             let located = [
                 &binding.url,
                 &binding.archive,
+                &binding.registry,
                 &binding.git,
                 &binding.rev,
                 &binding.reference,
@@ -800,9 +816,9 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             | (
                 Dependency,
                 "package" | "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref"
-                | "dir" | "workspace" | "authority",
+                | "dir" | "workspace" | "authority" | "registry",
             )
-            | (Selection, "root" | "url" | "archive" | "git" | "rev" | "dir")
+            | (Selection, "root" | "url" | "archive" | "git" | "rev" | "dir" | "registry")
             | (Program, "module" | "function" | "limit" | "grants" | "dirs")
             | (Tests, "sources" | "limit" | "grants" | "dirs")
             | (Run, "limit" | "grants" | "dirs")

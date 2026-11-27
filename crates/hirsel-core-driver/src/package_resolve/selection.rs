@@ -14,11 +14,12 @@ pub(crate) fn select(
         members: &workspace.members,
         selections: &Selections::new(),
     };
-    let mut fetch = |id: &Id, root: Root, source: &SourceLocation| {
-        Ok(store
+    let mut fetch = |request: FetchRequest<'_>| match request {
+        FetchRequest::Bundle(id, root, source) => Ok(store
             .fetch(&workspace.root, id, root, source, fetched)?
             .0
-            .entries)
+            .entries),
+        FetchRequest::Frames(frames) => store.fetch_frames(frames, fetched),
     };
     let (libraries, declared) = acquire(&graph, store, false, cached, &mut fetch)?;
     let mut seen = BTreeSet::new();

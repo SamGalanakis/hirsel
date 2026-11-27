@@ -84,6 +84,7 @@ struct Policy {
     log: Log,
     origin: String,
     signer: Key,
+    namespace: Option<Hash>,
     witnesses: Option<[(String, Key); 2]>,
 }
 
@@ -126,8 +127,16 @@ impl Trust {
             log,
             origin,
             signer,
+            namespace: None,
             witnesses,
         })))
+    }
+
+    pub(crate) fn in_namespace(mut self, digest: Hash) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("new registry trust")
+            .namespace = Some(digest);
+        self
     }
 
     pub(crate) fn accept(
@@ -150,20 +159,17 @@ impl Trust {
         }
         candidate.check_fresh(now)?;
         if let Some(previous) = previous {
-            if !tiles::consistent(
-                previous.size,
-                previous.root,
-                candidate.size,
-                candidate.root,
-                &mut read_tile,
-            ) {
-                return Err(conflict(previous, &candidate));
-            }
+            candidate.extends(previous, &mut read_tile)?;
         }
         Ok(candidate)
     }
 
-    fn authenticate(&self, note: &[u8]) -> Result<Checkpoint, Error> {
+    pub(crate) fn owns(&self, checkpoint: &Checkpoint) -> bool {
+        self.0 == checkpoint.policy
+    }
+
+    /// Checks signatures without requiring a historical envelope to be fresh.
+    pub(crate) fn authenticate(&self, note: &[u8]) -> Result<Checkpoint, Error> {
         if note.len() > NOTE_LIMIT || note.iter().any(|&byte| byte < b' ' && byte != b'\n') {
             return Err(Error::Note);
         }
@@ -285,6 +291,28 @@ impl Checkpoint {
 
     pub(crate) fn witness_times(&self) -> Option<[u64; 2]> {
         self.times
+    }
+
+    pub(crate) fn extends(
+        &self,
+        previous: &Self,
+        mut read_tile: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<(), Error> {
+        if !self.same_trust(previous) {
+            return Err(Error::Trust);
+        }
+        if self.size < previous.size
+            || !tiles::consistent(
+                previous.size,
+                previous.root,
+                self.size,
+                self.root,
+                &mut read_tile,
+            )
+        {
+            return Err(conflict(previous, self));
+        }
+        Ok(())
     }
 
     pub(crate) fn check_fresh(&self, now: u64) -> Result<(), Error> {

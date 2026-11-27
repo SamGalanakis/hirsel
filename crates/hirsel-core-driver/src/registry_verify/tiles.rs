@@ -244,6 +244,20 @@ impl Default for Frontier {
 }
 
 impl Frontier {
+    pub(super) fn levels(&self) -> [Option<Hash>; u64::BITS as usize] {
+        self.levels
+    }
+
+    pub(super) fn restore(size: u64, levels: Vec<Option<Hash>>) -> Option<Self> {
+        let levels: [Option<Hash>; u64::BITS as usize] = levels.try_into().ok()?;
+        for (level, hash) in levels.iter().enumerate() {
+            if hash.is_some() != ((size >> level) & 1 != 0) {
+                return None;
+            }
+        }
+        Some(Self { size, levels })
+    }
+
     pub(super) fn size(&self) -> u64 {
         self.size
     }

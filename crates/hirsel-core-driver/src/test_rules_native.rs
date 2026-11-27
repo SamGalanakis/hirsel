@@ -359,7 +359,7 @@ fn resident_child() {
 
 /// Start the resident laws' server in `directory` under `runtime`, and wait
 /// until it listens.
-fn start_resident(runtime: &Path, directory: &Path, shared: impl Fn(&mut std::process::Command)) -> std::process::Child {
+pub(crate) fn start_resident(runtime: &Path, directory: &Path, shared: impl Fn(&mut std::process::Command)) -> std::process::Child {
     start_resident_serving(runtime, directory, &[], shared)
 }
 
@@ -392,7 +392,7 @@ fn start_resident_serving(
 }
 
 /// Stop the resident laws' server under `runtime`.
-fn stop_resident(runtime: &Path, directory: &Path, mut server: std::process::Child) {
+pub(crate) fn stop_resident(runtime: &Path, directory: &Path, mut server: std::process::Child) {
     let mut stop = process::tape_request_command(&["serve".into(), "--stop".into()], directory);
     stop.env("XDG_RUNTIME_DIR", runtime);
     let (stopped, stdout, stderr) = process::tape_request_output(stop);

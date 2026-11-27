@@ -13,7 +13,7 @@ use crate::package_dir::MANIFEST;
 use crate::package_manifest::{
     Dependency, GitSource, Manifest, Package, Selections, SourceLocation,
 };
-use crate::package_resolve::{Libraries, Members, pack_members};
+use crate::package_resolve::{FetchRequest, Libraries, Members, pack_members};
 use crate::package_store::{PackageStore, decode, fetch_https};
 use crate::package_workspace::{Edge, Member, archive_path, cycles};
 use std::collections::{BTreeMap, VecDeque};
@@ -105,7 +105,28 @@ pub(crate) fn pack_listed(
         budget.outer = format!("{id}: {spelling}");
     }
     let mut fetched = Vec::new();
-    let mut fetch = |binder: &Id, root: Root, source: &SourceLocation| {
+    let mut fetch = |request: FetchRequest<'_>| -> Result<Libraries, Box<dyn std::error::Error>> {
+        let (binder, root, source) = match request {
+            FetchRequest::Bundle(binder, root, source) => (binder, root, source),
+            FetchRequest::Frames(frames) => {
+                let mut libraries = Libraries::new();
+                for frame in frames {
+                    budget
+                        .fetch()
+                        .map_err(|error| error.explain(frame.id, spelling.as_str()))?;
+                    let (library, source) = store
+                        .registry_frame(frame, |n| {
+                            budget.receive(n).map_err(|error| {
+                                std::io::Error::other(error.explain(frame.id, &spelling))
+                            })
+                        })
+                        .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+                    fetched.push(source);
+                    libraries.insert(frame.root, library);
+                }
+                return Ok(libraries);
+            }
+        };
         let source_text = source.to_string();
         let libraries: Libraries = match source {
             SourceLocation::Archive(path) => {
@@ -137,6 +158,7 @@ pub(crate) fn pack_listed(
                 fetched.push(source_text.clone());
                 archive.entries
             }
+            SourceLocation::Registry(_) => unreachable!("registry frames are acquired separately"),
             SourceLocation::Git(nested) => {
                 let acquired = pack_commit(store, session, budget, binder, root, nested)?;
                 fetched.push(source_text.clone());

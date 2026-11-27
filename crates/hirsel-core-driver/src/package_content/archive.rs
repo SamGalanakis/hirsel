@@ -8,6 +8,7 @@ const WINDOW_LIMIT: u64 = 1 << WINDOW_LOG;
 const COMPRESSION_LEVEL: i32 = 3;
 const FRAME_HEADER_MAX: usize = 18;
 const NOT_ONE_FRAME: &str = "not one Zstandard frame";
+const FRAME_LIMIT: usize = 65 << 20;
 
 impl PackageArchive {
     /// Opens the package archive at `path`; `toolchain` admits a toolchain package's own
@@ -121,9 +122,13 @@ impl PackageArchive {
             if len > ARCHIVE_LIMIT.saturating_sub(offset) {
                 return Err(format!("over the limit of {ARCHIVE_LIMIT} bytes"));
             }
-            let (root, encoded) =
-                entry((&mut input).take(len as u64), len, &mut total, &mut decoder)
-                    .map_err(|error| format!("bad compressed entry {index}: {error}"))?;
+            let (root, encoded) = entry(
+                (&mut input).take(len as u64),
+                Some(len),
+                &mut total,
+                &mut decoder,
+            )
+            .map_err(|error| format!("bad compressed entry {index}: {error}"))?;
             offset += len;
             let content = Content::decode_as(&encoded, toolchain && index == 0)?;
             if let Some(head) = head {
@@ -153,6 +158,26 @@ impl PackageArchive {
     }
 }
 
+impl Library {
+    pub(crate) fn read_frame(reader: impl Read, len: Option<u64>) -> Result<(Root, Self), String> {
+        if len.is_some_and(|len| len > FRAME_LIMIT as u64) {
+            return Err("compressed frame exceeds 65 MiB".into());
+        }
+        let mut decoder = DCtx::try_create().ok_or("could not allocate a Zstandard decoder")?;
+        decoder
+            .set_parameter(DParameter::WindowLogMax(WINDOW_LOG))
+            .map_err(zstd_safe::get_error_name)?;
+        let (root, encoded) = entry(
+            reader.take(FRAME_LIMIT as u64 + 1),
+            len.map(|len| len as usize),
+            &mut 0,
+            &mut decoder,
+        )?;
+        let content = Content::decode_as(&encoded, false)?;
+        Ok((root, Self { content, encoded }))
+    }
+}
+
 fn number(input: &mut impl Read, offset: usize) -> Result<usize, String> {
     read_number(offset, usize::MAX as u64, || {
         let mut byte = [0];
@@ -168,13 +193,28 @@ fn number_len(n: usize) -> usize {
 
 fn entry(
     mut frame: impl Read,
-    len: usize,
+    len: Option<usize>,
     total: &mut usize,
     decoder: &mut DCtx<'_>,
 ) -> Result<(Root, Bytes), String> {
     let mut header = [0; FRAME_HEADER_MAX];
-    let header = &mut header[..len.min(FRAME_HEADER_MAX)];
-    frame.read_exact(header).map_err(frame_read_error)?;
+    let header = if let Some(len) = len {
+        let header = &mut header[..len.min(FRAME_HEADER_MAX)];
+        frame.read_exact(header).map_err(frame_read_error)?;
+        header
+    } else {
+        let mut length = 0;
+        while length < header.len() {
+            let read = frame
+                .read(&mut header[length..])
+                .map_err(frame_read_error)?;
+            if read == 0 {
+                break;
+            }
+            length += read;
+        }
+        &mut header[..length]
+    };
     let (size, normalized) = frame_header(header)?;
     *total += size;
     if *total > ARCHIVE_LIMIT {
@@ -182,7 +222,8 @@ fn entry(
     }
 
     let mut encoded = Vec::with_capacity(size);
-    let frame_len = len - header.len() + normalized.len();
+    let frame_len = len.map(|len| len - header.len() + normalized.len());
+    let normalized_len = normalized.len();
     let mut compressed = BufReader::new(io::Cursor::new(normalized).chain(frame));
     let mut consumed = 0;
     let mut chunk = vec![0; DCtx::out_size()];
@@ -217,8 +258,17 @@ fn entry(
                 hash.update(bytes);
                 encoded.extend_from_slice(bytes);
                 if remaining == 0 {
-                    if consumed != frame_len {
-                        return Err(NOT_ONE_FRAME.into());
+                    if let Some(len) = frame_len {
+                        if consumed != len {
+                            return Err(NOT_ONE_FRAME.into());
+                        }
+                    } else {
+                        if consumed + header.len() > FRAME_LIMIT + normalized_len {
+                            return Err("compressed frame exceeds 65 MiB".into());
+                        }
+                        if !compressed.fill_buf().map_err(frame_read_error)?.is_empty() {
+                            return Err(NOT_ONE_FRAME.into());
+                        }
                     }
                     if inflated != size {
                         return Err(format!("inflates to {inflated} bytes, not {size}"));

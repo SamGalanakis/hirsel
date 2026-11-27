@@ -3,7 +3,9 @@ use super::tiles::{self, Frontier, WIDTH};
 use super::{
     Error, Hash, Release, Root, Value, Version, decimal, entry_json, json_digest, valid_auth,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ pub(crate) struct StatusReplay {
     states: BTreeMap<Root, Status>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Disposition {
     #[default]
     Active,
@@ -28,7 +30,7 @@ pub(crate) enum Disposition {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Status {
     last: Option<Hash>,
     pub(crate) disposition: Disposition,
@@ -45,15 +47,46 @@ impl StatusReplay {
         self.states.get(&root)
     }
 
+    pub(crate) fn snapshot(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let levels = self.frontier.levels();
+        let states: Vec<_> = self
+            .states
+            .iter()
+            .map(|(root, state)| (&root.0, state))
+            .collect();
+        serde_json::to_vec(&(levels.as_slice(), states))
+    }
+
+    pub(crate) fn restore(head: Checkpoint, snapshot: &[u8]) -> Result<Self, Error> {
+        type Snapshot = (Vec<Option<Hash>>, Vec<(Hash, Status)>);
+        let (levels, records): Snapshot =
+            serde_json::from_slice(snapshot).map_err(|_| Error::Entry)?;
+        let frontier = Frontier::restore(head.size(), levels).ok_or(Error::MerkleRoot)?;
+        if head.log() != Log::Status || frontier.root() != head.root() {
+            return Err(Error::MerkleRoot);
+        }
+        let mut states = BTreeMap::new();
+        for (root, status) in records {
+            if status.last.is_none() || states.insert(Root(root), status).is_some() {
+                return Err(Error::StatusTransition);
+            }
+        }
+        Ok(Self {
+            head: Some(head),
+            frontier,
+            states,
+        })
+    }
+
     /// Replays every entry through the accepted status checkpoint. The evidence
     /// callback supplies a verified release from this registry and its OSV document.
     /// Retains the prior frontier, statuses and note on every refusal.
-    pub(crate) fn advance<'a>(
+    pub(crate) fn advance<R: Borrow<Release>>(
         &mut self,
         head: &Checkpoint,
         now: u64,
         mut read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
-        mut advisory: impl FnMut(Root, Hash) -> Result<(&'a Release, Vec<u8>), Error>,
+        mut advisory: impl FnMut(Root, Hash) -> Result<(R, Vec<u8>), Error>,
     ) -> Result<(), Error> {
         if head.log() != Log::Status {
             return Err(Error::Origin);
@@ -123,6 +156,7 @@ impl StatusReplay {
         }
         for (root, id, digest) in pending {
             let (release, bytes) = advisory(root, digest)?;
+            let release = release.borrow();
             if release.root() != root
                 || release.authority != head.authority()
                 || Hash::from(Sha256::digest(&bytes)) != digest

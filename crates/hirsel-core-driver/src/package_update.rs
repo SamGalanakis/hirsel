@@ -122,6 +122,7 @@ impl Refresh<'_> {
             let requested = match &source {
                 SourceLocation::Archive(path) => Source::Archive(path.clone()),
                 SourceLocation::Url(url) => Source::Url(url.clone()),
+                SourceLocation::Registry(_) => continue,
                 SourceLocation::Git(git) => {
                     let Some(reference) = &git.reference else {
                         continue;

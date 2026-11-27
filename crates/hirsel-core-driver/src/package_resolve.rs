@@ -2,6 +2,7 @@ use crate::package_content::{Binding, Id, Library, PackageArchive, Root, check_i
 use crate::package_manifest::{Selections, SourceLocation, name::Version};
 use crate::package_store::{Entry, PackageStore};
 use crate::package_workspace::{Edge, Member, Workspace};
+use crate::registry_route::Origin;
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
@@ -12,10 +13,21 @@ type Declarations = BTreeMap<Root, (Id, SourceLocation)>;
 pub(crate) type Members = BTreeMap<Id, Member>;
 type Encoded = BTreeMap<Id, (Root, Library)>;
 
-/// Fetches the bundle a declared source holds for `root`, verified against it and kept
-/// wherever the caller keeps it.
-pub(crate) type Fetch<'a> =
-    dyn FnMut(&Id, Root, &SourceLocation) -> Result<Libraries, Failure> + 'a;
+pub(crate) struct Frame<'a> {
+    pub(crate) id: &'a Id,
+    pub(crate) root: Root,
+    pub(crate) carrier: &'a Id,
+    pub(crate) origin: &'a Origin,
+    /// The nearest logged floor on the path from the carrier, if any.
+    pub(crate) floor: Option<&'a Id>,
+}
+
+pub(crate) enum FetchRequest<'a> {
+    Bundle(&'a Id, Root, &'a SourceLocation),
+    Frames(&'a [Frame<'a>]),
+}
+
+pub(crate) type Fetch<'a> = dyn FnMut(FetchRequest<'_>) -> Result<Libraries, Failure> + 'a;
 
 pub(crate) struct Resolution {
     pub(crate) workspace: Workspace,
@@ -185,42 +197,91 @@ fn source(declared: &Declarations, libraries: &Libraries, root: Root) -> String 
     }
 }
 
-fn carrier(
+fn carrier<'a>(
     root: Root,
-    libraries: &Libraries,
+    graph: &Graph<'_>,
+    libraries: &'a Libraries,
     declared: &Declarations,
     paths: &Paths,
-) -> Option<Root> {
+) -> Option<(Root, Option<&'a Id>)> {
     let mut visited = BTreeSet::from([root]);
-    let mut frontier = BTreeSet::from([root]);
+    let mut frontier = BTreeMap::from([(root, None)]);
     while !frontier.is_empty() {
-        let binders: BTreeSet<_> = libraries
+        let mut binders = BTreeMap::new();
+        for (root, library) in libraries {
+            if !visited.insert(*root) {
+                continue;
+            }
+            if let Some(floor) = library.content.bindings.values().find_map(|(id, binding)| {
+                let (recorded, is_floor) = match binding {
+                    Binding::Toolchain => return None,
+                    Binding::Exact(root) => (*root, false),
+                    Binding::Floor { tested, .. } => (*tested, true),
+                };
+                let Node::Published(_, child) = graph.destination(id, recorded) else {
+                    return None;
+                };
+                frontier
+                    .get(&child)
+                    .map(|floor: &Option<&Id>| floor.or(is_floor.then_some(id)))
+            }) {
+                binders.insert(*root, floor);
+            } else {
+                visited.remove(root);
+            }
+        }
+        if let Some((&nearest, &floor)) = binders
             .iter()
-            .filter(|(root, library)| {
-                !visited.contains(root)
-                    && library
-                        .content
-                        .edges()
-                        .values()
-                        .any(|child| child.is_some_and(|child| frontier.contains(&child)))
-            })
-            .map(|(root, _)| *root)
-            .collect();
-        if let Some(nearest) = binders
-            .iter()
-            .filter(|root| declared.contains_key(root))
-            .min_by(|a, b| {
+            .filter(|(root, _)| declared.contains_key(root))
+            .min_by(|(a, _), (b, _)| {
                 let path =
                     |root| &paths[&Node::Published(libraries[&root].content.id.clone(), root)];
                 path_order(path(**a), path(**b)).then_with(|| a.cmp(b))
             })
         {
-            return Some(*nearest);
+            return Some((nearest, floor));
         }
-        visited.extend(binders.iter().copied());
         frontier = binders;
     }
     None
+}
+
+fn fill_sources<'a>(
+    pending: &[(Id, Root, &str)],
+    cached: &mut Libraries,
+    fetch: &mut Fetch<'_>,
+    mut locate: impl FnMut(Root) -> Option<(&'a Id, Root, &'a SourceLocation, Option<&'a Id>)>,
+) -> Result<(), Failure> {
+    let mut frames = Vec::new();
+    for (id, root, _) in pending {
+        if cached.contains_key(root) {
+            continue;
+        }
+        let Some((binder, carrier, source, floor)) = locate(*root) else {
+            continue;
+        };
+        if let SourceLocation::Registry(origin) = source {
+            frames.push(Frame {
+                id,
+                root: *root,
+                carrier: binder,
+                origin,
+                floor,
+            });
+        } else {
+            if !frames.is_empty() {
+                cached.extend(fetch(FetchRequest::Frames(&frames))?);
+                frames.clear();
+            }
+            if !cached.contains_key(root) {
+                cached.extend(fetch(FetchRequest::Bundle(binder, carrier, source))?);
+            }
+        }
+    }
+    if !frames.is_empty() {
+        cached.extend(fetch(FetchRequest::Frames(&frames))?);
+    }
+    Ok(())
 }
 
 /// Resolution step 3 over a member graph: every published root the members reach, from
@@ -315,13 +376,13 @@ fn acquire(
             break;
         }
 
+        fill_sources(&pending, &mut cached, fetch, |root| {
+            declared
+                .get(&root)
+                .map(|(id, source)| (id, root, source, None))
+        })?;
         let mut acquired = opened;
         for (id, root, _) in &pending {
-            if !cached.contains_key(root)
-                && let Some((binder, source)) = declared.get(root)
-            {
-                cached.extend(fetch(binder, *root, source)?);
-            }
             if let Some(library) = cached.remove(root) {
                 check_identity(id, *root, &library.content.id)?;
                 libraries.insert(*root, library);
@@ -335,17 +396,12 @@ fn acquire(
             break;
         };
         let paths = best_paths(graph, &libraries);
-        let mut found_carrier = false;
-        for (_, root, _) in &pending {
-            if !cached.contains_key(root)
-                && let Some(nearest) = carrier(*root, &libraries, &declared, &paths)
-            {
-                let (binder, source) = &declared[&nearest];
-                cached.extend(fetch(binder, nearest, source)?);
-                found_carrier = true;
-            }
-        }
-        if !found_carrier {
+        fill_sources(&pending, &mut cached, fetch, |root| {
+            let (nearest, floor) = carrier(root, graph, &libraries, &declared, &paths)?;
+            let (binder, source) = &declared[&nearest];
+            Some((binder, nearest, source, floor))
+        })?;
+        if !pending.iter().any(|(_, root, _)| cached.contains_key(root)) {
             return Err(format!(
                 "{missing} {root} is not in the package store and its binding names no source"
             )
@@ -825,10 +881,13 @@ impl Resolution {
         let mut inputs = Vec::new();
         let (libraries, declarations) = {
             let directory = &workspace.root;
-            let mut fetch = |id: &Id, root: Root, source: &SourceLocation| {
-                let (archive, identity) = store.fetch(directory, id, root, source, fetched)?;
-                inputs.extend(identity);
-                Ok(archive.entries)
+            let mut fetch = |request: FetchRequest<'_>| match request {
+                FetchRequest::Bundle(id, root, source) => {
+                    let (archive, identity) = store.fetch(directory, id, root, source, fetched)?;
+                    inputs.extend(identity);
+                    Ok(archive.entries)
+                }
+                FetchRequest::Frames(frames) => store.fetch_frames(frames, fetched),
             };
             acquire(&graph, &store, frozen, cached, &mut fetch)?
         };

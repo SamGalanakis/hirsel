@@ -70,6 +70,8 @@ mod package_update;
 mod package_workspace;
 mod prebuild;
 mod prof_command;
+mod registry_fetch;
+mod registry_route;
 mod registry_verify;
 mod release_manifest;
 mod unsupported_reach;
@@ -132,7 +134,6 @@ pub fn package(name: &str) -> PackageId {
         version: "1".into(),
     }
 }
-
 /// All producers are enumerated before any stage runs. Explicit manifests can select
 /// another source convention; the CLI's directory convention names a module per file.
 #[derive(Clone)]
@@ -163,7 +164,6 @@ impl CheckRequest {
         }
         Ok(())
     }
-
     fn source_std(root: &Path) -> io::Result<PackageManifest> {
         let mut manifest = PackageManifest::directory(root, package("std"), true)?;
         manifest.dependencies.push(package("core"));

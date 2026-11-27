@@ -514,7 +514,7 @@ fn full_and_incremental_status_replay_refuse_omission() {
     let full = Objects(&rows);
     let mut contiguous = StatusReplay::default();
     contiguous
-        .advance(&head, NOW, |path| full.read(path), |_, _| panic!())
+        .advance::<&Release>(&head, NOW, |path| full.read(path), |_, _| panic!())
         .unwrap();
     assert_eq!(
         contiguous.state(root).unwrap().disposition,
@@ -532,7 +532,7 @@ fn full_and_incremental_status_replay_refuse_omission() {
     );
     let mut incremental = StatusReplay::default();
     incremental
-        .advance(
+        .advance::<&Release>(
             &old,
             NOW,
             |path| {
@@ -555,7 +555,7 @@ fn full_and_incremental_status_replay_refuse_omission() {
         ("truncate bundle", Error::Bundle),
         ("edit message", Error::MerkleRoot),
     ] {
-        let result = incremental.advance(
+        let result = incremental.advance::<&Release>(
             &next,
             NOW,
             |path| {
@@ -586,7 +586,7 @@ fn full_and_incremental_status_replay_refuse_omission() {
         assert!(incremental.state(other).is_none());
     }
     incremental
-        .advance(&next, NOW, |path| full.read(path), |_, _| panic!())
+        .advance::<&Release>(&next, NOW, |path| full.read(path), |_, _| panic!())
         .unwrap();
     assert_eq!(incremental, contiguous);
 }
@@ -641,7 +641,7 @@ fn status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories() {
     let mut replay = StatusReplay::default();
     assert_eq!(
         replay
-            .advance(
+            .advance::<&Release>(
                 &status,
                 NOW,
                 |path| Objects(&rows).read(path),
@@ -652,7 +652,7 @@ fn status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories() {
     );
     assert!(replay.checkpoint().is_none());
     replay
-        .advance(
+        .advance::<&Release>(
             &status,
             NOW,
             |path| Objects(&rows).read(path),

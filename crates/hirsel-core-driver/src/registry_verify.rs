@@ -76,6 +76,8 @@ pub(crate) struct ReleaseClaim<'a> {
 #[derive(Debug)]
 pub(crate) struct Release {
     authority: String,
+    checkpoint: Checkpoint,
+    index: u64,
     identity: Id,
     version: Version,
     root: Root,
@@ -100,6 +102,14 @@ impl Release {
         self.facts
     }
 
+    pub(crate) fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
+    }
+
+    pub(crate) fn index(&self) -> u64 {
+        self.index
+    }
+
     pub(crate) fn time(&self) -> u64 {
         self.time
     }
@@ -111,6 +121,24 @@ impl Checkpoint {
         &self,
         index: u64,
         claim: ReleaseClaim<'_>,
+        read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Release, Error> {
+        let release = self.locate_release(index, claim.identity, claim.version, read)?;
+        if claim.root != release.root
+            || claim
+                .facts
+                .is_some_and(|expected| expected != release.facts)
+        {
+            return Err(Error::ReleaseClaim);
+        }
+        Ok(release)
+    }
+
+    pub(crate) fn locate_release(
+        &self,
+        index: u64,
+        expected_id: &str,
+        expected_version: &str,
         mut read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
     ) -> Result<Release, Error> {
         if self.log() != Log::Release {
@@ -152,15 +180,13 @@ impl Checkpoint {
         {
             return Err(Error::Entry);
         }
-        if claim.identity != identity
-            || claim.version != version_text
-            || claim.root != root
-            || claim.facts.is_some_and(|expected| expected != facts)
-        {
+        if expected_id != identity || expected_version != version_text {
             return Err(Error::ReleaseClaim);
         }
         Ok(Release {
             authority: self.authority().into(),
+            checkpoint: self.clone(),
+            index,
             identity: Id {
                 name: name.into(),
                 major: version.major,
@@ -238,7 +264,7 @@ fn canonical_base64(value: &Value, length: usize) -> bool {
         .is_some_and(|bytes| bytes.len() == length)
 }
 
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
     fn digit(byte: u8) -> Option<u32> {
         Some(u32::from(match byte {
             b'A'..=b'Z' => byte - b'A',

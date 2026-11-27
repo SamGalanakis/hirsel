@@ -3,6 +3,7 @@ use crate::package_content::{
 };
 use crate::package_files::{FileId, open_directory, walk};
 use crate::package_manifest::SourceLocation;
+use crate::registry_route::{Origin, Routes};
 use bytes::BytesMut;
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +16,7 @@ use std::sync::{Arc, OnceLock};
 pub(crate) struct PackageStore {
     path: PathBuf,
     pub(crate) transport: Transport,
+    routes: Arc<OnceLock<Result<Routes, String>>>,
     /// The commits this command has fetched (GIT-6).
     pub(crate) session: crate::package_git::Session,
 }
@@ -33,6 +35,7 @@ impl PackageStore {
     pub(crate) fn with_transport(path: Option<PathBuf>, transport: Transport) -> Self {
         Self {
             transport,
+            routes: Arc::new(OnceLock::new()),
             path: path.unwrap_or_else(|| {
                 crate::PackageProduct::default_cache().with_file_name("packages")
             }),
@@ -147,6 +150,76 @@ impl PackageStore {
         Ok(false)
     }
 
+    pub(crate) fn registry(
+        &self,
+        name: &str,
+        pin: Option<&Origin>,
+    ) -> Result<crate::registry_fetch::Client<'_>, String> {
+        let routes = self
+            .routes
+            .get_or_init(Routes::load)
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let route = match pin {
+            Some(origin) => routes.for_pin(name, origin)?,
+            None => routes.for_name(name)?,
+        };
+        Ok(crate::registry_fetch::Client::new(
+            routes,
+            route,
+            &self.transport,
+            &self.path,
+        ))
+    }
+
+    pub(crate) fn registry_frame(
+        &self,
+        frame: &crate::package_resolve::Frame<'_>,
+        receive: impl FnMut(usize) -> io::Result<()>,
+    ) -> Result<(Library, String), Box<dyn std::error::Error + Send + Sync>> {
+        if self.transport.is_offline() {
+            return Err("--frozen does not fetch".into());
+        }
+        let carrier = self.registry(&frame.carrier.name, Some(frame.origin))?;
+        let routed;
+        let client = if let Some(id) = frame.floor {
+            routed = self.registry(&id.name, None)?;
+            &routed
+        } else {
+            &carrier
+        };
+        let library = client.frame(frame.id, frame.root, receive)?;
+        Ok((library, format!("registry:{}", client.route().origin())))
+    }
+
+    pub(crate) fn fetch_frames(
+        &self,
+        frames: &[crate::package_resolve::Frame<'_>],
+        fetched: &mut BTreeSet<String>,
+    ) -> Result<crate::package_resolve::Libraries, Box<dyn std::error::Error>> {
+        let mut libraries = crate::package_resolve::Libraries::new();
+        for batch in frames.chunks(8) {
+            let results = std::thread::scope(|scope| {
+                let jobs: Vec<_> = batch
+                    .iter()
+                    .map(|frame| scope.spawn(|| self.registry_frame(frame, |_| Ok(()))))
+                    .collect();
+                jobs.into_iter()
+                    .map(|job| job.join().expect("registry frame worker"))
+                    .collect::<Vec<_>>()
+            });
+            for (frame, result) in batch.iter().zip(results) {
+                let (library, source) =
+                    result.map_err(|error| -> Box<dyn std::error::Error> { error })?;
+                self.install_entry(frame.root, &library.encoded)
+                    .map_err(|error| format!("{}: admitting {source}: {error}", frame.id))?;
+                libraries.insert(frame.root, library);
+                fetched.insert(source);
+            }
+        }
+        Ok(libraries)
+    }
+
     /// Fetches `source`'s bundle for `id` pinned to `pin`, verifies it and admits every entry.
     /// Each source contacted, nested ones a git snapshot declares included, joins `fetched`.
     pub(crate) fn fetch(
@@ -178,6 +251,19 @@ impl PackageStore {
                     fetch_https(&self.transport, url, &mut |_| Ok(()), &format!("{id}: "))?;
                 archive.verify(id, pin, &spelling)?;
                 (archive, None)
+            }
+            SourceLocation::Registry(origin) => {
+                let client = self.registry(&id.name, Some(origin))?;
+                let library = client
+                    .frame(id, pin, |_| Ok(()))
+                    .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+                (
+                    PackageArchive {
+                        head: pin,
+                        entries: [(pin, library)].into(),
+                    },
+                    None,
+                )
             }
             SourceLocation::Git(git) => {
                 let mut budget = crate::package_git::Budget::new(format!("{id}: {spelling}"));
@@ -371,6 +457,11 @@ impl Transport {
 
     pub(crate) fn online() -> Self {
         Self(Some(Arc::new(OnceLock::new())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_agent(agent: ureq::Agent) -> Self {
+        Self(Some(Arc::new(OnceLock::from(agent))))
     }
 
     pub(crate) fn is_offline(&self) -> bool {

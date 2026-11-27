@@ -275,7 +275,11 @@ pub(crate) fn old_rows(bytes: &[u8]) -> Option<Rows> {
             .iter()
             .map(|edge| self::id(edge))
             .collect::<Option<Vec<_>>>()?;
-        if row.tested.as_ref().is_some_and(Vec::is_empty)
+        if row.source.strip_prefix("registry:").is_some_and(|origin| {
+            crate::registry_route::Origin::parse(origin).is_err()
+                || !crate::package_manifest::name::scoped(&id.name)
+                || root.is_none()
+        }) || row.tested.as_ref().is_some_and(Vec::is_empty)
             || row.version.as_deref().is_some_and(|version| {
                 crate::package_manifest::name::Version::parse(version).is_none()
             })

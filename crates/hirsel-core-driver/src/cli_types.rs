@@ -23,6 +23,7 @@ pub enum NoOption {}
 pub enum Invocation {
     Compiler(Request<CompilerOption>),
     Simple(Request<NoOption>),
+    Lsp(Request<NoOption>),
     Add(Request<AddOption>),
     Update(Request<UpdateOption>),
     Audit(Request<AuditOption>),

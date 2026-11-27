@@ -137,6 +137,7 @@ pub(super) fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Erro
             )?;
             conclude(Outcome::Exit(0))
         }
+        Invocation::Lsp(_) => conclude(Outcome::Exit(crate::lsp::run()?)),
         Invocation::Compiler(request) => run_compiler(request),
     }
 }

@@ -50,6 +50,7 @@ mod fs;
 mod instance_walk;
 mod instances;
 mod law_lock;
+mod lsp;
 mod native;
 pub mod native_debug;
 mod native_entry;
@@ -236,7 +237,6 @@ impl CheckRequest {
         })
     }
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileProduct {
     pub(crate) test_source: bool,

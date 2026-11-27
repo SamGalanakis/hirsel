@@ -85,3 +85,12 @@ pub(crate) fn runtime_directory(name: &str) -> io::Result<PathBuf> {
     check_runtime_directory(&path, uid)?;
     Ok(path)
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "linux/lsp_test.rs"]
+mod lsp_test;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "darwin/lsp_test.rs"]
+mod lsp_test;
+#[cfg(test)]
+pub(crate) use lsp_test::offline_editor;

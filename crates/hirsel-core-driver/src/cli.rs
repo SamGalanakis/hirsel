@@ -81,6 +81,8 @@ commands! {
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HELP, Json, SourceCore, SourceStd, CoreProduct, Entry, Libraries,
             Store, Inputs, Metrics, ProfileFront, Image;
+    "lsp", "lsp", "Serve editor diagnostics over the Language Server Protocol on stdio.";
+        Lsp(NoOption), None: HELP;
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP;
     "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";

@@ -545,13 +545,18 @@ impl ConstCx<'_, '_> {
                     if !visible {
                         return self.fail(n, "constant constructor is not visible");
                     }
-                    let DeclBody::Variant(cs) = &self.p.decls[d.index()].body else {
-                        return self.mismatch(n, "constant constructor has another type");
+                    let decl = &self.p.decls[d.index()];
+                    let case = match &decl.body {
+                        DeclBody::Record(_) if decl.path.0.name == text => None,
+                        DeclBody::Variant(cs) => {
+                            let Some(i) = cs.iter().position(|c| c.name == text) else {
+                                return self.mismatch(n, "constant constructor has another type");
+                            };
+                            Some(i as u32)
+                        }
+                        _ => return self.mismatch(n, "constant constructor has another type"),
                     };
-                    let Some(i) = cs.iter().position(|c| c.name == text) else {
-                        return self.mismatch(n, "constant constructor has another type");
-                    };
-                    (d, Some(i as u32), Some(ty))
+                    (d, case, Some(ty))
                 } else {
                     let (d, case) = match self.p.bare_constructor(from, name) {
                         Ok(found) => found,

@@ -114,7 +114,8 @@ mod build_identity {
     #[test]
     fn test_binaries_take_no_place() {
         use crate::package_content::archive_digest;
-        let image = Path::new("/bin/true").canonicalize().unwrap();
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let image = crate::host::find_program(Path::new("true"), &search).unwrap();
         let profile = format!(
             "[true]\nimage = {:?}\nsha256 = \"{}\"\nargv0 = \"true\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = \"/\" }}\n",
             image.to_str().unwrap(),

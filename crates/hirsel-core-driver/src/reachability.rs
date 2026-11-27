@@ -584,7 +584,7 @@ impl CheckProduct {
             // A complete walk reached every callee as an instance; one that
             // stopped reaches the rest through the body's module.
             if stopped {
-                let ir = product.ir()?;
+                let ir = &*product.transient_ir()?;
                 edges.extend(
                     hirsel_core_materialize::external_functions(ir, function)
                         .into_iter()

@@ -162,8 +162,6 @@ impl ProgramIndex {
 pub(crate) struct Publication {
     /// The key shape every row's key was derived under.
     pub shape: ContentHash,
-    /// Body records framed when their body was checked.
-    pub bodies: Vec<(ContentHash, Vec<u8>)>,
     pub rows: BTreeMap<DefPath, Row>,
     /// Each body checked by this request: its [`key_pointer`] and its record.
     pub keyed: Vec<(ContentHash, ContentHash)>,
@@ -174,18 +172,42 @@ impl Publication {
     pub fn new() -> Self {
         Self {
             shape: ContentHash::default(),
-            bodies: vec![],
             rows: BTreeMap::new(),
             keyed: vec![],
             files: vec![],
         }
     }
+    /// Publish a freshly checked body as soon as it is checked: write its
+    /// record, drop the module it held, and enter its row, and its key
+    /// pointer when it is found by its key. The request then holds encoded
+    /// bodies, never every checked module at once.
+    pub fn body(
+        &mut self,
+        store: &Store,
+        product: &mut crate::body::DefinitionProduct,
+        key: ContentHash,
+        pointer: Option<ContentHash>,
+    ) -> io::Result<()> {
+        product.publish_into(store)?;
+        if let Some(pointer) = pointer {
+            self.keyed.push((pointer, product.record));
+        }
+        let row = Row {
+            key,
+            body: product.record,
+        };
+        self.rows.insert(product.definition.clone(), row);
+        Ok(())
+    }
     /// Write what the prior publication does not hold, then rename the selection.
     /// Returns the root node's address, a deterministic function of this
     /// request's rows and files alone.
-    pub fn publish(mut self, store: &Store, prior: &ProgramIndex) -> io::Result<ContentHash> {
+    pub fn publish(self, store: &Store, prior: &ProgramIndex) -> io::Result<ContentHash> {
         hirsel_core_front::cost_scope!("non-check", "program index publication");
-        let mut writes: Vec<(ContentHash, Vec<u8>)> = std::mem::take(&mut self.bodies);
+        // Body records are already written, each as its body was checked
+        // (`DefinitionProduct::publish_into`). A recheck after a damaged read
+        // yields the same address and replaces the damaged bytes.
+        let mut writes: Vec<(ContentHash, Vec<u8>)> = Vec::new();
         let mut files = Vec::with_capacity(self.files.len());
         for record in &self.files {
             let (hash, bytes) = Store::frame(&encode(record)?);
@@ -205,8 +227,6 @@ impl Publication {
             files,
             children,
         })?);
-        // Rechecked bodies are always written: a recheck after a damaged read
-        // yields the same address, and the damaged bytes must be replaced.
         let changed = prior.root != Some(root);
         if changed {
             writes.push((root, bytes));

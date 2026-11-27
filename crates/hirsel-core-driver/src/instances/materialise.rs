@@ -79,8 +79,11 @@ pub(super) fn materialise(
             hirsel_core_materialize::materialize_glue(key, arguments, target).map_err(input)?
         }
         Some(product) => {
+            // Decoded for this materialization only: holding every reached
+            // body's module would add the whole program's IR to reach.
+            let module = product.transient_ir().map_err(|e| input(e.to_string()))?;
             let own = Published {
-                module: product.ir().map_err(|e| input(e.to_string()))?,
+                module: &module,
                 function: product.check.function.unwrap(),
                 template: product.check.template.as_ref(),
             };

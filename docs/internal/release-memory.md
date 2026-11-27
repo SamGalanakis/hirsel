@@ -92,7 +92,11 @@ decoded and joined (`join_modules`) before the first partition is lowered.
 4. **Bound the publication.** Account *R* per request, and for many-test requests assemble from
    the stored recipe root (`Publication::open`) instead of holding every publication. Today
    `open` decodes all bodies eagerly and gives no memo hits, so it needs slice 2 first.
-5. **Lower the checker's peak.** The checker's committed high-water (about 1.85 GB for
-   platform) is then the data-limit peak. 3172's profile puts 227 MB in frontend definition
-   framing and 747 MB under `check_lower`. Free each module's lowering inputs once its bodies are
-   encoded, so the checker's peak is bounded by its largest module plus the encoded package.
+5. **Lower the checker's peak** (landed). Each checked body's record is written to the store as
+   soon as the body is checked, and the product drops its module, so a later read decodes it from
+   the record. Reach and materialization decode each body for one use and do not keep it. Before,
+   every checked module stayed alive through publication and reach, and the framed records were
+   buffered until the index was published. For platform's `test_local_creates_to_max_places`,
+   the committed memory at the end of check fell from 1.18 GB to 0.33 GB, and at hand-off from
+   1.77 GB to 0.85 GB. The whole link-only run now passes under the data limit: peak 1.51 GiB
+   committed, 1.25 GiB resident.

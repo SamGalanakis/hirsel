@@ -939,7 +939,7 @@ impl Driver {
             if layer.wanted() && declarations_accepted && !reachable_only {
                 layer_record = p.declared().map(|d| encode(&d)).transpose()?;
             }
-            let mut fresh: Vec<(DefPath, ContentHash, Option<ContentHash>)> = Vec::new();
+            let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
             // A duplicate definition is a refusal of the declarations.
             let duplicated: BTreeSet<&DefPath> = if declarations_accepted {
                 BTreeSet::new()
@@ -1042,7 +1042,7 @@ impl Driver {
                         .collect();
                     let anchors = keys.capture_anchors(&check, &incomplete);
                     result.rechecked.push(fd.path.clone());
-                    let product = DefinitionProduct::fresh(
+                    let mut product = DefinitionProduct::fresh(
                         fd.path.clone(),
                         check,
                         emitter.module,
@@ -1050,7 +1050,13 @@ impl Driver {
                         anchors,
                         incomplete,
                     );
-                    checked = Some(key_hash);
+                    if duplicated.contains(&fd.path) {
+                        checked = Some(key_hash);
+                    } else {
+                        let pointer = pointer
+                            .map_or_else(|| check_index::key_pointer(&fd.path, key_hash), Ok)?;
+                        publication.body(&store, &mut product, key_hash, Some(pointer))?;
+                    }
                     Arc::new(product)
                 };
                 for r in &product.check.refusals {
@@ -1076,18 +1082,19 @@ impl Driver {
                     .insert(fd.path.clone(), product)
                     .is_some()
                 {
-                    fresh.retain(|(path, _, _)| *path != fd.path);
+                    fresh.retain(|(path, _)| *path != fd.path);
                 }
-                // Framed below, as publication work, once checking is done.
+                // The copies of a duplicate definition are published below,
+                // once the last copy is known.
                 if let Some(key_hash) = checked {
-                    fresh.push((fd.path.clone(), key_hash, pointer));
+                    fresh.push((fd.path.clone(), key_hash));
                 }
             }
             meter.finish("check/lower");
             if MEASURE {
                 meter.finish_front();
             }
-            for (path, key_hash, pointer) in fresh {
+            for (path, key_hash) in fresh {
                 let product = result
                     .definitions
                     .get_mut(&path)
@@ -1097,25 +1104,9 @@ impl Driver {
                             "internal error: the checked body `{path}` is shared before its record is framed"
                         ))
                     })?;
-                let bytes = product.frame()?;
-                let record = product.record;
-                publication.bodies.push((record, bytes));
                 // The copies of a duplicate definition share a key; none is
                 // found by it.
-                if !duplicated.contains(&path) {
-                    let pointer = match pointer {
-                        Some(pointer) => pointer,
-                        None => check_index::key_pointer(&path, key_hash)?,
-                    };
-                    publication.keyed.push((pointer, record));
-                }
-                publication.rows.insert(
-                    path,
-                    check_index::Row {
-                        key: key_hash,
-                        body: record,
-                    },
-                );
+                publication.body(&store, product, key_hash, None)?;
             }
             meter.finish("publish/body records");
             let diagnostics = result.flow_refusals(|definition, site| {

@@ -75,10 +75,23 @@ impl DefinitionProduct {
             record: ContentHash::default(),
         }
     }
+    /// Frame this fresh product's body record, write it to `store`, and
+    /// drop the module it held: later reads decode it from the record, so
+    /// checking a package never holds every checked body's module at once.
+    pub(crate) fn publish_into(&mut self, store: &Store) -> io::Result<()> {
+        let bytes = self.frame()?;
+        store.write_framed(self.record, &bytes)?;
+        self.ir = std::sync::OnceLock::new();
+        self.ir_source = Some(IrSource {
+            store: store.clone(),
+            reader: None,
+        });
+        Ok(())
+    }
     /// The body record (`DiskCheck`): its head, then the serialization of
     /// the module the emitter has, encoded once into the envelope. The
     /// module part's hash is `ir_hash`.
-    pub(crate) fn frame(&mut self) -> io::Result<Vec<u8>> {
+    fn frame(&mut self) -> io::Result<Vec<u8>> {
         let head = encode(&DiskCheckRef::of(self)?)?;
         let ir = self.ir.get().expect("a fresh product holds its IR");
         thread_local! {
@@ -147,6 +160,18 @@ impl DefinitionProduct {
         if let Some(ir) = self.ir.get() {
             return Ok(ir);
         }
+        let ir = self.read_ir()?;
+        Ok(self.ir.get_or_init(|| ir))
+    }
+    /// The body's module, read without keeping it: a walk that visits every
+    /// reached body (reach, materialization) holds one decoding at a time.
+    pub(crate) fn transient_ir(&self) -> io::Result<std::borrow::Cow<'_, Module>> {
+        match self.ir.get() {
+            Some(ir) => Ok(std::borrow::Cow::Borrowed(ir)),
+            None => self.read_ir().map(std::borrow::Cow::Owned),
+        }
+    }
+    fn read_ir(&self) -> io::Result<Module> {
         let source = self
             .ir_source
             .as_ref()
@@ -171,7 +196,7 @@ impl DefinitionProduct {
                 self.definition
             )));
         };
-        Ok(self.ir.get_or_init(|| ir))
+        Ok(ir)
     }
     /// The hash of `ir`'s serialization, as its record's module part.
     pub fn ir_hash(&self) -> ContentHash {

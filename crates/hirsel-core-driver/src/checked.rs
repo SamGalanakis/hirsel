@@ -1,6 +1,6 @@
 use crate::{
-    CheckProduct, CheckRequest, ContentHash, CorpusManifest, Driver, Meter, reachability,
-    request_record,
+    CheckProduct, CheckRequest, ContentHash, CorpusManifest, Driver, Meter, ModuleInput, Site,
+    reachability, request_record,
 };
 use hirsel_core_ids::DefPath;
 use std::io;
@@ -81,7 +81,7 @@ impl Driver {
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.check_inner::<false>(request, meter, None, false, exports)?
+            self.check_inner::<false>(request, meter, None, false, exports, None)?
                 .product()
         })
     }
@@ -95,11 +95,11 @@ impl Driver {
     ) -> io::Result<Checked> {
         if meter.enabled() {
             hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<true>(request, meter, record, false, &[])
+                self.check_inner::<true>(request, meter, record, false, &[], None)
             })
         } else {
             hirsel_core_ids::published::catch_io(|| {
-                self.check_inner::<false>(request, meter, record, false, &[])
+                self.check_inner::<false>(request, meter, record, false, &[], None)
             })
         }
     }
@@ -108,8 +108,27 @@ impl Driver {
         request: CheckRequest,
     ) -> io::Result<Arc<CheckProduct>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.check_inner::<false>(request, &mut Meter::new(false), None, true, &[])?
+            self.check_inner::<false>(request, &mut Meter::new(false), None, true, &[], None)?
                 .product()
+        })
+    }
+
+    pub(crate) fn check_for_editor(
+        &mut self,
+        request: CheckRequest,
+        cache: &mut crate::lsp::cache::Cache,
+        editor: &mut crate::lsp::cache::Check,
+    ) -> io::Result<Arc<CheckProduct>> {
+        hirsel_core_ids::published::catch_io(|| {
+            self.check_inner::<false>(
+                request,
+                &mut Meter::new(false),
+                None,
+                true,
+                &[],
+                Some((cache, editor)),
+            )?
+            .product()
         })
     }
 }
@@ -136,4 +155,128 @@ pub(super) fn finish_authority(
         result.authority_refusal = Some(error.to_string());
     }
     Ok(result)
+}
+
+/// Publish codec failures through the same declaration/arguments/operation/member path,
+/// retaining the underlying type declaration that made a field lack `codec`.
+pub(super) fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
+    let context = |site: &Site| {
+        let module = modules.iter().find(|m| Some(m.source) == site.source)?;
+        hirsel_core_syntax::codec_context(&module.syntax, site.item as usize, site.span)
+    };
+    let generated = |site: &Site| {
+        modules
+            .iter()
+            .find(|m| Some(m.source) == site.source)
+            .and_then(|m| hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize))
+            .is_some()
+    };
+    let own: std::collections::HashSet<_> = result
+        .diagnostics
+        .iter()
+        .filter(|r| !generated(&r.primary))
+        .map(|r| (r.primary.source, r.primary.item))
+        .collect();
+    let project = |site: Site| {
+        if generated(&site) {
+            context(&site).map_or(site, |c| Site {
+                item: c.item as u32,
+                span: c.primary,
+                ..site
+            })
+        } else {
+            site
+        }
+    };
+    let apply = |primary: &mut Site, ctx: &hirsel_core_syntax::DeriveContext| {
+        primary.item = ctx.item as u32;
+        primary.span = ctx.primary;
+        let at = |span| Site { span, ..*primary };
+        let owner = |span| Site {
+            item: ctx.owner as u32,
+            span,
+            ..*primary
+        };
+        let mut path = vec![owner(ctx.declaration)];
+        path.extend(ctx.arguments.iter().map(|&(item, span)| Site {
+            item: item as u32,
+            span,
+            ..*primary
+        }));
+        path.push(owner(ctx.operation));
+        path.extend(ctx.path.iter().copied().map(at));
+        path
+    };
+    let mut seen = std::collections::HashSet::new();
+    result.diagnostics.retain_mut(|r| {
+        let is_generated = generated(&r.primary);
+        if !is_generated
+            && !(r.rule == "OWN-4"
+                && !r.causal.is_empty()
+                && r.required.as_deref().is_some_and(|b| b.contains("codec")))
+        {
+            return true;
+        }
+        let Some(ctx) = context(&r.primary) else {
+            return true;
+        };
+        if is_generated && own.contains(&(r.primary.source, ctx.owner as u32)) {
+            return false;
+        }
+        let path = apply(&mut r.primary, &ctx);
+        let mut causal: Vec<_> = path
+            .into_iter()
+            .map(|site| hirsel_core_resolve::Cause {
+                site,
+                role: hirsel_core_resolve::CausalRole::DerivedHere,
+            })
+            .collect();
+        for mut cause in std::mem::take(&mut r.causal) {
+            cause.site = project(cause.site);
+            if !causal.iter().any(|c| c.site == cause.site) {
+                causal.push(cause);
+            }
+        }
+        r.causal = causal;
+        r.detail = None;
+        r.unresolved = None;
+        let keep = seen.insert((
+            r.rule.clone(),
+            r.primary.source,
+            r.primary.item,
+            r.primary.span,
+            r.message.clone(),
+        ));
+        if is_generated {
+            r.message = format!("{}: {}", ctx.description, r.message);
+        }
+        keep
+    });
+    let mut seen = std::collections::HashSet::new();
+    result.incomplete.retain_mut(|g| {
+        if !generated(&g.primary) {
+            return true;
+        }
+        let Some(ctx) = context(&g.primary) else {
+            return true;
+        };
+        if own.contains(&(g.primary.source, ctx.owner as u32)) {
+            return false;
+        }
+        let mut path = apply(&mut g.primary, &ctx);
+        for cause in g.causal.iter().copied().map(project) {
+            if !path.contains(&cause) {
+                path.push(cause);
+            }
+        }
+        g.causal = path;
+        let keep = seen.insert((
+            g.primary.source,
+            g.primary.item,
+            g.primary.span,
+            g.message.clone(),
+        ));
+        g.message = format!("{}: {}", ctx.description, g.message);
+        keep
+    });
 }

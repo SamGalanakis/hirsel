@@ -1,3 +1,6 @@
+#[path = "image_navigation.rs"]
+mod image_navigation;
+
 use super::documents::file_uri;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -15,6 +18,269 @@ const APP: &str = concat!(
 const LIB_GOOD: &str = "pub fn value() -> u64 { 42u64 }";
 const LIB_BAD: &str = "pub fn value() -> bool { true }";
 const PIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn stdio_editor_queries() {
+    let driver = driver();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace with spaces");
+    let app = workspace.join("app/main.hirsel");
+    let lib = workspace.join("lib/main.hirsel");
+    let cache = root.join("cache");
+    let archive = workspace.join("app/archive.hpkg");
+    let archive_source = "/// From the verified archive.\npub fn value() -> u64 { 17u64 }\n";
+    let pin = package_archive(&root, &archive, archive_source);
+    let document = concat!(
+        "pub fn main() -> Result[(), Exit] { Ok(()) }\r\n",
+        "type Point { x: u64, y: u64 }\r\n",
+        "fn shadow() -> u64 { let _ = { let x = false; x }; { let x = dep.value(); x } }\r\n",
+        "fn from_archive() -> u64 { published.value() }\r\n",
+        "fn unresolved() -> u64 { dep.value(true) }\r\n",
+        "fn project(point: Point) -> u64 { point.x }\r\n",
+        "fn refused_shadow(x: u64) -> u64 { let x = 1u64; x }\r\n",
+        "fn refused() -> Missing {}",
+    );
+    write(
+        &workspace.join("hirsel.toml"),
+        "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+    );
+    write(
+        &workspace.join("app/hirsel.toml"),
+        &format!(
+            concat!(
+                "{}\n[dependencies]\ndep = {{ package = \"fixture.test/lib\", major = 1, path = \"../lib\" }}\n",
+                "published = {{ package = \"fixture.test/archive\", major = 1, root = \"{}\", archive = \"archive.hpkg\" }}\n",
+            ),
+            manifest("local/app", "main"),
+            pin,
+        ),
+    );
+    write(
+        &workspace.join("lib/hirsel.toml"),
+        &source_manifest("fixture.test/lib", "main", "lib"),
+    );
+    write(&app, document);
+    write(&lib, LIB_GOOD);
+    let package_store = cache.join("hirsel/packages");
+    cli(
+        &driver,
+        &root,
+        &workspace,
+        &["lock", "--package-store", package_store.to_str().unwrap()],
+        0,
+    );
+    let base = capture(&workspace);
+    fs::create_dir_all(&cache).unwrap();
+    let cache_base = capture(&cache);
+    let mut client = Client::start(&driver, &root, &cache);
+    client.request(
+        1,
+        "initialize",
+        json!({
+            "rootUri": file_uri(&workspace),
+            "capabilities": {"textDocument": {"definition": {"linkSupport": true}}}
+        }),
+    );
+    let initialized = client.response(1);
+    assert_eq!(initialized["result"]["capabilities"]["hoverProvider"], true);
+    client.open(&app, document);
+    let diagnostics = client.diagnostics(&app, Some(1));
+    assert!(has_rule(&diagnostics, "LANG-7"), "{diagnostics}");
+    let query = |path: &Path, line: usize, character: usize| {
+        json!({
+            "textDocument": {"uri": file_uri(path)},
+            "position": {"line": line, "character": character}
+        })
+    };
+    let shadow = document.lines().nth(2).unwrap();
+    let local = query(&app, 2, shadow.rfind('x').unwrap());
+    client.request(2, "textDocument/hover", local.clone());
+    let hover = client.response(2);
+    assert!(
+        hover["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("u64"),
+        "{hover}"
+    );
+    client.request(3, "textDocument/definition", local);
+    let definition = client.response(3);
+    assert_eq!(definition["result"][0]["targetUri"], file_uri(&app));
+    assert_eq!(
+        definition["result"][0]["targetSelectionRange"]["start"],
+        json!({"line": 2, "character": shadow.rfind("x =").unwrap()}),
+    );
+    let library =
+        format!("/// Written in the editor.\n{LIB_GOOD}\npub fn conditional(out: Stdout) {{}}");
+    client.open(&lib, &library);
+    assert_eq!(client.diagnostics(&lib, Some(1)), json!([]));
+    let imported = query(&app, 2, shadow.find("value").unwrap());
+    client.request(4, "textDocument/definition", imported.clone());
+    let definition = client.response(4);
+    assert_eq!(definition["result"][0]["targetUri"], file_uri(&lib));
+    assert_eq!(
+        definition["result"][0]["targetSelectionRange"]["start"]["line"],
+        1
+    );
+    client.request(5, "textDocument/hover", imported);
+    let hover = client.response(5);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("fn value() -> u64"), "{value}");
+    assert!(value.contains("Written in the editor."), "{value}");
+    assert!(value.contains("Package verdict · conditional"), "{value}");
+
+    let archived_call = document.lines().nth(3).unwrap().find("value").unwrap();
+    client.request(11, "textDocument/definition", query(&app, 3, archived_call));
+    let definition = client.response(11);
+    let target =
+        super::documents::file_path(definition["result"][0]["targetUri"].as_str().unwrap())
+            .unwrap();
+    assert_ne!(target, lib);
+    assert!(!target.starts_with(&workspace));
+    assert_eq!(target.file_name().unwrap(), "main.hirsel");
+    assert_eq!(fs::read_to_string(&target).unwrap(), archive_source);
+    assert!(target.metadata().unwrap().permissions().readonly());
+    assert_eq!(
+        definition["result"][0]["targetSelectionRange"]["start"]["line"],
+        1
+    );
+
+    let bad_call = document.lines().nth(4).unwrap().find("value").unwrap();
+    client.request(12, "textDocument/hover", query(&app, 4, bad_call));
+    let hover = client.response(12);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("Reached · unknown"), "{value}");
+    assert!(value.contains("Package verdict · unknown"), "{value}");
+    assert!(!value.contains("pure"), "{value}");
+
+    let field = document.lines().nth(5).unwrap().rfind('x').unwrap();
+    client.request(14, "textDocument/definition", query(&app, 5, field));
+    let definition = client.response(14);
+    assert_eq!(definition["result"][0]["targetUri"], file_uri(&app));
+    assert_eq!(
+        definition["result"][0]["targetSelectionRange"]["start"],
+        json!({"line": 1, "character": 13}),
+    );
+    client.open(&target, archive_source);
+    client.request(15, "textDocument/hover", query(&target, 1, 7));
+    let archived_hover = client.response(15);
+    assert!(
+        archived_hover["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("From the verified archive."),
+        "{archived_hover}"
+    );
+
+    let params = json!({"textDocument": {"uri": file_uri(&app)}});
+    client.request(6, "textDocument/documentSymbol", params.clone());
+    let outline = client.response(6);
+    let point = &outline["result"][1];
+    assert_eq!(point["name"], "Point");
+    assert_eq!(point["children"][0]["name"], "x");
+    assert_eq!(point["children"][1]["name"], "y");
+
+    let expected_file = root.join("format.hirsel");
+    write(&expected_file, document);
+    cli(&driver, &root, &expected_file, &["fmt"], 0);
+    let canonical = fs::read_to_string(&expected_file).unwrap();
+    assert_ne!(canonical, document);
+    client.request(7, "textDocument/formatting", params.clone());
+    let formatted = client.response(7);
+    assert_eq!(formatted["result"][0]["newText"], canonical);
+    assert_eq!(
+        formatted["result"][0]["range"]["end"],
+        json!({"line": 7, "character": document.lines().last().unwrap().len()}),
+    );
+    client.change(&app, 2, json!([{"text": canonical}]));
+    client.request(8, "textDocument/formatting", params.clone());
+    assert_eq!(client.response(8)["result"], json!([]));
+    client.change(&app, 3, json!([{"text": "fn malformed( "}]));
+    client.request(9, "textDocument/formatting", params.clone());
+    assert_eq!(client.response(9)["result"], json!([]));
+    let nested = "(".repeat(hirsel_core_syntax::PARSER_NESTING_LIMIT + 1);
+    client.change(
+        &app,
+        4,
+        json!([{"text": format!("fn refuse() {{ {nested}")}]),
+    );
+    client.request(13, "textDocument/formatting", params);
+    assert_eq!(client.response(13)["result"], json!([]));
+    client.request(10, "shutdown", Value::Null);
+    assert_eq!(client.response(10)["result"], Value::Null);
+    client.notify("exit", Value::Null);
+    client.finish();
+    assert_eq!(capture(&workspace), base);
+    assert_eq!(capture(&cache), cache_base);
+}
+
+#[test]
+fn revision_cache_rechecks_owners_and_rebinds_sites() {
+    use super::documents::{Document, Encoding};
+    use super::workspace::{EditorInputs, EditorSession};
+
+    let driver = driver();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let path = root.join("main.hirsel");
+    let original = concat!(
+        "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+        "fn seed() -> u64 { 1u64 }\n",
+        "fn dependent() { let x = seed(); let _ = x; }\n",
+        "fn independent() -> bool { false }\n",
+    );
+    write(&root.join("hirsel.toml"), &manifest("local/app", "main"));
+    write(&path, original);
+    cli(&driver, &root, &root, &["lock"], 0);
+    let mut session = EditorSession::default();
+    let mut revision = 0;
+    let mut check = |text: &str| {
+        revision += 1;
+        let inputs = EditorInputs {
+            generation: revision,
+            folders: None,
+            overlay: BTreeMap::from([(
+                path.clone(),
+                Document::open(file_uri(&path), revision as i64, text.to_owned()),
+            )]),
+        };
+        session.check(inputs, || false)
+    };
+    let open = check(original);
+    assert!(
+        open.diagnostics.is_empty(),
+        "the pinned workspace must check"
+    );
+    assert!(open.stats.body_checks >= 4, "{:?}", open.stats);
+    assert_eq!(open.stats.parse_hits, 0);
+
+    let unchanged = check(original);
+    assert_eq!(unchanged.stats.parse_misses, 0, "{:?}", unchanged.stats);
+    assert_eq!(unchanged.stats.body_checks, 0, "{:?}", unchanged.stats);
+
+    let body = original.replace("1u64", "2u64");
+    let warm = check(&body);
+    assert_eq!(warm.stats.parse_misses, 1, "{:?}", warm.stats);
+    assert_eq!(warm.stats.body_checks, 1, "{:?}", warm.stats);
+
+    let interface = body.replace("fn seed() -> u64 { 2u64 }", "fn seed() -> bool { true }");
+    let changed = check(&interface);
+    assert_eq!(changed.stats.body_checks, 2, "{:?}", changed.stats);
+    assert!(changed.diagnostics.is_empty(), "signature edit must check");
+
+    let moved = format!("// Inserted before the first item.\n\n{interface}");
+    let moved = check(&moved);
+    assert_eq!(moved.stats.body_checks, 0, "{:?}", moved.stats);
+    let position = serde_json::from_value(json!({"line": 4, "character": 25})).unwrap();
+    let target = moved
+        .query(&path, position, true, true, Encoding::Utf16)
+        .unwrap();
+    assert_eq!(
+        target[0]["targetSelectionRange"]["start"],
+        json!({"line": 3, "character": 3})
+    );
+}
 
 #[test]
 fn stdio_live_diagnostics_contract() {
@@ -248,9 +514,40 @@ fn driver() -> PathBuf {
 }
 
 fn manifest(name: &str, module: &str) -> String {
+    source_manifest(name, module, module)
+}
+
+fn source_manifest(name: &str, file: &str, module: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"{module}.hirsel\" = \"{module}\"\n"
+        "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"{file}.hirsel\" = \"{module}\"\n"
     )
+}
+
+fn package_archive(root: &Path, archive: &Path, source: &str) -> crate::package_content::Root {
+    use crate::package_content::{Library, PackageArchive};
+    use crate::package_workspace::Workspace;
+
+    let directory = root.join("archive-source");
+    write(&directory.join("main.hirsel"), source);
+    write(
+        &directory.join("hirsel.toml"),
+        &source_manifest("fixture.test/archive", "main", "archive"),
+    );
+    let workspace = Workspace::discover_for(&directory, false).unwrap().unwrap();
+    let content = workspace.members[workspace.member.as_ref().unwrap()]
+        .content
+        .clone();
+    let (root, encoded) = content.inventory().unwrap().encode().unwrap();
+    let entries = BTreeMap::from([(
+        root,
+        Library {
+            content,
+            encoded: encoded.into(),
+        },
+    )]);
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    fs::write(archive, PackageArchive::encode(root, &entries).unwrap()).unwrap();
+    root
 }
 
 fn write(path: &Path, text: &str) {

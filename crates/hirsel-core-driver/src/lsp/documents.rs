@@ -81,7 +81,7 @@ impl Text {
         }
     }
 
-    fn offset(&self, position: Position, encoding: Encoding) -> Option<usize> {
+    pub(super) fn offset(&self, position: Position, encoding: Encoding) -> Option<usize> {
         let (start, end) = *self.lines.get(position.line)?;
         let line = std::str::from_utf8(&self.bytes[start..end]).ok()?;
         match encoding {

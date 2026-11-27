@@ -96,6 +96,7 @@ pub(super) fn checked(
     product: &CheckProduct,
     origins: &InputOrigins,
     wanted: &BTreeSet<PathBuf>,
+    immutable: &BTreeSet<PathBuf>,
 ) -> Vec<Diagnostic> {
     let by_source: BTreeMap<_, _> = product
         .files
@@ -103,6 +104,9 @@ pub(super) fn checked(
         .filter_map(|file| {
             let package = product.index.module_path(file.module).package;
             let origin = origins.get(&(package, file.name.clone()?))?;
+            if immutable.contains(&origin.path) {
+                return None;
+            }
             Some((file.file, origin))
         })
         .collect();

@@ -1,5 +1,8 @@
+use super::cache::{Cache, Check};
 use super::diagnostics::{self, Diagnostic, InputOrigins, Origin};
 use super::documents::{SourceOverlay, Text};
+use super::snapshot::{EditorSnapshot, immutable_path};
+use crate::ContentHash;
 use crate::package_content::Id;
 use crate::package_dir::{MANIFEST, PackageDir};
 use crate::package_lock::{self, Lock, Mode};
@@ -27,27 +30,7 @@ impl EditorInputs {
     }
 }
 
-pub(super) struct EditorSnapshot {
-    pub(super) inputs: EditorInputs,
-    pub(super) origins: BTreeMap<PathBuf, Text>,
-    pub(super) diagnostics: Vec<Diagnostic>,
-}
-
 impl EditorSnapshot {
-    fn new(inputs: EditorInputs) -> Self {
-        let origins = inputs
-            .overlay
-            .iter()
-            .filter(|(path, _)| inputs.owns(path))
-            .map(|(path, document)| (path.clone(), document.text.clone()))
-            .collect();
-        Self {
-            inputs,
-            origins,
-            diagnostics: Vec::new(),
-        }
-    }
-
     fn syntax(&mut self, paths: &BTreeSet<PathBuf>, modes: &BTreeMap<PathBuf, ParseMode>) {
         for path in paths {
             let mode = modes.get(path).copied().unwrap_or(ParseMode::Source);
@@ -65,6 +48,8 @@ impl EditorSnapshot {
 #[derive(Default)]
 pub(super) struct EditorSession {
     driver: Driver,
+    cache: Cache,
+    scratch: BTreeMap<PathBuf, tempfile::TempDir>,
 }
 
 impl EditorSession {
@@ -135,6 +120,7 @@ impl EditorSession {
                     by_member.insert(id.clone(), owned);
                 }
             }
+            snapshot.modes.extend(modes.clone());
             snapshot.syntax(&paths, &modes);
             if by_member.is_empty() {
                 continue;
@@ -184,10 +170,20 @@ impl EditorSession {
     ) -> io::Result<()> {
         let app = PackageDir::from_resolution(resolved, member, true)?;
         let workspace = &resolved.workspace;
-        let scratch = private_store(&snapshot.inputs, &workspace.directory)?;
-        // Registered image opens may sweep their store. Bundled library
-        // sources keep all check artifacts in the editor's private store.
-        let mut request = CheckRequest::from_app(app, None, scratch.path())?;
+        let scratch = match self.scratch.entry(workspace.directory.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(private_store(&snapshot.inputs, &workspace.directory)?)
+            }
+        };
+        let store = scratch
+            .path()
+            .join("check")
+            .join(ContentHash::of_bytes(member.to_string().as_bytes()).to_string());
+        let sources = scratch.path().join("sources");
+        // Registered image opens may sweep their store. Bundled library sources
+        // keep the editor's analysis outside the regular build caches.
+        let mut request = CheckRequest::from_app(app, None, &store)?;
 
         let mut origins = InputOrigins::new();
         for (id, local) in &workspace.members {
@@ -226,15 +222,70 @@ impl EditorSession {
                 );
             }
         }
-        let product = self.driver.check_for_authority(request)?;
-        snapshot
-            .diagnostics
-            .extend(diagnostics::checked(&product, &origins, wanted));
+        for package in &mut request.inputs.packages {
+            let root = package
+                .namespace
+                .as_ref()
+                .and_then(|namespace| namespace.root)
+                .unwrap_or_else(|| {
+                    ContentHash::of_parts(
+                        "hirsel.editor-supplied-source.v1",
+                        [
+                            package.package.name.as_bytes(),
+                            package.package.version.as_bytes(),
+                        ],
+                    )
+                });
+            for source in &mut package.sources {
+                let mode = source.mode();
+                let Some(capture) = &mut source.captured else {
+                    continue;
+                };
+                let name = capture
+                    .name
+                    .get_or_insert_with(|| source.file.to_string_lossy().into_owned());
+                let key = (package.package.clone(), name.clone());
+                if origins.contains_key(&key) {
+                    continue;
+                }
+                let Some(path) =
+                    immutable_path(&sources, root, ContentHash::of_bytes(&capture.bytes), name)
+                else {
+                    continue;
+                };
+                snapshot.modes.insert(path.clone(), mode);
+                snapshot.immutable.insert(path.clone());
+                origins.insert(
+                    key,
+                    Origin {
+                        path,
+                        text: Text::new(capture.bytes.clone()),
+                    },
+                );
+            }
+        }
+        let mut check = Check::default();
+        let product = self
+            .driver
+            .check_for_editor(request, &mut self.cache, &mut check)?;
+        let stats = check.stats(&self.cache);
+        snapshot.stats.parse_hits += stats.parse_hits;
+        snapshot.stats.parse_misses += stats.parse_misses;
+        snapshot.stats.body_hits += stats.body_hits;
+        snapshot.stats.body_checks += stats.body_checks;
+        snapshot.stats.retained_bytes = stats.retained_bytes;
+        snapshot.diagnostics.extend(diagnostics::checked(
+            &product,
+            &origins,
+            wanted,
+            &snapshot.immutable,
+        ));
         snapshot.origins.extend(
             origins
-                .into_values()
-                .map(|origin| (origin.path, origin.text)),
+                .values()
+                .map(|origin| (origin.path.clone(), origin.text.clone())),
         );
+        snapshot.retain(&product, &check, &origins, wanted, resolved, &sources);
         if let Some(refusal) = &product.authority_refusal {
             snapshot.configuration(&workspace.members[member].manifest_path, refusal);
         }

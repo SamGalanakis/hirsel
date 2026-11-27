@@ -61,6 +61,8 @@ mod compare;
 mod constants;
 mod control;
 mod depth_steps;
+mod editor;
+use editor::EditorType;
 mod exits;
 mod pack_export;
 mod pack_export_ops;
@@ -196,6 +198,7 @@ impl SourceSignatures {
 #[derive(Default)]
 pub struct Emitter {
     pub module: Module,
+    editor_types: Option<Vec<EditorType>>,
     funcs: HashMap<InstanceKey, FuncId>,
     callable_adapters: HashMap<(FuncId, SigId), (FuncId, Option<GenericTemplate>)>,
     #[cfg(test)]
@@ -966,27 +969,6 @@ pub(crate) fn closed(path: &DefPath) -> Option<u8> {
 }
 
 impl Program<'_> {
-    /// Check function `f`'s body and emit it into `e` (LANG-8: one visit, reading only
-    /// this body, signatures and summaries).
-    pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
-        crate::cost_scope!("body", self.fns[f].path.to_string());
-        let fd = &self.fns[f];
-        let Some(body) = fd.body else {
-            return CoreCheck::default();
-        };
-        crate::cost_scope!("phase", "body typing");
-        let mut cx = Cx::new(self, f, e);
-        cx.run(f, body);
-        let mut out = cx.finish();
-        if self.entry.as_ref() == Some(&fd.path) {
-            self.check_entry(fd, &mut out.refusals);
-            if !out.refusals.is_empty() {
-                out.gaps.clear();
-            }
-        }
-        out
-    }
-
     /// PROG-3: the entry's parameters are unmarked capability types or `Args`, and its
     /// result is `Result[(), E]`.
     fn check_entry(&self, fd: &FnDecl, refusals: &mut Vec<crate::Refusal>) {
@@ -2460,6 +2442,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     fn finish(mut self) -> CoreCheck {
         crate::cost_scope!("phase", "body finish");
+        self.editor_bindings();
         self.out.flow.waits = self.fd.waits;
         // The resolver's and the declarations' refusals of this item are reported.
         let item = self.p.site(self.at, self.header);
@@ -2811,6 +2794,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        if self.e.editor_types.is_some() {
+            self.editor_type(self.span(n), t);
+        }
         if !self.versioned && t > HOLE && matches!(self.t.kind(t), TyKind::Vector(_)) {
             self.versioned = true;
         }

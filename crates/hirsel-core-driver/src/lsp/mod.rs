@@ -1,13 +1,20 @@
+pub(crate) mod cache;
 mod diagnostics;
 mod documents;
+mod formatting;
+mod hover;
+mod navigation;
 mod protocol;
+mod snapshot;
+mod symbols;
 mod workspace;
 
 #[cfg(test)]
 mod tests;
 
-use self::documents::{Change, Document, Encoding, file_path};
-use self::workspace::{EditorInputs, EditorSession, EditorSnapshot};
+use self::documents::{Change, Document, Encoding, Position, file_path};
+use self::snapshot::EditorSnapshot;
+use self::workspace::{EditorInputs, EditorSession};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +59,7 @@ struct Server {
 impl Server {
     fn compile(&self) {
         let mut session = EditorSession::default();
+        let trace = std::env::var_os("HIRSEL_LSP_STATS").is_some();
         loop {
             let inputs = {
                 let mut state = self
@@ -70,12 +78,23 @@ impl Server {
             let snapshot =
                 session.check(inputs, || self.state.lock().unwrap().obsolete(generation));
             let mut state = self.state.lock().unwrap();
-            if !state.obsolete(generation)
-                && let Err(error) = state.publish(snapshot)
-            {
-                eprintln!("hirsel lsp: {error}");
-                state.stop();
-                return;
+            if !state.obsolete(generation) {
+                if trace {
+                    let stats = snapshot.stats;
+                    eprintln!(
+                        "hirsel lsp: generation={generation} parse_hits={} parse_misses={} body_hits={} body_checks={} cache_bytes={}",
+                        stats.parse_hits,
+                        stats.parse_misses,
+                        stats.body_hits,
+                        stats.body_checks,
+                        stats.retained_bytes,
+                    );
+                }
+                if let Err(error) = state.publish(snapshot) {
+                    eprintln!("hirsel lsp: {error}");
+                    state.stop();
+                    return;
+                }
             }
         }
     }
@@ -107,6 +126,24 @@ struct State {
     pending: bool,
     register_watchers: bool,
     published: BTreeMap<PathBuf, String>,
+    snapshot: Option<EditorSnapshot>,
+    queries: Vec<Query>,
+    definition_links: bool,
+}
+
+struct Query {
+    id: Value,
+    generation: u64,
+    path: PathBuf,
+    kind: QueryKind,
+}
+
+#[derive(Clone, Copy)]
+enum QueryKind {
+    Hover(Position),
+    Definition(Position),
+    Symbols,
+    Format,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +215,16 @@ impl State {
             return Ok(None);
         };
         if let Some(id) = id {
+            if self.phase == Phase::Running {
+                if let Some(query) = self.editor_request(method, id, &message["params"]) {
+                    return query.map(|_| None);
+                }
+                if method == "shutdown" {
+                    for query in std::mem::take(&mut self.queries) {
+                        self.send(&protocol::error(&query.id, -32800, "Request cancelled"))?;
+                    }
+                }
+            }
             let answer = self.request(method, id, &message["params"]);
             self.send(&answer)?;
         } else if method == "exit" {
@@ -220,6 +267,10 @@ impl State {
                     .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
                     .and_then(Value::as_bool)
                     .unwrap_or_default();
+                self.definition_links = params
+                    .pointer("/capabilities/textDocument/definition/linkSupport")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_default();
                 self.phase = Phase::Running;
                 protocol::result(
                     id,
@@ -227,6 +278,10 @@ impl State {
                         "capabilities": {
                             "positionEncoding": self.encoding.name(),
                             "textDocumentSync": {"openClose": true, "change": 2, "save": true},
+                            "hoverProvider": true,
+                            "definitionProvider": true,
+                            "documentSymbolProvider": true,
+                            "documentFormattingProvider": true,
                             "workspace": {
                                 "workspaceFolders": {"supported": true, "changeNotifications": true}
                             }
@@ -352,9 +407,16 @@ impl State {
                     self.invalidate();
                 }
             }
-            // No request method in this slice leaves work outstanding. Push
-            // diagnostics are notifications and coalesce by input generation.
-            "$/cancelRequest" => {}
+            "$/cancelRequest" => {
+                if let Some(index) = self
+                    .queries
+                    .iter()
+                    .position(|query| query.id == params["id"])
+                {
+                    let query = self.queries.remove(index);
+                    self.send(&protocol::error(&query.id, -32800, "Request cancelled"))?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -372,6 +434,98 @@ impl State {
     fn stop(&mut self) {
         self.phase = Phase::Shutdown;
         self.pending = false;
+    }
+
+    fn editor_request(
+        &mut self,
+        method: &str,
+        id: &Value,
+        params: &Value,
+    ) -> Option<io::Result<()>> {
+        let position = || serde_json::from_value(params["position"].clone()).ok();
+        let kind = match method {
+            "textDocument/hover" => position().map(QueryKind::Hover),
+            "textDocument/definition" => position().map(QueryKind::Definition),
+            "textDocument/documentSymbol" => Some(QueryKind::Symbols),
+            "textDocument/formatting" => Some(QueryKind::Format),
+            _ => return None,
+        };
+        let path = params
+            .pointer("/textDocument/uri")
+            .and_then(Value::as_str)
+            .and_then(file_path);
+        let (Some(kind), Some(path)) = (kind, path) else {
+            return Some(self.send(&protocol::error(id, -32602, "Invalid document parameters")));
+        };
+        let query = Query {
+            id: id.clone(),
+            generation: self.inputs.generation,
+            path,
+            kind,
+        };
+        if self.inputs.overlay.contains_key(&query.path)
+            && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.inputs.generation != query.generation)
+        {
+            self.queries.push(query);
+            Some(Ok(()))
+        } else {
+            Some(self.send(&self.answer(query)))
+        }
+    }
+
+    fn answer(&self, query: Query) -> Value {
+        let Query {
+            id,
+            generation,
+            path,
+            kind,
+        } = query;
+        if generation != self.inputs.generation {
+            return protocol::error(&id, -32801, "Content modified");
+        }
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.inputs.generation == generation);
+        let answer = match kind {
+            QueryKind::Hover(position) | QueryKind::Definition(position) => snapshot
+                .and_then(|snapshot| {
+                    snapshot.query(
+                        &path,
+                        position,
+                        matches!(kind, QueryKind::Definition(_)),
+                        self.definition_links,
+                        self.encoding,
+                    )
+                })
+                .unwrap_or_default(),
+            QueryKind::Symbols | QueryKind::Format => {
+                let text = self
+                    .inputs
+                    .overlay
+                    .get(&path)
+                    .filter(|_| self.inputs.owns(&path))
+                    .map(|open| &open.text)
+                    .or_else(|| snapshot?.origins.get(&path));
+                let mode = snapshot
+                    .and_then(|snapshot| snapshot.modes.get(&path))
+                    .copied()
+                    .unwrap_or(hirsel_core_syntax::ParseMode::Source);
+                match (text, kind) {
+                    (Some(text), QueryKind::Symbols) => symbols::outline(text, mode, self.encoding),
+                    (Some(text), QueryKind::Format)
+                        if snapshot.is_none_or(|snapshot| !snapshot.immutable.contains(&path)) =>
+                    {
+                        formatting::edits(text, mode, self.encoding)
+                    }
+                    _ => json!([]),
+                }
+            }
+        };
+        protocol::result(&id, answer)
     }
 
     fn clear(&mut self, path: &Path, uri: &str) -> io::Result<()> {
@@ -407,6 +561,10 @@ impl State {
             published.insert(path.to_owned(), uri);
         }
         self.published = published;
+        self.snapshot = Some(snapshot);
+        for query in std::mem::take(&mut self.queries) {
+            self.send(&self.answer(query))?;
+        }
         Ok(())
     }
 }

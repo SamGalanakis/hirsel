@@ -492,6 +492,7 @@ impl Driver {
         record: Option<&request_record::Request>,
         report_authority: bool,
         pack_exports: &[DefPath],
+        mut editor: Option<(&mut lsp::cache::Cache, &mut lsp::cache::Check)>,
     ) -> io::Result<Checked> {
         request.inputs.normalise(request.manifest.as_deref());
         #[cfg(test)]
@@ -621,6 +622,18 @@ impl Driver {
                 )
             })
             .transpose()?;
+        let mut editor_prefix = editor
+            .is_some()
+            .then(|| {
+                native::key(
+                    "hirsel.editor-symbols-base.v1",
+                    &(
+                        image.as_ref().map(|i| i.identity),
+                        crate::resident::symbol_suffix(&symbols, base_symbols),
+                    ),
+                )
+            })
+            .transpose()?;
         let mut parse_keys = Vec::new();
         let mut parsed_files = Vec::new();
         let mut modules = Vec::with_capacity(sources.len());
@@ -635,7 +648,17 @@ impl Driver {
                 .and_then(|p| {
                     hirsel_core_resolve::codec_derive(&p.package, &p.dependencies, &path.modules)
                 });
-            let (output, parsed) = if let Some(prefix) = &mut symbol_prefix {
+            let (output, parsed) = if let Some((cache, check)) = &mut editor {
+                check.parse(
+                    cache,
+                    editor_prefix.as_mut().unwrap(),
+                    &mut symbols,
+                    *hash,
+                    bytes,
+                    *mode,
+                    derive.as_ref(),
+                )?
+            } else if let Some(prefix) = &mut symbol_prefix {
                 let (key, output, parsed) = resident::parse_file(
                     prefix,
                     &mut symbols,
@@ -994,6 +1017,12 @@ impl Driver {
                     prior_definition(&store, &prior, &fd.path, &key, key_hash, &mut pointer)?
                         .map(Arc::new)
                 };
+                let cached = cached.filter(|_| match &mut editor {
+                    Some((cache, check)) => {
+                        check.body(cache, &fd.path, key_hash, module, fd.at.item, item)
+                    }
+                    None => true,
+                });
                 let mut checked = None;
                 let product = if let Some(product) = cached {
                     publication.rows.insert(
@@ -1006,10 +1035,22 @@ impl Driver {
                     product
                 } else {
                     let mut emitter = Emitter::new();
-                    let check = if resolution.resource_refusal.is_some() {
-                        CoreCheck::default()
-                    } else {
-                        p.check_lower(f, &mut emitter)
+                    let check = match (&mut editor, resolution.resource_refusal.is_some()) {
+                        (_, true) => CoreCheck::default(),
+                        (Some((cache, editor)), false) => {
+                            let (check, types) = p.check_lower_editor(f, &mut emitter);
+                            editor.checked(
+                                cache,
+                                &fd.path,
+                                key_hash,
+                                module,
+                                fd.at.item,
+                                types,
+                                !duplicated.contains(&fd.path),
+                            );
+                            check
+                        }
+                        (None, false) => p.check_lower(f, &mut emitter),
                     };
                     emitter.seal();
                     let incomplete: Vec<Incomplete> = check
@@ -1145,6 +1186,9 @@ impl Driver {
                 }
             }
             diagnostics::resolve_method_edits(&p, &mut result.diagnostics);
+            if let Some((_, editor)) = &mut editor {
+                editor.declarations(&p);
+            }
             if produce && declarations_accepted {
                 result.library = Some(Arc::new(p.into_library()));
             } else {
@@ -1152,7 +1196,7 @@ impl Driver {
             }
         }
         meter.finish("check/lower");
-        derived_sites(&mut result, &modules);
+        checked::derived_sites(&mut result, &modules);
         let mut names: BTreeMap<Option<SourceId>, Vec<(DefinitionId, Definition)>> =
             BTreeMap::new();
         let base = index.definitions.base_len();
@@ -1193,7 +1237,11 @@ impl Driver {
         let result = Arc::new(result);
         meter.finish("publish/commit and Arc move");
         drop(index);
-        drop(resolutions);
+        if let Some((_, editor)) = editor {
+            editor.resolutions(resolutions);
+        } else {
+            drop(resolutions);
+        }
         drop(keys);
         drop(prior);
         drop(request);
@@ -1299,130 +1347,6 @@ fn file_record(
     }
     record
 }
-/// Publish codec failures through the same declaration/arguments/operation/member path,
-/// retaining the underlying type declaration that made a field lack `codec`.
-fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
-    let context = |site: &Site| {
-        let module = modules.iter().find(|m| Some(m.source) == site.source)?;
-        hirsel_core_syntax::codec_context(&module.syntax, site.item as usize, site.span)
-    };
-    let generated = |site: &Site| {
-        modules
-            .iter()
-            .find(|m| Some(m.source) == site.source)
-            .and_then(|m| hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize))
-            .is_some()
-    };
-    let own: std::collections::HashSet<_> = result
-        .diagnostics
-        .iter()
-        .filter(|r| !generated(&r.primary))
-        .map(|r| (r.primary.source, r.primary.item))
-        .collect();
-    let project = |site: Site| {
-        if generated(&site) {
-            context(&site).map_or(site, |c| Site {
-                item: c.item as u32,
-                span: c.primary,
-                ..site
-            })
-        } else {
-            site
-        }
-    };
-    let apply = |primary: &mut Site, ctx: &hirsel_core_syntax::DeriveContext| {
-        primary.item = ctx.item as u32;
-        primary.span = ctx.primary;
-        let at = |span| Site { span, ..*primary };
-        let owner = |span| Site {
-            item: ctx.owner as u32,
-            span,
-            ..*primary
-        };
-        let mut path = vec![owner(ctx.declaration)];
-        path.extend(ctx.arguments.iter().map(|&(item, span)| Site {
-            item: item as u32,
-            span,
-            ..*primary
-        }));
-        path.push(owner(ctx.operation));
-        path.extend(ctx.path.iter().copied().map(at));
-        path
-    };
-    let mut seen = std::collections::HashSet::new();
-    result.diagnostics.retain_mut(|r| {
-        let is_generated = generated(&r.primary);
-        if !is_generated
-            && !(r.rule == "OWN-4"
-                && !r.causal.is_empty()
-                && r.required.as_deref().is_some_and(|b| b.contains("codec")))
-        {
-            return true;
-        }
-        let Some(ctx) = context(&r.primary) else {
-            return true;
-        };
-        if is_generated && own.contains(&(r.primary.source, ctx.owner as u32)) {
-            return false;
-        }
-        let path = apply(&mut r.primary, &ctx);
-        let mut causal: Vec<_> = path
-            .into_iter()
-            .map(|site| hirsel_core_resolve::Cause {
-                site,
-                role: hirsel_core_resolve::CausalRole::DerivedHere,
-            })
-            .collect();
-        for mut cause in std::mem::take(&mut r.causal) {
-            cause.site = project(cause.site);
-            if !causal.iter().any(|c| c.site == cause.site) {
-                causal.push(cause);
-            }
-        }
-        r.causal = causal;
-        r.detail = None;
-        r.unresolved = None;
-        let keep = seen.insert((
-            r.rule.clone(),
-            r.primary.source,
-            r.primary.item,
-            r.primary.span,
-            r.message.clone(),
-        ));
-        if is_generated {
-            r.message = format!("{}: {}", ctx.description, r.message);
-        }
-        keep
-    });
-    let mut seen = std::collections::HashSet::new();
-    result.incomplete.retain_mut(|g| {
-        if !generated(&g.primary) {
-            return true;
-        }
-        let Some(ctx) = context(&g.primary) else {
-            return true;
-        };
-        if own.contains(&(g.primary.source, ctx.owner as u32)) {
-            return false;
-        }
-        let mut path = apply(&mut g.primary, &ctx);
-        for cause in g.causal.iter().copied().map(project) {
-            if !path.contains(&cause) {
-                path.push(cause);
-            }
-        }
-        g.causal = path;
-        let keep = seen.insert((
-            g.primary.source,
-            g.primary.item,
-            g.primary.span,
-            g.message.clone(),
-        ));
-        g.message = format!("{}: {}", ctx.description, g.message);
-        keep
-    });
-}
-
 /// A record's sites are canonical. An image body is reported as it stands, so
 /// bind its sites and anchors to the image's items once, when it is decoded;
 /// a request's own bodies bind the copies they report instead.

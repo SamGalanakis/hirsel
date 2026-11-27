@@ -1,4 +1,4 @@
-# Store spec v2.177
+# Store spec v2.178
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -5961,7 +5961,7 @@ Design: `store-m3b-d7-design-3106/DESIGN-v2.md` (v2.154 replaces v2.151's text a
   - Its log@1 reseal replaces the 72-byte header, so a resealed pack is identical in the bytes after it, with every frame at its offset and length.
   - That lane deletes `Export`, `Migrate` and `Install` from `TieredRefusal` in one public-type cutover. Until then the type is unchanged.
 
-**D7. An index is a collection with its own residency.** D7-S4 (v2.168) built `set_residency` on an index, Tiered index reads, writes and builds, and Format 12. D7-S5 (v2.176) builds IVF queries on a Tiered source.
+**D7. An index is a collection with its own residency.** D7-S4 (v2.168) built `set_residency` on an index, Tiered index reads, writes and builds, and Format 12. D7-S5 (v2.176) builds IVF queries on a Tiered source. D7-S6 (v2.178) passes the gates below.
 - **Residency 1 is legal on `CollectionRoot` kind 2.** `set_residency` accepts an index id, under the table rules of §13.8:
   - Memory → Tiered re-stamps the index (v2.96);
   - Tiered → Memory loads it in load steps on K inside its schema commit's cut (v2.74.2), refused `Full(Resident)` before the cut.
@@ -5981,6 +5981,42 @@ Design: `store-m3b-d7-design-3106/DESIGN-v2.md` (v2.154 replaces v2.151's text a
 - **IVF (D7-S5, v2.176, built; v2.177, built).** IVF stores its data in projector tables and needs no D7 index. `read_tail` reads a Tiered source through the Tx cursor and the deciding attempt, including the published image pin, replay and staged edits. An IVF query on a Memory source can independently read Tiered blocks. The two residency cases compare hits and exact scores to a Memory twin in `ivf_tiered_source` and `ivf_tiered_blocks`. L-TAIL's `test_tail_tiered` compares the paged tail to model rows across a cut that retires a published pin's old pack. From v2.177, IVF reads its projector source and its block tables each through its own descriptor, and its tail through §1.14 "The tail". The image's source and the Tx's source may differ in residency, including after the last Tiered table on main becomes Memory: a Cold image pin under an all-Memory head is read, not refused. Its attempt is admitted over the captured set (§13.3 "The captured read roots") and its misses are served through the image's inventory ("A miss names its source tree"). `test_tail_demoted_source` checks v2.176's refusal and is red under this text until it is built; L104 replaces it. The public `look` path checks the attempt window with a matched Tiered image, as well as with a Tiered source and with a Tiered block table (L104).
 - **Format 12** (§11.1 rule 6; built v2.168). Formats 10 and 11 accept kind 2 with residency 1. A previous-word reader attaches a nonzero Tiered index root as `ColdPage`, and a nonempty lookup then fails in `std.page.hot_child`. A zero base root with replayed entries looks empty. So D7 takes Format 12 alone, after 3048's Format 11. It lands with the first slice that can emit residency 1 on kind 2. Its list roots are 3048's three: pack list, lineage and `deferred_frees`. There is no dual reader.
 
+
+**D7-S6 gates (v2.178, built).** These are DESIGN-v2 §4.6 and §4.7. Lane 3279 measured the public IVF `look` on the 384-row fixture and checked hits and exact scores.
+
+| Source and block residency | Public `look` attempts / deliveries |
+|---|---|
+| Tiered source | 2 / 1 before the first image, 2 / 1 on the published image, 5 / 4 after committing the tail and reopening |
+| Memory source with Tiered blocks | 2 / 1 on the published image, 2 / 1 after committing the tail and reopening |
+
+The Tiered table and Tiered `Many` index use u64 keys. Lane 3279 measured `account_memory` at 784 B at 1,000, 10,000, and 100,000 durable rows. Lane 3295 populated 100,000,000 durable rows in each collection in 6,630.9 s under the 8 GiB scope on revision `f27b409e`. A fresh process reopened the store under the 2 GiB scope and served exact single-row `lookup` results for keys 0, 50,000,000, and 99,999,999. GNU `time -v` measured 8,912 KiB peak RSS, within the 1 GiB gate. Both scopes disabled swap.
+
+From each checkout root, set `lane` to the corresponding directory below and build the driver and runtime.
+
+```sh
+python3 tools/buck2/prepare.py
+.buck2/bin/buck2 build -j 6 //:hirsel-core-driver-bin-hirsel //:core-driver-runtime-pic --show-full-output > "$lane/build.log" 2>&1
+```
+
+The IVF and scaled Memory-account commands use lane 3279's scripts. Its population runner resumed from the durable 1,000-row cut.
+
+```sh
+lane=/workspace/code/hirsel-briefs/store-d7-s6-gates-3279
+bash "$lane/build-probe.sh" ivf vector@1/tests/ivf_attempt_probe cranelift 536870912 /dev/shm/hirsel-store-d7-s6-gates-3279 --debug-lines on --cc "$PWD/tools/buck2/toolchains/llvm-files/bin/clang"
+systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 -- timeout 300 gdb -nx --batch --return-child-result -x "$lane/ivf-attempts.gdb" --args "$lane/bin/ivf" tiered-source
+systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 -- timeout 300 gdb -nx --batch --return-child-result -x "$lane/ivf-attempts.gdb" --args "$lane/bin/ivf" tiered-blocks
+bash "$lane/build-probe.sh" resident store@1/store/resident_probe llvm 2147483648 "$lane/data" --release --cc "$PWD/tools/buck2/toolchains/llvm-files/bin/clang"
+systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 -- python3 "$lane/run-large.py"
+```
+
+Lane 3295's population runner starts from an empty directory and stops at four hours or 100 GiB free disk. The serve runner uses `/usr/bin/time -v` around `resident serve 100000000` inside the 2 GiB scope.
+
+```sh
+lane=/workspace/code/hirsel-briefs/store-d7-s6-resident-3295
+bash "$lane/build-probe.sh" resident store@1/store/resident_probe llvm 2147483648 "$lane/data" --release --cc "$PWD/tools/buck2/toolchains/llvm-files/bin/clang"
+systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 -- python3 "$lane/run-large.py"
+python3 "$lane/run-serve.py"
+```
 
 **Hot Tiered builds: the build pin (v2.169, store-hot-tiered-build-spec-3224; amended v2.171, store-hot-tiered-spec-fix-3231 after review 3228; built in v2.175, store-hot-tiered-build-3248).** A hot `Migrate` is `seal` in `Migrate` or `run_migration` on the serving `Db`. On a store holding a Tiered collection it builds every Tiered target the way install holds an import: off-root under a pin, through the writer's own cuts, then grafted onto main in one schema commit that drops the pin. Design: `store-hot-tiered-build-spec-3224` (DESIGN-v2 §4.4a, slice M3b-S5b).
 - **What needs a build.** A plan needs a hot Tiered build when it holds any of these:

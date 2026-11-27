@@ -116,7 +116,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         return Error(Expired)
     }
     db.ceiling = disk_limit
-    let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame, tiered_reserve: tiered_reserve, has_tiered: has_tiered)
+    let limits = manifest.TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit, frame: db.limits.frame, tiered_reserve: tiered_reserve, has_tiered: has_tiered)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = Some(limits)
     })

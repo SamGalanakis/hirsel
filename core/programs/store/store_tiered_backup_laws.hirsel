@@ -41,7 +41,7 @@ fn l96_blob_value(tag: u8, size: u64) -> Bytes {
 
 fn l96_listed_tiered_packs(db: Db) -> List[(u64, u8)] {
     let mut found: List[(u64, u8)] = list.new()
-    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut cursor = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut cursor) {
         if pack.class >= 3 {
             list.push(mut found, (seq, pack.class))
@@ -172,9 +172,9 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
         fail("L96 (a): backup stamp head differs from leased snapshot")
     }
     for (seq, _) in tiered_packs {
-        let path = paged_pack_path(seq)?
-        let want = disk_read_file(source, path, 1048576)?
-        let got = disk_read_file(target, path, 1048576)?
+        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+        let want = failure_result_from_rep(manifest.disk_read_file(source, path, 1048576))?
+        let got = failure_result_from_rep(manifest.disk_read_file(target, path, 1048576))?
         if got != want {
             fail("L96 (a): copied class-3/4 pack is not byte-identical")
         }
@@ -184,9 +184,9 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
         fail("L96 (a): restored stamp head differs from leased snapshot")
     }
     for (seq, _) in tiered_packs {
-        let path = paged_pack_path(seq)?
-        let want = disk_read_file(target, path, 1048576)?
-        let got = disk_read_file(restored, path, 1048576)?
+        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+        let want = failure_result_from_rep(manifest.disk_read_file(target, path, 1048576))?
+        let got = failure_result_from_rep(manifest.disk_read_file(restored, path, 1048576))?
         if got != want {
             fail("L96 (a): restored class-3/4 pack is not byte-identical")
         }
@@ -276,7 +276,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
         if compact_listed(db2, seq) {
             fail("L96 (b): Tiered-idle cut did not retire leased pack from MANIFEST")
         }
-        if !disk_exists(s1, paged_pack_path(seq)?)? {
+        if !disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L96 (b): retiring cut deleted a class-3/4 pack still held by an export lease")
         }
     }
@@ -286,7 +286,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
         if compact_listed(db2, seq) {
             fail("L96 (b): second cut under export lease re-listed a retired Tiered pack")
         }
-        if !disk_exists(s1, paged_pack_path(seq)?)? {
+        if !disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L96 (b): second cut deleted a pack still held by an export lease")
         }
     }
@@ -294,7 +294,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     release_export(mut db2, attempt)
     let _ = checkpoint(mut db2)?
     for (seq, _) in leased_packs {
-        if disk_exists(s1, paged_pack_path(seq)?)? {
+        if disk_exists(s1, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L96 (b): pack was not removed at the first cut after release_export")
         }
     }
@@ -325,13 +325,13 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     let attempt2 = b"l96b-lease-00002"
     let job2 = result.unwrap(begin_backup(mut db4, b2, failure_result_from_rep(types.copied(attempt2))?))
     let _ = checkpoint(mut db4)?
-    if compact_listed(db4, old_pack) || !disk_exists(s2, paged_pack_path(old_pack)?)? {
+    if compact_listed(db4, old_pack) || !disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?)? {
         fail("L96 (b): reading-probe retirement did not defer unlink of leased pack")
     }
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db4, attempt2)
     let _ = checkpoint(mut db4)?
-    if disk_exists(s2, paged_pack_path(old_pack)?)? {
+    if disk_exists(s2, failure_result_from_rep(manifest.paged_pack_path(old_pack))?)? {
         fail("L96 (b): reading-probe pack was not removed after release_export")
     }
     close(take db4)
@@ -369,7 +369,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
         fail("L96 (c) E1: lease survived a crash")
     }
     let _ = checkpoint(mut after_e1)?
-    if compact_listed(after_e1, pack_p) || disk_exists(source, paged_pack_path(pack_p)?)? {
+    if compact_listed(after_e1, pack_p) || disk_exists(source, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L96 (c) E1: next cut after E1 crash did not erase P")
     }
     // Re-Tier for E2/E3/R3/R5.
@@ -434,11 +434,11 @@ fn l96_find_bytes(haystack: Bytes, needle: Bytes) -> Option[u64] {
 // pack and MANIFEST are completely valid, while the incoming Cold PagePtr
 // mismatches the internally consistent class-3 frame (either checksum or stamp).
 fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.PagePtr, mutate_stamp: bool) -> Result[(), Error] waits {
-    let raw_manifest = read_page_manifest_bytes(dir)?
-    let (_, manifest) = disk_read_page_manifest("MANIFEST", raw_manifest)?
-    let col_ptr = manifest.branches[0].roots.collections
-    let col_path = paged_pack_path(col_ptr.pack)?
-    let mut pack_raw = disk_read_file(dir, col_path, 1048576)?
+    let raw_manifest = failure_result_from_rep(manifest.read_page_manifest_bytes(dir))?
+    let (_, page_record) = disk_read_page_manifest("MANIFEST", raw_manifest)?
+    let col_ptr = page_record.branches[0].roots.collections
+    let col_path = failure_result_from_rep(manifest.paged_pack_path(col_ptr.pack))?
+    let mut pack_raw = failure_result_from_rep(manifest.disk_read_file(dir, col_path, 1048576))?
     let width: u64 = int.widen(col_ptr.len)
     let mut page_payload = failure_result_from_rep(types.copied(list.slice(pack_raw, col_ptr.offset + 16, col_ptr.offset + 16 + width)))?
     let needle = std.page.encode_ptr(target_ptr)
@@ -456,7 +456,7 @@ fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.Pag
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: col_ptr.pack)
     let resealed = failure_result_from_rep(types.capacity(format.disk_seal(ctx, col_ptr.offset, 0x0021, 1, page_payload)))?
     list.copy_from_slice(mut pack_raw, col_ptr.offset, resealed)
-    disk_write_synced(dir, col_path, pack_raw)?
+    failure_result_from_rep(manifest.disk_write_synced(dir, col_path, pack_raw))?
     let mut updated_col = col_ptr
     updated_col.checksum = std.check.xxh3(page_payload, 0, list.len(page_payload))
     let old_col_bytes = std.page.encode_ptr(col_ptr)
@@ -466,9 +466,9 @@ fn l96_corrupt_cold_incoming_ptr(dir: Dir, id: StoreId, target_ptr: std.page.Pag
     }
     let mut next_manifest = failure_result_from_rep(types.copied(raw_manifest))?
     list.copy_from_slice(mut next_manifest, m_at, new_col_bytes)
-    let m_ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: manifest.generation)
-    seal_page_manifest_file(mut next_manifest, m_ctx, manifest.fence)?
-    disk_write_synced(dir, "MANIFEST", next_manifest)
+    let m_ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: page_record.generation)
+    seal_page_manifest_file(mut next_manifest, m_ctx, page_record.fence)?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "MANIFEST", next_manifest))
 }
 
 // L96 (d): an internally consistent class-3 pack with a mismatched incoming
@@ -541,8 +541,8 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     // no Tiered holder, P listed with live == 0.
     set_residency(mut db, rows.id, Memory)?
     let _ = checkpoint(mut db)?
-    let live_only = live_pack_sequences(disk_state(db).pages.locations)
-    let leased = export_lease_pack_sequences(disk_state(db).pages.locations)
+    let live_only = manifest.live_pack_sequences(manifest.pack_locations(disk_state(db).packs))
+    let leased = export_lease_pack_sequences(manifest.pack_locations(disk_state(db).packs))
     if list.len(leased) != list.len(live_only) + 1 || !list.contains(leased, pack_p) || list.contains(live_only, pack_p) {
         fail("L96 (e) D-ZL-2: last-conversion lease must be positive-live plus the one zero-live class-3 pack")
     }
@@ -550,7 +550,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     let job2 = result.unwrap(begin_backup(mut db, conv_backup, failure_result_from_rep(types.copied(attempt))?))
     let _ = result.unwrap(export_copy(take job2))
     release_export(mut db, attempt)
-    if !disk_exists(conv_backup, paged_pack_path(pack_p)?)? {
+    if !disk_exists(conv_backup, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L96 (e) D-ZL-2: backup of last-conversion store omitted listed zero-live pack P")
     }
     // R4 on the last-conversion store takes NO Tiered plan reserve: exact
@@ -570,7 +570,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
         fail("L96 (e): restored last-conversion store lost listed pack P before probe")
     }
     let _ = checkpoint(mut twin)?
-    if compact_listed(twin, pack_p) || disk_exists(conv_restored, paged_pack_path(pack_p)?)? {
+    if compact_listed(twin, pack_p) || disk_exists(conv_restored, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L96 (e): restored last-conversion store failed to retire P via Tiered-idle probe")
     }
     l96_full_scrub_clean(mut twin)?
@@ -602,8 +602,8 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     let job_a = result.unwrap(begin_backup(mut db_a, bak_a, failure_result_from_rep(types.copied(attempt_a))?))
     let _ = result.unwrap(export_copy(take job_a))
     release_export(mut db_a, attempt_a)
-    let want_pa = disk_read_file(src_a, paged_pack_path(pack_a)?, 1048576)?
-    if disk_read_file(bak_a, paged_pack_path(pack_a)?, 1048576)? != want_pa {
+    let want_pa = failure_result_from_rep(manifest.disk_read_file(src_a, failure_result_from_rep(manifest.paged_pack_path(pack_a))?, 1048576))?
+    if failure_result_from_rep(manifest.disk_read_file(bak_a, failure_result_from_rep(manifest.paged_pack_path(pack_a))?, 1048576))? != want_pa {
         fail("L100 (c) (a): pack P missing or altered in backup")
     }
     close(take db_a)?
@@ -636,21 +636,21 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     let job_b = result.unwrap(begin_backup(mut db_b, bak_b, failure_result_from_rep(types.copied(attempt_b))?))
     let _ = result.unwrap(export_copy(take job_b))
     release_export(mut db_b, attempt_b)
-    let want_pb = disk_read_file(src_b, paged_pack_path(pack_b)?, 1048576)?
-    if disk_read_file(bak_b, paged_pack_path(pack_b)?, 1048576)? != want_pb {
+    let want_pb = failure_result_from_rep(manifest.disk_read_file(src_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?, 1048576))?
+    if failure_result_from_rep(manifest.disk_read_file(bak_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?, 1048576))? != want_pb {
         fail("L100 (c) (b): pack P missing or altered in backup")
     }
     close(take db_b)?
     let _ = result.unwrap(restore(bak_b, res_b, c, clone(run_opts)))
     let mut twin_b = open(tasks, res_b, c, r, clone(run_opts))?
     let _ = checkpoint(mut twin_b)?
-    if compact_listed(twin_b, pack_b) || disk_exists(res_b, paged_pack_path(pack_b)?)? {
+    if compact_listed(twin_b, pack_b) || disk_exists(res_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?)? {
         fail("L100 (c) (b): restored idle store did not retire P")
     }
     l96_full_scrub_clean(mut twin_b)?
     close(take twin_b)?
     // Subcase 3: image of (b) with P's file removed -> R4 refuses Unsupported(0x0023).
-    let p_name = paged_pack_path(pack_b)?
+    let p_name = failure_result_from_rep(manifest.paged_pack_path(pack_b))?
     for listed in result.unwrap(std.dir.list(bak_b, None)) {
         if listed.name != p_name {
             copy_export_file(bak_b, missing_p, listed.name, None)?

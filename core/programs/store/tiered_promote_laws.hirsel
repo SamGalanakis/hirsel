@@ -30,7 +30,7 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
         fail("L88(a): the parent must keep its stamp and name the installed copy")
     }
     let input = fold_frame_at(captured, TieredPage(old))?
-    let ColdPage(converged) = promotion_resolve_page(cut, 9, HotPage(arc.share(fold_page(input))))? else {
+    let ColdPage(converged) = promotion_resolve_page(cut, 9, HotPage(arc.share(manifest.fold_page(input))))? else {
         fail("L88(c): a Hot capture slot must match the already sealed stamp")
     }
     if converged != moved {
@@ -114,7 +114,7 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.Pa
         let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 30 + slot, Collection)))?
         let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
         let width = std.page.sealed_size(std.page.image_of(page))
-        let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
+        let frame = manifest.PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
         let key = failure_result_from_rep(catalog.logical_key(9, types.key_word(slot)))?
         let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
             std.page.unlocated(stamp)
@@ -126,7 +126,7 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.Pa
         }
     }
     let (take raw, pack) = finish_tiered_pack(take draft)?
-    disk_write_synced(d, paged_pack_path(7)?, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(7))?, raw))?
     Ok((pack, first))
 }
 
@@ -142,7 +142,7 @@ fn l88_probe_keeps_progress(captured: TieredPageSource, pack: pages.PagePack, or
             list.push(mut promotion.lookup, PromotionPage(HotPage(take copied_leaf)))
         }
         let mut visits = 0u64
-        let finished = probe_tiered_index(captured, 7, mut cursor, 1, mut visits, scoped fn(mut seen: u64, row: PackIndexRow) -> Result[bool, Error] {
+        let finished = probe_tiered_index(captured, 7, mut cursor, 1, mut visits, scoped fn(mut seen: u64, row: manifest.PackIndexRow) -> Result[bool, Error] {
             if row.stamp != 30 + cut {
                 fail("L88(f): the probe must visit the next index row after each promotion")
             }
@@ -181,8 +181,8 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     let current_location = std.page.PagePtr(pack: 11, offset: 72, len: 128, checksum: 19, stamp: 40)
     let mut draw = 80u64
     let cut = l79_cut_table(old, 3, 258, mut draw)?
-    let old_bytes_cut = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
-    let count_bytes_cut = keyed_root_record_bytes(cut.keyed)
+    let old_bytes_cut = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_cut = manifest.keyed_root_record_bytes(cut.keyed)
     let head_cut = pages.holder_heads(db.holders)[0u64].head
     let at_cut = pages.holder_heads(db.holders)[0u64].at
     pages.replace_head(mut db.holders, 0u64, take cut, head_cut, at_cut, old_bytes_cut, count_bytes_cut)
@@ -191,8 +191,8 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     draw = 80
     let current = l79_cut_table(current_location, 3, 258, mut draw)?
     let shared = pages.share_roots(current)
-    let old_bytes_shared = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
-    let count_bytes_shared = keyed_root_record_bytes(shared.keyed)
+    let old_bytes_shared = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_shared = manifest.keyed_root_record_bytes(shared.keyed)
     let head_shared = pages.holder_heads(db.holders)[0u64].head
     let at_shared = pages.holder_heads(db.holders)[0u64].at
     pages.replace_head(mut db.holders, 0u64, take shared, head_shared, at_shared, old_bytes_shared, count_bytes_shared)
@@ -208,8 +208,8 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, failure_result_from_rep(catalog.prefix(9))?, HotPage(take page), mut draw)))?
     pages.set_head_collection(mut db.holders, 0, take tree)
     let hot_capture = snapshot(db)
-    let old_bytes_current = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
-    let count_bytes_current = keyed_root_record_bytes(current.keyed)
+    let old_bytes_current = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_current = manifest.keyed_root_record_bytes(current.keyed)
     let head_current = pages.holder_heads(db.holders)[0u64].head
     let at_current = pages.holder_heads(db.holders)[0u64].at
     pages.replace_head(mut db.holders, 0u64, take current, head_current, at_current, old_bytes_current, count_bytes_current)

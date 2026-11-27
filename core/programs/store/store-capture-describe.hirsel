@@ -281,7 +281,7 @@ fn describe_suffix(mut p: PreparedCapture) -> Result[(DescribeTotals, List[Descr
         let seq = p.segments[i].seq
         let end = p.segments[i].end
         let start = p.segments[i].start
-        let (_, frames) = capture_scan_frames(mut p.segments[i].file, p.id, seq, p.manifest.limits, end, end, false, KeepCommit, mut folded, describe_commit)?
+        let (_, frames) = capture_scan_frames(mut p.segments[i].file, p.id, seq, limits_from_rep(p.manifest.limits), end, end, false, KeepCommit, mut folded, describe_commit)?
         frame_count = capture_add(frame_count, frames)
         journal_bytes = capture_add(journal_bytes, end - start)
     }
@@ -299,7 +299,7 @@ fn describe_lines(p: PreparedCapture, mut packs: CapturePacks, names: List[Descr
         let row = describe_collection(mut source, names, roots.collections, deltas, path, at, key, value)?
         line(DescribeCollection(take row))
     })?
-    line(DescribeAccount(p.manifest.generation, manifest_account(p.manifest)))?
+    line(DescribeAccount(p.manifest.generation, manifest.manifest_account(p.manifest)))?
     line(DescribeJournal(summary))?
     if let Some(history) = read_scrub_history(p.dir, p.id)? {
         if let Some(round) = last_complete_scrub_round(history) {
@@ -307,14 +307,14 @@ fn describe_lines(p: PreparedCapture, mut packs: CapturePacks, names: List[Descr
         }
     }
     for pin_record in p.manifest.pins {
-        line(DescribePin(pin_owner_tag(pin_record.owner), clone(pin_record.name), pin_record.branch, pin_record.version))?
+        line(DescribePin(manifest.pin_owner_tag(pin_record.owner), clone(pin_record.name), pin_record.branch, pin_record.version))?
     }
     capture_walk_pages(mut packs, p.manifest.pack_root, 2, None, mut ignored, mut pages, scoped fn(mut _source: CapturePacks, mut _walk: (), path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), Error] waits {
         let raw = match value {
             InlineValue(found) => found,
             _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
         }
-        let pack = pack_record(path, at, raw)?
+        let pack = failure_result_from_rep(manifest.pack_record(path, at, raw))?
         let seq: u64 = list.word_be(key, 0)
         line(DescribePack(seq, pack.class, pack.frames, pack.live, pack.payload_bytes))
     })

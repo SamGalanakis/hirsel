@@ -127,7 +127,7 @@ CallDraft	store-attempts.hirsel	txn	txn	L12
 DraftedCall	store-attempts.hirsel	txn	txn	L12
 DraftRefusal	store-attempts.hirsel	txn	txn	L12
 metered_draft	store-attempts.hirsel	store	store	-
-raised_capacity	store-attempts.hirsel	txn	manifest	L4	pull-down txn -> manifest (used by disk_allocation)
+raised_capacity	store-manifest-support.hirsel	txn	manifest	L4	pull-down txn -> manifest (used by disk_allocation)
 stopped_pending	store-attempts.hirsel	txn	txn	L12
 tx_page_row	store-attempts.hirsel	txn	txn	L12
 look	store-attempts.hirsel	store	store	-
@@ -378,11 +378,11 @@ store_body_at_with	store-commit.hirsel	store	store	-
 append_transaction_at	store-commit.hirsel	store	store	-
 append_transaction_at_with	store-commit.hirsel	store	store	-
 note_held_roots	store-cut-participants.hirsel	manifest	manifest	L4
-visit_cut_heads	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
-visit_cut_pins	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+visit_cut_heads	store-cut-participants.hirsel	manifest	manifest	L4	neutral cut input
+visit_cut_pins	store-cut-participants.hirsel	manifest	manifest	L4	neutral cut input
 CutParticipants	store-cut-participants.hirsel	manifest	manifest	L4
-cut_participants	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
-fill_cut_manifest	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+cut_participants	store-cut-participants.hirsel	manifest	manifest	L4	neutral cut input
+fill_cut_manifest	store-cut-participants.hirsel	manifest	manifest	L4	neutral cut input
 disk_cut_state	store-cut-participants.hirsel	store	store	-
 raise_materialized_pin	store-cut-participants.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
 cut_retirement	store-cut-retirement.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
@@ -462,7 +462,7 @@ sweep_expired	store-expiry.hirsel	store	store	-
 expiry_drift	store-expiry.hirsel	maintenance	store	-	push-up maintenance -> store (refs at layer 12)
 due_rows	store-expiry.hirsel	store	store	-
 ExportStamp	store-export.hirsel	store	store	-
-ExportLease	store-export.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
+ExportLease	store-manifest-support.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
 LeaseStep	store-export.hirsel	transfer	transfer	L13
 ExportStep	store-export.hirsel	transfer	transfer	L13
 StepOp	store-export.hirsel	transfer	transfer	L13
@@ -667,7 +667,7 @@ history_key	store-history.hirsel	history	history	L7
 history_pair_matches	store-history.hirsel	history	history	L7
 history_ref_matches	store-history.hirsel	history	history	L7
 history_entry_range	store-history.hirsel	history	history	L7
-history_frame	store-history.hirsel	history	manifest	L4	pull-down history -> format (used by stream_batch_check); push-up format -> manifest (refs at layer 3)
+history_frame	store-manifest-support.hirsel	history	manifest	L4	pull-down history -> format (used by stream_batch_check); push-up format -> manifest (refs at layer 3)
 history_text	store-history.hirsel	history	history	L7
 history_config	store-history.hirsel	history	history	L7
 history_head_frame	store-history.hirsel	history	history	L7
@@ -783,9 +783,9 @@ perform_cutover_with	store-install.hirsel	store	store	-
 forget_import	store-install.hirsel	store	store	-
 JournalInput	store-journal-recover.hirsel	journal	format	L1	pull-down journal -> manifest (used by ScrubInput); pull-down manifest -> format (used by disk_stream_payload)
 journal_input	store-journal-recover.hirsel	journal	journal	L6
-journal_chunk	store-journal-recover.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by scrub_payload)
+journal_chunk	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by scrub_payload)
 JournalRecovered	store-journal-recover.hirsel	journal	journal	L6
-journal_wait_shared	store-journal-recover.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by journal_header)
+journal_wait_shared	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by journal_header)
 journal_refresh_size	store-journal-recover.hirsel	journal	journal	L6
 journal_recover	store-journal-recover.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
 journal_decode_fork	store-journal-recover.hirsel	journal	format	L1	pull-down journal -> format (used by journal_decode)
@@ -1068,13 +1068,12 @@ read_located_roots	store-manifest-wire.hirsel	manifest	manifest	L4
 read_keyed_roots	store-manifest-wire.hirsel	manifest	manifest	L4
 decode_page_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
 manifest_account	store-manifest-wire.hirsel	manifest	manifest	L4
-require_memory_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
 require_object_memory_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
 require_unarchived_manifest	store-manifest-wire.hirsel	manifest	manifest	L4
 ArchiveRange	store-manifest-wire.hirsel	manifest	manifest	L4
 encode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
 decode_archive_range	store-manifest-wire.hirsel	manifest	manifest	L4
-cut_manifest_size	store-manifest-wire.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+cut_manifest_size	store-manifest-wire.hirsel	manifest	manifest	L4	neutral cut input
 META_LIMIT	store-manifest.hirsel	manifest	types	L1	pull-down manifest -> types (used by limits_valid)
 MANIFEST_FIXED_BYTES	store-manifest.hirsel	manifest	manifest	L4
 MANIFEST_LIMIT	store-manifest.hirsel	manifest	manifest	L4
@@ -1401,7 +1400,7 @@ count_page_rows	store-pages.hirsel	pages	catalog	L3	push-up pages -> catalog (re
 collection_rank	store-pages.hirsel	pages	pages	L2
 one_page_account	store-pages.hirsel	pages	pages	L2
 page_image_charge	store-pages.hirsel	pages	pages	L2
-resident_images	store-pages.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+resident_images	store-manifest-support.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
 account_frontier	store-pages.hirsel	pages	pages	L2
 compare_row_versions	store-pages.hirsel	pages	pages	L2
 count_row_versions	store-pages.hirsel	pages	pages	L2
@@ -1490,8 +1489,8 @@ rebuild	store-projector.hirsel	store	store	-
 PinOwner	store-projector.hirsel	maintenance	pages	L2
 Pin	store-projector.hirsel	maintenance	pages	L2
 share_pin	store-projector.hirsel	maintenance	pages	L2	pull-down maintenance -> object_writer (used by copy_follow_state); pull-down object_writer -> pages (used by state_with_delta)
-pin_owner_tag	store-projector.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by append_page_manifest_pin)
-pin_order	store-projector.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by decode_page_manifest)
+pin_owner_tag	store-manifest-support.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by append_page_manifest_pin)
+pin_order	store-manifest-support.hirsel	maintenance	manifest	L4	pull-down maintenance -> manifest (used by decode_page_manifest)
 pin_index	store-projector.hirsel	store	store	-
 pinned	store-projector.hirsel	store	store	-
 owned_pin	store-projector.hirsel	store	store	-
@@ -1726,15 +1725,15 @@ ScrubConfig	store-scrub-pace.hirsel	store	store	-
 ScrubStatus	store-scrub-pace.hirsel	store	store	-
 ScrubStepResult	store-scrub-pace.hirsel	store	store	-
 ScrubPacer	store-scrub-pace.hirsel	store	store	-
-empty_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
-read_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
-write_scrub_history	store-scrub-pace.hirsel	manifest	manifest	L4
+empty_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
+read_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
+write_scrub_history	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
 scrub_history	store-scrub-pace.hirsel	store	store	-
 last_complete_scrub_round	store-scrub-pace.hirsel	store	capture	L7	A-split body to capture (used by describe_lines)
 record_scrub_round	store-scrub-pace.hirsel	store	store	-
 ceil_millis_ratio	store-scrub-pace.hirsel	manifest	manifest	L4
-scrub_estimated_bytes	store-scrub-pace.hirsel	manifest	manifest	L4
-scrub_pace_rate	store-scrub-pace.hirsel	manifest	manifest	L4
+scrub_estimated_bytes	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
+scrub_pace_rate	store-api-scrub-pace.hirsel	manifest	store	-	L3 public root type ruling
 begin_scrub_pacer	store-scrub-pace.hirsel	store	store	-
 scrub_pacer_status	store-scrub-pace.hirsel	store	store	-
 scrub_pacer_step	store-scrub-pace.hirsel	store	store	-
@@ -1746,7 +1745,7 @@ Scrub	store-scrub.hirsel	store	store	-
 ScrubReport	store-scrub.hirsel	store	store	-
 begin_scrub	store-scrub.hirsel	store	store	-
 scrub_step	store-scrub.hirsel	store	store	-
-scrub_finish_pack	store-scrub.hirsel	manifest	manifest	L4
+scrub_finish_pack	store-api-scrub.hirsel	manifest	store	-	L3 public root type ruling
 scrub_pack_pointers	store-scrub.hirsel	manifest	manifest	L4
 scrub_next	store-scrub.hirsel	manifest	journal	L6	push-up manifest -> journal (refs at layer 5)
 scrub_prefix	store-scrub.hirsel	manifest	manifest	L4
@@ -1858,13 +1857,13 @@ stream_attach_append	store-stream-frames.hirsel	format	format	L1
 stream_attach_decode	store-stream-frames.hirsel	format	format	L1
 stream_header	store-stream-frames.hirsel	format	format	L1
 StreamObjectHead	store-stream-frames.hirsel	format	format	L1
-stream_read_header	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_read_header	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 RegIndex	store-stream-frames.hirsel	format	format	L1
 RegRow	store-stream-frames.hirsel	format	format	L1
 StreamRegister	store-stream-frames.hirsel	format	format	L1
 stream_register_bytes	store-stream-frames.hirsel	format	format	L1
 stream_register_encode	store-stream-frames.hirsel	format	format	L1
-stream_register_decode	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_register_decode	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 stream_pair_below	store-stream-frames.hirsel	format	format	L1
 stream_register_follows	store-stream-frames.hirsel	format	format	L1
 BatchSlice	store-stream-frames.hirsel	format	format	L1
@@ -1877,11 +1876,11 @@ stream_batch_size	store-stream-frames.hirsel	format	format	L1
 stream_batch_encode	store-stream-frames.hirsel	format	format	L1
 stream_footer_append	store-stream-frames.hirsel	format	format	L1
 stream_term_encode	store-stream-frames.hirsel	format	format	L1
-stream_batch_head	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_batch_head	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 stream_identity	store-stream-frames.hirsel	format	format	L1
 stream_same	store-stream-frames.hirsel	format	format	L1
 stream_store_below	store-stream-frames.hirsel	format	format	L1
-stream_batch_check	store-stream-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_batch_check	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 stream_slice_check	store-stream-frames.hirsel	format	format	L1
 ROLE_XINDEX	store-stream-gc.hirsel	host_stream	format	L1	pull-down host_stream -> format (used by stream_xindex_decode)
 HeadRanges	store-stream-gc.hirsel	host_stream	host_stream	L8
@@ -1896,7 +1895,7 @@ HeadSummary	store-stream-gc.hirsel	host_stream	host_stream	L8
 StreamGcState	store-stream-gc.hirsel	host_stream	host_stream	L8
 stream_gc_new	store-stream-gc.hirsel	host_stream	host_stream	L8
 stream_xindex_encode	store-stream-gc.hirsel	format	format	L1
-stream_xindex_decode	store-stream-gc.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+stream_xindex_decode	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 stream_xindex_fetch	store-stream-gc.hirsel	host_stream	host_stream	L8
 stream_gc_batch_released	store-stream-gc.hirsel	host_stream	host_stream	L8
 stream_gc_add_entry	store-stream-gc.hirsel	host_stream	host_stream	L8
@@ -2120,7 +2119,7 @@ TailBases	store-tail.hirsel	pages	pages	L2
 no_tail_bases	store-tail.hirsel	pages	pages	L2
 share_tail_bases	store-tail.hirsel	pages	pages	L2
 tail_bases	store-tail.hirsel	pages	pages	L2
-capture_tail_bases	store-tail.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+capture_tail_bases	store-manifest-support.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
 key_codec	store-tail.hirsel	store	store	-
 Tail	store-tail.hirsel	store	store	-
 tail_base	store-tail.hirsel	pages	pages	L2
@@ -2227,7 +2226,7 @@ snapshot_collection_rows	store-tiered-changes.hirsel	pager	store	-	push-up pager
 TieredCompaction	store-tiered-compact.hirsel	pager	pager	L5
 no_tiered_compaction	store-tiered-compact.hirsel	pager	pager	L5
 prune_tiered_leases	store-tiered-compact.hirsel	pager	pager	L5
-tiered_leased	store-tiered-compact.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by cut_retirement)
+tiered_leased	store-manifest-support.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by cut_retirement)
 lease_cut_inventories	store-tiered-compact.hirsel	pager	pager	L5
 TieredQueueValue	store-tiered-compact.hirsel	pager	pager	L5
 TieredQueueMove	store-tiered-compact.hirsel	pager	pager	L5
@@ -2267,7 +2266,7 @@ CUT_PIN_BYTES	store-tiered-fold.hirsel	pager	pager	L5
 fold_frame	store-tiered-fold.hirsel	pager	pager	L5
 fold_frame_at	store-tiered-fold.hirsel	pager	pager	L5
 fold_cold_path	store-tiered-fold.hirsel	pager	pager	L5
-fold_page	store-tiered-fold.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by queue_page_children)
+fold_page	store-manifest-support.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by queue_page_children)
 fold_base_prior	store-tiered-fold.hirsel	pager	pager	L5
 fold_prefix_charge	store-tiered-fold.hirsel	pager	pager	L5
 visit_fold_records	store-tiered-fold.hirsel	pager	pager	L5
@@ -2296,7 +2295,7 @@ TieredPayload	store-tiered-frames.hirsel	format	format	L1
 TieredFrame	store-tiered-frames.hirsel	format	format	L1
 tiered_frame_id	store-tiered-frames.hirsel	format	format	L1
 verify_tiered_edge	store-tiered-frames.hirsel	format	format	L1
-read_tiered_frame	store-tiered-frames.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+read_tiered_frame	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 DeferredFree	store-tiered-frees.hirsel	manifest	manifest	L4
 deferred_free_value	store-tiered-frees.hirsel	manifest	manifest	L4
 deferred_free_entry	store-tiered-frees.hirsel	manifest	manifest	L4
@@ -2342,8 +2341,8 @@ empty_lineage	store-tiered-lineage.hirsel	manifest	manifest	L4
 same_lineage	store-tiered-lineage.hirsel	manifest	manifest	L4
 build_lineage_tree	store-tiered-lineage.hirsel	manifest	manifest	L4
 queued_branch_ids	store-tiered-lineage.hirsel	manifest	manifest	L4
-cut_lineage_rows	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
-settle_lineage_kills	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
+cut_lineage_rows	store-tiered-lineage.hirsel	manifest	manifest	L4	neutral cut input
+settle_lineage_kills	store-tiered-lineage.hirsel	manifest	manifest	L4	neutral cut input
 settle_compaction	store-tiered-lineage.hirsel	manifest	manifest	L4
 note_fork_row	store-tiered-lineage.hirsel	manifest	store	-	push-up manifest -> store (refs at layer 12)
 ReplayValue	store-tiered-overlay.hirsel	pager	pages	L2
@@ -2564,14 +2563,14 @@ tx_tiered_count	store-tiered-tx-read.hirsel	txn	txn	L12
 tx_tiered_index_row	store-tiered-tx-read.hirsel	txn	txn	L12
 fetch_many	store-tiered-tx-read.hirsel	store	store	-
 sealed_tiered_root	store-tiered.hirsel	pager	pager	L5
-ReplacedFrame	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by TieredDrainKill)
-BranchReplacements	store-tiered.hirsel	pager	pager	L5
+ReplacedFrame	store-manifest-support.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by TieredDrainKill)
+BranchReplacements	store-manifest-support.hirsel	pager	manifest	L4	neutral cut input
 REPLACED_ROW	store-tiered.hirsel	pager	pager	L5
 DROPPED_ROW	store-tiered.hirsel	pager	pager	L5
 TieredDirty	store-tiered.hirsel	pager	pager	L5
 clean_tiered_cut	store-tiered.hirsel	pager	pager	L5
-replaced_page	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
-replaced_blob	store-tiered.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
+replaced_page	store-manifest-support.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
+replaced_blob	store-manifest-support.hirsel	pager	manifest	L4	pull-down pager -> manifest (used by drain_queue_row)
 TieredFreed	store-tiered.hirsel	pager	pager	L5
 no_tiered_freed	store-tiered.hirsel	pager	pager	L5
 reserve_tiered_commit	store-tiered.hirsel	pager	pager	L5
@@ -2740,8 +2739,8 @@ checked_name	store.hirsel	store	store	-
 branch	store.hirsel	store	store	-
 this_open	store.hirsel	store	store	-
 cut_install	store.hirsel	store	store	-
-branch_root_bytes	store.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
-pin_root_bytes	store.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+branch_root_bytes	store-manifest-support.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
+pin_root_bytes	store-manifest-support.hirsel	pages	manifest	L4	push-up pages -> manifest (refs at layer 3)
 check_manifest_addition	store.hirsel	store	store	-
 adopt	store.hirsel	store	store	-
 delete_branch	store.hirsel	store	store	-
@@ -2893,14 +2892,14 @@ disk_check_start	store.hirsel	format	format	L1
 seal_frame	store.hirsel	format	format	L1
 disk_check	store.hirsel	format	format	L1
 disk_seal	store.hirsel	format	format	L1
-disk_kind_limit	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_kind_limit	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 DiskFrameHead	store.hirsel	format	format	L1
-disk_read_frame_head	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-disk_check_frame_kind	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-disk_read_frame	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-disk_frame_bytes	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_read_frame_head	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_check_frame_kind	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_read_frame	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_frame_bytes	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 disk_header_bytes	store.hirsel	format	format	L1
-disk_read_header	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_read_header	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 disk_number	store.hirsel	format	format	L1
 disk_count	store.hirsel	format	format	L1
 disk_name	store.hirsel	format	format	L1
@@ -2908,13 +2907,13 @@ disk_name_bytes	store.hirsel	format	format	L1
 disk_put_name	store.hirsel	format	format	L1
 encode_fork	store.hirsel	format	pages	L2	push-up format -> pages (refs at layer 2)
 disk_blob	store.hirsel	format	format	L1
-disk_io	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
-disk_path	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
-disk_write_synced	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by disk_publish_manifest)
-disk_remove_optional	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_dead_packs)
-DiskLoaded	store.hirsel	manifest	manifest	L4
+disk_io	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
+disk_path	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by check_list_pack)
+disk_write_synced	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by disk_publish_manifest)
+disk_remove_optional	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_dead_packs)
+DiskLoaded	store-manifest-support.hirsel	manifest	manifest	L4
 disk_loaded	store.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
-disk_publish_manifest	store.hirsel	manifest	manifest	L4
+disk_publish_manifest	store-manifest-support.hirsel	manifest	manifest	L4
 stage_export_migration	store.hirsel	store	store	-
 export_system_get	store.hirsel	store	store	-
 staged_snapshot	store.hirsel	store	store	-
@@ -2945,27 +2944,27 @@ imported_digest	store.hirsel	store	store	-
 prepared_matches	store.hirsel	store	store	-
 identity_words	store.hirsel	store	store	-
 Cutover	store.hirsel	store	store	-
-TargetLimits	store.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by validate_cut_pages)
+TargetLimits	store-manifest-support.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by validate_cut_pages)
 catalog_bytes_equal	store.hirsel	transfer	transfer	L13
 planned_catalog	store.hirsel	transfer	transfer	L13
 planned_ranges	store.hirsel	transfer	transfer	L13
 db_target	store.hirsel	store	store	-
-pack_leased	store.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
+pack_leased	store-manifest-support.hirsel	transfer	manifest	L4	pull-down transfer -> manifest (used by cut_retirement)
 SegmentSpan	store.hirsel	journal	journal	L6
 DiskRemovals	store.hirsel	journal	journal	L6
 removal_spans	store.hirsel	journal	journal	L6
-remove_numbered	store.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_page_manifest)
+remove_numbered	store-manifest-support.hirsel	journal	manifest	L4	pull-down journal -> manifest (used by cleanup_page_manifest)
 remove_cut_files	store.hirsel	journal	journal	L6
 disk_identity	store.hirsel	types	types	L1
 disk_read_end	store.hirsel	journal	journal	L6
 disk_end	store.hirsel	journal	journal	L6
 disk_exists	store.hirsel	journal	journal	L6
-PageDisk	store.hirsel	manifest	pager	L5	push-up manifest -> pager (refs at layer 4)
+PackDiskState	store-manifest-support.hirsel	manifest	manifest	L4	L4 ruling: compaction remains on Db until pager
 DiskStartup	store.hirsel	journal	journal	L6
-remember_roots	store.hirsel	manifest	manifest	L4
-located_owners	store.hirsel	manifest	manifest	L4
-manifest_state	store.hirsel	manifest	manifest	L4
-check_expected_store	store.hirsel	manifest	manifest	L4
+remember_roots	store-manifest-support.hirsel	manifest	manifest	L4
+located_owners	store-manifest-support.hirsel	manifest	manifest	L4
+manifest_state	store-manifest-support.hirsel	manifest	manifest	L4
+check_expected_store	store-manifest-support.hirsel	manifest	manifest	L4
 disk_start	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
 DiskSession	store.hirsel	journal	journal	L6
 disk_lock	store.hirsel	journal	journal	L6
@@ -3010,12 +3009,12 @@ decode_settlement	store.hirsel	format	format	L1
 journal_decode_commit	store.hirsel	format	store	-	push-up format -> store (refs at layer 12)
 journal_decode	store.hirsel	format	store	-	push-up format -> store (refs at layer 12)
 journal_torn	store.hirsel	format	format	L1
-journal_prefix	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-journal_read_prefix	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+journal_prefix	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+journal_read_prefix	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 JournalFrame	store.hirsel	format	format	L1
-journal_read_frame	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-disk_stream_payload	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
-disk_stream_payload_counted	store.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+journal_read_frame	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_stream_payload	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
+disk_stream_payload_counted	store-manifest-support.hirsel	format	manifest	L4	push-up format -> manifest (refs at layer 3)
 journal_scan	store.hirsel	journal	store	-	push-up journal -> store (refs at layer 12)
 JournalReplay	store.hirsel	journal	pager	L5	pull-down journal -> pager (used by journal_replay_manifest)
 journal_replay	store.hirsel	journal	pager	L5	pull-down journal -> pager (used by journal_replay_manifest)
@@ -3026,3 +3025,55 @@ reserve_tx	store.hirsel	store	store	-
 law_call_reserve	store.hirsel	store	store	-
 reserve_pinned_data	store.hirsel	store	store	-
 reserve_settles_pin	store.hirsel	store	store	-
+CutChange	store-cut-participants.hirsel	manifest	manifest	L4
+CutInput	store-cut-participants.hirsel	manifest	manifest	L4
+LoadedPackInventory	store-page-recovery.hirsel	manifest	manifest	L4
+ORIGIN_PAYLOAD_BYTES	store-manifest-support.hirsel	manifest	manifest	L4
+PackObjectRef	store-page-recovery.hirsel	manifest	manifest	L4
+add_pack_scrub	store-manifest-support.hirsel	manifest	manifest	L4
+append_pack_fork	store-manifest-support.hirsel	manifest	manifest	L4
+check_page_emission	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
+check_page_location_closure	store_locations_disk_laws.hirsel	manifest	manifest	L4
+check_paged_manifest	manifest_manifest_page_laws_2_white_box.hirsel	manifest	manifest	L4
+cut_removed_pin	store-cut-participants.hirsel	manifest	manifest	L4
+disk_index_len	store_locations_disk_laws.hirsel	manifest	manifest	L4
+disk_law_page_emission	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
+disk_law_page_location_closure	store_locations_disk_laws.hirsel	manifest	manifest	L4
+disk_law_paged_manifest	manifest_manifest_page_laws_2_white_box.hirsel	manifest	manifest	L4
+disk_test_page_emission	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
+disk_test_page_location_closure	store_locations_disk_laws.hirsel	manifest	manifest	L4
+disk_test_paged_manifest	manifest_manifest_page_laws_2_white_box.hirsel	manifest	manifest	L4
+edit_pack_locations	store_locations_disk_laws.hirsel	manifest	manifest	L4
+history_kind_limit	store-manifest-support.hirsel	manifest	manifest	L4
+install_pack_cut	store-manifest-support.hirsel	manifest	manifest	L4
+l69_adopt_origin	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+l69_ghost_watermark	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+l69_live	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+l69_pack	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+l69_shared_watermark	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+law_full_frame_selection	manifest_packs_disk_laws_white_box.hirsel	manifest	manifest	L4
+list_kind_deferred	store-list-read.hirsel	manifest	manifest	L4
+list_kind_lineage	store-list-read.hirsel	manifest	manifest	L4
+list_kind_pack	store-list-read.hirsel	manifest	manifest	L4
+location_edge_charge	store_locations_disk_laws.hirsel	manifest	manifest	L4
+manifest_tiered_inventory	store-page-recovery.hirsel	manifest	manifest	L4
+pack_carried	store-manifest-support.hirsel	manifest	manifest	L4
+pack_deferred	store-manifest-support.hirsel	manifest	manifest	L4
+pack_forked	store-manifest-support.hirsel	manifest	manifest	L4
+pack_lists	store-manifest-support.hirsel	manifest	manifest	L4
+pack_locations	store-manifest-support.hirsel	manifest	manifest	L4
+pack_next	store-manifest-support.hirsel	manifest	manifest	L4
+pack_owners	store-manifest-support.hirsel	manifest	manifest	L4
+pack_scan_finished	store-manifest.hirsel	manifest	manifest	L4
+pack_scan_indexed	store-manifest.hirsel	manifest	manifest	L4
+pack_scrubs	store-manifest-support.hirsel	manifest	manifest	L4
+page_data_pack_vector	manifest_manifest_page_laws_white_box.hirsel	manifest	manifest	L4
+prune_pack_scrubs	store-manifest-support.hirsel	manifest	manifest	L4
+recovered_pack_inventory	store-page-recovery.hirsel	manifest	manifest	L4
+scan_location_storage_charge	store_locations_disk_laws.hirsel	manifest	manifest	L4
+set_pack_forks	store-manifest-support.hirsel	manifest	manifest	L4
+set_pack_next	store_locations_disk_laws.hirsel	manifest	manifest	L4
+test_l69_lineage_last_holder_ghost_and_adopt	tiered_lineage_laws_white_box.hirsel	manifest	manifest	L4
+genesis_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4
+recovered_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4
+retired_pack_disk	store-manifest-support.hirsel	manifest	manifest	L4

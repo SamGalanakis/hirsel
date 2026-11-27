@@ -3,9 +3,9 @@ type ReplayTieredAccount: shareable + send {
     exact: bool
 }
 
-fn journal_replay_manifest(take state: pages.State, manifest: PageManifest) -> Result[JournalReplay, Error] {
-    let mut replay = journal_replay(take state, manifest.next_stamp - 1, manifest.limits)?
-    replay.tiered.total = manifest.account_tiered
+fn journal_replay_manifest(take state: pages.State, page_record: manifest.PageManifest) -> Result[JournalReplay, Error] {
+    let mut replay = journal_replay(take state, page_record.next_stamp - 1, limits_from_rep(page_record.limits))?
+    replay.tiered.total = page_record.account_tiered
     Ok(take replay)
 }
 

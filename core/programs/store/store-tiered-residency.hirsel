@@ -27,7 +27,7 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
         ColdPage(ptr) => {
             let frame = fold_frame_at(source, TieredPage(ptr))?
             disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
-                Ok(std.page.copy_with_stamp(fold_page(frame), ptr.stamp))
+                Ok(std.page.copy_with_stamp(manifest.fold_page(frame), ptr.stamp))
             })?
         },
     }
@@ -75,11 +75,11 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
 
 // Releasing residency does not read the old tree. A Cold root is a single
 // queue row. A Hot root releases the Cold edges under its Hot pages.
-fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[DeferredFree]) -> Result[(), Error] {
+fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[manifest.DeferredFree]) -> Result[(), Error] {
     match root {
         ColdPage(place) => {
             failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
-            list.push(mut queued, DeferredFree(branch_id: branch_id, target: TieredPage(place)))
+            list.push(mut queued, manifest.DeferredFree(branch_id: branch_id, target: TieredPage(place)))
         },
         HotPage(page) => {
             let image = std.page.image_of(page)
@@ -89,7 +89,7 @@ fn residency_release(root: std.page.Slot, branch_id: u32, mut queued: List[Defer
                 } else if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
                     if let Some(ColdBlob(ptr)) = std.page.blob_slot(page, reference.body) {
                         failure_result_from_rep(types.capacity(list.try_reserve(mut queued, 1)))?
-                        list.push(mut queued, DeferredFree(branch_id: branch_id, target: TieredBlob(ptr)))
+                        list.push(mut queued, manifest.DeferredFree(branch_id: branch_id, target: TieredBlob(ptr)))
                     }
                 }
             }
@@ -296,7 +296,7 @@ fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
 // step through the pager (`fold_frame_at` pins it on K), and every Hot page
 // and blob is copied, so the whole tree takes fresh stamps (v2.96). The old
 // tree is released as a dropped collection's is, so this cut's probe sees it.
-fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
+fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[manifest.DeferredFree]) -> Result[bool, Error] waits {
     let Some(id) = unload else {
         return Ok(false)
     }

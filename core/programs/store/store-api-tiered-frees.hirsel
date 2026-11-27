@@ -1,0 +1,122 @@
+fn enqueue_tiered_free(mut queue: manifest.TieredDeferredQueue, take row: manifest.DeferredFree) -> Result[u64, Error] {
+    let seq = queue.next_seq
+    let following = failure_result_from_rep(catalog.stamp_after(seq))?
+    let (take pending, issued) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[u64, manifest.DeferredFree], u64), Error] {
+        let mut draw = queue.issued
+        let (take rows, _) = std.omap.insert(mut draw, queue.rows, seq, clone(row))
+        Ok((take rows, draw))
+    })?
+    queue.rows = take pending
+    queue.issued = issued
+    queue.next_seq = following
+    Ok(seq)
+}
+
+fn tiered_drain_page(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u32, mut queue: manifest.TieredDeferredQueue) -> Result[(), Error] waits {
+    let mut children: List[manifest.DeferredFree] = list.new()
+    queue_page_children(cut, ptr, branch_id, mut children)?
+    for take child in take children {
+        let _ = enqueue_tiered_free(mut queue, take child)?
+    }
+    Ok(())
+}
+
+// A drained page hands its child pages, or a leaf its blobs, to the queue.
+fn queue_page_children(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u32, mut out: List[manifest.DeferredFree]) -> Result[(), Error] waits {
+    let frame = fold_frame_at(cut, TieredPage(ptr))?
+    let image = std.page.image_of(manifest.fold_page(frame))
+    for slot in 0u64 .. std.page.count(image) {
+        let edge: Option[format.TieredTarget] = match std.page.owning_edge(image, slot) {
+            Some(PageEdge(child)) => Some(TieredPage(child)),
+            Some(BlobEdge(body)) => Some(TieredBlob(body)),
+            None => None,
+        }
+        if let Some(take child) = take edge {
+            failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
+            list.push(mut out, manifest.DeferredFree(branch_id: branch_id, target: take child))
+        }
+    }
+    Ok(())
+}
+
+fn drain_tiered_frees(cut: TieredPageSource, mut queue: manifest.TieredDeferredQueue, rewritten: Map[u64, ()], budget: u64) -> Result[List[manifest.TieredDrainKill], Error] waits {
+    let mut lower: std.omap.Bound[u64] = Unbounded
+    let mut pages = 0u64
+    let mut killed: List[manifest.TieredDrainKill] = list.new()
+    while pages < budget {
+        let item: Option[(u64, manifest.DeferredFree)] = disk_allocation(scoped fn() -> Result[Option[(u64, manifest.DeferredFree)], Error] {
+            let mut cursor = std.omap.range(queue.rows, lower, Unbounded)
+            Ok(std.omap.next(mut cursor))
+        })?
+        let Some((seq, row)) = take item else {
+            break
+        }
+        lower = Excluded(seq)
+        if map.contains(rewritten, seq) {
+            continue
+        }
+        let replaced = match row.target {
+            TieredPage(ptr) => {
+                tiered_drain_page(cut, ptr, row.branch_id, mut queue)?
+                pages += 1
+                manifest.replaced_page(ptr)
+            },
+            TieredBlob(body) => manifest.replaced_blob(body),
+        }
+        failure_result_from_rep(types.capacity(list.try_reserve(mut killed, 1)))?
+        let (take remaining, following) = disk_allocation(scoped fn() -> Result[(std.omap.OMap[u64, manifest.DeferredFree], u64), Error] {
+            let mut draw = queue.issued
+            let rows = std.omap.remove(mut draw, queue.rows, seq)
+            Ok((take rows, draw))
+        })?
+        queue.rows = take remaining
+        queue.issued = following
+        list.push(mut killed, manifest.TieredDrainKill(branch_id: row.branch_id, frame: replaced))
+    }
+    Ok(take killed)
+}
+
+fn drain_queue_row(cut: TieredPageSource, seq: u64, row: manifest.DeferredFree, mut queue: manifest.CutQueue, mut pages: u64) -> Result[(), Error] waits {
+    let frame = match row.target {
+        TieredPage(ptr) => {
+            queue_page_children(cut, ptr, row.branch_id, mut queue.added)?
+            pages += 1
+            manifest.replaced_page(ptr)
+        },
+        TieredBlob(body) => manifest.replaced_blob(body),
+    }
+    failure_result_from_rep(types.capacity(list.try_reserve(mut queue.drained, 1)))?
+    failure_result_from_rep(types.capacity(list.try_reserve(mut queue.kills, 1)))?
+    list.push(mut queue.drained, seq)
+    list.push(mut queue.kills, manifest.TieredDrainKill(branch_id: row.branch_id, frame: frame))
+    Ok(())
+}
+
+// T8 step 4 (§13.6 "Deferred frees"): oldest first, up to `budget` pages of
+// the installed rows and then this cut's added rows, the first at `next_seq`.
+// A drained page's children join the end and may drain at this cut. A row
+// this cut's compaction moved (`moving`) stays queued under its new value,
+// so the drain never reads a frame the cut has just moved.
+fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], next_seq: u64, mut queue: manifest.CutQueue, moving: Map[u64, TieredQueueMove], budget: u64) -> Result[(), Error] waits {
+    let mut pages = 0u64
+    let mut cursor = std.page.cursor_open(arc.share(installed), None, true, false)
+    while pages < budget {
+        let Some(row) = std.page.cursor_next(mut cursor) else {
+            break
+        }
+        let seq: u64 = list.word_be(row.key, 0)
+        if map.contains(moving, seq) {
+            continue
+        }
+        drain_queue_row(cut, seq, manifest.queued_free(row.value), mut queue, mut pages)?
+    }
+    let mut at = 0u64
+    while pages < budget && at < list.len(queue.added) {
+        if !map.contains(moving, next_seq + at) {
+            let row: manifest.DeferredFree = clone(queue.added[at])
+            drain_queue_row(cut, next_seq + at, row, mut queue, mut pages)?
+        }
+        at += 1
+    }
+    Ok(())
+}

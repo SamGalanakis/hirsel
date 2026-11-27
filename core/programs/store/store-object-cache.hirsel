@@ -62,13 +62,13 @@ fn pack_cache_lock(d: Dir) -> Option[std.file.Lock] waits {
 
 // A fixed listing buffer keeps RAM independent of the directory's capacity.
 fn pack_cache_scan(d: Dir, requested: u64, evict: bool) -> Result[u64, Error] waits {
-    let mut listing = disk_io(host.entries(d, None))?
-    let mut buf = disk_read_buffer(1024)?
+    let mut listing = failure_result_from_rep(manifest.disk_io(host.entries(d, None)))?
+    let mut buf = failure_result_from_rep(manifest.disk_read_buffer(1024))?
     let mut remaining = requested
     let mut total = 0u64
     loop {
         list.clear(mut buf)
-        if disk_io(host.next_entries(mut listing, mut buf))? == 0 {
+        if failure_result_from_rep(manifest.disk_io(host.next_entries(mut listing, mut buf)))? == 0 {
             return Ok(if evict {
                 remaining
             } else {
@@ -93,12 +93,12 @@ fn pack_cache_scan(d: Dir, requested: u64, evict: bool) -> Result[u64, Error] wa
             if let None = history_parse_name(string.slice(name, 0, 60)) {
                 continue
             }
-            let status = disk_io(host.stat(d, name))?
+            let status = failure_result_from_rep(manifest.disk_io(host.stat(d, name)))?
             let File = status.kind else {
                 continue
             }
             if evict {
-                disk_io(host.remove(d, name))?
+                failure_result_from_rep(manifest.disk_io(host.remove(d, name)))?
                 remaining = remaining - order.min(remaining, status.size)
                 if remaining == 0 {
                     return Ok(0)
@@ -263,7 +263,7 @@ fn pack_cache_write_payload(mut file: HostFile, raw: Bytes, with_trailer: bool) 
     if !with_trailer {
         return true
     }
-    let Ok(take allocated) = disk_read_buffer(8) else {
+    let Ok(take allocated) = failure_result_from_rep(manifest.disk_read_buffer(8)) else {
         return false
     }
     let mut trailer = take allocated

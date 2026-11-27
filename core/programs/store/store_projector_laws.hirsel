@@ -699,8 +699,8 @@ fn first_follower_versions(directory: Dir, c: Clock, r: Random, tasks: Tasks, op
 // checkpoint, and folds the whole source again when that checkpoint is gone.
 @test
 fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    disk_io(host.mkdir(d, "follower-projector"))?
-    let directory = disk_io(host.open_dir(d, "follower-projector"))?
+    failure_result_from_rep(manifest.disk_io(host.mkdir(d, "follower-projector")))?
+    let directory = failure_result_from_rep(manifest.disk_io(host.open_dir(d, "follower-projector")))?
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let (floor_version, image_version) = first_follower_versions(directory, c, r, tasks, options)?
     let mut destination = test_db(c, 1073741824)

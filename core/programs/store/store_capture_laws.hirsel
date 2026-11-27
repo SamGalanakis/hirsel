@@ -71,7 +71,7 @@ fn capture_test_fill(width: u64, value: u8) -> Bytes {
     take raw
 }
 
-fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), Error] waits {
+fn capture_test_catalog(mut m: manifest.PageManifest, id: StoreId, d: Dir) -> Result[(), Error] waits {
     let data = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 1)
     let large = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 2)
     let inventory = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 3)
@@ -95,7 +95,7 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     let payload = failure_result_from_rep(pages.page_result(std.page.encode_blob(1, large_value)))?
     let mut blob_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(large, 0, 0)))?
     list.append(mut blob_bytes, failure_result_from_rep(types.capacity(format.disk_seal(large, 72, 0x0022, 1, payload)))?)
-    disk_write_synced(d, "p-2", blob_bytes)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "p-2", blob_bytes))?
     let reference = std.page.BlobRef(stamp: 1, len: list.len(large_value), checksum: std.check.xxh3(large_value, 0, list.len(large_value)), pack: 2, offset: 72, body: 0)
     list.push(mut catalog_rows, std.page.Entry(key: failure_result_from_rep(catalog.catalog_index_key(1, "large"))?, cell: BlobValue(reference)))
     let leaf = failure_result_from_rep(pages.page_result(std.page.encode(catalog_rows, 0, 2, Unprefixed)))?
@@ -107,15 +107,15 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
         let branch_image = failure_result_from_rep(pages.page_result(std.page.encode(children, height, stamp + 2, Unprefixed)))?
         root = capture_test_page(mut raw, data, branch_image)?
     }
-    disk_write_synced(d, "p-1", raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "p-1", raw))?
     let mut pack_rows: List[std.page.Entry] = list.with_capacity(2)
     let page_bytes = list.len(raw) - 72 - 16 * 65
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(encode_pack_row(pages.PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(encode_pack_row(pages.PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
     let listing = failure_result_from_rep(pages.page_result(std.page.encode(pack_rows, 0, 67, Unprefixed)))?
     let mut list_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(inventory, 0, 0)))?
     m.pack_root = capture_test_page(mut list_bytes, inventory, listing)?
-    disk_write_synced(d, "p-3", list_bytes)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "p-3", list_bytes))?
     m.next_stamp = 68
     m.next_pack = 4
     m.next_table = 17
@@ -123,15 +123,15 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     let main_roots: pages.LocatedRoots = clone(m.branches[0].roots)
     let second_roots: pages.LocatedRoots = clone(main_roots)
     m.next_branch = 2
-    list.push(mut m.branches, LocatedBranch(id: 1, name: "child", parent: 0, forked_at: 0, version: 0, at: 0, roots: take second_roots))
+    list.push(mut m.branches, manifest.LocatedBranch(id: 1, name: "child", parent: 0, forked_at: 0, version: 0, at: 0, roots: take second_roots))
     for pin_name in["a", "b", "c"] {
-        list.push(mut m.pins, LocatedPin(owner: ApplicationPin, name: clone(pin_name), branch: 0, version: 0, roots: clone(main_roots), watermark: 68))
+        list.push(mut m.pins, manifest.LocatedPin(owner: ApplicationPin, name: clone(pin_name), branch: 0, version: 0, roots: clone(main_roots), watermark: 68))
     }
     Ok(())
 }
 
-fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
-    let mut remaining = manifest_limit(m.limits) - page_manifest_size(m)
+fn capture_test_meta_ceiling(mut m: manifest.PageManifest) -> Result[(), Error] {
+    let mut remaining = manifest.manifest_limit(m.limits) - manifest.page_manifest_size(m)
     let additional: u64 = (remaining + 397) / 398
     failure_result_from_rep(types.capacity(list.try_reserve(mut m.branches, additional)))?
     for i in 0u64 .. additional {
@@ -145,11 +145,11 @@ fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
         let id: u32 = int.truncate(2 + i)
         let zero = std.page.unlocated(0)
         let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
-        list.push(mut m.branches, LocatedBranch(id: id, name: take label, parent: 0, forked_at: 0, version: 0, at: 0, roots: take roots))
+        list.push(mut m.branches, manifest.LocatedBranch(id: id, name: take label, parent: 0, forked_at: 0, version: 0, at: 0, roots: take roots))
         remaining -= 143 + width
     }
     m.next_branch = int.truncate(2 + additional)
-    if remaining != 0 || page_manifest_size(m) != manifest_limit(m.limits) {
+    if remaining != 0 || manifest.page_manifest_size(m) != manifest.manifest_limit(m.limits) {
         fail("MANIFEST fixture did not reach the meta ceiling")
     }
     Ok(())
@@ -216,16 +216,16 @@ fn capture_test_stored_blob(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
 fn need_covers(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let limits = default_limits()
     let id = StoreId(hi: 7, lo: 3000)
-    let mut manifest = page_manifest_empty(limits)
-    capture_test_catalog(mut manifest, id, d)?
-    capture_test_meta_ceiling(mut manifest)?
-    disk_write_synced(d, "MANIFEST", disk_page_manifest_bytes(id, manifest)?)?
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(limits))
+    capture_test_catalog(mut page_record, id, d)?
+    capture_test_meta_ceiling(mut page_record)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?))?
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     list.append(mut raw, capture_test_commit(ctx, 72, 1, VALUE_LIMIT, 0)?)
-    disk_write_synced(d, journal_path(1, "")?, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.journal_path(1, ""))?, raw))?
     let _ = take raw
-    let _ = take manifest
+    let _ = take page_record
     capture_test_cover(d, c)?
     capture_test_check_cover(d, c, 16)?;
     let mut name = string.with_capacity(64)
@@ -265,9 +265,9 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let initial_segs = list.len(empty.segments)
     let id = empty.id
     let _ = take empty
-    let path = journal_path(seq, "")?
+    let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq)
-    let mut file = disk_io(host.open(d, path, ReadWrite))?
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, ReadWrite)))?
     let mut offset = segment_end
     let width = 1048576u64
     for i in 0u64 .. 64 {
@@ -280,8 +280,8 @@ fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         host.write_at(mut file, offset, frame) ?=> |problem| Io(problem.error)
         offset += list.len(frame)
     }
-    disk_io(host.sync(mut file))?
-    disk_io(host.close(take file))?
+    failure_result_from_rep(manifest.disk_io(host.sync(mut file)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))?
     let with_suffix = prepare(d, c, Describe)?
     let after = capture_need(with_suffix)
     for i in 0u64 .. list.len(before.parts) {

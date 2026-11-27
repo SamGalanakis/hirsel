@@ -123,9 +123,9 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         if host.mono_ns(c) >= deadline {
             return Error(Remote(Retriable(Deadline)))
         }
-        let (take raw, id, take manifest) = read_only_manifest(d)?
-        check_expected_store(expected, id)?
-        let candidate = capture_walk(d, id, manifest.first_live, restarted)?
+        let (take raw, id, take page_record) = read_only_manifest(d)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(id)))?
+        let candidate = capture_walk(d, id, page_record.first_live, restarted)?
         let Some(take selected) = take candidate else {
             restarted = true
             continue
@@ -133,13 +133,13 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         let mut walk = take selected
         capture_fence(d, c, deadline, mut walk)?
         let image = replace(mut walk.end_image, None)
-        let key = LogCaptureKey(manifest: std.sha256.hash(raw), first: manifest.first_live, count: list.len(walk.segments), end_image: take image, torn_tail: walk.torn_tail)
+        let key = LogCaptureKey(manifest: std.sha256.hash(raw), first: page_record.first_live, count: list.len(walk.segments), end_image: take image, torn_tail: walk.torn_tail)
         let old_charge = if let Some(old) = previous {
             if let Some(attempt) = progress.last {
                 // A cancelled or timed-out caller may still name the capture
                 // before the last attempt. Only reuse against its actual base.
                 if attempt.capture_id == old.log_id && same_capture_key(attempt.key, key) {
-                    let _ = validate_page_manifest(d, id, take manifest)?
+                    let _ = validate_page_manifest(d, id, take page_record)?
                     check_read_only_manifest(d, raw)?
                     return Ok(None)
                 }
@@ -148,12 +148,12 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: LogCaptureP
         } else {
             0u64
         }
-        disk_io(host.sync_dir(d))?
-        if read_page_manifest_bytes(d)? != raw {
+        failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
+        if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
             restarted = false
             continue
         }
-        let initial = read_only_checkpoint(d, id, take manifest)?
+        let initial = read_only_checkpoint(d, id, take page_record)?
         let torn_tail = walk.torn_tail
         let replay = capture_scan(id, take walk, take initial)?
         let resident = journal_account(replay)?
@@ -539,28 +539,28 @@ pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapsh
     }
 }
 
-fn read_only_checkpoint(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[JournalReplay, Error] waits {
-    let validated = validate_page_manifest(d, id, take manifest)?
-    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+fn read_only_checkpoint(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[JournalReplay, Error] waits {
+    let validated = validate_page_manifest(d, id, take page_record)?
+    let manifest.ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
     let mut graph = take resolved
     let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
         Ok(std.page.empty(0, 0, Collection))
     })?
-    let page_nodes = attach_page_graph(mut graph, empty_collection)?
+    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
     let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-        let holders = attach_manifest_holders(selected, page_nodes, empty_collection)
-        failure_result_from_rep(types.capacity(manifest_state(selected, holders)))
+        let holders = manifest.attach_manifest_holders(selected, page_nodes, empty_collection)
+        failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
     })?
     journal_replay_manifest(take state, selected)
 }
 
 fn log_floor(directory: Dir, store_id: StoreId, ceiling: u64, at_most: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
-    let (take raw, id, take manifest) = read_only_manifest(directory)?
-    check_expected_store(Some(store_id), id)?
-    if manifest.branches[0u64].version > at_most {
+    let (take raw, id, take page_record) = read_only_manifest(directory)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store_id)), store_key_to_rep(id)))?
+    if page_record.branches[0u64].version > at_most {
         return Ok(None)
     }
-    let recovered = read_only_checkpoint(directory, id, take manifest)?
+    let recovered = read_only_checkpoint(directory, id, take page_record)?
     let resident = journal_account(recovered)?
     failure_result_from_rep(catalog.over_ceiling(resident, ceiling))?
     check_read_only_manifest(directory, raw)?

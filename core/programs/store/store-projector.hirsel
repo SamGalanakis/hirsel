@@ -832,23 +832,6 @@ pub fn rebuild(mut db: Db, name: String) -> Result[Ticket, Error] waits {
     }
 }
 
-fn pin_owner_tag(owner: pages.PinOwner) -> u64 {
-    match owner {
-        ApplicationPin => 1,
-        ProjectorPin => 2,
-        ImportPin => 3,
-    }
-}
-
-fn pin_order(a: String, a_owner: pages.PinOwner, b: String, b_owner: pages.PinOwner) -> Order {
-    let names = order.compare(a, b)
-    if names == Equal {
-        order.compare(pin_owner_tag(a_owner), pin_owner_tag(b_owner))
-    } else {
-        names
-    }
-}
-
 fn pin_index(db: Db, owner: pages.PinOwner, name: String) -> u64 {
     for k in 0u64 .. list.len(pages.holder_pins(db.holders)) {
         if pages.holder_pins(db.holders)[k].owner == owner && pages.same_name(pages.holder_pins(db.holders)[k].name, name) {
@@ -921,9 +904,9 @@ fn pin_delta(mut db: Db, owner: pages.PinOwner, name: String, s: Snapshot) -> Re
         if owner == ApplicationPin {
             return Error(Exists(take owned))
         }
-        check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(pages.holder_pins(db.holders)[slot].roots.keyed)))?
+        check_manifest_addition(db, int.saturating_sub(manifest.keyed_root_record_bytes(s.roots.keyed), manifest.keyed_root_record_bytes(pages.holder_pins(db.holders)[slot].roots.keyed)))?
     } else {
-        check_manifest_addition(db, pin_root_bytes(name, s.roots))?
+        check_manifest_addition(db, manifest.pin_root_bytes(name, s.roots))?
     }
     let serial = pages.holder_next_pin(db.holders)
     let Some(following) = int.checked_add(serial, 1) else {

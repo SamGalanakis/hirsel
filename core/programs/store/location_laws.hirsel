@@ -163,7 +163,7 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
         }
         return Ok(())
     }
-    let raw = disk_read_paged_file(d, paged_pack_path(ptr.pack)?, 67108864)?
+    let raw = failure_result_from_rep(manifest.disk_read_paged_file(d, failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?, 67108864))?
     law_scan_location_pack(mut graph, ptr.pack, class, raw)
     if let Some(physical) = map.get(graph.physical, (ptr.pack, ptr.offset)) {
         if physical != ptr {
@@ -266,7 +266,7 @@ fn law_same_pack(a: pages.PagePack, b: pages.PagePack) -> bool {
 }
 
 fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
-    let raw = disk_read_paged_file(d, "MANIFEST", 16384)?
+    let raw = failure_result_from_rep(manifest.disk_read_paged_file(d, "MANIFEST", 16384))?
     let manifest_kind: u16 = list.word_le(raw, 72)
     if manifest_kind != 0x0031 || format.read_le(raw, 76, 4) + 88 != list.len(raw) {
         fail("location law: MANIFEST frame")
@@ -325,7 +325,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let listed: Map[u64, pages.PagePack] = clone(graph.listed)
     for (seq, row) in listed {
         if !map.contains(graph.packs, seq) {
-            let pack = disk_read_paged_file(d, paged_pack_path(seq)?, 67108864)?
+            let pack = failure_result_from_rep(manifest.disk_read_paged_file(d, failure_result_from_rep(manifest.paged_pack_path(seq))?, 67108864))?
             law_scan_location_pack(mut graph, seq, row.class, pack)
         }
     }
@@ -345,8 +345,8 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
 fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     let disk = disk_state(db)
     let oracle = law_parse_locations(log_directory(db)?)?
-    let known = view disk.pages.locations
-    if disk_index_len(known.frames) != map.len(oracle.frames) || disk_index_len(known.packs) != map.len(oracle.packs) {
+    let known = manifest.pack_locations(disk.packs)
+    if manifest.disk_index_len(known.frames) != map.len(oracle.frames) || manifest.disk_index_len(known.packs) != map.len(oracle.packs) {
         fail("location law: inventory size")
     }
     let mut pin_names: Map[u64, (pages.PinOwner, String)] = map.new()
@@ -361,7 +361,7 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     }
     let mut incoming: Map[(u64, LawLocationSource), u64] = map.new()
     for (stamp, frame) in oracle.frames {
-        let Some(live_bytes) = disk_index_get(known.frames, stamp) else {
+        let Some(live_bytes) = manifest.disk_index_get(known.frames, stamp) else {
             fail("location law: missing live stamp")
         }
         if live_bytes.place != frame.place || live_bytes.class != frame.class || live_bytes.outgoing != frame.outgoing {
@@ -393,7 +393,7 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
         }
     }
     for (seq, pack) in oracle.packs {
-        let Some(live_bytes) = disk_index_get(known.packs, seq) else {
+        let Some(live_bytes) = manifest.disk_index_get(known.packs, seq) else {
             fail("location law: missing pack")
         }
         if !law_same_pack(live_bytes, pack) {
@@ -850,12 +850,12 @@ fn test_index_walker_corruptions(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     disk_crash_init(child, c, r, tasks, "checkpoint")?
     trust_directory(child)?
     // Change the first payload byte of a pack frame that MANIFEST points to.
-    let (_, take manifest) = read_page_manifest_file(child)?
-    let root = manifest.branches[0u64].roots.catalog
-    let pack = paged_pack_path(root.pack)?
-    let mut raw = disk_read_paged_file(child, pack, 67108864)?
+    let (_, take page_record) = read_page_manifest_file(child)?
+    let root = page_record.branches[0u64].roots.catalog
+    let pack = failure_result_from_rep(manifest.paged_pack_path(root.pack))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(child, pack, 67108864))?
     raw[root.offset + 16] = raw[root.offset + 16] ^ 1u8
-    disk_write_synced(child, pack, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(child, pack, raw))?
     match trust_directory(child) {
         Error(Corrupt(Fault(file: found_file, offset: found_at, why: Checksum))) if found_file == pack && found_at == root.offset => (),
         _ => fail("store trust: the structural walk must reject the damaged pack frame"),

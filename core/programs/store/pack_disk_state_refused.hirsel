@@ -1,0 +1,3 @@
+fn forge_pack_disk_state() -> store.manifest.PackDiskState {
+    store.manifest.PackDiskState(next_pack: 1, locations: store.manifest.new_page_locations(), lists: store.manifest.empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), scrubs: list.new())
+}

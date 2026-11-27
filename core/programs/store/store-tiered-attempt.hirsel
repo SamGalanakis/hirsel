@@ -324,7 +324,7 @@ fn tiered_resolve_cold(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCa
     }
     let frame = option.unwrap(found)
     if frame.identity != facts {
-        failure_result_from_rep(format.verify_tiered_edge(paged_pack_path(facts.pack)?, target, frame.identity))?
+        failure_result_from_rep(format.verify_tiered_edge(failure_result_from_rep(manifest.paged_pack_path(facts.pack))?, target, frame.identity))?
     }
     Ok(Some(frame))
 }
@@ -347,7 +347,7 @@ fn tiered_pinned_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCac
     }
     if let Some(wanted) = expected_level {
         if std.page.level(std.page.image_of(page)) != wanted {
-            return Error(failure_from_rep(format.disk_fault(paged_pack_path(ptr.pack)?, ptr.offset, Malformed)))
+            return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?, ptr.offset, Malformed)))
         }
     }
     Ok(page)

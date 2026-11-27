@@ -296,7 +296,7 @@ fn bucket_test_backup_restore_full_scan(d: Dir, c: Clock, r: Random, tasks: Task
 }
 
 fn disk_io_deploy(take r: Result[(), IoError]) -> Result[(), DeployError] {
-    scratch_result(disk_io(r))
+    scratch_result(failure_result_from_rep(manifest.disk_io(r)))
 }
 
 fn offline_law_copy(source: Dir, target: Dir, c: Clock) -> Result[Option[(ExportStamp, u64)], BackupError] waits {
@@ -333,35 +333,35 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
     let recovered_end = db.file_end
     let id = db.store
     let seq = db.file_seq
-    let terminal = journal_path(seq, "")?
-    let end_file = journal_path(seq, ".end")?
+    let terminal = failure_result_from_rep(manifest.journal_path(seq, ""))?
+    let end_file = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
     close(take db)?
-    disk_write_synced(source, end_file, journal_end_bytes(id, seq, stale))?
-    let original_manifest = read_page_manifest_bytes(source)?
-    let original_terminal = disk_io(host.stat(source, terminal))?
-    let mut fence = disk_io(host.open(source, terminal, ReadWrite))?
-    if !disk_io(host.try_lock(mut fence))? {
+    failure_result_from_rep(manifest.disk_write_synced(source, end_file, journal_end_bytes(id, seq, stale)))?
+    let original_manifest = failure_result_from_rep(manifest.read_page_manifest_bytes(source))?
+    let original_terminal = failure_result_from_rep(manifest.disk_io(host.stat(source, terminal)))?
+    let mut fence = failure_result_from_rep(manifest.disk_io(host.open(source, terminal, ReadWrite)))?
+    if !failure_result_from_rep(manifest.disk_io(host.try_lock(mut fence)))? {
         fail("backup fixture could not fence the terminal")
     }
     let exclusive = task.spawn(tasks, bytes 134217728, (source, target, c), fn(take work: (Dir, Dir, Clock)) -> Result[Option[(ExportStamp, u64)], BackupError] waits {
         offline_law_copy(work.0, work.1, work.2)
     })
-    let mut probe = disk_io(host.open(source, "LOCK", Read))?
-    while disk_io(host.try_lock(mut probe))? {
-        disk_io(host.unlock(mut probe))?
+    let mut probe = failure_result_from_rep(manifest.disk_io(host.open(source, "LOCK", Read)))?
+    while failure_result_from_rep(manifest.disk_io(host.try_lock(mut probe)))? {
+        failure_result_from_rep(manifest.disk_io(host.unlock(mut probe)))?
         std.clock.sleep_ns(c, 1000000)
     }
     if disk_exists(target, "EXPORT")? {
         fail("backup stamped while the terminal fence was held")
     }
-    disk_io(host.unlock(mut fence))?
+    failure_result_from_rep(manifest.disk_io(host.unlock(mut fence)))?
     let Some((stamp, _)) = result.unwrap(result.unwrap(task.join(take exclusive))) else {
         fail("locked recovery routed a valid terminal to the writer")
     }
     if stamp.head != head || stamp.opened != seq || stamp.terminal != seq || stamp.end != recovered_end {
         fail("backup did not stamp the recovered terminal and head")
     }
-    if disk_io(host.stat(source, terminal))?.size != original_terminal.size || disk_end(source, id, seq)? != Some(stale) || read_page_manifest_bytes(source)? != original_manifest {
+    if failure_result_from_rep(manifest.disk_io(host.stat(source, terminal)))?.size != original_terminal.size || disk_end(source, id, seq)? != Some(stale) || failure_result_from_rep(manifest.read_page_manifest_bytes(source))? != original_manifest {
         fail("backup changed the source")
     }
     let _ = result.unwrap(restore(target, restored, c, options))
@@ -388,8 +388,8 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
         let held = snapshot(db)
         let change = change_pin(mut db, ImportPin, "import", held)?
         durable(mut db, change)?
-        let (_, take manifest) = read_page_manifest_file(source)?
-        if list.len(manifest.pins) != 1 || manifest.pins[0].owner != ImportPin {
+        let (_, take page_record) = read_page_manifest_file(source)?
+        if list.len(page_record.pins) != 1 || page_record.pins[0].owner != ImportPin {
             fail("orphan pin fixture failed to publish the import pin")
         }
     }
@@ -397,8 +397,8 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
     let seq = db.file_seq
     close(take db)?
     if !orphan {
-        let _ = disk_remove_optional(source, journal_path(seq, ".end")?)?
-        disk_write_synced(source, journal_path(seq, "")?, b"")?
+        let _ = failure_result_from_rep(manifest.disk_remove_optional(source, failure_result_from_rep(manifest.journal_path(seq, ".end"))?))?
+        failure_result_from_rep(manifest.disk_write_synced(source, failure_result_from_rep(manifest.journal_path(seq, ""))?, b""))?
     }
     if let Some(_) = result.unwrap(offline_law_copy(source, target, c)) {
         fail("the offline backup bypassed the writer fallback")
@@ -407,8 +407,8 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
         fail("a writer fallback published an offline stamp")
     }
     let stamp = result.unwrap(backup_with_writer(tasks, source, target, c, r, clone(options), b"backup-law-3079!"))
-    let (_, take manifest) = read_page_manifest_file(target)?
-    if stamp.head != head || list.len(manifest.pins) != 0 {
+    let (_, take page_record) = read_page_manifest_file(target)?
+    if stamp.head != head || list.len(page_record.pins) != 0 {
         fail("writer backup lost the head or retained the orphan import pin")
     }
     let _ = result.unwrap(restore(target, restored, c, options))
@@ -431,10 +431,10 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     let target = disk_test_directory(d)
     let restored = disk_test_directory(d)
     result.unwrap(backup_law_seed(tasks, source, c, r, options))
-    let (id, take manifest) = read_page_manifest_file(source)?
-    let mut packs = capture_packs(source, id, manifest, false, 0)
-    let counts = capture_lists(mut packs, manifest)?
-    let inventory = check_inventory(source, id, manifest, counts.rows + counts.pages)?
+    let (id, take page_record) = read_page_manifest_file(source)?
+    let mut packs = capture_packs(source, id, page_record, false, 0)
+    let counts = capture_lists(mut packs, page_record)?
+    let inventory = check_inventory(source, id, page_record, counts.rows + counts.pages)?
     let mut listed: Option[u64] = None
     for candidate in inventory {
         if candidate.class == 0 {
@@ -445,34 +445,34 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     let Some(seq) = listed else {
         fail("backup fixture needs a listed data pack")
     }
-    let pack = paged_pack_path(seq)?
+    let pack = failure_result_from_rep(manifest.paged_pack_path(seq))?
     let extra = "p-99999999"
     let temp = "p-99999999.tmp"
-    disk_write_synced(source, extra, b"stray")?
-    disk_write_synced(source, temp, b"temporary")?
+    failure_result_from_rep(manifest.disk_write_synced(source, extra, b"stray"))?
+    failure_result_from_rep(manifest.disk_write_synced(source, temp, b"temporary"))?
     let Some((stamp, _)) = result.unwrap(offline_law_copy(source, target, c)) else {
         fail("backup refused a store with an unlisted pack")
     }
     if disk_exists(target, extra)? || disk_exists(target, temp)? || !disk_exists(source, extra)? || !disk_exists(source, temp)? {
         fail("backup copied or removed unlisted files")
     }
-    disk_write_synced(target, extra, b"stray")?
-    disk_write_synced(target, temp, b"temporary")?
+    failure_result_from_rep(manifest.disk_write_synced(target, extra, b"stray"))?
+    failure_result_from_rep(manifest.disk_write_synced(target, temp, b"temporary"))?
     let restored_stamp = result.unwrap(restore(target, restored, c, options))
     if !same_stamp(stamp, restored_stamp) || disk_exists(restored, extra)? || disk_exists(restored, temp)? {
         fail("restore copied unlisted files or changed the stamp")
     }
-    let raw = disk_read_file(source, pack, 1048576)?
+    let raw = failure_result_from_rep(manifest.disk_read_file(source, pack, 1048576))?
     for damage in 0u64 .. 3 {
         let output = disk_test_directory(d)
         let incomplete = disk_test_directory(d)
         for at in[source, target] {
             if damage == 2 {
-                disk_io(host.rename(at, pack, "p-99999998"))?
+                failure_result_from_rep(manifest.disk_io(host.rename(at, pack, "p-99999998")))?
             } else {
-                disk_io(host.remove(at, pack))?
+                failure_result_from_rep(manifest.disk_io(host.remove(at, pack)))?
                 if damage == 1 {
-                    disk_write_synced(at, pack, list.slice(raw, 0, 73))?
+                    failure_result_from_rep(manifest.disk_write_synced(at, pack, list.slice(raw, 0, 73)))?
                 }
             }
         }
@@ -494,9 +494,9 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
         }
         for at in[source, target] {
             if damage == 2 {
-                disk_io(host.rename(at, "p-99999998", pack))?
+                failure_result_from_rep(manifest.disk_io(host.rename(at, "p-99999998", pack)))?
             } else {
-                disk_write_synced(at, pack, raw)?
+                failure_result_from_rep(manifest.disk_write_synced(at, pack, raw))?
             }
         }
     }
@@ -556,7 +556,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
         let _ = deploy_result(checkpoint(mut db))?
     }
     let resident_exact = db.resident
-    let want_packs = live_pack_sequences(disk_state(db).pages.locations)
+    let want_packs = manifest.live_pack_sequences(manifest.pack_locations(disk_state(db).packs))
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 17u8)
     let job = begin_backup(mut db, target, result.unwrap(failure_result_from_rep(types.copied(attempt))))?

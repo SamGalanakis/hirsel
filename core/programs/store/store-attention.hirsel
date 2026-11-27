@@ -27,7 +27,7 @@ pub fn accounts(db: Db) -> Accounts {
 fn memory_page_images(db: Db) -> u64 {
     let counted = isolate(scoped fn() -> Result[u64, Capacity] {
         let roots = pages.state_roots(current_state(db)?)?
-        Ok(resident_images(roots, None))
+        Ok(manifest.resident_images(roots, None))
     })
     match counted {
         Ok(Ok(Ok(images))) => images,

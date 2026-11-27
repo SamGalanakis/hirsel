@@ -1,8 +1,8 @@
 // AP16. Records refer to frames and holders by stamp or durable identity.
 // They hold no Arc share of a page or blob.
-type IncomingEdge: key = PageSource(u64) | HolderSource(u8, u64, u8) | ListSource(u8)
+pub type IncomingEdge: key = PageSource(u64) | HolderSource(u8, u64, u8) | ListSource(u8)
 
-type FrameLocation: shareable + send {
+pub type FrameLocation: shareable + send {
     place: std.page.PagePtr,
     class: u8,
     // A page's resident image capacity (AP15). A blob's charge is its
@@ -15,18 +15,18 @@ type FrameLocation: shareable + send {
 // images is the sum of every record's frame charge: the resident report's
 // page images and blob bodies, each once by stamp (AP15). A record is
 // charged when it is added and refunded when its last incoming edge goes.
-type PageLocations: send {
+pub type PageLocations: send {
     frames: DiskIndex[u64, FrameLocation],
     packs: DiskIndex[u64, pages.PagePack],
     members: DiskIndex[(u64, u64), ()],
     images: u64
 }
 
-fn new_page_locations() -> PageLocations {
+pub fn new_page_locations() -> PageLocations {
     PageLocations(frames: disk_index(), packs: disk_index(), members: disk_index(), images: 0)
 }
 
-fn share_page_locations(known: PageLocations) -> PageLocations {
+pub fn share_page_locations(known: PageLocations) -> PageLocations {
     PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs), members: disk_index_share(known.members), images: known.images)
 }
 
@@ -46,25 +46,25 @@ fn image_width(image: std.page.Image) -> u16 {
     int.truncate(width)
 }
 
-fn resident_location_charge(known: PageLocations) -> u64 {
+pub fn resident_location_charge(known: PageLocations) -> u64 {
     int.saturating_add(known.images, location_storage_charge(known))
 }
 
-fn location_storage_charge(known: PageLocations) -> u64 {
+pub fn location_storage_charge(known: PageLocations) -> u64 {
     let records = std.omap.storage_charge(known.frames.values, 8, 87)
     let packs = std.omap.storage_charge(known.packs.values, 8, 29)
     let members = std.omap.storage_charge(known.members.values, 16, 0)
     int.saturating_add(int.saturating_add(records, packs), int.saturating_add(members, known.frames.payload))
 }
 
-fn frame_edge_charge(record: FrameLocation) -> u64 {
+pub fn frame_edge_charge(record: FrameLocation) -> u64 {
     let outgoing = 8 * list.capacity(record.outgoing)
     // IncomingEdge's largest payload has u8, u64, u8 and a tag.
     let incoming = format.round8(18 * list.capacity(record.incoming))
     int.saturating_add(outgoing, incoming)
 }
 
-fn pack_edge_charge(_pack: pages.PagePack) -> u64 {
+pub fn pack_edge_charge(_pack: pages.PagePack) -> u64 {
     0
 }
 
@@ -72,7 +72,7 @@ fn member_charge(_member: ()) -> u64 {
     0
 }
 
-fn live_pack_sequences(known: PageLocations) -> List[u64] {
+pub fn live_pack_sequences(known: PageLocations) -> List[u64] {
     let mut result: List[u64] = list.new()
     let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut cursor) {
@@ -83,25 +83,11 @@ fn live_pack_sequences(known: PageLocations) -> List[u64] {
     take result
 }
 
-// D-ZL-2 (§13.10a): an export lease names every positive-live pack and every
-// listed class-3/4 pack (even when `live == 0`). When no zero-live class-3/4
-// pack is listed this returns the exact same sequence list as `live_pack_sequences`.
-fn export_lease_pack_sequences(known: PageLocations) -> List[u64] {
-    let mut result: List[u64] = list.new()
-    let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
-    while let Some((seq, pack)) = std.omap.next(mut cursor) {
-        if pack.live != 0 || pack.class >= 3 {
-            list.push(mut result, seq)
-        }
-    }
-    take result
-}
-
-fn published_page_pointer(known: PageLocations, root: pages.PageTree) -> std.page.PagePtr {
+pub fn published_page_pointer(known: PageLocations, root: pages.PageTree) -> std.page.PagePtr {
     published_tree_pointer(known, root.root)
 }
 
-fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std.page.PagePtr {
+pub fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std.page.PagePtr {
     let stamp = std.page.stamp(std.page.image_of(root))
     if stamp == 0 {
         return std.page.unlocated(0)
@@ -112,7 +98,7 @@ fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std
     record.place
 }
 
-fn published_page_roots(known: PageLocations, roots: pages.PageRoots) -> pages.LocatedRoots {
+pub fn published_page_roots(known: PageLocations, roots: pages.PageRoots) -> pages.LocatedRoots {
     let mut keyed: List[std.page.PagePtr] = list.with_capacity(list.len(roots.keyed))
     for tree in roots.keyed {
         list.push(mut keyed, published_page_pointer(known, tree))
@@ -120,11 +106,11 @@ fn published_page_roots(known: PageLocations, roots: pages.PageRoots) -> pages.L
     pages.LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
 }
 
-fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
+pub fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), types.Failure] {
     if stamp != 0 {
-        let changed = failure_result_from_rep(types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) {
+        let changed = types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) {
             list.push(mut location.incoming, source)
-        })))?
+        }))?
         if let None = changed {
             fail("store: missing live frame")
         }
@@ -132,22 +118,22 @@ fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -
     Ok(())
 }
 
-fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, image: u16, take outgoing: List[u64]) -> Result[(), Error] {
+pub fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, image: u16, take outgoing: List[u64]) -> Result[(), types.Failure] {
     // Its children already have records. The caller walks in postorder.
     for child in outgoing {
         add_page_source(mut known, child, PageSource(ptr.stamp))?
     }
     let item = FrameLocation(place: ptr, class: class, image: image, outgoing: take outgoing, incoming: list.new())
     let charge = frame_charge(item)
-    failure_result_from_rep(types.capacity(disk_index_put(mut known.frames, ptr.stamp, take item, frame_edge_charge)))?
+    types.capacity(disk_index_put(mut known.frames, ptr.stamp, take item, frame_edge_charge))?
     if ptr.pack != 0 {
-        failure_result_from_rep(types.capacity(disk_index_put(mut known.members, (ptr.pack, ptr.stamp), (), member_charge)))?
+        types.capacity(disk_index_put(mut known.members, (ptr.pack, ptr.stamp), (), member_charge))?
     }
     known.images = int.saturating_add(known.images, charge)
     Ok(())
 }
 
-fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
+fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: pages.LocatedRoots) -> Result[(), types.Failure] {
     add_page_source(mut known, roots.collections.stamp, HolderSource(kind, holder, 0))?
     add_page_source(mut known, roots.streams.stamp, HolderSource(kind, holder, 1))?
     add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))?
@@ -159,14 +145,14 @@ fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: p
 
 // Rebuild the installed generation's metadata from the validated postorder.
 // List-only retirements have already been removed by open and are absent here.
-fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocations, Error] {
+pub fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocations, types.Failure] {
     let mut known = new_page_locations()
     for (seq, pack) in validated.inventory {
         let mut loaded: pages.PagePack = clone(pack)
         if loaded.class < 3 {
             loaded.live = 0
         }
-        failure_result_from_rep(types.capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge)))?
+        types.capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge))?
     }
     for stamp in validated.graph.postorder {
         let Some(ptr) = map.get(validated.graph.stamps, stamp) else {
@@ -175,11 +161,11 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         let Some(frame) = map.get(validated.graph.frames, stamp) else {
             fail("store: missing validated frame")
         }
-        let class = option.unwrap(failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: pages.PagePack) -> u8 {
+        let class = option.unwrap(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: pages.PagePack) -> u8 {
             let width: u64 = int.widen(ptr.len)
             pack.live += width
             pack.class
-        })))?)
+        }))?)
         let mut outgoing: List[u64] = list.new()
         let mut image = 0u16
         if let ReadPage(raw, kids, blobs) = frame {
@@ -208,11 +194,11 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
 
 // The candidate can drop an incoming edge only after all of its additions.
 // If this was the last edge, remove the record, debit its pack and cascade.
-fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
+pub fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), types.Failure] {
     if stamp == 0 {
         return Ok(())
     }
-    let dead = failure_result_from_rep(types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) -> bool {
+    let dead = types.capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) -> bool {
         for slot in 0u64 .. list.len(location.incoming) {
             if location.incoming[slot] == source {
                 let _ = list.swap_remove(mut location.incoming, slot)
@@ -220,16 +206,16 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
             }
         }
         fail("store: missing incoming edge")
-    })))?
+    }))?
     if let Some(true) = dead {
-        let location = option.unwrap(failure_result_from_rep(types.capacity(disk_index_remove(mut known.frames, stamp, frame_edge_charge)))?)
+        let location = option.unwrap(types.capacity(disk_index_remove(mut known.frames, stamp, frame_edge_charge))?)
         known.images -= frame_charge(location)
         if location.place.pack != 0 {
-            let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge)))?
-            let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
+            let _ = types.capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge))?
+            let _ = types.capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
                 let width: u64 = int.widen(location.place.len)
                 pack.live -= width
-            })))?
+            }))?
         }
         for child in location.outgoing {
             remove_page_source(mut known, child, PageSource(stamp))?
@@ -238,7 +224,7 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
     Ok(())
 }
 
-fn relocation_ancestors(known: PageLocations, bodies: List[u64]) -> Map[u64, ()] {
+pub fn relocation_ancestors(known: PageLocations, bodies: List[u64]) -> Map[u64, ()] {
     let mut marked: Map[u64, ()] = map.new()
     let mut pending: List[u64] = clone(bodies)
     while let Some(stamp) = list.pop(mut pending) {
@@ -275,7 +261,7 @@ fn may_own_edges(page: Arc[std.page.Page]) -> bool {
     true
 }
 
-fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: u8) -> Result[(), Error] {
+pub fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: u8) -> Result[(), types.Failure] {
     let image = std.page.image_of(root)
     let stamp = std.page.stamp(image)
     if stamp == 0 || map_has_location(known, stamp) {
@@ -312,12 +298,12 @@ fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: 
     add_location(mut known, std.page.unlocated(stamp), class, image_width(image), take outgoing)
 }
 
-type HeldPage: shareable + send {
+pub type HeldPage: shareable + send {
     source: IncomingEdge,
     root: Arc[std.page.Page]
 }
 
-fn candidate_page_locations(installed: PageLocations, before: Map[IncomingEdge, u64], after: List[HeldPage]) -> Result[PageLocations, Error] {
+fn candidate_page_locations(installed: PageLocations, before: Map[IncomingEdge, u64], after: List[HeldPage]) -> Result[PageLocations, types.Failure] {
     let mut candidate = share_page_locations(installed)
     let mut stamps: Map[IncomingEdge, u64] = map.new()
     for held in after {
@@ -336,7 +322,7 @@ fn candidate_page_locations(installed: PageLocations, before: Map[IncomingEdge, 
     Ok(take candidate)
 }
 
-fn change_list_root(mut candidate: PageLocations, before: Arc[std.page.Page], after: Arc[std.page.Page], which: u8) -> Result[(), Error] {
+pub fn change_list_root(mut candidate: PageLocations, before: Arc[std.page.Page], after: Arc[std.page.Page], which: u8) -> Result[(), types.Failure] {
     let old_stamp = std.page.stamp(std.page.image_of(before))
     let new_stamp = std.page.stamp(std.page.image_of(after))
     if old_stamp == new_stamp {
@@ -347,7 +333,7 @@ fn change_list_root(mut candidate: PageLocations, before: Arc[std.page.Page], af
     remove_page_source(mut candidate, old_stamp, ListSource(which))
 }
 
-fn map_has_location(known: PageLocations, stamp: u64) -> bool {
+pub fn map_has_location(known: PageLocations, stamp: u64) -> bool {
     match disk_index_get(known.frames, stamp) {
         Some(_) => true,
         None => false,
@@ -382,7 +368,7 @@ fn requires_emit(known: PageLocations, marked: Map[u64, ()], stamp: u64) -> bool
 
 // The marks include the whole ancestor closure. An installed, unmarked
 // page therefore has no selected descendant. Each marked frame emits once.
-fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.page.Page], mut output: CutFrames) {
+pub fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.page.Page], mut output: CutFrames) {
     let image = std.page.image_of(root)
     let stamp = std.page.stamp(image)
     if !requires_emit(known, marked, stamp) || map.contains(output.emitted, stamp) {
@@ -415,13 +401,13 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
     list.push(mut output.pages, PageWrite(stamp: stamp, body: arc.share(root)))
 }
 
-type DiskIndex[K: ordered + shareable + send, T: shareable + send]: send {
+pub type DiskIndex[K: ordered + shareable + send, T: shareable + send]: send {
     values: std.omap.OMap[K, T],
     ids: u64,
     payload: u64
 }
 
-fn disk_index[K: ordered + shareable + send, T: shareable + send]() -> DiskIndex[K, T] {
+pub fn disk_index[K: ordered + shareable + send, T: shareable + send]() -> DiskIndex[K, T] {
     DiskIndex(values: std.omap.new(), ids: 0, payload: 0)
 }
 
@@ -429,11 +415,11 @@ fn disk_index_share[K: ordered + shareable + send, T: shareable + send](table_in
     DiskIndex(values: std.omap.snapshot(table_index.values), ids: table_index.ids, payload: table_index.payload)
 }
 
-fn disk_index_get[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T], key: K) -> Option[View[T]] in table_index {
+pub fn disk_index_get[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T], key: K) -> Option[View[T]] in table_index {
     std.omap.get(table_index.values, key)
 }
 
-fn disk_index_put[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, take value: T, charge: scoped[view] fn(T) -> u64) -> Result[(), Capacity] {
+pub fn disk_index_put[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, take value: T, charge: scoped[view] fn(T) -> u64) -> Result[(), Capacity] {
     // A cut edits one candidate many times. The owned insert copies a node
     // shared with the installed generation once and then edits it in place.
     let added = charge(value)
@@ -458,7 +444,7 @@ fn disk_index_update[K: ordered + shareable + send, T: shareable + send, R](mut 
     Ok(Some(take answer))
 }
 
-fn disk_index_remove[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, charge: scoped[view] fn(T) -> u64) -> Result[Option[T], Capacity] {
+pub fn disk_index_remove[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, charge: scoped[view] fn(T) -> u64) -> Result[Option[T], Capacity] {
     let (take value, removed) = {
         let Some(old) = disk_index_get(table_index, key) else {
             return Ok(None)

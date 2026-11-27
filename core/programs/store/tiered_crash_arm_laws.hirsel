@@ -52,7 +52,7 @@ fn crash_arm_check(d: Dir, db: Db, rows: Table[u64, Bytes], row_count: u64, widt
     for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
         let walk = compact_walk_from(d, db, compact_branch_root(db, slot, rows.id)?)?
         for (seq, _) in walk.live {
-            if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
                 fail("§13.6 crash: every branch reaches its frames in listed packs on disk")
             }
         }
@@ -72,7 +72,7 @@ fn crash_arm_check(d: Dir, db: Db, rows: Table[u64, Bytes], row_count: u64, widt
         return compact_check_published(d, db, rows.id)
     }
     let walk = compact_walk_from(d, db, compact_branch_root(db, 0, rows.id)?)?
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class >= 3 && listed.live < map.get_or(walk.live, seq, 0) {
             fail("§13.6 crash: a Tiered pack's live bytes cover its reachable frames")
@@ -98,7 +98,7 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
         },
         MidProbe => {
             let _ = checkpoint(mut db)?
-            if !compact_listed(db, probed) || map.len(disk_state(db).pages.compaction.probes) == 0 {
+            if !compact_listed(db, probed) || map.len(db.compaction.probes) == 0 {
                 fail("§13.6 crash: the probe is still running after its first cut")
             }
         },
@@ -108,29 +108,29 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
         SnapshotLease => Some(snapshot(db)),
         _ => None,
     }
-    let first_output = disk_state(db).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = compact_refused_retiring_cut(mut db)?
-    if !disk_exists(d, paged_pack_path(first_output)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: the cut wrote its packs before the rename")
     }
     if let Some(take reading) = take held {
         drop(take reading)
     }
     close(take db)?
-    disk_write_synced(d, if renamed {
+    failure_result_from_rep(manifest.disk_write_synced(d, if renamed {
         "MANIFEST"
     } else {
         "MANIFEST.tmp"
-    }, sealed)?
+    }, sealed))?
     let mut reopened = open(tasks, d, c, r, crash_arm_options(arm, floor)?)?
     if disk_exists(d, "MANIFEST.tmp")? {
         fail("§13.6 crash: open removes an unpublished MANIFEST.tmp")
     }
     if !renamed {
-        if disk_exists(d, paged_pack_path(first_output)?)? {
+        if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
             fail("§13.6 crash: open removes an unpublished cut's packs")
         }
-        if !compact_listed(reopened, probed) || !disk_exists(d, paged_pack_path(probed)?)? {
+        if !compact_listed(reopened, probed) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
             fail("§13.6 crash: the previous generation recovers with the probed pack listed and on disk")
         }
     } else {
@@ -139,7 +139,7 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
                 fail("§13.6 crash: a mid-probe cut does not retire the pack")
             }
         } else {
-            if compact_listed(reopened, probed) || disk_exists(d, paged_pack_path(probed)?)? {
+            if compact_listed(reopened, probed) || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
                 fail("§13.6 crash: the new generation retired the pack, and Remove resumes at open")
             }
         }
@@ -163,7 +163,7 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
     }
     let _ = checkpoint(mut reopened)?
     let _ = checkpoint(mut reopened)?
-    if disk_exists(d, paged_pack_path(probed)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("§13.6 crash: the retired pack's file is removed")
     }
     crash_arm_check(d, reopened, rows, row_count, width, probed, !lost_cursors)?

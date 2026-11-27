@@ -102,7 +102,7 @@ fn stream_unhold_reg_rows(report: std.sim.s3.Report, reg: String) -> Result[List
     let Some(final) = map.get(report.objects, reg) else {
         fail("reg object is missing")
     }
-    let body = stream_register_decode(final.data, stream_law_sid(), 0)?
+    let body = failure_result_from_rep(manifest.stream_register_decode(final.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     let format.StreamRegister(rows: take rows, ..) = take body
     Ok(take rows)
 }

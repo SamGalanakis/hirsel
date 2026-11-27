@@ -141,8 +141,8 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     let mut replay = journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, pages.holder_next_node(db.holders), db.limits)?
     result.unwrap(journal_apply("fixture", mut replay, Commit(take commit)))
     let roots = pages.share_roots(replay.state.tips[i].roots)
-    let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
-    let count_bytes = keyed_root_record_bytes(roots.keyed)
+    let old_bytes = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
+    let count_bytes = manifest.keyed_root_record_bytes(roots.keyed)
     pages.replace_head(mut db.holders, i, take roots, replay.state.tips[i].head, replay.state.tips[i].at, old_bytes, count_bytes)
     pages.set_next_node(mut db.holders, replay.next_node)
     db.changes += 1
@@ -705,7 +705,7 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     if disk_state(db).journaled != wanted {
         return false
     }
-    let header = option.unwrap(result.unwrap(journal_header(d, db.store, previous_seq + 1, None)))
+    let header = option.unwrap(result.unwrap(failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(db.store), previous_seq + 1, None))))
     if header.prev_end != pending_end {
         return false
     }
@@ -884,7 +884,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     }
     let seq = db.file_seq
     result.unwrap(close(take db))
-    let path = result.unwrap(disk_path("j-", seq, ""))
+    let path = result.unwrap(manifest.disk_path("j-", seq, ""))
     if accepted {
         let raw = result.unwrap(read_journal_prefix(d, path, 72 + 15729082 + final_item))
         if format.read_le(raw, 76, 4) != 15729066 + final_item {
@@ -893,7 +893,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     } else {
         // §3.3b: the segment is its Direct creation block, the header and zeros
         // to 4096; the refused frame wrote nothing past the header.
-        let raw = result.unwrap(disk_read_file(d, path, 4096))
+        let raw = result.unwrap(failure_result_from_rep(manifest.disk_read_file(d, path, 4096)))
         if list.len(raw) != 4096 {
             return false
         }

@@ -1,0 +1,125 @@
+pub opaque type Scrub {
+    d: Dir,
+    store: StoreId,
+    generation: u64,
+    next_stamp: u64,
+    packs: List[manifest.ScrubPack],
+    position: u64,
+    at: u64,
+    open: Option[manifest.ScrubInput],
+    checked: u64,
+    // The generation's frame records: the pointer each reachable frame must
+    // match. A persistent share, so taking it copies nothing.
+    known: manifest.PageLocations,
+    lease: Arc[manifest.ScrubLease]
+}
+
+// generation is the cut whose listed packs the tour reads. checked counts
+// the bytes read so far. next is the lowest pack not yet finished, or None
+// when the tour is done. faults holds what this step found, at most one per
+// pack: a fault ends that pack's tour.
+pub type ScrubReport: send {
+    generation: u64,
+    checked: u64,
+    next: Option[u64],
+    faults: List[Fault]
+}
+
+pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(NotFound)
+    }
+    let next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    let (take packs, take seqs) = disk_allocation(scoped fn() -> Result[(List[manifest.ScrubPack], List[u64]), Error] {
+        let mut packs: List[manifest.ScrubPack] = list.new()
+        let mut seqs: List[u64] = list.new()
+        let mut cursor = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
+        while let Some((seq, pack)) = std.omap.next(mut cursor) {
+            list.push(mut packs, manifest.ScrubPack(seq: seq, class: pack.class, frames: int.widen(pack.frames), payload_bytes: pack.payload_bytes, index: pack.index))
+            list.push(mut seqs, seq)
+        }
+        Ok((take packs, take seqs))
+    })?
+    let lease = arc.new(manifest.ScrubLease(packs: take seqs))
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
+        failure_result_from_rep(manifest.add_pack_scrub(mut state.packs, arc.share(lease)))
+    })?
+    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
+}
+
+// Reads at least one frame, then stops once budget bytes are read this step.
+pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] waits {
+    let mut faults: List[Fault] = list.new()
+    let mut spent = 0u64
+    while tour.position < list.len(tour.packs) && (spent == 0 || spent < budget) {
+        match scrub_next(mut tour, mut spent) {
+            Ok(()) => (),
+            Error(Corrupt(take fault)) => {
+                failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
+                list.push(mut faults, take fault)
+                scrub_finish_pack(mut tour)?
+            },
+            Error(Unsupported(kind)) => {
+                let path = failure_result_from_rep(manifest.paged_pack_path(tour.packs[tour.position].seq))?
+                failure_result_from_rep(types.capacity(list.try_reserve(mut faults, 1)))?
+                list.push(mut faults, Fault(file: take path, offset: tour.at, why: Kind(kind)))
+                scrub_finish_pack(mut tour)?
+            },
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    tour.checked = int.saturating_add(tour.checked, spent)
+    let pending = if tour.position < list.len(tour.packs) {
+        Some(tour.packs[tour.position].seq)
+    } else {
+        None
+    }
+    Ok(ScrubReport(generation: tour.generation, checked: tour.checked, next: pending, faults: take faults))
+}
+
+fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
+    if let Some(take reading) = replace(mut tour.open, None) {
+        let manifest.ScrubInput(input: take input, ..) = take reading
+        let handle = format.take_journal_file(take input)
+        failure_result_from_rep(manifest.disk_io(host.close(take handle)))?
+    }
+    tour.position += 1
+    tour.at = 0
+    Ok(())
+}
+
+// Checks one unit of the current pack: its HEADER, one frame, or its end
+// against the pack's record. Charges bytes as they are examined.
+fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
+    let seq = tour.packs[tour.position].seq
+    let class = tour.packs[tour.position].class
+    let unopened = match tour.open {
+        Some(_) => false,
+        None => true
+    }
+    if unopened {
+        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+        let expected = failure_result_from_rep(manifest.scrub_pack_pointers(tour.known, seq))?
+        let opened = failure_result_from_rep(manifest.disk_io(host.open(tour.d, path, Read)))?
+        let mut input = journal_input(take opened, false)?
+        let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(seq), optional_store_key_to_rep(Some(tour.store))))?
+        let index_at = tour.packs[tour.position].index
+        tour.open = Some(manifest.ScrubInput(input: take input, path: take path, context: header.context, checked_pack: manifest.pack_scan_indexed(class, tour.next_stamp, index_at), expected: take expected, slot: 0))
+        tour.at = 72
+        return Ok(())
+    }
+    let at = tour.at
+    let frames = tour.packs[tour.position].frames
+    let payload_bytes = tour.packs[tour.position].payload_bytes
+    let checked = match tour.open {
+        Some(mut reading) => failure_result_from_rep(manifest.scrub_frame(mut reading, frames, payload_bytes, at, mut spent)),
+        None => fail("store: scrub has no open pack"),
+    }
+    if let Some(end) = checked? {
+        tour.at = end
+        Ok(())
+    } else {
+        scrub_finish_pack(mut tour)
+    }
+}

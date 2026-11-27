@@ -287,7 +287,7 @@ fn encode_rewrite_frame(staged: StagedMigration, take extra: List[ActivationRewr
     }
     let mut rows: List[ActivationRewrite] = list.new()
     let mut size = 4u64
-    let limit = option.unwrap(disk_kind_limit(0x0085))
+    let limit = option.unwrap(manifest.disk_kind_limit(0x0085))
     for ((id, key), _) in staged.rewrites {
         let logical = deploy_result(failure_result_from_rep(catalog.logical_key(id, key)))?
         let Some(raw) = pages.get_page_row(staged.plan.schema.roots.collections, logical) else {
@@ -346,7 +346,7 @@ fn prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] waits {
         // Keep the old temporary's admission before issuing the read.
         let charge = ((room + 7u64) / 8u64) * 8u64
         failure_result_from_rep(types.capacity(bound bytes charge {}))?
-        if disk_io(host.read(mut file, mut out))? == 0 {
+        if failure_result_from_rep(manifest.disk_io(host.read(mut file, mut out)))? == 0 {
             // The old temporary was still charged when the eight-byte name
             // was cloned. Check both charges before cloning in the caller.
             if let Error(c) = bound bytes (charge + 8u64) {} {
@@ -369,7 +369,7 @@ fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec
 
 fn prepared_payload(mut input: PreparedInput, kind: u16, raw: Bytes) -> Result[Bytes, DeployError] waits {
     let n = format.read_le(raw, 4u64, 4u64)
-    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
+    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(manifest.disk_kind_limit(kind)) {
         return Error(ImportMalformed)
     }
     let encoded = scratch_result(prepared_read(mut input.file, n))?
@@ -387,7 +387,7 @@ fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite
     let mut first: Bytes = list.with_capacity(1)
     if let Some(peeked) = replace(mut input.peek, None) {
         list.push(mut first, peeked)
-    } else if scratch_result(disk_io(host.read(mut input.file, mut first)))? == 0 {
+    } else if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut first))))? == 0 {
         return Ok(list.new())
     }
     if first[0] != 0x85 {
@@ -409,7 +409,7 @@ fn read_rewrite_frame(mut input: PreparedInput) -> Result[List[ActivationRewrite
         }
     }
     list.clear(mut first)
-    if scratch_result(disk_io(host.read(mut input.file, mut first)))? != 0 {
+    if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut first))))? != 0 {
         return Error(ImportMalformed)
     }
     Ok(take rewrites)

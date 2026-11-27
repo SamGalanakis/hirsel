@@ -57,7 +57,7 @@ fn check_journal_fork(mut state: CheckJournal, path: String, at: u64, raw: Bytes
     }
     let keyed = state.branches[parent].keyed
     let charge = pages.branch_record_bytes(forked.name) + (if keyed {
-        KEYED_ROOT_RECORD_BYTES
+        manifest.KEYED_ROOT_RECORD_BYTES
     } else {
         0u64
     })
@@ -253,7 +253,7 @@ fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw:
                     // A delete may empty the main keyed trees. Subsequent
                     // checks use the proven lower bound on manifest bytes.
                     state.branches[slot].keyed = false
-                    state.record_bytes -= KEYED_ROOT_RECORD_BYTES
+                    state.record_bytes -= manifest.KEYED_ROOT_RECORD_BYTES
                 }
             },
         }
@@ -268,11 +268,11 @@ fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw:
 fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] waits {
     let m = view p.manifest
     let mut state = CheckJournal(
-        branches: list.with_capacity(capture_branch_slots(m.limits)),
+        branches: list.with_capacity(capture_branch_slots(limits_from_rep(m.limits))),
         names: list.with_capacity(m.limits.meta),
         next_branch: m.next_branch,
-        record_bytes: page_manifest_size(m) - MANIFEST_FIXED_BYTES,
-        limits: m.limits,
+        record_bytes: manifest.page_manifest_size(m) - manifest.MANIFEST_FIXED_BYTES,
+        limits: limits_from_rep(m.limits),
     )
     for holder in m.branches {
         check_add_branch(mut state, holder.id, holder.version, holder.name, list.len(holder.roots.keyed) != 0)
@@ -284,7 +284,7 @@ fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] w
         let seq = p.segments[i].seq
         let bound_end = p.segments[i].end
         let start = p.segments[i].start
-        let (end, _) = capture_scan_frames(mut p.segments[i].file, p.id, seq, m.limits, bound_end, bound_end, false, KeepEvents, mut state, fn(mut replay: CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), Error] {
+        let (end, _) = capture_scan_frames(mut p.segments[i].file, p.id, seq, limits_from_rep(m.limits), bound_end, bound_end, false, KeepEvents, mut state, fn(mut replay: CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), Error] {
             let checked = if kind == 0x0011 {
                 check_journal_commit(mut replay, path, at, raw)
             } else {

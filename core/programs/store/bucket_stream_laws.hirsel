@@ -124,15 +124,15 @@ fn bucket_stream_register_rules() -> Result[(), Error] {
     if list.len(raw) != 72 + 16 + 110 + 2 * 49 {
         fail("the register body is not 110 + 49 per row")
     }
-    let read = stream_register_decode(raw, stream_law_sid(), 5)?
+    let read = failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(stream_law_sid()), 5))?
     if read.rev != 5 || list.len(read.rows) != 2 || !read.rows[1].abandoned || read.rows[0].rev_hold != 5 || read.low_seq != 10 {
         fail("the register did not read back")
     }
-    match stream_register_decode(raw, stream_law_sid(), 6) {
+    match failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(stream_law_sid()), 6)) {
         Error(Corrupt(Fault(file: f, why: Regressed, ..))) if f == "reg" => (),
         _ => fail("a register body with a lower rev was accepted"),
     }
-    match stream_register_decode(raw, HostStreamId(hi: 1, lo: 1), 0) {
+    match failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(HostStreamId(hi: 1, lo: 1)), 0)) {
         Error(Corrupt(_)) => (),
         _ => fail("another stream's register was accepted"),
     }
@@ -163,7 +163,7 @@ fn bucket_stream_batch_objects() -> Result[(), Error] {
     list.push(mut slices, stream_law_slice(4, stream_law_bytes(9, 5, 0)))
     let mut raw: Bytes = list.with_capacity(4096)
     failure_result_from_rep(format.stream_batch_encode(mut raw, host_stream_id_to_rep(stream_law_sid()), 2, 17, 1, 44, slices))?
-    let found = stream_batch_check("b", raw, stream_law_sid(), 2, 17)?
+    let found = failure_result_from_rep(manifest.stream_batch_check("b", raw, host_stream_id_to_rep(stream_law_sid()), 2, 17))?
     // HEADER 72, INDEX 16 + 16 + 2 × 68, slices 3 + 5, FOOTER 16 + 32.
     if found.byte_len != 240 || list.len(raw) != 240 + 8 + 48 || found.seen_rev != 44 {
         fail("the batch layout differs from §12.11.2")
@@ -179,23 +179,23 @@ fn bucket_stream_batch_objects() -> Result[(), Error] {
         Error(Corrupt(Fault(why: Checksum, ..))) => (),
         _ => fail("a changed slice byte passed its digest"),
     }
-    match stream_batch_check("b", changed, stream_law_sid(), 2, 17) {
+    match failure_result_from_rep(manifest.stream_batch_check("b", changed, host_stream_id_to_rep(stream_law_sid()), 2, 17)) {
         Error(Corrupt(Fault(why: Checksum, ..))) => (),
         _ => fail("a changed slice byte passed FOOTER"),
     }
-    match stream_batch_check("b", raw, stream_law_sid(), 2, 18) {
+    match failure_result_from_rep(manifest.stream_batch_check("b", raw, host_stream_id_to_rep(stream_law_sid()), 2, 18)) {
         Error(Corrupt(_)) => (),
         _ => fail("a batch read at another key was accepted"),
     }
     if format.STREAM_INDEX_PREFIX + 58 * format.STREAM_INDEX_ROW_BYTES > format.STREAM_INDEX_PROBE || format.STREAM_INDEX_PREFIX + 59 * format.STREAM_INDEX_ROW_BYTES <= format.STREAM_INDEX_PROBE {
         fail("the first 4 KiB does not hold exactly 58 rows")
     }
-    if 16 + 68 * 10698 != format.STREAM_INDEX_LIMIT || disk_kind_limit(0x0101) != Some(727480) {
+    if 16 + 68 * 10698 != format.STREAM_INDEX_LIMIT || manifest.disk_kind_limit(0x0101) != Some(727480) {
         fail("INDEX's limit is not the constant 727,480")
     }
     let mut term: Bytes = list.with_capacity(256)
     failure_result_from_rep(format.stream_term_encode(mut term, host_stream_id_to_rep(stream_law_sid()), 2, 18, 1))?
-    match stream_batch_head("b", term, stream_law_sid(), 2, 18)? {
+    match failure_result_from_rep(manifest.stream_batch_head("b", term, host_stream_id_to_rep(stream_law_sid()), 2, 18))? {
         Term(2, 18) => (),
         _ => fail("a TERM did not read as the terminal fence"),
     }

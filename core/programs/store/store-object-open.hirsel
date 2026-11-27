@@ -2,19 +2,19 @@ type HistoryOpenBase: send {
     generation: u64,
     fence: u32,
     recorded_after: u64,
-    sweep: SweepCursor,
+    sweep: manifest.SweepCursor,
     archive_on: u64,
-    pages: PageDisk
+    pages: manifest.PackDiskState
 }
 
 fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
     let (take replay, take checkpoint_state) = history_paged_load(mut read_source, head, ceiling)?
-    let owners = disk_allocation(scoped fn() -> Result[Map[IncomingEdge, u64], Error] {
-        Ok(located_owners(checkpoint_state.manifest))
+    let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
+        Ok(manifest.located_owners(checkpoint_state.manifest))
     })?
-    let LoadedPageStore(manifest: take manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
-    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-    read_source.admitted_base = Some(HistoryOpenBase(generation: manifest.generation, fence: manifest.fence, recorded_after: manifest.branches[0].version, sweep: manifest.sweep, archive_on: manifest.archive_on, pages: take pages))
+    let manifest.LoadedPageStore(manifest: take page_record, lists: take lists, locations: take locations, ..) = take checkpoint_state
+    let pages = manifest.recovered_pack_disk(page_record, take locations, take lists, take owners, list.new())
+    read_source.admitted_base = Some(HistoryOpenBase(generation: page_record.generation, fence: page_record.fence, recorded_after: page_record.branches[0].version, sweep: page_record.sweep, archive_on: page_record.archive_on, pages: take pages))
     Ok(take replay)
 }
 
@@ -63,7 +63,7 @@ fn history_superseded_by(client: std.object.Client, store: StoreId, observed: By
     let Ok((take capture, _)) = history_decode_head_attach(observed) else {
         return Lost
     }
-    if let Error(_) = check_expected_store(Some(store), capture.head.store) {
+    if let Error(_) = failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store)), store_key_to_rep(capture.head.store))) {
         return Lost
     }
     if let Error(_) = history_check_namespace(capture, client) {
@@ -77,7 +77,7 @@ fn history_superseded_by(client: std.object.Client, store: StoreId, observed: By
 
 fn history_check_open(client: std.object.Client, selected: HistoryCapture, requested_levels: List[String], authority_kind: u8, options: Options) -> Result[ClaimAuth, Error] {
     let current = selected.head
-    check_expected_store(options.expect, current.store)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(current.store)))?
     history_check_namespace(selected, client)?
     if current.authority_kind != authority_kind {
         return Error(Unsupported(int.widen(current.authority_kind)))
@@ -379,7 +379,7 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
                     // A stale ClaimAuth is refused `Superseded` before the
                     // attachment-mode refusal, so a deposed opener parks.
                     if let Some(a) = attached {
-                        check_expected_store(options.expect, capture.head.store)?
+                        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(capture.head.store)))?
                         history_check_namespace(capture, read_source.client)?
                         let _ = history_check_claim_auth(options, capture.head.pair)?
                         return Error(Attached(optional_host_stream_id_from_rep(format.stream_attached_sid(a))))

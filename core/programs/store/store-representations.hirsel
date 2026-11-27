@@ -439,3 +439,10 @@ fn optional_stop_kind_from_rep(take value: Option[format.StopKindRep]) -> Option
         None => None,
     }
 }
+
+fn optional_store_key_to_rep(take id: Option[StoreId]) -> Option[types.StoreKey] {
+    match id {
+        Some(value) => Some(store_key_to_rep(value)),
+        None => None,
+    }
+}

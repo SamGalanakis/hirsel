@@ -1,88 +1,3 @@
-fn l69_pack() -> Result[DiskIndex[u64, pages.PagePack], Error] {
-    let mut packs: DiskIndex[u64, pages.PagePack] = disk_index()
-    failure_result_from_rep(types.capacity(disk_index_put(mut packs, 7, pages.PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge)))?
-    Ok(take packs)
-}
-
-fn l69_live(packs: DiskIndex[u64, pages.PagePack]) -> u64 {
-    let Some(pack) = disk_index_get(packs, 7) else {
-        fail("L69: the fixture pack must remain in inventory")
-    }
-    pack.live
-}
-
-@test
-fn test_l69_lineage_last_holder_ghost_and_adopt() -> Result[(), Error] {
-    let frame = ReplacedFrame(pack: 7, len: 4000, stamp: 30)
-    l69_shared_watermark(frame)?
-    l69_ghost_watermark(frame)?
-    l69_adopt_origin(frame)
-}
-
-fn l69_shared_watermark(frame: ReplacedFrame) -> Result[(), Error] {
-    let mut lineage = Lineage(forks: map.new(), cells: map.new())
-    let mut packs = l69_pack()?
-    let mut pins: List[(u32, u64)] = list.new()
-    list.push(mut pins, (0u32, 50u64))
-    list.push(mut pins, (0u32, 50u64))
-    let holders = lineage_holders(lineage.forks, pins, list.new())
-    file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
-    let cell = LineageCell(branch: 0, boundary: 50, side: 1, interval: 0, pack: 7)
-    if l69_live(packs) != 12000 || map.get_or(lineage.cells, cell, 0u64) != 4000 {
-        fail("L69(a): the first cut must retain the kill at watermark 50")
-    }
-    let _ = list.pop(mut pins)
-    let one = lineage_holders(lineage.forks, pins, list.new())
-    apply_lineage_drops(mut lineage, one, mut packs)?
-    if l69_live(packs) != 12000 || map.get_or(lineage.cells, cell, 0u64) != 4000 {
-        fail("L69(a): the second pin still owns watermark 50")
-    }
-    let empty = lineage_holders(lineage.forks, list.new(), list.new())
-    apply_lineage_drops(mut lineage, empty, mut packs)?
-    if l69_live(packs) != 8000 || map.len(lineage.cells) != 0 {
-        fail("L69(a): the last unpin must charge one frame")
-    }
-    Ok(())
-}
-
-fn l69_ghost_watermark(frame: ReplacedFrame) -> Result[(), Error] {
-    let mut lineage = Lineage(forks: map.new(), cells: map.new())
-    let mut packs = l69_pack()?
-    let mut pins: List[(u32, u64)] = list.new()
-    list.push(mut pins, (1u32, 70u64))
-    map.insert(mut lineage.forks, 1u32, LineageFork(child: 1, parent: 0, watermark: 60, adopted: false))
-    let holders = lineage_holders(lineage.forks, pins, list.new())
-    file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
-    file_lineage_kill(mut lineage, holders, mut packs, 1, frame)?
-    prune_lineage_forks(mut lineage.forks, list.new(), pins, list.new(), list.new())
-    if l69_live(packs) != 12000 || !map.contains(lineage.forks, 1u32) || map.len(lineage.cells) != 2 {
-        fail("L69(b): a pinned ghost keeps both cells and all 12000 bytes")
-    }
-    prune_lineage_forks(mut lineage.forks, list.new(), list.new(), list.new(), list.new())
-    let empty = lineage_holders(lineage.forks, list.new(), list.new())
-    apply_lineage_drops(mut lineage, empty, mut packs)?
-    if l69_live(packs) != 8000 || map.len(lineage.forks) != 0 || map.len(lineage.cells) != 0 {
-        fail("L69(b): dropping the origin must leave only the parent-side charge")
-    }
-    Ok(())
-}
-
-fn l69_adopt_origin(frame: ReplacedFrame) -> Result[(), Error] {
-    let mut lineage = Lineage(forks: map.new(), cells: map.new())
-    let mut packs = l69_pack()?
-    map.insert(mut lineage.forks, 1u32, LineageFork(child: 1, parent: 0, watermark: 60, adopted: false))
-    let holders = lineage_holders(lineage.forks, list.new(), list.new())
-    file_lineage_kill(mut lineage, holders, mut packs, 1, frame)?
-    prune_lineage_forks(mut lineage.forks, list.new(), list.new(), list.new(), list.new())
-    let empty = lineage_holders(lineage.forks, list.new(), list.new())
-    adopt_lineage_cells(mut lineage, empty, mut packs, 1)?
-    apply_lineage_drops(mut lineage, empty, mut packs)?
-    if l69_live(packs) != 8000 || map.len(lineage.forks) != 0 || map.len(lineage.cells) != 0 {
-        fail("L69(c): adopt must file the former origin as a main-chain kill")
-    }
-    Ok(())
-}
-
 // §13.6 "Fork rows": a journaled fork's watermark survives only in its FORK
 // frame until a cut publishes its row. Reopen replays the frame, the cut
 // writes (beta, main, w, 0), and the next reopen reads it back. Deleting
@@ -111,9 +26,9 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
     let _ = checkpoint(mut replayed)?
     close(take replayed)?
     let mut reopened = open(tasks, root, c, r, journal_crash_options())?
-    let expected = LineageFork(child: beta.id, parent: 0, watermark: watermark, adopted: false)
+    let expected = manifest.LineageFork(child: beta.id, parent: 0, watermark: watermark, adopted: false)
     let published = {
-        let forks = disk_state(reopened).pages.lists.rows.forks
+        let forks = manifest.pack_lists(disk_state(reopened).packs).rows.forks
         map.len(forks) == 1 && match map.get(forks, beta.id) {
             Some(row) => row == expected,
             None => false,
@@ -125,7 +40,7 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
     let _ = delete_branch(mut reopened, beta)?
     close(take reopened)?
     let deleted = open(tasks, root, c, r, journal_crash_options())?
-    if map.len(disk_state(deleted).pages.lists.rows.forks) != 0 {
+    if map.len(manifest.pack_lists(disk_state(deleted).packs).rows.forks) != 0 {
         fail("lineage: a deleted branch's row with no dependent is removed")
     }
     close(take deleted)
@@ -147,7 +62,7 @@ fn l69_options(floor: u64) -> Result[Options, Error] {
 }
 
 fn l69_pack_live(db: Db, pack: u64) -> u64 {
-    let Some(listed) = disk_index_get(disk_state(db).pages.locations.packs, pack) else {
+    let Some(listed) = manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, pack) else {
         fail("L69: a Tiered pack stays listed until a probe retires it")
     }
     listed.live
@@ -179,15 +94,15 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     let _ = checkpoint(mut db)?
     close(take db)?
     db = open(tasks, d, c, r, l69_options(floor)?)?
-    let cell = LineageCell(branch: 0, boundary: w, side: 1, interval: 0, pack: leaf.pack)
-    let filed = map.len(disk_state(db).pages.lists.rows.cells) == 1 && map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) == width
+    let cell = manifest.LineageCell(branch: 0, boundary: w, side: 1, interval: 0, pack: leaf.pack)
+    let filed = map.len(manifest.pack_lists(disk_state(db).packs).rows.cells) == 1 && map.get_or(manifest.pack_lists(disk_state(db).packs).rows.cells, cell, 0u64) == width
     if !filed || l69_pack_live(db, leaf.pack) != before {
         fail("L69: the pinned leaf's kill is one holder cell of its length, and live keeps it")
     }
     let _ = unpin(mut db, "held")?
     close(take db)?
     db = open(tasks, d, c, r, l69_options(floor)?)?
-    if map.len(disk_state(db).pages.lists.rows.cells) != 0 || l69_pack_live(db, leaf.pack) != before - width {
+    if map.len(manifest.pack_lists(disk_state(db).packs).rows.cells) != 0 || l69_pack_live(db, leaf.pack) != before - width {
         fail("L69: the last unpin at w drops the cell and charges exactly the leaf")
     }
     let later = l69_cold_root(db, rows.id)?
@@ -197,7 +112,7 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     let _ = checkpoint(mut db)?
     close(take db)?
     let reopened = open(tasks, d, c, r, l69_options(floor)?)?
-    if map.len(disk_state(reopened).pages.lists.rows.cells) != 0 || l69_pack_live(reopened, later.pack) != later_before - later_width {
+    if map.len(manifest.pack_lists(disk_state(reopened).packs).rows.cells) != 0 || l69_pack_live(reopened, later.pack) != later_before - later_width {
         fail("L69: with no holder the overwrite's kill leaves live at its cut")
     }
     if l69_pack_live(reopened, leaf.pack) != before - width {

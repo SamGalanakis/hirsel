@@ -23,10 +23,10 @@ fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     })? else {
         fail("L70: fixture inserts did not commit")
     }
-    let pack_seq = disk_state(db).pages.next_pack
+    let pack_seq = manifest.pack_next(disk_state(db).packs)
     match db.disk {
         Some(mut state) => {
-            state.pages.next_pack = pack_seq + 1
+            manifest.set_pack_next(mut state.packs, pack_seq + 1)
         },
         None => fail("L70: the fixture store is on disk"),
     }
@@ -36,10 +36,10 @@ fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     // The fixture produced the Cold graph. The three 6-byte values with
     // 12-byte keys each cost 62 + 16 + 8 in the Tiered account.
     let (_, id, take selected) = read_only_manifest(d)?
-    let mut manifest = take selected
-    manifest.account_tiered = 258
-    let memory_bytes = manifest.account_memory
-    publish_page_manifest_bytes(d, disk_page_manifest_bytes(id, manifest)?)?
+    let mut page_record = take selected
+    page_record.account_tiered = 258
+    let memory_bytes = page_record.account_memory
+    failure_result_from_rep(manifest.publish_page_manifest_bytes(d, failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?))?
     let below = l70_open_options(floor - 1)?
     if below.cache_bytes != 0 {
         fail("L70: one byte below the floor no Tiered plan is feasible")
@@ -137,10 +137,10 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
         }
         arc.share(here)
     }
-    let pack_seq = disk_state(db).pages.next_pack
+    let pack_seq = manifest.pack_next(disk_state(db).packs)
     match db.disk {
         Some(mut state) => {
-            state.pages.next_pack = pack_seq + 1
+            manifest.set_pack_next(mut state.packs, pack_seq + 1)
         },
         None => fail("L68: the fixture store is on disk"),
     }
@@ -198,10 +198,10 @@ fn l68_cold_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Resul
     })? else {
         fail("L68: fixture inserts did not commit")
     }
-    let pack_seq = disk_state(db).pages.next_pack
+    let pack_seq = manifest.pack_next(disk_state(db).packs)
     match db.disk {
         Some(mut state) => {
-            state.pages.next_pack = pack_seq + 1
+            manifest.set_pack_next(mut state.packs, pack_seq + 1)
         },
         None => fail("L68: the fixture store is on disk"),
     }
@@ -268,7 +268,7 @@ fn test_l68_refused_cut_keeps_acknowledged_write(d: Dir, c: Clock, r: Random, ta
     l68_cold_rows(d, c, r, tasks, floor)?
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     l68_write_rows(mut db, 3u64, 31u32, None)?
-    let installed = disk_state(db).pages.next_pack
+    let installed = manifest.pack_next(disk_state(db).packs)
     match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
         failure_result_from_rep(types.capacity(bound bytes 0 {
             seal_page_manifest_file(mut raw, context, fence)
@@ -277,10 +277,10 @@ fn test_l68_refused_cut_keeps_acknowledged_write(d: Dir, c: Clock, r: Random, ta
         Error(Full(Allocation(_))) => (),
         _ => fail("L68: the refused seal fails the cut before its rename"),
     }
-    if disk_state(db).pages.next_pack != installed {
+    if manifest.pack_next(disk_state(db).packs) != installed {
         fail("L68: the refused cut publishes nothing")
     }
-    let orphan = disk_read_file(d, paged_pack_path(installed)?, 4194304)?
+    let orphan = failure_result_from_rep(manifest.disk_read_file(d, failure_result_from_rep(manifest.paged_pack_path(installed))?, 4194304))?
     if list.len(orphan) <= 72 {
         fail("L68: the refused cut wrote its class-3 pack before the rename")
     }
@@ -389,11 +389,11 @@ fn test_f3_corrupt_fold_refuses_the_call(d: Dir, c: Clock, r: Random, tasks: Tas
         fail("F3: the journaled trim commits")
     }
     close(take cold)?
-    let name = paged_pack_path(leaf.pack)?
-    let mut raw = disk_read_file(d, name, 4194304)?
+    let name = failure_result_from_rep(manifest.paged_pack_path(leaf.pack))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_file(d, name, 4194304))?
     let flipped = leaf.offset + 16 + int.widen(leaf.len) - 1
     raw[flipped] = raw[flipped] ^ 1u8
-    disk_write_synced(d, name, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, name, raw))?
     let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
     let attempt = run(mut replayed, Some(100000), copy_env(events), fn(mut tx: Tx, log: Log[Bytes]) -> Result[(), Error] {
         let _ = append(mut tx, log, b"after")?

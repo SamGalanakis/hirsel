@@ -3,10 +3,10 @@ pub type BackupError: send = BackupDeploy(DeployError) | BackupCheck(CheckError)
 fn backup_lock(d: Dir) -> Result[HostFile, Error] waits {
     let mut handle = match host.open(d, "LOCK", Read) {
         Ok(take file) => take file,
-        Error(NotFound) => disk_io(host.open(d, "LOCK", ReadWrite))?,
+        Error(NotFound) => failure_result_from_rep(manifest.disk_io(host.open(d, "LOCK", ReadWrite)))?,
         Error(problem) => return Error(Io(problem)),
     }
-    if !disk_io(host.try_lock(mut handle))? {
+    if !failure_result_from_rep(manifest.disk_io(host.try_lock(mut handle)))? {
         return Error(Held)
     }
     Ok(take handle)
@@ -52,8 +52,8 @@ pub fn backup_offline(take p: PreparedBackup, take attempt: Bytes) -> Result[Opt
     written ?=> BackupDeploy
     let stamp = ExportStamp(attempt: take attempt, store_hi: selected.id.hi, store_lo: selected.id.lo, opened: terminal, branch: 0, head: head, next_table: selected.manifest.next_table, activation: 0, terminal: terminal, end: end)
     let raw = scratch_result(export_bytes(stamp)) ?=> BackupDeploy
-    scratch_result(disk_write_synced(target, "EXPORT", raw)) ?=> BackupDeploy
-    scratch_result(disk_io(host.sync_dir(target))) ?=> BackupDeploy
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(target, "EXPORT", raw))) ?=> BackupDeploy
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(target)))) ?=> BackupDeploy
     Ok(Some((take stamp, checked.repeats)))
 }
 
@@ -78,9 +78,9 @@ pub fn backup_with_writer(tasks: Tasks, from: Dir, target: Dir, c: Clock, r: Ran
 }
 
 fn copy_backup_journal(mut p: PreparedCapture, target: Dir) -> Result[(), DeployError] waits {
-    scratch_result(disk_write_synced(target, "MANIFEST", p.raw))?
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(target, "MANIFEST", p.raw)))?
     for i in 0u64 .. list.len(p.segments) {
-        let path = scratch_result(journal_path(p.segments[i].seq, ""))?
+        let path = scratch_result(failure_result_from_rep(manifest.journal_path(p.segments[i].seq, "")))?
         let end = p.segments[i].end
         scratch_result(copy_export_prefix(mut p.segments[i].file, target, path, Some(end), JOURNAL_CHUNK_BYTES))?
     }

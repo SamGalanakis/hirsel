@@ -12,22 +12,3 @@ fn define_empty_tiered_index(mut tree: pages.PageTree, id: u32, mut final_item: 
     final_item = draw - 1
     Ok(())
 }
-
-fn resident_images(roots: List[pages.PageRoots], lists: Option[View[PagedLists]]) -> u64 {
-    let mut seen: Map[u64, ()] = map.new()
-    let mut total = 0u64
-    for held in roots {
-        total = int.saturating_add(total, pages.page_image_charge(held.collections.root, mut seen))
-        total = int.saturating_add(total, pages.page_image_charge(held.streams.root, mut seen))
-        total = int.saturating_add(total, pages.page_image_charge(held.catalog.root, mut seen))
-        for tree in held.keyed {
-            total = int.saturating_add(total, pages.page_image_charge(tree.root, mut seen))
-        }
-    }
-    if let Some(published) = lists {
-        total = int.saturating_add(total, pages.page_image_charge(published.packs, mut seen))
-        total = int.saturating_add(total, pages.page_image_charge(published.deferred, mut seen))
-        total = int.saturating_add(total, pages.page_image_charge(published.lineage, mut seen))
-    }
-    total
-}

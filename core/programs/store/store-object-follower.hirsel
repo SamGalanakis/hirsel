@@ -121,7 +121,7 @@ pub fn head_view(mut client: std.object.Client, expect: Option[StoreId], op_ms: 
         Error(take problem) => return Error(take problem),
     }
     let (take capture, _) = history_decode_head_attach(scratch)?
-    check_expected_store(expect, capture.head.store)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expect), store_key_to_rep(capture.head.store)))?
     history_check_namespace(capture, client)?
     history_head_view(capture.head)
 }
@@ -234,7 +234,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         return Ok(None)
     }
     let latest = head_capture.head
-    check_expected_store(expected, latest.store)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(latest.store)))?
     let old_charge = if let Some(old_capture) = previous {
         let Some(old) = view old_capture.remote else {
             fail("object follower missing remote head")
@@ -307,7 +307,7 @@ fn object_follow_floor(mut source: ObjectPackRead, expected: Option[StoreId], ce
         return Error(NotFound)
     }
     let head = current.head
-    check_expected_store(expected, head.store)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(head.store)))?
     let latest_mark = history_checkpoint(mut source.client, head, source.deadline)
     let (take mark, take raw) = check_floor_missing(mut source, head, take latest_mark, mut scratch)?
     let latest = object_floor_loaded(mut source, head, mark, raw, at_most, ceiling)

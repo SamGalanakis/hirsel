@@ -342,7 +342,7 @@ fn write_round(d: Dir, id: StoreId, take meta: RoundMeta, ops: List[RoundOp]) ->
     let meta_codec: std.codec.Codec[RoundMeta] = std.codec.of()
     let mut encoded: Bytes = list.new()
     std.codec.encode(meta_codec, meta, mut encoded) ?=> |_| Scratch(Limit(Value))
-    if list.len(encoded) > option.unwrap(disk_kind_limit(0x0086)) {
+    if list.len(encoded) > option.unwrap(manifest.disk_kind_limit(0x0086)) {
         return Error(Scratch(Limit(Value)))
     }
     let mut file = scratch_result(open_frames(d, "ROUND", ctx))?
@@ -366,7 +366,7 @@ type FrameFile {
 const FRAME_BATCH: u64 = 1048576
 
 fn open_frames(d: Dir, name: String, ctx: format.DiskContext) -> Result[FrameFile, Error] waits {
-    let file = disk_io(host.open(d, name, Write))?
+    let file = failure_result_from_rep(manifest.disk_io(host.open(d, name, Write)))?
     let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0u64, 0)))?
     Ok(FrameFile(file: take file, pending: take header, ctx: ctx, offset: 72u64))
 }
@@ -403,17 +403,17 @@ fn finish_frames(take out: FrameFile) -> Result[(), Error] waits {
     flush_frames(mut done)?
     let FrameFile(file: take file, ..) = take done
     let mut written = take file
-    disk_io(host.sync(mut written))?
-    disk_io(host.close(take written))
+    failure_result_from_rep(manifest.disk_io(host.sync(mut written)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take written)))
 }
 
 // Reads and checks ROUND without touching the store: frames sealed for this
 // store and round, ops in strictly increasing key order, each a well-formed
 // entry change.
 pub fn validate_round(d: Dir) -> Result[ValidatedRound, DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "ROUND", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "ROUND", Read))))?
     let header = scratch_result(prepared_read(mut file, 72u64))?
-    let head = deploy_result(disk_read_header("ROUND", header, ROUND_ROLE, None, None))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("ROUND", header, ROUND_ROLE, None, optional_store_key_to_rep(None))))?
     let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start(), peek: None)
     let meta_codec: std.codec.Codec[RoundMeta] = std.codec.of()
     let op_codec: std.codec.Codec[RoundOp] = std.codec.of()
@@ -435,11 +435,11 @@ pub fn validate_round(d: Dir) -> Result[ValidatedRound, DeployError] waits {
         list.push(mut ops, take op)
     }
     let mut rest: Bytes = list.with_capacity(1)
-    if scratch_result(disk_io(host.read(mut input.file, mut rest)))? != 0 {
+    if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut rest))))? != 0 {
         return Error(ImportMalformed)
     }
     let PreparedInput(file: take done, ..) = take input
-    scratch_result(disk_io(host.close(take done)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     Ok(ValidatedRound(meta: take meta, ops: take ops))
 }
 

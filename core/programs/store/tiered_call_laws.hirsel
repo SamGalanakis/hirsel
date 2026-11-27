@@ -452,7 +452,7 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
     if receipt.reply != types.key_word(40) || version(snapshot(db)) != option.unwrap(inserted.info).id.version + 1 {
         fail("L63 (d): A reruns at B's head, reads 40 and commits once")
     }
-    let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+    let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
     let wire = read_journal_prefix(directory, path, db.file_end)?
     let frame = journal_decode_commit(path, failure_result_from_rep(types.copied(list.slice(wire, start + 16, db.file_end)))?)?
     let k = failure_result_from_rep(catalog.logical_key(rows.id, types.key_word(4)))?

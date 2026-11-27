@@ -336,12 +336,12 @@ type WitnessCut {
 }
 
 fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: pages.HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.generation = generation
-    manifest.first_live = pos
-    manifest.prev_first = pos
-    manifest.branches[0u64].version = rows_version
-    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.generation = generation
+    page_record.first_live = pos
+    page_record.prev_first = pos
+    page_record.branches[0u64].version = rows_version
+    let mut raw_manifest = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
     bucket_m2_object_header(mut raw_manifest, id, 1, generation)?
     let reference = history_new_ref(generation, pair.epoch, raw_manifest)
     let mut raw_entry: Bytes = list.with_capacity(1024)

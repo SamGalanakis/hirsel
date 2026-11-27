@@ -35,7 +35,7 @@ fn promotion_load_page(source: TieredPageSource, edge: std.page.Slot) -> Result[
     match edge {
         ColdPage(ptr) => {
             let frame = fold_frame_at(source, TieredPage(ptr))?
-            Ok(arc.share(fold_page(frame)))
+            Ok(arc.share(manifest.fold_page(frame)))
         },
         HotPage(page) => Ok(arc.share(page)),
     }
@@ -215,7 +215,7 @@ fn promotion_tiered_collections(root: Arc[std.page.Page], mut found: List[(u32, 
     Ok(())
 }
 
-fn promotion_queue_root(source: TieredPageSource, row: DeferredFree, mut roots_found: List[TieredPromotionRoot]) -> Result[(), Error] {
+fn promotion_queue_root(source: TieredPageSource, row: manifest.DeferredFree, mut roots_found: List[TieredPromotionRoot]) -> Result[(), Error] {
     let (pack, root) = match row.target {
         TieredPage(ptr) => (ptr.pack, PromotionPage(ColdPage(ptr))),
         TieredBlob(reference) => (reference.pack, PromotionBlob(reference)),
@@ -249,7 +249,7 @@ fn promotion_has_overlay(tree: pages.PageTree, collection: u32) -> bool {
 // a pack is the installed inventory's answer; the Snapshot's own inventory,
 // which its lease keeps readable, reads what it captured. A refusal here
 // refuses the cut: promotion is mandatory.
-fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
+fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], at: u64, queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
     let mut collections: List[(u32, std.page.Slot)] = list.new()
     promotion_tiered_collections(roots[at].collections.root, mut collections)?
     if list.len(collections) == 0 {
@@ -258,8 +258,8 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
     let Some(requests) = pager else {
         return Error(Io(Closed))
     }
-    let installed = disk_state(db).pages
-    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed, next_stamp)?
+    let installed = disk_state(db).packs
+    let paging = recovered_tiered_inventory(manifest.pack_locations(installed), None, db.checkpointed, next_stamp)?
     let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
     let captured_packs = match view roots[at].collections.paging {
@@ -268,14 +268,14 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
     }
     let captured = TieredPageSource(pager: channel.sender(requests), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
     let mut probed_through: Map[u64, u64] = map.new()
-    for (seq, cursor) in installed.compaction.probes {
+    for (seq, cursor) in db.compaction.probes {
         failure_result_from_rep(types.capacity(map.try_reserve(mut probed_through, 1)))?
         map.insert(mut probed_through, seq, cursor.next_data - 1)
     }
     let mut queue_roots: List[TieredPromotionRoot] = list.new()
-    let mut rows = std.page.cursor_open(arc.share(installed.lists.deferred), None, true, false)
+    let mut rows = std.page.cursor_open(arc.share(manifest.pack_lists(installed).deferred), None, true, false)
     while let Some(queue_row) = std.page.cursor_next(mut rows) {
-        promotion_queue_root(source, queued_free(queue_row.value), mut queue_roots)?
+        promotion_queue_root(source, manifest.queued_free(queue_row.value), mut queue_roots)?
     }
     for added in queued {
         promotion_queue_root(source, added, mut queue_roots)?

@@ -12,17 +12,6 @@ fn sealed_tiered_root(root: Arc[std.page.Page], locate: scoped[view] fn(u64) -> 
     failure_result_from_rep(pages.page_result(std.page.attach_cold(take ready)))
 }
 
-type ReplacedFrame: key {
-    pack: u64,
-    len: u32,
-    stamp: u64
-}
-
-type BranchReplacements: send {
-    branch: u32,
-    frames: List[ReplacedFrame]
-}
-
 // §13.8: each replaced-list row is charged 24 bytes (`branch u32, pack u64,
 // len u32, stamp u64`) and each dropped-list row one 48-byte slot, with the
 // dirty Tiered bytes.
@@ -33,27 +22,19 @@ const DROPPED_ROW: u64 = 48
 // The live replaced and dropped lists since the installed cut (§13.6a T8).
 // The cut that publishes them clears both.
 type TieredDirty: send {
-    replaced: List[BranchReplacements],
+    replaced: List[manifest.BranchReplacements],
     replaced_rows: u64,
-    dropped: List[DeferredFree]
+    dropped: List[manifest.DeferredFree]
 }
 
 fn clean_tiered_cut() -> TieredDirty {
     TieredDirty(replaced: list.new(), replaced_rows: 0, dropped: list.new())
 }
 
-fn replaced_page(ptr: std.page.PagePtr) -> ReplacedFrame {
-    ReplacedFrame(pack: ptr.pack, len: ptr.len, stamp: ptr.stamp)
-}
-
-fn replaced_blob(reference: std.page.BlobRef) -> ReplacedFrame {
-    ReplacedFrame(pack: reference.pack, len: int.truncate(8 + reference.len), stamp: reference.stamp)
-}
-
 // One commit's Cold frames that its plan stopped reaching: replaced edges,
 // and subtrees or blobs a Log floor detached.
 type TieredFreed: send {
-    replaced: List[ReplacedFrame],
+    replaced: List[manifest.ReplacedFrame],
     dropped: List[format.TieredTarget]
 }
 
@@ -81,10 +62,10 @@ fn admit_tiered_commit(mut dirty: TieredDirty, br: u32, take freed: TieredFreed)
     let TieredFreed(replaced: take replaced, dropped: take dropped) = take freed
     dirty.replaced_rows += list.len(replaced)
     if list.len(replaced) != 0 {
-        list.push(mut dirty.replaced, BranchReplacements(branch: br, frames: take replaced))
+        list.push(mut dirty.replaced, manifest.BranchReplacements(branch: br, frames: take replaced))
     }
     for take target in take dropped {
-        list.push(mut dirty.dropped, DeferredFree(branch_id: br, target: take target))
+        list.push(mut dirty.dropped, manifest.DeferredFree(branch_id: br, target: take target))
     }
 }
 

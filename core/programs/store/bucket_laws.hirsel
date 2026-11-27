@@ -604,18 +604,18 @@ fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: pages.HistoryRef,
 fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(ObjectPackRead, HistoryHead), Error] waits {
     let (id, take selected) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take selected)?
-    let ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
-    let mut manifest = take initial
-    manifest.first_live = 1
-    manifest.prev_first = 1
+    let manifest.ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
+    let mut page_record = take initial
+    page_record.first_live = 1
+    page_record.prev_first = 1
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut refs: List[pages.HistoryRef] = list.with_capacity(map.len(inventory))
     let mut kinds = 0u8
     for (seq, pack) in inventory {
         kinds |= 1u8 << pack.class
-        let file = paged_pack_path(seq)?
-        let mut raw = disk_read_paged_file(d, file, 1048576)?
+        let file = failure_result_from_rep(manifest.paged_pack_path(seq))?
+        let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(d, file, 1048576))?
         bucket_m2_object_header(mut raw, id, 3, seq)?
         let item = history_new_ref(seq, 1, raw)
         let name = history_key("p-", item)
@@ -629,9 +629,9 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     list.sort(mut refs, fn(a: pages.HistoryRef, b: pages.HistoryRef) -> Order {
         order.compare(a.seq, b.seq)
     })
-    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
-    bucket_m2_object_header(mut raw_manifest, id, 1, manifest.generation)?
-    let base = history_new_ref(manifest.generation, 1, raw_manifest)
+    let mut raw_manifest = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
+    bucket_m2_object_header(mut raw_manifest, id, 1, page_record.generation)?
+    let base = history_new_ref(page_record.generation, 1, raw_manifest)
     let mut compare: Bytes = list.with_capacity(65536)
     history_create(mut client, history_key("m-", base), mut raw_manifest, mut compare, due)?
     let mut raw_entry: Bytes = list.with_capacity(65536)

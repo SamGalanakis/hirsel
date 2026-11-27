@@ -1,17 +1,17 @@
 // The caller holds LOCK. The export opener uses the reader and validator
 // directly, so it never selects or removes files in the captured directory.
-fn read_selected_page_manifest(d: Dir) -> Result[(StoreId, ValidatedPageManifest), Error] waits {
-    let (id, take manifest) = read_page_manifest_file(d)?
-    Ok((id, select_page_manifest(d, id, take manifest)?))
+fn read_selected_page_manifest(d: Dir) -> Result[(StoreId, manifest.ValidatedPageManifest), Error] waits {
+    let (id, take page_record) = read_page_manifest_file(d)?
+    Ok((id, select_page_manifest(d, id, take page_record)?))
 }
 
-fn publish_page_manifest(d: Dir, id: StoreId, m: PageManifest, target: Option[TargetLimits], mut scratch: Bytes) -> Result[(), Error] waits {
-    fill_page_manifest_file(mut scratch, id, m)?
+fn publish_page_manifest(d: Dir, id: StoreId, m: manifest.PageManifest, target: Option[manifest.TargetLimits], mut scratch: Bytes) -> Result[(), Error] waits {
+    failure_result_from_rep(manifest.fill_page_manifest_file(mut scratch, store_key_to_rep(id), m))?
     if let Some(wanted) = target {
-        let none = new_page_locations()
-        validate_new_page_manifest(d, id, scratch, wanted, SettledPacks(below: 0, locations: view none))?
+        let none = manifest.new_page_locations()
+        validate_new_page_manifest(d, id, scratch, wanted, manifest.SettledPacks(below: 0, locations: view none))?
     }
-    publish_page_manifest_bytes(d, scratch)
+    failure_result_from_rep(manifest.publish_page_manifest_bytes(d, scratch))
 }
 
 // Independently encoded from AP3, AP14 (Format 12, no `retired` root), AP20 and §13.1
@@ -90,137 +90,6 @@ fn page_manifest_vector() -> Bytes {
         list.put_word_le(mut raw, word)
     }
     list.truncate(mut raw, 515)
-    take raw
-}
-
-fn page_data_pack_vector() -> Bytes {
-    let expected: Inline[u8, 121] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        51,
-        9,
-        97,
-        54,
-        175,
-        0,
-        235,
-        148,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        12,
-        0,
-        0,
-        0,
-        3,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        33,
-        0,
-        1,
-        0,
-        33,
-        0,
-        0,
-        0,
-        195,
-        83,
-        68,
-        188,
-        164,
-        12,
-        197,
-        1,
-        0,
-        0,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        31,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        16,
-        0,
-        0,
-        0,
-        1,
-        0,
-        120,
-        25,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(121)
-    for byte in expected {
-        list.push(mut raw, byte)
-    }
     take raw
 }
 

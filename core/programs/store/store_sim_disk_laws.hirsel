@@ -32,21 +32,21 @@ fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kin
     let mut blank: Bytes = list.with_capacity(width * 2)
     list.fill(mut blank, width * 2, 0u8)
     let (clean, server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), 1048576)
-    disk_write_synced(clean, name, blank)?
-    disk_io(host.sync_dir(clean))?
+    failure_result_from_rep(manifest.disk_write_synced(clean, name, blank))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(clean)))?
     let image = sim_disk_unmount(take clean, take server)
     let mut plan = std.sim.world.plan(2)
     std.sim.world.set_write_faults(mut plan, rates)
     let (d, writer) = sim_disk_mount(tasks, c, take image, take plan, 1048576)
-    let mut f = disk_io(host.open(d, name, ReadWrite))?
+    let mut f = failure_result_from_rep(manifest.disk_io(host.open(d, name, ReadWrite)))?
     host.write_at(mut f, 0, frame) ?=> |e| Io(e.error)
-    disk_io(host.sync(mut f))?
-    disk_io(host.close(take f))?
+    failure_result_from_rep(manifest.disk_io(host.sync(mut f)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take f)))?
     let mut crashed = sim_disk_unmount(take d, take writer)
     let mut cut = std.sim.world.plan(3)
     std.sim.fs.crash(mut crashed, mut cut)
     let (after, recovered) = sim_disk_mount(tasks, c, take crashed, std.sim.world.plan(4), 1048576)
-    let raw = disk_read_paged_file(after, name, width * 2)?
+    let raw = failure_result_from_rep(manifest.disk_read_paged_file(after, name, width * 2))?
     let first = list.slice(raw, 0, width)
     let second = list.slice(raw, width, width * 2)
     match kind {
@@ -69,7 +69,7 @@ fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kin
             if first != list.slice(blank, 0, width) || second != frame {
                 fail("misdirected write must leave the old slot and copy the exact frame to the other slot")
             }
-            match disk_read_frame(name, ctx, raw, width) {
+            match failure_result_from_rep(manifest.disk_read_frame(name, ctx, raw, width)) {
                 Error(Corrupt(Fault(why: Checksum, ..))) => (),
                 _ => fail("the store accepted a well-formed frame at the wrong offset"),
             }
@@ -78,17 +78,17 @@ fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kin
             fail("lost write must leave both old slots")
         },
     }
-    match disk_read_frame(name, ctx, raw, 0) {
+    match failure_result_from_rep(manifest.disk_read_frame(name, ctx, raw, 0)) {
         Error(Corrupt(_)) => (),
         _ => fail("the store accepted a damaged or missing frame"),
     }
     // A subsequent correct write repairs the source slot. Restoring it
     // must not require access to the simulator's pristine bytes.
-    let mut repair_file = disk_io(host.open(after, name, ReadWrite))?
+    let mut repair_file = failure_result_from_rep(manifest.disk_io(host.open(after, name, ReadWrite)))?
     host.write_at(mut repair_file, 0, frame) ?=> |e| Io(e.error)
-    disk_io(host.close(take repair_file))?
-    let repaired = disk_read_paged_file(after, name, width * 2)?
-    let _ = disk_read_frame(name, ctx, repaired, 0)?
+    failure_result_from_rep(manifest.disk_io(host.close(take repair_file)))?
+    let repaired = failure_result_from_rep(manifest.disk_read_paged_file(after, name, width * 2))?
+    let _ = failure_result_from_rep(manifest.disk_read_frame(name, ctx, repaired, 0))?
     let _ = sim_disk_unmount(take after, take recovered)
     Ok(())
 }

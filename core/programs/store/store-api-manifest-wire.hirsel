@@ -1,0 +1,3 @@
+fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
+    manifest.cut_manifest_size(cut_input(db, delta))
+}

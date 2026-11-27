@@ -126,7 +126,7 @@ fn journal_group_room(limit: u64) -> u64 {
 }
 
 fn journal_window_step(mut segment: HostFile, at: u64, width: u64) -> Result[(), Error] waits {
-    disk_io(host.zero_at(mut segment, at, width))
+    failure_result_from_rep(manifest.disk_io(host.zero_at(mut segment, at, width)))
 }
 
 fn journal_write_aligned(mut segment: HostFile, at: u64, mut buffer: Bytes) -> Result[(), Error] waits {
@@ -414,8 +414,8 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             }
         }
         if let Some((take new_file, take new_end, take next_header)) = take rotating {
-            disk_io(host.close(take segment_file))?
-            disk_io(host.close(replace(mut end_handle, take new_end)))?
+            failure_result_from_rep(manifest.disk_io(host.close(take segment_file)))?
+            failure_result_from_rep(manifest.disk_io(host.close(replace(mut end_handle, take new_end))))?
             segment_file = take new_file
             seq += 1
             end = 72
@@ -425,8 +425,8 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             list.append(mut buffer, next_header)
         }
         if closing {
-            disk_io(host.close(take segment_file))?
-            disk_io(host.close(take end_handle))?
+            failure_result_from_rep(manifest.disk_io(host.close(take segment_file)))?
+            failure_result_from_rep(manifest.disk_io(host.close(take end_handle)))?
             return Ok(())
         }
     }
@@ -468,8 +468,8 @@ fn disk_creation_block() -> Result[Bytes, Error] {
 
 fn disk_new_segment(d: Dir, c: Clock, id: StoreId, seq: u64, prev_end: u64, mut creation: Bytes) -> Result[(HostFile, HostFile, Bytes), Error] waits {
     let (take path, take end_path, take journal, take end_bytes) = disk_allocation(scoped fn() -> Result[(String, String, Bytes, Bytes), Error] {
-        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
-        let end_path = failure_result_from_rep(types.capacity(disk_path("j-", seq, ".end")))?
+        let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
+        let end_path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ".end")))?
         let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq), prev_end, 0)))?
         let ctx = format.DiskContext(store: store_key_to_rep(id), role: 4, seq: seq)
         let mut end_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
@@ -479,8 +479,8 @@ fn disk_new_segment(d: Dir, c: Clock, id: StoreId, seq: u64, prev_end: u64, mut 
         list.append(mut end_bytes, frame)
         Ok((take path, take end_path, take header, take end_bytes))
     })?
-    let mut file = disk_io(host.open(d, path, Direct))?
-    while !disk_io(host.try_lock(mut file))? {
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Direct)))?
+    while !failure_result_from_rep(manifest.disk_io(host.try_lock(mut file)))? {
         std.clock.sleep_ns(c, 1000000)
     }
     list.copy_from_slice(mut creation, 0, journal)
@@ -488,11 +488,11 @@ fn disk_new_segment(d: Dir, c: Clock, id: StoreId, seq: u64, prev_end: u64, mut 
         Ok(()) => (),
         Error(e) => return Error(Io(e.error)),
     }
-    let mut end_file = disk_io(host.open(d, end_path, Durable))?
+    let mut end_file = failure_result_from_rep(manifest.disk_io(host.open(d, end_path, Durable)))?
     match host.write_at(mut end_file, 0, end_bytes) {
         Ok(()) => (),
         Error(e) => return Error(Io(e.error)),
     }
-    disk_io(host.sync_dir(d))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
     Ok((take file, take end_file, take journal))
 }

@@ -45,15 +45,6 @@ fn prune_tiered_leases(mut held: List[Arc[pages.TieredReadInventory]]) {
     }
 }
 
-fn tiered_leased(held: List[Arc[pages.TieredReadInventory]], seq: u64) -> bool {
-    for inventory in held {
-        if let Some(_) = std.omap.get(inventory.packs, seq) {
-            return true
-        }
-    }
-    false
-}
-
 // The participants' current inventories join the leases, once per generation.
 fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Roots]) -> Result[List[Arc[pages.TieredReadInventory]], Error] {
     let mut held: List[Arc[pages.TieredReadInventory]] = clone(installed.held)
@@ -111,7 +102,7 @@ fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std
         ColdPage(ptr) => {
             let frame = fold_frame_at(source, TieredPage(ptr))?
             disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
-                Ok(std.page.copy_with_stamp(fold_page(frame), ptr.stamp))
+                Ok(std.page.copy_with_stamp(manifest.fold_page(frame), ptr.stamp))
             })
         },
         HotPage(page) => Ok(arc.share(page)),
@@ -203,7 +194,7 @@ fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredP
     compact_rebuild(page, at, Some(moved_child), None)
 }
 
-fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, row: PackIndexRow, mut work: TieredCompactWork) -> Result[Option[TieredQueueValue], Error] waits {
+fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, row: manifest.PackIndexRow, mut work: TieredCompactWork) -> Result[Option[TieredQueueValue], Error] waits {
     let Some(path) = probe_tiered_path(source, slot, pack, row)? else {
         return Ok(None)
     }
@@ -213,7 +204,7 @@ fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, 
 
 // §13.6 "Queue rows are their own roots": a Page row is compared and then
 // descended by the index row's key; a Blob row is compared. A match moves.
-fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: u64, queued: DeferredFree, pack: u64, row: PackIndexRow) -> Result[(), Error] waits {
+fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: u64, queued: manifest.DeferredFree, pack: u64, row: manifest.PackIndexRow) -> Result[(), Error] waits {
     let current: Option[TieredQueueValue] = match map.get(work.queue, at) {
         Some(earlier) => Some(clone(earlier.value)),
         None => None,
@@ -254,10 +245,10 @@ fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: 
 // One PACK_INDEX row. Every queue row and every root that reaches the frame
 // takes a moved path. The added rows are numbered from `first_added`, the
 // installed `deferred_next`, as T8 step 3 will key them.
-fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, seq: u64, row: PackIndexRow) -> Result[bool, Error] waits {
+fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, seq: u64, row: manifest.PackIndexRow) -> Result[bool, Error] waits {
     let mut rows = std.page.cursor_open(arc.share(installed_queue), None, true, false)
     while let Some(queue_row) = std.page.cursor_next(mut rows) {
-        compact_queue_row(mut work, source, list.word_be(queue_row.key, 0), queued_free(queue_row.value), seq, row)?
+        compact_queue_row(mut work, source, list.word_be(queue_row.key, 0), manifest.queued_free(queue_row.value), seq, row)?
     }
     for at in 0u64 .. list.len(queued) {
         compact_queue_row(mut work, source, first_added + at, queued[at], seq, row)?
@@ -283,7 +274,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
     Ok(true)
 }
 
-fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
+fn compact_probes(source: TieredPageSource, queued: List[manifest.DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
     let mut packs_in_order: List[u64] = list.new()
     for (seq, _) in probes {
         failure_result_from_rep(types.capacity(list.try_reserve(mut packs_in_order, 1)))?
@@ -302,7 +293,7 @@ fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installe
         }
         let mut walk = take cursor
         let rows_before = walk.rows
-        let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: PackIndexRow) -> Result[bool, Error] waits {
+        let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: manifest.PackIndexRow) -> Result[bool, Error] waits {
             compact_row(mut state, source, queued, installed_queue, first_added, seq, row)
         })?
         left = int.saturating_sub(left, walk.rows - rows_before)
@@ -341,7 +332,7 @@ fn pack_selected_for_compaction(seq: u64, pack: pages.PagePack, running: Map[u64
     scaled < threshold
 }
 
-fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], Error] {
+fn select_compaction(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], Error] {
     let mut probes: Map[u64, TieredProbeCursor] = map.new()
     let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -362,7 +353,7 @@ fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCurs
 // Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
 // collection descriptor, the candidate queue (installed and added rows) is
 // empty, and there is no anchor (anchors are empty until archival lands).
-fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[DeferredFree]) -> bool {
+fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[manifest.DeferredFree]) -> bool {
     !pages.holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
 }
 
@@ -371,7 +362,7 @@ fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page]
 // this cut (charging its rows left against `budget`, finishing the pack it
 // starts), removes the cursor of every pack it retires, and never installs or
 // moves a cursor.
-fn compact_idle_probes(installed: PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
+fn compact_idle_probes(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
     let mut probes: Map[u64, TieredProbeCursor] = clone(running)
     let mut retiring: List[u64] = list.new()
     let mut left = budget
@@ -402,10 +393,10 @@ fn compact_idle_probes(installed: PageLocations, running: Map[u64, TieredProbeCu
 // progress: the installed cursors stand, nothing retires, and every root
 // is the one the cut staged before the probes ran, and no queue row is
 // rewritten.
-fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
-    let installed = disk_state(db).pages
+fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
+    let installed = disk_state(db).packs
     let running: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
-        Ok(clone(installed.compaction.probes))
+        Ok(clone(db.compaction.probes))
     })?
     let budget = disk_state(db).options.probe_budget
     let kept_probes: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
@@ -415,9 +406,9 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     if budget == 0 {
         return Ok(take unchanged)
     }
-    if cut_tiered_idle(roots, installed.lists.deferred, queued) {
+    if cut_tiered_idle(roots, manifest.pack_lists(installed).deferred, queued) {
         let idle = disk_allocation(scoped fn() -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
-            compact_idle_probes(installed.locations, running, budget)
+            compact_idle_probes(manifest.pack_locations(installed), running, budget)
         })
         return match take idle {
             Ok((take probes, take retiring)) => Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: list.new(), queue: map.new())),
@@ -429,7 +420,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     // Selection, the probe inventory and the saved roots change nothing, so
     // a refusal among them skips the step like a refusal in the probes.
     let selecting = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
-        select_compaction(installed.locations, running, permille)
+        select_compaction(manifest.pack_locations(installed), running, permille)
     })
     let selected = match take selecting {
         Ok(take chosen) => take chosen,
@@ -444,7 +435,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     }
     let checkpointed = db.checkpointed
     let inventory_read = disk_allocation(scoped fn() -> Result[Arc[pages.TieredReadInventory], Error] {
-        recovered_tiered_inventory(installed.locations, None, checkpointed, next_stamp)
+        recovered_tiered_inventory(manifest.pack_locations(installed), None, checkpointed, next_stamp)
     })
     let paging = match take inventory_read {
         Ok(take ready) => take ready,
@@ -470,7 +461,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     let mut work = TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new(), queue: map.new())
     let mut probes = take selected
     let mut retiring: List[u64] = list.new()
-    let ran = compact_probes(source, queued, installed.lists.deferred, installed.lists.deferred_next, mut work, mut probes, mut retiring, budget)
+    let ran = compact_probes(source, queued, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut work, mut probes, mut retiring, budget)
     next_stamp = work.next_stamp
     match ran {
         Ok(()) => {
@@ -509,7 +500,7 @@ fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueM
             MovedQueueBlob(reference, body) => {
                 if !map.contains(pending.seen, reference.stamp) {
                     let key = failure_result_from_rep(types.copied(moved.key))?
-                    let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
+                    let frame = manifest.PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
                     failure_result_from_rep(types.capacity(map.try_reserve(mut pending.seen, 1)))?
                     failure_result_from_rep(types.capacity(list.try_reserve(mut pending.blobs, 1)))?
                     map.insert(mut pending.seen, reference.stamp, ())
@@ -523,7 +514,7 @@ fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueM
 
 // Each moved row's value at its emitted location (T8 step 3): an added row's
 // in `added`, an installed row's in `rewritten`.
-fn settle_queue_moves(mut queue: CutQueue, moving: Map[u64, TieredQueueMove], emitted: Map[u64, std.page.PagePtr], first_added: u64) -> Result[(), Error] {
+fn settle_queue_moves(mut queue: manifest.CutQueue, moving: Map[u64, TieredQueueMove], emitted: Map[u64, std.page.PagePtr], first_added: u64) -> Result[(), Error] {
     for at in queue_moves_in_order(moving)? {
         let Some(moved) = map.get(moving, at) else {
             continue
@@ -545,7 +536,7 @@ fn settle_queue_moves(mut queue: CutQueue, moving: Map[u64, TieredQueueMove], em
                 TieredBlob(std.page.BlobRef(stamp: reference.stamp, len: reference.len, checksum: place.checksum, pack: place.pack, offset: place.offset, body: reference.body))
             },
         }
-        let row = DeferredFree(branch_id: moved.branch_id, target: take target)
+        let row = manifest.DeferredFree(branch_id: moved.branch_id, target: take target)
         if at >= first_added {
             queue.added[at - first_added] = take row
         } else {

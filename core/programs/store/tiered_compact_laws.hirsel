@@ -22,10 +22,10 @@ fn compact_walk_frame(d: Dir, db: Db, ptr: std.page.PagePtr, mut walk: CompactWa
     map.update_or_insert(mut walk.live, ptr.pack, 0, fn(mut total: u64) {
         total += width
     })
-    let path = paged_pack_path(ptr.pack)?
-    let wire = disk_read_file(d, path, 4194304)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
-    let page = fold_page(frame)
+    let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
+    let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 4194304))?
+    let frame = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
+    let page = manifest.fold_page(frame)
     let image = std.page.image_of(page)
     for slot in 0u64 .. std.page.count(image) {
         if let Some(ColdPage(child)) = std.page.child_slot(page, slot) {
@@ -50,9 +50,9 @@ fn compact_walk_blob(d: Dir, db: Db, body: std.page.BlobRef, mut walk: CompactWa
     map.update_or_insert(mut walk.live, body.pack, 0, fn(mut total: u64) {
         total += width
     })
-    let path = paged_pack_path(body.pack)?
-    let wire = disk_read_file(d, path, 4194304)?
-    let _ = read_tiered_frame(path, db.store, TieredBlob(body), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(body.pack))?
+    let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 4194304))?
+    let _ = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredBlob(body), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
     Ok(())
 }
 
@@ -91,14 +91,14 @@ fn compact_check_rows(r: Reader, s: Snapshot, events: Log[Bytes], floor_seq: u64
 }
 
 fn compact_listed(db: Db, seq: u64) -> bool {
-    match disk_index_get(disk_state(db).pages.locations.packs, seq) {
+    match manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) {
         Some(_) => true,
         None => false,
     }
 }
 
 fn compact_dead_pack(db: Db) -> bool {
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((_, listed)) = std.omap.next(mut inventory) {
         if listed.class >= 3 && listed.live == 0 {
             return true
@@ -126,7 +126,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
         fail("L88 (h): the trim commits")
     }
     let _ = checkpoint(mut db)?
-    let frames: u64 = match disk_index_get(disk_state(db).pages.locations.packs, probed) {
+    let frames: u64 = match manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, probed) {
         Some(pack) => int.widen(pack.frames),
         None => fail("L88 (h): the probed pack is still listed after the trim"),
     }
@@ -142,7 +142,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
         // pack the inventory no longer lists.
         let walk = compact_walk(d, db, events.binding.id)?
         for (seq, _) in walk.live {
-            if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
                 fail("L88 (h): a reachable frame lives in a listed pack on disk")
             }
         }
@@ -157,7 +157,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
     }
     // Each listed Tiered pack's live bytes are exactly the frames the tree
     // reaches in it: a move kills each old ancestor once.
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class == 3 && listed.live != map.get_or(walk.live, seq, 0) {
             fail("L88 (h): a Tiered pack's live bytes are its reachable frames")
@@ -173,12 +173,12 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
         }
         let _ = checkpoint(mut db)?
         idle += 1
-        if !disk_exists(d, paged_pack_path(probed)?)? {
+        if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
             fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
         }
     }
     let settled = compact_walk(d, db, events.binding.id)?
-    let mut packs_after = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut packs_after = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut packs_after) {
         if listed.class == 3 && listed.live != map.get_or(settled.live, seq, 0) {
             fail("L88 (h): live bytes stay the reachable frames after the dead packs retire")
@@ -192,7 +192,7 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
     }
     drop(take before)
     let _ = checkpoint(mut db)?
-    if disk_exists(d, paged_pack_path(probed)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("L88 (h): the cut after the last reader removes the retired file")
     }
     close(take db)?
@@ -322,7 +322,7 @@ fn test_l87_probe_across_a_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     // Two more cuts let the retired file go once no inventory lists it.
     let _ = checkpoint(mut db)?
     let _ = checkpoint(mut db)?
-    if disk_exists(d, paged_pack_path(probed)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("L87 (b): the retired pack's file is removed")
     }
     for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
@@ -362,7 +362,7 @@ fn compact_blob_rows(db: Db, rows: Table[u64, Bytes], row_count: u64, width: u64
 }
 
 fn compact_blob_pack(db: Db) -> Result[u64, Error] {
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     let mut found: Option[u64] = None
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class == 4 {
@@ -385,12 +385,12 @@ fn compact_blob_pack(db: Db) -> Result[u64, Error] {
 fn compact_check_published(d: Dir, db: Db, collection: u32) -> Result[(), Error] waits {
     let walk = compact_walk_from(d, db, compact_branch_root(db, 0, collection)?)?
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L88 (h): a reachable frame lives in a listed pack on disk")
         }
     }
-    let idle = map.len(disk_state(db).pages.compaction.probes) == 0
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let idle = map.len(db.compaction.probes) == 0
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class < 3 {
             continue
@@ -439,7 +439,7 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     let before = snapshot(db)
     let mut cuts = 0u64
-    while compact_listed(db, probed) || map.len(disk_state(db).pages.compaction.probes) != 0 {
+    while compact_listed(db, probed) || map.len(db.compaction.probes) != 0 {
         if cuts == 256 {
             fail("L88 (h): the class-4 probe ends")
         }
@@ -453,7 +453,7 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     let mut moved_blobs = false
     for (seq, _) in walk.live {
-        if let Some(listed) = disk_index_get(disk_state(db).pages.locations.packs, seq) {
+        if let Some(listed) = manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) {
             moved_blobs = moved_blobs || listed.class == 4
         }
     }
@@ -476,13 +476,13 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
         }
         drop(take read_handle)
     }
-    if !disk_exists(d, paged_pack_path(probed)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
     }
     drop(take before)
     let _ = checkpoint(mut db)?
     let _ = checkpoint(mut db)?
-    if disk_exists(d, paged_pack_path(probed)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("L88 (h): the cut after the last reader removes the retired class-4 file")
     }
     close(take db)?
@@ -570,7 +570,7 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
         fail("L88 (h): some bound refuses the probes after a move was installed")
     }
     let _ = checkpoint(mut db)?
-    if map.len(disk_state(db).pages.compaction.probes) == 0 && compact_listed(db, original.pack) {
+    if map.len(db.compaction.probes) == 0 && compact_listed(db, original.pack) {
         fail("L88 (h): an unbounded cut publishes the probes' progress")
     }
     compact_branch_rows(db, main_branch(db), rows, row_count, row_count, 0)?
@@ -643,18 +643,18 @@ fn test_l88_crash_before_publication_keeps_the_probed_pack(d: Dir, c: Clock, r: 
     let rows = compact_cold_table(d, c, r, tasks, floor, row_count)?
     let mut db = open(tasks, d, c, r, compact_crash_options(floor)?)?
     let probed = compact_branch_root(db, 0, rows.id)?.pack
-    let first_output = disk_state(db).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = compact_refused_retiring_cut(mut db)?
-    if !disk_exists(d, paged_pack_path(first_output)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: the retiring cut wrote its packs before the rename")
     }
-    disk_write_synced(d, "MANIFEST.tmp", sealed)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", sealed))?
     close(take db)?
     let mut reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
-    if disk_exists(d, "MANIFEST.tmp")? || disk_exists(d, paged_pack_path(first_output)?)? {
+    if disk_exists(d, "MANIFEST.tmp")? || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: open removes an unpublished cut's outputs")
     }
-    if !compact_listed(reopened, probed) || !disk_exists(d, paged_pack_path(probed)?)? {
+    if !compact_listed(reopened, probed) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("§13.6 crash: the previous generation recovers with P listed and on disk")
     }
     compact_check_published(d, reopened, rows.id)?
@@ -684,15 +684,15 @@ fn test_l88_crash_after_publication_resumes_remove(d: Dir, c: Clock, r: Random, 
     let probed = compact_branch_root(db, 0, rows.id)?.pack
     let sealed = compact_refused_retiring_cut(mut db)?
     close(take db)?
-    disk_write_synced(d, "MANIFEST", sealed)?
-    if !disk_exists(d, paged_pack_path(probed)?)? {
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", sealed))?
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("§13.6 crash: P's file is still on disk when Remove has not run")
     }
     let reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
     if compact_listed(reopened, probed) {
         fail("§13.6 crash: reopen selects the new generation, which retired P")
     }
-    if disk_exists(d, paged_pack_path(probed)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("§13.6 crash: Remove resumes at open and unlinks P")
     }
     compact_check_published(d, reopened, rows.id)?
@@ -794,7 +794,7 @@ fn l100_a_run(d: Dir, c: Clock, r: Random, tasks: Tasks, demote_main: bool) -> R
     // Before-rename crash of the retiring cut recovers P listed and readable.
     let mut crashing = open(tasks, d, c, r, clone(active))?
     let sealed_before = compact_refused_retiring_cut(mut crashing)?
-    disk_write_synced(d, "MANIFEST.tmp", sealed_before)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", sealed_before))?
     close(take crashing)?
     let mut reopened = open(tasks, d, c, r, clone(active))?
     if !compact_listed(reopened, pack_p) {
@@ -804,7 +804,7 @@ fn l100_a_run(d: Dir, c: Clock, r: Random, tasks: Tasks, demote_main: bool) -> R
     // After-rename crash of the retiring cut retires P and moves A to A'.
     let sealed_after = compact_refused_retiring_cut(mut reopened)?
     close(take reopened)?
-    disk_write_synced(d, "MANIFEST", sealed_after)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", sealed_after))?
     let settled = open(tasks, d, c, r, clone(active))?
     if compact_listed(settled, pack_p) {
         fail("L100 (a): the probe retires P")
@@ -889,18 +889,18 @@ fn test_l100_tiered_idle_retires_without_pager(d: Dir, c: Clock, r: Random, task
     }
     // Before-rename crash leaves P listed and on disk.
     let sealed_before = compact_refused_retiring_cut(mut db)?
-    disk_write_synced(d, "MANIFEST.tmp", sealed_before)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", sealed_before))?
     close(take db)?
     let mut after_before = open(tasks, d, c, r, clone(active))?
     if let Some(_) = after_before.pager {
         fail("L100 (b): reopen after before-rename crash still starts no pager")
     }
-    if !compact_listed(after_before, pack_p) || !disk_exists(d, paged_pack_path(pack_p)?)? {
+    if !compact_listed(after_before, pack_p) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L100 (b): before-rename crash keeps P listed and on disk")
     }
     // No-crash cut retires P whole with no pager and removes its file.
     let _ = checkpoint(mut after_before)?
-    if compact_listed(after_before, pack_p) || disk_exists(d, paged_pack_path(pack_p)?)? {
+    if compact_listed(after_before, pack_p) || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L100 (b): Tiered-idle cut retires P whole and removes its file")
     }
     l100_b_check_row(after_before, clone(rows), clone(v1))?
@@ -927,9 +927,9 @@ fn test_l100_tiered_idle_retires_without_pager_crash_after_rename(d: Dir, c: Clo
     }
     let sealed = compact_refused_retiring_cut(mut db)?
     close(take db)?
-    disk_write_synced(d, "MANIFEST", sealed)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", sealed))?
     let reopened = open(tasks, d, c, r, active)?
-    if compact_listed(reopened, pack_p) || disk_exists(d, paged_pack_path(pack_p)?)? {
+    if compact_listed(reopened, pack_p) || disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack_p))?)? {
         fail("L100 (b): after-rename crash retires P and open removes its file")
     }
     l100_b_check_row(reopened, rows, v1)?

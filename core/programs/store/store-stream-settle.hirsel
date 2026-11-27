@@ -155,7 +155,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
             if let None = stream_tail_range(mut c, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, due)? {
                 return Ok(None)
             }
-            let mut batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(sid), inc, seq)? {
+            let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(sid)), inc, seq))? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(Latched(Superseded)),
             }
@@ -163,7 +163,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
                 if let None = stream_tail_range(mut c, key, 0, batch_index.byte_len, mut buffers.index, due)? {
                     return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                 }
-                batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(sid), inc, seq)? {
+                batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(sid)), inc, seq))? {
                     Rows(take found) => take found,
                     Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
                 }
@@ -192,7 +192,7 @@ fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64
             let mut at = 0u64
             let mut fidx = 0u64
             while at < list.len(buffers.slice) {
-                let frame = disk_frame_bytes(key, batch_ctx, buffers.slice, at)?
+                let frame = failure_result_from_rep(manifest.disk_frame_bytes(key, batch_ctx, buffers.slice, at))?
                 if fidx >= skip {
                     if frame.kind == 0x0040 {
                         if frame.end - frame.payload != 24 || format.read_le(buffers.slice, frame.payload, 8) != epoch {

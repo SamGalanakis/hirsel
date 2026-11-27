@@ -83,7 +83,7 @@ pub fn journal_law_genesis_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         return false
     }
     let DiskSession(lock: take lock, startup: _) = take first
-    result.unwrap(disk_io(host.close(take lock)))
+    result.unwrap(failure_result_from_rep(manifest.disk_io(host.close(take lock))))
     options.limits = None
     let db = result.unwrap(open(tasks, dir, c, r, options))
     let kept = types.same_limits(limits_to_rep(store_limits(db)), limits_to_rep(small)) && pages.holder_heads(db.holders)[0].head == 0
@@ -127,10 +127,10 @@ pub fn journal_law_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     }
     result.unwrap(durable(mut db, x.ticket))
     result.unwrap(close(take db))
-    let (id, take manifest) = result.unwrap(read_page_manifest_file(dir))
-    let mut lowered = take manifest
-    lowered.limits = small_place_limits()
-    result.unwrap(disk_publish_manifest(dir, id, lowered))
+    let (id, take page_record) = result.unwrap(read_page_manifest_file(dir))
+    let mut lowered = take page_record
+    lowered.limits = limits_to_rep(small_place_limits())
+    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(dir, store_key_to_rep(id), lowered)))
     match open(tasks, dir, c, r, options) {
         Error(Corrupt(_)) => true,
         _ => false,
@@ -563,11 +563,11 @@ fn cadence_failed_write(tasks: Tasks, c: Clock, fail_end: bool) -> Result[(), Er
         _ => fail("L94: the worker did not return its write failure"),
     }
     drop(take send)
-    let mut segment_check = disk_io(host.open(d, journal_path(7, "")?, Read))?
-    if !disk_io(host.try_lock_shared(mut segment_check))? {
+    let mut segment_check = failure_result_from_rep(manifest.disk_io(host.open(d, failure_result_from_rep(manifest.journal_path(7, ""))?, Read)))?
+    if !failure_result_from_rep(manifest.disk_io(host.try_lock_shared(mut segment_check)))? {
         fail("L94: a failed write kept the segment fence")
     }
-    disk_io(host.close(take segment_check))?
+    failure_result_from_rep(manifest.disk_io(host.close(take segment_check)))?
     if disk_end(d, id, 7)? != Some(72u64) {
         fail("L94: a failed write advanced END")
     }

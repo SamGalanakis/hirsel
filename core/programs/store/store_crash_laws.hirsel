@@ -270,10 +270,10 @@ fn export_refuses_a_second_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
 }
 
 fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "PREPARED", Read))))?
     // AP1b gives 216 + 32 bytes for this fixture's 32-byte describe and no limits.
-    let frame = scratch_result(read_disk_bytes(mut file, "PREPARED", 72, 16 + 248))?
-    scratch_result(disk_io(host.close(take file)))?
+    let frame = scratch_result(failure_result_from_rep(manifest.read_disk_bytes(mut file, "PREPARED", 72, 16 + 248)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take file))))?
     let kind: u16 = list.word_le(frame, 0)
     let width: u32 = list.word_le(frame, 4)
     if kind != 0x0081 || width != 248 {
@@ -302,7 +302,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         _ => fail("cutover accepted a superseded candidate"),
     }
     let (scratch_limit, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
-    let before = deploy_result(disk_read_paged_file(d, "MANIFEST", MANIFEST_LIMIT))?
+    let before = deploy_result(failure_result_from_rep(manifest.disk_read_paged_file(d, "MANIFEST", manifest.MANIFEST_LIMIT)))?
     let blocked = crash_import(mut db, scratch_limit, c, tasks, attempt, 66u8, 16781391u64)?
     let limited_meta = crash_prepared_meta(scratch_limit)?
     let fitted: u64 = list.word_le(fitted_meta, 216)
@@ -314,7 +314,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         Error(FullNew(Journal(problem))) if problem.requested == 16781392 && problem.available == 16781391 => (),
         _ => fail("cutover ignored NEW's journal floor"),
     }
-    let after = deploy_result(disk_read_paged_file(d, "MANIFEST", MANIFEST_LIMIT))?
+    let after = deploy_result(failure_result_from_rep(manifest.disk_read_paged_file(d, "MANIFEST", manifest.MANIFEST_LIMIT)))?
     if version(snapshot(db)) != base || before != after || disk_state(db).options.journal_limit != 268435456 {
         fail("a refused install changed OLD")
     }
@@ -566,11 +566,11 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
 }
 
 fn disk_crash_torn_manifest(d: Dir) -> Result[(), Error] waits {
-    let raw = read_page_manifest_bytes(d)?
+    let raw = failure_result_from_rep(manifest.read_page_manifest_bytes(d))?
     let torn = list.slice(raw, 0, list.len(raw) - 1)
-    disk_write_synced(d, "MANIFEST.tmp", torn)?
-    disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
-    disk_io(host.sync_dir(d))
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", torn))?
+    failure_result_from_rep(manifest.disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST")))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))
 }
 
 fn disk_crash_read_only(d: Dir, c: Clock, torn: bool) -> Result[(), Error] waits {

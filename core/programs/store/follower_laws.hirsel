@@ -234,7 +234,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let mut content = string.into_bytes(string.from("payload"))
     // MEM-24 rounds the 7-byte payload to 8 bytes.
     let destination = option.unwrap(charge.seq(bytes[u8], list.len(content)))
-    let mut compared = disk_read_buffer(destination)?
+    let mut compared = failure_result_from_rep(manifest.disk_read_buffer(destination))?
     let object_ref = history_new_ref(1, 1, content)
     for name in["p-1", "m-1"] {
         history_create(mut client, name, mut content, mut compared, due)?

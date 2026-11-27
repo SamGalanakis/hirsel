@@ -70,7 +70,7 @@ fn bucket_stream_orphan_hold_no_head_task(c: Clock, r: Random, tasks: Tasks) -> 
     let Some(final_obj) = map.get(report.objects, reg_a) else {
         fail("L90-O(2): S_A reg missing")
     }
-    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    let final_reg = failure_result_from_rep(manifest.stream_register_decode(final_obj.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     if final_reg.inc != 1 || final_reg.collecting {
         fail("L90-O(2): foreign janitor unexpectedly elected on healthy S_A")
     }
@@ -184,7 +184,7 @@ fn stream_l90c_register_full(c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
     let Some(final_obj) = map.get(report.objects, reg) else {
         fail("L90-C(1): reg missing")
     }
-    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    let final_reg = failure_result_from_rep(manifest.stream_register_decode(final_obj.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     if final_reg.inc != 1 {
         fail("L90-C(1): refused claimant elected on Full(Register)")
     }
@@ -245,7 +245,7 @@ fn stream_l90c_dead_collecting(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let Some(final_obj) = map.get(report.objects, reg_a) else {
         fail("L90-C(2): S_A reg missing")
     }
-    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    let final_reg = failure_result_from_rep(manifest.stream_register_decode(final_obj.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     if final_reg.inc != 2 || !final_reg.collecting {
         fail("L90-C(2): S_A did not end in Collecting incarnation 2")
     }
@@ -451,7 +451,7 @@ fn stream_l90c_racing_janitors(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let Some(final_obj) = map.get(report.objects, reg) else {
         fail("L90-C(4): reg missing")
     }
-    let final_reg = stream_register_decode(final_obj.data, stream_law_sid(), 0)?
+    let final_reg = failure_result_from_rep(manifest.stream_register_decode(final_obj.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     if final_reg.inc != 2 || !final_reg.collecting {
         fail("L90-C(4): loser rebuilt over fresh winner (expected inc == 2)")
     }

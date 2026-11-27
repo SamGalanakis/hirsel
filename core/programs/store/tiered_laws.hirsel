@@ -164,7 +164,7 @@ fn l65_page_wire(child_pack: u64, bound_digest: u64) -> Bytes {
 fn l65_check_page(owner: StoreId) -> Result[(), ()] {
     let mut ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let raw = l65_page_wire(7, 0x37bed3f9c4f620ba)
-    let cached = result.unwrap(read_tiered_frame("p-8", owner, TieredPage(ptr), raw, 72, 42))
+    let cached = result.unwrap(failure_result_from_rep(manifest.read_tiered_frame("p-8", store_key_to_rep(owner), TieredPage(ptr), raw, 72, 42)))
     let TieredImage(ready) = cached.payload else {
         return Error(())
     }
@@ -177,7 +177,7 @@ fn l65_check_page(owner: StoreId) -> Result[(), ()] {
     }
     ptr.checksum = 0xebf10455d6dc2bc3
     let self_edge = l65_page_wire(8, 0x36034793180eb3d0)
-    let Error(Corrupt(Fault(offset: 72, why: Order, ..))) = read_tiered_frame("p-8", owner, TieredPage(ptr), self_edge, 72, 42) else {
+    let Error(Corrupt(Fault(offset: 72, why: Order, ..))) = failure_result_from_rep(manifest.read_tiered_frame("p-8", store_key_to_rep(owner), TieredPage(ptr), self_edge, 72, 42)) else {
         return Error(())
     }
     Ok(())
@@ -198,7 +198,7 @@ fn test_l65_tiered_edges() -> Result[(), ()] {
     list.put_word_le(mut raw, 2u64)
     list.fill(mut raw, 1025, 106u8)
     let valid: format.TieredTarget = TieredBlob(reference)
-    let cached = result.unwrap(read_tiered_frame("p-7", owner, valid, raw, 64, 3))
+    let cached = result.unwrap(failure_result_from_rep(manifest.read_tiered_frame("p-7", store_key_to_rep(owner), valid, raw, 64, 3)))
     let TieredValue(value) = cached.payload else {
         return Error(())
     }
@@ -226,7 +226,7 @@ fn test_l65_tiered_edges() -> Result[(), ()] {
     }
     let _ = result.unwrap(failure_result_from_rep(format.verify_tiered_edge("p-7", valid, cached.identity)))
     raw[16u64] = 0
-    let Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) = read_tiered_frame("p-7", owner, valid, raw, 64, 3) else {
+    let Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) = failure_result_from_rep(manifest.read_tiered_frame("p-7", store_key_to_rep(owner), valid, raw, 64, 3)) else {
         return Error(())
     }
     l65_check_page(owner)
@@ -438,12 +438,12 @@ fn l65_pager_exchange(requests: Sender[TieredPagerMessage], ready: TieredPagerTa
 @test
 fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
-    let path = paged_pack_path(8)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(8))?
     let mut pack_bytes: Bytes = list.with_capacity(196)
     list.fill(mut pack_bytes, 72, 0u8)
     list.append(mut pack_bytes, l65_page_wire(7, 0x37bed3f9c4f620ba))
     list.fill(mut pack_bytes, 28, 0u8)
-    disk_write_synced(fixtures, path, pack_bytes)?
+    failure_result_from_rep(manifest.disk_write_synced(fixtures, path, pack_bytes))?
     let owner = StoreId(hi: 3, lo: 4)
     let inventory = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
@@ -620,7 +620,7 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
     if found != ptr || descriptor[53u64] != 1 || rows != 1 || charged != 78 {
         fail("L68: lazy attach changed the table descriptor")
     }
-    let Error(Unsupported(0x0021)) = decode_located_page("p-9", 72, take raw, CollectionMap) else {
+    let Error(Unsupported(0x0021)) = failure_result_from_rep(manifest.decode_located_page("p-9", 72, take raw, CollectionMap)) else {
         fail("L68: the eager opener accepted a Tiered descriptor")
     }
     Ok(())
@@ -637,7 +637,7 @@ fn l68_page_pack(owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> 
 
 fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
     let (take pack_bytes, pointer) = l68_page_pack(owner, seq, stamp, payload_bytes)?
-    disk_write_synced(d, paged_pack_path(seq)?, pack_bytes)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(seq))?, pack_bytes))?
     Ok(pointer)
 }
 
@@ -645,8 +645,8 @@ fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
     let mut records: List[std.page.Entry] = list.with_capacity(2)
     let cold = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
     let warm = pages.PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
-    list.push(mut records, std.page.Entry(key: types.key_word(8), cell: InlineValue(encode_pack_row(cold))))
-    list.push(mut records, std.page.Entry(key: types.key_word(9), cell: InlineValue(encode_pack_row(warm))))
+    list.push(mut records, std.page.Entry(key: types.key_word(8), cell: InlineValue(manifest.encode_pack_row(cold))))
+    list.push(mut records, std.page.Entry(key: types.key_word(9), cell: InlineValue(manifest.encode_pack_row(warm))))
     let image = failure_result_from_rep(pages.page_result(std.page.encode(records, 0, 101, Unprefixed)))?
     failure_result_from_rep(types.copied(std.page.payload(image)))
 }
@@ -655,16 +655,16 @@ fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
 fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let owner = StoreId(hi: 3, lo: 4)
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.next_pack = 11
-    manifest.next_stamp = 102
-    manifest.next_table = 10
-    manifest.account_tiered = 78
-    manifest.branches[0u64].roots.collections = l68_write_page_pack(fixtures, owner, 9, 100, l68_collection_map_wire())?
-    manifest.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(168)?)?
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.next_pack = 11
+    page_record.next_stamp = 102
+    page_record.next_table = 10
+    page_record.account_tiered = 78
+    page_record.branches[0u64].roots.collections = l68_write_page_pack(fixtures, owner, 9, 100, l68_collection_map_wire())?
+    page_record.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(168)?)?
     // There is no p-8 to read. The root and inventory must come only from
     // the Memory map and list pages.
-    let verified = validate_directory_graph(fixtures, owner, clone(manifest), true)?
+    let verified = validate_directory_graph(fixtures, owner, clone(page_record), true)?
     let loaded = rebuild_page_store(take verified, None)?
     let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: recovery forced or discarded the Cold root")
@@ -673,17 +673,17 @@ fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     if ptr != std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40) || rows != 1 {
         fail("L68: recovery did not preserve the root pointer and row count")
     }
-    let Some(cold) = disk_index_get(loaded.locations.packs, 8u64) else {
+    let Some(cold) = manifest.disk_index_get(loaded.locations.packs, 8u64) else {
         fail("L68: recovery dropped the Cold pack inventory")
     }
     if cold.live != 80 {
         fail("L68: recovery reset the Cold pack's live bytes")
     }
-    if let Some(_) = disk_index_get(loaded.locations.frames, 40u64) {
+    if let Some(_) = manifest.disk_index_get(loaded.locations.frames, 40u64) {
         fail("L68: recovery indexed the Cold page in RAM")
     }
-    manifest.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(167)?)?
-    let Error(Corrupt(Fault(file: bad_pack, why: Malformed, ..))) = validate_directory_graph(fixtures, owner, take manifest, true) else {
+    page_record.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(167)?)?
+    let Error(Corrupt(Fault(file: bad_pack, why: Malformed, ..))) = validate_directory_graph(fixtures, owner, take page_record, true) else {
         fail("L68: a root crossing the pack's index was accepted")
     }
     if bad_pack != "p-8" {
@@ -701,10 +701,10 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
     list.push(mut slots, ColdPage(std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)))
     let mut roots = pages.empty_roots()
     roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take slots, list.new())))?
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.account_tiered = 172
-    manifest.next_stamp = 101
-    journal_replay_manifest(failure_result_from_rep(types.capacity(pages.main_state(take roots, 0, 0)))?, manifest)
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.account_tiered = 172
+    page_record.next_stamp = 101
+    journal_replay_manifest(failure_result_from_rep(types.capacity(pages.main_state(take roots, 0, 0)))?, page_record)
 }
 
 fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[format.JournalEvent, Error] {
@@ -810,17 +810,17 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let until = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut source = history_reader(take client, until)
     let owner = StoreId(hi: 3, lo: 4)
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.next_pack = 11
-    manifest.next_stamp = 102
-    manifest.next_table = 10
-    manifest.account_tiered = 78
-    manifest.branches[0u64].roots.collections = l68_object_pack(mut source, owner, 9, 100, l68_collection_map_wire())?
-    manifest.pack_root = l68_object_pack(mut source, owner, 10, 101, l68_inventory_wire(168)?)?
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.next_pack = 11
+    page_record.next_stamp = 102
+    page_record.next_table = 10
+    page_record.account_tiered = 78
+    page_record.branches[0u64].roots.collections = l68_object_pack(mut source, owner, 9, 100, l68_collection_map_wire())?
+    page_record.pack_root = l68_object_pack(mut source, owner, 10, 101, l68_inventory_wire(168)?)?
     let cold = pages.HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
     // The locator names the Tiered pack, but the test never uploads it.
     map.insert(mut source.locator.rows, 8u64, cold)
-    let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(manifest), true, None)?
+    let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(page_record), true, None)?
     let loaded = rebuild_page_store(take verified, Some(view source.locator))?
     let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, failure_result_from_rep(catalog.prefix(9))?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
@@ -843,7 +843,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let mut truncated = cold
     truncated.len = 219
     map.insert(mut source.locator.rows, 8u64, truncated)
-    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", take manifest, true, None) else {
+    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", take page_record, true, None) else {
         fail("L68: a Tiered locator width differing from the pack row was accepted")
     }
     Ok(())

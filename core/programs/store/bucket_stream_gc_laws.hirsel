@@ -210,7 +210,7 @@ fn stream_b4_sealed_range(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error
     let Some(reg_obj) = map.get(report.objects, reg) else {
         fail("L90-B4(3): reg missing")
     }
-    let final_reg = stream_register_decode(reg_obj.data, stream_law_sid(), 0)?
+    let final_reg = failure_result_from_rep(manifest.stream_register_decode(reg_obj.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     if final_reg.low_inc > 1 || (final_reg.low_inc == 1 && final_reg.low_seq > 10) {
         fail("L90-B4(3): low passed batch 10 while X's sealed entry contained it")
     }

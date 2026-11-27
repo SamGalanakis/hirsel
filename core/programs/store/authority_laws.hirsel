@@ -112,7 +112,7 @@ fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tas
     let main = option.unwrap(follower_branch(mirror, "main"))
     // A recovery read would fail here. The expired call must return the
     // already published position without trying to load another manifest.
-    disk_io(host.remove(directory, "MANIFEST"))?
+    failure_result_from_rep(manifest.disk_io(host.remove(directory, "MANIFEST")))?
     match catch_up(mut mirror, 0) {
         Error(Behind(p)) if types.same(p.store.hi, p.store.lo, main.store.hi, main.store.lo) && p.branch == 0 && p.version == 1 => (),
         _ => fail("expired catch-up did not return Behind at the applied position"),

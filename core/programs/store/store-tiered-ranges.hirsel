@@ -166,7 +166,7 @@ fn tiered_window_cached(cache: ObjectsCache, request: TieredBucketGet) -> Option
     } else {
         0u64
     }
-    let Ok(take buffer) = disk_read_buffer(width + trailer) else {
+    let Ok(take buffer) = failure_result_from_rep(manifest.disk_read_buffer(width + trailer)) else {
         return None
     }
     let mut raw = take buffer

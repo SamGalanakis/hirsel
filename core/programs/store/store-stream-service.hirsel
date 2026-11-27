@@ -103,7 +103,7 @@ fn stream_reg_fetch_once(mut client: std.object.Client, dir: String, sid: HostSt
     if meta.size != list.len(raw) || meta.etag.len == 0 {
         return Error(failure_from_rep(format.disk_fault("reg", 0, Truncated)))
     }
-    stream_register_decode(raw, sid, 0)
+    failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(sid), 0))
 }
 
 fn stream_stalled(lane: StreamLane, store: StoreId, epoch: u64) -> bool {
@@ -131,7 +131,7 @@ fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline
     if meta.size != list.len(lane.compare) || meta.etag.len == 0 {
         return Error(Remote(Fatal(Malformed)))
     }
-    lane.reg = stream_register_decode(lane.compare, lane.sid, lane.reg.rev)?
+    lane.reg = failure_result_from_rep(manifest.stream_register_decode(lane.compare, host_stream_id_to_rep(lane.sid), lane.reg.rev))?
     lane.tag = meta.etag
     Ok(())
 }
@@ -372,7 +372,7 @@ fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: Hos
         let Some(()) = probed else {
             break
         }
-        match stream_batch_head(key, compare, sid, old_inc, term)? {
+        match failure_result_from_rep(manifest.stream_batch_head(key, compare, host_stream_id_to_rep(sid), old_inc, term))? {
             Term(_, _) => return Ok(term),
             Rows(_) => {
                 term += 1
@@ -391,7 +391,7 @@ fn stream_fence_incarnation(mut client: std.object.Client, dir: String, sid: Hos
                 let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut compare, deadline)? else {
                     return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                 }
-                match stream_batch_head(key, compare, sid, old_inc, term)? {
+                match failure_result_from_rep(manifest.stream_batch_head(key, compare, host_stream_id_to_rep(sid), old_inc, term))? {
                     Term(_, _) => return Ok(term),
                     Rows(_) => {
                         term += 1
@@ -553,7 +553,7 @@ fn stream_batch_put(mut lane: StreamLane, mut client: std.object.Client, slices:
             if lane.compare == lane.body {
                 return Ok(())
             }
-            match stream_batch_head(key, lane.compare, lane.sid, lane.inc, lane.seq) {
+            match failure_result_from_rep(manifest.stream_batch_head(key, lane.compare, host_stream_id_to_rep(lane.sid), lane.inc, lane.seq)) {
                 Ok(Term(_, _)) => Error(stream_latch(mut lane, Superseded)),
                 _ => {
                     lane.latched = Some(Batch)

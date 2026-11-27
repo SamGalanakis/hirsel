@@ -199,7 +199,7 @@ fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], marks: Option[Table[u64
     }
     drop(take read_handle)
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L69 random: every reached frame sits in a listed pack on disk")
         }
     }
@@ -539,11 +539,11 @@ fn random_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, take db: Db, renamed:
     let mut crashing = take db
     let sealed = random_refused_cut(mut crashing)?
     close(take crashing)?
-    disk_write_synced(d, if renamed {
+    failure_result_from_rep(manifest.disk_write_synced(d, if renamed {
         "MANIFEST"
     } else {
         "MANIFEST.tmp"
-    }, sealed)?
+    }, sealed))?
     let reopened = open(tasks, d, c, r, options)?
     if disk_exists(d, "MANIFEST.tmp")? {
         fail("L69 random: open removes an unpublished MANIFEST.tmp")
@@ -921,7 +921,7 @@ fn test_l69_pin_after_its_pack_retires(d: Dir, c: Clock, r: Random, tasks: Tasks
         }
     }
     let _ = checkpoint(mut db)?
-    if !disk_exists(d, paged_pack_path(probed)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(probed))?)? {
         fail("L69 random: the Snapshot's lease keeps the retired pack's file")
     }
     let mut initial: Map[u64, u8] = map.new()

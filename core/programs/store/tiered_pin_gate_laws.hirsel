@@ -41,7 +41,7 @@ fn gate_l88_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[GateFix
         }
     }
     let mut frames = 0u64
-    let mut inventory = std.omap.range(disk_state(probing).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(probing).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if listed.class < 3 {
             continue
@@ -77,7 +77,7 @@ fn gate_pin_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, tak
     }
     let delta = pin_delta(mut carried, ApplicationPin, clone(name), s)?
     drop(take s)
-    let first_output = disk_state(carried).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(carried).packs)
     let sealed = refused_cut_bytes(mut carried, take delta)?
     if let Some(_) = pinned(carried, clone(name)) {
         fail("§13.6 crash: a refused cut installs no pin")
@@ -142,7 +142,7 @@ fn gate_leaf_rows(leaf: GateLeaf) -> Map[u64, ()] {
 }
 
 fn gate_probe_rows(db: Db, pack: u64) -> u64 {
-    match map.get(disk_state(db).pages.compaction.probes, pack) {
+    match map.get(db.compaction.probes, pack) {
         Some(cursor) => cursor.rows,
         None => 0,
     }
@@ -530,7 +530,7 @@ fn idle_walk_holders(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Err
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L100 (d): every holder reaches its frames in listed packs on disk")
         }
     }
@@ -608,7 +608,7 @@ fn idle_l100_five_leaf_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, row_co
             fail("L100 (d1)/(d2): all five leaves live in class-3 pack P")
         }
     }
-    let frames: u64 = match disk_index_get(disk_state(probing).pages.locations.packs, pack) {
+    let frames: u64 = match manifest.disk_index_get(manifest.pack_locations(disk_state(probing).packs).packs, pack) {
         Some(listed) => int.widen(listed.frames),
         None => fail("L100 (d1)/(d2): P is listed"),
     }
@@ -679,7 +679,7 @@ fn test_l100_idle_retires_whole_pack_over_budget_then_pin(d: Dir, c: Clock, r: R
 }
 
 fn idle_l100_has_tiered_pack(db: Db) -> bool {
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((_, listed)) = std.omap.next(mut inventory) {
         if listed.class == 3 || listed.class == 4 {
             return true
@@ -719,13 +719,13 @@ fn test_l100_idle_retire_lease_defers_remove_until_pin(d: Dir, c: Clock, r: Rand
     if compact_listed(db, pack) {
         fail("L100 (d2): idle cut retires P whole")
     }
-    if !disk_exists(d, paged_pack_path(pack)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?)? {
         fail("L100 (d2): S's lease defers Remove of P's file")
     }
     let _ = pin(mut db, "s", s)?
     drop(take s)
     let _ = checkpoint(mut db)?
-    if disk_exists(d, paged_pack_path(pack)?)? {
+    if disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(pack))?)? {
         fail("L100 (d2): P's file is removed at the first cut after S's lease ends")
     }
     let _ = idle_walk_holders(d, db, rows.id)?

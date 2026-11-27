@@ -16,7 +16,7 @@ fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] wa
     while list.len(out) < n {
         let mut chunk: Bytes = list.new()
         failure_result_from_rep(types.capacity(list.try_reserve(mut chunk, n - list.len(out))))?
-        if disk_io(host.read(mut file, mut chunk))? == 0 {
+        if failure_result_from_rep(manifest.disk_io(host.read(mut file, mut chunk)))? == 0 {
             return Error(original_disk_fault("PREPARED", list.len(out), Truncated))
         }
         failure_result_from_rep(types.capacity(list.try_reserve(mut out, list.len(chunk))))?
@@ -28,7 +28,7 @@ fn original_prepared_read(mut file: HostFile, n: u64) -> Result[Bytes, Error] wa
 fn original_prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec[T]) -> Result[T, DeployError] waits {
     let raw = scratch_result(original_prepared_read(mut input.file, 16u64))?
     let n = format.read_le(raw, 4u64, 4u64)
-    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(disk_kind_limit(kind)) {
+    if format.read_le(raw, 0u64, 2u64) != int.widen(kind) || format.read_le(raw, 2u64, 2u64) != 1u64 || n > option.unwrap(manifest.disk_kind_limit(kind)) {
         return Error(ImportMalformed)
     }
     let encoded = scratch_result(original_prepared_read(mut input.file, n))?
@@ -46,9 +46,9 @@ fn original_prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.co
 }
 
 fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "PREPARED", Read))))?
     let header = scratch_result(original_prepared_read(mut file, 72u64))?
-    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("PREPARED", header, 6, None, optional_store_key_to_rep(None))))?
     let mut digest = std.sha256.start()
     std.sha256.add(mut digest, header, 0u64, 72u64)
     let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
@@ -69,11 +69,11 @@ fn original_validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] wa
     let ranges: List[ValidatedRange] = list.new()
     let mut extra: Bytes = list.new()
     deploy_result(failure_result_from_rep(types.capacity(list.try_reserve(mut extra, 1))))?
-    if scratch_result(disk_io(host.read(mut input.file, mut extra)))? != 0 {
+    if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut extra))))? != 0 {
         return Error(ImportMalformed)
     }
     let PreparedInput(file: take done, digest: take hashed, ..) = take input
-    scratch_result(disk_io(host.close(take done)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: list.new(), digest: std.sha256.finish(hashed), charge: 0, source_map: list.new(), dir: None, rewrites_checked: false))
 }
 
@@ -96,7 +96,7 @@ fn joined_read[X: send, R: send](tasks: Tasks, take job: X, f: fn(take X) -> Res
     let running = task.spawn(tasks, bytes 1048576, take job, f)
     match task.join(take running) {
         Ok(Ok(take seen)) => ReadReturned(take seen),
-        Error(Failed(causes)) => match raised_capacity(causes) {
+        Error(Failed(causes)) => match manifest.raised_capacity(causes) {
             Some(c) => ReadRaised(c),
             None => ReadLost,
         },
@@ -279,7 +279,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     result.unwrap(finish_frames(take prepared_file))
     // AP1b: a 32-byte description and no limits make a 248-byte payload. The four
     // option words start at payload offset 192 (file offset 280).
-    let bytes_on_disk = result.unwrap(disk_read_paged_file(d, "PREPARED", 336))
+    let bytes_on_disk = result.unwrap(failure_result_from_rep(manifest.disk_read_paged_file(d, "PREPARED", 336)))
     if list.len(bytes_on_disk) != 336 || format.read_le(bytes_on_disk, 72, 2) != 0x0081 || format.read_le(bytes_on_disk, 76, 4) != 248 || format.read_le(bytes_on_disk, 280, 8) != 1048576 || format.read_le(bytes_on_disk, 288, 8) != 1048576 || format.read_le(bytes_on_disk, 296, 8) != 67108864 || format.read_le(bytes_on_disk, 304, 8) != 268435456 {
         return false
     }
@@ -387,7 +387,7 @@ fn rewrite_law_target() -> PreparedTarget {
 }
 
 fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), truncated: bool) -> Result[(), DeployError] waits {
-    let header = deploy_result(disk_read_header("PREPARED", base, 6, None, None))?
+    let header = deploy_result(failure_result_from_rep(manifest.disk_read_header("PREPARED", base, 6, None, optional_store_key_to_rep(None))))?
     let mut payload: Bytes = list.new()
     let row_count: u32 = if let Some(_) = keys.1 {
         2u32
@@ -410,7 +410,7 @@ fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), tr
         list.put_word_le(mut payload, 5u64)
     }
     let frame = deploy_result(failure_result_from_rep(types.capacity(format.disk_seal(header.context, list.len(base), 0x0085, 1, payload))))?
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "PREPARED", Write))))?
     match host.write(mut file, base) {
         Error(problem) => return Error(Scratch(Io(problem.error))),
         Ok(()) => (),
@@ -424,7 +424,7 @@ fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), tr
         Error(problem) => return Error(Scratch(Io(problem.error))),
         Ok(()) => (),
     }
-    scratch_result(disk_io(host.close(take file)))
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take file))))
 }
 
 fn rewrite_law_import_refused(mut db: Db, scratch: Dir, base: u64) -> () waits {
@@ -467,7 +467,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
     rewrite_law_refusals(mut staged, rows)
     deploy_result(stage_rewrite(mut staged, rows, 1, RewriteLawRow(due: 10, body: 6)))?
     write_prepared(mut source, staged, scratch, rewrite_law_target())?
-    let file = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let file = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
     let mut at = 72u64
     let mut final_kind = 0u64
     while at + 16 <= list.len(file) {
@@ -536,13 +536,13 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let exported_rows = deploy_result(catalog_handle(source.db.store, pages.holder_heads(source.db.holders)[0].roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     let replaced = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace)))?
     write_prepared(mut source, replaced, scratch, rewrite_law_target())?
-    let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let replacement = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
     rewrite_law_append(scratch, replacement, exported_rows.id, (1u64, None), false)?
     rewrite_law_import_refused(mut db, scratch, base)
     let mut staged = deploy_result(rewrite_law_stage_export(source, tasks))?
     rewrite_law_refusals(mut staged, exported_rows)
     write_prepared(mut source, staged, scratch, rewrite_law_target())?
-    let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let empty = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
     if list.len(empty) != 336 {
         fail("L51(e″): preparation without rewrites has a suffix")
     }
@@ -558,9 +558,9 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     }
     deploy_result(stage_rewrite(mut staged, exported_rows, 1, RewriteLawRow(due: 10, body: 5)))?
     rewrite_law_append(scratch, empty, exported_rows.id, (1u64, None), false)?
-    let expected = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let expected = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
     write_prepared(mut source, staged, scratch, rewrite_law_target())?
-    let coded = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let coded = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
     if coded != expected {
         fail("L51(e″): wrong rewrite frame bytes")
     }

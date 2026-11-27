@@ -1,0 +1,312 @@
+pub type ScrubRound: codec + key + shareable + send {
+    round: u64,
+    generation: u64,
+    start_version: u64,
+    end_version: u64,
+    started_ms: u64,
+    ended_ms: u64,
+    examined: u64,
+    faults: u64,
+    complete: bool
+}
+
+pub type ScrubHistory: codec + key + shareable + send {
+    next_round: u64,
+    last_clean_ms: Option[u64],
+    last_clean_round: Option[ScrubRound],
+    rounds: List[ScrubRound]
+}
+
+pub type ScrubConfig: key + shareable + send {
+    target_ms: u64,
+    max_rate_bps: u64,
+    slice_bytes: u64,
+    min_rate_bps: u64
+}
+
+pub type ScrubStatus: key + shareable + send {
+    active: bool,
+    generation: Option[u64],
+    checked: u64,
+    estimated_bytes: u64,
+    rate_bps: u64,
+    faults: u64,
+    total_faults: u64,
+    tours_completed: u64,
+    last_clean_ms: Option[u64],
+    clean_age_ms: Option[u64],
+    overdue: bool,
+    next_due_ms: u64
+}
+
+pub type ScrubStepResult: send {
+    stepped: bool,
+    completed: Option[ScrubRound],
+    faults: List[Fault],
+    status: ScrubStatus
+}
+
+pub opaque type ScrubPacer {
+    config: ScrubConfig,
+    created_ms: u64,
+    next_due_ms: u64,
+    tour: Option[Scrub],
+    tour_start_version: u64,
+    tour_started_ms: u64,
+    tour_estimated_bytes: u64,
+    tour_checked: u64,
+    tour_faults: u64,
+    rate_bps: u64,
+    last_generation: Option[u64],
+    last_checked: u64,
+    last_faults: u64,
+    total_faults: u64,
+    tours_completed: u64,
+    last_clean_ms: Option[u64],
+    stopped: bool
+}
+
+fn empty_scrub_history() -> ScrubHistory {
+    ScrubHistory(next_round: 1u64, last_clean_ms: None, last_clean_round: None, rounds: list.new())
+}
+
+// Reads and validates the store's `SCRUB` history file, or returns None when
+// no round has been recorded yet.
+fn read_scrub_history(d: Dir, id: StoreId) -> Result[Option[ScrubHistory], Error] waits {
+    let mut file = match host.open(d, "SCRUB", Read) {
+        Ok(take opened) => take opened,
+        Error(NotFound) => return Ok(None),
+        Error(problem) => return Error(Io(problem)),
+    }
+    let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut file)))?.size
+    if size < 72u64 || size > manifest.SCRUB_HISTORY_FILE_LIMIT {
+        let _ = host.close(take file)
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 0u64, Malformed)))
+    }
+    let raw = failure_result_from_rep(manifest.read_disk_bytes(mut file, "SCRUB", 0u64, size))?
+    let _ = host.close(take file)
+    let header = failure_result_from_rep(manifest.disk_read_header("SCRUB", raw, manifest.SCRUB_HISTORY_ROLE, None, optional_store_key_to_rep(Some(id))))?
+    if 72u64 >= list.len(raw) {
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 72u64, Truncated)))
+    }
+    let frame = failure_result_from_rep(manifest.disk_frame_bytes("SCRUB", header.context, raw, 72u64))?
+    if frame.kind != manifest.SCRUB_HISTORY_KIND || frame.flags != 1u16 || frame.end != list.len(raw) {
+        return Error(failure_from_rep(format.disk_fault("SCRUB", 72u64, Malformed)))
+    }
+    let payload = list.slice(raw, frame.payload, frame.end)
+    let codec: std.codec.Codec[ScrubHistory] = std.codec.of()
+    let parsed = std.codec.decode(codec, payload) ?=> |_| failure_from_rep(format.disk_fault("SCRUB", 72u64, Malformed))
+    Ok(Some(take parsed))
+}
+
+fn write_scrub_history(d: Dir, id: StoreId, history: ScrubHistory) -> Result[(), Error] waits {
+    let payload = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        let codec: std.codec.Codec[ScrubHistory] = std.codec.of()
+        let mut out: Bytes = list.new()
+        std.codec.encode(codec, history, mut out) ?=> |_| Limit(Value)
+        Ok(take out)
+    })?
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: manifest.SCRUB_HISTORY_ROLE, seq: history.next_round)
+    let raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        let mut out = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0u64, 0u8)))?
+        list.append(mut out, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72u64, manifest.SCRUB_HISTORY_KIND, 1u16, payload)))?)
+        Ok(take out)
+    })?
+    if list.len(raw) > manifest.SCRUB_HISTORY_FILE_LIMIT {
+        return Error(Limit(Value))
+    }
+    failure_result_from_rep(manifest.disk_write_synced(d, "SCRUB.tmp", raw))?
+    failure_result_from_rep(manifest.disk_io(host.rename(d, "SCRUB.tmp", "SCRUB")))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))
+}
+
+pub fn scrub_history(db: Db) -> Result[Option[ScrubHistory], Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Ok(None)
+    }
+    read_scrub_history(log_directory(db)?, db.store)
+}
+
+pub fn last_complete_scrub_round(history: ScrubHistory) -> Option[ScrubRound] {
+    let mut i = list.len(history.rounds)
+    while i > 0u64 {
+        i -= 1u64
+        if history.rounds[i].complete {
+            return Some(clone(history.rounds[i]))
+        }
+    }
+    clone(history.last_clean_round)
+}
+
+// Appends one scrub round to `SCRUB` atomically. Only a complete round with
+// zero faults refreshes `last_clean_ms` and `last_clean_round`.
+pub fn record_scrub_round(db: Db, generation: u64, start_version: u64, end_version: u64, started_ms: u64, ended_ms: u64, examined: u64, faults: u64, complete: bool) -> Result[ScrubRound, Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(NotFound)
+    }
+    let dir = log_directory(db)?
+    let mut history = match read_scrub_history(dir, db.store)? {
+        Some(take existing) => take existing,
+        None => empty_scrub_history(),
+    }
+    let seq = if history.next_round == 0u64 {
+        1u64
+    } else {
+        history.next_round
+    }
+    history.next_round = int.saturating_add(seq, 1u64)
+    let scrub_row = ScrubRound(round: seq, generation: generation, start_version: start_version, end_version: end_version, started_ms: started_ms, ended_ms: ended_ms, examined: examined, faults: faults, complete: complete)
+    if complete && faults == 0u64 {
+        history.last_clean_ms = Some(ended_ms)
+        history.last_clean_round = Some(clone(scrub_row))
+    }
+    let mut kept: List[ScrubRound] = list.new()
+    let existing_len = list.len(history.rounds)
+    let drop_count = if existing_len >= manifest.SCRUB_HISTORY_MAX_ROUNDS {
+        existing_len - manifest.SCRUB_HISTORY_MAX_ROUNDS + 1u64
+    } else {
+        0u64
+    }
+    for i in drop_count .. existing_len {
+        list.push(mut kept, clone(history.rounds[i]))
+    }
+    list.push(mut kept, clone(scrub_row))
+    history.rounds = take kept
+    write_scrub_history(dir, db.store, history)?
+    Ok(scrub_row)
+}
+
+fn scrub_estimated_bytes(tour: Scrub) -> u64 {
+    let mut total = 0u64
+    for pack in tour.packs {
+        let headers = int.saturating_add(72u64, int.saturating_mul(16u64, pack.frames))
+        total = int.saturating_add(total, int.saturating_add(headers, pack.payload_bytes))
+    }
+    total
+}
+
+fn scrub_pace_rate(estimated_bytes: u64, config: ScrubConfig) -> u64 {
+    let needed = manifest.ceil_millis_ratio(estimated_bytes, config.target_ms)
+    let floor = order.min(config.min_rate_bps, config.max_rate_bps)
+    let desired = order.max(needed, floor)
+    let bounded = order.min(desired, config.max_rate_bps)
+    order.max(bounded, 1u64)
+}
+
+pub fn begin_scrub_pacer(db: Db, config: ScrubConfig, now_ms: u64) -> Result[ScrubPacer, Error] waits {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(NotFound)
+    }
+    if config.target_ms == 0u64 {
+        return Error(Missing("target_ms"))
+    }
+    if config.max_rate_bps == 0u64 {
+        return Error(Missing("max_rate_bps"))
+    }
+    if config.slice_bytes == 0u64 {
+        return Error(Missing("slice_bytes"))
+    }
+    let persisted = read_scrub_history(log_directory(db)?, db.store)?
+    let last_clean = match persisted {
+        Some(history) => history.last_clean_ms,
+        None => None,
+    }
+    let initial_rate = order.max(order.min(config.min_rate_bps, config.max_rate_bps), 1u64)
+    Ok(ScrubPacer(config: config, created_ms: now_ms, next_due_ms: now_ms, tour: None, tour_start_version: 0u64, tour_started_ms: now_ms, tour_estimated_bytes: 0u64, tour_checked: 0u64, tour_faults: 0u64, rate_bps: initial_rate, last_generation: None, last_checked: 0u64, last_faults: 0u64, total_faults: 0u64, tours_completed: 0u64, last_clean_ms: last_clean, stopped: false))
+}
+
+pub fn scrub_pacer_status(pacer: ScrubPacer, now_ms: u64) -> ScrubStatus {
+    let active = match pacer.tour {
+        Some(_) => true,
+        None => false,
+    }
+    let (checked, estimated_bytes, faults) = if active {
+        (pacer.tour_checked, pacer.tour_estimated_bytes, pacer.tour_faults)
+    } else {
+        (pacer.last_checked, 0u64, pacer.last_faults)
+    }
+    let (clean_age_ms, overdue) = match pacer.last_clean_ms {
+        Some(at) => {
+            let age = int.saturating_sub(now_ms, at)
+            (Some(age), age > pacer.config.target_ms)
+        },
+        None => (None, int.saturating_sub(now_ms, pacer.created_ms) > pacer.config.target_ms),
+    }
+    ScrubStatus(active: active, generation: pacer.last_generation, checked: checked, estimated_bytes: estimated_bytes, rate_bps: pacer.rate_bps, faults: faults, total_faults: pacer.total_faults, tours_completed: pacer.tours_completed, last_clean_ms: pacer.last_clean_ms, clean_age_ms: clean_age_ms, overdue: overdue, next_due_ms: pacer.next_due_ms)
+}
+
+// Advances the paced scrubber by at most one bounded slice when `now_ms >=
+// pacer.next_due_ms`. Actual examined bytes (including faulted units and
+// single-unit overshoot) are debited against the derived rate to compute the
+// next due time.
+pub fn scrub_pacer_step(mut pacer: ScrubPacer, mut db: Db, now_ms: u64) -> Result[ScrubStepResult, Error] waits {
+    healthy(db)?
+    if pacer.stopped || now_ms < pacer.next_due_ms {
+        return Ok(ScrubStepResult(stepped: false, completed: None, faults: list.new(), status: scrub_pacer_status(pacer, now_ms)))
+    }
+    let mut tour = match replace(mut pacer.tour, None) {
+        Some(take running) => take running,
+        None => {
+            let started = begin_scrub(mut db)?
+            let est = scrub_estimated_bytes(started)
+            pacer.tour_start_version = version(snapshot(db))
+            pacer.tour_started_ms = now_ms
+            pacer.tour_estimated_bytes = est
+            pacer.tour_checked = 0u64
+            pacer.tour_faults = 0u64
+            pacer.rate_bps = scrub_pace_rate(est, pacer.config)
+            pacer.last_generation = Some(started.generation)
+            take started
+        },
+    }
+    let ScrubReport(generation: report_gen, checked: report_checked, next: report_next, faults: take report_faults) = match scrub_step(mut tour, pacer.config.slice_bytes) {
+        Ok(take r) => take r,
+        Error(take problem) => {
+            pacer.tour = Some(take tour)
+            return Error(take problem)
+        },
+    }
+    let delta = int.saturating_sub(report_checked, pacer.tour_checked)
+    let debit_ms = manifest.ceil_millis_ratio(delta, pacer.rate_bps)
+    let found = list.len(report_faults)
+    pacer.tour_checked = report_checked
+    pacer.tour_faults = int.saturating_add(pacer.tour_faults, found)
+    pacer.total_faults = int.saturating_add(pacer.total_faults, found)
+    if let Some(_) = report_next {
+        pacer.tour = Some(take tour)
+        pacer.next_due_ms = int.saturating_add(now_ms, debit_ms)
+        return Ok(ScrubStepResult(stepped: true, completed: None, faults: take report_faults, status: scrub_pacer_status(pacer, now_ms)))
+    }
+    // Tour finished: drop the tour immediately to release its ScrubLease.
+    let _ = take tour
+    pacer.tours_completed = int.saturating_add(pacer.tours_completed, 1u64)
+    pacer.last_checked = pacer.tour_checked
+    pacer.last_faults = pacer.tour_faults
+    let end_ver = version(snapshot(db))
+    let round = record_scrub_round(db, report_gen, pacer.tour_start_version, end_ver, pacer.tour_started_ms, now_ms, pacer.tour_checked, pacer.tour_faults, true)?
+    if pacer.tour_faults == 0u64 {
+        pacer.last_clean_ms = Some(now_ms)
+    }
+    let cycle_due = int.saturating_add(pacer.tour_started_ms, pacer.config.target_ms)
+    let debit_due = int.saturating_add(now_ms, debit_ms)
+    pacer.next_due_ms = order.max(cycle_due, debit_due)
+    Ok(ScrubStepResult(stepped: true, completed: Some(round), faults: take report_faults, status: scrub_pacer_status(pacer, now_ms)))
+}
+
+// Stops the pacer, drops any active tour (releasing its ScrubLease), and
+// persists an incomplete round without advancing `last_clean_ms`.
+pub fn scrub_pacer_stop(mut pacer: ScrubPacer, db: Db, now_ms: u64) -> Result[Option[ScrubRound], Error] waits {
+    pacer.stopped = true
+    let Some(take tour) = replace(mut pacer.tour, None) else {
+        return Ok(None)
+    }
+    let generation = tour.generation
+    let _ = take tour
+    pacer.last_checked = pacer.tour_checked
+    pacer.last_faults = pacer.tour_faults
+    let round = record_scrub_round(db, generation, pacer.tour_start_version, version(snapshot(db)), pacer.tour_started_ms, now_ms, pacer.tour_checked, pacer.tour_faults, false)?
+    Ok(Some(round))
+}

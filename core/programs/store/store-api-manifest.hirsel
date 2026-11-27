@@ -1,0 +1,196 @@
+fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, Error] waits {
+    let path = failure_result_from_rep(types.capacity(manifest.disk_path("p-", seq, "")))?
+    let opened = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
+    let mut input = journal_input(take opened, false)?
+    let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.journal_prefix(mut input, path, 0, 72))?, 3, Some(seq), optional_store_key_to_rep(Some(id))))?
+    let mut reached = disk_allocation(scoped fn() -> Result[List[u64], Error] {
+        Ok(clone(offsets))
+    })?
+    list.sort(mut reached, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let mut at = 72u64
+    let mut slot_order = 0u64
+    let mut live_bytes = 0u64
+    let mut checked_pack = manifest.pack_scan(2, next_stamp)
+    while at < format.journal_input_size(input) {
+        let mut spent = 0u64
+        let frame = failure_result_from_rep(manifest.read_pack_frame(mut input, path, header.context, mut checked_pack, at, false, mut spent))?
+        let end = at + 16 + frame.size
+        if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
+            slot_order += 1
+            live_bytes += frame.size
+        }
+        if slot_order < list.len(reached) && reached[slot_order] < end {
+            return Error(failure_from_rep(format.disk_fault(path, reached[slot_order], Malformed)))
+        }
+        at = end
+    }
+    if slot_order != list.len(reached) || checked_pack.frames > 4294967295 {
+        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+    }
+    let handle = format.take_journal_file(take input)
+    failure_result_from_rep(manifest.disk_io(host.close(take handle)))?
+    Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
+}
+
+fn validate_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    failure_result_from_rep(manifest.require_object_memory_manifest(page_record))?
+    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
+    validate_directory_graph(d, id, take page_record, false)
+}
+
+fn validate_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    let none = manifest.new_page_locations()
+    walk_directory_graph(d, id, take page_record, allow_tiered, false, manifest.SettledPacks(below: 0, locations: view none))
+}
+
+fn validate_export_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
+    let none = manifest.new_page_locations()
+    walk_directory_graph(d, id, take page_record, allow_tiered, walk_cold, manifest.SettledPacks(below: 0, locations: view none))
+}
+
+fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool, settled: manifest.SettledPacks) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    let graph = manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
+    let mut lists = manifest.empty_listed_pages(allow_tiered, take graph)
+    let mut final_item: Option[u64] = None
+    let mut directory = d
+    failure_result_from_rep(manifest.read_page_list(mut directory, store_key_to_rep(id), page_record, page_record.pack_root, None, PackList, mut final_item, mut lists, manifest.read_list_page))?
+    final_item = None
+    failure_result_from_rep(manifest.read_page_list(mut directory, store_key_to_rep(id), page_record, page_record.deferred_frees, None, DeferredList, mut final_item, mut lists, manifest.read_list_page))?
+    final_item = None
+    failure_result_from_rep(manifest.read_page_list(mut directory, store_key_to_rep(id), page_record, page_record.lineage, None, LineageList, mut final_item, mut lists, manifest.read_list_page))?
+    failure_result_from_rep(manifest.validate_lineage_forks("MANIFEST", page_record, lists.lineage.forks))?
+    for (seq, _) in lists.class_two {
+        if map.contains(lists.packs, seq) {
+            return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
+        }
+    }
+    let mut data: Map[u64, manifest.LoadedPack] = map.new()
+    for (seq, pack) in lists.class_two {
+        let checked = check_list_pack(d, id, seq, page_record.next_stamp, pack)?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut lists.packs, 1)))?
+        map.insert(mut lists.packs, seq, checked)
+    }
+    for (seq, pack) in lists.packs {
+        if pack.class != 2 && seq < settled.below {
+            let Some(record) = manifest.disk_index_get(settled.locations.packs, seq) else {
+                return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
+            }
+            if record.class != pack.class || record.frames != pack.frames || record.payload_bytes != pack.payload_bytes || record.index != pack.index {
+                return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
+            }
+        } else if pack.class < 2 {
+            let loaded = failure_result_from_rep(manifest.disk_load_page_pack(d, store_key_to_rep(id), seq, pack, page_record.next_stamp))?
+            failure_result_from_rep(types.capacity(map.try_reserve(mut data, 1)))?
+            map.insert(mut data, seq, take loaded)
+        }
+    }
+    if walk_cold && settled.below == 0 {
+        check_listed_tiered_present(d, lists.packs)?
+    }
+    for queued in lists.deferred {
+        failure_result_from_rep(manifest.validate_deferred_target(manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered), queued.target))?
+    }
+    let (take resolved_graph, take cold_roots) = disk_allocation(scoped fn() -> Result[(manifest.PageGraph, List[std.page.PagePtr]), Error] {
+        let mut candidate: manifest.PageGraph = clone(lists.live_graph)
+        let mut collected: List[std.page.PagePtr] = list.new()
+        let inventory = manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered)
+        for item in page_record.branches {
+            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, item.roots, walk_cold, mut collected, mut candidate))?
+        }
+        for held in page_record.pins {
+            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, held.roots, walk_cold, mut collected, mut candidate))?
+        }
+        Ok((take candidate, take collected))
+    })?
+    let mut resolved = take resolved_graph
+    if walk_cold {
+        walk_cold_reachable(d, id, lists.packs, page_record.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps)?
+    }
+    let manifest.ListedPages(packs: take inventory, lineage: take lineage, ..) = take lists
+    Ok(manifest.ValidatedPageManifest(manifest: take page_record, inventory: take inventory, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
+}
+
+// A store's own open and its cut's check accept Tiered roots: the walk reads
+// the collection map and the pack list, never a Cold page (§13.8). Whether the
+// open can fund them is checked once the holders are attached.
+fn validate_store_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
+    validate_directory_graph(d, id, take page_record, true)
+}
+
+fn select_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
+    let validated = validate_store_manifest(d, id, take page_record)?
+    failure_result_from_rep(manifest.cleanup_page_manifest(d, validated))?
+    Ok(take validated)
+}
+
+fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: manifest.TargetLimits, settled: manifest.SettledPacks) -> Result[(), Error] waits {
+    if let Some(problem) = types.journal_floor(target.checkpoint, target.journal, target.frame) {
+        return Error(Full(Journal(problem)))
+    }
+    let (owner, take page_record) = disk_allocation(scoped fn() -> Result[(StoreId, manifest.PageManifest), Error] {
+        disk_read_page_manifest("MANIFEST.tmp", raw)
+    })?
+    if !types.same(owner.hi, owner.lo, id.hi, id.lo) {
+        return Error(failure_from_rep(format.disk_fault("MANIFEST.tmp", 0, Header)))
+    }
+    let requested = page_record.account_memory
+    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
+    let validated = walk_directory_graph(d, id, take page_record, true, true, settled)?
+    let admitted = if validated.manifest.account_tiered != 0 || target.has_tiered {
+        int.saturating_add(requested, target.tiered_reserve)
+    } else {
+        requested
+    }
+    failure_result_from_rep(catalog.over_ceiling(admitted, target.resident))
+}
+
+// A cut made while an export lease is held reads back the packs it wrote
+// before it publishes, so every pack an install settles was read once while
+// OLD still serves (AP21 "Settled packs at a cut").
+fn validate_leased_cut(d: Dir, id: StoreId, raw: Bytes, settled: manifest.SettledPacks) -> Result[(), Error] waits {
+    let (_, take page_record) = disk_allocation(scoped fn() -> Result[(StoreId, manifest.PageManifest), Error] {
+        disk_read_page_manifest("MANIFEST.tmp", raw)
+    })?
+    failure_result_from_rep(manifest.require_unarchived_manifest(page_record))?
+    let _ = walk_directory_graph(d, id, take page_record, true, true, settled)?
+    Ok(())
+}
+
+// A cut's AP21 check: an install proves NEW against the installed generation,
+// any other cut under an export lease (import pin cuts among them) reads back
+// its own packs, and a cut with no lease is not walked.
+fn validate_cut_pages(d: Dir, id: StoreId, raw: Bytes, target: Option[manifest.TargetLimits], lease: Option[Arc[manifest.ExportLease]], published: manifest.PackDiskState) -> Result[(), Error] waits {
+    let settled = manifest.SettledPacks(below: manifest.pack_next(published), locations: manifest.pack_locations(published))
+    if let Some(wanted) = target {
+        return validate_new_page_manifest(d, id, raw, wanted, settled)
+    }
+    if let Some(_) = lease {
+        return validate_leased_cut(d, id, raw, settled)
+    }
+    Ok(())
+}
+
+fn disk_allocation[T](operation: scoped[view] fn() -> Result[T, Error]) -> Result[T, Error] {
+    failure_result_from_rep(manifest.disk_allocation(scoped fn() -> Result[T, types.Failure] {
+        failure_result_to_rep(operation())
+    }))
+}
+
+fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(StoreId, manifest.PageManifest), Error] {
+    let (id, take decoded) = failure_result_from_rep(manifest.disk_read_page_manifest(path, raw))?
+    Ok((store_key_from_rep(id), take decoded))
+}
+
+fn read_page_manifest_file(d: Dir) -> Result[(StoreId, manifest.PageManifest), Error] waits {
+    let (id, take decoded) = failure_result_from_rep(manifest.read_page_manifest_file(d))?
+    Ok((store_key_from_rep(id), take decoded))
+}
+
+fn seal_page_manifest_file(mut raw: Bytes, context: format.DiskContext, level_number: u32) -> Result[(), Error] {
+    failure_result_from_rep(manifest.seal_page_manifest_file(mut raw, context, level_number))
+}

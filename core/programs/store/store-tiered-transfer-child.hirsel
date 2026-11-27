@@ -28,8 +28,8 @@ fn child_cut_tiered(mut tree: pages.PageTree, d: Dir, id: StoreId, mut next_pack
         None => 1000000u64,
     }
     for written in packs {
-        let name = paged_pack_path(written.seq)?
-        disk_write_synced(d, name, written.wire)?
+        let name = failure_result_from_rep(manifest.paged_pack_path(written.seq))?
+        failure_result_from_rep(manifest.disk_write_synced(d, name, written.wire))?
         let pager_pack = pages.TieredPagerPack(inventory: written.pack, object: None)
         let (take updated, _) = std.omap.insert(mut map_ids, take existing, written.seq, pager_pack)
         existing = take updated
@@ -829,7 +829,7 @@ fn run_deferred_index_builds_roots(mut ctx: ChildCutContext, opened: u64, pendin
 // inventory frames without disturbing the following 0x0084/0x0085 frame.
 fn read_optional_source_map(mut input: PreparedInput) -> Result[List[MigrateSource], DeployError] waits {
     let mut first: Bytes = list.with_capacity(1)
-    if scratch_result(disk_io(host.read(mut input.file, mut first)))? == 0 {
+    if scratch_result(failure_result_from_rep(manifest.disk_io(host.read(mut input.file, mut first))))? == 0 {
         return Ok(list.new())
     }
     if first[0u64] != 0x8Bu8 {

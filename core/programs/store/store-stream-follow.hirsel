@@ -73,7 +73,7 @@ fn stream_follow_scan_slices(mut client: std.object.Client, mut lane: StreamLane
                 }
             }
         }
-        let mut batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(tail.sid), tail.inc, seq)? {
+        let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(tail.sid)), tail.inc, seq))? {
             Rows(take found) => take found,
             Term(_, _) => return Ok((take slices, seq, false)),
         }
@@ -81,7 +81,7 @@ fn stream_follow_scan_slices(mut client: std.object.Client, mut lane: StreamLane
             if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
                 return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
             }
-            batch_index = match stream_batch_head(key, buffers.index, host_stream_id_from_rep(tail.sid), tail.inc, seq)? {
+            batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(tail.sid)), tail.inc, seq))? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
             }
@@ -151,7 +151,7 @@ fn stream_follow_load_fresh(mut source: ObjectPackRead, root: String, place_pref
     loop {
         let (take capture, take attach, tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, initial)?
         let head = capture.head
-        check_expected_store(expected, head.store)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(head.store)))?
         match take attach {
             None => {
                 let replay = history_paged_capture(mut source, head, ceiling)?
@@ -237,7 +237,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
                     // check `head` without touching `reg`.
                     let (take capture, take attach, tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, false)?
                     let head = capture.head
-                    check_expected_store(expected, head.store)?
+                    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(head.store)))?
                     if head.floor < old.current.floor || head.entry.seq < old.current.entry.seq {
                         return Error(failure_from_rep(format.disk_fault("head", 72, Order)))
                     }
@@ -316,7 +316,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
         })?
         // Step 3: GET X's `head`, issued AFTER step 2's response.
         let (take after_cap, take after_attach, after_tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, false)?
-        check_expected_store(expected, after_cap.head.store)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(expected), store_key_to_rep(after_cap.head.store)))?
         // Step 4: decide by the four cases of §12.11.9.
         if scratch == cur_bytes {
             let clean = lane.reg.inc == tail.inc && !lane.reg.collecting && !stream_follow_reg_has_row(lane.reg, store, epoch)

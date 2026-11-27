@@ -36,7 +36,7 @@ fn stream_elect_batch_body(report: std.sim.s3.Report, key: String, inc: u64, seq
     let Some(obj) = map.get(report.objects, key) else {
         fail("expected batch/TERM object is missing")
     }
-    stream_batch_head(key, obj.data, stream_law_sid(), inc, seq)
+    failure_result_from_rep(manifest.stream_batch_head(key, obj.data, host_stream_id_to_rep(stream_law_sid()), inc, seq))
 }
 
 // L90-T (§12.11.7, §12.11.15): an old-incarnation batch m with X frames is

@@ -1,0 +1,48 @@
+fn check_page_emission() -> Result[(), types.Failure] {
+    let id = types.StoreKey(hi: 1, lo: 2)
+    let mut tree = std.page.empty(0, 0, Unprefixed)
+    let mut stamp = 1u64
+    let mut key: Bytes = list.with_capacity(1)
+    list.push(mut key, 16u8)
+    pages.page_result(std.page.insert(mut tree, key, string.as_bytes("x"), None, 1024, 1, mut stamp))?
+    let mut known = new_page_locations()
+    record_fresh_tree(mut known, tree, 0)?
+    let mut emission = empty_cut_frames()
+    plan_tree_frames(known, map.new(), tree, mut emission)
+    let layout = layout_packs(page_frames(emission), 0, 1, 96)?
+    apply_pack_layout(mut known, layout)?
+    let mut raw: Bytes = list.with_capacity(121)
+    if layout.next_pack != 2 || list.len(layout.packs) != 1 || layout.packs[0u64].size != 121 || layout.packs[0u64].payload_bytes != 33 {
+        return Error(Foreign)
+    }
+    encode_pack(id, layout, layout.packs[0u64], mut known, mut raw)?
+    if raw != page_data_pack_vector() {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+pub fn disk_law_page_emission() -> bool {
+    match check_page_emission() {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_page_emission() -> Result[(), types.Failure] {
+    check_page_emission()
+}
+
+pub fn law_full_frame_selection(known: PageLocations, lists: bool) -> List[u64] {
+    let mut expected: List[u64] = list.new()
+    let mut frames = std.omap.range(known.frames.values, Unbounded, Unbounded)
+    while let Some((stamp, frame)) = std.omap.next(mut frames) {
+        if let Some(pack) = disk_index_get(known.packs, frame.place.pack) {
+            if (pack.class == 2) == lists && pack.frames > 1 && 2 * pack.live < pack.payload_bytes {
+                list.push(mut expected, stamp)
+            }
+        }
+    }
+    take expected
+}

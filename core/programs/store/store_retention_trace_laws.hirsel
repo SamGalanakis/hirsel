@@ -78,7 +78,7 @@ fn rt_has(xs: List[u64], v: u64) -> bool {
 // The installed generation's listed class-3/4 packs, in sequence order.
 fn rt_listed(db: Db) -> List[u64] {
     let mut xs: List[u64] = list.new()
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
         if pack.class == 3 || pack.class == 4 {
             list.push(mut xs, seq)

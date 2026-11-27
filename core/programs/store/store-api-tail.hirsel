@@ -1,9 +1,3 @@
-fn capture_tail_bases(pins: List[pages.Pin]) -> Result[pages.TailBases, Error] {
-    disk_allocation(scoped fn() -> Result[pages.TailBases, Error] {
-        Ok(pages.tail_bases(pins))
-    })
-}
-
 /// The key codec of the table. Rows rank in the order of the bytes it
 /// writes, which is the order a package breaks ties in.
 pub fn key_codec[K, V](t: Table[K, V]) -> std.codec.Key[K] {

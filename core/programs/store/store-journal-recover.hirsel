@@ -6,22 +6,11 @@ fn journal_input(take file: HostFile, flush: bool) -> Result[format.JournalInput
     }))
 }
 
-fn journal_chunk(mut input: format.JournalInput, path: String, offset: u64) -> Result[u64, Error] waits {
-    failure_result_from_rep(format.refill_journal_chunk(mut input, path, offset))
-}
-
 type JournalRecovered {
     replay: JournalReplay,
     seq: u64,
     end: u64,
     uncovered: u64
-}
-
-fn journal_wait_shared(mut file: HostFile, c: Clock) -> Result[(), Error] waits {
-    while !disk_io(host.try_lock_shared(mut file))? {
-        std.clock.sleep_ns(c, 1000000)
-    }
-    Ok(())
 }
 
 // A live reader may stat before the writer extends the file and then read a
@@ -36,13 +25,13 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
     let mut seq = first
     let mut uncovered = 0u64
     loop {
-        let path = journal_path(seq, "")?
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
             Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, 0, Header))),
             Error(e) => return Error(Io(e))
         }
-        journal_wait_shared(mut file, c)?
+        failure_result_from_rep(manifest.journal_wait_shared(mut file, c))?
         let mut source = journal_input(take file, true)?
         let following = journal_following(d, id, seq, Some(c))?
         let boundary = match following {
@@ -58,8 +47,8 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
         })
         let consumed_file = format.take_journal_file(take source)
         let mut consumed = take consumed_file
-        disk_io(host.unlock(mut consumed))?
-        disk_io(host.close(take consumed))?
+        failure_result_from_rep(manifest.disk_io(host.unlock(mut consumed)))?
+        failure_result_from_rep(manifest.disk_io(host.close(take consumed)))?
         let (end, segment_bytes) = match take scanned {
             Ok(segment) => segment,
             Error(Corrupt(take fault)) => {
@@ -70,7 +59,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
                     Some(_) => false
                 }
                 if final_item && no_end && seq == first {
-                    if let Error(Corrupt(_)) = journal_header(d, id, seq, None) {
+                    if let Error(Corrupt(_)) = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq, None)) {
                         return Ok(JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
                     }
                 }
@@ -107,7 +96,7 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: for
         }
         Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     })?
-    let charge = branch_root_bytes(name, roots)
+    let charge = manifest.branch_root_bytes(name, roots)
     if charge > replay.limits.meta - replay.record_bytes {
         return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
     }
@@ -117,7 +106,7 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: for
     map.insert(mut replay.names, take key, id)
     list.push(mut replay.state.tips, pages.Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
     replay.record_bytes += charge
-    list.push(mut replay.forked, LineageFork(child: id, parent: parent, watermark: watermark, adopted: false))
+    list.push(mut replay.forked, manifest.LineageFork(child: id, parent: parent, watermark: watermark, adopted: false))
     replay.state.next_branch = id + 1
     replay.next_node = order.max(replay.next_node, watermark - 1)
     replay.tiered.exact = false
@@ -137,8 +126,8 @@ type CaptureWalk {
 }
 
 fn capture_end_image(d: Dir, seq: u64) -> Result[Option[Bytes], Error] waits {
-    let path = journal_path(seq, ".end")?
-    match disk_read_file(d, path, 96 + 1048576) {
+    let path = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
+    match failure_result_from_rep(manifest.disk_read_file(d, path, 96 + 1048576)) {
         Ok(take raw) => Ok(Some(take raw)),
         Error(Io(NotFound)) => Ok(None),
         Error(Io(Other(5))) => Ok(None),
@@ -149,7 +138,7 @@ fn capture_end_image(d: Dir, seq: u64) -> Result[Option[Bytes], Error] waits {
 
 fn capture_end(id: StoreId, seq: u64, raw: Option[Bytes]) -> Result[Option[u64], Error] {
     if let Some(image) = raw {
-        let path = journal_path(seq, ".end")?
+        let path = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
         match disk_read_end(path, id, seq, image) {
             Ok(at) => Ok(Some(at)),
             Error(Corrupt(_)) => Ok(None),
@@ -167,7 +156,7 @@ fn capture_walk(d: Dir, id: StoreId, first: u64, restarted: bool) -> Result[Opti
     let mut terminal_image: Option[Bytes] = None
     let mut seq = first
     loop {
-        let path = journal_path(seq, "")?
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut file = match host.open(d, path, Read) {
             Ok(take opened) => take opened,
             Error(NotFound) if seq != first => break,
@@ -176,15 +165,15 @@ fn capture_walk(d: Dir, id: StoreId, first: u64, restarted: bool) -> Result[Opti
         }
         let image = capture_end_image(d, seq)?
         let boundary_read = capture_end(id, seq, image)?
-        let header_read = read_disk_bytes(mut file, path, 0, 72)
+        let header_read = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, 0, 72))
         let parsed_header = match take header_read {
-            Ok(take head_bytes) => disk_read_header(path, head_bytes, 2, Some(seq), Some(id)),
+            Ok(take head_bytes) => failure_result_from_rep(manifest.disk_read_header(path, head_bytes, 2, Some(seq), optional_store_key_to_rep(Some(id)))),
             Error(take problem) => Error(take problem),
         }
         let header = match take parsed_header {
             Ok(found) => found,
             Error(Corrupt(take problem)) => {
-                let successor = journal_path(seq + 1, "")?
+                let successor = failure_result_from_rep(manifest.journal_path(seq + 1, ""))?
                 if disk_exists(d, successor)? {
                     if !restarted {
                         return Ok(None)
@@ -215,11 +204,11 @@ fn capture_lock_free(d: Dir) -> Result[bool, Error] waits {
         Error(NotFound) => return Ok(true),
         Error(problem) => return Error(Io(problem)),
     }
-    let free = disk_io(host.try_lock_shared(mut probe))?
+    let free = failure_result_from_rep(manifest.disk_io(host.try_lock_shared(mut probe)))?
     if free {
-        disk_io(host.unlock(mut probe))?
+        failure_result_from_rep(manifest.disk_io(host.unlock(mut probe)))?
     }
-    disk_io(host.close(take probe))?
+    failure_result_from_rep(manifest.disk_io(host.close(take probe)))?
     Ok(free)
 }
 
@@ -229,7 +218,7 @@ fn capture_fence(d: Dir, c: Clock, deadline: u64, mut walk: CaptureWalk) -> Resu
         return Ok(())
     }
     loop {
-        if disk_io(host.try_lock_shared(mut walk.segments[segment_count - 1].file))? {
+        if failure_result_from_rep(manifest.disk_io(host.try_lock_shared(mut walk.segments[segment_count - 1].file)))? {
             return Ok(())
         }
         if !capture_lock_free(d)? {
@@ -265,7 +254,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
         } else {
             stored_end
         }
-        let path = journal_path(seq, "")?
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut source = journal_input(take opened, torn)?
         journal_refresh_size(mut source, boundary)?
         let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
@@ -274,9 +263,9 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
         let consumed = format.take_journal_file(take source)
         let mut file = take consumed
         if torn {
-            disk_io(host.unlock(mut file))?
+            failure_result_from_rep(manifest.disk_io(host.unlock(mut file)))?
         }
-        disk_io(host.close(take file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take file)))?
     }
     Ok(take replay)
 }
@@ -297,14 +286,14 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: format.
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, replay.immutable)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, replay.immutable)?
     if list.len(commit.keyed) != 0 {
-        let before = keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        let before = manifest.keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
         let mut draw = failure_result_from_rep(catalog.stamp_after(replay.next_node))?
         failure_result_from_rep(pages.materialize_keyed_edits(mut replay.state.tips[i].roots, commit.keyed, 0, mut draw))?
         if !replay.immutable {
             failure_result_from_rep(pages.canonical_roots(mut replay.state.tips[i].roots))?
         }
         replay.next_node = draw - 1
-        replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        replay.record_bytes = replay.record_bytes - before + manifest.keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
         if replay.record_bytes > replay.limits.meta {
             return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
         }

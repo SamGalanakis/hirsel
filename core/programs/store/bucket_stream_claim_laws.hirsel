@@ -83,7 +83,7 @@ fn bucket_stream_claim_admission(c: Clock, r: Random, tasks: Tasks) -> Result[()
     let Some(final) = map.get(report.objects, reg) else {
         fail("L90-Q4: `reg` is gone")
     }
-    let body = stream_register_decode(final.data, stream_law_sid(), 0)?
+    let body = failure_result_from_rep(manifest.stream_register_decode(final.data, host_stream_id_to_rep(stream_law_sid()), 0))?
     for row in body.rows {
         if row.abandoned || row.token == store_key_to_rep(token) {
             fail("L90-Q4: B's Abandoned row outlived A's unhold")
@@ -97,7 +97,7 @@ fn stream_q4_rows(s: BucketSim, tasks: Tasks, reg: String) -> Result[List[format
     let mut client = stream_service_client(s, tasks, 98, "", "us-east-1")?
     let mut raw: Bytes = list.with_capacity(256)
     let _ = history_fetch(mut client, reg, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS))?
-    let mut body = stream_register_decode(raw, stream_law_sid(), 0)?
+    let mut body = failure_result_from_rep(manifest.stream_register_decode(raw, host_stream_id_to_rep(stream_law_sid()), 0))?
     Ok(replace(mut body.rows, list.new()))
 }
 

@@ -1,0 +1,22 @@
+fn check_paged_manifest() -> Result[(), types.Failure] {
+    let id = types.StoreKey(hi: 1, lo: 2)
+    let encoded = disk_page_manifest_bytes(id, page_manifest_empty(types.default_limits()))?
+    // page_manifest_vector with its pack root, data root and counters reset to
+    // page_manifest_empty's, re-encoded and re-checked with libxxhash (Format 12).
+    if list.len(encoded) != 515 || std.check.xxh3(encoded, 0, 515) != 0x37200a6d9d18f257u64 {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+pub fn disk_law_paged_manifest() -> bool {
+    match check_paged_manifest() {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_paged_manifest() -> Result[(), types.Failure] {
+    check_paged_manifest()
+}

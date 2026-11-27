@@ -1,8 +1,8 @@
 // A sparse suffix in holder order. Each record names a branch or pin slot
 // followed by the seven claim tree pointers in journal tag order.
-const KEYED_ROOT_RECORD_BYTES: u64 = 4 + 36 * pages.KEYED_TREE_COUNT
+pub const KEYED_ROOT_RECORD_BYTES: u64 = 4 + 36 * pages.KEYED_TREE_COUNT
 
-fn keyed_root_record_bytes[T](trees: List[T]) -> u64 {
+pub fn keyed_root_record_bytes[T](trees: List[T]) -> u64 {
     if list.len(trees) == 0 {
         0u64
     } else {
@@ -10,7 +10,7 @@ fn keyed_root_record_bytes[T](trees: List[T]) -> u64 {
     }
 }
 
-type LocatedBranch: shareable + send {
+pub type LocatedBranch: shareable + send {
     id: u32,
     name: String,
     parent: u32,
@@ -20,7 +20,7 @@ type LocatedBranch: shareable + send {
     roots: pages.LocatedRoots
 }
 
-type LocatedPin: shareable + send {
+pub type LocatedPin: shareable + send {
     owner: pages.PinOwner,
     name: String,
     branch: u32,
@@ -29,18 +29,18 @@ type LocatedPin: shareable + send {
     watermark: u64
 }
 
-type SweepCursor: shareable + send {
+pub type SweepCursor: shareable + send {
     position: u64,
     epoch: u64,
     digest: u64
 }
 
-type PageManifest: shareable + send {
+pub type PageManifest: shareable + send {
     generation: u64,
     fence: u32,
     inline: u64,
     // The store's limits, recorded at genesis and kept by every cut (AP4a).
-    limits: StoreLimits,
+    limits: types.LimitsRep,
     next_stamp: u64,
     next_branch: u32,
     next_table: u32,
@@ -61,7 +61,7 @@ type PageManifest: shareable + send {
     pins: List[LocatedPin]
 }
 
-fn page_manifest_empty(limits: StoreLimits) -> PageManifest {
+pub fn page_manifest_empty(limits: types.LimitsRep) -> PageManifest {
     let zero = std.page.unlocated(0)
     let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
@@ -69,7 +69,7 @@ fn page_manifest_empty(limits: StoreLimits) -> PageManifest {
     PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
 }
 
-fn page_manifest_size(m: PageManifest) -> u64 {
+pub fn page_manifest_size(m: PageManifest) -> u64 {
     let mut size = MANIFEST_FIXED_BYTES
     for item in m.branches {
         size = int.saturating_add(size, pages.branch_record_bytes(item.name) + keyed_root_record_bytes(item.roots.keyed))
@@ -80,7 +80,7 @@ fn page_manifest_size(m: PageManifest) -> u64 {
     size
 }
 
-fn page_manifest_file_size(payload: u64, fence: u32) -> u64 {
+pub fn page_manifest_file_size(payload: u64, fence: u32) -> u64 {
     72 + 16 + payload + (if fence == 0 {
         0u64
     } else {
@@ -88,7 +88,7 @@ fn page_manifest_file_size(payload: u64, fence: u32) -> u64 {
     })
 }
 
-fn put_page_ptr(mut out: Bytes, ptr: std.page.PagePtr) {
+pub fn put_page_ptr(mut out: Bytes, ptr: std.page.PagePtr) {
     list.put_word_le(mut out, ptr.pack)
     list.put_word_le(mut out, ptr.offset)
     list.put_word_le(mut out, ptr.len)
@@ -102,57 +102,57 @@ fn put_located_roots(mut out: Bytes, roots: pages.LocatedRoots) {
     put_page_ptr(mut out, roots.catalog)
 }
 
-fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.generation, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.limits.value, 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.limits.meta, 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.inline, 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, types.transaction_limit(limits_to_rep(m.limits)), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.next_stamp, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(m.next_branch), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(m.next_table), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.next_pack, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.first_live, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.prev_first, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.account_memory, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.account_tiered, 8)))?
+pub fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[(), types.Failure] {
+    types.capacity(format.le(mut raw, m.generation, 8))?
+    types.capacity(format.le(mut raw, m.limits.value, 4))?
+    types.capacity(format.le(mut raw, m.limits.meta, 4))?
+    types.capacity(format.le(mut raw, m.inline, 4))?
+    types.capacity(format.le(mut raw, types.transaction_limit(m.limits), 4))?
+    types.capacity(format.le(mut raw, m.next_stamp, 8))?
+    types.capacity(format.le(mut raw, int.widen(m.next_branch), 4))?
+    types.capacity(format.le(mut raw, int.widen(m.next_table), 4))?
+    types.capacity(format.le(mut raw, m.next_pack, 8))?
+    types.capacity(format.le(mut raw, m.first_live, 8))?
+    types.capacity(format.le(mut raw, m.prev_first, 8))?
+    types.capacity(format.le(mut raw, m.account_memory, 8))?
+    types.capacity(format.le(mut raw, m.account_tiered, 8))?
     put_page_ptr(mut raw, m.lineage)
     put_page_ptr(mut raw, m.deferred_frees)
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.deferred_next, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.archive_on, 8)))?
+    types.capacity(format.le(mut raw, m.deferred_next, 8))?
+    types.capacity(format.le(mut raw, m.archive_on, 8))?
     put_page_ptr(mut raw, m.archive)
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.archive_drop, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.sweep.position, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.sweep.epoch, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, m.sweep.digest, 8)))?
+    types.capacity(format.le(mut raw, m.archive_drop, 8))?
+    types.capacity(format.le(mut raw, m.sweep.position, 8))?
+    types.capacity(format.le(mut raw, m.sweep.epoch, 8))?
+    types.capacity(format.le(mut raw, m.sweep.digest, 8))?
     put_page_ptr(mut raw, m.pack_root)
     Ok(())
 }
 
-fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(id), 4)))?
-    failure_result_from_rep(types.capacity(format.disk_put_name(mut raw, name)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(parent), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, forked_at, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, head, 8)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, at, 8)))?
+pub fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: pages.LocatedRoots) -> Result[(), types.Failure] {
+    types.capacity(format.le(mut raw, int.widen(id), 4))?
+    types.capacity(format.disk_put_name(mut raw, name))?
+    types.capacity(format.le(mut raw, int.widen(parent), 4))?
+    types.capacity(format.le(mut raw, forked_at, 8))?
+    types.capacity(format.le(mut raw, head, 8))?
+    types.capacity(format.le(mut raw, at, 8))?
     put_located_roots(mut raw, roots)
-    failure_result_from_rep(types.capacity(format.le(mut raw, 0, 1)))
+    types.capacity(format.le(mut raw, 0, 1))
 }
 
-fn append_page_manifest_pin(mut raw: Bytes, owner: pages.PinOwner, name: String, branch_id: u32, held_at: u64, roots: pages.LocatedRoots, watermark: u64) -> Result[(), Error] {
-    failure_result_from_rep(types.capacity(format.le(mut raw, pin_owner_tag(owner), 1)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, string.byte_len(name), 1)))?
+pub fn append_page_manifest_pin(mut raw: Bytes, owner: pages.PinOwner, name: String, branch_id: u32, held_at: u64, roots: pages.LocatedRoots, watermark: u64) -> Result[(), types.Failure] {
+    types.capacity(format.le(mut raw, pin_owner_tag(owner), 1))?
+    types.capacity(format.le(mut raw, string.byte_len(name), 1))?
     list.append(mut raw, string.as_bytes(name))
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(branch_id), 4)))?
-    failure_result_from_rep(types.capacity(format.le(mut raw, held_at, 8)))?
+    types.capacity(format.le(mut raw, int.widen(branch_id), 4))?
+    types.capacity(format.le(mut raw, held_at, 8))?
     put_located_roots(mut raw, roots)
-    failure_result_from_rep(types.capacity(format.le(mut raw, watermark, 8)))
+    types.capacity(format.le(mut raw, watermark, 8))
 }
 
-fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
+fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: pages.LocatedRoots) -> Result[(), types.Failure] {
     if list.len(roots.keyed) != 0 {
-        failure_result_from_rep(types.capacity(format.le(mut raw, holder, 4)))?
+        types.capacity(format.le(mut raw, holder, 4))?
         for ptr in roots.keyed {
             put_page_ptr(mut raw, ptr)
         }
@@ -160,13 +160,13 @@ fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: pages.LocatedRoots) ->
     Ok(())
 }
 
-fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
+fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), types.Failure] {
     append_page_manifest_fields(mut raw, m)?
-    failure_result_from_rep(types.capacity(format.le(mut raw, list.len(m.branches), 4)))?
+    types.capacity(format.le(mut raw, list.len(m.branches), 4))?
     for item in m.branches {
         append_page_manifest_branch(mut raw, item.id, item.name, item.parent, item.forked_at, item.version, item.at, item.roots)?
     }
-    failure_result_from_rep(types.capacity(format.le(mut raw, list.len(m.pins), 4)))?
+    types.capacity(format.le(mut raw, list.len(m.pins), 4))?
     for held in m.pins {
         append_page_manifest_pin(mut raw, held.owner, held.name, held.branch, held.version, held.roots, held.watermark)?
     }
@@ -179,30 +179,30 @@ fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
     Ok(())
 }
 
-fn read_page_ptr(file: String, raw: Bytes, mut at: u64) -> Result[std.page.PagePtr, Error] {
+fn read_page_ptr(file: String, raw: Bytes, mut at: u64) -> Result[std.page.PagePtr, types.Failure] {
     if at > list.len(raw) || list.len(raw) - at < 36 {
-        return Error(failure_from_rep(format.disk_fault(file, at, Truncated)))
+        return Error(format.disk_fault(file, at, Truncated))
     }
-    let ptr = std.page.decode_ptr(list.slice(raw, at, at + 36)) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
+    let ptr = std.page.decode_ptr(list.slice(raw, at, at + 36)) ?=> |_| format.disk_fault(file, at, Malformed)
     at += 36
     Ok(ptr)
 }
 
-fn read_located_roots(file: String, raw: Bytes, mut at: u64) -> Result[pages.LocatedRoots, Error] {
+fn read_located_roots(file: String, raw: Bytes, mut at: u64) -> Result[pages.LocatedRoots, types.Failure] {
     let collections = read_page_ptr(file, raw, mut at)?
     let streams = read_page_ptr(file, raw, mut at)?
     let catalog = read_page_ptr(file, raw, mut at)?
     Ok(pages.LocatedRoots(collections: collections, streams: streams, catalog: catalog, keyed: list.new()))
 }
 
-fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[LocatedBranch], mut pins: List[LocatedPin]) -> Result[(), Error] {
+fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[LocatedBranch], mut pins: List[LocatedPin]) -> Result[(), types.Failure] {
     let branch_count = list.len(branches)
     let holders = branch_count + list.len(pins)
     let mut next_holder = 0u64
     while at < list.len(raw) {
-        let holder = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
+        let holder = format.disk_number(file, raw, mut at, 4)?
         if holder < next_holder || holder >= holders {
-            return Error(failure_from_rep(format.disk_fault(file, at - 4, Order)))
+            return Error(format.disk_fault(file, at - 4, Order))
         }
         next_holder = holder + 1
         let mut keyed: List[std.page.PagePtr] = list.with_capacity(pages.KEYED_TREE_COUNT)
@@ -213,7 +213,7 @@ fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[Lo
             list.push(mut keyed, ptr)
         }
         if !any {
-            return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+            return Error(format.disk_fault(file, at, Malformed))
         }
         if holder < branch_count {
             branches[holder].roots.keyed = take keyed
@@ -224,105 +224,105 @@ fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[Lo
     Ok(())
 }
 
-fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageManifest, Error] {
+pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageManifest, types.Failure] {
     if list.len(raw) > MANIFEST_LIMIT {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Malformed)))
+        return Error(format.disk_fault(file, 0, Malformed))
     }
     let mut at = 0u64
-    let generation = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let value = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
-    let meta = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
-    let inline = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
-    let transaction = failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?
+    let generation = format.disk_number(file, raw, mut at, 8)?
+    let value = format.disk_number(file, raw, mut at, 4)?
+    let meta = format.disk_number(file, raw, mut at, 4)?
+    let inline = format.disk_number(file, raw, mut at, 4)?
+    let transaction = format.disk_number(file, raw, mut at, 4)?
     if generation != number {
-        return Error(failure_from_rep(format.disk_fault(file, 0, Header)))
+        return Error(format.disk_fault(file, 0, Header))
     }
-    let limits = StoreLimits(frame: transaction + 16, value: value, meta: meta)
-    if inline > 1024 || !types.limits_fit(limits_to_rep(limits)) || list.len(raw) > manifest_limit(limits) {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+    let limits = types.LimitsRep(frame: transaction + 16, value: value, meta: meta)
+    if inline > 1024 || !types.limits_fit(limits) || list.len(raw) > manifest_limit(limits) {
+        return Error(format.disk_fault(file, at, Malformed))
     }
-    let next_stamp = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let next_branch: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
-    let next_table: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
-    let next_pack = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let first_live = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let prev_first = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let account_memory = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let account_tiered = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+    let next_stamp = format.disk_number(file, raw, mut at, 8)?
+    let next_branch: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
+    let next_table: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
+    let next_pack = format.disk_number(file, raw, mut at, 8)?
+    let first_live = format.disk_number(file, raw, mut at, 8)?
+    let prev_first = format.disk_number(file, raw, mut at, 8)?
+    let account_memory = format.disk_number(file, raw, mut at, 8)?
+    let account_tiered = format.disk_number(file, raw, mut at, 8)?
     if let None = int.checked_add(account_memory, account_tiered) {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+        return Error(format.disk_fault(file, at, Malformed))
     }
     let lineage = read_page_ptr(file, raw, mut at)?
     let deferred_frees = read_page_ptr(file, raw, mut at)?
-    let deferred_next = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let archive_on = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+    let deferred_next = format.disk_number(file, raw, mut at, 8)?
+    let archive_on = format.disk_number(file, raw, mut at, 8)?
     let archive_ptr = read_page_ptr(file, raw, mut at)?
-    let archive_drop = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let sweep_position = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let epoch = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-    let digest = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+    let archive_drop = format.disk_number(file, raw, mut at, 8)?
+    let sweep_position = format.disk_number(file, raw, mut at, 8)?
+    let epoch = format.disk_number(file, raw, mut at, 8)?
+    let digest = format.disk_number(file, raw, mut at, 8)?
     let sweep = SweepCursor(position: sweep_position, epoch: epoch, digest: digest)
     if next_stamp == 0 || next_table == 0 || next_pack == 0 || first_live == 0 || prev_first == 0 || prev_first > first_live {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+        return Error(format.disk_fault(file, at, Malformed))
     }
     let pack_root = read_page_ptr(file, raw, mut at)?
-    let branch_count = failure_result_from_rep(format.disk_count(file, raw, mut at, 143))?
+    let branch_count = format.disk_count(file, raw, mut at, 143)?
     if branch_count == 0 {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+        return Error(format.disk_fault(file, at, Malformed))
     }
     let mut branches: List[LocatedBranch] = list.with_capacity(branch_count)
     for i in 0u64 .. branch_count {
-        let id: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
+        let id: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
         if (i == 0 && id != 0) || (i != 0 && id <= branches[i - 1].id) {
-            return Error(failure_from_rep(format.disk_fault(file, at, Order)))
+            return Error(format.disk_fault(file, at, Order))
         }
         if id >= next_branch {
-            return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+            return Error(format.disk_fault(file, at, Malformed))
         }
-        let name = failure_result_from_rep(format.disk_name(file, raw, mut at))?
-        let parent: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
-        let forked_at = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-        let head = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
-        let wall = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+        let name = format.disk_name(file, raw, mut at)?
+        let parent: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
+        let forked_at = format.disk_number(file, raw, mut at, 8)?
+        let head = format.disk_number(file, raw, mut at, 8)?
+        let wall = format.disk_number(file, raw, mut at, 8)?
         let roots = read_located_roots(file, raw, mut at)?
-        match failure_result_from_rep(format.disk_number(file, raw, mut at, 1))? {
+        match format.disk_number(file, raw, mut at, 1)? {
             0 => (),
             1 => return Error(Unsupported(0x0031)),
-            _ => return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed))),
+            _ => return Error(format.disk_fault(file, at - 1, Malformed)),
         }
         list.push(mut branches, LocatedBranch(id: id, name: take name, parent: parent, forked_at: forked_at, version: head, at: wall, roots: roots))
     }
-    let pin_count = failure_result_from_rep(format.disk_count(file, raw, mut at, 130))?
+    let pin_count = format.disk_count(file, raw, mut at, 130)?
     let mut pins: List[LocatedPin] = list.with_capacity(pin_count)
     for i in 0u64 .. pin_count {
-        let owner: pages.PinOwner = match failure_result_from_rep(format.disk_number(file, raw, mut at, 1))? {
+        let owner: pages.PinOwner = match format.disk_number(file, raw, mut at, 1)? {
             1 => ApplicationPin,
             2 => ProjectorPin,
             3 => ImportPin,
-            _ => return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed))),
+            _ => return Error(format.disk_fault(file, at - 1, Malformed)),
         }
-        let size = failure_result_from_rep(format.disk_number(file, raw, mut at, 1))?
-        let name = failure_result_from_rep(format.disk_name_bytes(file, raw, mut at, size))?
+        let size = format.disk_number(file, raw, mut at, 1)?
+        let name = format.disk_name_bytes(file, raw, mut at, size)?
         if i != 0 && pin_order(pins[i - 1].name, pins[i - 1].owner, name, owner) != Less {
-            return Error(failure_from_rep(format.disk_fault(file, at, Order)))
+            return Error(format.disk_fault(file, at, Order))
         }
-        let branch_id: u32 = int.truncate(failure_result_from_rep(format.disk_number(file, raw, mut at, 4))?)
-        let head = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+        let branch_id: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
+        let head = format.disk_number(file, raw, mut at, 8)?
         let roots = read_located_roots(file, raw, mut at)?
-        let watermark = failure_result_from_rep(format.disk_number(file, raw, mut at, 8))?
+        let watermark = format.disk_number(file, raw, mut at, 8)?
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
     Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive_ptr, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
 }
 
-fn manifest_account(m: PageManifest) -> u64 {
+pub fn manifest_account(m: PageManifest) -> u64 {
     m.account_memory + m.account_tiered
 }
 
 // Objects@1 / sim@1 and Memory-only reader manifests refuse Tiered roots until
 // Tiered lands on those paths.
-fn require_object_memory_manifest(m: PageManifest) -> Result[(), Error] {
+pub fn require_object_memory_manifest(m: PageManifest) -> Result[(), types.Failure] {
     if m.account_tiered != 0 {
         return Error(Unsupported(0x0031))
     }
@@ -333,20 +333,20 @@ fn require_object_memory_manifest(m: PageManifest) -> Result[(), Error] {
 }
 
 // The archive plan (M3 S7) has no reader yet.
-fn require_unarchived_manifest(m: PageManifest) -> Result[(), Error] {
+pub fn require_unarchived_manifest(m: PageManifest) -> Result[(), types.Failure] {
     if m.archive.stamp != 0 || m.archive_on != 0 || m.archive_drop != 0 {
         return Error(Unsupported(0x0031))
     }
     Ok(())
 }
 
-type ArchiveRange {
+pub type ArchiveRange {
     start: u64,
     end: u64,
     segment: pages.HistoryRef
 }
 
-fn encode_archive_range(row: ArchiveRange) -> std.page.Entry {
+pub fn encode_archive_range(row: ArchiveRange) -> std.page.Entry {
     let mut key: Bytes = list.with_capacity(8)
     list.put_word_be(mut key, row.start)
     let mut value: Bytes = list.with_capacity(40)
@@ -358,39 +358,39 @@ fn encode_archive_range(row: ArchiveRange) -> std.page.Entry {
     std.page.Entry(key: take key, cell: InlineValue(take value))
 }
 
-fn decode_archive_range(file: String, at: u64, key: Bytes, value: Bytes, previous_end: u64) -> Result[ArchiveRange, Error] {
+pub fn decode_archive_range(file: String, at: u64, key: Bytes, value: Bytes, previous_end: u64) -> Result[ArchiveRange, types.Failure] {
     if list.len(key) != 8 || list.len(value) != 40 {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+        return Error(format.disk_fault(file, at, Malformed))
     }
     let start: u64 = list.word_be(key, 0)
     let end: u64 = list.word_le(value, 0)
     let segment_position: u64 = list.word_le(value, 8)
     if start < previous_end || start >= end || segment_position != end {
-        return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+        return Error(format.disk_fault(file, at, Malformed))
     }
     let segment = pages.HistoryRef(seq: segment_position, epoch: list.word_le(value, 16), len: list.word_le(value, 32), digest: list.word_le(value, 24))
     Ok(ArchiveRange(start: start, end: end, segment: segment))
 }
 
-fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
-    let records = match delta {
-        AddHead(head, _) => pages.holder_record_bytes(db.holders) + branch_root_bytes(head.name, head.roots),
-        RemoveHead(slot) => pages.holder_record_bytes(db.holders) - branch_root_bytes(pages.holder_heads(db.holders)[slot].name, pages.holder_heads(db.holders)[slot].roots),
-        ReplaceMain(proposed, gone) => {
+pub fn cut_manifest_size[in installed, in proposed](input: CutInput[in installed, in proposed]) -> u64 {
+    let records = match input.change {
+        CutAddHead(head) => input.record_bytes + branch_root_bytes(head.name, head.roots),
+        CutRemoveHead(slot) => input.record_bytes - branch_root_bytes(input.heads[slot].name, input.heads[slot].roots),
+        CutReplaceMain(roots, _, _, _, gone, drop_pin) => {
             let removed = match gone {
-                Some(slot) => branch_root_bytes(pages.holder_heads(db.holders)[slot].name, pages.holder_heads(db.holders)[slot].roots),
+                Some(slot) => branch_root_bytes(input.heads[slot].name, input.heads[slot].roots),
                 None => 0u64,
             }
-            let unpinned = match proposed.drop_pin {
-                Some(pin_slot) => pin_root_bytes(pages.holder_pins(db.holders)[pin_slot].name, pages.holder_pins(db.holders)[pin_slot].roots),
+            let unpinned = match drop_pin {
+                Some(pin_slot) => pin_root_bytes(input.pins[pin_slot].name, input.pins[pin_slot].roots),
                 None => 0u64,
             }
-            pages.holder_record_bytes(db.holders) - removed - unpinned - keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed) + keyed_root_record_bytes(proposed.roots.keyed)
+            input.record_bytes - removed - unpinned - keyed_root_record_bytes(input.heads[0u64].roots.keyed) + keyed_root_record_bytes(roots.keyed)
         },
-        AddPin(held) => pages.holder_record_bytes(db.holders) + pin_root_bytes(held.name, held.roots),
-        RemovePin(slot) => pages.holder_record_bytes(db.holders) - pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots),
-        ReplacePin(slot, held) => pages.holder_record_bytes(db.holders) - pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots) + pin_root_bytes(held.name, held.roots),
-        _ => pages.holder_record_bytes(db.holders),
+        CutAddPin(held, _) => input.record_bytes + pin_root_bytes(held.name, held.roots),
+        CutRemovePin(slot) => input.record_bytes - pin_root_bytes(input.pins[slot].name, input.pins[slot].roots),
+        CutReplacePin(slot, held, _) => input.record_bytes - pin_root_bytes(input.pins[slot].name, input.pins[slot].roots) + pin_root_bytes(held.name, held.roots),
+        _ => input.record_bytes,
     }
-    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, catalog.current_fence(db.schema))
+    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, input.fence)
 }

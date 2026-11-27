@@ -37,7 +37,7 @@ fn gate_walk_all(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] 
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L88: every published root reaches its frames in listed packs on disk")
         }
     }
@@ -80,16 +80,16 @@ fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options
         },
     }
     close(take db)?
-    disk_write_synced(d, if renamed {
+    failure_result_from_rep(manifest.disk_write_synced(d, if renamed {
         "MANIFEST"
     } else {
         "MANIFEST.tmp"
-    }, sealed)?
+    }, sealed))?
     let reopened = open(tasks, d, c, r, options)?
     if disk_exists(d, "MANIFEST.tmp")? {
         fail("§13.6 crash: open removes an unpublished MANIFEST.tmp")
     }
-    if !renamed && disk_exists(d, paged_pack_path(first_output)?)? {
+    if !renamed && disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: open removes an unpublished cut's packs")
     }
     Ok(take reopened)
@@ -107,7 +107,7 @@ fn gate_published(crash: GateCrash) -> bool {
 // detached first Cold leaf.
 fn gate_one_queued_leaf(db: Db, leaf: std.page.PagePtr) -> Result[(), Error] {
     let queued = l87_queue(db)?
-    if list.len(queued) != 1 || disk_state(db).pages.lists.deferred_next != 1 {
+    if list.len(queued) != 1 || manifest.pack_lists(disk_state(db).packs).deferred_next != 1 {
         fail("L87: a pin's materialization adds no queue row")
     }
     let (seq, row) = queued[0u64]
@@ -163,9 +163,9 @@ fn gate_pin_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -
     let _ = checkpoint(mut db)?
     let delta = pin_delta(mut db, ApplicationPin, "history", s)?
     drop(take s)
-    let first_output = disk_state(db).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = refused_cut_bytes(mut db, take delta)?
-    if !disk_exists(d, paged_pack_path(first_output)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: the pin's cut wrote its materialization before the rename")
     }
     if let Some(_) = pinned(db, "history") {
@@ -219,9 +219,9 @@ fn gate_fork_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
         fail("L87 (e2): a fork of a Snapshot before the cut is published by a cut")
     }
     drop(take s)
-    let first_output = disk_state(db).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = refused_cut_bytes(mut db, take delta)?
-    if !disk_exists(d, paged_pack_path(first_output)?)? {
+    if !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?)? {
         fail("§13.6 crash: the fork's cut wrote its materialization before the rename")
     }
     if let Some(_) = gate_head(db, "beta") {
@@ -242,7 +242,7 @@ fn gate_fork_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
             fail("§13.6 crash: the previous generation recovers without the fork")
         }
         // The refused fork's lineage row never publishes: no head names it.
-        if map.contains(disk_state(reopened).pages.lists.rows.forks, beta_id) {
+        if map.contains(manifest.pack_lists(disk_state(reopened).packs).rows.forks, beta_id) {
             fail("§13.6 crash: a refused fork publishes no lineage row")
         }
         return close(take reopened)
@@ -283,10 +283,10 @@ fn test_l87_each_promoted_holder_crash_after_rename(d: Dir, c: Clock, r: Random,
 
 // A Cold page's frame, read from its pack.
 fn gate_page(d: Dir, db: Db, ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], Error] waits {
-    let path = paged_pack_path(ptr.pack)?
-    let wire = disk_read_file(d, path, 4194304)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
-    Ok(arc.share(fold_page(frame)))
+    let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
+    let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 4194304))?
+    let frame = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
+    Ok(arc.share(manifest.fold_page(frame)))
 }
 
 // A Cold leaf of a two-level table tree: its location, its row count and
@@ -374,7 +374,7 @@ fn gate_fold_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, pack: u6
         let _ = checkpoint(mut db)?
         return Ok(db)
     }
-    let first_output = disk_state(db).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = refused_cut_bytes(mut db, NoHolderChange)?
     if l69_pack_live(db, pack) != before_live {
         fail("§13.6 crash: a refused fold cut files nothing")
@@ -426,7 +426,7 @@ fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     close(take writer)?
     // The fold cut, crashed at the crash table's row, or not at all.
     let mut db = gate_fold_cut(d, c, r, tasks, floor, pack, before_live, crash)?
-    let w0 = match map.get(disk_state(db).pages.lists.rows.forks, beta.id) {
+    let w0 = match map.get(manifest.pack_lists(disk_state(db).packs).rows.forks, beta.id) {
         Some(fork_row) => fork_row.watermark,
         None => fail("L87 (d): the fold cut publishes beta's fork row"),
     }
@@ -440,8 +440,8 @@ fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
             fail("L87 (d): every branch's fold merges L and R and replaces T")
         }
     }
-    let cell = LineageCell(branch: 0, boundary: w0, side: 1, interval: 0, pack: pack)
-    if map.len(disk_state(db).pages.lists.rows.cells) != 1 || map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) != replaced || l69_pack_live(db, pack) != before_live {
+    let cell = manifest.LineageCell(branch: 0, boundary: w0, side: 1, interval: 0, pack: pack)
+    if map.len(manifest.pack_lists(disk_state(db).packs).rows.cells) != 1 || map.get_or(manifest.pack_lists(disk_state(db).packs).rows.cells, cell, 0u64) != replaced || l69_pack_live(db, pack) != before_live {
         fail("L87 (d): main's merge files T, L and R into its holder cell for beta, live[P] keeps them, and beta's own fold records nothing")
     }
     let _ = gate_walk_all(d, db, rows.id)?
@@ -493,7 +493,7 @@ fn gate_crash_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, t
         let _ = checkpoint(mut carried)?
         return Ok(take carried)
     }
-    let first_output = disk_state(carried).pages.next_pack
+    let first_output = manifest.pack_next(disk_state(carried).packs)
     let (take sealed, attempts) = refused_cut_seals(mut carried, NoHolderChange)?
     if let RetryAfterRename = crash {
         if attempts != 2 {
@@ -600,7 +600,7 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     }
     let reached = gate_walk_queue(d, probing)?
     let mut old: List[u64] = list.new()
-    let mut inventory = std.omap.range(disk_state(probing).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(probing).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
         if pack.class == 3 || pack.class == 4 {
             list.push(mut old, seq)
@@ -678,7 +678,7 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     draining.probe_budget = 0
     let mut db_drained = open(tasks, d, c, r, draining)?
     let mut rounds = 0u64
-    while std.page.count(std.page.image_of(disk_state(db_drained).pages.lists.deferred)) != 0 {
+    while std.page.count(std.page.image_of(manifest.pack_lists(disk_state(db_drained).packs).deferred)) != 0 {
         if rounds == 16 {
             fail("L87 (c): the drain consumes every moved row")
         }
@@ -686,7 +686,7 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
         rounds += 1
     }
     let _ = checkpoint(mut db_drained)?
-    let mut left = std.omap.range(disk_state(db_drained).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut left = std.omap.range(manifest.pack_locations(disk_state(db_drained).packs).packs.values, Unbounded, Unbounded)
     while let Some((_, pack)) = std.omap.next(mut left) {
         if (pack.class == 3 || pack.class == 4) && pack.live != 0 {
             fail("L87 (c): the drain files every moved frame dead")
@@ -708,7 +708,7 @@ fn gate_walk_queue(d: Dir, db: Db) -> Result[CompactWalk, Error] waits {
         }
     }
     for (seq, _) in walk.live {
-        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+        if !compact_listed(db, seq) || !disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("L87 (c): every queue row reaches its frames in listed packs on disk")
         }
     }

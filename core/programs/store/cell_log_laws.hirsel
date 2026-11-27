@@ -553,7 +553,7 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let receipt = trim_law_receipt(run(mut db, None, copy_env(target), trim_law_nested)?)?
     durable(mut db, receipt)?
     cell_law_require(db.resident == baseline + 110 && db.file_end == start + 42 + 21 + 55, "masked append charge and frame")?
-    let path = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq, "")))?
+    let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, "")))?
     let wire = read_journal_prefix(dir, path, db.file_end)?
     cell_law_require(wire[start + 42] == 3 && format.word_be(wire, start + 47) == 1 && format.word_be(wire, start + 55) == 0 && wire[start + 63] == 1, "trim sorts before append and drops zero head rows")?
     let written = run(mut db, None, copy_env(target), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {

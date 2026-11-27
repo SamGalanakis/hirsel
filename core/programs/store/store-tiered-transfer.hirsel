@@ -190,21 +190,21 @@ fn read_export_base_descriptors(d: Dir, id: StoreId) -> Result[Map[u32, (std.pag
     let manifest_raw = match host.open(d, "MANIFEST", Read) {
         Ok(take fd) => {
             let mut file = take fd
-            let limit = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
+            let limit = 72 + 16 + manifest.MANIFEST_LIMIT + 20 + manifest.UNKNOWN_ROOM
             let read_res = read_disk_file_bounded(mut file, "MANIFEST", limit)
-            disk_io(host.close(take file))?
+            failure_result_from_rep(manifest.disk_io(host.close(take file)))?
             read_res?
         },
         Error(NotFound) => return Ok(take out),
         Error(problem) => return Error(Io(problem)),
     }
-    let (owner, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
+    let (owner, take page_record) = disk_allocation(scoped fn() -> Result[(StoreId, manifest.PageManifest), Error] {
         disk_read_page_manifest("MANIFEST", manifest_raw)
     })?
-    if !types.same(owner.hi, owner.lo, id.hi, id.lo) || list.len(manifest.branches) == 0 {
+    if !types.same(owner.hi, owner.lo, id.hi, id.lo) || list.len(page_record.branches) == 0 {
         return Ok(take out)
     }
-    let root_ptr = manifest.branches[0u64].roots.collections
+    let root_ptr = page_record.branches[0u64].roots.collections
     if root_ptr.stamp == 0 {
         return Ok(take out)
     }
@@ -217,7 +217,7 @@ fn read_disk_file_bounded(mut file: HostFile, name: String, limit: u64) -> Resul
     let mut chunk: Bytes = list.with_capacity(16384)
     loop {
         list.clear(mut chunk)
-        let n = disk_io(host.read(mut file, mut chunk))?
+        let n = failure_result_from_rep(manifest.disk_io(host.read(mut file, mut chunk)))?
         if n == 0 {
             return Ok(take out)
         }
@@ -233,11 +233,11 @@ fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, m
     if ptr.stamp == 0 {
         return Ok(())
     }
-    let path = paged_pack_path(ptr.pack)?
-    let mut file = disk_io(host.open(d, path, Read))?
+    let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
     let width: u64 = int.widen(ptr.len)
-    let wire = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
-    disk_io(host.close(take file))?
+    let wire = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, ptr.offset, 16 + width))?
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))?
     let (height, take children, take found_descs) = disk_allocation(scoped fn() -> Result[(u8, List[std.page.PagePtr], List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]), Error] {
         let image = failure_result_from_rep(pages.page_result(std.page.decode(failure_result_from_rep(types.copied(list.slice(wire, 16, 16 + width)))?, CollectionMap)))?
         let lvl = std.page.level(image)
@@ -747,9 +747,9 @@ fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode],
 // `hold_import` cuts at `dirty_bytes`. Re-derives each range's digest; a
 // mismatch forgets the import and returns `ImportMalformed`.
 fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mut collections: pages.PageTree, low: u64, high: u64, inline: u64) -> Result[(), DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "PREPARED", Read))))?
     let header = scratch_result(prepared_read(mut file, 72u64))?
-    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("PREPARED", header, 6, None, optional_store_key_to_rep(None))))?
     let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start(), peek: None)
     let metadata_codec: std.codec.Codec[PreparedMeta] = std.codec.of()
     let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
@@ -824,6 +824,6 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
         }
     }
     let PreparedInput(file: take done, ..) = take input
-    scratch_result(disk_io(host.close(take done)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     Ok(())
 }

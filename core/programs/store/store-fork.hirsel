@@ -26,7 +26,7 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
     if id == 4294967295 {
         return Error(Limit(Ids))
     }
-    check_manifest_addition(db, branch_root_bytes(name, from.roots))?
+    check_manifest_addition(db, manifest.branch_root_bytes(name, from.roots))?
     // A Snapshot carries no wall time; the branch it was taken on, if it is
     // still live, gives the at its CallInfo continues from (section 1.7).
     let mut at = pages.holder_heads(db.holders)[0].at
@@ -43,7 +43,7 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
     }
     pages.advance_branch(mut db.holders)
     if is_disk(db) {
-        note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))?
+        note_fork_row(mut db, manifest.LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))?
     }
     let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(pages.Head, String), Error] {
         Ok((pages.Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: pages.share_roots(from.roots), head: from.head, at: at), string.from(name)))
@@ -97,7 +97,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         durable(mut db, fork_ticket)?
     }
     if disk {
-        note_fork_row(mut db, LineageFork(child: id, parent: head.parent, watermark: watermark, adopted: false))?
+        note_fork_row(mut db, manifest.LineageFork(child: id, parent: head.parent, watermark: watermark, adopted: false))?
     }
     install_head(mut db, take head, take indexed_name)
     db.changes += 1

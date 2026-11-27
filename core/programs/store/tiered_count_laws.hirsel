@@ -1,14 +1,14 @@
 fn l62_write_count_page(d: Dir, owner: StoreId, seq: u64, collection: u32, page: Arc[std.page.Page], mut packs: std.omap.OMap[u64, pages.TieredPagerPack], mut ids: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut draft = begin_tiered_pack(owner, seq, 3, 4096)?
     let image = std.page.image_of(page)
-    let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
+    let frame = manifest.PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
     let Some(ptr) = add_tiered_pack_frame(mut draft, frame, collection, tiered_page_index_key(collection, image)?, scoped fn(stamp: u64) -> std.page.PagePtr {
         fail("L62: count fixture's child locations are already Cold")
     })? else {
         fail("L62: a first data frame must fit")
     }
     let (take raw, inventory) = finish_tiered_pack(take draft)?
-    disk_write_synced(d, paged_pack_path(seq)?, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(seq))?, raw))?
     let (take stored, _) = std.omap.insert(mut ids, packs, seq, pages.TieredPagerPack(inventory: inventory, object: None))
     packs = take stored
     Ok(ptr)

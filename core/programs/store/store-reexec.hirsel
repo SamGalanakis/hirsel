@@ -48,7 +48,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[format.Journ
     let d = log_directory(db)?
     let mut seq = disk_state(db).record_cut
     loop {
-        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+        let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
         let file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
             Error(NotFound) => return Ok(None),
@@ -77,7 +77,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[format.Journ
             Ok(())
         })?
         let consumed_file = format.take_journal_file(take source)
-        disk_io(host.close(take consumed_file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take consumed_file)))?
         if let Some(take commit) = take search {
             return Ok(Some(take commit))
         }
@@ -101,8 +101,8 @@ type BaseReplay {
 // when the MANIFEST is already past `base`.
 fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error] waits {
     let d = log_directory(db)?
-    let (_, id, take manifest) = read_only_manifest(d)?
-    let validated = validate_store_manifest(d, id, take manifest)?
+    let (_, id, take page_record) = read_only_manifest(d)?
+    let validated = validate_store_manifest(d, id, take page_record)?
     let (take selected, take state) = replay_base_state(take validated)?
     let replay = journal_replay_manifest(take state, selected)?
     for tip in replay.state.tips {
@@ -113,7 +113,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
     let mut held = BaseReplay(replay: take replay, branch: b.id, next: base + 1, stopped: false)
     let mut seq = selected.first_live
     loop {
-        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+        let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
         let file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
             Error(e) => return Error(Io(e))
@@ -144,7 +144,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
             }
         })
         let consumed_file = format.take_journal_file(take source)
-        disk_io(host.close(take consumed_file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take consumed_file)))?
         let _ = scanned?
         if held.stopped || final_item {
             break
@@ -159,7 +159,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
     Ok(None)
 }
 
-fn replay_base_state(take validated: ValidatedPageManifest) -> Result[(PageManifest, pages.State), Error] {
+fn replay_base_state(take validated: manifest.ValidatedPageManifest) -> Result[(manifest.PageManifest, pages.State), Error] {
     let mut has_cold = false
     for (_, pack) in validated.inventory {
         if pack.class >= 3 {
@@ -168,21 +168,21 @@ fn replay_base_state(take validated: ValidatedPageManifest) -> Result[(PageManif
         }
     }
     if has_cold {
-        let LoadedPageStore(manifest: take selected, holders: take holders, ..) = rebuild_page_store(take validated, None)?
+        let manifest.LoadedPageStore(manifest: take selected, holders: take holders, ..) = rebuild_page_store(take validated, None)?
         let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-            failure_result_from_rep(types.capacity(manifest_state(selected, holders)))
+            failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
         })?
         return Ok((take selected, take state))
     }
-    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let manifest.ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
     let mut graph = take resolved
     let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
         Ok(std.page.empty(0, 0, Collection))
     })?
-    let page_nodes = attach_page_graph(mut graph, empty_collection)?
+    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
     let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
-        let holders = attach_manifest_holders(selected, page_nodes, empty_collection)
-        failure_result_from_rep(types.capacity(manifest_state(selected, holders)))
+        let holders = manifest.attach_manifest_holders(selected, page_nodes, empty_collection)
+        failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))
     })?
     Ok((take selected, take state))
 }
@@ -227,7 +227,7 @@ fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: pages.Roots, ci: Call
     }
     let finished = match take caught {
         Error(problem) => return Halted(OutOfBytes(problem)),
-        Ok(Error(take causes)) => return match raised_capacity(causes) {
+        Ok(Error(take causes)) => return match manifest.raised_capacity(causes) {
             Some(problem) => Halted(OutOfBytes(problem)),
             None => Halted(Raised(cause_number(causes))),
         },

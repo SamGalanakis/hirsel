@@ -170,11 +170,11 @@ fn history_publish_checkpoint(mut client: std.object.Client, mut register: Histo
     history_register_publish(mut client, mut register, candidate, authority, mut workspace, deadline, fn(ignored: u64) {})
 }
 
-fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, manifest: PageManifest, mut workspace: HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, Error] waits {
+fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, page_record: manifest.PageManifest, mut workspace: HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, Error] waits {
     let (take prepared, take header) = disk_allocation(scoped fn() -> Result[(Bytes, Bytes), Error] {
-        let raw = disk_page_manifest_bytes(id, manifest)?
+        let raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), page_record))?
         let mut leader: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
-        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: manifest.generation)
+        let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: page_record.generation)
         failure_result_from_rep(types.capacity(format.history_append_header(mut leader, ctx, epoch, kind)))?
         Ok((take raw, take leader))
     })?
@@ -182,7 +182,7 @@ fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u6
     for i in 0u64 .. 72 {
         raw[i] = header[i]
     }
-    let item = history_new_ref(manifest.generation, epoch, raw)
+    let item = history_new_ref(page_record.generation, epoch, raw)
     history_fill_key(mut workspace.key, "m-", item)
     if item.len > list.capacity(workspace.compare) {
         workspace.compare = disk_allocation(scoped fn() -> Result[Bytes, Error] {
@@ -284,9 +284,9 @@ fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, m
     Error(Remote(take last_upload_error))
 }
 
-fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, cache: Option[ObjectsCache], pack_layout: PackRun, mut known: PageLocations, mut pack_objects: Map[u64, pages.HistoryRef], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, cache: Option[ObjectsCache], pack_layout: manifest.PackRun, mut known: manifest.PageLocations, mut pack_objects: Map[u64, pages.HistoryRef], mut buffers: manifest.PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
     for pack in pack_layout.packs {
-        encode_pack(id, pack_layout, pack, mut known, mut buffers.out)?
+        failure_result_from_rep(manifest.encode_pack(store_key_to_rep(id), pack_layout, pack, mut known, mut buffers.out))?
         history_copy_header(mut buffers.out, format.DiskContext(store: store_key_to_rep(id), role: 3, seq: pack.seq), epoch, kind)?
         let item = history_new_ref(pack.seq, epoch, buffers.out)
         history_fill_key(mut workspace.key, "p-", item)
@@ -301,7 +301,7 @@ fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64
     Ok(())
 }
 
-fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, take prepared: PagedCutLayout, inherited: HistoryLocator, cache: Option[ObjectsCache], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(PagedCutLayout, List[pages.HistoryRef]), Error] waits {
+fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, inherited: HistoryLocator, cache: Option[ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), Error] waits {
     let (take uploaded, take covered_packs) = disk_allocation(scoped fn() -> Result[(Map[u64, pages.HistoryRef], List[pages.HistoryRef]), Error] {
         let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
         let mut refs: Map[u64, pages.HistoryRef] = map.new()
@@ -310,7 +310,7 @@ fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64
     })?
     list.clear(mut workspace.compare)
     failure_result_from_rep(types.capacity(list.try_reserve(mut workspace.compare, 65536)))?
-    let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take prepared
+    let manifest.PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take prepared
     let mut known = take locations
     let mut packs = take uploaded
     let mut rows = take covered_packs
@@ -328,5 +328,5 @@ fn history_write_page_cut(mut client: std.object.Client, id: StoreId, epoch: u64
         }
         list.push(mut rows, item)
     }
-    Ok((PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists), take rows))
+    Ok((manifest.PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists), take rows))
 }

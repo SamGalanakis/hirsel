@@ -11,19 +11,6 @@ pub type ExportStamp: codec + send {
     end: u64
 }
 
-type ExportLease: shareable + send {
-    attempt: Bytes,
-    packs: List[u64],
-    // M2 needs the exported rows even when OLD has advanced.
-    collections: pages.PageTree,
-    first: u64,
-    terminal: u64,
-    end: u64,
-    head: u64,
-    next_table: u32,
-    activation: u64
-}
-
 // A schema commit main published under the lease (§3.5a "Catch-up", D-CU-1):
 // an index build chunk or a verify demotion. Captured at the cut so no old
 // Roots are retained while the lease stays open.
@@ -262,9 +249,9 @@ fn write_steps(to: Dir, id: StoreId, stamp: ExportStamp, steps: List[ExportStep]
 
 // Reads the round's STEPS, which OLD wrote for `stamp` before EXPORT.
 fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "STEPS", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "STEPS", Read))))?
     let header = scratch_result(prepared_read(mut file, 72u64))?
-    let head = deploy_result(disk_read_header("STEPS", header, STEPS_ROLE, None, None))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("STEPS", header, STEPS_ROLE, None, optional_store_key_to_rep(None))))?
     if head.context.store.hi != stamp.store_hi || head.context.store.lo != stamp.store_lo || head.context.seq != stamp.head {
         return Error(ExportMismatch)
     }
@@ -281,7 +268,7 @@ fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployErro
         list.push(mut steps, ReplayStep(version: at, catalog: replay_ops(take catalog), superseded: take superseded, rows: replay_ops(take rows)))
     }
     let PreparedInput(file: take done, ..) = take input
-    scratch_result(disk_io(host.close(take done)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     Ok(take steps)
 }
 
@@ -310,7 +297,7 @@ pub opaque type ExportCopy: send {
     source: ExportSource,
     into: ExportInto,
     stamp: ExportStamp,
-    lease: Arc[ExportLease]
+    lease: Arc[manifest.ExportLease]
 }
 
 pub type DeployError: send = Store(Error) | Scratch(Error) | ExportMismatch | AttemptBusy | ImportMalformed | Unsettled | IdBound | Drift | Expired | FullNew(StoreCapacity)
@@ -330,13 +317,13 @@ fn deploy_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
 }
 
 fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Result[(), Error] waits {
-    let mut input = disk_io(host.open(from, name, Read))?
+    let mut input = failure_result_from_rep(manifest.disk_io(host.open(from, name, Read)))?
     copy_export_prefix(mut input, to, name, end, 16384)?;
-    disk_io(host.close(take input))
+    failure_result_from_rep(manifest.disk_io(host.close(take input)))
 }
 
 fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u64], chunk_bytes: u64) -> Result[(), Error] waits {
-    let mut output = disk_io(host.open(to, name, Write))?
+    let mut output = failure_result_from_rep(manifest.disk_io(host.open(to, name, Write)))?
     let mut offset = 0u64
     let mut chunk: Bytes = list.with_capacity(chunk_bytes)
     loop {
@@ -350,7 +337,7 @@ fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u6
                 chunk = list.with_capacity(total - offset)
             }
         }
-        let read_size = disk_io(host.read(mut input, mut chunk))?
+        let read_size = failure_result_from_rep(manifest.disk_io(host.read(mut input, mut chunk)))?
         if read_size == 0 {
             if let Some(_) = end {
                 return Error(failure_from_rep(format.disk_fault(name, offset, Truncated)))
@@ -374,8 +361,8 @@ fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u6
         }
         offset += written
     }
-    disk_io(host.sync(mut output))?
-    disk_io(host.close(take output))
+    failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take output)))
 }
 
 fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
@@ -391,7 +378,7 @@ fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
 pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
     let mut name = string.with_capacity(32)
     let to = match job.into {
-        Scratch(scratch) => scratch_result(disk_io(host.mkdtemp(scratch, mut name)))?,
+        Scratch(scratch) => scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut name))))?,
         Target(target) => target,
     }
     let raw_stamp = scratch_result(export_bytes(job.stamp))?
@@ -399,33 +386,33 @@ pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits 
         ExportLog(from, raw) => copy_log_export(from, raw, to, job.lease, job.stamp)?,
         ExportObject(plan) => object_export_copy(plan, to, job.stamp)?,
     }
-    scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
-    scratch_result(disk_io(host.sync_dir(to)))?
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(to, "EXPORT", raw_stamp)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     let ExportCopy(stamp: take stamp, ..) = take job
     Ok(Exported(dir: to, name: take name, stamp: take stamp))
 }
 
-fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stamp: ExportStamp) -> Result[(), DeployError] waits {
+fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[manifest.ExportLease], stamp: ExportStamp) -> Result[(), DeployError] waits {
     for pack in lease.packs {
-        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("p-", pack, ""))))?
+        let path = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("p-", pack, ""))))?
         scratch_result(copy_export_file(from, to, path, None))?
     }
-    scratch_result(disk_write_synced(to, "MANIFEST", raw))?
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(to, "MANIFEST", raw)))?
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     for seq in lease.first .. stamp.terminal {
-        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?
-        let following = match journal_header(from, id, seq + 1, None) {
+        let path = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ""))))?
+        let following = match failure_result_from_rep(manifest.journal_header(from, store_key_to_rep(id), seq + 1, None)) {
             Ok(header) => header,
             Error(Corrupt(_)) => None,
             Error(take problem) => return Error(Scratch(take problem)),
         }
         let Some(successor) = following else {
-            let next_path = scratch_result(journal_path(seq + 1, ""))?
+            let next_path = scratch_result(failure_result_from_rep(manifest.journal_path(seq + 1, "")))?
             return Error(Scratch(failure_from_rep(format.disk_fault(next_path, 0, Header))))
         }
         scratch_result(copy_export_file(from, to, path, Some(successor.prev_end)))?
     }
-    let terminal = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", stamp.terminal, ""))))?
+    let terminal = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", stamp.terminal, ""))))?
     scratch_result(copy_export_file(from, to, terminal, Some(stamp.end)))?
     Ok(())
 }
@@ -475,7 +462,7 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
-    let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
+    let raw = deploy_result(failure_result_from_rep(manifest.disk_read_paged_file(from, "MANIFEST", 72 + 16 + manifest.MANIFEST_LIMIT + 20 + manifest.UNKNOWN_ROOM)))?
     let lease_attempt = deploy_result(failure_result_from_rep(types.copied(attempt)))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: match activation {
         Some(given) => given,
@@ -483,12 +470,12 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     }, terminal: db.file_seq, end: db.file_end)
     let first_live = disk_state(db).record_cut
     let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
-        Ok(export_lease_pack_sequences(disk_state(db).pages.locations))
+        Ok(export_lease_pack_sequences(manifest.pack_locations(disk_state(db).packs)))
     }))?
-    let kept = ExportLease(attempt: take lease_attempt, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    let kept = manifest.ExportLease(attempt: take lease_attempt, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     let lease = arc.new(take kept)
     let job = ExportCopy(source: ExportLog(from, take raw), into: take into, stamp: take stamp, lease: arc.share(lease))
-    write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {
+    write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[manifest.ExportLease]) {
         state.lease = Some(take held)
         state.steps = list.new()
     })
@@ -538,7 +525,7 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     if !is_disk(db) || object_writer_open(db) {
         return Error(ExportMismatch)
     }
-    let lease: Arc[ExportLease] = match disk_state(db).lease {
+    let lease: Arc[manifest.ExportLease] = match disk_state(db).lease {
         Some(held) => arc.share(held),
         None => return Error(ExportMismatch),
     }
@@ -570,8 +557,8 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     }
     let stamp = ExportStamp(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation: lease.activation, terminal: db.file_seq, end: db.file_end)
     let packs: List[u64] = clone(lease.packs)
-    let kept = ExportLease(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
-    write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[ExportLease]) {
+    let kept = manifest.ExportLease(attempt: deploy_result(failure_result_from_rep(types.copied(attempt)))?, packs: take packs, collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[manifest.ExportLease]) {
         state.lease = Some(take advanced)
         if let Some(mut kept_import) = state.imported {
             rebase_kept_delta(mut kept_import, steps)
@@ -589,7 +576,7 @@ fn tail_bytes(from: Dir, id: StoreId, terminal: u64, end: u64, final_seq: u64, f
     loop {
         let boundary = segment_boundary(from, id, seq, final_seq, final_end)?
         if boundary < start {
-            return Error(failure_from_rep(format.disk_fault(journal_path(seq, "")?, start, Truncated)))
+            return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.journal_path(seq, ""))?, start, Truncated)))
         }
         total += boundary - start
         if seq == final_seq {
@@ -604,9 +591,9 @@ fn segment_boundary(from: Dir, id: StoreId, seq: u64, final_seq: u64, final_end:
     if seq == final_seq {
         return Ok(final_end)
     }
-    match journal_header(from, id, seq + 1, None)? {
+    match failure_result_from_rep(manifest.journal_header(from, store_key_to_rep(id), seq + 1, None))? {
         Some(following) => Ok(following.prev_end),
-        None => Error(failure_from_rep(format.disk_fault(journal_path(seq + 1, "")?, 0, Header))),
+        None => Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.journal_path(seq + 1, ""))?, 0, Header))),
     }
 }
 
@@ -620,7 +607,7 @@ pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployErr
     let mut total = 0u64
     let mut seq = terminal
     loop {
-        let path = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?
+        let path = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ""))))?
         let boundary = scratch_result(segment_boundary(from, id, seq, stamp.terminal, stamp.end))?
         if seq == terminal {
             scratch_result(append_export_range(from, to, path, end, boundary))?
@@ -636,8 +623,8 @@ pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployErr
     }
     scratch_result(write_steps(to, id, stamp, steps))?
     let raw_stamp = scratch_result(export_bytes(stamp))?
-    scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
-    scratch_result(disk_io(host.sync_dir(to)))?
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(to, "EXPORT", raw_stamp)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     Ok(total)
 }
 
@@ -647,13 +634,13 @@ fn append_export_range(from: Dir, to: Dir, name: String, low: u64, high: u64) ->
     if low == high {
         return Ok(())
     }
-    let mut input = disk_io(host.open(from, name, Read))?
-    let mut output = disk_io(host.open(to, name, Append))?
+    let mut input = failure_result_from_rep(manifest.disk_io(host.open(from, name, Read)))?
+    let mut output = failure_result_from_rep(manifest.disk_io(host.open(to, name, Append)))?
     let mut chunk: Bytes = list.with_capacity(65536)
     let mut at = low
     while at < high {
         list.clear(mut chunk)
-        let read_size = disk_io(host.read_at(mut input, at, mut chunk))?
+        let read_size = failure_result_from_rep(manifest.disk_io(host.read_at(mut input, at, mut chunk)))?
         if read_size == 0 {
             return Error(failure_from_rep(format.disk_fault(name, at, Truncated)))
         }
@@ -664,9 +651,9 @@ fn append_export_range(from: Dir, to: Dir, name: String, low: u64, high: u64) ->
         }
         at += written
     }
-    disk_io(host.close(take input))?
-    disk_io(host.sync(mut output))?
-    disk_io(host.close(take output))
+    failure_result_from_rep(manifest.disk_io(host.close(take input)))?
+    failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take output)))
 }
 
 // R1 has no LOCK, cleanup, rotation or worker. Only this module has a Db
@@ -681,7 +668,7 @@ pub opaque type Preparation {
     next_pack: core.Cell[u64],
     pack_bytes: u64,
     dirty_bytes: u64,
-    deferred_frees: List[DeferredFree]
+    deferred_frees: List[manifest.DeferredFree]
 }
 
 pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
@@ -701,32 +688,32 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     if stamp.attempt != attempt {
         return Error(ExportMismatch)
     }
-    let (id, take manifest) = deploy_result(read_page_manifest_file(d))?
-    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || (deploy && manifest.fence != 1) || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
+    let (id, take page_record) = deploy_result(read_page_manifest_file(d))?
+    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || (deploy && page_record.fence != 1) || page_record.first_live > stamp.terminal || page_record.next_table > stamp.next_table {
         return Error(ExportMismatch)
     }
-    let validated = deploy_result(validate_export_manifest(d, id, take manifest, true, !deploy))?
-    let ValidatedPageManifest(manifest: take selected, inventory: take inventory, graph: take resolved, ..) = take validated
+    let validated = deploy_result(validate_export_manifest(d, id, take page_record, true, !deploy))?
+    let manifest.ValidatedPageManifest(manifest: take selected, inventory: take inventory, graph: take resolved, ..) = take validated
     let mut graph = take resolved
     let empty_collection = deploy_result(disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
         Ok(std.page.empty(0, 0, Collection))
     }))?
-    let page_nodes = deploy_result(attach_page_graph(mut graph, empty_collection))?
+    let page_nodes = deploy_result(failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection)))?
     let (take initial, has_tiered) = deploy_result(disk_allocation(scoped fn() -> Result[(pages.State, bool), Error] {
-        let mut holders = attach_manifest_holders(selected, page_nodes, empty_collection)
+        let mut holders = manifest.attach_manifest_holders(selected, page_nodes, empty_collection)
         let tiered = pages.holders_tiered(holders)
         if tiered && !tiered_open_funded(options) {
             return Error(Missing("cache_bytes"))
         }
         if tiered {
-            let paging = manifest_tiered_inventory(inventory, selected.generation, selected.next_stamp)?
+            let paging = failure_result_from_rep(manifest.manifest_tiered_inventory(inventory, selected.generation, selected.next_stamp))?
             for slot in 0u64 .. list.len(holders) {
                 if pages.tiered_collections(holders[slot].collections.root) {
                     holders[slot].collections.paging = Some(arc.share(paging))
                 }
             }
         }
-        let state = failure_result_from_rep(types.capacity(manifest_state(selected, holders)))?
+        let state = failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))?
         Ok((take state, tiered))
     }))?
     let replay = deploy_result(journal_replay_manifest(take initial, selected))?
@@ -746,16 +733,16 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     deploy_result(open_heads(mut db, take state))?
     db.resident = live_bytes
     db.tiered = tiered_account.total
-    db.limits = selected.limits
+    db.limits = limits_from_rep(selected.limits)
     pages.set_next_node(mut db.holders, ids)
     catalog.set_next_table(mut db.schema, stamp.next_table)
     Ok(Preparation(db: take db, stamp: take stamp, shipped: None, dir: d, next_pack: cell.new(selected.next_pack), pack_bytes: options.pack_bytes, dirty_bytes: options.dirty_bytes, deferred_frees: list.new()))
 }
 
 fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
-    let raw = scratch_result(disk_read_file(d, "EXPORT", 216))?
-    let head = deploy_result(disk_read_header("EXPORT", raw, 5, None, None))?
-    let frame = deploy_result(disk_read_frame("EXPORT", head.context, raw, 72))?
+    let raw = scratch_result(failure_result_from_rep(manifest.disk_read_file(d, "EXPORT", 216)))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("EXPORT", raw, 5, None, optional_store_key_to_rep(None))))?
+    let frame = deploy_result(failure_result_from_rep(manifest.disk_read_frame("EXPORT", head.context, raw, 72)))?
     if frame.kind != 0x0080 || frame.flags != 1 || frame.end != list.len(raw) {
         return Error(ExportMismatch)
     }
@@ -768,9 +755,9 @@ fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
 }
 
 fn require_empty(d: Dir, take what: String) -> Result[(), DeployError] waits {
-    let mut listing = scratch_result(disk_io(std.dir.entries(d, None)))?
+    let mut listing = scratch_result(failure_result_from_rep(manifest.disk_io(std.dir.entries(d, None))))?
     let mut first_entry: Bytes = list.with_capacity(258)
-    if scratch_result(disk_io(std.dir.next_entries(mut listing, mut first_entry)))? != 0 {
+    if scratch_result(failure_result_from_rep(manifest.disk_io(std.dir.next_entries(mut listing, mut first_entry))))? != 0 {
         return Error(Scratch(Exists(take what)))
     }
     Ok(())
@@ -787,31 +774,31 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     require_empty(to, "restore target")?
     let stamp = read_export_stamp(from)?
     copy_restore_file(from, to, "EXPORT")?
-    scratch_result(disk_io(host.sync_dir(to)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     copy_restore_file(from, to, "MANIFEST")?
-    let (id, take manifest) = deploy_result(read_page_manifest_file(to))?
-    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
+    let (id, take page_record) = deploy_result(read_page_manifest_file(to))?
+    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || page_record.first_live > stamp.terminal || page_record.next_table > stamp.next_table {
         return Error(ExportMismatch)
     }
-    let mut packs = capture_packs(from, id, manifest, false, 0)
-    let counts = deploy_result(capture_lists(mut packs, manifest))?
+    let mut packs = capture_packs(from, id, page_record, false, 0)
+    let counts = deploy_result(capture_lists(mut packs, page_record))?
     let slots = capture_add(counts.rows, counts.pages)
     let need_bytes = capture_add(CAPTURE_PATH + CAPTURE_SCRATCH, capture_mul(CAPTURE_LIST_ROW, slots))
     let selected = deploy_result(failure_result_from_rep(types.capacity(bound bytes need_bytes {
-        check_inventory(from, id, manifest, slots)
+        check_inventory(from, id, page_record, slots)
     })))?
     let inventory = deploy_result(take selected)?
     for pack in inventory {
-        copy_restore_file(from, to, deploy_result(paged_pack_path(pack.seq))?)?
+        copy_restore_file(from, to, deploy_result(failure_result_from_rep(manifest.paged_pack_path(pack.seq)))?)?
     }
-    for seq in manifest.first_live .. stamp.terminal {
-        copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", seq, ""))))?)?
+    for seq in page_record.first_live .. stamp.terminal {
+        copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ""))))?)?
     }
-    copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", stamp.terminal, ""))))?)?
-    scratch_result(disk_io(host.sync_dir(to)))?
+    copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", stamp.terminal, ""))))?)?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     let _validated = open_copied(to, c, stamp.attempt, options, false)?
-    scratch_result(disk_io(host.remove(to, "EXPORT")))?
-    scratch_result(disk_io(host.sync_dir(to)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove(to, "EXPORT"))))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
     Ok(take stamp)
 }
 
@@ -826,17 +813,17 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
     let mut start = from
     let mut stepped = 0u64
     loop {
-        let path = failure_result_from_rep(types.capacity(disk_path("j-", seq, "")))?
+        let path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, "")))?
         let boundary = if seq == terminal {
             limit
         } else {
-            let following = journal_header(d, id, seq + 1u64, None)?
+            let following = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq + 1u64, None))?
             match following {
                 Some(head) => head.prev_end,
                 None => return Error(failure_from_rep(format.disk_fault(path, 0u64, Header)))
             }
         }
-        let mut source = journal_input(disk_io(host.open(d, path, Read))?, false)?
+        let mut source = journal_input(failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?, false)?
         if seq == terminal && format.journal_input_size(source) > boundary {
             return Error(failure_from_rep(format.disk_fault(path, boundary, Malformed)))
         }
@@ -857,7 +844,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
             journal_apply(path, mut recovered_state, take event)
         })?
         let file = format.take_journal_file(take source)
-        disk_io(host.close(take file))?
+        failure_result_from_rep(manifest.disk_io(host.close(take file)))?
         if seq == terminal {
             apply_steps(path, mut replay, steps, mut stepped, 18446744073709551615u64)?
             return Ok(take replay)
@@ -896,7 +883,7 @@ fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep],
                     for take effect in take effects {
                         if let FoldDropped(take target) = take effect {
                             failure_result_from_rep(types.capacity(list.try_reserve(mut replay.deferred_frees, 1)))?
-                            list.push(mut replay.deferred_frees, DeferredFree(branch_id: 0u32, target: take target))
+                            list.push(mut replay.deferred_frees, manifest.DeferredFree(branch_id: 0u32, target: take target))
                         }
                     }
                     let _ = failure_result_from_rep(catalog.remove_store_collection(mut replay.state.tips[0u64].roots.collections, id, mut replay.next_node))?

@@ -402,7 +402,7 @@ fn writer_state_bytes() -> u64 {
 
 // The largest pack or MANIFEST file a cut writes (§3.9).
 fn cut_output_bytes(pack: u64, l: StoreLimits) -> u64 {
-    order.max(pack, page_manifest_file_size(manifest_limit(l), 1))
+    order.max(pack, manifest.page_manifest_file_size(manifest.manifest_limit(limits_to_rep(l)), 1))
 }
 
 fn history_workspace_bytes(packet: u64, compare: u64) -> Option[u64] {

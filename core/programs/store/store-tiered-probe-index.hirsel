@@ -6,7 +6,7 @@ type TieredIndexRequest: send {
 }
 
 fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request: TieredIndexRequest) -> Result[Arc[Bytes], Error] waits {
-    let path = paged_pack_path(request.pack)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(request.pack))?
     let pack = request.listed.inventory
     let at = request.offset
     if (pack.class != 3 && pack.class != 4) || at < pack.index || at >= pack.payload_bytes || pack.payload_bytes - at < 16 {
@@ -20,8 +20,8 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
                 Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, at, Absent))),
                 Error(problem) => return Error(Io(problem)),
             }
-            let obtained = read_disk_bytes(mut opened, path, at, width)
-            disk_io(host.close(take opened))?
+            let obtained = failure_result_from_rep(manifest.read_disk_bytes(mut opened, path, at, width))
+            failure_result_from_rep(manifest.disk_io(host.close(take opened)))?
             let wire = obtained?
             let end = checked_tiered_index(path, owner, request.pack, at, width, wire)?
             (take wire, end)
@@ -57,8 +57,8 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
 }
 
 fn checked_tiered_index(path: String, owner: StoreId, pack_seq: u64, at: u64, width: u64, wire: Bytes) -> Result[u64, Error] {
-    let head = disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
-    if head.kind != PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
+    let head = failure_result_from_rep(manifest.disk_read_frame_head(path, list.slice(wire, 0, 16), at))?
+    if head.kind != manifest.PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let end = 16 + head.size
@@ -85,7 +85,7 @@ fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages
 type TieredProbeCursor: send {
     index_at: u64,
     previous_index: u64,
-    inside: Option[PackIndexCursor],
+    inside: Option[manifest.PackIndexCursor],
     next_data: u64,
     rows: u64
 }
@@ -94,8 +94,8 @@ fn start_tiered_probe(pack: pages.PagePack) -> TieredProbeCursor {
     TieredProbeCursor(index_at: pack.index, previous_index: 0, inside: None, next_data: 72, rows: 0)
 }
 
-fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, PackIndexRow) -> Result[bool, Error] waits) -> Result[bool, Error] waits {
-    let path = paged_pack_path(seq)?
+fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProbeCursor, budget: u64, mut state: S, visit: scoped fn(mut S, manifest.PackIndexRow) -> Result[bool, Error] waits) -> Result[bool, Error] waits {
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
     let Some(listed) = std.omap.get(cut.packs, seq) else {
         return Error(failure_from_rep(format.disk_fault(path, cursor.index_at, Absent)))
     }
@@ -108,7 +108,7 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
         let mut inside = match replace(mut cursor.inside, None) {
             Some(take saved) => take saved,
             None => {
-                let (prev, take first) = start_pack_index(path, at, payload, 0)?
+                let (prev, take first) = failure_result_from_rep(manifest.start_pack_index(path, at, payload, 0))?
                 if prev != cursor.previous_index {
                     return Error(failure_from_rep(format.disk_fault(path, at, Order)))
                 }
@@ -116,8 +116,8 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
             },
         }
         while work < budget {
-            let before: PackIndexCursor = clone(inside)
-            let Some(take row) = next_pack_index(path, at, payload, mut inside)? else {
+            let before: manifest.PackIndexCursor = clone(inside)
+            let Some(take row) = failure_result_from_rep(manifest.next_pack_index(path, at, payload, mut inside))? else {
                 break
             }
             let width: u64 = int.widen(row.len)

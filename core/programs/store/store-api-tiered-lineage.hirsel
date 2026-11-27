@@ -1,0 +1,15 @@
+fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List[manifest.DeferredFree]) -> Result[manifest.Lineage, Error] {
+    failure_result_from_rep(manifest.cut_lineage_rows(disk_state(db).packs, cut_input(db, delta), holders, queued))
+}
+
+fn settle_lineage_kills(take settled: manifest.Lineage, db: Db, delta: HolderDelta, queue: manifest.CutQueue, mut packs: manifest.DiskIndex[u64, pages.PagePack]) -> Result[manifest.Lineage, Error] {
+    failure_result_from_rep(manifest.settle_lineage_kills(take settled, cut_input(db, delta), disk_state(db).tiered_dirty.replaced, queue, mut packs))
+}
+
+// A fork the next cut is the first to publish: a journaled fork's FORK
+// watermark, or a cut-path fork's capture watermark.
+fn note_fork_row(mut db: Db, fork_row: manifest.LineageFork) -> Result[(), Error] {
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
+        failure_result_from_rep(manifest.append_pack_fork(mut state.packs, fork_row))
+    })
+}

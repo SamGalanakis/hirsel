@@ -55,10 +55,10 @@ fn l87_first_leaf(d: Dir, db: Db, collection: u32) -> Result[(std.page.PagePtr, 
     let Some((ColdPage(root), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) else {
         fail("L87: the cut must leave the Log root Cold")
     }
-    let path = paged_pack_path(root.pack)?
-    let wire = disk_read_file(d, path, 1048576)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
-    let page = fold_page(frame)
+    let path = failure_result_from_rep(manifest.paged_pack_path(root.pack))?
+    let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 1048576))?
+    let frame = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredPage(root), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
+    let page = manifest.fold_page(frame)
     let Some(ColdPage(leaf)) = std.page.child_slot(page, 0) else {
         fail("L87: the root's first child is a Cold leaf")
     }
@@ -69,9 +69,9 @@ fn l87_first_leaf(d: Dir, db: Db, collection: u32) -> Result[(std.page.PagePtr, 
     Ok((leaf, following + 1))
 }
 
-fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
-    let lists = disk_state(db).pages.lists
-    let mut rows: List[(u64, DeferredFree)] = list.new()
+fn l87_queue(db: Db) -> Result[List[(u64, manifest.DeferredFree)], Error] {
+    let lists = manifest.pack_lists(disk_state(db).packs)
+    let mut rows: List[(u64, manifest.DeferredFree)] = list.new()
     let mut cursor = std.page.cursor_open(arc.share(lists.deferred), None, true, false)
     while let Some(row) = std.page.cursor_next(mut cursor) {
         let seq: u64 = list.word_be(row.key, 0)
@@ -81,7 +81,7 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
         } else {
             TieredBlob(std.page.decode_ref(list.slice(row.value, 5, 47)) ?=> |_| Missing("L87 queued Blob row"))
         }
-        list.push(mut rows, (seq, DeferredFree(branch_id: owner, target: take target)))
+        list.push(mut rows, (seq, manifest.DeferredFree(branch_id: owner, target: take target)))
     }
     Ok(take rows)
 }
@@ -99,7 +99,7 @@ fn drain_pack_sizes(d: Dir) -> Result[List[u64], Error] waits {
     let mut sizes: List[u64] = list.new()
     for listed in result.unwrap(std.dir.list(d, None)) {
         if std.string.starts_with(listed.name, "p-") {
-            let file = disk_io(host.stat(d, listed.name))?
+            let file = failure_result_from_rep(manifest.disk_io(host.stat(d, listed.name)))?
             list.push(mut sizes, file.size)
         }
     }
@@ -113,9 +113,9 @@ fn drain_directory(d: Dir, mut db: Db) -> Result[List[u64], Error] waits {
         let _ = checkpoint(mut db)?
         // A cut can replace the retirement-list pack at the same footprint.
         let current = drain_pack_sizes(d)?
-        let page_ptrs = disk_state(db).pages
-        let (queued, _) = std.page.totals(page_ptrs.lists.deferred)
-        if current == previous && queued == 0 && map.len(page_ptrs.compaction.probes) == 0 {
+        let page_ptrs = disk_state(db).packs
+        let (queued, _) = std.page.totals(manifest.pack_lists(page_ptrs).deferred)
+        if current == previous && queued == 0 && map.len(db.compaction.probes) == 0 {
             return Ok(take current)
         }
         previous = take current
@@ -134,7 +134,7 @@ fn test_directory_drain_to_baseline(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let before = snapshot(loaded)
     let (held, _) = fork(mut loaded, "retained", before)?
     let _ = checkpoint(mut loaded)?
-    let (lineage_rows, _) = std.page.totals(disk_state(loaded).pages.lists.lineage)
+    let (lineage_rows, _) = std.page.totals(manifest.pack_lists(disk_state(loaded).packs).lineage)
     if lineage_rows == 0 {
         fail("drain fixture did not publish lineage")
     }
@@ -145,7 +145,7 @@ fn test_directory_drain_to_baseline(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         fail("drain fixture did not trim its rows")
     }
     let _ = delete_branch(mut loaded, held)?
-    let (queued, _) = std.page.totals(disk_state(loaded).pages.lists.deferred)
+    let (queued, _) = std.page.totals(manifest.pack_lists(disk_state(loaded).packs).deferred)
     if queued == 0 {
         fail("drain fixture did not publish deferred frees")
     }
@@ -208,7 +208,7 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
     close(take replayed)?
     let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
-    if list.len(queued) != 1 || disk_state(reopened).pages.lists.deferred_next != 1 {
+    if list.len(queued) != 1 || manifest.pack_lists(disk_state(reopened).packs).deferred_next != 1 {
         fail("L87: the fold queues one detached subtree")
     }
     let (seq, row) = queued[0u64]
@@ -247,7 +247,7 @@ fn test_l87_pin_materialization_adds_no_queue_row(d: Dir, c: Clock, r: Random, t
     pin(mut db, "history", s)?
     for round in 0u64 .. 2 {
         let queued = l87_queue(db)?
-        if list.len(queued) != 1 || disk_state(db).pages.lists.deferred_next != 1 {
+        if list.len(queued) != 1 || manifest.pack_lists(disk_state(db).packs).deferred_next != 1 {
             fail("L87: a pin's materialization adds no queue row")
         }
         let (seq, row) = queued[0u64]
@@ -312,10 +312,10 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     let mut detached: List[std.page.PagePtr] = list.new()
     list.push(mut detached, root)
     {
-        let path = paged_pack_path(root.pack)?
-        let wire = disk_read_file(d, path, 1048576)?
-        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
-        let page = fold_page(frame)
+        let path = failure_result_from_rep(manifest.paged_pack_path(root.pack))?
+        let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 1048576))?
+        let frame = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredPage(root), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
+        let page = manifest.fold_page(frame)
         let image = std.page.image_of(page)
         if std.page.level(image) != 1 || std.page.count(image) < 3 {
             fail("L87: the trimmed root keeps at least three Cold leaves")
@@ -386,7 +386,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
     let expected = 1 + list.len(dropped)
-    if list.len(queued) != expected || disk_state(reopened).pages.lists.deferred_next != expected {
+    if list.len(queued) != expected || manifest.pack_lists(disk_state(reopened).packs).deferred_next != expected {
         fail("L87: the queue holds the first leaf and every dropped page")
     }
     for at in 0u64 .. expected {
@@ -427,10 +427,10 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     while walk < list.len(page_ptrs) {
         let ptr = page_ptrs[walk]
         walk += 1
-        let path = paged_pack_path(ptr.pack)?
-        let wire = disk_read_file(d, path, 4194304)?
-        let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?)?
-        let page = fold_page(frame)
+        let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
+        let wire = failure_result_from_rep(manifest.disk_read_file(d, path, 4194304))?
+        let frame = failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(db.store), TieredPage(ptr), wire, 0, failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?))?
+        let page = manifest.fold_page(frame)
         let image = std.page.image_of(page)
         for slot in 0u64 .. std.page.count(image) {
             match std.page.owning_edge(image, slot) {
@@ -536,7 +536,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     }
     close(take db)?
     let reopened = open(tasks, d, c, r, l87_options(floor, 1)?)?
-    if disk_state(reopened).pages.lists.deferred_next <= dropped_rows {
+    if manifest.pack_lists(disk_state(reopened).packs).deferred_next <= dropped_rows {
         fail("L87: a drained leaf queues its blobs")
     }
     if list.len(l87_queue(reopened)?) != 0 || l69_pack_live(reopened, root.pack) != page_laid - page_total || l69_pack_live(reopened, blob_pack) != blob_laid - blob_total {
@@ -553,9 +553,9 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
     let one = std.page.PagePtr(pack: 12, offset: 72, len: 72, checksum: 102, stamp: 2)
     let two = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 11, offset: 72, body: 0)
     let three = std.page.PagePtr(pack: 12, offset: 160, len: 80, checksum: 103, stamp: 3)
-    let mut edited: List[ReplacedFrame] = list.new()
-    list.push(mut edited, replaced_page(one))
-    list.push(mut edited, replaced_blob(two))
+    let mut edited: List[manifest.ReplacedFrame] = list.new()
+    list.push(mut edited, manifest.replaced_page(one))
+    list.push(mut edited, manifest.replaced_blob(two))
     let mut detached: List[format.TieredTarget] = list.new()
     list.push(mut detached, TieredPage(three))
     // 2 × 24 + 1 × 48 = 96.
@@ -574,8 +574,8 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
     }
     admit_tiered_commit(mut dirty, 8, take second)
     // 3 × 24 + 3 × 48 = 216 > 200.
-    let mut more: List[ReplacedFrame] = list.new()
-    list.push(mut more, replaced_page(three))
+    let mut more: List[manifest.ReplacedFrame] = list.new()
+    list.push(mut more, manifest.replaced_page(three))
     let third = TieredFreed(replaced: take more, dropped: list.new())
     let Error(Full(Resident(refused))) = reserve_tiered_commit(mut dirty, third, 200) else {
         return Error(())
@@ -587,7 +587,7 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
         return Error(())
     }
     let published = view dirty.replaced[0u64]
-    if published.branch != 7 || list.len(published.frames) != 2 || published.frames[0u64] != ReplacedFrame(pack: 12, len: 72, stamp: 2) || published.frames[1u64] != ReplacedFrame(pack: 11, len: 1033, stamp: 1) {
+    if published.branch != 7 || list.len(published.frames) != 2 || published.frames[0u64] != manifest.ReplacedFrame(pack: 12, len: 72, stamp: 2) || published.frames[1u64] != manifest.ReplacedFrame(pack: 11, len: 1033, stamp: 1) {
         return Error(())
     }
     if dirty.dropped[0u64].branch_id != 7 || dirty.dropped[1u64].branch_id != 8 || dirty.dropped[2u64].branch_id != 8 {

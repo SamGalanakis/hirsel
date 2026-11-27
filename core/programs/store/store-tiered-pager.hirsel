@@ -194,7 +194,7 @@ fn tiered_point_continuation(frame: format.TieredFrame, key: Bytes, direction: T
     let height = std.page.level(image)
     if let Some(expected) = expected_level {
         if height != expected {
-            return Error(failure_from_rep(format.disk_fault(paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed)))
+            return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(frame.identity.pack))?, frame.identity.offset, Malformed)))
         }
     }
     let Some(sought) = std.page.descend(image, key) else {
@@ -537,7 +537,7 @@ fn tiered_pager_demand_target(demand: TieredPointDemand, edge: format.TieredTarg
 fn tiered_pager_target(packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, direction: TieredDirection, edge: format.TieredTarget) -> Result[TieredPagerTarget, Error] {
     let facts = format.tiered_frame_id(edge)
     let Some(pack) = std.omap.get(packs, facts.pack) else {
-        return Error(failure_from_rep(format.disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp))))
+        return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(facts.pack))?, facts.offset, Dangling(facts.stamp))))
     }
     Ok(TieredPagerTarget(edge: clone(edge), direction: direction, inventory: pack.inventory, object: pack.object, next_stamp: next_stamp, deadline: deadline))
 }
@@ -550,9 +550,9 @@ fn tiered_pager_point_frame(mut input: TieredPagerInput, mut private_cache: Tier
 fn checked_tiered_pager_target(input: TieredPagerInput, demand: TieredPagerTarget) -> Result[(String, format.TieredFrameId), Error] {
     let expected = format.tiered_frame_id(demand.edge)
     let path = match input {
-        PagerLocal(_) => paged_pack_path(expected.pack)?,
+        PagerLocal(_) => failure_result_from_rep(manifest.paged_pack_path(expected.pack))?,
         PagerObjects(..) => {
-            let file = paged_pack_path(expected.pack)?
+            let file = failure_result_from_rep(manifest.paged_pack_path(expected.pack))?
             let Some(item) = demand.object else {
                 return Error(failure_from_rep(format.disk_fault(file, expected.offset, Dangling(expected.stamp))))
             }
@@ -570,7 +570,7 @@ fn checked_tiered_pager_target(input: TieredPagerInput, demand: TieredPagerTarge
     if demand.inventory.class != expected_class || expected.stamp == 0 || expected.stamp >= demand.next_stamp {
         return Error(failure_from_rep(format.disk_fault(path, expected.offset, Malformed)))
     }
-    let Some(maximum) = disk_kind_limit(expected.kind) else {
+    let Some(maximum) = manifest.disk_kind_limit(expected.kind) else {
         fail("store: unknown Tiered frame kind")
     }
     if expected.len > maximum {
@@ -600,11 +600,11 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
                 Error(NotFound) => return Error(failure_from_rep(format.disk_fault(path, expected.offset, Dangling(expected.stamp)))),
                 Error(problem) => return Error(Io(problem)),
             }
-            let obtained = read_disk_bytes(mut opened, path, expected.offset, width)
-            disk_io(host.close(take opened))?
+            let obtained = failure_result_from_rep(manifest.read_disk_bytes(mut opened, path, expected.offset, width))
+            failure_result_from_rep(manifest.disk_io(host.close(take opened)))?
             let raw = obtained?
             disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], Error] {
-                read_tiered_frame(path, owner, demand.edge, raw, expected.offset, demand.next_stamp)
+                failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(owner), demand.edge, raw, expected.offset, demand.next_stamp))
             })?
         },
         PagerObjects(mut client, op_ms, cache) => {
@@ -618,7 +618,7 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
             let request = TieredBucketGet(pack_ref: item, window, deadline)
             let (_, take checked_frame) = read_checked_bucket_window(mut client, cache, request, scoped fn(raw: Bytes) -> Result[Arc[format.TieredFrame], Error] {
                 disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], Error] {
-                    read_tiered_frame(path, owner, demand.edge, raw, window.lo, demand.next_stamp)
+                    failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(owner), demand.edge, raw, window.lo, demand.next_stamp))
                 })
             })?
             take checked_frame

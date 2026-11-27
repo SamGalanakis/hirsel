@@ -5,7 +5,7 @@ type ObjectJournalStart: send {
     buffers: HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
-    sweep: SweepCursor,
+    sweep: manifest.SweepCursor,
     archive_on: u64,
     issued_generation: u64,
     next_pack: u64,
@@ -44,7 +44,7 @@ fn history_group_append(mut packet: Bytes, ctx: format.DiskContext, frame: Bytes
 fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
     let result = history_probe_head(mut client, register.tag, mut workspace.witness, deadline)?
     if let Some((capture, _)) = result {
-        check_expected_store(Some(register.head.store), capture.head.store)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(register.head.store)), store_key_to_rep(capture.head.store)))?
         if !history_pair_matches(capture.head.pair, register.head.pair) {
             let fenced: Error = Fenced(register.head.pair.epoch)
             register.terminal = Some(HistoryFault(clone(fenced)))
@@ -57,7 +57,7 @@ fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegi
 fn history_probe_writer_attach(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
     let result = history_probe_head_attach(mut client, register.tag, mut workspace.witness, deadline)?
     if let Some((capture, _)) = result {
-        check_expected_store(Some(register.head.store), capture.head.store)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(register.head.store)), store_key_to_rep(capture.head.store)))?
         if !history_pair_matches(capture.head.pair, register.head.pair) {
             let fenced: Error = Fenced(register.head.pair.epoch)
             register.terminal = Some(HistoryFault(clone(fenced)))
@@ -74,7 +74,7 @@ type ObjectJournalSession {
     buffers: HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
-    sweep: SweepCursor,
+    sweep: manifest.SweepCursor,
     archive_on: u64,
     issued_generation: u64,
     next_pack: u64,
@@ -580,7 +580,7 @@ fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Resul
     }
     let _ = history_fetch(mut lane.client, "head", mut lane.buffers.witness, due)?
     let (take capture, _) = history_decode_head_attach(lane.buffers.witness)?
-    check_expected_store(Some(store), capture.head.store)?
+    failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(store)), store_key_to_rep(capture.head.store)))?
     if !history_pair_matches(capture.head.pair, head.pair) {
         let fenced: Error = Fenced(epoch)
         lane.register.terminal = Some(HistoryFault(clone(fenced)))

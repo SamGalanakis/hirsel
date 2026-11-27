@@ -1,4 +1,4 @@
-fn scan_location_storage_charge(known: PageLocations) -> u64 {
+pub fn scan_location_storage_charge(known: PageLocations) -> u64 {
     // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
     // PagePack is class (1), frames (4), live (8) and payload bytes (8).
     let records = std.omap.scan_storage_charge(known.frames.values, 8, 87)
@@ -24,10 +24,10 @@ fn location_edge_charge(n: Arc[std.omap.Node[u64, FrameLocation]]) -> u64 {
     total
 }
 
-fn check_page_location_closure() -> Result[(), Error] {
+fn check_page_location_closure() -> Result[(), types.Failure] {
     let mut installed = new_page_locations()
-    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 1, pages.PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10, index: 0), pack_edge_charge)))?
-    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 2, pages.PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66, index: 0), pack_edge_charge)))?
+    types.capacity(disk_index_put(mut installed.packs, 1, pages.PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10, index: 0), pack_edge_charge))?
+    types.capacity(disk_index_put(mut installed.packs, 2, pages.PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66, index: 0), pack_edge_charge))?
     add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
     for parent in 2u64 .. 4 {
         let mut outgoing: List[u64] = list.with_capacity(1)
@@ -67,7 +67,7 @@ fn check_page_location_closure() -> Result[(), Error] {
     Ok(())
 }
 
-fn disk_index_len[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T]) -> u64 {
+pub fn disk_index_len[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T]) -> u64 {
     std.omap.len(table_index.values)
 }
 
@@ -79,6 +79,14 @@ pub fn disk_law_page_location_closure() -> bool {
 }
 
 @test
-fn disk_test_page_location_closure() -> Result[(), Error] {
+fn disk_test_page_location_closure() -> Result[(), types.Failure] {
     check_page_location_closure()
+}
+
+pub fn set_pack_next(mut state: PackDiskState, next_pack: u64) {
+    state.next_pack = next_pack
+}
+
+pub fn edit_pack_locations[T](mut state: PackDiskState, edit: scoped fn(mut PageLocations) -> T) -> T {
+    edit(mut state.locations)
 }

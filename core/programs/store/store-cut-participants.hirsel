@@ -1,24 +1,28 @@
-type ProposedMain {
-    roots: pages.Roots,
-    head: u64,
-    at: u64,
-    tables: u32,
-    activation: Option[HistoryActivation],
-    // The import pin slot an installing cut removes with the replacement
-    // (§3.5a "The kept import").
-    drop_pin: Option[u64],
-    superseded: List[u32],
-    chunk_freed: Option[TieredFreed],
-    // D-CU-1: rows this schema commit itself wrote, and whether the commit is
-    // non-replayable under an export lease.
-    step_rows: List[StepOp],
-    step_drift: bool
+pub scoped type CutChange = CutUnchanged | CutAddHead(View[pages.Head]) | CutRemoveHead(u64) | CutAddPin(View[pages.Pin], bool) | CutRemovePin(u64) | CutReplacePin(u64, View[pages.Pin], bool) | CutReplaceMain(View[pages.Roots], u64, u64, u32, Option[u64], Option[u64])
+
+pub scoped type CutInput[in installed, in proposed] {
+    heads: View[List[pages.Head]] in installed,
+    pins: View[List[pages.Pin]] in installed,
+    change: CutChange in proposed,
+    record_bytes: u64,
+    lease_span: Option[(u64, u64)],
+    store: types.StoreKey,
+    limits: types.LimitsRep,
+    fence: u32,
+    next_branch: u32,
+    next_table: u32
 }
 
-type HolderDelta = NoHolderChange | AddHead(pages.Head, String) | RemoveHead(u64) | AddPin(pages.Pin) | RemovePin(u64) | ReplacePin(u64, pages.Pin) | ReplaceMain(ProposedMain, Option[u64])
+fn cut_removed_pin(change: CutChange) -> Option[u64] {
+    match change {
+        CutRemovePin(slot) => Some(slot),
+        CutReplaceMain(_, _, _, _, _, slot) => slot,
+        _ => None,
+    }
+}
 
 // The holders a cut publishes: every head and pin with the holder delta applied.
-fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: pages.Roots) {
+pub fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: pages.Roots) {
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 0), root: arc.share(roots.collections.root)))
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 1), root: arc.share(roots.streams.root)))
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 2), root: arc.share(roots.catalog.root)))
@@ -27,47 +31,47 @@ fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: pag
     }
 }
 
-fn visit_cut_heads[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn(mut T, pages.Head, pages.Roots, u64, u64) -> Result[(), Error]) -> Result[(), Error] {
-    let removed: Option[u64] = match delta {
-        RemoveHead(slot) => Some(slot),
-        ReplaceMain(_, slot) => slot,
+pub fn visit_cut_heads[T, E, in installed, in proposed](input: CutInput[in installed, in proposed], mut output: T, visit: scoped fn(mut T, pages.Head, pages.Roots, u64, u64) -> Result[(), E]) -> Result[(), E] {
+    let removed: Option[u64] = match input.change {
+        CutRemoveHead(slot) => Some(slot),
+        CutReplaceMain(_, _, _, _, slot, _) => slot,
         _ => None,
     }
-    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
+    for slot in 0u64 .. list.len(input.heads) {
         if removed == Some(slot) {
             continue
         }
-        let head = pages.holder_heads(db.holders)[slot]
+        let head = input.heads[slot]
         if slot == 0 {
-            if let ReplaceMain(replacement, _) = delta {
-                visit(mut output, head, replacement.roots, replacement.head, replacement.at)?
+            if let CutReplaceMain(roots, head_version, at, _, _, _) = input.change {
+                visit(mut output, head, roots, head_version, at)?
                 continue
             }
         }
         visit(mut output, head, head.roots, head.head, head.at)?
     }
-    if let AddHead(added, _) = delta {
+    if let CutAddHead(added) = input.change {
         visit(mut output, added, added.roots, added.head, added.at)?
     }
     Ok(())
 }
 
-fn visit_cut_pins[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn(mut T, pages.Pin) -> Result[(), Error]) -> Result[(), Error] {
-    let removed = removed_pin(delta)
+pub fn visit_cut_pins[T, E, in installed, in proposed](input: CutInput[in installed, in proposed], mut output: T, visit: scoped fn(mut T, pages.Pin) -> Result[(), E]) -> Result[(), E] {
+    let removed = cut_removed_pin(input.change)
     let mut inserted = false
-    for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
+    for slot in 0u64 .. list.len(input.pins) {
         if removed == Some(slot) {
             continue
         }
-        if let ReplacePin(at, replacement) = delta {
+        if let CutReplacePin(at, replacement, _) = input.change {
             if at == slot {
                 visit(mut output, replacement)?
                 continue
             }
         }
-        let held = pages.holder_pins(db.holders)[slot]
+        let held = input.pins[slot]
         if !inserted {
-            if let AddPin(added) = delta {
+            if let CutAddPin(added, _) = input.change {
                 if pin_order(added.name, added.owner, held.name, held.owner) == Less {
                     visit(mut output, added)?
                     inserted = true
@@ -77,14 +81,14 @@ fn visit_cut_pins[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn
         visit(mut output, held)?
     }
     if !inserted {
-        if let AddPin(added) = delta {
+        if let CutAddPin(added, _) = input.change {
             visit(mut output, added)?
         }
     }
     Ok(())
 }
 
-type CutParticipants {
+pub type CutParticipants {
     holders: List[HeldPage],
     roots: List[pages.Roots],
     // Each root's branch, for the rows a fold hands to `deferred_frees`.
@@ -96,13 +100,13 @@ type CutParticipants {
     promote: Option[u64]
 }
 
-fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error] {
-    let n = list.len(pages.holder_heads(db.holders)) + list.len(pages.holder_pins(db.holders)) + 1
+pub fn cut_participants[in installed, in proposed](input: CutInput[in installed, in proposed]) -> Result[CutParticipants, types.Failure] {
+    let n = list.len(input.heads) + list.len(input.pins) + 1
     let mut participants = CutParticipants(holders: list.with_capacity(3 * n), roots: list.with_capacity(n), branches: list.with_capacity(n), heads: 0, promote: None)
-    visit_cut_heads(db, delta, mut participants, scoped fn(mut current: CutParticipants, head: pages.Head, roots: pages.Roots, head_version: u64, at: u64) -> Result[(), Error] {
+    visit_cut_heads(input, mut participants, scoped fn(mut current: CutParticipants, head: pages.Head, roots: pages.Roots, head_version: u64, at: u64) -> Result[(), types.Failure] {
         // A cut adds a head only for a fork of a Snapshot that is not the
         // live head; `fork_live` journals the other forks.
-        if let AddHead(added, _) = delta {
+        if let CutAddHead(added) = input.change {
             if added.id == head.id {
                 current.promote = Some(list.len(current.roots))
             }
@@ -113,13 +117,13 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
         current.heads += 1
         Ok(())
     })?
-    visit_cut_pins(db, delta, mut participants, scoped fn(mut current: CutParticipants, held: pages.Pin) -> Result[(), Error] {
-        let added = match delta {
-            AddPin(pinned_now) => pinned_now.serial == held.serial,
-            ReplacePin(_, pinned_now) => pinned_now.serial == held.serial,
+    visit_cut_pins(input, mut participants, scoped fn(mut current: CutParticipants, held: pages.Pin) -> Result[(), types.Failure] {
+        let added = match input.change {
+            CutAddPin(pinned_now, promotes) => promotes && pinned_now.serial == held.serial,
+            CutReplacePin(_, pinned_now, promotes) => promotes && pinned_now.serial == held.serial,
             _ => false,
         }
-        if added && held.owner != ImportPin && !pin_shares_head(db, held) {
+        if added {
             current.promote = Some(list.len(current.roots))
         }
         note_held_roots(mut current.holders, 1, held.serial, held.roots)
@@ -133,75 +137,52 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
 // AP16 item 9's MANIFEST. Each branch and pin names the root the cut
 // published for it: `published` holds the participants' roots in
 // `cut_participants` order, sealed or folded by the Tiered stage.
-fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[pages.Roots], generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
-    let tables = match delta {
-        ReplaceMain(main, _) => main.tables,
-        _ => catalog.next_table_id(db.schema)
+pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutInput[in installed, in proposed], published: List[pages.Roots], generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, account_tiered: u64, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), types.Failure] waits) -> Result[(), types.Failure] waits {
+    let tables = match input.change {
+        CutReplaceMain(_, _, _, tables, _, _) => tables,
+        _ => input.next_table
     }
     let zero = std.page.unlocated(0)
-    let account_tiered = cut_tiered_account(published)?
-    let manifest = PageManifest(generation: generation, fence: catalog.current_fence(db.schema), inline: pages.holder_heads(db.holders)[0u64].roots.collections.inline, limits: db.limits, next_stamp: next_stamp, next_branch: pages.holder_next_branch(db.holders), next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
-    let context = format.DiskContext(store: store_key_to_rep(db.store), role: 1, seq: generation)
+    let manifest = PageManifest(generation: generation, fence: input.fence, inline: input.heads[0u64].roots.collections.inline, limits: input.limits, next_stamp: next_stamp, next_branch: input.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
+    let context = format.DiskContext(store: input.store, role: 1, seq: generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?
-    let heads = list.len(pages.holder_heads(db.holders))
-    let branch_count = match delta {
-        AddHead(_, _) => heads + 1,
-        RemoveHead(_) => heads - 1,
-        ReplaceMain(_, Some(_)) => heads - 1,
+    let heads = list.len(input.heads)
+    let branch_count = match input.change {
+        CutAddHead(_) => heads + 1,
+        CutRemoveHead(_) => heads - 1,
+        CutReplaceMain(_, _, _, _, Some(_), _) => heads - 1,
         _ => heads,
     }
-    failure_result_from_rep(types.capacity(format.le(mut raw, branch_count, 4)))?
+    types.capacity(format.le(mut raw, branch_count, 4))?
     let mut slot = 0u64
-    visit_cut_heads(db, delta, mut raw, scoped fn(mut buffer: Bytes, head: pages.Head, _roots: pages.Roots, head_version: u64, at: u64) -> Result[(), Error] {
+    visit_cut_heads(input, mut raw, scoped fn(mut buffer: Bytes, head: pages.Head, _roots: pages.Roots, head_version: u64, at: u64) -> Result[(), types.Failure] {
         slot += 1
         append_page_manifest_branch(mut buffer, head.id, head.name, head.parent, head.forked_at, head_version, at, published_page_roots(layout.locations, published[slot - 1]))
     })?
-    let pins = list.len(pages.holder_pins(db.holders))
-    let pin_count = match delta {
-        AddPin(_) => pins + 1,
-        _ => if let Some(_) = removed_pin(delta) {
+    let pins = list.len(input.pins)
+    let pin_count = match input.change {
+        CutAddPin(_, _) => pins + 1,
+        _ => if let Some(_) = cut_removed_pin(input.change) {
             pins - 1
         } else {
             pins
         }
     }
-    failure_result_from_rep(types.capacity(format.le(mut raw, pin_count, 4)))?
-    visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: pages.Pin) -> Result[(), Error] {
+    types.capacity(format.le(mut raw, pin_count, 4))?
+    visit_cut_pins(input, mut raw, scoped fn(mut buffer: Bytes, held: pages.Pin) -> Result[(), types.Failure] {
         slot += 1
         append_page_manifest_pin(mut buffer, held.owner, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
     })?
     for order_slot in 0u64 .. list.len(published) {
         let keyed = view published[order_slot].keyed
         if list.len(keyed) != 0 {
-            failure_result_from_rep(types.capacity(format.le(mut raw, order_slot, 4)))?
+            types.capacity(format.le(mut raw, order_slot, 4))?
             for tree in keyed {
                 put_page_ptr(mut raw, published_page_pointer(layout.locations, tree))
             }
         }
     }
-    write_seal(mut raw, context, catalog.current_fence(db.schema))?
+    write_seal(mut raw, context, input.fence)?
     Ok(())
-}
-
-fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
-    let mut timing: Option[CutTiming] = None
-    disk_cut_timed(mut db, take delta, write_seal, mut timing)
-}
-
-// A pin's materialized pages are its own: its watermark rises above them,
-// so no holder reaches a frame at or above its watermark (§13.5 step 3).
-fn raise_materialized_pin(mut delta: HolderDelta, staged: TieredCutStage) {
-    if !staged.materialized {
-        return ()
-    }
-    match delta {
-        AddPin(mut added) => {
-            added.watermark = staged.stamp_end
-        },
-        ReplacePin(_, mut added) => {
-            added.watermark = staged.stamp_end
-        },
-        _ => (),
-    }
 }

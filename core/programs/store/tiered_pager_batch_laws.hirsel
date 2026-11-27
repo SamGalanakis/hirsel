@@ -5,7 +5,7 @@ fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: 
         let stamp = first + offset
         let mut value: Bytes = list.with_capacity(value_bytes)
         list.fill(mut value, value_bytes, int.truncate(stamp))
-        let frame = PackFrame(stamp: stamp, size: value_bytes + 8, body: BlobBody(arc.new(take value)))
+        let frame = manifest.PackFrame(stamp: stamp, size: value_bytes + 8, body: BlobBody(arc.new(take value)))
         let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, log_key(9, stamp)?, scoped fn(expected: u64) -> std.page.PagePtr {
             fail("L84: a BLOB has no owning page edge")
         })? else {
@@ -113,7 +113,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
     let page = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
     let mut draft = begin_tiered_pack(owner, 9, 3, 8192)?
     let width = std.page.sealed_size(std.page.image_of(page))
-    let frame = PackFrame(stamp: 43, size: width, body: PageBody(take page))
+    let frame = manifest.PackFrame(stamp: 43, size: width, body: PageBody(take page))
     let Some(leaf) = add_tiered_pack_frame(mut draft, frame, 9, failure_result_from_rep(catalog.logical_key(9, types.key_word(1)))?, fn(stamp: u64) -> std.page.PagePtr {
         std.page.unlocated(stamp)
     })? else {

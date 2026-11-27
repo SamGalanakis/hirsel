@@ -87,7 +87,7 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
         if i > 0 {
             let mut at = 112u64
             while at < list.len(eobj.data) {
-                let frame = disk_frame_bytes(ekey, ctx, eobj.data, at)?
+                let frame = failure_result_from_rep(manifest.disk_frame_bytes(ekey, ctx, eobj.data, at))?
                 if frame.kind == 0x0011 || frame.kind == 0x0013 {
                     commit_frames += 1
                 }

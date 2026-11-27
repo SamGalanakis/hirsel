@@ -68,12 +68,12 @@ fn capture_catalog_cell(mut packs: CapturePacks, path: String, at: u64, value: s
 }
 
 fn capture_catalog_blob(mut packs: CapturePacks, reference: std.page.BlobRef) -> Result[CaptureCatalog, Error] waits {
-    let path = paged_pack_path(reference.pack)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(reference.pack))?
     let id = packs.id
     // The file is lent from the held table throughout both the checksum and
     // projection. Read field lengths by offset and skip their schema bytes.
     capture_with_pack(mut packs, path, reference.pack, reference.stamp, reference.offset, 1, scoped fn(mut file: HostFile) -> Result[CaptureCatalog, Error] waits {
-        let size = disk_io(host.stat_file(mut file))?.size
+        let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut file)))?.size
         if reference.offset > size || 24 + reference.len > size - reference.offset {
             return Error(failure_from_rep(format.disk_fault(path, reference.offset, Truncated)))
         }
@@ -81,9 +81,9 @@ fn capture_catalog_blob(mut packs: CapturePacks, reference: std.page.BlobRef) ->
         let end = start + reference.len
         let mut source = new_capture_chunk(end)
         let head = capture_prefix(mut file, path, mut source, reference.offset, 16)?
-        let frame = disk_read_frame_head(path, head, reference.offset)?
+        let frame = failure_result_from_rep(manifest.disk_read_frame_head(path, head, reference.offset))?
         let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: reference.pack)
-        disk_check_frame_kind(path, ctx, frame.kind, frame.flags, reference.offset)?
+        failure_result_from_rep(manifest.disk_check_frame_kind(path, ctx, frame.kind, frame.flags, reference.offset))?
         let stamp = capture_prefix(mut file, path, mut source, reference.offset + 16, 8)?
         let actual_stamp: u64 = list.word_le(stamp, 0)
         if frame.kind != 0x0022 || frame.size != 8 + reference.len || actual_stamp != reference.stamp {

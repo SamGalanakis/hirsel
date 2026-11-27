@@ -85,90 +85,6 @@ fn stream_gc_new(reg: format.StreamRegister) -> StreamGcState {
     StreamGcState(entries: list.new(), pins: list.new(), heads: map.new(), fences: list.new(), deleted_inc: d_inc, deleted_seq: d_seq, batches_since_checkpoint: 0)
 }
 
-fn stream_xindex_decode(key: String, raw: Bytes, sid: HostStreamId, meta: format.RegIndex) -> Result[format.XIndex, Error] {
-    if list.len(raw) != meta.len {
-        return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
-    }
-    if std.check.xxh3(raw, 0, list.len(raw)) != meta.digest {
-        return Error(failure_from_rep(format.disk_fault(key, 0, Checksum)))
-    }
-    let head = stream_read_header(key, raw, sid, format.ROLE_XINDEX)?
-    if head.ctx.seq != meta.k {
-        return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
-    }
-    let frame = history_frame(key, head.ctx, raw, 72, 0x0104)?
-    if frame.end != list.len(raw) {
-        return Error(failure_from_rep(format.disk_fault(key, frame.end, Malformed)))
-    }
-    let p = list.slice(raw, frame.payload, frame.end)
-    let size = list.len(p)
-    if size < 40 {
-        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-    }
-    let low_inc = format.read_le(p, 0, 8)
-    let low_seq = format.read_le(p, 8, 8)
-    let covers_inc = format.read_le(p, 16, 8)
-    let covers_seq = format.read_le(p, 24, 8)
-    if covers_inc != meta.covers_inc || covers_seq != meta.covers_seq {
-        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-    }
-    let entry_count = format.read_le(p, 32, 4)
-    let mut cursor = 36u64
-    let mut x_entries: List[format.XIndexEntry] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut x_entries, entry_count)))?
-    for _ in 0u64 .. entry_count {
-        if size - cursor < 28 {
-            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-        }
-        let store = StoreId(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
-        let epoch = format.read_le(p, cursor + 16, 8)
-        let bc = format.read_le(p, cursor + 24, 4)
-        cursor += 28
-        if size - cursor < 16 * bc {
-            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-        }
-        let mut batches: List[(u64, u64)] = list.new()
-        failure_result_from_rep(types.capacity(list.try_reserve(mut batches, bc)))?
-        for _ in 0u64 .. bc {
-            let bi = format.read_le(p, cursor, 8)
-            let bs = format.read_le(p, cursor + 8, 8)
-            cursor += 16
-            list.push(mut batches, (bi, bs))
-        }
-        list.push(mut x_entries, format.XIndexEntry(store: store_key_to_rep(store), epoch, batches: take batches))
-    }
-    if size - cursor < 4 {
-        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-    }
-    let pin_count = format.read_le(p, cursor, 4)
-    cursor += 4
-    let mut pins: List[format.StreamPin] = list.new()
-    failure_result_from_rep(types.capacity(list.try_reserve(mut pins, pin_count)))?
-    for _ in 0u64 .. pin_count {
-        if size - cursor < 36 {
-            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-        }
-        let store = StoreId(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
-        let pin_inc = format.read_le(p, cursor + 16, 8)
-        let pin_seq = format.read_le(p, cursor + 24, 8)
-        let plen = format.read_le(p, cursor + 32, 4)
-        cursor += 36
-        if size - cursor < plen {
-            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-        }
-        let pfx_bytes = failure_result_from_rep(types.copied(list.slice(p, cursor, cursor + plen)))?
-        let Ok(take pfx) = string.from_utf8(take pfx_bytes) else {
-            return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-        }
-        cursor += plen
-        list.push(mut pins, format.StreamPin(store: store_key_to_rep(store), pin_inc, pin_seq, prefix: take pfx, first_pinned_ns: 0))
-    }
-    if cursor != size {
-        return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
-    }
-    Ok(format.XIndex(k: meta.k, low_inc, low_seq, covers_inc, covers_seq, entries: take x_entries, pins: take pins))
-}
-
 // Fetches and validates `x-<k>`. A corrupt or missing XINDEX returns `Ok(None)`
 // so callers fall back to INDEX frames from `low` (§12.11.10 quarantine).
 fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: HostStreamId, meta: format.RegIndex, deadline: u64) -> Result[Option[format.XIndex], Error] waits {
@@ -180,7 +96,7 @@ fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: HostStre
     let (take outcome, take back) = std.object.fetch(mut client, key, take buf, deadline)
     buf = take back
     match take outcome {
-        Ok(_) => match stream_xindex_decode(key, buf, sid, meta) {
+        Ok(_) => match failure_result_from_rep(manifest.stream_xindex_decode(key, buf, host_stream_id_to_rep(sid), meta)) {
             Ok(take x_decoded) => Ok(Some(take x_decoded)),
             Error(Corrupt(_)) => Ok(None),
             Error(take problem) => Error(take problem),
@@ -364,7 +280,7 @@ fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], 
             }
             break
         }
-        let head = stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)?
+        let head = failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(lane.sid), scan_inc, scan_seq))?
         match take head {
             Term(_, _) => {
                 failure_result_from_rep(types.capacity(list.try_reserve(mut gc.fences, 1)))?
@@ -378,7 +294,7 @@ fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], 
                     let Some(()) = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? else {
                         return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                     }
-                    let Rows(take full) = stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)? else {
+                    let Rows(take full) = failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(lane.sid), scan_inc, scan_seq))? else {
                         return Error(failure_from_rep(format.disk_fault(key, 72, Malformed)))
                     }
                     batch_index = take full

@@ -7,7 +7,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         }
         let image = std.page.image_of(here)
         let mut draft = begin_tiered_pack(db.store, pack_seq, 3, 4096)?
-        let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
+        let frame = manifest.PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
         let first_key = failure_result_from_rep(catalog.logical_key(collection, option.unwrap(std.page.key_at(image, 0))))?
         let Some(place) = add_tiered_pack_frame(mut draft, frame, collection, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
             fail("L62: the fixture leaf has no owning edge")
@@ -24,7 +24,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         }
         (take raw, inventory, place, arc.share(here), take descriptor)
     }
-    disk_write_synced(d, paged_pack_path(pack_seq)?, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(pack_seq))?, raw))?
     let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let first = draw
     failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw)))?
@@ -46,7 +46,9 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
     db.tiered = int.saturating_add(db.tiered, charge)
     // A disk store lists the pack as a promotion does, so a cut publishes it.
     if let Some(mut state) = db.disk {
-        failure_result_from_rep(types.capacity(disk_index_put(mut state.pages.locations.packs, pack_seq, inventory, pack_edge_charge)))?
+        failure_result_from_rep(manifest.edit_pack_locations(mut state.packs, scoped fn(mut locations: manifest.PageLocations) -> Result[(), types.Failure] {
+            types.capacity(manifest.disk_index_put(mut locations.packs, pack_seq, inventory, manifest.pack_edge_charge))
+        }))?
     }
     Ok(())
 }

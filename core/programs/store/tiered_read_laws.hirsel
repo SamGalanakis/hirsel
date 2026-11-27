@@ -389,7 +389,7 @@ fn test_l68_resident_images_ignore_cold_slots() -> Result[(), Error] {
     let mut retained: List[pages.Roots] = list.with_capacity(2)
     list.push(mut retained, pages.share_roots(roots))
     list.push(mut retained, pages.share_roots(roots))
-    if resident_images(retained, None) != 91 || pages.page_row_account(retained) != 126 {
+    if manifest.resident_images(retained, None) != 91 || pages.page_row_account(retained) != 126 {
         fail("L68: shared collection map counts once and its Cold data is neither resident nor Memory")
     }
     let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
@@ -498,8 +498,8 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     }
     // The first frame costs 28 bytes. The worst-case index adds 28 bytes
     // for its head and prefix and 41 per row, including both 12-byte keys.
-    let first = PackFrame(stamp: 31, size: 12, body: BlobBody(arc.share(value)))
-    let second = PackFrame(stamp: 32, size: 12, body: BlobBody(arc.share(value)))
+    let first = manifest.PackFrame(stamp: 31, size: 12, body: BlobBody(arc.share(value)))
+    let second = manifest.PackFrame(stamp: 32, size: 12, body: BlobBody(arc.share(value)))
     let first_key = log_key(9, 1)?
     let second_key = log_key(9, 2)?
     let mut draft = begin_tiered_pack(owner, 7, 4, 237)?
@@ -533,27 +533,27 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
         fail("L68: pack inventory did not describe the frames and full object")
     }
     let context = format.DiskContext(store: store_key_to_rep(owner), role: 3, seq: 8)
-    let trailer = disk_frame_bytes("p-8", context, raw, pack.index)?
-    if trailer.kind != PACK_INDEX_KIND || trailer.end != 227 {
+    let trailer = failure_result_from_rep(manifest.disk_frame_bytes("p-8", context, raw, pack.index))?
+    if trailer.kind != manifest.PACK_INDEX_KIND || trailer.end != 227 {
         fail("L68: pack did not finish with its authenticated index")
     }
     let payload = list.slice(raw, trailer.payload, trailer.end)
-    let (prior_offset, take index_start) = start_pack_index("p-8", pack.index, payload, 0)?
+    let (prior_offset, take index_start) = failure_result_from_rep(manifest.start_pack_index("p-8", pack.index, payload, 0))?
     let mut cursor = take index_start
-    let Some(take indexed_first) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+    let Some(take indexed_first) = failure_result_from_rep(manifest.next_pack_index("p-8", pack.index, payload, mut cursor))? else {
         fail("L68: probing one row must yield the first index key")
     }
     if prior_offset != 0 || indexed_first.offset != 72 || cursor.remaining != 1 || indexed_first.key != first_key {
         fail("L68: a partial index read must preserve the cursor at the second BLOB")
     }
-    let Some(take indexed_second) = next_pack_index("p-8", pack.index, payload, mut cursor)? else {
+    let Some(take indexed_second) = failure_result_from_rep(manifest.next_pack_index("p-8", pack.index, payload, mut cursor))? else {
         fail("L68: the cursor must resume the front-coded key")
     }
     if indexed_second.offset != 100 || indexed_second.key != second_key || cursor.remaining != 0 {
         fail("L68: index resume must recover the second BLOB's full key")
     }
     let mut last_offset = 0u64
-    let decoded_index = decode_pack_index("p-8", pack.index, payload, mut last_offset)?
+    let decoded_index = failure_result_from_rep(manifest.decode_pack_index("p-8", pack.index, payload, mut last_offset))?
     if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key || decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
         fail("L68: the index did not describe the second BLOB")
     }
@@ -623,17 +623,17 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take children, list.new())))?
     let mut held_roots: List[pages.Roots] = list.with_capacity(1)
     list.push(mut held_roots, pages.share_roots(roots))
-    let mut holders: List[HeldPage] = list.with_capacity(3)
-    note_held_roots(mut holders, 0, 0, roots)
-    let mut installed = new_page_locations()
+    let mut holders: List[manifest.HeldPage] = list.with_capacity(3)
+    manifest.note_held_roots(mut holders, 0, 0, roots)
+    let mut installed = manifest.new_page_locations()
     let cold = pages.PagePack(class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
-    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 8, cold, pack_edge_charge)))?
-    let base = page_retry_base(installed, map.new(), holders, held_roots)?
-    if base.account != 126 || map_has_location(base.locations, 40) {
+    failure_result_from_rep(types.capacity(manifest.disk_index_put(mut installed.packs, 8, cold, manifest.pack_edge_charge)))?
+    let base = failure_result_from_rep(manifest.page_retry_base(installed, map.new(), holders, held_roots))?
+    if base.account != 126 || manifest.map_has_location(base.locations, 40) {
         fail("L68: a Tiered root entered the Memory location table or account")
     }
     let mut ids = 101u64
-    let mut cut_plan = plan_page_cut(base, holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut cut_plan = plan_page_cut(base, holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
     if list.len(cut_plan.data_pages.frames) != 1 || list.len(cut_plan.blobs.frames) != 0 || list.len(cut_plan.lists.removals) != 0 {
         fail("L68: a Memory cut tried to re-emit or retire a Tiered frame")
     }
@@ -645,7 +645,7 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     }
     let owner = StoreId(hi: 3, lo: 4)
     let mut output: Bytes = list.with_capacity(179)
-    encode_pack(owner, cut_plan.data_pages, cut_plan.data_pages.packs[0u64], mut cut_plan.locations, mut output)?
+    failure_result_from_rep(manifest.encode_pack(store_key_to_rep(owner), cut_plan.data_pages, cut_plan.data_pages.packs[0u64], mut cut_plan.locations, mut output))?
     if list.len(output) != 179 || list.slice(output, 88, 179) != raw {
         fail("L68: the emitted Memory map did not retain the Cold pointer")
     }
@@ -671,7 +671,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let capture = pages.share_roots(roots)
     let id = failure_result_from_rep(catalog.prefix(9))?
     let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
-    let frame = PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
+    let frame = manifest.PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
     let Some(place) = add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
         fail("L68: an inline leaf does not resolve a child")
     })? else {
@@ -691,23 +691,23 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     }
     let mut held_roots: List[pages.Roots] = list.with_capacity(1)
     list.push(mut held_roots, pages.share_roots(roots))
-    let mut holders: List[HeldPage] = list.with_capacity(3)
-    note_held_roots(mut holders, 0, 0, roots)
-    let mut installed = new_page_locations()
-    failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, 8, inventory, pack_edge_charge)))?
-    let base = page_retry_base(installed, map.new(), holders, held_roots)?
-    let cut_plan = plan_page_cut(base, holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
-    let mut buffers = cut_output_buffers(cut_plan, 1048576, 1048576)?
-    let layout = write_page_cut(fixtures, owner, take cut_plan, mut buffers)?
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.next_pack = layout.lists.run_packs.next_pack
-    manifest.next_stamp = ids
-    manifest.next_table = 10
-    manifest.account_memory = 126
-    manifest.account_tiered = 78
-    manifest.pack_root = published_tree_pointer(layout.locations, layout.lists.roots.packs)
-    manifest.branches[0u64].roots = published_page_roots(layout.locations, roots)
-    let manifest_wire = disk_page_manifest_bytes(owner, manifest)?
+    let mut holders: List[manifest.HeldPage] = list.with_capacity(3)
+    manifest.note_held_roots(mut holders, 0, 0, roots)
+    let mut installed = manifest.new_page_locations()
+    failure_result_from_rep(types.capacity(manifest.disk_index_put(mut installed.packs, 8, inventory, manifest.pack_edge_charge)))?
+    let base = failure_result_from_rep(manifest.page_retry_base(installed, map.new(), holders, held_roots))?
+    let cut_plan = plan_page_cut(base, holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, 1048576, 1048576))?
+    let layout = failure_result_from_rep(manifest.write_page_cut(fixtures, store_key_to_rep(owner), take cut_plan, mut buffers))?
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.next_pack = layout.lists.run_packs.next_pack
+    page_record.next_stamp = ids
+    page_record.next_table = 10
+    page_record.account_memory = 126
+    page_record.account_tiered = 78
+    page_record.pack_root = manifest.published_tree_pointer(layout.locations, layout.lists.roots.packs)
+    page_record.branches[0u64].roots = manifest.published_page_roots(layout.locations, roots)
+    let manifest_wire = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(owner), page_record))?
     let (_, take opened_manifest) = disk_read_page_manifest("MANIFEST", manifest_wire)?
     // p-8 is absent: the metadata walk must read only the map and pack list.
     let validated = validate_directory_graph(fixtures, owner, take opened_manifest, true)?
@@ -718,7 +718,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     if found != place || place.offset != 72 || place.len != 37 || inventory.index != 125 || inventory.payload_bytes != 186 || format.read_le(descriptor, 44, 8) != 78 {
         fail("L68: the reopened descriptor or pack extent differs from the cut")
     }
-    let verified = read_tiered_frame("p-8", owner, TieredPage(found), payload_bytes, 0, ids)?
+    let verified = failure_result_from_rep(manifest.read_tiered_frame("p-8", store_key_to_rep(owner), TieredPage(found), payload_bytes, 0, ids))?
     let TieredImage(ready) = view verified.payload else {
         fail("L68: the installed pointer must resolve to a PAGE")
     }

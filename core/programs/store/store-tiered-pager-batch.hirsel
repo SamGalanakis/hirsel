@@ -198,7 +198,7 @@ fn unpack_bucket_window(owner: StoreId, next_stamp: u64, misses: List[TieredBuck
         let target = view misses[member]
         let delivered = match response {
             Ok(raw) => disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], Error] {
-                read_tiered_frame(path, owner, target.edge, raw, request.window.lo, next_stamp)
+                failure_result_from_rep(manifest.read_tiered_frame(path, store_key_to_rep(owner), target.edge, raw, request.window.lo, next_stamp))
             }),
             Error(problem) => Error(clone(problem)),
         }

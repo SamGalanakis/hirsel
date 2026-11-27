@@ -12,7 +12,7 @@ fn history_witness(mut client: std.object.Client, capture: HistoryHead, required
             }
         }
         let witness = history_decode_head(observed)?
-        check_expected_store(Some(capture.store), witness.head.store)?
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(Some(capture.store)), store_key_to_rep(witness.head.store)))?
         history_check_namespace(witness, client)?
         if let Some(seq) = missing_seq {
             if seq < witness.head.floor {

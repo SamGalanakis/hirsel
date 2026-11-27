@@ -319,14 +319,14 @@ fn lcu_import_leaf(db: Db) -> Result[std.page.PagePtr, DeployError] {
     if stamp == 0 {
         fail("L-IX catch-up: the kept import holds a pin")
     }
-    let frames = disk_state(db).pages.locations.frames
+    let frames = manifest.pack_locations(disk_state(db).packs).frames
     loop {
-        let Some(record) = disk_index_get(frames, stamp) else {
+        let Some(record) = manifest.disk_index_get(frames, stamp) else {
             fail("L-IX catch-up: the import pin's pages are located")
         }
         let mut deeper = 0u64
         for child in record.outgoing {
-            if let Some(kid) = disk_index_get(frames, child) {
+            if let Some(kid) = manifest.disk_index_get(frames, child) {
                 if kid.class == 0 {
                     deeper = child
                 }
@@ -540,11 +540,11 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
     if let CheckpointPack = damage {
         state = lix_next(state)
         deploy_result(lcu_round(mut db, t, 115u8, state, mut next_value, mut model))?
-        let name = deploy_result(paged_pack_path(disk_state(db).pages.next_pack))?
+        let name = deploy_result(failure_result_from_rep(manifest.paged_pack_path(manifest.pack_next(disk_state(db).packs))))?
         let refused = disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] waits {
-            let mut pack = disk_read_paged_file(directory, name, 67108864)?
+            let mut pack = failure_result_from_rep(manifest.disk_read_paged_file(directory, name, 67108864))?
             pack[88] = pack[88] ^ 1u8
-            disk_write_synced(directory, name, pack)?
+            failure_result_from_rep(manifest.disk_write_synced(directory, name, pack))?
             seal_page_manifest_file(mut raw, context, fence)
         })
         match refused {
@@ -559,13 +559,13 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
     }
     if let SettledLeaf = damage {
         let leaf = lcu_import_leaf(db)?
-        let name = deploy_result(paged_pack_path(leaf.pack))?
-        let mut raw = deploy_result(disk_read_paged_file(directory, name, 67108864))?
+        let name = deploy_result(failure_result_from_rep(manifest.paged_pack_path(leaf.pack)))?
+        let mut raw = deploy_result(failure_result_from_rep(manifest.disk_read_paged_file(directory, name, 67108864)))?
         let flipped = leaf.offset + 16 + int.widen(leaf.len) - 1
         raw[flipped] = raw[flipped] ^ 1u8
-        deploy_result(disk_write_synced(directory, name, raw))?
+        deploy_result(failure_result_from_rep(manifest.disk_write_synced(directory, name, raw)))?
         let _ = crash_apply(mut db, attempt, digest)?
-        let in_place = match disk_index_get(disk_state(db).pages.locations.frames, leaf.stamp) {
+        let in_place = match manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).frames, leaf.stamp) {
             Some(kept) => kept.place == leaf,
             None => false,
         }

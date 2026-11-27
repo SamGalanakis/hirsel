@@ -1,0 +1,52 @@
+fn recovered_tiered_inventory(locations: manifest.PageLocations, locator: Option[View[HistoryLocator]], generation: u64, next_stamp: u64) -> Result[Arc[pages.TieredReadInventory], Error] {
+    let rows = match locator {
+        Some(remote) => Some(view remote.rows),
+        None => None,
+    }
+    let manifest.LoadedPackInventory(packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp) = manifest.recovered_pack_inventory(locations, rows, generation, next_stamp)
+    Ok(arc.new(pages.TieredReadInventory(packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp)))
+}
+
+fn rebuild_page_store(take validated: manifest.ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[manifest.LoadedPageStore, Error] {
+    let locations = disk_allocation(scoped fn() -> Result[manifest.PageLocations, Error] {
+        failure_result_from_rep(manifest.rebuild_page_locations(validated))
+    })?
+    let manifest.ValidatedPageManifest(manifest: take page_record, graph: take resolved, lineage: take rows, allow_tiered, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
+    let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[pages.PageRoots], manifest.PagedLists), Error] {
+        let mut all = manifest.attach_manifest_holders(page_record, page_nodes, empty_collection)
+        if allow_tiered {
+            let mut paging: Option[Arc[pages.TieredReadInventory]] = None
+            for slot in 0u64 .. list.len(all) {
+                if pages.tiered_collections(all[slot].collections.root) {
+                    if let None = paging {
+                        paging = Some(recovered_tiered_inventory(locations, locator, page_record.generation, page_record.next_stamp)?)
+                    }
+                    all[slot].collections.paging = clone(paging)
+                }
+            }
+        }
+        let list_tree = pages.attach_page_tree(page_nodes, page_record.pack_root, Unprefixed, 1024, None)
+        let pages.PageTree(root: take packs, ..) = take list_tree
+        let deferred = if page_record.deferred_frees.stamp == 0 {
+            std.page.empty(0, 0, Unprefixed)
+        } else {
+            let pages.PageTree(root: take queue, ..) = pages.attach_page_tree(page_nodes, page_record.deferred_frees, Unprefixed, 1024, None)
+            take queue
+        }
+        let lineage = if page_record.lineage.stamp == 0 && page_record.deferred_frees.stamp == 0 {
+            arc.share(deferred)
+        } else if page_record.lineage.stamp == 0 {
+            std.page.empty(0, 0, Unprefixed)
+        } else {
+            let pages.PageTree(root: take tree, ..) = pages.attach_page_tree(page_nodes, page_record.lineage, Unprefixed, 1024, None)
+            take tree
+        }
+        Ok((take all, manifest.PagedLists(packs: take packs, deferred: deferred, deferred_next: page_record.deferred_next, lineage: lineage, rows: clone(rows))))
+    })?
+    Ok(manifest.LoadedPageStore(manifest: take page_record, holders: take holders, lists: take lists, locations: take locations))
+}

@@ -531,7 +531,7 @@ fn fork_tip_fits(c: Clock, depth: u64, steps: u64) -> bool waits {
     let mut tip = source
     for id in 1u64 .. 33 {
         let from = result.unwrap(snapshot_of(db, tip))
-        let name = result.unwrap(disk_path("depth-", id, ""))
+        let name = result.unwrap(manifest.disk_path("depth-", id, ""))
         let (child, _) = result.unwrap(fork(mut db, name, from))
         tip = child
         if id == depth {

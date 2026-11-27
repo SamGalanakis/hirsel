@@ -9,9 +9,7 @@ type HistoryPair {
     holder: StoreId
 }
 
-const ORIGIN_PAYLOAD_BYTES: u64 = 49
-
-const ORIGIN_FRAME_BYTES: u64 = 16 + ORIGIN_PAYLOAD_BYTES
+const ORIGIN_FRAME_BYTES: u64 = 16 + manifest.ORIGIN_PAYLOAD_BYTES
 
 type HistoryOrigin: shareable + send {
     epoch: u64,
@@ -69,20 +67,6 @@ fn history_ref_matches(a: pages.HistoryRef, b: pages.HistoryRef) -> bool {
 
 fn history_entry_range(item: pages.HistoryRef, epoch: u64) -> bool {
     item.epoch != 0 && item.epoch <= epoch && item.len >= 112 && item.len <= HISTORY_ENTRY_READ_LIMIT
-}
-
-fn history_frame(path: String, ctx: format.DiskContext, raw: Bytes, at: u64, kind: u16) -> Result[format.DiskFrame, Error] {
-    let frame = disk_frame_bytes(path, ctx, raw, at)?
-    if frame.kind != kind {
-        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
-            return Error(Unsupported(int.widen(frame.kind)))
-        }
-        return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-    }
-    if frame.flags != 1 {
-        return Error(failure_from_rep(format.disk_fault(path, at, Flags)))
-    }
-    Ok(frame)
 }
 
 fn history_text(raw: Bytes, mut cursor: u64, lo: u64, hi: u64, frame_at: u64) -> Result[String, Error] {
@@ -158,7 +142,7 @@ fn history_head_frame(raw: Bytes) -> Result[(format.DiskContext, format.DiskFram
     }
     let id = StoreId(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8))
     let context = format.DiskContext(store: store_key_to_rep(id), role: 7, seq: format.read_le(raw, 56, 8))
-    let header = history_frame("head", context, raw, 0, 0x0001)?
+    let header = failure_result_from_rep(manifest.history_frame("head", context, raw, 0, 0x0001))?
     if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || raw[28] != 7 || format.read_le(raw, 30, 2) != 0 || format.read_le(raw, 64, 8) != 0 {
         return Error(failure_from_rep(format.disk_fault("head", 0, Header)))
     }
@@ -169,7 +153,7 @@ fn history_head_frame(raw: Bytes) -> Result[(format.DiskContext, format.DiskFram
     if raw[29] != 1 && raw[29] != 2 {
         return Error(Unsupported(int.widen(raw[29])))
     }
-    let field = history_frame("head", context, raw, 72, 0x00A0)?
+    let field = failure_result_from_rep(manifest.history_frame("head", context, raw, 72, 0x00A0))?
     if field.end - field.payload != 136 {
         return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
     }
@@ -209,20 +193,12 @@ fn history_origin_same_bytes(a: Inline[u8, 16], b: Inline[u8, 16]) -> bool {
     true
 }
 
-// The objects@1 head's own frame kinds (ORIGIN), then the host stream's.
-fn history_kind_limit(kind: u16) -> Option[u64] {
-    if kind == 0x00E0 {
-        return Some(ORIGIN_PAYLOAD_BYTES)
-    }
-    format.stream_kind_limit(kind)
-}
-
 fn history_origin_decode(raw: Bytes, frame: format.DiskFrame, head_epoch: u64) -> Result[HistoryOrigin, Error] {
     let at = frame.payload - 16
     if frame.flags != 1 {
         return Error(failure_from_rep(format.disk_fault("head", at, Flags)))
     }
-    if frame.end - frame.payload != ORIGIN_PAYLOAD_BYTES {
+    if frame.end - frame.payload != manifest.ORIGIN_PAYLOAD_BYTES {
         return Error(failure_from_rep(format.disk_fault("head", at, Malformed)))
     }
     let p = frame.payload
@@ -282,9 +258,9 @@ fn history_origin_append(mut raw_bytes: Bytes, ctx: format.DiskContext, origin: 
 }
 
 fn history_optional_tail_frame(raw: Bytes, ctx: format.DiskContext, at: u64) -> Result[format.DiskFrame, Error] {
-    let frame = disk_frame_bytes("head", ctx, raw, at)?
+    let frame = failure_result_from_rep(manifest.disk_frame_bytes("head", ctx, raw, at))?
     if frame.kind != 0x0100 && frame.kind != 0x00E0 {
-        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
+        if frame.flags == 1 && manifest.disk_kind_limit(frame.kind) == None {
             return Error(Unsupported(int.widen(frame.kind)))
         }
         return Error(failure_from_rep(format.disk_fault("head", at, Malformed)))
@@ -313,7 +289,7 @@ fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[form
     for i in 0u64 .. 32 {
         schema_binding[i] = head[104 + i]
     }
-    let config = history_frame("head", context, raw, field.end, 0x00D0)?
+    let config = failure_result_from_rep(manifest.history_frame("head", context, raw, field.end, 0x00D0))?
     if config.end - config.payload > AUTHORITY_LIMIT {
         return Error(failure_from_rep(format.disk_fault("head", field.end, Malformed)))
     }
@@ -328,7 +304,7 @@ fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[form
             attach = Some(failure_result_from_rep(format.stream_attach_decode(raw, first_tail, newest.seq))?)
             at = first_tail.end
             if at < list.len(raw) {
-                let second_tail = history_frame("head", context, raw, at, 0x00E0)?
+                let second_tail = failure_result_from_rep(manifest.history_frame("head", context, raw, at, 0x00E0))?
                 origin = Some(history_origin_decode(raw, second_tail, epoch)?)
                 at = second_tail.end
             }
@@ -338,8 +314,8 @@ fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[form
         }
     }
     if at < list.len(raw) {
-        let extra = disk_frame_bytes("head", context, raw, at)?
-        if extra.flags == 1 && disk_kind_limit(extra.kind) == None {
+        let extra = failure_result_from_rep(manifest.disk_frame_bytes("head", context, raw, at))?
+        if extra.flags == 1 && manifest.disk_kind_limit(extra.kind) == None {
             return Error(Unsupported(int.widen(extra.kind)))
         }
         return Error(failure_from_rep(format.disk_fault("head", at, Malformed)))

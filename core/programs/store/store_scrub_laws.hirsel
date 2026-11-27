@@ -24,7 +24,7 @@ fn scrub_to_end(mut tour: Scrub, budget: u64, mut faults: List[Fault]) -> Result
 }
 
 fn scrub_fault_is(fault: Fault, seq: u64, offset: u64, why: Why) -> Result[bool, Error] {
-    let path = paged_pack_path(seq)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
     let matched = match fault.why {
         Checksum => match why {
             Checksum => true,
@@ -62,7 +62,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     // byte of every listed pack, by the files' own sizes.
     let mut listed: List[u64] = list.new()
     let mut data: List[u64] = list.new()
-    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut cursor = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut cursor) {
         list.push(mut listed, seq)
         if pack.class == 0 {
@@ -71,7 +71,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     }
     let mut total = 0u64
     for seq in listed {
-        total += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+        total += list.len(failure_result_from_rep(manifest.disk_read_paged_file(path, failure_result_from_rep(manifest.paged_pack_path(seq))?, 67108864))?)
     }
     let mut clean: List[Fault] = list.new()
     let control = begin_scrub(mut db)?
@@ -82,10 +82,10 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     // A is the first data pack whose first frame fits inside B, the second.
     let a = data[0u64]
     let b = data[1u64]
-    let a_name = paged_pack_path(a)?
-    let b_name = paged_pack_path(b)?
-    let mut a_raw = disk_read_paged_file(path, a_name, 67108864)?
-    let mut b_raw = disk_read_paged_file(path, b_name, 67108864)?
+    let a_name = failure_result_from_rep(manifest.paged_pack_path(a))?
+    let b_name = failure_result_from_rep(manifest.paged_pack_path(b))?
+    let mut a_raw = failure_result_from_rep(manifest.disk_read_paged_file(path, a_name, 67108864))?
+    let mut b_raw = failure_result_from_rep(manifest.disk_read_paged_file(path, b_name, 67108864))?
     let old_stamp = format.read_le(a_raw, 96, 8)
     let width = 16 + format.read_le(a_raw, 76, 4)
     if 72 + width > list.len(b_raw) {
@@ -95,24 +95,24 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         b_raw[at] = a_raw[at]
         a_raw[at] = 0u8
     }
-    disk_write_synced(path, a_name, a_raw)?
-    disk_write_synced(path, b_name, b_raw)?
+    failure_result_from_rep(manifest.disk_write_synced(path, a_name, a_raw))?
+    failure_result_from_rep(manifest.disk_write_synced(path, b_name, b_raw))?
     // A lost write over a leftover of the same pack number: C at 72 holds a
     // frame sealed for C at 72 whose last payload byte differs. The envelope
     // passes; only the generation's pointer to C at 72 tells the bytes apart.
     let c_seq = data[2u64]
-    let c_name = paged_pack_path(c_seq)?
-    let mut c_raw = disk_read_paged_file(path, c_name, 67108864)?
+    let c_name = failure_result_from_rep(manifest.paged_pack_path(c_seq))?
+    let mut c_raw = failure_result_from_rep(manifest.disk_read_paged_file(path, c_name, 67108864))?
     let c_width = format.read_le(c_raw, 76, 4)
     c_raw[87 + c_width] = c_raw[87 + c_width] ^ 1u8
     let sealed = failure_result_from_rep(types.capacity(format.disk_check(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: c_seq), 72, list.slice(c_raw, 72, 80), list.slice(c_raw, 88, 88 + c_width))))?
     list.set_word_le(mut c_raw, 80, sealed)
-    disk_write_synced(path, c_name, c_raw)?
+    failure_result_from_rep(manifest.disk_write_synced(path, c_name, c_raw))?
     // D's live frame is replaced by a same-width frame sealed for D at
     // this offset, but carrying the stamp of a different live frame.
     let d_seq = data[3u64]
-    let d_name = paged_pack_path(d_seq)?
-    let mut d_raw = disk_read_paged_file(path, d_name, 67108864)?
+    let d_name = failure_result_from_rep(manifest.paged_pack_path(d_seq))?
+    let mut d_raw = failure_result_from_rep(manifest.disk_read_paged_file(path, d_name, 67108864))?
     let d_width = format.read_le(d_raw, 76, 4)
     if old_stamp == format.read_le(d_raw, 96, 8) {
         fail("the stale frame needs a different stamp")
@@ -120,7 +120,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     list.set_word_le(mut d_raw, 96, old_stamp)
     let d_seal = failure_result_from_rep(types.capacity(format.disk_check(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: d_seq), 72, list.slice(d_raw, 72, 80), list.slice(d_raw, 88, 88 + d_width))))?
     list.set_word_le(mut d_raw, 80, d_seal)
-    disk_write_synced(path, d_name, d_raw)?
+    failure_result_from_rep(manifest.disk_write_synced(path, d_name, d_raw))?
     let mut faults: List[Fault] = list.new()
     let damaged = begin_scrub(mut db)?
     let mut second = take damaged
@@ -149,7 +149,7 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     scrub_fill(mut db, t, 2000, 0)?
     let _ = checkpoint(mut db)?
-    let mut listed = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut listed = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     let Some((first, _)) = std.omap.next(mut listed) else {
         return Error(MigrationFault)
     }
@@ -159,15 +159,15 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let Some((third, _)) = std.omap.next(mut listed) else {
         return Error(MigrationFault)
     }
-    let first_name = paged_pack_path(first)?
-    let mut raw = disk_read_paged_file(path, first_name, 67108864)?
+    let first_name = failure_result_from_rep(manifest.paged_pack_path(first))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(path, first_name, 67108864))?
     // The 72-byte HEADER and the first frame's 16-byte envelope and payload.
     let budget = 72 + 16 + format.read_le(raw, 76, 4)
     raw[budget - 1] = raw[budget - 1] ^ 1u8
-    disk_write_synced(path, first_name, raw)?
-    let second_name = paged_pack_path(second)?
-    let header = disk_read_paged_file(path, second_name, 67108864)?
-    disk_write_synced(path, second_name, list.slice(header, 0, 7))?
+    failure_result_from_rep(manifest.disk_write_synced(path, first_name, raw))?
+    let second_name = failure_result_from_rep(manifest.paged_pack_path(second))?
+    let header = failure_result_from_rep(manifest.disk_read_paged_file(path, second_name, 67108864))?
+    failure_result_from_rep(manifest.disk_write_synced(path, second_name, list.slice(header, 0, 7)))?
     let mut tour = begin_scrub(mut db)?
     let damaged = scrub_step(mut tour, budget)?
     if damaged.checked != budget || damaged.next != Some(second) || list.len(damaged.faults) != 1 || !scrub_fault_is(damaged.faults[0], first, 72, Checksum)? {
@@ -207,13 +207,13 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let _ = checkpoint(mut db)?
     let mut retired = 0u64
     for seq in tour.lease.packs {
-        if !disk_exists(path, paged_pack_path(seq)?)? {
+        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             return Error(MigrationFault)
         }
     }
     // The cut carries each retirement the lease holds back.
-    for seq in disk_state(db).pages.carried {
-        if scrub_leased(disk_state(db).scrubs, seq) {
+    for seq in manifest.pack_carried(disk_state(db).packs) {
+        if manifest.scrub_leased(manifest.pack_scrubs(disk_state(db).packs), seq) {
             retired += 1
         }
     }
@@ -227,8 +227,8 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let _ = checkpoint(mut db)?
     let mut gone = 0u64
     for seq in leased {
-        let present = disk_exists(path, paged_pack_path(seq)?)?
-        let listed = match disk_index_get(disk_state(db).pages.locations.packs, seq) {
+        let present = disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)?
+        let listed = match manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) {
             Some(_) => true,
             None => false
         }
@@ -309,7 +309,7 @@ fn check_test_pack(d: Dir, id: StoreId, seq: u64, image: std.page.Image, stale: 
         // The bytes on disk have a valid envelope. Only the pointer disagrees.
         ptr.checksum = ptr.checksum ^ 1u64
     }
-    disk_write_synced(d, paged_pack_path(seq)?, raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(seq))?, raw))?
     Ok(ptr)
 }
 
@@ -321,7 +321,7 @@ fn check_test_stamp(stamp: u64) -> Result[std.page.Image, Error] {
 
 fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(2)
-    let packed = encode_pack_row(pages.PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
+    let packed = manifest.encode_pack_row(pages.PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
     list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(clone(packed))))
     if second {
         list.push(mut rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(take packed)))
@@ -330,7 +330,7 @@ fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result
     check_test_pack(d, id, 3, image, false)
 }
 
-fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamage) -> Result[(String, u64, Why), Error] waits {
+fn check_test_packs(d: Dir, id: StoreId, mut m: manifest.PageManifest, damage: CheckDamage) -> Result[(String, u64, Why), Error] waits {
     let image = check_test_stamp(1)?
     let first = check_test_pack(d, id, 1, image, damage == PinPointer || damage == KeyedPointer)?
     m.next_stamp = 3
@@ -351,7 +351,7 @@ fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamag
         first
     }
     let roots = pages.LocatedRoots(collections: std.page.unlocated(0), streams: std.page.unlocated(0), catalog: held, keyed: list.new())
-    list.push(mut m.pins, LocatedPin(owner: ApplicationPin, name: "held", branch: 0, version: 0, roots: take roots, watermark: 3))
+    list.push(mut m.pins, manifest.LocatedPin(owner: ApplicationPin, name: "held", branch: 0, version: 0, roots: take roots, watermark: 3))
     if damage == RepeatedStamp {
         Ok(("p-2", 72u64, Malformed))
     } else {
@@ -359,10 +359,10 @@ fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamag
     }
 }
 
-fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, Error] waits {
+fn check_test_lineage(d: Dir, id: StoreId, mut m: manifest.PageManifest) -> Result[u64, Error] waits {
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 1)
     let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
-    let edge = lineage_row(ForkRow(LineageFork(child: 1, parent: 0, watermark: 1, adopted: true)))
+    let edge = manifest.lineage_row(ForkRow(manifest.LineageFork(child: 1, parent: 0, watermark: 1, adopted: true)))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: clone(edge.key), cell: InlineValue(clone(edge.value))))
     let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 1, Unprefixed)))?
@@ -370,7 +370,7 @@ fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, E
     let at = list.len(raw)
     let _ = capture_test_page(mut raw, ctx, check_test_stamp(2)?)?
     raw[at + 8] = raw[at + 8] ^ 1u8
-    disk_write_synced(d, "p-1", raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "p-1", raw))?
     m.next_pack = 2
     m.next_stamp = 3
     m.next_branch = 2
@@ -383,12 +383,12 @@ fn check_test_end(d: Dir, id: StoreId, end: u64) -> Result[(), Error] waits {
     let mut payload: Bytes = list.with_capacity(8)
     list.put_word_le(mut payload, end)
     list.append(mut raw, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0012, 1, payload)))?)
-    disk_write_synced(d, "j-1.end", raw)
+    failure_result_from_rep(manifest.disk_write_synced(d, "j-1.end", raw))
 }
 
 fn check_test_damage(d: Dir, c: Clock, damage: CheckDamage) -> Result[(), Error] waits {
     let id = StoreId(hi: 7, lo: 3013)
-    let mut m = page_manifest_empty(default_limits())
+    let mut m = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     let mut journal = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let (path, at, reason) = match damage {
@@ -412,9 +412,9 @@ fn check_test_damage(d: Dir, c: Clock, damage: CheckDamage) -> Result[(), Error]
         },
         _ => check_test_packs(d, id, mut m, damage)?,
     }
-    disk_write_synced(d, "LOCK", b"")?
-    disk_write_synced(d, "MANIFEST", disk_page_manifest_bytes(id, m)?)?
-    disk_write_synced(d, "j-1", journal)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "LOCK", b""))?
+    failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST", failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), m))?))?
+    failure_result_from_rep(manifest.disk_write_synced(d, "j-1", journal))?
     let empty: List[Fault] = list.new()
     let observed: core.Cell[List[Fault]] = cell.new(take empty)
     let on_fault: scoped[view] fn(Fault) -> Result[(), Error] waits = scoped fn(found: Fault) -> Result[(), Error] {
@@ -471,9 +471,9 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     // Independent oracle: sum of actual on-disk bytes of all listed packs.
     let mut total_bytes = 0u64
     let mut first_data_pack = 0u64
-    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut cursor = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut cursor) {
-        total_bytes += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+        total_bytes += list.len(failure_result_from_rep(manifest.disk_read_paged_file(path, failure_result_from_rep(manifest.paged_pack_path(seq))?, 67108864))?)
         if pack.class == 0 && first_data_pack == 0 {
             first_data_pack = seq
         }
@@ -488,7 +488,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     if !step1.stepped || step1.completed != None || !step1.status.active || step1.status.rate_bps != 4000u64 {
         fail("infeasible pacer must start active and clamp to max_rate_bps")
     }
-    let expected_debit = ceil_millis_ratio(step1.status.checked, 4000u64)
+    let expected_debit = manifest.ceil_millis_ratio(step1.status.checked, 4000u64)
     if step1.status.next_due_ms != 1000u64 + expected_debit {
         fail("actual byte debit must drive next_due_ms")
     }
@@ -507,7 +507,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     // 2. Interrupting the tour drops the lease and persists an incomplete round
     // without advancing last_clean_ms.
     let mut leased_packs: List[u64] = list.new()
-    let mut c2 = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut c2 = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut c2) {
         if pack.class == 0 {
             list.push(mut leased_packs, seq)
@@ -516,7 +516,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     scrub_fill(mut db, t, 1200, 1)?
     let _ = checkpoint(mut db)?
     for seq in leased_packs {
-        if !disk_exists(path, paged_pack_path(seq)?)? {
+        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             fail("active pacer tour must hold its ScrubLease across cuts")
         }
     }
@@ -529,7 +529,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     let _ = checkpoint(mut db)?
     let mut unlinked = 0u64
     for seq in leased_packs {
-        if !disk_exists(path, paged_pack_path(seq)?)? {
+        if !disk_exists(path, failure_result_from_rep(manifest.paged_pack_path(seq))?)? {
             unlinked += 1
         }
     }
@@ -545,9 +545,9 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     // Recompute current on-disk pack bytes after the checkpoint above.
     let mut live_total = 0u64
     let mut live_data_pack = 0u64
-    let mut c3 = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut c3 = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut c3) {
-        live_total += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+        live_total += list.len(failure_result_from_rep(manifest.disk_read_paged_file(path, failure_result_from_rep(manifest.paged_pack_path(seq))?, 67108864))?)
         if pack.class == 0 && live_data_pack == 0 {
             live_data_pack = seq
         }
@@ -599,10 +599,10 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     }
     // 4. Faulty tour: corrupt a listed pack, run a full tour to completion,
     // verify faults > 0, and verify last_clean_ms is NOT refreshed.
-    let bad_name = paged_pack_path(live_data_pack)?
-    let mut bad_raw = disk_read_paged_file(path, bad_name, 67108864)?
+    let bad_name = failure_result_from_rep(manifest.paged_pack_path(live_data_pack))?
+    let mut bad_raw = failure_result_from_rep(manifest.disk_read_paged_file(path, bad_name, 67108864))?
     bad_raw[80] = bad_raw[80] ^ 1u8
-    disk_write_synced(path, bad_name, bad_raw)?
+    failure_result_from_rep(manifest.disk_write_synced(path, bad_name, bad_raw))?
     now = clean_status.next_due_ms
     clock.set_wall(mut wall, now)
     let mut bad_done: Option[ScrubRound] = None

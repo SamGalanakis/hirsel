@@ -80,7 +80,7 @@ fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut bu
             return Ok(outcome)
         }
     }
-    let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+    let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(sid), inc, seq))? {
         Rows(take found) => take found,
         Term(_, _) => return Ok(TailTerm),
     }
@@ -88,7 +88,7 @@ fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut bu
         if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
             return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
         }
-        batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+        batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(sid), inc, seq))? {
             Rows(take found) => take found,
             Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
         }
@@ -120,7 +120,7 @@ fn stream_tail_apply(key: String, slice: Bytes, row: format.BatchRow, seq: u64, 
     let mut at = 0u64
     let mut frames = 0u64
     while at < list.len(slice) {
-        let frame = disk_frame_bytes(key, ctx, slice, at)?
+        let frame = failure_result_from_rep(manifest.disk_frame_bytes(key, ctx, slice, at))?
         if frames >= skip {
             if frame.kind == 0x0040 {
                 if frame.end - frame.payload != 24 || format.read_le(slice, frame.payload, 8) != epoch {
@@ -248,7 +248,7 @@ fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, pla
                         let Some(()) = stream_tail_range(mut client, key, 0, format.STREAM_INDEX_PROBE, mut side.buffers.index, deadline)? else {
                             return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
                         }
-                        match stream_batch_head(key, side.buffers.index, host_stream_id_from_rep(tail.sid), tail.inc, cursor.next)? {
+                        match failure_result_from_rep(manifest.stream_batch_head(key, side.buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(tail.sid)), tail.inc, cursor.next))? {
                             Term(_, _) => return Ok(true),
                             Rows(_) => (),
                         }
@@ -333,7 +333,7 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
                 }
             }
         }
-        let mut batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
+        let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(cut_key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid)), st.tail.inc, st.cutoff))? {
             Rows(take found) => take found,
             Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
         }
@@ -341,7 +341,7 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
             if let None = stream_tail_range(mut c, cut_key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
                 return Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent)))
             }
-            batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
+            batch_index = match failure_result_from_rep(manifest.stream_batch_head(cut_key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid)), st.tail.inc, st.cutoff))? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
             }
@@ -395,13 +395,13 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
     let deadline = read_source.deadline
     let chain = history_suffix(mut read_source.client, head, head.checkpoint, deadline)?
     let (take mark, take checkpoint_data) = history_checkpoint(mut read_source.client, head, deadline)?
-    let manifest = history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline)?
-    let (take replay, take checkpoint_state) = history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take manifest, ceiling)?
-    let owners = disk_allocation(scoped fn() -> Result[Map[IncomingEdge, u64], Error] {
-        Ok(located_owners(checkpoint_state.manifest))
+    let page_record = history_read_manifest(mut read_source.client, head.store, mark, head.checkpoint.seq, deadline)?
+    let (take replay, take checkpoint_state) = history_open_checkpoint(mut read_source, head, mark, checkpoint_data, take page_record, ceiling)?
+    let owners = disk_allocation(scoped fn() -> Result[Map[manifest.IncomingEdge, u64], Error] {
+        Ok(manifest.located_owners(checkpoint_state.manifest))
     })?
-    let LoadedPageStore(manifest: take loaded_manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
-    let pages = PageDisk(next_pack: loaded_manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
+    let manifest.LoadedPageStore(manifest: take loaded_manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
+    let pages = manifest.recovered_pack_disk(loaded_manifest, take locations, take lists, take owners, list.new())
     read_source.admitted_base = Some(HistoryOpenBase(generation: loaded_manifest.generation, fence: loaded_manifest.fence, recorded_after: loaded_manifest.branches[0].version, sweep: loaded_manifest.sweep, archive_on: loaded_manifest.archive_on, pages: take pages))
     let mut recovered = take replay
     let base_seq = head.checkpoint.seq

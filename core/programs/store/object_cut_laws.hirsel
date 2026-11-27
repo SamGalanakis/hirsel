@@ -13,15 +13,15 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     let old_checkpoint = history_key("e-", held.head.checkpoint)
     let (take previous, _) = history_checkpoint(mut source.client, held.head, source.deadline)?
     let retained = history_retain(previous, held.head.checkpoint, 4, 1)?
-    let mut page_manifest = page_manifest_empty(default_limits())
+    let mut page_manifest = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     page_manifest.generation = 2
     page_manifest.first_live = 4
     page_manifest.prev_first = 4
     page_manifest.branches[0].version = 1
-    let manifest = history_create_manifest(mut source.client, id, held.head.pair.epoch, 1, page_manifest, mut workspace, source.deadline)?
+    let page_record = history_create_manifest(mut source.client, id, held.head.pair.epoch, 1, page_manifest, mut workspace, source.deadline)?
     let location = history_make_locator(mut source.client, id, 4, 1, 1, list.new(), mut workspace, source.deadline)?
     let activation = HistoryActivation(number: 1, binding:[42; 32])
-    let HistoryApplied(_) = history_publish_checkpoint(mut source.client, mut held, metadata, manifest, retained, location, Some(activation), mut workspace, source.deadline)? else {
+    let HistoryApplied(_) = history_publish_checkpoint(mut source.client, mut held, metadata, page_record, retained, location, Some(activation), mut workspace, source.deadline)? else {
         fail("checkpoint did not advance the register")
     }
     let mut new_reader = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
@@ -39,7 +39,7 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     if recovered.state.tips[0].head != 1 {
         fail("cold recovery lost the checkpoint's main tip")
     }
-    object_locator_boundary(mut source, held.head, manifest, mut workspace)
+    object_locator_boundary(mut source, held.head, page_record, mut workspace)
 }
 
 // A root at the row limit fits directly. One more row needs two child
@@ -597,10 +597,10 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
         fail("fixture did not write a blob")
     }
     let participants = cut_participants(draft, NoHolderChange)?
-    let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
+    let base = failure_result_from_rep(manifest.page_retry_base(manifest.new_page_locations(), map.new(), participants.holders, participants.roots))?
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
-    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
-    let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536)?
+    let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
+    let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536))?
     let (take layout, take packed) = history_write_page_cut(mut source.client, held.head.store, held.head.pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline)?
     if list.len(packed) != 3 {
         fail("object cut did not emit exactly the three live pack classes")

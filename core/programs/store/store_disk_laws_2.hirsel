@@ -26,12 +26,12 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         return Error(Foreign)
     }
     let sh: Table[u64, u64] = clone(rows)
-    let first = disk_state(db).pages.next_pack
+    let first = manifest.pack_next(disk_state(db).packs)
     let _ = law_drop(mut db, tasks)?
-    let after = disk_state(db).pages.next_pack
+    let after = manifest.pack_next(disk_state(db).packs)
     let mut stamps: Map[u64, ()] = map.new()
     for seq in first .. after {
-        let raw = disk_read_file(d, failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?, 8500)?
+        let raw = failure_result_from_rep(manifest.disk_read_file(d, failure_result_from_rep(types.capacity(manifest.disk_path("p-", seq, "")))?, 8500))?
         let mut at = 72u64
         while at < list.len(raw) {
             let kind = format.read_le(raw, at, 2)
@@ -47,7 +47,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
             at += 16 + format.read_le(raw, at + 4, 4)
         }
     }
-    let manifest = disk_read_file(d, "MANIFEST", 4096)?
+    let page_record = failure_result_from_rep(manifest.disk_read_file(d, "MANIFEST", 4096))?
     // The index catalog key is 1 + 4 + 2 bytes. The value's 44 fixed bytes
     // include the index kind, payload count and two empty projection fields.
     // A disk value holds the composite identity: the extractor's 32-byte code
@@ -55,7 +55,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
     let index_charge = 62 + format.round8(7 + 44 + list.len(schema) + list.len(code.identity(by)) + 160)
     let logical = 2 * 126 + 2 * 94 + 2 * 86 + 134 + index_charge
-    if format.read_le(manifest, 152, 8) != logical {
+    if format.read_le(page_record, 152, 8) != logical {
         return Error(Foreign)
     }
     close(take db)?
@@ -278,17 +278,17 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = view t
-    let (_, take manifest) = disk_read_page_manifest("MANIFEST", disk_read_file(d, "MANIFEST", 4096)?)?
-    let segment = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq, "")))?
-    let end = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq, ".end")))?
+    let (_, take page_record) = disk_read_page_manifest("MANIFEST", failure_result_from_rep(manifest.disk_read_file(d, "MANIFEST", 4096))?)?
+    let segment = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, "")))?
+    let end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq, ".end")))?
     let durable_prefix = read_journal_prefix(d, segment, db.file_end)?
-    let boundary = disk_read_file(d, end, 4096)?
+    let boundary = failure_result_from_rep(manifest.disk_read_file(d, end, 4096))?
     if !typed_put(mut db, t, 1, 10) {
         fail("watermark: old insert did not commit")
     }
     let old = snapshot(db)
     let old_id = pages.tree_stamp(old.roots.collections)
-    if old_id < manifest.next_stamp {
+    if old_id < page_record.next_stamp {
         fail("watermark: old node was below the cut")
     }
     // Drain the writer to materialize the frame, then construct the two
@@ -301,11 +301,11 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
             fail("watermark: no frame to tear")
         }
         let torn_prefix = read_journal_prefix(d, segment, frame_end - 1)?
-        disk_write_synced(d, segment, torn_prefix)?
+        failure_result_from_rep(manifest.disk_write_synced(d, segment, torn_prefix))?
     } else {
-        disk_write_synced(d, segment, durable_prefix)?
+        failure_result_from_rep(manifest.disk_write_synced(d, segment, durable_prefix))?
     }
-    disk_write_synced(d, end, boundary)?
+    failure_result_from_rep(manifest.disk_write_synced(d, end, boundary))?
     options.create = false
     let mut reopened = open(tasks, d, c, r, options)?
     let recovered = snapshot(reopened)
@@ -549,10 +549,10 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let listed_entries = result.unwrap(std.dir.list(directory, None))
     let mut original: List[Bytes] = list.with_capacity(list.len(listed_entries))
     for file in listed_entries {
-        list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
+        list.push(mut original, failure_result_from_rep(manifest.disk_read_paged_file(directory, file.name, 4096))?)
     }
     let pack_size = 72u64 + 16 + 8 + 6 + 1024
-    let pack = paged_pack_path(disk_state(db).pages.next_pack)?
+    let pack = failure_result_from_rep(manifest.paged_pack_path(manifest.pack_next(disk_state(db).packs)))?
     let mut timing: Option[CutTiming] = None
     match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, pack_size - 1, mut timing) {
         Error(Full(Allocation(problem))) if problem.requested == pack_size && problem.available == pack_size - 1 => (),
@@ -563,7 +563,7 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         return Error(Foreign)
     }
     for i in 0u64 .. list.len(listed_entries) {
-        if after[i].name != listed_entries[i].name || disk_read_paged_file(directory, after[i].name, 4096)? != original[i] {
+        if after[i].name != listed_entries[i].name || failure_result_from_rep(manifest.disk_read_paged_file(directory, after[i].name, 4096))? != original[i] {
             return Error(Foreign)
         }
     }
@@ -574,7 +574,7 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         seal_page_manifest_file(mut raw, context, fence)
     }, None, options.pack_bytes, pack_size, mut timing)?
     durable(mut db, committed_at)?
-    let written = disk_read_paged_file(directory, pack, pack_size)?
+    let written = failure_result_from_rep(manifest.disk_read_paged_file(directory, pack, pack_size))?
     if list.len(written) != pack_size || format.read_le(written, 72, 2) != 0x0022 {
         return Error(Foreign)
     }
@@ -614,15 +614,15 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     let cut = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, cut))
-    let (_, manifest) = result.unwrap(read_page_manifest_file(d))
-    let checked = result.unwrap(validate_page_manifest(d, db.store, clone(manifest)))
+    let (_, page_record) = result.unwrap(read_page_manifest_file(d))
+    let checked = result.unwrap(validate_page_manifest(d, db.store, clone(page_record)))
     let mut large_pack = false
     for (seq, pack) in checked.inventory {
         if pack.class != 1 {
             continue
         }
-        let path = result.unwrap(paged_pack_path(seq))
-        let bytes_in_pack = result.unwrap(disk_read_paged_file(d, path, 41943040))
+        let path = result.unwrap(failure_result_from_rep(manifest.paged_pack_path(seq)))
+        let bytes_in_pack = result.unwrap(failure_result_from_rep(manifest.disk_read_paged_file(d, path, 41943040)))
         if list.len(bytes_in_pack) == 72 + 36 * (16 + 8 + 1048572) {
             large_pack = true
         }
@@ -669,8 +669,8 @@ fn law_resident_scan(db: Db) -> bool {
     for held in pages.holder_pins(db.holders) {
         list.push(mut roots, pages.share_roots(held.roots))
     }
-    let images = resident_images(roots, Some(disk_state(db).pages.lists))
-    accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(disk_state(db).pages.locations))
+    let images = manifest.resident_images(roots, Some(manifest.pack_lists(disk_state(db).packs)))
+    accounts(db).resident == int.saturating_add(images, manifest.scan_location_storage_charge(manifest.pack_locations(disk_state(db).packs)))
 }
 
 fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
@@ -742,15 +742,15 @@ fn law_resident_name(lead: String, slot: u64) -> String {
 
 // A copied leaf keeps its rows but drops the installed leaf's spare slots.
 fn law_location_cow_charge() -> Result[bool, Error] {
-    let mut installed = new_page_locations()
+    let mut installed = manifest.new_page_locations()
     for stamp in 1u64 .. 3 {
-        add_location(mut installed, std.page.unlocated(stamp), 0, 0, list.new())?
+        failure_result_from_rep(manifest.add_location(mut installed, std.page.unlocated(stamp), 0, 0, list.new()))?
     }
-    let mut candidate = share_page_locations(installed)
-    add_page_source(mut candidate, 1, HolderSource(0, 0, 0))?
-    let before = std.omap.storage_charge(installed.frames.values, bytes[u64], bytes[FrameLocation])
-    let after = std.omap.storage_charge(candidate.frames.values, bytes[u64], bytes[FrameLocation])
-    Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed) && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
+    let mut candidate = manifest.share_page_locations(installed)
+    failure_result_from_rep(manifest.add_page_source(mut candidate, 1, HolderSource(0, 0, 0)))?
+    let before = std.omap.storage_charge(installed.frames.values, bytes[u64], bytes[manifest.FrameLocation])
+    let after = std.omap.storage_charge(candidate.frames.values, bytes[u64], bytes[manifest.FrameLocation])
+    Ok(before > after && manifest.resident_location_charge(installed) == manifest.scan_location_storage_charge(installed) && manifest.resident_location_charge(candidate) == manifest.scan_location_storage_charge(candidate))
 }
 
 // Wrong implementations caught: a record charged twice when a second holder
@@ -770,10 +770,10 @@ pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
     let _ = result.unwrap(checkpoint(mut db))
     let before = accounts(db).resident
-    let installed = share_page_locations(disk_state(db).pages.locations)
+    let installed = manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs))
     let _ = result.unwrap(checkpoint(mut db))
-    let frame_ids = disk_state(db).pages.locations.frames.ids
-    let pack_ids = disk_state(db).pages.locations.packs.ids
+    let frame_ids = manifest.pack_locations(disk_state(db).packs).frames.ids
+    let pack_ids = manifest.pack_locations(disk_state(db).packs).packs.ids
     if before != accounts(db).resident || installed.frames.ids != frame_ids || installed.packs.ids != pack_ids || !law_resident_scan(db) {
         return false
     }
@@ -909,17 +909,17 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
     if scenario == "gap" {
         let loaded = disk_load(d, options.resident_limit)?
         let seq = loaded.manifest.next_pack
-        let first_name = failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?
-        let second_name = failure_result_from_rep(types.capacity(disk_path("p-", seq + 1, "")))?
+        let first_name = failure_result_from_rep(types.capacity(manifest.disk_path("p-", seq, "")))?
+        let second_name = failure_result_from_rep(types.capacity(manifest.disk_path("p-", seq + 1, "")))?
         let first = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: seq), 0, 0)))?
         let second = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(db.store), role: 3, seq: seq + 1), 0, 0)))?
-        disk_write_synced(d, first_name, first)?
-        disk_write_synced(d, second_name, second)?
-        disk_io(host.sync_dir(d))?
+        failure_result_from_rep(manifest.disk_write_synced(d, first_name, first))?
+        failure_result_from_rep(manifest.disk_write_synced(d, second_name, second))?
+        failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
         // Explicit legal post-cleanup gap from H3's partial-persistence model.
         // W2's restart itself still discards all volatile directory operations.
-        let _ = disk_remove_optional(d, first_name)?
-        disk_io(host.sync_dir(d))?
+        let _ = failure_result_from_rep(manifest.disk_remove_optional(d, first_name))?
+        failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
     }
     if scenario == "checkpoint" || scenario == "gap" || scenario == "oversize" {
         // L4 cuts only the checkpoint. Its input commits are durable before

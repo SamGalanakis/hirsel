@@ -1,0 +1,892 @@
+pub fn capture_tail_bases(pins: List[pages.Pin]) -> Result[pages.TailBases, types.Failure] {
+    disk_allocation(scoped fn() -> Result[pages.TailBases, types.Failure] {
+        Ok(pages.tail_bases(pins))
+    })
+}
+
+pub fn resident_images(roots: List[pages.PageRoots], lists: Option[View[PagedLists]]) -> u64 {
+    let mut seen: Map[u64, ()] = map.new()
+    let mut total = 0u64
+    for held in roots {
+        total = int.saturating_add(total, pages.page_image_charge(held.collections.root, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(held.streams.root, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(held.catalog.root, mut seen))
+        for tree in held.keyed {
+            total = int.saturating_add(total, pages.page_image_charge(tree.root, mut seen))
+        }
+    }
+    if let Some(published) = lists {
+        total = int.saturating_add(total, pages.page_image_charge(published.packs, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(published.deferred, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(published.lineage, mut seen))
+    }
+    total
+}
+
+// Checks HEADER of a stream object read from `key`, with the expected role.
+pub fn stream_read_header(key: String, raw: Bytes, sid: types.HostStreamIdRep, role: u8) -> Result[format.StreamObjectHead, types.Failure] {
+    if list.len(raw) < 72 {
+        return Error(format.disk_fault(key, 0, Truncated))
+    }
+    let ctx = format.DiskContext(store: types.StoreKey(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8)), role: raw[28], seq: format.read_le(raw, 56, 8))
+    let header = history_frame(key, ctx, raw, 0, 0x0001)?
+    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || format.read_le(raw, 30, 2) != 0 || format.read_le(raw, 64, 8) != 0 {
+        return Error(format.disk_fault(key, 0, Header))
+    }
+    let disk_version = format.read_le(raw, 24, 4)
+    if disk_version != format.DISK_FORMAT {
+        return Error(Unsupported(disk_version))
+    }
+    if raw[29] != 1 && raw[29] != 2 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    if ctx.role != role || !types.same(ctx.store.hi, ctx.store.lo, sid.hi, sid.lo) {
+        return Error(format.disk_fault(key, 0, Header))
+    }
+    Ok(format.StreamObjectHead(ctx, inc: format.read_le(raw, 48, 8), authority_kind: raw[29]))
+}
+
+// Decodes `reg`. `seen_rev` is the highest rev this reader has seen: a lower
+// one is an old body seen again (§12.11.3 rule 1).
+pub fn stream_register_decode(raw: Bytes, sid: types.HostStreamIdRep, seen_rev: u64) -> Result[format.StreamRegister, types.Failure] {
+    let head = stream_read_header("reg", raw, sid, format.ROLE_REGISTER)?
+    if head.ctx.seq != 0 {
+        return Error(format.disk_fault("reg", 0, Header))
+    }
+    let frame = history_frame("reg", head.ctx, raw, 72, 0x0103)?
+    if frame.end != list.len(raw) {
+        return Error(format.disk_fault("reg", frame.end, Malformed))
+    }
+    let p = list.slice(raw, frame.payload, frame.end)
+    let size = list.len(p)
+    if size < format.REG_FIXED_BYTES || (size - format.REG_FIXED_BYTES) % format.REG_ROW_BYTES != 0 {
+        return Error(format.disk_fault("reg", 72, Malformed))
+    }
+    let n = format.read_le(p, 106, 4)
+    if format.REG_FIXED_BYTES + format.REG_ROW_BYTES * n != size || p[48] > 1 || p[65] > 1 {
+        return Error(format.disk_fault("reg", 72, Malformed))
+    }
+    let rev = format.read_le(p, 0, 8)
+    let reg_sid = types.HostStreamIdRep(hi: format.read_le(p, 8, 8), lo: format.read_le(p, 16, 8))
+    let inc = format.read_le(p, 24, 8)
+    if !format.stream_same(reg_sid, sid) || inc != head.inc || rev == 0 {
+        return Error(format.disk_fault("reg", 72, Malformed))
+    }
+    if rev < seen_rev {
+        return Error(format.disk_fault("reg", 0, Regressed))
+    }
+    let reg_index = if p[65] == 1 {
+        Some(format.RegIndex(k: format.read_le(p, 66, 8), len: format.read_le(p, 74, 8), digest: format.read_le(p, 82, 8), covers_inc: format.read_le(p, 90, 8), covers_seq: format.read_le(p, 98, 8)))
+    } else {
+        for i in 66u64 .. 106 {
+            if p[i] != 0 {
+                return Error(format.disk_fault("reg", 72, Malformed))
+            }
+        }
+        None
+    }
+    let mut rows: List[format.RegRow] = types.capacity(bound bytes (64 * n + 64) {
+        list.with_capacity(n)
+    })?
+    let mut cursor = format.REG_FIXED_BYTES
+    for _ in 0u64 .. n {
+        let state = p[cursor + 48]
+        if state > 1 {
+            return Error(format.disk_fault("reg", 72, Malformed))
+        }
+        list.push(mut rows, format.RegRow(store: types.StoreKey(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8)), epoch: format.read_le(p, cursor + 16, 8), token: types.StoreKey(hi: format.read_le(p, cursor + 24, 8), lo: format.read_le(p, cursor + 32, 8)), rev_hold: format.read_le(p, cursor + 40, 8), abandoned: state == 1))
+        cursor += format.REG_ROW_BYTES
+    }
+    Ok(format.StreamRegister(rev, sid: reg_sid, inc, holder: types.StoreKey(hi: format.read_le(p, 32, 8), lo: format.read_le(p, 40, 8)), collecting: p[48] == 1, low_inc: format.read_le(p, 49, 8), low_seq: format.read_le(p, 57, 8), index: reg_index, rows: take rows))
+}
+
+// Decodes what a batch key holds from its first bytes: INDEX (which needs
+// `byte_len` bytes; a shorter `raw` returns `Rows` with no rows read and the
+// caller reads up to `byte_len`) or TERM.
+pub fn stream_batch_head(key: String, raw: Bytes, sid: types.HostStreamIdRep, inc: u64, seq: u64) -> Result[format.BatchBody, types.Failure] {
+    let head = stream_read_header(key, raw, sid, format.ROLE_BATCH)?
+    if head.inc != inc || head.ctx.seq != seq {
+        return Error(format.disk_fault(key, 0, Header))
+    }
+    if list.len(raw) < 88 {
+        return Error(format.disk_fault(key, 72, Truncated))
+    }
+    let kind = format.read_le(raw, 72, 2)
+    if kind == 0x0102 {
+        let frame = history_frame(key, head.ctx, raw, 72, 0x0102)?
+        let p = list.slice(raw, frame.payload, frame.end)
+        if frame.end != list.len(raw) || list.len(p) != format.STREAM_TERM_BYTES || format.read_le(p, 0, 8) != sid.hi || format.read_le(p, 8, 8) != sid.lo || format.read_le(p, 16, 8) != inc || format.read_le(p, 24, 8) != seq {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        return Ok(Term(inc, seq))
+    }
+    if kind != 0x0101 {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    if list.len(raw) < format.STREAM_INDEX_PREFIX {
+        return Error(format.disk_fault(key, 72, Truncated))
+    }
+    let byte_len = format.read_le(raw, 88, 4)
+    let n = format.read_le(raw, 100, 4)
+    if byte_len != format.STREAM_INDEX_PREFIX + format.STREAM_INDEX_ROW_BYTES * n || n > format.STREAM_MAX_SLOTS {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    if list.len(raw) < byte_len {
+        return Ok(Rows(format.BatchIndex(byte_len, seen_rev: format.read_le(raw, 92, 8), rows: list.new())))
+    }
+    let frame = history_frame(key, head.ctx, list.slice(raw, 0, byte_len), 72, 0x0101)?
+    let p = list.slice(raw, frame.payload, frame.end)
+    let mut rows: List[format.BatchRow] = types.capacity(bound bytes (88 * n + 64) {
+        list.with_capacity(n)
+    })?
+    let mut cursor = 16u64
+    let mut slice_at = byte_len
+    for i in 0u64 .. n {
+        let store = types.StoreKey(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
+        let offset = format.read_le(p, cursor + 24, 4)
+        let len = format.read_le(p, cursor + 28, 4)
+        if offset != slice_at || (i > 0 && !format.stream_store_below(rows[i - 1].store, store)) {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        let mut digest: Inline[u8, 32] =[0; 32]
+        for j in 0u64 .. 32 {
+            digest[j] = p[cursor + 36 + j]
+        }
+        list.push(mut rows, format.BatchRow(store: store, epoch: format.read_le(p, cursor + 16, 8), offset, len, frames: format.read_le(p, cursor + 32, 4), digest))
+        slice_at = offset + len
+        cursor += format.STREAM_INDEX_ROW_BYTES
+    }
+    Ok(Rows(format.BatchIndex(byte_len, seen_rev: format.read_le(p, 4, 8), rows: take rows)))
+}
+
+// A full read checks FOOTER's body digest over HEADER through the last slice.
+pub fn stream_batch_check(key: String, raw: Bytes, sid: types.HostStreamIdRep, inc: u64, seq: u64) -> Result[format.BatchIndex, types.Failure] {
+    let Rows(take found) = stream_batch_head(key, raw, sid, inc, seq)? else {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    let mut body_end = found.byte_len
+    for i in 0u64 .. list.len(found.rows) {
+        body_end = found.rows[i].offset + found.rows[i].len
+    }
+    if list.len(raw) < body_end + 16 + format.STREAM_FOOTER_BYTES {
+        return Error(format.disk_fault(key, body_end, Truncated))
+    }
+    let ctx = format.DiskContext(store: format.stream_identity(sid), role: format.ROLE_BATCH, seq)
+    let frame = history_frame(key, ctx, raw, body_end, 0x0105)?
+    if frame.end != list.len(raw) || frame.end - frame.payload != format.STREAM_FOOTER_BYTES {
+        return Error(format.disk_fault(key, body_end, Malformed))
+    }
+    let body = std.sha256.hash(list.slice(raw, 0, body_end))
+    for j in 0u64 .. 32 {
+        if body[j] != raw[frame.payload + j] {
+            return Error(format.disk_fault(key, body_end, Checksum))
+        }
+    }
+    Ok(take found)
+}
+
+// `raw` may hold several frames. The offset in the authenticity check
+// remains absolute within the pack even when a range starts there.
+pub fn read_tiered_frame(path: String, id: types.StoreKey, target: format.TieredTarget, raw: Bytes, start: u64, next_stamp: u64) -> Result[Arc[format.TieredFrame], types.Failure] {
+    let expected = format.tiered_frame_id(target)
+    let offset = expected.offset
+    if offset < 72 || start > offset || offset - start > list.len(raw) || list.len(raw) - (offset - start) < 16 {
+        return Error(format.disk_fault(path, offset, Dangling(expected.stamp)))
+    }
+    let at = offset - start
+    let head = list.slice(raw, at, at + 16)
+    let kind: u16 = list.word_le(head, 0)
+    let flags: u16 = list.word_le(head, 2)
+    let size = format.read_le(head, 4, 4)
+    let Some(maximum) = disk_kind_limit(expected.kind) else {
+        fail("store: unknown Tiered frame kind")
+    }
+    let minimum = if expected.kind == 0x0021 {
+        24u64
+    } else {
+        8u64
+    }
+    if kind != expected.kind || size != expected.len || size < minimum || size > maximum || size > list.len(raw) - at - 16 {
+        return Error(format.disk_fault(path, offset, Checksum))
+    }
+    if flags & 65534 != 0 {
+        return Error(format.disk_fault(path, offset, Flags))
+    }
+    let body_start = at + 16
+    let body_end = body_start + size
+    let body_bytes = list.slice(raw, body_start, body_end)
+    let context = format.DiskContext(store: id, role: 3, seq: expected.pack)
+    let bound_check: u64 = list.word_le(head, 8)
+    if types.capacity(format.disk_check(context, offset, head, body_bytes))? != bound_check {
+        return Error(format.disk_fault(path, offset, Checksum))
+    }
+    let stamp_at = if kind == 0x0021 {
+        8u64
+    } else {
+        0u64
+    }
+    let stamp: u64 = list.word_le(body_bytes, stamp_at)
+    let value_start = if kind == 0x0021 {
+        0u64
+    } else {
+        8u64
+    }
+    let digest = std.check.xxh3(body_bytes, value_start, size)
+    let found = format.TieredFrameId(pack: expected.pack, offset: offset, kind: kind, len: size, checksum: digest, stamp: stamp)
+    format.verify_tiered_edge(path, target, found)?
+    if stamp == 0 || stamp >= next_stamp {
+        return Error(format.disk_fault(path, offset, Malformed))
+    }
+    let payload: format.TieredPayload = match target {
+        TieredPage(ptr) => {
+            let image = decode_located_page(path, offset, types.copied(body_bytes)?, Collection)?
+            for slot in 0u64 .. std.page.count(image) {
+                if let Some(PageEdge(child_ptr)) = std.page.owning_edge(image, slot) {
+                    format.page_edge_order(path, ptr, child_ptr)?
+                }
+            }
+            TieredImage(std.page.attach_cold(take image) ?=> |_| format.disk_fault(path, offset, Malformed))
+        },
+        TieredBlob(_) => TieredValue(arc.new(types.copied(list.slice(body_bytes, 8, size))?)),
+    }
+    Ok(arc.new(format.TieredFrame(identity: found, payload: take payload)))
+}
+
+pub fn branch_root_bytes(name: String, roots: pages.Roots) -> u64 {
+    pages.branch_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
+}
+
+pub fn pin_root_bytes(name: String, roots: pages.Roots) -> u64 {
+    pages.pin_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
+}
+
+pub fn disk_kind_limit(kind: u16) -> Option[u64] {
+    match kind {
+        0x0001 => Some(56),
+        0x0011 => Some(16777280),
+        0x0012 => Some(8),
+        0x0013 => Some(281),
+        0x0021 => Some(8384),
+        0x0022 => Some(16711688),
+        0x0023 => Some(format.PACK_INDEX_LIMIT),
+        0x0031 => Some(MANIFEST_LIMIT),
+        0x0040 => Some(format.CLAIM_BYTES),
+        0x0070 => Some(4),
+        0x0080 => Some(128),
+        0x0081 => Some(1048832),
+        0x0082 => Some(2097480),
+        0x0083 => Some(20),
+        0x0084 => Some(16715784),
+        0x0085 => Some(16715784),
+        0x0086 => Some(1048832),
+        0x0087 => Some(16715784),
+        0x0088 => Some(1048832),
+        0x0089 => Some(16715784),
+        0x008B => Some(1048832),
+        _ => history_kind_limit(kind)
+    }
+}
+
+pub fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[format.DiskFrameHead, types.Failure] {
+    let kind: u16 = list.word_le(raw, 0)
+    let flags: u16 = list.word_le(raw, 2)
+    let size = format.read_le(raw, 4, 4)
+    if kind == 0 {
+        return Error(format.disk_fault(file, at, Kind(0)))
+    }
+    if flags & 65534 != 0 {
+        return Error(format.disk_fault(file, at, Flags))
+    }
+    match disk_kind_limit(kind) {
+        Some(limit) => if size > limit {
+            return Error(format.disk_fault(file, at, Malformed))
+        },
+        None => if flags & 1 == 0 && size > 65536 {
+            return Error(format.disk_fault(file, at, Malformed))
+        }
+    }
+    Ok(format.DiskFrameHead(kind: kind, flags: flags, size: size, checksum: list.word_le(raw, 8)))
+}
+
+pub fn disk_check_frame_kind(file: String, ctx: format.DiskContext, kind: u16, flags: u16, at: u64) -> Result[(), types.Failure] {
+    if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (((kind >= 0x0081 && kind <= 0x0085) || kind == 0x008B) && ctx.role != 6) {
+        return Error(format.disk_fault(file, at, Malformed))
+    }
+    if let None = disk_kind_limit(kind) {
+        if flags & 1 != 0 {
+            return Error(Unsupported(int.widen(kind)))
+        }
+    }
+    if kind == 0x0001 && at != 0 {
+        return Error(format.disk_fault(file, at, Header))
+    }
+    if kind == 0x00E0 || (kind >= 0x0100 && kind <= 0x0105) || ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind >= 0x0021 && kind <= 0x0023) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
+        return Error(format.disk_fault(file, at, Kind(int.widen(kind))))
+    }
+    if (kind == 0x0013 || kind == 0x0023) && flags != 1 {
+        return Error(format.disk_fault(file, at, Flags))
+    }
+    Ok(())
+}
+
+pub fn disk_read_frame(file: String, ctx: format.DiskContext, raw: Bytes, at: u64) -> Result[format.DiskFrame, types.Failure] {
+    let frame = disk_frame_bytes(file, ctx, raw, at)?
+    disk_check_frame_kind(file, ctx, frame.kind, frame.flags, at)?
+    Ok(frame)
+}
+
+pub fn disk_frame_bytes(file: String, ctx: format.DiskContext, raw: Bytes, at: u64) -> Result[format.DiskFrame, types.Failure] {
+    if at > list.len(raw) || list.len(raw) - at < 16 {
+        return Error(format.disk_fault(file, at, Truncated))
+    }
+    let head = list.slice(raw, at, at + 16)
+    let frame = disk_read_frame_head(file, head, at)?
+    if frame.size > list.len(raw) - at - 16 {
+        return Error(format.disk_fault(file, at, Truncated))
+    }
+    let end = at + 16 + frame.size
+    let payload = list.slice(raw, at + 16, end)
+    let check = types.capacity(format.disk_check(ctx, at, head, payload))?
+    if check != frame.checksum {
+        return Error(format.disk_fault(file, at, Checksum))
+    }
+    Ok(format.DiskFrame(kind: frame.kind, flags: frame.flags, payload: at + 16, end: end))
+}
+
+pub fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expected_id: Option[types.StoreKey]) -> Result[format.DiskHeader, types.Failure] {
+    if list.len(raw) < 72 {
+        return Error(format.disk_fault(file, 0, Truncated))
+    }
+    let ctx = format.DiskContext(store: types.StoreKey(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8)), role: role, seq: format.read_le(raw, 56, 8))
+    let frame = disk_read_frame(file, ctx, raw, 0)?
+    if frame.kind != 1 || frame.end != 72 {
+        return Error(format.disk_fault(file, 0, Header))
+    }
+    let magic = list.slice(raw, 16, 24)
+    if magic != string.as_bytes("HIRSTORE") || raw[28] != role || format.read_le(raw, 30, 2) != 0 {
+        return Error(format.disk_fault(file, 0, Header))
+    }
+    let disk_version = format.read_le(raw, 24, 4)
+    if disk_version != format.DISK_FORMAT {
+        return Error(Unsupported(disk_version))
+    }
+    if raw[29] != 0 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    let epoch = format.read_le(raw, 48, 8)
+    if epoch != 0 {
+        return Error(Unsupported(epoch))
+    }
+    if let Some(expected) = seq {
+        if expected != ctx.seq {
+            return Error(format.disk_fault(file, 0, Header))
+        }
+    }
+    if let Some(expected) = expected_id {
+        if !types.same(expected.hi, expected.lo, ctx.store.hi, ctx.store.lo) {
+            return Error(format.disk_fault(file, 0, Header))
+        }
+    }
+    let previous = format.read_le(raw, 64, 8)
+    if role != 2 && previous != 0 {
+        return Error(format.disk_fault(file, 0, Header))
+    }
+    Ok(format.DiskHeader(context: ctx, prev_end: previous))
+}
+
+pub fn disk_io[T](take r: Result[T, IoError]) -> Result[T, types.Failure] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(Io(e))
+    }
+}
+
+pub fn disk_path(lead: String, seq: u64, suffix: String) -> Result[String, Capacity] {
+    let mut path = string.from(lead)
+    string.push_u64(mut path, seq)
+    string.push(mut path, suffix)
+    Ok(take path)
+}
+
+pub fn disk_write_synced(d: Dir, path: String, raw: Bytes) -> Result[(), types.Failure] waits {
+    let mut file = disk_io(host.open(d, path, Write))?
+    match host.write(mut file, raw) {
+        Ok(()) => {},
+        Error(e) => return Error(Io(e.error))
+    }
+    disk_io(host.sync(mut file))?
+    disk_io(host.close(take file))
+}
+
+pub fn disk_remove_optional(d: Dir, path: String) -> Result[bool, types.Failure] waits {
+    match host.remove(d, path) {
+        Ok(()) => Ok(true),
+        Error(NotFound) => Ok(false),
+        Error(e) => Error(Io(e))
+    }
+}
+
+// Checkpoint graph: new nodes contribute their child edges once; root edges
+// change at the cut. Removing a last edge cascades without walking live subtrees.
+pub type DiskLoaded: send {
+    store: types.StoreKey,
+    manifest: PageManifest,
+    all: List[pages.Roots],
+    lists: PagedLists,
+    locations: PageLocations
+}
+
+pub fn disk_publish_manifest(d: Dir, id: types.StoreKey, m: PageManifest) -> Result[(), types.Failure] waits {
+    let raw = disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        disk_page_manifest_bytes(id, m)
+    })?
+    disk_write_synced(d, "MANIFEST.tmp", raw)?
+    disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
+    disk_io(host.sync_dir(d))
+}
+
+pub fn pack_leased(lease: Option[Arc[ExportLease]], seq: u64) -> bool {
+    if let Some(kept) = lease {
+        for pack in kept.packs {
+            if pack == seq {
+                return true
+            }
+        }
+    }
+    false
+}
+
+pub fn remove_numbered(d: Dir, prefix_name: String, seq: u64, both: bool, mut name: String) -> Result[(), types.Failure] waits {
+    string.truncate(mut name, 0)
+    string.push(mut name, prefix_name)
+    string.push_u64(mut name, seq)
+    let _ = disk_remove_optional(d, name)?
+    if both {
+        string.push(mut name, ".end")
+        let _ = disk_remove_optional(d, name)?
+    }
+    Ok(())
+}
+
+pub opaque type PackDiskState: send {
+    next_pack: u64,
+    locations: PageLocations,
+    lists: PagedLists,
+    owners: Map[IncomingEdge, u64],
+    carried: List[u64],
+    deferred: Option[u64],
+    forked: List[LineageFork],
+    scrubs: List[Arc[ScrubLease]]
+}
+
+pub fn genesis_pack_disk() -> PackDiskState {
+    PackDiskState(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), scrubs: list.new())
+}
+
+pub fn recovered_pack_disk(m: PageManifest, take locations: PageLocations, take lists: PagedLists, take owners: Map[IncomingEdge, u64], take forked: List[LineageFork]) -> PackDiskState {
+    PackDiskState(next_pack: m.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, scrubs: list.new())
+}
+
+pub fn retired_pack_disk(layout: PagedCutLayout, holders: List[HeldPage], take locations: PageLocations, take carried: List[u64], deferred: Option[u64]) -> PackDiskState {
+    let mut owners: Map[IncomingEdge, u64] = map.new()
+    for held in holders {
+        let stamp = std.page.stamp(std.page.image_of(held.root))
+        if stamp != 0 {
+            map.insert(mut owners, held.source, stamp)
+        }
+    }
+    let installed_lists: PagedLists = clone(layout.lists.roots)
+    PackDiskState(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new(), scrubs: list.new())
+}
+
+pub fn install_pack_cut(mut previous: PackDiskState, take candidate: PackDiskState) {
+    let mut installing = take candidate
+    installing.scrubs = replace(mut previous.scrubs, list.new())
+    previous = take installing
+}
+
+pub fn pack_next(state: PackDiskState) -> u64 {
+    state.next_pack
+}
+
+pub fn pack_deferred(state: PackDiskState) -> Option[u64] {
+    state.deferred
+}
+
+pub fn set_pack_forks(mut state: PackDiskState, take forked: List[LineageFork]) {
+    state.forked = take forked
+}
+
+pub fn append_pack_fork(mut state: PackDiskState, fork_row: LineageFork) -> Result[(), types.Failure] {
+    types.capacity(list.try_reserve(mut state.forked, 1))?
+    list.push(mut state.forked, fork_row)
+    Ok(())
+}
+
+pub fn add_pack_scrub(mut state: PackDiskState, take lease: Arc[ScrubLease]) -> Result[(), types.Failure] {
+    types.capacity(list.try_reserve(mut state.scrubs, 1))?
+    list.push(mut state.scrubs, take lease)
+    Ok(())
+}
+
+pub fn prune_pack_scrubs(mut state: PackDiskState) {
+    prune_scrubs(mut state.scrubs)
+}
+
+pub fn pack_locations(state: PackDiskState) -> View[PageLocations] in state {
+    view state.locations
+}
+
+pub fn pack_lists(state: PackDiskState) -> View[PagedLists] in state {
+    view state.lists
+}
+
+pub fn pack_owners(state: PackDiskState) -> View[Map[IncomingEdge, u64]] in state {
+    view state.owners
+}
+
+pub fn pack_carried(state: PackDiskState) -> View[List[u64]] in state {
+    view state.carried
+}
+
+pub fn pack_forked(state: PackDiskState) -> View[List[LineageFork]] in state {
+    view state.forked
+}
+
+pub fn pack_scrubs(state: PackDiskState) -> View[List[Arc[ScrubLease]]] in state {
+    view state.scrubs
+}
+
+fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, roots: pages.LocatedRoots) {
+    if roots.collections.stamp != 0 {
+        map.insert(mut owners, HolderSource(kind, owner, 0), roots.collections.stamp)
+    }
+    if roots.streams.stamp != 0 {
+        map.insert(mut owners, HolderSource(kind, owner, 1), roots.streams.stamp)
+    }
+    if roots.catalog.stamp != 0 {
+        map.insert(mut owners, HolderSource(kind, owner, 2), roots.catalog.stamp)
+    }
+    for slot in 0u64 .. list.len(roots.keyed) {
+        let stamp = roots.keyed[slot].stamp
+        if stamp != 0 {
+            map.insert(mut owners, HolderSource(kind, owner, int.narrow(3 + slot)), stamp)
+        }
+    }
+}
+
+pub fn located_owners(manifest: PageManifest) -> Map[IncomingEdge, u64] {
+    let mut owners: Map[IncomingEdge, u64] = map.new()
+    for tip in manifest.branches {
+        remember_roots(mut owners, 0, int.widen(tip.id), tip.roots)
+    }
+    for serial in 0u64 .. list.len(manifest.pins) {
+        remember_roots(mut owners, 1, serial, manifest.pins[serial].roots)
+    }
+    take owners
+}
+
+// The branches and then the pins, in the manifest's order, which is `all`'s.
+pub fn manifest_state(m: PageManifest, all: List[pages.Roots]) -> Result[pages.State, Capacity] {
+    let mut tips: List[pages.Tip] = list.with_capacity(list.len(m.branches))
+    let mut k = 0u64
+    for b in m.branches {
+        list.push(mut tips, pages.Tip(id: b.id, name: string.from(b.name), parent: b.parent, forked_at: b.forked_at, roots: pages.share_roots(all[k]), head: b.version, at: b.at))
+        k += 1
+    }
+    let mut pins: List[pages.Pin] = list.with_capacity(list.len(m.pins))
+    for held in m.pins {
+        let serial = list.len(pins)
+        list.push(mut pins, pages.Pin(owner: held.owner, name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: pages.share_roots(all[k]), watermark: held.watermark))
+        k += 1
+    }
+    Ok(pages.State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
+}
+
+pub fn check_expected_store(expected: Option[types.StoreKey], found: types.StoreKey) -> Result[(), types.Failure] {
+    if let Some(wanted) = expected {
+        if !types.same(wanted.hi, wanted.lo, found.hi, found.lo) {
+            return Error(Foreign)
+        }
+    }
+    Ok(())
+}
+
+pub fn journal_prefix(mut input: format.JournalInput, path: String, offset: u64, width: u64) -> Result[Bytes, types.Failure] waits {
+    if offset > format.journal_input_size(input) || width > format.journal_input_size(input) - offset {
+        return Error(format.disk_fault(path, offset, Truncated))
+    }
+    let mut spent = 0u64
+    journal_read_prefix(mut input, path, offset, width, mut spent)
+}
+
+fn journal_read_prefix(mut input: format.JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, types.Failure] waits {
+    let mut raw = disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        Ok(list.with_capacity(width))
+    })?
+    while list.len(raw) < width {
+        let start = journal_chunk(mut input, path, offset + list.len(raw))?
+        let part = order.min(width - list.len(raw), list.len(format.journal_input_chunk(input)) - start)
+        list.append(mut raw, list.slice(format.journal_input_chunk(input), start, start + part))
+        spent = int.saturating_add(spent, part)
+    }
+    Ok(take raw)
+}
+
+pub fn journal_read_frame(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64) -> Result[format.JournalFrame, types.Failure] waits {
+    let head = journal_prefix(mut input, path, offset, 16)?
+    let frame = disk_read_frame_head(path, head, offset)?
+    let keep = format.journal_event_kind(frame.kind)
+    let payload = disk_stream_payload(mut input, path, context, offset, head, frame, if keep {
+        frame.size
+    } else {
+        0
+    })?
+    disk_check_frame_kind(path, context, frame.kind, frame.flags, offset)?
+    let event_payload: Option[Bytes] = if keep {
+        Some(take payload)
+    } else {
+        None
+    }
+    Ok(format.JournalFrame(end: offset + 16 + frame.size, kind: frame.kind, payload: take event_payload))
+}
+
+fn disk_stream_payload(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64, head: Bytes, frame: format.DiskFrameHead, keep: u64) -> Result[Bytes, types.Failure] waits {
+    let mut spent = 0u64
+    disk_stream_payload_counted(mut input, path, context, offset, head, frame, keep, mut spent)
+}
+
+fn disk_stream_payload_counted(mut input: format.JournalInput, path: String, context: format.DiskContext, offset: u64, head: Bytes, frame: format.DiskFrameHead, keep: u64, mut spent: u64) -> Result[Bytes, types.Failure] waits {
+    if frame.size > format.journal_input_size(input) - offset - 16 {
+        return Error(format.disk_fault(path, offset, Truncated))
+    }
+    let mut check = disk_allocation(scoped fn() -> Result[std.check.Xxh3, types.Failure] {
+        types.capacity(format.disk_check_start(context, offset, head))
+    })?
+    let mut payload = disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        Ok(list.with_capacity(keep))
+    })?
+    let end = offset + 16 + frame.size
+    let mut at = offset + 16
+    while at < end {
+        let start = journal_chunk(mut input, path, at)?
+        let part = order.min(end - at, list.len(format.journal_input_chunk(input)) - start)
+        std.check.add(mut check, format.journal_input_chunk(input), start, start + part)
+        if list.len(payload) < keep {
+            let capture = order.min(part, keep - list.len(payload))
+            list.append(mut payload, list.slice(format.journal_input_chunk(input), start, start + capture))
+        }
+        at += part
+        spent = int.saturating_add(spent, part)
+    }
+    if std.check.finish(check) != frame.checksum {
+        return Error(format.disk_fault(path, offset, Checksum))
+    }
+    Ok(take payload)
+}
+
+// R1: a refused admission inside a body raises Capacity. The store reports it
+// as the refusal it is (`Refused`), not as a fault, so it is never recorded.
+pub fn raised_capacity(causes: Causes) -> Option[Capacity] {
+    for cause in causes {
+        return match cause.kind {
+            Capacity(c) => Some(c),
+            _ => None,
+        }
+    }
+    None
+}
+
+fn journal_chunk(mut input: format.JournalInput, path: String, offset: u64) -> Result[u64, types.Failure] waits {
+    format.refill_journal_chunk(mut input, path, offset)
+}
+
+pub fn journal_wait_shared(mut file: HostFile, c: Clock) -> Result[(), types.Failure] waits {
+    while !disk_io(host.try_lock_shared(mut file))? {
+        std.clock.sleep_ns(c, 1000000)
+    }
+    Ok(())
+}
+
+pub type ReplacedFrame: key {
+    pack: u64,
+    len: u32,
+    stamp: u64
+}
+
+pub fn replaced_page(ptr: std.page.PagePtr) -> ReplacedFrame {
+    ReplacedFrame(pack: ptr.pack, len: ptr.len, stamp: ptr.stamp)
+}
+
+pub fn replaced_blob(reference: std.page.BlobRef) -> ReplacedFrame {
+    ReplacedFrame(pack: reference.pack, len: int.truncate(8 + reference.len), stamp: reference.stamp)
+}
+
+pub fn fold_page(frame: format.TieredFrame) -> View[Arc[std.page.Page]] in frame {
+    let TieredImage(page) = view frame.payload else {
+        fail("store: expected a PAGE on the fold's path")
+    }
+    page
+}
+
+pub fn tiered_leased(held: List[Arc[pages.TieredReadInventory]], seq: u64) -> bool {
+    for inventory in held {
+        if let Some(_) = std.omap.get(inventory.packs, seq) {
+            return true
+        }
+    }
+    false
+}
+
+pub const ORIGIN_PAYLOAD_BYTES: u64 = 49
+
+pub fn history_frame(path: String, ctx: format.DiskContext, raw: Bytes, at: u64, kind: u16) -> Result[format.DiskFrame, types.Failure] {
+    let frame = disk_frame_bytes(path, ctx, raw, at)?
+    if frame.kind != kind {
+        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
+            return Error(Unsupported(int.widen(frame.kind)))
+        }
+        return Error(format.disk_fault(path, at, Malformed))
+    }
+    if frame.flags != 1 {
+        return Error(format.disk_fault(path, at, Flags))
+    }
+    Ok(frame)
+}
+
+// The objects@1 head's own frame kinds (ORIGIN), then the host stream's.
+fn history_kind_limit(kind: u16) -> Option[u64] {
+    if kind == 0x00E0 {
+        return Some(ORIGIN_PAYLOAD_BYTES)
+    }
+    format.stream_kind_limit(kind)
+}
+
+pub fn stream_xindex_decode(key: String, raw: Bytes, sid: types.HostStreamIdRep, meta: format.RegIndex) -> Result[format.XIndex, types.Failure] {
+    if list.len(raw) != meta.len {
+        return Error(format.disk_fault(key, 0, Truncated))
+    }
+    if std.check.xxh3(raw, 0, list.len(raw)) != meta.digest {
+        return Error(format.disk_fault(key, 0, Checksum))
+    }
+    let head = stream_read_header(key, raw, sid, format.ROLE_XINDEX)?
+    if head.ctx.seq != meta.k {
+        return Error(format.disk_fault(key, 0, Header))
+    }
+    let frame = history_frame(key, head.ctx, raw, 72, 0x0104)?
+    if frame.end != list.len(raw) {
+        return Error(format.disk_fault(key, frame.end, Malformed))
+    }
+    let p = list.slice(raw, frame.payload, frame.end)
+    let size = list.len(p)
+    if size < 40 {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    let low_inc = format.read_le(p, 0, 8)
+    let low_seq = format.read_le(p, 8, 8)
+    let covers_inc = format.read_le(p, 16, 8)
+    let covers_seq = format.read_le(p, 24, 8)
+    if covers_inc != meta.covers_inc || covers_seq != meta.covers_seq {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    let entry_count = format.read_le(p, 32, 4)
+    let mut cursor = 36u64
+    let mut x_entries: List[format.XIndexEntry] = list.new()
+    types.capacity(list.try_reserve(mut x_entries, entry_count))?
+    for _ in 0u64 .. entry_count {
+        if size - cursor < 28 {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        let store = types.StoreKey(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
+        let epoch = format.read_le(p, cursor + 16, 8)
+        let bc = format.read_le(p, cursor + 24, 4)
+        cursor += 28
+        if size - cursor < 16 * bc {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        let mut batches: List[(u64, u64)] = list.new()
+        types.capacity(list.try_reserve(mut batches, bc))?
+        for _ in 0u64 .. bc {
+            let bi = format.read_le(p, cursor, 8)
+            let bs = format.read_le(p, cursor + 8, 8)
+            cursor += 16
+            list.push(mut batches, (bi, bs))
+        }
+        list.push(mut x_entries, format.XIndexEntry(store: store, epoch, batches: take batches))
+    }
+    if size - cursor < 4 {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    let pin_count = format.read_le(p, cursor, 4)
+    cursor += 4
+    let mut pins: List[format.StreamPin] = list.new()
+    types.capacity(list.try_reserve(mut pins, pin_count))?
+    for _ in 0u64 .. pin_count {
+        if size - cursor < 36 {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        let store = types.StoreKey(hi: format.read_le(p, cursor, 8), lo: format.read_le(p, cursor + 8, 8))
+        let pin_inc = format.read_le(p, cursor + 16, 8)
+        let pin_seq = format.read_le(p, cursor + 24, 8)
+        let plen = format.read_le(p, cursor + 32, 4)
+        cursor += 36
+        if size - cursor < plen {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        let pfx_bytes = types.copied(list.slice(p, cursor, cursor + plen))?
+        let Ok(take pfx) = string.from_utf8(take pfx_bytes) else {
+            return Error(format.disk_fault(key, 72, Malformed))
+        }
+        cursor += plen
+        list.push(mut pins, format.StreamPin(store: store, pin_inc, pin_seq, prefix: take pfx, first_pinned_ns: 0))
+    }
+    if cursor != size {
+        return Error(format.disk_fault(key, 72, Malformed))
+    }
+    Ok(format.XIndex(k: meta.k, low_inc, low_seq, covers_inc, covers_seq, entries: take x_entries, pins: take pins))
+}
+
+pub type ExportLease: shareable + send {
+    attempt: Bytes,
+    packs: List[u64],
+    // M2 needs the exported rows even when OLD has advanced.
+    collections: pages.PageTree,
+    first: u64,
+    terminal: u64,
+    end: u64,
+    head: u64,
+    next_table: u32,
+    activation: u64
+}
+
+pub type TargetLimits {
+    resident: u64,
+    pack: u64,
+    checkpoint: u64,
+    journal: u64,
+    frame: u64,
+    tiered_reserve: u64,
+    has_tiered: bool
+}
+
+pub fn pin_owner_tag(owner: pages.PinOwner) -> u64 {
+    match owner {
+        ApplicationPin => 1,
+        ProjectorPin => 2,
+        ImportPin => 3,
+    }
+}
+
+pub fn pin_order(a: String, a_owner: pages.PinOwner, b: String, b_owner: pages.PinOwner) -> Order {
+    let names = order.compare(a, b)
+    if names == Equal {
+        order.compare(pin_owner_tag(a_owner), pin_owner_tag(b_owner))
+    } else {
+        names
+    }
+}
+
+pub type BranchReplacements: send {
+    branch: u32,
+    frames: List[ReplacedFrame]
+}

@@ -100,7 +100,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
     let mut next_id = pages.holder_next_node(db.holders)
     let staged: Stage[Bytes, ServeReply] = match take caught {
         Error(problem) => Over(Refused(Allocation(problem))),
-        Ok(Error(take causes)) => match raised_capacity(causes) {
+        Ok(Error(take causes)) => match manifest.raised_capacity(causes) {
             Some(problem) => Over(Refused(Allocation(problem))),
             None => Over(Failed(Raised(take causes))),
         },
@@ -148,18 +148,6 @@ fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: 
         Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
         Ok(take drafted) => Ok(take drafted),
     }
-}
-
-// R1: a refused admission inside a body raises Capacity. The store reports it
-// as the refusal it is (`Refused`), not as a fault, so it is never recorded.
-fn raised_capacity(causes: Causes) -> Option[Capacity] {
-    for cause in causes {
-        return match cause.kind {
-            Capacity(c) => Some(c),
-            _ => None,
-        }
-    }
-    None
 }
 
 fn stopped_pending(take pending_run: Pending, take stop: Stop) -> Served {
@@ -274,7 +262,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     let seen = log.finish(take reads)
     match take caught {
         Error(c) => Refused(Allocation(c), take seen),
-        Ok(Error(take cs)) => match raised_capacity(cs) {
+        Ok(Error(take cs)) => match manifest.raised_capacity(cs) {
             Some(c) => Refused(Allocation(c), take seen),
             None => Failed(take cs, take seen),
         },

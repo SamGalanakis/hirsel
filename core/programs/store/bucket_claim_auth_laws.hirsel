@@ -392,7 +392,7 @@ fn bucket_origin_survives_advance_cut_settle_and_head_view(c: Clock, r: Random, 
         let (take cap, _) = history_decode_head_attach(hw.data)?
         if cap.head.pair.epoch == 3 {
             let n = list.len(hw.data)
-            let payload = list.slice(hw.data, n - ORIGIN_PAYLOAD_BYTES, n)
+            let payload = list.slice(hw.data, n - manifest.ORIGIN_PAYLOAD_BYTES, n)
             if payload != expected_origin {
                 fail("ORIGIN 49-byte payload changed across advance or cut")
             }
@@ -449,7 +449,7 @@ fn origin_and_head_view_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[Byt
     let mut b2 = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 3)?, s.time, r, opts_b2) ?=> |Refusal(error: take p, ..)| take p
     let pair_b2 = claim_of(b2)?
     // Capture exact 49-byte ORIGIN payload at epoch 3 for comparison across advance + cut.
-    let mut expected_origin: Bytes = list.with_capacity(ORIGIN_PAYLOAD_BYTES)
+    let mut expected_origin: Bytes = list.with_capacity(manifest.ORIGIN_PAYLOAD_BYTES)
     list.put_word_le(mut expected_origin, 3u64)
     list.append(mut expected_origin, att_b2)
     list.push(mut expected_origin, 1u8)

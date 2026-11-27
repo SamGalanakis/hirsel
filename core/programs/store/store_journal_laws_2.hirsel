@@ -6,7 +6,7 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     let slots = list.capacity(pages.holder_heads(mem.holders))
     for id in 1u64 .. slots {
         let saved = snapshot(mem)
-        let name = failure_result_from_rep(types.capacity(disk_path("branch-", id, "")))?
+        let name = failure_result_from_rep(types.capacity(manifest.disk_path("branch-", id, "")))?
         let _ = fork(mut mem, name, saved)?
     }
     failure_result_from_rep(types.capacity(pages.reserve_branch_name(mut mem.holders)))?
@@ -54,26 +54,26 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
 
 // L51(a) and (k). Main is 147 bytes. 43,575 full pins and
 // pins named with 143 and 144 bytes bring the total to 16,777,069.
-fn fork_limit_manifest() -> PageManifest {
-    let mut manifest = page_manifest_empty(default_limits())
-    manifest.fence = 1
-    let roots: pages.LocatedRoots = clone(manifest.branches[0].roots)
+fn fork_limit_manifest() -> manifest.PageManifest {
+    let mut page_record = manifest.page_manifest_empty(limits_to_rep(default_limits()))
+    page_record.fence = 1
+    let roots: pages.LocatedRoots = clone(page_record.branches[0].roots)
     let padding = string.repeat("x", 249)
     for i in 0u64 .. 43575 {
-        let name = result.unwrap(disk_path("", 100000 + i, padding))
-        list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
+        let name = result.unwrap(manifest.disk_path("", 100000 + i, padding))
+        list.push(mut page_record.pins, manifest.LocatedPin(owner: ApplicationPin, name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
-    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
-    take manifest
+    list.push(mut page_record.pins, manifest.LocatedPin(owner: ApplicationPin, name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    list.push(mut page_record.pins, manifest.LocatedPin(owner: ApplicationPin, name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    take page_record
 }
 
 fn fork_limit_image(d: Dir, id: StoreId, attempt: Bytes, name: String, end: u64) -> Result[(), DeployError] waits {
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
-    deploy_result(disk_write_synced(d, "j-1", result.unwrap(format.disk_header_bytes(ctx, 0, 0))))?
+    deploy_result(failure_result_from_rep(manifest.disk_write_synced(d, "j-1", result.unwrap(format.disk_header_bytes(ctx, 0, 0)))))?
     deploy_result(fork_test_append(d, id, 1, 72, 1, name))?
     let stamp = ExportStamp(attempt: result.unwrap(failure_result_from_rep(types.copied(attempt))), store_hi: id.hi, store_lo: id.lo, opened: 1, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 1, end: end)
-    deploy_result(disk_write_synced(d, "EXPORT", deploy_result(export_bytes(stamp))?))
+    deploy_result(failure_result_from_rep(manifest.disk_write_synced(d, "EXPORT", deploy_result(export_bytes(stamp))?)))
 }
 
 @test
@@ -81,7 +81,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let child = disk_test_directory(d)
     let options = journal_crash_options()
     let id = StoreId(hi: 1, lo: 2)
-    deploy_result(disk_publish_manifest(child, id, fork_limit_manifest()))?
+    deploy_result(failure_result_from_rep(manifest.disk_publish_manifest(child, store_key_to_rep(id), fork_limit_manifest())))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 2u8)
     fork_limit_image(child, id, attempt, "betas", 119)?
@@ -89,7 +89,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         Error(Store(Corrupt(Fault(why: Malformed, ..)))) => (),
         _ => fail("export accepted the over-limit FORK"),
     }
-    deploy_result(disk_io(host.remove(child, "EXPORT")))?
+    deploy_result(failure_result_from_rep(manifest.disk_io(host.remove(child, "EXPORT"))))?
     match open(tasks, child, c, r, options) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("open accepted the over-limit FORK"),
@@ -99,7 +99,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     if pages.holder_record_bytes(exported.db.holders) != 16777216 || option.unwrap(branch(exported.db, "beta")).id != 1 {
         fail("export lost the equality FORK")
     }
-    deploy_result(disk_io(host.remove(child, "EXPORT")))?
+    deploy_result(failure_result_from_rep(manifest.disk_io(host.remove(child, "EXPORT"))))?
     let mut db = deploy_result(open(tasks, child, c, r, options))?
     if pages.holder_record_bytes(db.holders) != 16777216 || disk_state(db).uncovered != 46 {
         fail("open lost the equality FORK")
@@ -116,8 +116,8 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let (refork, _) = deploy_result(fork(mut db, "beta", held))?
     let _ = deploy_result(checkpoint(mut db))?
-    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777604))?
-    if format.read_le(manifest, 76, 4) != 16777496 {
+    let page_record = deploy_result(failure_result_from_rep(manifest.disk_read_file(child, "MANIFEST", 16777604)))?
+    if format.read_le(page_record, 76, 4) != 16777496 {
         fail("cut encoded the wrong fork record total")
     }
     let _ = deploy_result(delete_branch(mut db, refork))?
@@ -128,7 +128,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let fitting = string.repeat("q", 17)
     let _ = deploy_result(pin(mut db, fitting, held))?
-    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777604))?
+    let pinned_manifest = deploy_result(failure_result_from_rep(manifest.disk_read_file(child, "MANIFEST", 16777604)))?
     if pages.holder_record_bytes(db.holders) != 16777216 || format.read_le(pinned_manifest, 76, 4) != 16777496 {
         fail("cut encoded the wrong pin record total")
     }
@@ -166,7 +166,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     list.fill(mut attempt, 16, 3u8)
     let captured = begin_export_copy(mut db, disk_test_directory(d), result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let exported = export_copy(take captured)?
-    deploy_result(disk_io(host.remove(exported.dir, "EXPORT")))?
+    deploy_result(failure_result_from_rep(manifest.disk_io(host.remove(exported.dir, "EXPORT"))))?
     let mut reopened = deploy_result(open(tasks, exported.dir, c, r, options))?
     let name = string.repeat("n", 100)
     let live_bytes = snapshot(db)
@@ -260,41 +260,41 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
         failure_result_from_rep(catalog.bulk_store_collection(mut tree, rows.id, 1, values, mut stamp))
     })?
-    let first = disk_state(db).pages.next_pack
+    let first = manifest.pack_next(disk_state(db).packs)
     let _ = checkpoint(mut db)?
-    let after = disk_state(db).pages.next_pack
-    let manifest = disk_read_file(child, "MANIFEST", 515)?
-    if format.read_le(manifest, 76, 4) != 427 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
+    let after = manifest.pack_next(disk_state(db).packs)
+    let page_record = failure_result_from_rep(manifest.disk_read_file(child, "MANIFEST", 515))?
+    if format.read_le(page_record, 76, 4) != 427 || std.page.level(std.page.image_of(manifest.pack_lists(disk_state(db).packs).packs)) < 2 {
         return Error(Foreign)
     }
     let held = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", held)?
-    if beta.id != 1 || !covered(db, receipt.mark) || disk_state(db).pages.next_pack != after {
+    if beta.id != 1 || !covered(db, receipt.mark) || manifest.pack_next(disk_state(db).packs) != after {
         return Error(Foreign)
     }
     let id = db.store
     close(take db)?
     // A class-2 pack can be present before its MANIFEST replaces the old one.
-    let orphan = paged_pack_path(after)?
+    let orphan = failure_result_from_rep(manifest.paged_pack_path(after))?
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: after)
     let mut orphan_wire = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
     let prior_list = page_list_pack_vector()
     let unused_page = list.slice(prior_list, 88, list.len(prior_list))
     list.append(mut orphan_wire, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 33, 1, unused_page)))?)
-    disk_write_synced(child, orphan, orphan_wire)?
+    failure_result_from_rep(manifest.disk_write_synced(child, orphan, orphan_wire))?
     let reopened = open(tasks, child, c, r, options)?
-    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(disk_state(reopened).pages.lists.packs)) < 2 {
+    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(manifest.pack_lists(disk_state(reopened).packs).packs)) < 2 {
         return Error(Foreign)
     }
     let mut blob_count = 0u64
     for seq in first .. after {
-        let Some(pack) = disk_index_get(disk_state(reopened).pages.locations.packs, seq) else {
+        let Some(pack) = manifest.disk_index_get(manifest.pack_locations(disk_state(reopened).packs).packs, seq) else {
             continue
         }
         if pack.class != 1 {
             continue
         }
-        let wire = disk_read_file(child, paged_pack_path(seq)?, 1126)?
+        let wire = failure_result_from_rep(manifest.disk_read_file(child, failure_result_from_rep(manifest.paged_pack_path(seq))?, 1126))?
         if list.len(wire) != 1126 || format.read_le(wire, 72, 2) != 34 || format.read_le(wire, 76, 4) != 1038 || pack.live != 1038 || pack.payload_bytes != 1038 || pack.frames != 1 {
             return Error(Foreign)
         }
@@ -540,7 +540,7 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
             Committed(_) => {},
             _ => fail("cut input refused")
         }
-        let next_path = failure_result_from_rep(types.capacity(disk_path("j-", db.file_seq + 1, "")))?
+        let next_path = failure_result_from_rep(types.capacity(manifest.disk_path("j-", db.file_seq + 1, "")))?
         if !journal_is_poisoned(checkpoint(mut db)) {
             fail("cut missed prior sync failure")
         }

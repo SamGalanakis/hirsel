@@ -65,7 +65,7 @@ fn tiered_install_pin(mut pins: TieredPins, from_root: TieredPinRoot, touched: M
     let target_key = tiered_cache_key(frame.identity)
     if let Some(previous) = map.get(pins.frames, target_key) {
         if previous.identity != frame.identity {
-            return Error(failure_from_rep(format.disk_fault(paged_pack_path(target_key.0)?, target_key.1, Checksum)))
+            return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(target_key.0))?, target_key.1, Checksum)))
         }
         return Ok(true)
     }

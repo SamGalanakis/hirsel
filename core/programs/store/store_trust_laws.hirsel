@@ -249,7 +249,7 @@ fn trust_teardown_mem_case(take job: TeardownMemCase) -> Result[(), Error] waits
 
 fn trust_teardown_dir_case(take job: TeardownDirCase) -> Result[(), Error] waits {
     let dir_db = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
-    disk_write_synced(job.d, job.pack, job.raw)?
+    failure_result_from_rep(manifest.disk_write_synced(job.d, job.pack, job.raw))?
     let _ = dir_db
     Ok(())
 }
@@ -319,10 +319,10 @@ fn test_teardown_catches_corrupt_live_db(c: Clock, d: Dir, r: Random, tasks: Tas
     // 2. Live Directory Db with a corrupted pack frame left at close/drop.
     let child = disk_test_directory(d)
     disk_crash_init(child, c, r, tasks, "checkpoint")?
-    let (_, take manifest) = read_page_manifest_file(child)?
-    let root = manifest.branches[0u64].roots.catalog
-    let pack = paged_pack_path(root.pack)?
-    let mut raw = disk_read_paged_file(child, pack, 67108864)?
+    let (_, take page_record) = read_page_manifest_file(child)?
+    let root = page_record.branches[0u64].roots.catalog
+    let pack = failure_result_from_rep(manifest.paged_pack_path(root.pack))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(child, pack, 67108864))?
     raw[root.offset + 16] = raw[root.offset + 16] ^ 1u8
     let dir_task = task.spawn(tasks, bytes 33554432, TeardownDirCase(d: child, c, r, tasks, pack: clone(pack), raw: take raw), trust_teardown_dir_case)
     match task.join(take dir_task) {

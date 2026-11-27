@@ -442,7 +442,7 @@ fn format12_manifest_law() -> Result[(), Error] {
         Error(Unsupported(11)) => (),
         _ => return Error(Foreign),
     }
-    let mut m = page_manifest_empty(default_limits())
+    let mut m = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     m.next_stamp = 100
     m.next_pack = 50
     m.first_live = 7
@@ -455,37 +455,37 @@ fn format12_manifest_law() -> Result[(), Error] {
     m.archive_on = 66
     m.archive = std.page.PagePtr(pack: 5, offset: 100, len: 113, checksum: 14, stamp: 43)
     m.archive_drop = 77
-    m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
+    m.sweep = manifest.SweepCursor(position: 88, epoch: 99, digest: 101)
     let roots: pages.LocatedRoots = clone(m.branches[0].roots)
-    list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
-    let raw = disk_page_manifest_bytes(id, m)?
+    list.push(mut m.pins, manifest.LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
+    let raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), m))?
     if raw != format12_manifest() {
         return Error(Foreign)
     }
     let (_, take parsed) = disk_read_page_manifest(path, raw)?
-    if manifest_account(parsed) != 120 || parsed.account_memory != 37 || parsed.account_tiered != 83 || parsed.lineage != m.lineage || parsed.deferred_frees != m.deferred_frees || parsed.deferred_next != 55 || parsed.archive_on != 66 || parsed.archive != m.archive || parsed.archive_drop != 77 || parsed.sweep.position != 88 || parsed.sweep.epoch != 99 || parsed.sweep.digest != 101 || parsed.pins[0].owner != ProjectorPin || parsed.pins[0].watermark != 92 || disk_page_manifest_bytes(id, parsed)? != raw {
+    if manifest.manifest_account(parsed) != 120 || parsed.account_memory != 37 || parsed.account_tiered != 83 || parsed.lineage != m.lineage || parsed.deferred_frees != m.deferred_frees || parsed.deferred_next != 55 || parsed.archive_on != 66 || parsed.archive != m.archive || parsed.archive_drop != 77 || parsed.sweep.position != 88 || parsed.sweep.epoch != 99 || parsed.sweep.digest != 101 || parsed.pins[0].owner != ProjectorPin || parsed.pins[0].watermark != 92 || failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), parsed))? != raw {
         return Error(Foreign)
     }
     let payload = list.slice(raw, 88, list.len(raw))
-    if !disk_corrupt(decode_page_manifest(path, list.slice(payload, 0, list.len(payload) - 1), 1)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.decode_page_manifest(path, list.slice(payload, 0, list.len(payload) - 1), 1))) {
         return Error(Foreign)
     }
     let mut invalid_owner = failure_result_from_rep(types.copied(payload))?
     invalid_owner[463 - 36] = 0
-    if !disk_corrupt(decode_page_manifest(path, invalid_owner, 1)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.decode_page_manifest(path, invalid_owner, 1))) {
         return Error(Foreign)
     }
     let mut overflow = failure_result_from_rep(types.copied(payload))?
     list.set_word_le(mut overflow, 64, 18446744073709551615u64)
-    if !disk_corrupt(decode_page_manifest(path, overflow, 1)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.decode_page_manifest(path, overflow, 1))) {
         return Error(Foreign)
     }
     Ok(())
 }
 
 fn format12_archive_law() -> Result[(), Error] {
-    let row = ArchiveRange(start: 7, end: 15, segment: pages.HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
-    let archive_entry = encode_archive_range(row)
+    let row = manifest.ArchiveRange(start: 7, end: 15, segment: pages.HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
+    let archive_entry = manifest.encode_archive_range(row)
     let InlineValue(value) = view archive_entry.cell else {
         return Error(Foreign)
     }
@@ -498,8 +498,8 @@ fn format12_archive_law() -> Result[(), Error] {
             return Error(Foreign)
         }
     }
-    let parsed = decode_archive_range("archive", 72, archive_entry.key, value, 7)?
-    if parsed.start != 7 || parsed.end != 15 || parsed.segment.seq != 15 || parsed.segment.epoch != 27 || parsed.segment.len != 39 || parsed.segment.digest != 51 || !disk_corrupt(decode_archive_range("archive", 72, archive_entry.key, value, 8)) {
+    let parsed = failure_result_from_rep(manifest.decode_archive_range("archive", 72, archive_entry.key, value, 7))?
+    if parsed.start != 7 || parsed.end != 15 || parsed.segment.seq != 15 || parsed.segment.epoch != 27 || parsed.segment.len != 39 || parsed.segment.digest != 51 || !disk_corrupt(failure_result_from_rep(manifest.decode_archive_range("archive", 72, archive_entry.key, value, 8))) {
         return Error(Foreign)
     }
     Ok(())
@@ -511,12 +511,12 @@ fn format12_pack_row_law() -> Result[(), Error] {
     for byte in expected {
         list.push(mut raw, byte)
     }
-    let pack = pack_record("p-6", 72, raw)?
-    if pack.class != 4 || pack.frames != 2 || pack.live != 1106 || pack.payload_bytes != 1594 || pack.index != 1500 || encode_pack_row(pack) != raw {
+    let pack = failure_result_from_rep(manifest.pack_record("p-6", 72, raw))?
+    if pack.class != 4 || pack.frames != 2 || pack.live != 1106 || pack.payload_bytes != 1594 || pack.index != 1500 || manifest.encode_pack_row(pack) != raw {
         return Error(Foreign)
     }
     let _ = list.set(mut raw, 0, 0u8)
-    if !disk_corrupt(pack_record("p-6", 72, raw)) || !disk_corrupt(pack_record("p-6", 72, list.slice(raw, 0, 21))) {
+    if !disk_corrupt(failure_result_from_rep(manifest.pack_record("p-6", 72, raw))) || !disk_corrupt(failure_result_from_rep(manifest.pack_record("p-6", 72, list.slice(raw, 0, 21)))) {
         return Error(Foreign)
     }
     Ok(())
@@ -535,39 +535,39 @@ fn format12_index_law() -> Result[(), Error] {
     let _ = list.set(mut other, 5, 121u8)
     let first = std.page.BlobRef(stamp: 17, len: 1025, checksum: 0, pack: 6, offset: 72, body: 0)
     let second = std.page.BlobRef(stamp: 19, len: 65, checksum: 0, pack: 6, offset: 1121, body: 1)
-    let mut rows: List[PackIndexRow] = list.new()
-    list.push(mut rows, blob_index_row(first, 7, failure_result_from_rep(types.copied(key))?))
-    list.push(mut rows, blob_index_row(second, 7, failure_result_from_rep(types.copied(other))?))
+    let mut rows: List[manifest.PackIndexRow] = list.new()
+    list.push(mut rows, manifest.blob_index_row(first, 7, failure_result_from_rep(types.copied(key))?))
+    list.push(mut rows, manifest.blob_index_row(second, 7, failure_result_from_rep(types.copied(other))?))
     let mut out: Bytes = list.new()
     list.fill(mut out, 1500, 0u8)
-    let at = append_pack_index(mut out, ctx, rows)?
+    let at = failure_result_from_rep(manifest.append_pack_index(mut out, ctx, rows))?
     if at != 1500 || list.slice(out, at, list.len(out)) != expected {
         return Error(Foreign)
     }
     let second_at = list.len(out)
-    let mut remaining: List[PackIndexRow] = list.new()
+    let mut remaining: List[manifest.PackIndexRow] = list.new()
     let third = std.page.BlobRef(stamp: 21, len: 4, checksum: 0, pack: 6, offset: 1210, body: 2)
-    list.push(mut remaining, blob_index_row(third, 7, failure_result_from_rep(types.copied(key))?))
-    append_pack_index_frame(mut out, ctx, at, remaining, 0, 1, 47)?
+    list.push(mut remaining, manifest.blob_index_row(third, 7, failure_result_from_rep(types.copied(key))?))
+    failure_result_from_rep(manifest.append_pack_index_frame(mut out, ctx, at, remaining, 0, 1, 47))?
     if list.slice(out, second_at, list.len(out)) != following_wire {
         return Error(Foreign)
     }
-    let frame = disk_read_frame(path, ctx, out, at)?
+    let frame = failure_result_from_rep(manifest.disk_read_frame(path, ctx, out, at))?
     let payload = list.slice(out, frame.payload, frame.end)
     let mut final_item = 0u64
-    let parsed = decode_pack_index(path, at, payload, mut final_item)?
-    let tail = decode_pack_index(path, second_at, list.slice(following_wire, 16, list.len(following_wire)), mut final_item)?
+    let parsed = failure_result_from_rep(manifest.decode_pack_index(path, at, payload, mut final_item))?
+    let tail = failure_result_from_rep(manifest.decode_pack_index(path, second_at, list.slice(following_wire, 16, list.len(following_wire)), mut final_item))?
     if frame.kind != 0x0023 || frame.flags != 1 || parsed.prev != 0 || list.len(parsed.rows) != 2 || parsed.rows[0].offset != 72 || parsed.rows[0].len != 1033 || parsed.rows[0].kind != 0x22 || parsed.rows[0].collection != 7 || parsed.rows[0].stamp != 17 || parsed.rows[0].key != key || parsed.rows[1].len != 73 || parsed.rows[1].key != other || tail.prev != at || tail.rows[0].key != key || final_item != 1210 {
         return Error(Foreign)
     }
     let mut corrupt = failure_result_from_rep(types.copied(payload))?
     let _ = list.set(mut corrupt, 37, 1u8)
     final_item = 0
-    if !disk_corrupt(decode_pack_index(path, at, corrupt, mut final_item)) || !disk_corrupt(decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut final_item)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.decode_pack_index(path, at, corrupt, mut final_item))) || !disk_corrupt(failure_result_from_rep(manifest.decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut final_item))) {
         return Error(Foreign)
     }
     final_item = 72
-    if !disk_corrupt(decode_pack_index(path, at, payload, mut final_item)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.decode_pack_index(path, at, payload, mut final_item))) {
         return Error(Foreign)
     }
     let page_ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 7)
@@ -575,11 +575,11 @@ fn format12_index_law() -> Result[(), Error] {
     let mut page_key: Bytes = list.new()
     list.put_word_be(mut page_key, 9u32)
     list.push(mut page_key, 122u8)
-    let mut page_rows: List[PackIndexRow] = list.new()
-    list.push(mut page_rows, page_index_row(ptr, 9, take page_key))
+    let mut page_rows: List[manifest.PackIndexRow] = list.new()
+    list.push(mut page_rows, manifest.page_index_row(ptr, 9, take page_key))
     let mut page_out: Bytes = list.new()
     list.fill(mut page_out, 135, 0u8)
-    let page_at = append_pack_index(mut page_out, page_ctx, page_rows)?
+    let page_at = failure_result_from_rep(manifest.append_pack_index(mut page_out, page_ctx, page_rows))?
     if page_at != 135 || list.slice(page_out, page_at, list.len(page_out)) != format12_page_index() {
         return Error(Foreign)
     }

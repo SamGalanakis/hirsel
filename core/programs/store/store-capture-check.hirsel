@@ -26,11 +26,11 @@ fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64, index_at: u64) ->
     CheckPack(seq: seq, payload_bytes: size, base: 0, size: index_at, head: 72, frames: frames, class: class)
 }
 
-fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
+fn check_inventory(d: Dir, id: StoreId, m: manifest.PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
     let mut inventory: List[CheckPack] = list.with_capacity(slots)
     let mut packs = capture_packs(d, id, m, false, 0)
     let mut pages = 0u64
-    for (kind, root) in[(PackList, m.pack_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
+    for (kind, root) in[(manifest.list_kind_pack(), m.pack_root), (manifest.list_kind_deferred(), m.deferred_frees), (manifest.list_kind_lineage(), m.lineage)] {
         capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
             list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0, 0))
         }, scoped fn(mut _packs: CapturePacks, mut rows: List[CheckPack], path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
@@ -40,7 +40,7 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
                         InlineValue(found) => found,
                         _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
                     }
-                    let pack = pack_record(path, at, raw)?
+                    let pack = failure_result_from_rep(manifest.pack_record(path, at, raw))?
                     list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes, pack.index))
                 },
                 _ => (),
@@ -55,7 +55,7 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
     for read in 0u64 .. list.len(inventory) {
         if write != 0 && inventory[write - 1].seq == inventory[read].seq {
             if inventory[write - 1].class != 2 || inventory[read].class != 2 {
-                return Error(failure_from_rep(format.disk_fault(paged_pack_path(inventory[read].seq)?, 72, Malformed)))
+                return Error(failure_from_rep(format.disk_fault(failure_result_from_rep(manifest.paged_pack_path(inventory[read].seq))?, 72, Malformed)))
             }
         } else {
             list.swap(mut inventory, write, read)
@@ -75,32 +75,32 @@ fn check_open_pack(d: Dir, path: String) -> Result[HostFile, Error] waits {
 }
 
 fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], mut spent: u64) -> Result[(), Error] waits {
-    let path = paged_pack_path(pack.seq)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(pack.seq))?
     let opened = check_open_pack(p.dir, path)?
     let mut input = journal_input(take opened, false)?
     if let Some(to) = target {
-        format.journal_input_copy_to(mut input, disk_io(host.open(to, path, Write))?)
+        format.journal_input_copy_to(mut input, failure_result_from_rep(manifest.disk_io(host.open(to, path, Write)))?)
     }
-    let header = disk_read_header(path, scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(pack.seq), Some(p.id))?
+    let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(pack.seq), optional_store_key_to_rep(Some(p.id))))?
     let index_at = pack.size
-    let mut scanned = pack_scan_indexed(pack.class, p.manifest.next_stamp, index_at)
+    let mut scanned = manifest.pack_scan_indexed(pack.class, p.manifest.next_stamp, index_at)
     let mut at = 72u64
     while at < format.journal_input_size(input) {
-        let frame = match read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent) {
+        let frame = match failure_result_from_rep(manifest.read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent)) {
             Ok(found) => found,
             Error(Unsupported(kind)) => return Error(failure_from_rep(format.disk_fault(path, at, Kind(kind)))),
             Error(take problem) => return Error(take problem),
         }
         at += 16 + frame.size
     }
-    if !pack_scan_finished(scanned, int.widen(pack.frames), pack.payload_bytes, at) {
+    if !manifest.pack_scan_finished(scanned, int.widen(pack.frames), pack.payload_bytes, at) {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     let copy_to = format.take_journal_copy(take input)
     if let Some(take finished) = take copy_to {
         let mut output = take finished
-        disk_io(host.sync(mut output))?
-        disk_io(host.close(take output))?
+        failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
+        failure_result_from_rep(manifest.disk_io(host.close(take output)))?
     }
     pack.payload_bytes = index_at
     pack.size = at
@@ -147,7 +147,7 @@ fn check_at_head(mut input: format.JournalInput, mut pack: CheckPack, path: Stri
         72u64
     }
     while at < ptr.offset {
-        let head = disk_read_frame_head(path, journal_prefix(mut input, path, at, 16)?, at)?
+        let head = failure_result_from_rep(manifest.disk_read_frame_head(path, failure_result_from_rep(manifest.journal_prefix(mut input, path, at, 16))?, at))?
         at += 16 + head.size
     }
     if at != ptr.offset {
@@ -223,8 +223,8 @@ fn check_arrive(mut walk: CheckWalk, path: String, ptr: std.page.PagePtr, locati
 }
 
 fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Result[(), Error] waits {
-    let path = paged_pack_path(reference.pack)?
-    if reference.len > BLOB_LIMIT - 8 {
+    let path = failure_result_from_rep(manifest.paged_pack_path(reference.pack))?
+    if reference.len > manifest.BLOB_LIMIT - 8 {
         return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
     }
     let ptr = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(8 + reference.len), checksum: reference.checksum, stamp: reference.stamp)
@@ -242,10 +242,10 @@ fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Re
     let opened = check_open_pack(walk.dir, path)?
     let mut input = journal_input(take opened, false)?
     check_at_head(mut input, mut walk.packs[slot], path, ptr)?
-    let mut scanned = pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
+    let mut scanned = manifest.pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
     let mut spent = 0u64
     let ctx = format.DiskContext(store: store_key_to_rep(walk.id), role: 3, seq: ptr.pack)
-    let frame = read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent)?
+    let frame = failure_result_from_rep(manifest.read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent))?
     if frame.stamp != Some(ptr.stamp) || frame.size != int.widen(ptr.len) || frame.checksum != ptr.checksum {
         return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Checksum)))
     }
@@ -257,7 +257,7 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     if ptr.stamp == 0 {
         return Ok(())
     }
-    let path = paged_pack_path(ptr.pack)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
     let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
     if class == 3 {
         let pack = walk.packs[slot]
@@ -337,7 +337,7 @@ fn check_reachable(p: PreparedCapture, mut walk: CheckWalk) -> Result[(), Error]
             let InlineValue(raw) = view cell_value else {
                 return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
             }
-            let (_, queued) = decode_deferred_free(path, at, key, raw, p.manifest)?
+            let (_, queued) = failure_result_from_rep(manifest.decode_deferred_free(path, at, key, raw, p.manifest))?
             match queued.target {
                 TieredPage(ptr) => check_page(mut current, ptr, 3, Collection, None),
                 TieredBlob(body) => check_blob(mut current, body, 4),

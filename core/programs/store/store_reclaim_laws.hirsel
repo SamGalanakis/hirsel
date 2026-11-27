@@ -9,7 +9,7 @@ fn count_reclaim_item(items: List[ReclaimItem], kind: ReclaimKind, key: String) 
     found
 }
 
-fn lane_sweep_cursor(db: Db) -> SweepCursor waits {
+fn lane_sweep_cursor(db: Db) -> manifest.SweepCursor waits {
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))

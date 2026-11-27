@@ -151,7 +151,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         Error(take problem) => return Error(take problem),
     }
     if let Some(roots) = draft.roots {
-        let extra = int.saturating_sub(keyed_root_record_bytes(roots.keyed), keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed))
+        let extra = int.saturating_sub(manifest.keyed_root_record_bytes(roots.keyed), manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed))
         check_manifest_addition(db, extra)?
     }
     if let Some(_) = draft.tiered {
@@ -241,8 +241,8 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         },
     }
     if let Some(take candidate) = take roots {
-        let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
-        let count_bytes = keyed_root_record_bytes(candidate.keyed)
+        let old_bytes = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
+        let count_bytes = manifest.keyed_root_record_bytes(candidate.keyed)
         pages.commit_roots(mut db.holders, i, take candidate, old_bytes, count_bytes)
     }
     db.resident = live_bytes

@@ -239,7 +239,7 @@ pub fn disk_law_frames() -> bool {
             return false
         }
     }
-    let header = result.unwrap(disk_read_header("p-7", raw, 3, Some(7), Some(id)))
+    let header = result.unwrap(failure_result_from_rep(manifest.disk_read_header("p-7", raw, 3, Some(7), optional_store_key_to_rep(Some(id)))))
     if header.prev_end != 0 || header.context.seq != 7 {
         return false
     }
@@ -247,41 +247,41 @@ pub fn disk_law_frames() -> bool {
         let mut broken = result.unwrap(failure_result_from_rep(types.copied(raw)))
         let changed = broken[i] ^ 1u8
         let _ = list.set(mut broken, i, changed)
-        if !disk_corrupt(disk_read_header("p-7", broken, 3, Some(7), Some(id))) {
+        if !disk_corrupt(failure_result_from_rep(manifest.disk_read_header("p-7", broken, 3, Some(7), optional_store_key_to_rep(Some(id))))) {
             return false
         }
         let short = list.slice(raw, 0, i)
-        if !disk_corrupt(disk_read_header("p-7", short, 3, Some(7), Some(id))) {
+        if !disk_corrupt(failure_result_from_rep(manifest.disk_read_header("p-7", short, 3, Some(7), optional_store_key_to_rep(Some(id))))) {
             return false
         }
     }
-    if !disk_corrupt(disk_read_frame("p-8", format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 8), raw, 0)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.disk_read_frame("p-8", format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 8), raw, 0))) {
         return false
     }
-    if !disk_corrupt(disk_read_frame("j-7", format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), raw, 0)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.disk_read_frame("j-7", format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), raw, 0))) {
         return false
     }
-    if !disk_corrupt(disk_read_header("p-7", raw, 3, Some(7), Some(StoreId(hi: 9, lo: 9)))) {
+    if !disk_corrupt(failure_result_from_rep(manifest.disk_read_header("p-7", raw, 3, Some(7), optional_store_key_to_rep(Some(StoreId(hi: 9, lo: 9)))))) {
         return false
     }
     let mut moved: Bytes = list.with_capacity(88)
     list.fill(mut moved, 16, 0u8)
     list.append(mut moved, raw)
-    if !disk_corrupt(disk_read_frame("p-7", ctx, moved, 16)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.disk_read_frame("p-7", ctx, moved, 16))) {
         return false
     }
     let payload = types.key_word(42)
     let optional = result.unwrap(format.disk_seal(ctx, 72, 0x0066, 0, payload))
     let mut file = result.unwrap(failure_result_from_rep(types.copied(raw)))
     list.append(mut file, optional)
-    let following_frame = result.unwrap(disk_read_frame("p-7", ctx, file, 72))
+    let following_frame = result.unwrap(failure_result_from_rep(manifest.disk_read_frame("p-7", ctx, file, 72)))
     if following_frame.kind != 0x0066 || following_frame.end != 96 {
         return false
     }
     let must = result.unwrap(format.disk_seal(ctx, 72, 0x0066, 1, payload))
     let mut required = result.unwrap(failure_result_from_rep(types.copied(raw)))
     list.append(mut required, must)
-    match disk_read_frame("p-7", ctx, required, 72) {
+    match failure_result_from_rep(manifest.disk_read_frame("p-7", ctx, required, 72)) {
         Error(Unsupported(0x0066)) => {},
         _ => return false
     }
@@ -290,7 +290,7 @@ pub fn disk_law_frames() -> bool {
     let _ = list.set(mut too_large, 77, 255u8)
     let _ = list.set(mut too_large, 78, 255u8)
     let _ = list.set(mut too_large, 79, 255u8)
-    if !disk_corrupt(disk_read_frame("p-7", ctx, too_large, 72)) {
+    if !disk_corrupt(failure_result_from_rep(manifest.disk_read_frame("p-7", ctx, too_large, 72))) {
         return false
     }
     // §11.14's Leaf A and its frame bound to offset 72 of pack 3.
@@ -387,7 +387,7 @@ pub fn disk_law_frames() -> bool {
     }
     let mut pack = result.unwrap(format.disk_header_bytes(page_ctx, 0, 0))
     list.append(mut pack, page_frame)
-    let read_back = result.unwrap(disk_read_frame("p-3", page_ctx, pack, 72))
+    let read_back = result.unwrap(failure_result_from_rep(manifest.disk_read_frame("p-3", page_ctx, pack, 72)))
     let image = result.unwrap(std.page.decode(result.unwrap(failure_result_from_rep(types.copied(list.slice(pack, read_back.payload, read_back.end)))), Collection))
     read_back.kind == 0x0021 && read_back.end == 147 && std.page.stamp(image) == 5 && std.page.level(image) == 0 && std.page.count(image) == 2 && fork_frame_vector(id)
 }
@@ -491,30 +491,30 @@ fn disk_test_frames() -> Result[(), ()] {
     }
 }
 
-fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
-    let (id, take manifest) = read_page_manifest_file(d)?
-    let validated = validate_page_manifest(d, id, take manifest)?
+fn disk_load(d: Dir, ceiling: u64) -> Result[manifest.DiskLoaded, Error] waits {
+    let (id, take page_record) = read_page_manifest_file(d)?
+    let validated = validate_page_manifest(d, id, take page_record)?
     let loaded = disk_loaded(id, take validated)?
     failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }
 
-fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[DiskLoaded, Error] waits {
-    let (id, take manifest) = disk_read_page_manifest("MANIFEST", raw)?
-    let validated = validate_page_manifest(d, id, take manifest)?
+fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[manifest.DiskLoaded, Error] waits {
+    let (id, take page_record) = disk_read_page_manifest("MANIFEST", raw)?
+    let validated = validate_page_manifest(d, id, take page_record)?
     let loaded = disk_loaded(id, take validated)?
     failure_result_from_rep(catalog.over_ceiling(pages.page_row_account(loaded.all), ceiling))?
     Ok(take loaded)
 }
 
-fn cut_lease(lease: Option[Arc[ExportLease]]) -> Option[Arc[ExportLease]] {
+fn cut_lease(lease: Option[Arc[manifest.ExportLease]]) -> Option[Arc[manifest.ExportLease]] {
     match lease {
         Some(kept) => Some(arc.share(kept)),
         None => None
     }
 }
 
-fn db_lease(db: Db) -> Option[Arc[ExportLease]] {
+fn db_lease(db: Db) -> Option[Arc[manifest.ExportLease]] {
     if is_disk(db) {
         cut_lease(disk_state(db).lease)
     } else {
@@ -542,8 +542,8 @@ fn disk_test_removal_spans() -> Result[(), ()] {
 }
 
 fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] waits {
-    let mut file = disk_io(host.open(d, path, Read))?
-    disk_io(host.sync(mut file))?
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
+    failure_result_from_rep(manifest.disk_io(host.sync(mut file)))?
     let mut raw: Bytes = list.new()
     loop {
         let size = list.len(raw)
@@ -557,7 +557,7 @@ fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wa
             1u64
         }
         let mut chunk: Bytes = list.with_capacity(room)
-        let total_count = disk_io(host.read(mut file, mut chunk))?
+        let total_count = failure_result_from_rep(manifest.disk_io(host.read(mut file, mut chunk)))?
         if total_count == 0 {
             break
         }
@@ -566,7 +566,7 @@ fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wa
         }
         list.append(mut raw, chunk)
     }
-    disk_io(host.close(take file))?
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))?
     Ok(take raw)
 }
 
@@ -674,7 +674,7 @@ fn journal_test_end() -> Result[(), ()] {
 
 fn disk_session_close(take session: DiskSession) -> Result[(), Error] waits {
     let DiskSession(lock: take lock, startup: _) = take session
-    disk_io(host.close(take lock))
+    failure_result_from_rep(manifest.disk_io(host.close(take lock)))
 }
 
 type WaitedLock: send {
@@ -741,11 +741,11 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
             return false
         }
     }
-    let mut too_new = page_manifest_empty(default_limits())
+    let mut too_new = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     too_new.fence = 2
-    result.unwrap(disk_publish_manifest(d, id, too_new))
+    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, store_key_to_rep(id), too_new)))
     let left: Bytes = list.new()
-    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", left))
+    result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", left)))
     match open(tasks, d, c, r, options) {
         Error(Unsupported(0x0070)) => {},
         _ => return false
@@ -754,15 +754,15 @@ pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
         return false
     }
     // AP21 rejects the corrupt list before removing any file.
-    let mut damaged = page_manifest_empty(default_limits())
+    let mut damaged = manifest.page_manifest_empty(limits_to_rep(default_limits()))
     damaged.next_pack = 2
     damaged.next_stamp = 2
     damaged.pack_root = std.page.PagePtr(pack: 1, offset: 72, len: 60, checksum: 0, stamp: 1)
-    result.unwrap(disk_publish_manifest(d, id, damaged))
+    result.unwrap(failure_result_from_rep(manifest.disk_publish_manifest(d, store_key_to_rep(id), damaged)))
     let empty: Bytes = list.new()
-    result.unwrap(disk_write_synced(d, "p-1", empty))
-    result.unwrap(disk_write_synced(d, "p-2", empty))
-    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", empty))
+    result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "p-1", empty)))
+    result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "p-2", empty)))
+    result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, "MANIFEST.tmp", empty)))
     match disk_session(d, c, r, options) {
         Error(Corrupt(_)) => {},
         _ => return false

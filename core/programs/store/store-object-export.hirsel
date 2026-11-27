@@ -114,7 +114,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     deploy_result(return_object_journal(take lane, resume))?
     let job = captured?
     let held = arc.share(job.lease)
-    write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[ExportLease])) {
+    write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[manifest.ExportLease])) {
         let (take sending, take lease) = take grant
         state.lease = Some(take lease)
         state.steps = list.new()
@@ -167,7 +167,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
             return Error(Store(failure_from_rep(format.disk_fault(key, 112, Truncated))))
         }
         deploy_result(history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due))?
-        let frame = deploy_result(disk_read_frame_head(key, lane.buffers.compare, 112))?
+        let frame = deploy_result(failure_result_from_rep(manifest.disk_read_frame_head(key, lane.buffers.compare, 112)))?
         if frame.kind != 0x0040 {
             let Some(total) = int.checked_add(journal_end, item.len - 112) else {
                 return Error(Store(Limit(Value)))
@@ -178,7 +178,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(failure_result_from_rep(types.copied(attempt)))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation, terminal: head.checkpoint.seq, end: journal_end)
-    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
+    let lease = arc.new(manifest.ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
     Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))
 }
@@ -199,19 +199,19 @@ fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String
     for i in 0u64 .. 72 {
         raw[i] = header[i]
     }
-    scratch_result(disk_write_synced(to, local, raw))
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(to, local, raw)))
 }
 
 fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Result[(), DeployError] waits {
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     for item in plan.packs {
-        let local = scratch_result(paged_pack_path(item.seq))?
+        let local = scratch_result(failure_result_from_rep(manifest.paged_pack_path(item.seq)))?
         object_export_file(plan, to, id, "p-", item, 3, local)?
     }
     object_export_file(plan, to, id, "m-", plan.manifest, 1, "MANIFEST")?
-    let local = scratch_result(failure_result_from_rep(types.capacity(disk_path("j-", stamp.terminal, ""))))?
+    let local = scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", stamp.terminal, ""))))?
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: stamp.terminal)
-    let mut output = scratch_result(disk_io(host.open(to, local, Write)))?
+    let mut output = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(to, local, Write))))?
     export_write(mut output, deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0))))?)?
     let mut offset = 72u64
     for item in plan.entries {
@@ -219,18 +219,18 @@ fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Re
         let mut raw = deploy_result(object_export_fetch(plan, "e-", item))?
         let (remote, _) = deploy_result(history_entry_context(key, id, item, raw))?
         deploy_result(history_object_digest(key, item, raw))?
-        let first = deploy_result(disk_frame_bytes(key, remote, raw, 112))?
+        let first = deploy_result(failure_result_from_rep(manifest.disk_frame_bytes(key, remote, raw, 112)))?
         if first.kind == 0x0040 {
             deploy_result(history_check_claim(key, item, raw, first))?
             continue
         }
         let mut at = 112u64
         while at < item.len {
-            let frame = deploy_result(disk_frame_bytes(key, remote, raw, at))?
+            let frame = deploy_result(failure_result_from_rep(manifest.disk_frame_bytes(key, remote, raw, at)))?
             if frame.kind == 0x0090 || frame.kind == 0x00C0 {
                 return Error(Store(failure_from_rep(format.disk_fault(key, at, Malformed))))
             }
-            deploy_result(disk_check_frame_kind(key, remote, frame.kind, frame.flags, at))?
+            deploy_result(failure_result_from_rep(manifest.disk_check_frame_kind(key, remote, frame.kind, frame.flags, at)))?
             let check = deploy_result(failure_result_from_rep(types.capacity(format.disk_check(ctx, offset, list.slice(raw, at, frame.payload), list.slice(raw, frame.payload, frame.end)))))?
             list.set_word_le(mut raw, at + 8, check)
             offset += frame.end - at
@@ -241,6 +241,6 @@ fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Re
     if offset != stamp.end {
         return Error(ExportMismatch)
     }
-    scratch_result(disk_io(host.sync(mut output)))?
-    scratch_result(disk_io(host.close(take output)))
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync(mut output))))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take output))))
 }

@@ -1,20 +1,9 @@
-fn check_paged_manifest() -> Result[(), Error] {
-    let id = StoreId(hi: 1, lo: 2)
-    let encoded = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
-    // page_manifest_vector with its pack root, data root and counters reset to
-    // page_manifest_empty's, re-encoded and re-checked with libxxhash (Format 12).
-    if list.len(encoded) != 515 || std.check.xxh3(encoded, 0, 515) != 0x37200a6d9d18f257u64 {
-        return Error(Foreign)
-    }
-    Ok(())
-}
-
 fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     let path = disk_test_directory(d)
-    let (id, take manifest) = disk_read_page_manifest("MANIFEST", page_manifest_vector())?
-    disk_write_synced(path, "p-1", page_data_pack_vector())?
-    disk_write_synced(path, "p-2", page_list_pack_vector())?
-    let validated = validate_page_manifest(path, id, take manifest)?
+    let (id, take page_record) = disk_read_page_manifest("MANIFEST", page_manifest_vector())?
+    failure_result_from_rep(manifest.disk_write_synced(path, "p-1", manifest.page_data_pack_vector()))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "p-2", page_list_pack_vector()))?
+    let validated = validate_page_manifest(path, id, take page_record)?
     {
         let Some(data_pack) = map.get(validated.inventory, 1u64) else {
             return Error(Foreign)
@@ -26,11 +15,11 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
             return Error(Foreign)
         }
     }
-    let locations = rebuild_page_locations(validated)?
-    let Some(data) = disk_index_get(locations.frames, 1) else {
+    let locations = failure_result_from_rep(manifest.rebuild_page_locations(validated))?
+    let Some(data) = manifest.disk_index_get(locations.frames, 1) else {
         return Error(Foreign)
     }
-    let Some(listed) = disk_index_get(locations.frames, 2) else {
+    let Some(listed) = manifest.disk_index_get(locations.frames, 2) else {
         return Error(Foreign)
     }
     if data.place.pack != 1 || data.place.offset != 72 || list.len(data.incoming) != 1 || data.incoming[0u64] != HolderSource(0, 0, 1) || listed.place.pack != 2 || listed.place.offset != 72 || list.len(listed.incoming) != 1 || listed.incoming[0u64] != ListSource(0) {
@@ -38,10 +27,10 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     }
     let root_ptrs: pages.LocatedRoots = clone(validated.manifest.branches[0u64].roots)
     let inline = validated.manifest.inline
-    let ValidatedPageManifest(graph: take resolved, ..) = take validated
+    let manifest.ValidatedPageManifest(graph: take resolved, ..) = take validated
     let mut graph = take resolved
     let empty_collection = std.page.empty(0, 0, Collection)
-    let page_nodes = attach_page_graph(mut graph, empty_collection)?
+    let page_nodes = failure_result_from_rep(manifest.attach_page_graph(mut graph, empty_collection))?
     let roots = pages.attach_page_roots(page_nodes, root_ptrs, inline, empty_collection)
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
@@ -53,10 +42,10 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     }
     // The checked pointer reads the inner PAGE. The file's only frame after
     // HEADER is the extension containing it, so the offset cannot be live.
-    disk_write_synced(path, "p-2", page_planted_pack_vector())?
-    disk_write_synced(path, "MANIFEST", page_planted_manifest_vector())?
-    disk_write_synced(path, "MANIFEST.tmp", string.as_bytes("tmp"))?
-    disk_write_synced(path, "p-3", string.as_bytes("leftover"))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "p-2", page_planted_pack_vector()))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "MANIFEST", page_planted_manifest_vector()))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "MANIFEST.tmp", string.as_bytes("tmp")))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "p-3", string.as_bytes("leftover")))?
     match read_selected_page_manifest(path) {
         Error(Corrupt(Fault(why: Malformed, offset: 88, ..))) => (),
         _ => return Error(Foreign),
@@ -64,25 +53,13 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     if !disk_exists(path, "MANIFEST.tmp")? || !disk_exists(path, "p-3")? {
         return Error(Foreign)
     }
-    disk_write_synced(path, "MANIFEST", page_manifest_vector())?
-    disk_write_synced(path, "p-2", page_list_pack_vector())?
+    failure_result_from_rep(manifest.disk_write_synced(path, "MANIFEST", page_manifest_vector()))?
+    failure_result_from_rep(manifest.disk_write_synced(path, "p-2", page_list_pack_vector()))?
     let _ = read_selected_page_manifest(path)?
     if disk_exists(path, "MANIFEST.tmp")? || disk_exists(path, "p-3")? {
         return Error(Foreign)
     }
     Ok(())
-}
-
-pub fn disk_law_paged_manifest() -> bool {
-    match check_paged_manifest() {
-        Ok(()) => true,
-        Error(_) => false,
-    }
-}
-
-@test
-fn disk_test_paged_manifest() -> Result[(), Error] {
-    check_paged_manifest()
 }
 
 pub fn disk_law_paged_inventory(d: Dir) -> bool waits {
@@ -109,20 +86,20 @@ fn format_header(ctx: format.DiskContext, raw: Bytes, word: u32) -> Result[Bytes
 fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreId, word: u32) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: 1)
-    let current = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
-    let mut manifest = format_header(ctx, current, word)?
-    list.append(mut manifest, list.slice(current, 72, list.len(current)))
+    let current = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), manifest.page_manifest_empty(limits_to_rep(default_limits()))))?
+    let mut page_record = format_header(ctx, current, word)?
+    list.append(mut page_record, list.slice(current, 72, list.len(current)))
     let scratch = string.as_bytes("unselected")
-    disk_write_synced(directory, "MANIFEST", manifest)?
-    disk_write_synced(directory, "MANIFEST.tmp", scratch)?
+    failure_result_from_rep(manifest.disk_write_synced(directory, "MANIFEST", page_record))?
+    failure_result_from_rep(manifest.disk_write_synced(directory, "MANIFEST.tmp", scratch))?
     let lock = disk_lock(directory, c, 0)?
     let observed: u64 = int.widen(word)
     match open(tasks, directory, c, r, journal_crash_options()) {
         Error(Unsupported(found)) if found == observed => (),
         _ => return Error(Missing("directory format refusal")),
     }
-    disk_io(host.close(take lock))?
-    if disk_read_paged_file(directory, "MANIFEST", list.len(manifest))? != manifest || disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch))? != scratch || disk_exists(directory, "j-1")? {
+    failure_result_from_rep(manifest.disk_io(host.close(take lock)))?
+    if failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST", list.len(page_record)))? != page_record || failure_result_from_rep(manifest.disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch)))? != scratch || disk_exists(directory, "j-1")? {
         return Error(Missing("directory changed after format refusal"))
     }
     let retired = failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0030, 1, list.new())))?
@@ -157,7 +134,7 @@ fn refuse_stream_format() -> Result[(), Error] {
     let sid = HostStreamId(hi: 3, lo: 4)
     let mut raw: Bytes = list.with_capacity(72 + format.BINDING_BYTES)
     let ctx = failure_result_from_rep(format.stream_header(mut raw, host_stream_id_to_rep(sid), 11, 1, 2, 1))?
-    match stream_read_header("reg", format_header(ctx, raw, 9u32)?, sid, 11) {
+    match failure_result_from_rep(manifest.stream_read_header("reg", format_header(ctx, raw, 9u32)?, host_stream_id_to_rep(sid), 11)) {
         Error(Unsupported(9)) => Ok(()),
         _ => Error(Missing("stream format refusal")),
     }

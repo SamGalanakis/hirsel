@@ -211,9 +211,9 @@ fn validate_prepared_on(db: Db, d: Dir) -> Result[ValidatedImport, DeployError] 
 }
 
 fn validate_prepared_inner(owner: Option[View[Db]], d: Dir) -> Result[ValidatedImport, DeployError] waits {
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    let mut file = scratch_result(failure_result_from_rep(manifest.disk_io(host.open(d, "PREPARED", Read))))?
     let header = scratch_result(prepared_read(mut file, 72u64))?
-    let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
+    let head = deploy_result(failure_result_from_rep(manifest.disk_read_header("PREPARED", header, 6, None, optional_store_key_to_rep(None))))?
     let mut digest = std.sha256.start()
     std.sha256.add(mut digest, header, 0u64, 72u64)
     let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: take digest, peek: None)
@@ -273,7 +273,7 @@ fn validate_prepared_inner(owner: Option[View[Db]], d: Dir) -> Result[ValidatedI
     }
     let rewrites = read_rewrite_frame(mut input)?
     let PreparedInput(file: take done, digest: take hashed, ..) = take input
-    scratch_result(disk_io(host.close(take done)))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take done))))?
     let mut rewrites_checked = false
     if let Some(db) = owner {
         if list.len(rewrites) != 0 {
@@ -323,7 +323,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
         return Error(ExportMismatch)
     }
     let mut payload = take validated
-    let lease: Arc[ExportLease] = match disk_state(db).lease {
+    let lease: Arc[manifest.ExportLease] = match disk_state(db).lease {
         Some(held) => arc.share(held),
         None => return Error(ExportMismatch),
     }
@@ -468,16 +468,6 @@ pub type Cutover: send {
     attempt: Bytes,
     digest: Inline[u8, 32],
     deadline: u64
-}
-
-type TargetLimits {
-    resident: u64,
-    pack: u64,
-    checkpoint: u64,
-    journal: u64,
-    frame: u64,
-    tiered_reserve: u64,
-    has_tiered: bool
 }
 
 fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {

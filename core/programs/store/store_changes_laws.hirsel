@@ -662,7 +662,7 @@ pub fn law_changes(c: Clock) -> bool waits {
         }
     })
     match take no_room {
-        Ok(Error(causes)) => match raised_capacity(causes) {
+        Ok(Error(causes)) => match manifest.raised_capacity(causes) {
             Some(_) => true,
             None => false
         },

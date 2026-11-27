@@ -269,7 +269,7 @@ pub fn journal_law_frame_oversize() -> bool {
     list.append(mut frame, payload)
     let mut file = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
     list.append(mut file, frame)
-    match disk_read_frame("j-7", ctx, file, 72) {
+    match failure_result_from_rep(manifest.disk_read_frame("j-7", ctx, file, 72)) {
         Error(Corrupt(f)) => match f.why {
             Malformed => f.offset == 72,
             _ => false
@@ -620,7 +620,7 @@ fn window_law_image(d: Dir, c: Clock, id: StoreId, raw: Bytes, start: u64, frame
         expected_end = end
         expected_head += 1
     }
-    disk_write_synced(d, "j-7", raw)?
+    failure_result_from_rep(manifest.disk_write_synced(d, "j-7", raw))?
     let mut initial = journal_initial()
     failure_result_from_rep(catalog.define_store_collection(mut initial.state.tips[0].roots.collections, 1, 1, mut initial.next_node))?
     let recovered = journal_recover(d, id, 7, c, take initial)?
@@ -666,7 +666,7 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
     }
     for with_end in[false, true] {
         if with_end {
-            disk_write_synced(dir, "j-7.end", journal_end_bytes(id, 7, acked_end))?
+            failure_result_from_rep(manifest.disk_write_synced(dir, "j-7.end", journal_end_bytes(id, 7, acked_end)))?
         }
         for cut in cuts {
             for room in[0u64, 1u64, length - 1, 4096u64, 8192u64, 4194304u64] {
@@ -759,11 +759,11 @@ fn disk_window_read(d: Dir, c: Clock, r: Random, tasks: Tasks, issued: u64, ackn
             return Error(Missing("window unissued row"))
         }
     }
-    let header = option.unwrap(journal_header(d, db.store, db.file_seq, None)?)
-    let segment = journal_path(db.file_seq - 1, "")?
-    let mut previous = disk_io(host.open(d, segment, Read))?
-    let size = disk_io(host.stat_file(mut previous))?.size
-    disk_io(host.close(take previous))?
+    let header = option.unwrap(failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(db.store), db.file_seq, None))?)
+    let segment = failure_result_from_rep(manifest.journal_path(db.file_seq - 1, ""))?
+    let mut previous = failure_result_from_rep(manifest.disk_io(host.open(d, segment, Read)))?
+    let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut previous)))?.size
+    failure_result_from_rep(manifest.disk_io(host.close(take previous)))?
     let end = header.prev_end
     let target = order.min(4194304u64, (end - 72) / 4096 * 4096)
     // A pending group can extend the file as far as its issued frame end.

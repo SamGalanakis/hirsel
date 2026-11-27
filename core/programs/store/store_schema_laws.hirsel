@@ -256,8 +256,8 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     let raw = result.unwrap(encode_catalog(meta))
     let base = pages.share_roots(pages.holder_heads(db.holders)[0].roots)
     let patched = result.unwrap(catalog_put(mut db, base, old.catalog_key, raw))
-    let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[0].roots.keyed)
-    let count_bytes = keyed_root_record_bytes(patched.keyed)
+    let old_bytes = manifest.keyed_root_record_bytes(pages.holder_heads(db.holders)[0].roots.keyed)
+    let count_bytes = manifest.keyed_root_record_bytes(patched.keyed)
     let current_head = pages.holder_heads(db.holders)[0].head
     let at = pages.holder_heads(db.holders)[0].at
     pages.replace_head(mut db.holders, 0, take patched, current_head, at, old_bytes, count_bytes)

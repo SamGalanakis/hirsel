@@ -72,7 +72,7 @@ fn residency_check_published(d: Dir, db: Db, id: u32, held_stamps: List[u64]) ->
     let mut reached = 0u64
     let mut pages = false
     let mut blobs = false
-    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut inventory = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
     while let Some((seq, listed)) = std.omap.next(mut inventory) {
         if let Some(_) = map.get(walk.live, seq) {
             if listed.class < 3 {
@@ -144,14 +144,14 @@ fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Ran
     let mut db = open(tasks, d, c, r, l70_open_options(182375271u64)?)?
     let rows = residency_rows(mut db, 20)?
     let generation = db.checkpointed
-    let next_pack = disk_state(db).pages.next_pack
+    let next_pack = manifest.pack_next(disk_state(db).packs)
     let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Tiered) else {
         fail("residency: a store below the Tiered floor refuses the first change")
     }
     if let Some(_) = db.pager {
         fail("residency: a refused change leaves no pager")
     }
-    if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
+    if db.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
         fail("residency: a refused change publishes nothing")
     }
     if residency_mode(db, rows.id)? != (TableCollection, ResidentMemory) {
@@ -330,11 +330,11 @@ fn test_set_residency_refused_load_changes_nothing(d: Dir, c: Clock, r: Random, 
         let _ = checkpoint(mut db)?
     }
     let generation = db.checkpointed
-    let next_pack = disk_state(db).pages.next_pack
+    let next_pack = manifest.pack_next(disk_state(db).packs)
     let Error(Full(Resident(_))) = set_residency(mut db, rows.id, Memory) else {
         fail("residency: a collection larger than the Memory room refuses the load")
     }
-    if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
+    if db.checkpointed != generation || manifest.pack_next(disk_state(db).packs) != next_pack {
         fail("residency: a refused load publishes nothing")
     }
     if residency_mode(db, rows.id)? != (TableCollection, ResidentTiered) {

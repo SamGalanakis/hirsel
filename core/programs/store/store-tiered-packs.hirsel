@@ -3,7 +3,7 @@ type TieredPackDraft {
     class: u8,
     cap: u64,
     raw: Bytes,
-    rows: List[PackIndexRow],
+    rows: List[manifest.PackIndexRow],
     planned_bytes: u64,
     index_room: u64,
     live: u64
@@ -31,18 +31,18 @@ fn begin_tiered_pack(owner: StoreId, seq: u64, class: u8, cap: u64) -> Result[Ti
 }
 
 fn tiered_frame_extent(bytes_written: u64, index_room: u64, size: u64, key_size: u64) -> Result[(u64, u64), Error] {
-    let row_width = PACK_INDEX_ROW + key_size
-    if row_width > format.PACK_INDEX_LIMIT - PACK_INDEX_PREFIX {
+    let row_width = manifest.PACK_INDEX_ROW + key_size
+    if row_width > format.PACK_INDEX_LIMIT - manifest.PACK_INDEX_PREFIX {
         return Error(Limit(Key))
     }
     let starts_index = index_room == 0 || row_width > format.PACK_INDEX_LIMIT - index_room
     if starts_index {
-        return Ok((bytes_written + 16 + size + 16 + PACK_INDEX_PREFIX + row_width, PACK_INDEX_PREFIX + row_width))
+        return Ok((bytes_written + 16 + size + 16 + manifest.PACK_INDEX_PREFIX + row_width, manifest.PACK_INDEX_PREFIX + row_width))
     }
     Ok((bytes_written + 16 + size + row_width, index_room + row_width))
 }
 
-fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collection: u32, key: Bytes, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[Option[std.page.PagePtr], Error] {
+fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: manifest.PackFrame, collection: u32, key: Bytes, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[Option[std.page.PagePtr], Error] {
     let (class, kind): (u8, u8) = match frame.body {
         PageBody(_) => (3, 0x21),
         BlobBody(_) => (4, 0x22),
@@ -58,7 +58,7 @@ fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collectio
     failure_result_from_rep(types.capacity(list.try_reserve(mut draft.rows, 1)))?
     failure_result_from_rep(types.capacity(list.try_reserve(mut draft.raw, 16 + frame.size)))?
     let offset = list.len(draft.raw)
-    let encoded = emit_located_frame(mut draft.raw, draft.context, frame, locate)
+    let encoded = failure_result_from_rep(manifest.emit_located_frame(mut draft.raw, draft.context, frame, locate))
     let place = match take encoded {
         Ok(ptr) => ptr,
         Error(take problem) => {
@@ -66,7 +66,7 @@ fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collectio
             return Error(take problem)
         },
     }
-    list.push(mut draft.rows, PackIndexRow(offset: place.offset, len: place.len, kind: kind, collection: collection, stamp: place.stamp, key: take logical))
+    list.push(mut draft.rows, manifest.PackIndexRow(offset: place.offset, len: place.len, kind: kind, collection: collection, stamp: place.stamp, key: take logical))
     draft.planned_bytes = next_size
     draft.index_room = next_index_room
     draft.live += frame.size
@@ -79,7 +79,7 @@ fn finish_tiered_pack(take draft: TieredPackDraft) -> Result[(Bytes, pages.PageP
         fail("store: attempted to seal an empty Tiered pack")
     }
     let mut raw = take bytes_out
-    let index_offset = append_pack_index(mut raw, context, rows)?
+    let index_offset = failure_result_from_rep(manifest.append_pack_index(mut raw, context, rows))?
     let pack = pages.PagePack(class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
     Ok((take raw, pack))
 }

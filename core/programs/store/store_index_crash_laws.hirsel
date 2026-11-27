@@ -327,7 +327,7 @@ fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, dri
         } else {
             "MANIFEST"
         }
-        disk_write_synced(d, name, sealed)?
+        failure_result_from_rep(manifest.disk_write_synced(d, name, sealed))?
         1u64
     } else {
         rebuild_index(mut db, schema.by_v)?
@@ -488,14 +488,14 @@ fn test_l68_demote_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     d7_check_demoted(db, schema, 1u64)?
     {
         let state = disk_state(db)
-        let manifest = view state.pages.lists.rows
-        let forked = option.unwrap(map.get(manifest.forks, beta.id))
-        let cell = LineageCell(branch: 0, boundary: forked.watermark, side: 1, interval: 0, pack: base.pack)
+        let page_record = manifest.pack_lists(state.packs).rows
+        let forked = option.unwrap(map.get(page_record.forks, beta.id))
+        let cell = manifest.LineageCell(branch: 0, boundary: forked.watermark, side: 1, interval: 0, pack: base.pack)
         let expected: u64 = int.widen(base.len)
-        let Some(filed) = map.get(manifest.cells, cell) else {
+        let Some(filed) = map.get(page_record.cells, cell) else {
             fail("L68(h): main must file the old leaf at beta's fork boundary")
         }
-        if map.len(manifest.cells) != 1 || filed != expected {
+        if map.len(page_record.cells) != 1 || filed != expected {
             fail("L68(h): main must file the old leaf once, at beta's fork boundary")
         }
     }

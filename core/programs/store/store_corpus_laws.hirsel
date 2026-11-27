@@ -256,8 +256,8 @@ fn corpus_freeze_directory(dir_out: Dir, meta_out: Dir, c: Clock, r: Random, tas
     trust_store(mut db)?
     let dump = corpus_canonical_dump(mut db, schema)?
     close(take db)?
-    disk_write_synced(meta_out, "directory.dump", string.into_bytes(take dump))?
-    disk_io(host.sync_dir(meta_out))
+    failure_result_from_rep(manifest.disk_write_synced(meta_out, "directory.dump", string.into_bytes(take dump)))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(meta_out)))
 }
 
 fn corpus_freeze_bucket(bucket_out: Dir, meta_out: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
@@ -272,29 +272,29 @@ fn corpus_freeze_bucket(bucket_out: Dir, meta_out: Dir, c: Clock, r: Random, tas
     let dump = corpus_canonical_dump(mut db, schema)?
     close(take db)?
     let report = bucket_law_report(take sim)
-    disk_write_synced(meta_out, "bucket.dump", string.into_bytes(take dump))?
+    failure_result_from_rep(manifest.disk_write_synced(meta_out, "bucket.dump", string.into_bytes(take dump)))?
     let mut keys: List[String] = list.new()
     for (k, _) in report.objects {
         list.push(mut keys, string.from(k))
     }
     corpus_sort_strings(mut keys)
-    let mut manifest = string.from("")
+    let mut page_record = string.from("")
     let mut idx = 0u64
     for key in keys {
         let obj = option.unwrap(map.get(report.objects, key))
         let mut fname = string.from("obj-")
         string.push_u64(mut fname, idx)
         string.push(mut fname, ".bin")
-        disk_write_synced(bucket_out, fname, obj.data)?
-        string.push(mut manifest, fname)
-        string.push(mut manifest, "\t")
-        string.push(mut manifest, key)
-        string.push(mut manifest, "\n")
+        failure_result_from_rep(manifest.disk_write_synced(bucket_out, fname, obj.data))?
+        string.push(mut page_record, fname)
+        string.push(mut page_record, "\t")
+        string.push(mut page_record, key)
+        string.push(mut page_record, "\n")
         idx += 1u64
     }
-    disk_io(host.sync_dir(bucket_out))?
-    disk_write_synced(meta_out, "bucket.manifest", string.into_bytes(take manifest))?
-    disk_io(host.sync_dir(meta_out))
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(bucket_out)))?
+    failure_result_from_rep(manifest.disk_write_synced(meta_out, "bucket.manifest", string.into_bytes(take page_record)))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(meta_out)))
 }
 
 // Entry run by core/tools/store_freeze_corpus.py to freeze the current format.
@@ -388,9 +388,9 @@ fn test_frozen_format_corpus(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     // indexes + exact canonical logical dump, then write, checkpoint, reopen.
     let dir_copy = disk_test_directory(d)
     for (name, raw) in dir_files {
-        disk_write_synced(dir_copy, name, raw)?
+        failure_result_from_rep(manifest.disk_write_synced(dir_copy, name, raw))?
     }
-    disk_io(host.sync_dir(dir_copy))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(dir_copy)))?
     let mut dir_db = open(tasks, dir_copy, c, r, corpus_dir_options(false))?
     let dir_schema = corpus_schema(mut dir_db, Open)?
     trust_store(mut dir_db)?

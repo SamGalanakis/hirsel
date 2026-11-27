@@ -120,7 +120,7 @@ fn stage_migration_plan_with(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Mi
     }
     match task.join(take running) {
         Ok(()) => (),
-        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
+        Error(Failed(causes)) => return Error(match manifest.raised_capacity(causes) {
             Some(c) => Full(Allocation(c)),
             None => MigrationFault,
         }),

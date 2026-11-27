@@ -72,7 +72,7 @@ fn stream_sealed_tail_epoch(mut client: std.object.Client, mut buffers: TailBuff
         if let None = stream_tail_range(mut c, cut_key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
             return Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent)))
         }
-        let mut batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
+        let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(cut_key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid)), st.tail.inc, st.cutoff))? {
             Rows(take found) => take found,
             Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
         }
@@ -80,7 +80,7 @@ fn stream_sealed_tail_epoch(mut client: std.object.Client, mut buffers: TailBuff
             if let None = stream_tail_range(mut c, cut_key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
                 return Error(failure_from_rep(format.disk_fault(cut_key, 0, Absent)))
             }
-            batch_index = match stream_batch_head(cut_key, buffers.index, host_stream_id_from_rep(st.tail.sid), st.tail.inc, st.cutoff)? {
+            batch_index = match failure_result_from_rep(manifest.stream_batch_head(cut_key, buffers.index, host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid)), st.tail.inc, st.cutoff))? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(failure_from_rep(format.disk_fault(cut_key, 72, Malformed))),
             }
@@ -99,7 +99,7 @@ fn stream_sealed_fetch_slice(mut client: std.object.Client, mut buffers: TailBuf
         if let None = stream_tail_range(mut c, key, 0, format.STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
             return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
         }
-        let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+        let mut batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(sid), inc, seq))? {
             Rows(take found) => take found,
             Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
         }
@@ -107,7 +107,7 @@ fn stream_sealed_fetch_slice(mut client: std.object.Client, mut buffers: TailBuf
             if let None = stream_tail_range(mut c, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
                 return Error(failure_from_rep(format.disk_fault(key, 0, Absent)))
             }
-            batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+            batch_index = match failure_result_from_rep(manifest.stream_batch_head(key, buffers.index, host_stream_id_to_rep(sid), inc, seq))? {
                 Rows(take found) => take found,
                 Term(_, _) => return Error(failure_from_rep(format.disk_fault(key, 72, Malformed))),
             }
@@ -168,7 +168,7 @@ fn stream_settle_sealed_core(mut client: std.object.Client, mut register: Histor
                 let mut at = 0u64
                 let mut fidx = 0u64
                 while at < list.len(tail_bufs.slice) {
-                    let frame = disk_frame_bytes(key, batch_ctx, tail_bufs.slice, at)?
+                    let frame = failure_result_from_rep(manifest.disk_frame_bytes(key, batch_ctx, tail_bufs.slice, at))?
                     if fidx >= skip {
                         if frame.kind == 0x0040 {
                             if frame.end - frame.payload != 24 || format.read_le(tail_bufs.slice, frame.payload, 8) != tail_epoch {
@@ -329,7 +329,7 @@ fn history_decode_archive_segment(key: String, store: StoreId, reference: pages.
     let mut out: List[pages.HistoryRef] = list.new()
     let mut at = 72u64
     while at < list.len(raw) {
-        let frame = disk_frame_bytes(key, ctx, raw, at)?
+        let frame = failure_result_from_rep(manifest.disk_frame_bytes(key, ctx, raw, at))?
         if frame.kind != KIND_ARCHIVE_ROWS {
             return Error(failure_from_rep(format.disk_fault(key, at, Kind(int.widen(frame.kind)))))
         }

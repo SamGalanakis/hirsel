@@ -576,7 +576,7 @@ fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: page
     let (Some(old_log), Some(new_log)) = (std.omap.get(old_branch.collections, id), std.omap.get(new_branch.collections, id)) else {
         return Ok(true)
     }
-    let path = paged_pack_path(left.pack)?
+    let path = failure_result_from_rep(manifest.paged_pack_path(left.pack))?
     let Some(cold_next) = old_log.cold_next else {
         return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
     }

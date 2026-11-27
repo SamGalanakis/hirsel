@@ -37,21 +37,21 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
 }
 
 fn history_import_base(mut client: std.object.Client, draft: Db, options: Options, mut workspace: HistoryBuffers, deadline: u64) -> Result[(pages.HistoryRef, HistoryLocateRoot), Error] waits {
-    let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
+    let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(draft, NoHolderChange)
     })?
-    let blank = new_page_locations()
-    let base = page_retry_base(blank, map.new(), participants.holders, participants.roots)?
+    let blank = manifest.new_page_locations()
+    let base = failure_result_from_rep(manifest.page_retry_base(blank, map.new(), participants.holders, participants.roots))?
     failure_result_from_rep(catalog.over_ceiling(base.account, options.resident_limit))?
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
-    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
-    let limit = order.max(options.pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
-    let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit)?
+    let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
+    let limit = order.max(options.pack_bytes, manifest.page_manifest_file_size(manifest.MANIFEST_LIMIT, 1))
+    let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit))?
     let no_packs = empty_history_locator()
     let (take layout, take refs) = history_write_page_cut(mut client, draft.store, 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline)?
     fill_cut_manifest(mut buffers.out, draft, NoHolderChange, participants.roots, 1, 1, 1, layout, next_stamp, base.account, seal_page_manifest_file)?
-    let (_, take manifest) = disk_read_page_manifest("MANIFEST", buffers.out)?
-    let uploaded = history_create_manifest(mut client, draft.store, 1, 1, manifest, mut workspace, deadline)?
+    let (_, take page_record) = disk_read_page_manifest("MANIFEST", buffers.out)?
+    let uploaded = history_create_manifest(mut client, draft.store, 1, 1, page_record, mut workspace, deadline)?
     let locator = history_make_locator(mut client, draft.store, 1, 1, 1, take refs, mut workspace, deadline)?
     Ok((uploaded, take locator))
 }

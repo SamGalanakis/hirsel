@@ -1,0 +1,72 @@
+type ProposedMain {
+    roots: pages.Roots,
+    head: u64,
+    at: u64,
+    tables: u32,
+    activation: Option[HistoryActivation],
+    // The import pin slot an installing cut removes with the replacement
+    // (§3.5a "The kept import").
+    drop_pin: Option[u64],
+    superseded: List[u32],
+    chunk_freed: Option[TieredFreed],
+    // D-CU-1: rows this schema commit itself wrote, and whether the commit is
+    // non-replayable under an export lease.
+    step_rows: List[StepOp],
+    step_drift: bool
+}
+
+type HolderDelta = NoHolderChange | AddHead(pages.Head, String) | RemoveHead(u64) | AddPin(pages.Pin) | RemovePin(u64) | ReplacePin(u64, pages.Pin) | ReplaceMain(ProposedMain, Option[u64])
+
+fn cut_input(db: Db, delta: HolderDelta) -> manifest.CutInput[in db, in delta] {
+    let change: manifest.CutChange = match delta {
+        NoHolderChange => CutUnchanged,
+        AddHead(head, _) => CutAddHead(view head),
+        RemoveHead(slot) => CutRemoveHead(slot),
+        AddPin(held) => CutAddPin(view held, held.owner != ImportPin && !pin_shares_head(db, held)),
+        RemovePin(slot) => CutRemovePin(slot),
+        ReplacePin(slot, held) => CutReplacePin(slot, view held, held.owner != ImportPin && !pin_shares_head(db, held)),
+        ReplaceMain(main, removed) => CutReplaceMain(view main.roots, main.head, main.at, main.tables, removed, main.drop_pin),
+    }
+    // A catch-up round copies every segment OLD wrote from the lease's first.
+    let lease_span = match view db.disk {
+        Some(state) => match state.lease {
+            Some(held) => Some((held.first, 18446744073709551615u64)),
+            None => None,
+        },
+        None => None,
+    }
+    manifest.CutInput(heads: pages.holder_heads(db.holders), pins: pages.holder_pins(db.holders), change: change, record_bytes: pages.holder_record_bytes(db.holders), lease_span: lease_span, store: store_key_to_rep(db.store), limits: limits_to_rep(db.limits), fence: catalog.current_fence(db.schema), next_branch: pages.holder_next_branch(db.holders), next_table: catalog.next_table_id(db.schema))
+}
+
+fn cut_participants(db: Db, delta: HolderDelta) -> Result[manifest.CutParticipants, Error] {
+    failure_result_from_rep(manifest.cut_participants(cut_input(db, delta)))
+}
+
+fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[pages.Roots], generation: u64, seq: u64, prev_first: u64, layout: manifest.PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let account_tiered = cut_tiered_account(published)?
+    failure_result_from_rep(manifest.fill_cut_manifest(mut raw, cut_input(db, delta), published, generation, seq, prev_first, layout, next_stamp, account, account_tiered, scoped fn(mut output: Bytes, context: format.DiskContext, fence: u32) -> Result[(), types.Failure] waits {
+        failure_result_to_rep(write_seal(mut output, context, fence))
+    }))
+}
+
+fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, format.DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
+    let mut timing: Option[CutTiming] = None
+    disk_cut_timed(mut db, take delta, write_seal, mut timing)
+}
+
+// A pin's materialized pages are its own: its watermark rises above them,
+// so no holder reaches a frame at or above its watermark (§13.5 step 3).
+fn raise_materialized_pin(mut delta: HolderDelta, staged: TieredCutStage) {
+    if !staged.materialized {
+        return ()
+    }
+    match delta {
+        AddPin(mut added) => {
+            added.watermark = staged.stamp_end
+        },
+        ReplacePin(_, mut added) => {
+            added.watermark = staged.stamp_end
+        },
+        _ => (),
+    }
+}

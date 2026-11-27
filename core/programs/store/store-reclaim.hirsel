@@ -218,11 +218,11 @@ fn reclaim_page_bytes() -> u64 {
     option.unwrap(charge.seq(bytes[std.object.Entry], std.object.LIST_PAGE_MAX))
 }
 
-fn sweep_start() -> SweepCursor {
-    SweepCursor(position: 0, epoch: 0, digest: 0)
+fn sweep_start() -> manifest.SweepCursor {
+    manifest.SweepCursor(position: 0, epoch: 0, digest: 0)
 }
 
-fn history_entry_cursor(mark: SweepCursor) -> String {
+fn history_entry_cursor(mark: manifest.SweepCursor) -> String {
     history_key("e-", pages.HistoryRef(seq: mark.position, epoch: mark.epoch, len: 0, digest: mark.digest))
 }
 
@@ -246,7 +246,7 @@ fn history_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, mut 
         if history_dead_key(pass, name) {
             std.object.erase(mut lane.client, name, deadline) ?=> Remote
         }
-        lane.sweep = SweepCursor(position: parsed_name.seq, epoch: parsed_name.epoch, digest: parsed_name.digest)
+        lane.sweep = manifest.SweepCursor(position: parsed_name.seq, epoch: parsed_name.epoch, digest: parsed_name.digest)
     }
     if !page.truncated {
         lane.sweep = sweep_start()
@@ -365,7 +365,7 @@ fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimC
         Ok(list.with_capacity(std.object.LIST_PAGE_MAX))
     })?
     history_sweep_entries(mut lane, pass, mut members, deadline)?
-    let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))
+    let start_live = history_entry_cursor(manifest.SweepCursor(position: pass.floor, epoch: 0, digest: 0))
     history_reclaim_prefix(mut lane, pass, "e-", take start_live, mut members, deadline)?
     for lead in["m-", "l-", "p-"] {
         history_reclaim_prefix(mut lane, pass, lead, string.new(), mut members, deadline)?
@@ -391,7 +391,7 @@ fn preview_record(mut acc: PreviewAcc, kind: ReclaimKind, take key: String, size
     Ok(())
 }
 
-fn preview_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, cursor: SweepCursor, mut members: List[std.object.Entry], mut acc: PreviewAcc, deadline: u64) -> Result[(), Error] waits {
+fn preview_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, cursor: manifest.SweepCursor, mut members: List[std.object.Entry], mut acc: PreviewAcc, deadline: u64) -> Result[(), Error] waits {
     let after = if cursor.position == 0 {
         string.new()
     } else {
@@ -494,7 +494,7 @@ fn preview_on_lane(mut lane: ObjectJournalSession, store_id: StoreId, fixed: Obj
     })?
     let mut acc = PreviewAcc(items: list.new(), total_bytes: 0u64, max_items, omitted: 0u64)
     preview_sweep_entries(mut lane, pass, private_cursor, mut members, mut acc, deadline)?
-    let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))
+    let start_live = history_entry_cursor(manifest.SweepCursor(position: pass.floor, epoch: 0, digest: 0))
     preview_reclaim_prefix(mut lane, pass, "e-", take start_live, mut members, mut acc, deadline)?
     for lead in["m-", "l-", "p-"] {
         preview_reclaim_prefix(mut lane, pass, lead, string.new(), mut members, mut acc, deadline)?
@@ -532,7 +532,7 @@ pub fn reclaim_preview(mut db: Db, max_items: u64) -> Result[ReclaimList, Error]
     durable(mut db, latest_receipt)?
     let recovered = object_state(db).recovered
     let generation = db.checkpointed
-    let next_pack = disk_state(db).pages.next_pack
+    let next_pack = manifest.pack_next(disk_state(db).packs)
     let store_id = db.store
     let (take paused, take resume) = take_object_journal(mut db)?
     let mut lane = take paused
@@ -641,7 +641,7 @@ pub fn reclaim_purge(mut db: Db, plan: ReclaimList) -> Result[PurgeReport, Recla
     durable(mut db, latest_receipt) ?=> Store
     let recovered = object_state(db).recovered
     let generation = db.checkpointed
-    let next_pack = disk_state(db).pages.next_pack
+    let next_pack = manifest.pack_next(disk_state(db).packs)
     let (take paused, take resume) = take_object_journal(mut db) ?=> Store
     let mut lane = take paused
     let fixed = ObjectReclaimCapture(head: lane.register.head, recovered, generation, next_pack)

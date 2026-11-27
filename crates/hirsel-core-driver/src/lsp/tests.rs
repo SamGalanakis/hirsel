@@ -2,6 +2,7 @@
 mod image_navigation;
 
 use super::documents::file_uri;
+use super::stdio_fixture::{P1_APP, at, compare_cli, p1};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,14 +10,14 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-const APP: &str = concat!(
+pub(super) const APP: &str = concat!(
     "pub fn main() -> Result[(), Exit] { Ok(()) }\r\n",
     "fn poisoned(x: Missing) {}\r\n",
     "fn answer() -> u64 { let _ = \"😀\"; dep.value() }\r\n",
     "fn moved(take s: String) -> String { let t = s; s }",
 );
 const LIB_GOOD: &str = "pub fn value() -> u64 { 42u64 }";
-const LIB_BAD: &str = "pub fn value() -> bool { true }";
+pub(super) const LIB_BAD: &str = "pub fn value() -> bool { true }";
 const PIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
@@ -162,6 +163,16 @@ fn stdio_editor_queries() {
         definition["result"][0]["targetSelectionRange"]["start"],
         json!({"line": 1, "character": 13}),
     );
+    client.request(
+        16,
+        "textDocument/prepareRename",
+        query(&app, 3, archived_call),
+    );
+    assert_eq!(client.response(16)["result"], Value::Null);
+    let mut rename = query(&app, 3, archived_call);
+    rename["newName"] = json!("different");
+    client.request(17, "textDocument/rename", rename);
+    assert_eq!(client.response(17)["error"]["code"], -32602);
     client.open(&target, archive_source);
     client.request(15, "textDocument/hover", query(&target, 1, 7));
     let archived_hover = client.response(15);
@@ -207,10 +218,7 @@ fn stdio_editor_queries() {
     );
     client.request(13, "textDocument/formatting", params);
     assert_eq!(client.response(13)["result"], json!([]));
-    client.request(10, "shutdown", Value::Null);
-    assert_eq!(client.response(10)["result"], Value::Null);
-    client.notify("exit", Value::Null);
-    client.finish();
+    client.shutdown(10);
     assert_eq!(capture(&workspace), base);
     assert_eq!(capture(&cache), cache_base);
 }
@@ -483,10 +491,7 @@ fn stdio_live_diagnostics_contract() {
         assert_eq!(client.diagnostics(&lock, None), json!([]));
         client.close(&app);
         assert_eq!(client.diagnostics(&app, None), json!([]));
-        client.request(3, "shutdown", Value::Null);
-        assert_eq!(client.response(3)["result"], Value::Null);
-        client.notify("exit", Value::Null);
-        client.finish();
+        client.shutdown(3);
 
         if encoding == "utf-16" {
             let entry = cache
@@ -498,7 +503,7 @@ fn stdio_live_diagnostics_contract() {
     }
 }
 
-fn driver() -> PathBuf {
+pub(super) fn driver() -> PathBuf {
     let path = if let Some(path) = std::env::var_os("HIRSEL_DEV_TEST_DRIVER") {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -513,11 +518,11 @@ fn driver() -> PathBuf {
     path.canonicalize().expect("built hirsel binary")
 }
 
-fn manifest(name: &str, module: &str) -> String {
+pub(super) fn manifest(name: &str, module: &str) -> String {
     source_manifest(name, module, module)
 }
 
-fn source_manifest(name: &str, file: &str, module: &str) -> String {
+pub(super) fn source_manifest(name: &str, file: &str, module: &str) -> String {
     format!(
         "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"{file}.hirsel\" = \"{module}\"\n"
     )
@@ -550,7 +555,7 @@ fn package_archive(root: &Path, archive: &Path, source: &str) -> crate::package_
     root
 }
 
-fn write(path: &Path, text: &str) {
+pub(super) fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
 }
@@ -559,7 +564,13 @@ fn folder(path: &Path) -> Value {
     json!({"uri": file_uri(path), "name": path.file_name().unwrap().to_str().unwrap()})
 }
 
-fn cli(driver: &Path, root: &Path, directory: &Path, flags: &[&str], status: i32) -> Vec<u8> {
+pub(super) fn cli(
+    driver: &Path,
+    root: &Path,
+    directory: &Path,
+    flags: &[&str],
+    status: i32,
+) -> Vec<u8> {
     let output = Command::new(driver)
         .args(flags)
         .arg(directory)
@@ -576,7 +587,7 @@ fn cli(driver: &Path, root: &Path, directory: &Path, flags: &[&str], status: i32
     output.stdout
 }
 
-fn capture(path: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(super) fn capture(path: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     fn walk(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
         for entry in fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
@@ -612,69 +623,6 @@ fn cache_snapshot(
     base
 }
 
-fn compare_cli(driver: &Path, root: &Path, workspace: &Path, lsp: &Value, encoding: &str) {
-    let comparison = root.join("cli-workspace");
-    for (relative, bytes) in capture(workspace) {
-        if let Some(bytes) = bytes {
-            let path = comparison.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, bytes).unwrap();
-        }
-    }
-    write(&comparison.join("lib/lib.hirsel"), LIB_BAD);
-    let scratch = root.join("cli-store");
-    let result: Value = serde_json::from_slice(&cli(
-        driver,
-        root,
-        &comparison.join("app"),
-        &[
-            "check",
-            "--frozen",
-            "--json",
-            "--store",
-            scratch.to_str().unwrap(),
-        ],
-        1,
-    ))
-    .unwrap();
-    let cli = result["diagnostics"].as_array().unwrap();
-    let source: Vec<_> = cli
-        .iter()
-        .filter(|d| d["primary"]["module"] == "main.hirsel")
-        .collect();
-    assert_eq!(
-        lsp.as_array().unwrap().len(),
-        source.len(),
-        "{lsp}\n{result}"
-    );
-    for diagnostic in source {
-        let live = entry(lsp, diagnostic["rule"].as_str().unwrap());
-        assert_eq!(
-            live["range"],
-            byte_range(APP, &diagnostic["primary"]["span"], encoding)
-        );
-        let roles: Vec<Value> = diagnostic["causal"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|cause| {
-                assert_eq!(cause["site"]["module"], "main.hirsel");
-                json!({
-                    "location": {
-                        "uri": file_uri(&workspace.join("app/main.hirsel")),
-                        "range": byte_range(APP, &cause["site"]["span"], encoding)
-                    },
-                    "message": cause["role"].as_str().unwrap().replace('_', " ")
-                })
-            })
-            .collect();
-        assert_eq!(
-            live.get("relatedInformation").cloned().unwrap_or(json!([])),
-            json!(roles)
-        );
-    }
-}
-
 fn has_rule(diagnostics: &Value, code: &str) -> bool {
     diagnostics
         .as_array()
@@ -683,7 +631,7 @@ fn has_rule(diagnostics: &Value, code: &str) -> bool {
         .any(|entry| entry["code"] == code)
 }
 
-fn entry<'a>(diagnostics: &'a Value, code: &str) -> &'a Value {
+pub(super) fn entry<'a>(diagnostics: &'a Value, code: &str) -> &'a Value {
     diagnostics
         .as_array()
         .unwrap()
@@ -692,21 +640,7 @@ fn entry<'a>(diagnostics: &'a Value, code: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing {code} in {diagnostics}"))
 }
 
-fn byte_range(source: &str, span: &Value, encoding: &str) -> Value {
-    let position = |offset: &Value| {
-        let offset = offset.as_u64().unwrap() as usize;
-        let prefix = &source[..offset];
-        point(
-            prefix.rsplit('\n').next().unwrap(),
-            prefix.rsplit('\n').next().unwrap().len(),
-            prefix.bytes().filter(|&byte| byte == b'\n').count(),
-            encoding,
-        )
-    };
-    json!({"start": position(&span["start"]), "end": position(&span["end"])})
-}
-
-fn point(line: &str, offset: usize, row: usize, encoding: &str) -> Value {
+pub(super) fn point(line: &str, offset: usize, row: usize, encoding: &str) -> Value {
     let character = if encoding == "utf-8" {
         offset
     } else {
@@ -720,14 +654,14 @@ fn range_text(line: &str, text: &str, row: usize, encoding: &str) -> Value {
     json!({"start": point(line, start, row, encoding), "end": point(line, start + text.len(), row, encoding)})
 }
 
-struct Client {
+pub(super) struct Client {
     child: Child,
     input: BufWriter<ChildStdin>,
     output: BufReader<ChildStdout>,
 }
 
 impl Client {
-    fn start(driver: &Path, directory: &Path, cache: &Path) -> Self {
+    pub(super) fn start(driver: &Path, directory: &Path, cache: &Path) -> Self {
         let mut child = crate::host::offline_editor(driver)
             .arg("lsp")
             .current_dir(directory)
@@ -773,11 +707,11 @@ impl Client {
         serde_json::from_slice(&body).unwrap()
     }
 
-    fn request(&mut self, id: u64, method: &str, params: Value) {
+    pub(super) fn request(&mut self, id: u64, method: &str, params: Value) {
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
     }
 
-    fn response(&mut self, id: u64) -> Value {
+    pub(super) fn response(&mut self, id: u64) -> Value {
         loop {
             let message = self.receive();
             if message["id"] == id {
@@ -790,11 +724,11 @@ impl Client {
         }
     }
 
-    fn notify(&mut self, method: &str, params: Value) {
+    pub(super) fn notify(&mut self, method: &str, params: Value) {
         self.send(&json!({"jsonrpc":"2.0", "method":method, "params":params}));
     }
 
-    fn open(&mut self, path: &Path, text: &str) {
+    pub(super) fn open(&mut self, path: &Path, text: &str) {
         self.notify(
             "textDocument/didOpen",
             json!({"textDocument": {
@@ -829,7 +763,7 @@ impl Client {
         );
     }
 
-    fn diagnostics(&mut self, path: &Path, version: Option<i64>) -> Value {
+    pub(super) fn diagnostics(&mut self, path: &Path, version: Option<i64>) -> Value {
         let uri = file_uri(path);
         loop {
             let value = self.receive();
@@ -853,10 +787,203 @@ impl Client {
         }
     }
 
+    pub(super) fn shutdown(mut self, id: u64) {
+        self.request(id, "shutdown", Value::Null);
+        assert_eq!(self.response(id)["result"], Value::Null);
+        self.notify("exit", Value::Null);
+        self.finish();
+    }
+
     fn finish(mut self) {
         self.input.flush().unwrap();
         drop(self.input);
         assert!(self.output.fill_buf().unwrap().is_empty());
         assert!(self.child.wait().unwrap().success());
     }
+}
+
+#[test]
+fn stdio_completion_filters_scope_and_receiver() {
+    p1(
+        P1_APP,
+        "/// The result.\npub fn value() -> u64 { 1u64 }\nfn secret() -> u64 { 2u64 }",
+        |client, app, _, source| {
+            client.request(2, "textDocument/completion", at(app, source, 2, "value"));
+            let reply = client.response(2);
+            let items = reply["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{reply}"));
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["label"], "value");
+            assert_eq!(
+                items[0]["textEdit"]["range"],
+                range_text(source.lines().nth(2).unwrap(), "value", 2, "utf-16")
+            );
+            client.request(4, "textDocument/completion", at(app, source, 4, "n }"));
+            let reply = client.response(4);
+            let local = reply["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["label"] == "n")
+                .unwrap_or_else(|| panic!("{reply}"));
+            assert_eq!(local["detail"], "u64");
+
+            assert!(items[0]["detail"].as_str().unwrap().contains("fn value()"));
+            assert!(
+                items[0]["documentation"]
+                    .to_string()
+                    .contains("The result.")
+            );
+            let incomplete = source.replace("point.x", "point.");
+            client.change(app, 2, json!([{"text": incomplete}]));
+            let mut query = at(app, &incomplete, 6, ". }");
+            query["position"]["character"] =
+                json!(query["position"]["character"].as_u64().unwrap() + 1);
+            client.request(3, "textDocument/completion", query);
+            let reply = client.response(3);
+            let labels: Vec<_> = reply["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{reply}"))
+                .iter()
+                .map(|item| item["label"].as_str().unwrap())
+                .collect();
+            assert_eq!(labels, ["x", "y"]);
+        },
+    );
+}
+
+#[test]
+fn stdio_references_follow_bindings_across_files() {
+    p1(P1_APP, LIB_GOOD, |client, app, lib, source| {
+        for (id, path, text, row, name, lines) in [
+            (2, app, source, 4, "n }", vec![4, 4]),
+            (3, lib, LIB_GOOD, 0, "value", vec![2, 3, 5, 0]),
+            (4, app, source, 2, "dep.", vec![2, 5]),
+        ] {
+            let mut query = at(path, text, row, name);
+            query["context"] = json!({"includeDeclaration": true});
+            client.request(id, "textDocument/references", query);
+            let reply = client.response(id);
+            let refs = reply["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{reply}"));
+            assert_eq!(
+                refs.iter()
+                    .map(|hit| hit["range"]["start"]["line"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                lines
+            );
+            if id == 2 {
+                assert!(refs[0]["range"]["start"]["character"].as_u64().unwrap() > 50);
+            }
+        }
+        client.close(app);
+        assert_eq!(client.diagnostics(app, None), json!([]));
+        let mut query = at(lib, LIB_GOOD, 0, "value");
+        query["context"] = json!({"includeDeclaration": false});
+        client.request(5, "textDocument/references", query);
+        let reply = client.response(5);
+        let hits = reply["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{reply}"));
+        assert_eq!(hits.len(), 3);
+        assert!(hits.iter().all(|hit| hit["uri"] == file_uri(app)));
+    });
+}
+
+#[test]
+fn stdio_rename_rejects_capture_and_versions_workspace_edits() {
+    p1(P1_APP, LIB_GOOD, |client, app, lib, source| {
+        let mut query = at(lib, LIB_GOOD, 0, "value");
+        client.request(2, "textDocument/prepareRename", query.clone());
+        assert_eq!(client.response(2)["result"]["placeholder"], "value");
+        query["newName"] = json!("quantity");
+        client.request(3, "textDocument/rename", query);
+        let reply = client.response(3);
+        let changes = reply["result"]["documentChanges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{reply}"));
+        assert_eq!(changes.len(), 2);
+        assert_eq!(
+            changes[0]["textDocument"],
+            json!({"uri": file_uri(app), "version": 1})
+        );
+        assert_eq!(changes[0]["edits"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            changes[1]["textDocument"],
+            json!({"uri": file_uri(lib), "version": 1})
+        );
+        for (id, name) in [(4, "answer"), (5, "let"), (6, "dep")] {
+            let mut query = at(app, source, 5, "item }");
+            query["newName"] = json!(name);
+            client.request(id, "textDocument/rename", query);
+            assert_eq!(client.response(id)["error"]["code"], -32602);
+        }
+    });
+}
+
+#[test]
+fn stdio_code_actions_use_compiler_applicability_and_versions() {
+    let app = format!(
+        "{P1_APP}fn literal() -> u64 {{ let x = 1; x }}\nfn missing(b: bool) -> u64 {{ match b {{ true => 1u64 }} }}\n"
+    );
+    let lib = format!("{LIB_GOOD}\nfn edit(mut xs: List[u64]) {{ list.clear(xs) }}\n");
+    p1(&app, &lib, |client, app, library, _| {
+        client.change(library, 7, json!([{"text": lib}]));
+        let mut old = Value::Null;
+        let params = |path: &Path, row, diagnostics: Value| {
+            json!({
+                "textDocument": {"uri": file_uri(path)}, "context": {"diagnostics": diagnostics},
+                "range": {"start": {"line": row, "character": 0}, "end": {"line": row + 1, "character": 0}}
+            })
+        };
+        for (id, path, row, version, applicability, preferred) in [
+            (2, library, 1, 7, "safe", true),
+            (3, app, 9, 1, "maybe", false),
+            (4, app, 10, 1, "placeholder", false),
+        ] {
+            client.request(id, "textDocument/codeAction", params(path, row, json!([])));
+            let reply = client.response(id);
+            let action = &reply["result"][0];
+            assert_eq!(action["data"]["applicability"], applicability, "{reply}");
+            assert_eq!(action["isPreferred"], preferred);
+            assert_eq!(
+                action["edit"]["documentChanges"][0]["textDocument"],
+                json!({"uri": file_uri(path), "version": version})
+            );
+            if id == 2 {
+                old = action["diagnostics"].clone();
+            }
+        }
+        client.change(library, 8, json!([{"text": format!("{lib}\n")}]));
+        client.request(5, "textDocument/codeAction", params(library, 1, old));
+        assert_eq!(client.response(5)["result"], json!([]));
+    });
+}
+
+#[test]
+fn stdio_inlay_hints_are_range_filtered_and_generation_guarded() {
+    p1(P1_APP, LIB_GOOD, |client, app, _, source| {
+        let range = |row| json!({"start": {"line": row, "character": 0}, "end": {"line": row + 1, "character": 0}});
+        client.request(
+            2,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": file_uri(app)}, "range": range(8)}),
+        );
+        let reply = client.response(2);
+        let hints = reply["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{reply}"));
+        assert_eq!(
+            hints
+                .iter()
+                .map(|hint| hint["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [": u64", "amount:"]
+        );
+        client.change(app, 2, json!([{"text": format!("{source}\n")}]));
+        client.request(3, "inlayHint/resolve", hints[0].clone());
+        assert_eq!(client.response(3)["error"]["code"], -32801);
+    });
 }

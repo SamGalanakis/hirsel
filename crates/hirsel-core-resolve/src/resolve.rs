@@ -81,7 +81,7 @@ pub struct Resolution {
     /// The node whose nesting reaches [`RESOLVE_NESTING_LIMIT`], and that limit.
     pub resource_refusal: Option<(Site, u32)>,
 }
-pub(crate) fn builtin(n: Symbol) -> bool {
+pub fn builtin(n: Symbol) -> bool {
     matches!(
         n,
         sym::INLINE

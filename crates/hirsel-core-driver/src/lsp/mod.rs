@@ -1,10 +1,15 @@
 pub(crate) mod cache;
+mod code_actions;
+mod completion;
 mod diagnostics;
 mod documents;
 mod formatting;
 mod hover;
+mod inlay_hints;
 mod navigation;
 mod protocol;
+mod references;
+mod rename;
 mod snapshot;
 mod symbols;
 mod workspace;
@@ -15,6 +20,7 @@ mod tests;
 use self::documents::{Change, Document, Encoding, Position, file_path};
 use self::snapshot::EditorSnapshot;
 use self::workspace::{EditorInputs, EditorSession};
+use hirsel_core_syntax::Span;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -138,12 +144,23 @@ struct Query {
     kind: QueryKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize)]
+struct QueryRange {
+    start: Position,
+    end: Position,
+}
+
 enum QueryKind {
     Hover(Position),
     Definition(Position),
     Symbols,
     Format,
+    Completion(Position),
+    References(Position, bool),
+    PrepareRename(Position),
+    Rename(Position, String),
+    CodeAction(QueryRange, Value),
+    InlayHint(QueryRange),
 }
 
 #[derive(Deserialize)]
@@ -282,6 +299,11 @@ impl State {
                             "definitionProvider": true,
                             "documentSymbolProvider": true,
                             "documentFormattingProvider": true,
+                            "completionProvider": {"triggerCharacters": ["."]},
+                            "referencesProvider": true,
+                            "renameProvider": {"prepareProvider": true},
+                            "codeActionProvider": {"codeActionKinds": ["quickfix"]},
+                            "inlayHintProvider": {"resolveProvider": true},
                             "workspace": {
                                 "workspaceFolders": {"supported": true, "changeNotifications": true}
                             }
@@ -294,6 +316,15 @@ impl State {
                 protocol::error(id, -32602, "Invalid params")
             }
             (Phase::BeforeInitialize, _) => protocol::error(id, -32002, "Server not initialized"),
+            (Phase::Running, "inlayHint/resolve") => {
+                match params.pointer("/data/generation").and_then(Value::as_u64) {
+                    Some(generation) if generation == self.inputs.generation => {
+                        protocol::result(id, params.clone())
+                    }
+                    Some(_) => protocol::error(id, -32801, "Content modified"),
+                    None => protocol::error(id, -32602, "Invalid inlay hint"),
+                }
+            }
             (Phase::Running, "shutdown") => {
                 self.stop();
                 protocol::result(id, Value::Null)
@@ -443,11 +474,24 @@ impl State {
         params: &Value,
     ) -> Option<io::Result<()>> {
         let position = || serde_json::from_value(params["position"].clone()).ok();
+        let range = || serde_json::from_value(params["range"].clone()).ok();
         let kind = match method {
             "textDocument/hover" => position().map(QueryKind::Hover),
             "textDocument/definition" => position().map(QueryKind::Definition),
             "textDocument/documentSymbol" => Some(QueryKind::Symbols),
             "textDocument/formatting" => Some(QueryKind::Format),
+            "textDocument/completion" => position().map(QueryKind::Completion),
+            "textDocument/references" => position()
+                .zip(params["context"]["includeDeclaration"].as_bool())
+                .map(|(position, include)| QueryKind::References(position, include)),
+            "textDocument/prepareRename" => position().map(QueryKind::PrepareRename),
+            "textDocument/rename" => position()
+                .zip(params["newName"].as_str())
+                .map(|(position, name)| QueryKind::Rename(position, name.to_owned())),
+            "textDocument/codeAction" => range()
+                .filter(|_| params["context"].is_object())
+                .map(|range| QueryKind::CodeAction(range, params["context"].clone())),
+            "textDocument/inlayHint" => range().map(QueryKind::InlayHint),
             _ => return None,
         };
         let path = params
@@ -463,7 +507,11 @@ impl State {
             path,
             kind,
         };
-        if self.inputs.overlay.contains_key(&query.path)
+        if (self.inputs.overlay.contains_key(&query.path)
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.origins.contains_key(&query.path)))
             && self
                 .snapshot
                 .as_ref()
@@ -490,7 +538,43 @@ impl State {
             .snapshot
             .as_ref()
             .filter(|snapshot| snapshot.inputs.generation == generation);
+        let span = |range: QueryRange| {
+            let snapshot = snapshot?;
+            let start = snapshot.offset(&path, range.start, self.encoding)?;
+            let end = snapshot.offset(&path, range.end, self.encoding)?;
+            (start <= end).then_some(Span { start, end })
+        };
         let answer = match kind {
+            QueryKind::Completion(position) => snapshot
+                .and_then(|snapshot| snapshot.complete(&path, position, self.encoding))
+                .unwrap_or_else(|| json!([])),
+            QueryKind::References(position, include) => snapshot
+                .and_then(|snapshot| snapshot.references(&path, position, include, self.encoding))
+                .unwrap_or_else(|| json!([])),
+            QueryKind::PrepareRename(position) => snapshot
+                .and_then(|snapshot| snapshot.prepare_rename(&path, position, self.encoding))
+                .unwrap_or_default(),
+            QueryKind::Rename(position, new_name) => {
+                let edit = snapshot
+                    .ok_or("No checked source for rename")
+                    .and_then(|snapshot| {
+                        snapshot.rename(&path, position, &new_name, self.encoding)
+                    });
+                match edit {
+                    Ok(edit) => edit,
+                    Err(message) => return protocol::error(&id, -32602, message),
+                }
+            }
+            QueryKind::CodeAction(range, context) => snapshot
+                .zip(span(range))
+                .map(|(snapshot, span)| {
+                    json!(snapshot.code_actions(&path, span, &context, self.encoding))
+                })
+                .unwrap_or_else(|| json!([])),
+            QueryKind::InlayHint(range) => snapshot
+                .zip(span(range))
+                .and_then(|(snapshot, span)| snapshot.inlay_hints(&path, span, self.encoding))
+                .unwrap_or_else(|| json!([])),
             QueryKind::Hover(position) | QueryKind::Definition(position) => snapshot
                 .and_then(|snapshot| {
                     snapshot.query(
@@ -542,10 +626,19 @@ impl State {
             .map(|path| (path.as_path(), Vec::new()))
             .collect();
         for diagnostic in &snapshot.diagnostics {
-            if let Some(value) = diagnostic.lsp(&snapshot.origins, self.encoding, |path| {
+            let path = diagnostic.path();
+            if path.extension().is_some_and(|ext| ext == "hirsel")
+                && !inputs.overlay.contains_key(path)
+            {
+                continue;
+            }
+            if let Some(mut value) = diagnostic.lsp(&snapshot.origins, self.encoding, |path| {
                 diagnostics::uri(path, &inputs.overlay)
             }) {
-                by_path.entry(diagnostic.path()).or_default().push(value);
+                if snapshot.fixes.contains_key(path) {
+                    value["data"] = json!({"generation": inputs.generation});
+                }
+                by_path.entry(path).or_default().push(value);
             }
         }
         for (path, uri) in &self.published {
@@ -575,4 +668,156 @@ fn publication(uri: &str, version: Option<i64>, diagnostics: Vec<Value>) -> Valu
         params["version"] = json!(version);
     }
     protocol::notify("textDocument/publishDiagnostics", params)
+}
+
+#[cfg(test)]
+mod stdio_fixture {
+    use super::documents::file_uri;
+    use super::tests::{
+        APP, Client, LIB_BAD, capture, cli, driver, entry, manifest, point, source_manifest, write,
+    };
+    use serde_json::{Value, json};
+    use std::fs;
+    use std::path::Path;
+
+    pub(super) const P1_APP: &str = concat!(
+        "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+        "type Point { x: u64, y: u64 }\n",
+        "fn use_dep() -> u64 { dep.value() }\n",
+        "fn other() -> u64 { second.value() }\n",
+        "fn siblings() -> u64 { let _ = { let n = false; n }; { let n = 1u64; n } }\n",
+        "fn capture() -> u64 { let answer = 3u64; let item = answer; let _ = dep.value(); item }\n",
+        "fn draw(point: Point) -> u64 { point.x }\n",
+        "fn width(amount: u64) -> u64 { amount }\n",
+        "fn hints() -> u64 { let size = width(3u64); size }\n",
+    );
+
+    pub(super) fn p1(app: &str, lib: &str, check: impl FnOnce(&mut Client, &Path, &Path, &str)) {
+        let driver = driver();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let workspace = root.join("workspace with spaces");
+        let app_path = workspace.join("app/main.hirsel");
+        let lib_path = workspace.join("lib/main.hirsel");
+        write(
+            &workspace.join("hirsel.toml"),
+            "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+        );
+        let dependency = "{ package = \"fixture.test/lib\", major = 1, path = \"../lib\" }";
+        write(
+            &workspace.join("app/hirsel.toml"),
+            &format!(
+                "{}\n[dependencies]\ndep = {dependency}\nsecond = {dependency}\n",
+                manifest("local/app", "main"),
+            ),
+        );
+        write(
+            &workspace.join("lib/hirsel.toml"),
+            &source_manifest("fixture.test/lib", "main", "lib"),
+        );
+        write(&app_path, app);
+        write(&lib_path, lib);
+        cli(&driver, &root, &workspace, &["lock"], 0);
+        let cache = root.join("cache");
+        fs::create_dir(&cache).unwrap();
+        let before = capture(&workspace);
+        let mut client = Client::start(&driver, &root, &cache);
+        client.request(1, "initialize", json!({"rootUri": file_uri(&workspace)}));
+        assert!(client.response(1)["result"].is_object());
+        client.open(&app_path, app);
+        client.open(&lib_path, lib);
+        client.diagnostics(&lib_path, Some(1));
+        check(&mut client, &app_path, &lib_path, app);
+        client.shutdown(99);
+        assert_eq!(capture(&workspace), before);
+        assert!(capture(&cache).is_empty());
+    }
+
+    pub(super) fn at(path: &Path, source: &str, row: usize, word: &str) -> Value {
+        let line = source.lines().nth(row).unwrap();
+        json!({"textDocument": {"uri": file_uri(path)}, "position": point(line, line.rfind(word).unwrap(), row, "utf-16")})
+    }
+
+    pub(super) fn compare_cli(
+        driver: &Path,
+        root: &Path,
+        workspace: &Path,
+        lsp: &Value,
+        encoding: &str,
+    ) {
+        let comparison = root.join("cli-workspace");
+        for (relative, bytes) in capture(workspace) {
+            if let Some(bytes) = bytes {
+                let path = comparison.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        write(&comparison.join("lib/lib.hirsel"), LIB_BAD);
+        let scratch = root.join("cli-store");
+        let result: Value = serde_json::from_slice(&cli(
+            driver,
+            root,
+            &comparison.join("app"),
+            &[
+                "check",
+                "--frozen",
+                "--json",
+                "--store",
+                scratch.to_str().unwrap(),
+            ],
+            1,
+        ))
+        .unwrap();
+        let cli = result["diagnostics"].as_array().unwrap();
+        let source: Vec<_> = cli
+            .iter()
+            .filter(|d| d["primary"]["module"] == "main.hirsel")
+            .collect();
+        assert_eq!(
+            lsp.as_array().unwrap().len(),
+            source.len(),
+            "{lsp}\n{result}"
+        );
+        for diagnostic in source {
+            let live = entry(lsp, diagnostic["rule"].as_str().unwrap());
+            assert_eq!(
+                live["range"],
+                byte_range(APP, &diagnostic["primary"]["span"], encoding)
+            );
+            let roles: Vec<Value> = diagnostic["causal"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cause| {
+                    assert_eq!(cause["site"]["module"], "main.hirsel");
+                    json!({
+                        "location": {
+                            "uri": file_uri(&workspace.join("app/main.hirsel")),
+                            "range": byte_range(APP, &cause["site"]["span"], encoding)
+                        },
+                        "message": cause["role"].as_str().unwrap().replace('_', " ")
+                    })
+                })
+                .collect();
+            assert_eq!(
+                live.get("relatedInformation").cloned().unwrap_or(json!([])),
+                json!(roles)
+            );
+        }
+    }
+
+    fn byte_range(source: &str, span: &Value, encoding: &str) -> Value {
+        let position = |offset: &Value| {
+            let offset = offset.as_u64().unwrap() as usize;
+            let prefix = &source[..offset];
+            point(
+                prefix.rsplit('\n').next().unwrap(),
+                prefix.rsplit('\n').next().unwrap().len(),
+                prefix.bytes().filter(|&byte| byte == b'\n').count(),
+                encoding,
+            )
+        };
+        json!({"start": position(&span["start"]), "end": position(&span["end"])})
+    }
 }

@@ -305,7 +305,6 @@ pub struct NameIndex {
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
-    /// Which definitions other packages can name: the public ones.
     pub fn outward(&self) -> Vec<bool> {
         self.definitions.iter().map(|d| d.public).collect()
     }
@@ -417,11 +416,10 @@ impl NameIndex {
             self.symbols.find(&package.name)?,
             self.symbols.find(&package.version)?,
         )?;
-        let mut module = self.packages[key.0 as usize].root;
-        for name in modules {
-            module = self.child(module, self.symbols.find(name)?)?;
-        }
-        Some(module)
+        let root = self.packages[key.0 as usize].root;
+        modules.iter().try_fold(root, |module, name| {
+            self.child(module, self.symbols.find(name)?)
+        })
     }
     pub fn child_names(&self, module: ModuleId) -> impl Iterator<Item = Symbol> + '_ {
         self.modules
@@ -544,6 +542,15 @@ impl NameIndex {
             })
             .or_else(|| self.core_module(name))
     }
+    /// Discard source headers while retaining the package and module topology.
+    pub fn clear_editor_headers(&mut self) {
+        self.definitions = Table::default();
+        self.members = Map::default();
+        self.occurrences = Map::default();
+        self.member_names = Table::default();
+        self.prelude = Map::default();
+        self.variants.clear();
+    }
     pub fn get(&self, id: DefinitionId) -> &Definition {
         &self.definitions[id.0 as usize]
     }
@@ -663,13 +670,12 @@ impl NameIndex {
         .map(|(id, _)| id)
     }
     pub fn member_names_in(&self, module: ModuleId) -> impl Iterator<Item = Symbol> + '_ {
-        let merged = self.modules[module.0 as usize]
-            .merge
-            .slice(&self.extensions);
+        let merged_in = &self.modules[module.0 as usize];
+        let merge = merged_in.merge.slice(&self.extensions);
         self.definitions.iter().filter_map(move |d| {
             (d.kind != DefinitionKind::Clone
                 && !is_assertion(d.kind, d.name)
-                && (d.site.module == module || merged.contains(&d.site.module)))
+                && (d.site.module == module || merge.contains(&d.site.module)))
             .then_some(d.name)
         })
     }
@@ -926,26 +932,14 @@ impl NameIndex {
         }
         self.definition(module, name)
     }
-    /// Materialize neutral paths only at driver/checker/output boundaries.
     pub fn module_path(&self, module: ModuleId) -> ModulePath {
-        let mut parts = vec![];
-        let mut m = module;
-        while let Some(parent) = self.modules[m.0 as usize].parent {
-            parts.push(
-                self.symbols
-                    .text(self.modules[m.0 as usize].name)
-                    .to_owned(),
-            );
-            m = parent;
-        }
-        parts.reverse();
         let p = self.packages[self.module_package(module).0 as usize];
         ModulePath {
             package: PackageId {
                 name: self.symbols.text(p.name).into(),
                 version: self.symbols.text(p.version).into(),
             },
-            modules: parts,
+            modules: self.module_components(module, str::to_owned),
         }
     }
     pub fn definition_path(&self, id: DefinitionId) -> DefPath {
@@ -962,13 +956,6 @@ impl NameIndex {
     /// building the owned path: it serializes as that `DefPath` does.
     pub fn definition_path_ref(&self, id: DefinitionId) -> DefPathRef<'_> {
         let d = self.get(id);
-        let mut modules = vec![];
-        let mut m = d.site.module;
-        while let Some(parent) = self.modules[m.0 as usize].parent {
-            modules.push(self.symbols.text(self.modules[m.0 as usize].name));
-            m = parent;
-        }
-        modules.reverse();
         let p = self.packages[self.module_package(d.site.module).0 as usize];
         let name = self.symbols.text(d.name);
         DefPathRef {
@@ -976,9 +963,23 @@ impl NameIndex {
                 name: self.symbols.text(p.name),
                 version: self.symbols.text(p.version),
             },
-            modules,
+            modules: self.module_components(d.site.module, |name| name),
             name: self.path_name(id, name),
         }
+    }
+    fn module_components<'a, T>(
+        &'a self,
+        module: ModuleId,
+        convert: impl Fn(&'a str) -> T,
+    ) -> Vec<T> {
+        let mut modules = vec![];
+        let mut row = &self.modules[module.0 as usize];
+        while let Some(parent) = row.parent {
+            modules.push(convert(self.symbols.text(row.name)));
+            row = &self.modules[parent.0 as usize];
+        }
+        modules.reverse();
+        modules
     }
     /// A definition's last path segment: its name, `<Type>.$clone` for a clone
     /// body, and `_$<k>` for its module's assertion `k` in index order.
@@ -1014,9 +1015,8 @@ fn clone_type_name(item: Item<'_>) -> Option<Symbol> {
         .tree
         .children(item.root)
         .iter()
-        .copied()
-        .find(|&c| item.tree.node(c).kind == NodeKind::Parameters)?;
-    let param = *item.tree.children(params).first()?;
+        .find(|&&child| item.tree.node(child).kind == NodeKind::Parameters)?;
+    let param = *item.tree.children(*params).first()?;
     let ty = *item.tree.children(param).first()?;
     let path = if item.tree.node(ty).kind == NodeKind::TypePath {
         ty

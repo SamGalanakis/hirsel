@@ -1,8 +1,13 @@
 use super::cache::{Check, Stats};
+use super::code_actions::{self, Offer};
+use super::completion::TypesAt;
 use super::diagnostics::{Diagnostic, InputOrigins};
 use super::documents::{Encoding, Position, Text};
 use super::hover::{self, Authority};
+use super::inlay_hints::{self, Hint};
 use super::navigation::{self, Location, absolute};
+use super::references::{Key, References};
+use super::rename::Graph;
 use super::workspace::EditorInputs;
 use crate::package_resolve::Resolution as WorkspaceResolution;
 use crate::reachability::authority::Cards;
@@ -25,6 +30,13 @@ pub(super) struct EditorSnapshot {
     pub(super) immutable: BTreeSet<PathBuf>,
     pub(super) stats: Stats,
     sources: BTreeMap<PathBuf, SourceFacts>,
+    pub(super) graphs: Vec<Graph>,
+    pub(super) graph_sources: BTreeMap<PathBuf, (usize, usize)>,
+    pub(super) completion_types: BTreeMap<PathBuf, TypesAt>,
+    pub(super) references: References,
+    pub(super) hints: BTreeMap<PathBuf, Vec<Hint>>,
+    pub(super) fixes: BTreeMap<PathBuf, Vec<Offer>>,
+    member_sources: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 struct SourceFacts {
@@ -42,6 +54,7 @@ pub(super) struct Fact {
 
 pub(super) struct Declaration {
     location: Option<Location>,
+    identity: Key,
     pub(super) signature: Option<String>,
     pub(super) doc: Option<String>,
     ty: Option<Arc<str>>,
@@ -49,12 +62,13 @@ pub(super) struct Declaration {
 
 impl EditorSnapshot {
     pub(super) fn new(inputs: EditorInputs) -> Self {
-        let origins = inputs
+        let mut origins: BTreeMap<_, _> = inputs
             .overlay
             .iter()
             .filter(|(path, _)| inputs.owns(path))
             .map(|(path, document)| (path.clone(), document.text.clone()))
             .collect();
+        let member_sources = workspace_sources(&inputs, &mut origins);
         Self {
             inputs,
             origins,
@@ -63,7 +77,53 @@ impl EditorSnapshot {
             immutable: BTreeSet::new(),
             stats: Stats::default(),
             sources: BTreeMap::new(),
+            graphs: Vec::new(),
+            graph_sources: BTreeMap::new(),
+            completion_types: BTreeMap::new(),
+            references: References::default(),
+            hints: BTreeMap::new(),
+            fixes: BTreeMap::new(),
+            member_sources,
         }
+    }
+
+    pub(super) fn offset(
+        &self,
+        path: &Path,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<u32> {
+        self.origins
+            .get(path)?
+            .offset(position, encoding)?
+            .try_into()
+            .ok()
+    }
+
+    pub(super) fn editable(&self, path: &Path) -> Option<&Text> {
+        if self.immutable.contains(path) || !self.inputs.owns(path) {
+            return None;
+        }
+        let text = self.origins.get(path)?;
+        if let Some(open) = self.inputs.overlay.get(path) {
+            return (open.text.bytes == text.bytes).then_some(text);
+        }
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        (metadata.is_file()
+            && !metadata.permissions().readonly()
+            && std::fs::read(path).ok()?.as_slice() == text.bytes.as_ref())
+        .then_some(text)
+    }
+
+    pub(super) fn complete_workspace(&self, path: &Path) -> bool {
+        self.member_sources
+            .iter()
+            .filter(|(root, _)| path.starts_with(root))
+            .all(|(_, paths)| {
+                paths
+                    .iter()
+                    .all(|path| self.graph_sources.contains_key(path))
+            })
     }
 
     pub(super) fn query(
@@ -128,8 +188,35 @@ impl EditorSnapshot {
                 context.files.insert(file.file, origin.path.clone());
             }
         }
+        code_actions::collect(product, origins, wanted, &self.immutable, &mut self.fixes);
+        let graph = self.graphs.len();
+        self.graphs.push(Graph {
+            index: Arc::clone(&product.index),
+            files: product.files.clone(),
+            paths: context.files.clone(),
+            resolutions: check.resolutions.clone(),
+            complete: product.index.diagnostics.is_empty()
+                && product.resources.is_empty()
+                && product.incomplete.is_empty()
+                && product.files.len() == check.resolutions.len()
+                && product
+                    .files
+                    .iter()
+                    .zip(&check.resolutions)
+                    .all(|(file, rows)| {
+                        file.syntax.items.len() == rows.len()
+                            && file.syntax.items.iter().all(|item| !item.has_errors)
+                            && rows.iter().all(|row| {
+                                row.diagnostics.is_empty() && row.resource_refusal.is_none()
+                            })
+                    }),
+            callables: check.callables.clone(),
+            field_types: check.field_types.clone(),
+        });
         let cards = Arc::new(product.authority_cards.clone());
-        for (file, resolutions) in product.files.iter().zip(&check.resolutions) {
+        for (file_id, (file, resolutions)) in
+            product.files.iter().zip(&check.resolutions).enumerate()
+        {
             let Some(path) = context.files.get(&file.file).cloned() else {
                 continue;
             };
@@ -142,6 +229,8 @@ impl EditorSnapshot {
             let authored = text.bytes.len();
             let package = product.index.module_path(file.module).package;
             let mut facts = Vec::new();
+            let mut completion_types = TypesAt::default();
+            let mut hints = Vec::new();
             for (ordinal, (item, resolution)) in file.syntax.items().zip(resolutions).enumerate() {
                 if item.range.end as usize > authored {
                     continue;
@@ -166,7 +255,36 @@ impl EditorSnapshot {
                     self, &mut facts, file, item, ordinal, &path, &package, resolution, &types,
                     &invalid,
                 );
+                for (&(start, end), (ty, nominal)) in &types {
+                    let at = (item.file_offset + start, item.file_offset + end);
+                    completion_types.shown.insert(at, Arc::clone(ty));
+                    if let Some(nominal) = nominal {
+                        completion_types.nominal.insert(at, (*nominal).clone());
+                    }
+                }
+                inlay_hints::bindings(item, resolution, &types, &mut hints);
+                inlay_hints::parameters(
+                    item,
+                    resolution,
+                    |def| {
+                        check
+                            .callables
+                            .get(&product.index.definition_path(def))
+                            .map(|callable| {
+                                callable
+                                    .parameters
+                                    .iter()
+                                    .map(|(name, _)| name.clone())
+                                    .collect()
+                            })
+                    },
+                    |span| !invalid.intersects(span),
+                    &mut hints,
+                );
             }
+            self.graph_sources.insert(path.clone(), (graph, file_id));
+            self.completion_types.insert(path.clone(), completion_types);
+            self.hints.insert(path.clone(), hints);
             self.sources.insert(
                 path,
                 SourceFacts {
@@ -178,7 +296,7 @@ impl EditorSnapshot {
     }
 }
 
-type Types<'a> = BTreeMap<(u32, u32), (Arc<str>, Option<&'a DefPath>)>;
+pub(super) type Types<'a> = BTreeMap<(u32, u32), (Arc<str>, Option<&'a DefPath>)>;
 
 struct Context<'a> {
     product: &'a CheckProduct,
@@ -206,11 +324,19 @@ impl Context<'_> {
     ) {
         let mut local = BTreeMap::new();
         for binder in &resolution.binders {
-            let selection = absolute(item, binder.site.span);
+            let site = absolute(item, binder.site.span);
+            let tokens = &item.tree.tokens;
+            let at = tokens.partition_point(|token| token.span.start < site.start);
+            let selection = tokens[at..]
+                .iter()
+                .take_while(|token| token.span.start < site.end)
+                .find(|token| token.symbol == binder.name && token.span.end <= site.end)
+                .map_or(site, |token| token.span);
             let ty = types
                 .get(&(binder.site.span.start, binder.site.span.end))
                 .map(|(ty, _)| Arc::clone(ty));
             let declaration = Arc::new(Declaration {
+                identity: Key::Binder(path.to_owned(), ordinal, binder.id),
                 location: Some(Location {
                     path: path.to_owned(),
                     selection,
@@ -220,6 +346,10 @@ impl Context<'_> {
                 doc: None,
                 ty: ty.clone(),
             });
+            snapshot.references.declaration(
+                declaration.identity.clone(),
+                declaration.location.as_ref().unwrap(),
+            );
             facts.push(Fact {
                 span: selection,
                 ty,
@@ -238,6 +368,30 @@ impl Context<'_> {
             if definition.site.source == Some(file.file) && definition.site.item == ordinal {
                 let target = self.declaration(snapshot, id);
                 let ty = target.ty.clone();
+                if let Some(location) = &target.location {
+                    snapshot
+                        .references
+                        .declaration(target.identity.clone(), location);
+                }
+                if definition.kind == DefinitionKind::Type {
+                    let index = &self.product.index;
+                    let owner = index.definition_path(id);
+                    let names = index
+                        .field_names(id)
+                        .iter()
+                        .chain(index.variant_names(id))
+                        .map(|&name| index.symbols.text(name).to_owned())
+                        .collect::<Vec<_>>();
+                    for name in names {
+                        if let Some(target) = self.member(snapshot, &owner, &name)
+                            && let Some(location) = &target.location
+                        {
+                            snapshot
+                                .references
+                                .declaration(target.identity.clone(), location);
+                        }
+                    }
+                }
                 facts.push(Fact {
                     span: absolute(item, definition.site.span),
                     target: Some(target),
@@ -262,6 +416,8 @@ impl Context<'_> {
                 snapshot,
                 facts,
                 item,
+                file.module,
+                path,
                 package,
                 usage,
                 &local,
@@ -269,6 +425,33 @@ impl Context<'_> {
                 calls.get(&usage.node).copied(),
                 invalid,
             );
+        }
+        for id in item.range.nodes.clone().map(hirsel_core_syntax::NodeId) {
+            let node = item.tree.node(id);
+            if node.kind != NodeKind::Projection || invalid.intersects(node.origin.span) {
+                continue;
+            }
+            let Some(token) = node.token else { continue };
+            let Some(&receiver) = item.tree.children(id).first() else {
+                continue;
+            };
+            let span = item.tree.node(receiver).origin.span;
+            let Some((_, Some(owner))) = types.get(&(span.start, span.end)) else {
+                continue;
+            };
+            let name = item.tree.token_text(item.text, token);
+            if let Some(target) = self.member(snapshot, owner, name) {
+                snapshot.references.use_site(
+                    target.identity.clone(),
+                    path,
+                    absolute(item, item.token_span(token)),
+                );
+                if let Some(location) = &target.location {
+                    snapshot
+                        .references
+                        .declaration(target.identity.clone(), location);
+                }
+            }
         }
         for (&(start, end), (ty, _)) in types {
             if end <= item.range.end - item.file_offset {
@@ -288,6 +471,8 @@ impl Context<'_> {
         snapshot: &mut EditorSnapshot,
         facts: &mut Vec<Fact>,
         item: Item<'_>,
+        module: hirsel_core_resolve::ModuleId,
+        path: &Path,
         package: &PackageId,
         usage: ResolvedUse,
         locals: &BTreeMap<u32, Arc<Declaration>>,
@@ -296,15 +481,21 @@ impl Context<'_> {
         invalid: &Invalid,
     ) {
         let node = item.tree.node(usage.node);
-        let mut names = node
+        let names = node
             .origin
             .tokens
             .clone()
             .take_while(|&token| usage.projections.start == 0 || token < usage.projections.start)
-            .filter(|&i| item.tree.tokens[i as usize].kind == TokenKind::Ident)
-            .map(TokenId);
-        let first = names.next().or(node.token);
-        let last = names.last().or(first);
+            .filter(|&i| {
+                matches!(
+                    item.tree.tokens[i as usize].kind,
+                    TokenKind::Ident | TokenKind::Label
+                )
+            })
+            .map(TokenId)
+            .collect::<Vec<_>>();
+        let first = names.first().copied().or(node.token);
+        let last = names.last().copied().or(first);
         let Some(token) = last else { return };
         let written = |token| item.tree.token_text(item.text, token);
         let first_name = first.map(written);
@@ -360,6 +551,44 @@ impl Context<'_> {
             }
             Target::Builtin(_) | Target::Module(_) | Target::Missing => None,
         };
+        let occurrence = absolute(item, name_span);
+        if let Some(target) = &target {
+            snapshot
+                .references
+                .use_site(target.identity.clone(), path, occurrence);
+            if let Some(location) = &target.location {
+                snapshot
+                    .references
+                    .declaration(target.identity.clone(), location);
+            }
+        }
+        match usage.target {
+            Target::Builtin(_) => snapshot.references.use_site(
+                Key::Builtin(written(token).to_owned()),
+                path,
+                occurrence,
+            ),
+            Target::Module(id) if names.len() <= 1 => {
+                let key = self.qualifier_key(module, id, package, item.symbol(token), true);
+                snapshot.references.use_site(key, path, occurrence);
+            }
+            Target::Definition(_) if names.len() > 1 => {
+                let index = &self.product.index;
+                for (i, &token) in names[..names.len() - 1].iter().enumerate() {
+                    let Some(resolved) =
+                        index.qualified_module(module, names[..=i].iter().copied().map(written))
+                    else {
+                        break;
+                    };
+                    let key =
+                        self.qualifier_key(module, resolved, package, item.symbol(token), i == 0);
+                    snapshot
+                        .references
+                        .use_site(key, path, absolute(item, item.token_span(token)));
+                }
+            }
+            _ => {}
+        }
         let unresolved = matches!(usage.target, Target::Missing)
             || (refused_call && authority.is_none() && !matches!(usage.target, Target::Binder(_)));
         let ty = types
@@ -406,20 +635,32 @@ impl Context<'_> {
             let start = binder.selection.start - item.file_offset;
             let end = binder.selection.end - item.file_offset;
             let mut nominal = types
-                .get(&(start, end))
+                .iter()
+                .filter(|&(&(a, b), _)| a <= start && end <= b)
+                .min_by_key(|&(&(a, b), _)| b - a)
+                .map(|(_, row)| row)
                 .and_then(|(_, nominal)| *nominal)
                 .cloned();
             for i in usage.projections.start..usage.projections.end {
                 if item.tree.tokens[i as usize].kind != TokenKind::Ident {
                     continue;
                 }
-                let Some(path) = nominal.take() else { break };
+                let Some(owner) = nominal.take() else { break };
                 let name = written(TokenId(i));
-                let Some(target) = self.member(snapshot, &path, name) else {
+                let Some(target) = self.member(snapshot, &owner, name) else {
                     break;
                 };
+                let occurrence = absolute(item, item.token_span(TokenId(i)));
+                snapshot
+                    .references
+                    .use_site(target.identity.clone(), path, occurrence);
+                if let Some(location) = &target.location {
+                    snapshot
+                        .references
+                        .declaration(target.identity.clone(), location);
+                }
                 facts.push(Fact {
-                    span: absolute(item, item.token_span(TokenId(i))),
+                    span: occurrence,
                     ty: target.ty.clone(),
                     target: Some(target),
                     authority: None,
@@ -428,10 +669,39 @@ impl Context<'_> {
                 nominal = self
                     .check
                     .field_types
-                    .get(&(path, name.to_owned()))
+                    .get(&(owner, name.to_owned()))
                     .and_then(|(_, nominal)| nominal.clone());
             }
         }
+    }
+
+    fn qualifier_key(
+        &self,
+        from: hirsel_core_resolve::ModuleId,
+        target: hirsel_core_resolve::ModuleId,
+        owner: &PackageId,
+        name: hirsel_core_syntax::Symbol,
+        head: bool,
+    ) -> Key {
+        let index = &self.product.index;
+        let workspace = &self.workspace.workspace.directory;
+        if head
+            && self
+                .binding(owner, index.symbols.text(name))
+                .is_some_and(|(dependency, _)| {
+                    index
+                        .module_head(from, name)
+                        .is_some_and(|module| index.module_path(module).package == dependency)
+                })
+        {
+            return Key::Alias(
+                workspace.clone(),
+                owner.clone(),
+                index.symbols.text(name).to_owned(),
+            );
+        }
+        let module = index.module_path(target);
+        Key::Module(workspace.clone(), module.package, module.modules)
     }
 
     fn binding(&self, package: &PackageId, name: &str) -> Option<(PackageId, Option<u16>)> {
@@ -496,6 +766,7 @@ impl Context<'_> {
             })
             .unwrap_or_default();
         let declaration = Arc::new(Declaration {
+            identity: Key::Definition(path, location.as_ref().map(|site| site.path.clone())),
             location,
             signature,
             doc,
@@ -570,6 +841,7 @@ impl Context<'_> {
             .get(&key)
             .map(|(ty, _)| Arc::clone(ty));
         let target = Arc::new(Declaration {
+            identity: Key::Member(owner.clone(), path.clone(), name.to_owned()),
             location: Some(Location {
                 path,
                 selection,
@@ -607,6 +879,59 @@ impl Invalid {
             .iter()
             .any(|other| other.start <= span.end && other.end >= span.start)
     }
+}
+
+// Seed one check per workspace member that has no open file. This lets a
+// definition query see reverse dependencies whose documents are still closed.
+fn workspace_sources(
+    inputs: &EditorInputs,
+    origins: &mut BTreeMap<PathBuf, Text>,
+) -> BTreeMap<PathBuf, BTreeSet<PathBuf>> {
+    let directories = origins
+        .keys()
+        .filter_map(|path| {
+            path.ancestors()
+                .skip(1)
+                .find(|dir| dir.join(crate::package_dir::MANIFEST).is_file())
+        })
+        .map(Path::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut roots = BTreeMap::new();
+    for directory in directories {
+        if roots
+            .keys()
+            .any(|root: &PathBuf| directory.starts_with(root))
+        {
+            continue;
+        }
+        let Ok(Some(workspace)) =
+            crate::package_workspace::Workspace::discover_for(&directory, false)
+        else {
+            continue;
+        };
+        let mut members = BTreeSet::new();
+        for member in workspace.members.values() {
+            let directory = member.manifest_path.parent().unwrap();
+            let sources = member
+                .content
+                .files
+                .iter()
+                .chain(&member.tests)
+                .collect::<Vec<_>>();
+            let open = sources
+                .iter()
+                .any(|(name, _)| origins.contains_key(&directory.join(name)));
+            if !open && let Some((name, source)) = sources.first() {
+                let path = directory.join(name);
+                if inputs.owns(&path) {
+                    origins.insert(path, Text::new(source.bytes.clone()));
+                }
+            }
+            members.extend(sources.into_iter().map(|(name, _)| directory.join(name)));
+        }
+        roots.insert(workspace.directory, members);
+    }
+    roots
 }
 
 pub(super) fn immutable_path(

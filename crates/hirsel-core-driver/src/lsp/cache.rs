@@ -1,3 +1,4 @@
+use super::completion::Callable;
 use crate::{ContentHash, ModuleInput, Resolution};
 use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::SourceId;
@@ -5,6 +6,8 @@ use hirsel_core_syntax::{Derive, Item, ParseMode, ParseOutput, Span, Symbols};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::Arc;
+
+pub(super) type FieldTypes = BTreeMap<(DefPath, String), (Arc<str>, Option<DefPath>)>;
 
 type EditorType = (Span, String, Option<DefPath>);
 
@@ -39,15 +42,36 @@ pub(crate) struct Check {
     stats: Stats,
     pub(super) resolutions: Vec<Vec<Arc<Resolution>>>,
     pub(super) types: BTreeMap<(SourceId, u32), Arc<[EditorType]>>,
+    pub(super) callables: BTreeMap<DefPath, Callable>,
     pub(super) declared_types: BTreeMap<DefPath, Arc<str>>,
-    pub(super) field_types: BTreeMap<(DefPath, String), (Arc<str>, Option<DefPath>)>,
+    pub(super) field_types: FieldTypes,
 }
 
 impl Check {
     pub(crate) fn declarations(&mut self, program: &hirsel_core_front::Program<'_>) {
         use hirsel_core_front::{ERROR, TyKind, canonical};
         let shown = |ty| Arc::<str>::from(canonical(&program.decls, &program.types, ty));
+        let nominal = |ty| match program.types.kind(ty) {
+            TyKind::Adt(decl, _) => Some(program.decls[decl.index()].path.clone()),
+            _ => None,
+        };
         for function in program.fns.iter().filter(|f| f.callable != ERROR) {
+            self.callables.insert(
+                function.path.clone(),
+                Callable {
+                    parameters: function
+                        .params
+                        .iter()
+                        .map(|param| {
+                            (
+                                program.index.symbols.text(param.name).to_owned(),
+                                nominal(param.ty),
+                            )
+                        })
+                        .collect(),
+                    result: nominal(function.result),
+                },
+            );
             self.declared_types
                 .insert(function.path.clone(), shown(function.callable));
         }
@@ -57,10 +81,7 @@ impl Check {
         }
         for decl in program.decls.iter() {
             for field in decl.fields(None).iter().filter(|f| f.ty != ERROR) {
-                let nominal = match program.types.kind(field.ty) {
-                    TyKind::Adt(decl, _) => Some(program.decls[decl.index()].path.clone()),
-                    _ => None,
-                };
+                let nominal = nominal(field.ty);
                 let name = field.name.clone();
                 self.field_types
                     .insert((decl.path.clone(), name), (shown(field.ty), nominal));

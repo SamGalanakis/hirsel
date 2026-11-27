@@ -1,0 +1,18 @@
+pub fn schema(mut declaration: store.Declare) -> Result[store.Table[u64, u64], store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    let table = store.declare_table(mut declaration, "counter", std.codec.key_u64(), codec)?
+    store.finish(mut declaration, take table)
+}
+
+pub fn step(mut tx: store.Tx, table: store.Table[u64, u64], delta: u64) -> Result[u64, store.Error] {
+    let current = match store.fetch(tx, table, 0u64)? {
+        Some(value) => value,
+        None => 0u64,
+    }
+    if delta == 0u64 {
+        return Ok(current)
+    }
+    let next = current + delta
+    store.put(mut tx, table, 0u64, next)?
+    Ok(next)
+}

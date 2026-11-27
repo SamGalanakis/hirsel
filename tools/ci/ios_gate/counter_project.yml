@@ -1,0 +1,20 @@
+name: HirselCounterComparison
+options:
+  deploymentTarget:
+    iOS: "26.0"
+packages:
+  SimGate:
+    path: SimGate
+targets:
+  EmbedCounter:
+    type: application
+    platform: iOS
+    sources: [CounterHost.swift]
+    dependencies:
+      - package: SimGate
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-counter-embed
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: "-"

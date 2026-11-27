@@ -1,0 +1,36 @@
+type Request {
+    table: store.Table[u64, u64],
+    delta: u64,
+}
+
+fn run_step(mut tx: store.Tx, request: Request) -> Result[u64, store.Error] {
+    counter.step(mut tx, request.table, request.delta)
+}
+
+pub fn main(app: Foreign[ios.Ios], dir: Dir, tasks: Tasks, clock: Clock, random: Random) -> Result[(), Exit] waits {
+    let scene = result.unwrap(ios.attach(app))
+    let delta = loop {
+        match result.unwrap(ios.next_event(scene, 1000u32)) {
+            Some(Lifecycle(Launched)) => break 1u64,
+            Some(Lifecycle(Active)) => break 0u64,
+            _ => (),
+        }
+    }
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random,
+        result.unwrap(store.sized(Directory, 1074790400u64))))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let table = result.unwrap(counter.schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
+    let value = match result.unwrap(store.run(mut db, None, Request(table: table, delta: delta), run_step)) {
+        Committed(store.Done(value: value, ..)) => value,
+        _ => fail("counter transaction did not commit"),
+    }
+    let mut text = string.new()
+    string.push_u64(mut text, value)
+    result.unwrap(ios.render(scene, ios.ui.text("counter", take text)))
+
+    // The simulator terminates the app after the host sees the acknowledgment.
+    loop {
+        let _ = result.unwrap(ios.next_event(scene, 1000u32))
+    }
+}

@@ -1,0 +1,95 @@
+type Handles: shareable + send {
+    counter: store.Table[u64, u64]
+}
+
+fn schema(mut declaration: store.Declare) -> Result[Handles, store.Error] {
+    Ok(Handles(counter: counter.schema(mut declaration)?))
+}
+
+fn answer(take n: u64) -> Result[u64, Capacity] {
+    Ok(n + 7u64)
+}
+
+fn write(mut tx: store.Tx, h: Handles, _author: runner.Caller, take n: u64) -> Result[u64, u32] {
+    match store.put(mut tx, h.counter, 0u64, n) {
+        Ok(()) => Ok(n),
+        Error(_) => Error(1u32),
+    }
+}
+
+fn counter_step(mut tx: store.Tx, h: Handles, _author: runner.Caller, take delta: u64) -> Result[u64, u32] {
+    match counter.step(mut tx, h.counter, delta) {
+        Ok(value) => Ok(value),
+        Error(_) => Error(1u32),
+    }
+}
+
+fn counter_table(h: Handles) -> store.Table[u64, u64] {
+    clone(h.counter)
+}
+
+fn slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
+    runner.table_slot("counter", code.describe(counter_table))
+}
+
+fn rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("counter", h.counter, Unbounded, Unbounded)
+}
+
+fn room(tx: store.Tx, h: Handles, _author: runner.Caller, take _arg: ()) -> Result[runner.Answer[runner.Grant], Capacity] {
+    let runner.Answer(value: _, covers: take covers) = runner.table_answer("counter", h.counter, Unbounded, Unbounded)?
+    Ok(runner.Answer(value: Join, covers: take covers))
+}
+
+fn handshake(n: Net, _author: runner.Caller, take args: (String, u16, Option[Bytes], bool)) -> Result[u32, Capacity] waits {
+    let (name, port, take roots, lookup) = take args
+    let addresses = if lookup {
+        match std.net.lookup(n, name, Never) {
+            Ok(take addresses) => take addresses,
+            Error(_) => return Ok(8u32),
+        }
+    } else {
+        let mut local: List[Ip] = list.with_capacity(1u64)
+        list.push(mut local, V4(2130706433u32))
+        take local
+    }
+    for ip in addresses {
+        if let Ok(take socket) = host.connect(n, Addr(ip: ip, port: port), Never) {
+            return tls_status(n, take socket, name, take roots)
+        }
+    }
+    Ok(9u32)
+}
+
+fn tls_status(n: Net, take socket: Socket, name: String, take roots: Option[Bytes]) -> Result[u32, Capacity] waits {
+    let trust: Trust = match take roots {
+        None => System,
+        Some(take pem) => Roots(take pem),
+    }
+    Ok(match tls.connect(n, take socket, name, take trust, list.new(), Never) {
+        Ok(_) => 0u32,
+        Error(Tls(Certificate(UnknownIssuer))) => 1u32,
+        Error(Tls(Certificate(NameMismatch))) => 2u32,
+        Error(Tls(Certificate(Expired))) => 3u32,
+        Error(Tls(Certificate(NotYetValid))) => 4u32,
+        Error(Denied) => 5u32,
+        Error(_) => 6u32,
+    })
+}
+
+fn place(mut registry: runner.Registry[Net, Handles]) -> Result[(), runner.RegisterError] {
+    runner.compute(mut registry, code.describe(answer), 1024u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(counter_step), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut registry, code.describe(handshake), 1048576u64, runner.DEFAULT_STEPS)?
+    runner.query(mut registry, code.describe(rows), slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    runner.room(mut registry, code.describe(room), slots()?, codec, codec,
+        runner.RoomBounds(peers: 2u32, state: 8u32, message: 8u32), 1024u64, 1024u64, runner.DEFAULT_STEPS)
+}
+
+pub fn main(args: Args, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
+    runner.launch_server(args, clock, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] {
+        Ok(())
+    })
+}

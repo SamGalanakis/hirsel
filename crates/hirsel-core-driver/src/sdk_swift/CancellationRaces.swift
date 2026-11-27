@@ -37,6 +37,23 @@ final class CancellationRaces: XCTestCase {
         XCTAssertEqual(audit.counts(), [1, 1])
     }
 
+    func testCancellationAfterIssueAbandonsExactlyOnce() async {
+        let audit = Calls()
+        let call = CallBox(abandon: audit.abandon)
+        let task = Task.detached { try await call.run(register: audit.register) }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(5)
+        while !call.issued && clock.now < deadline { await Task.yield() }
+        XCTAssertTrue(call.issued)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("CancellationError expected")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        call.cancel()
+        XCTAssertEqual(audit.counts(), [1, 1])
+    }
+
     func testEarlyOutcomeBeforeCReturnsWins() async throws {
         let audit = Calls()
         let call = CallBox(abandon: audit.abandon)

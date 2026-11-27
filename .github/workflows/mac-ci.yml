@@ -1,5 +1,7 @@
 name: Mac CI
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '30 */6 * * *'
     - cron: '30 3 * * *'
@@ -210,6 +212,82 @@ jobs:
         run: |
           tools/ci/mac_scrub.sh tools/ci/side.sh "$RUNNER_TEMP/prefix/hirsel" "$RUNNER_TEMP/mac-corpus"
           python3 tools/ci/compare.py "$RUNNER_TEMP/linux-corpus" "$RUNNER_TEMP/mac-corpus"
+
+  ios_inputs:
+    name: Build Apple embed packages on Linux
+    if: ${{ (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (inputs.control || 'none') == 'none' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned build tools
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          python3 tools/buck2/prepare.py --local
+      - name: Generate Swift packages and symbol reference objects
+        run: python3 tools/ci/ios_gate/export.py "$RUNNER_TEMP/ios-artifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-gate-inputs
+          path: ${{ runner.temp }}/ios-artifacts
+          if-no-files-found: error
+          retention-days: 3
+
+  ios_simulator:
+    name: Qualify Swift embed on iOS simulator and macOS
+    needs: ios_inputs
+    if: ${{ (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (inputs.control || 'none') == 'none' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert arm64 macOS 26
+        run: tools/ci/mac_assert.sh
+      - uses: actions/download-artifact@v4
+        id: download
+        with:
+          name: ios-simulator-gate-inputs
+          path: ${{ runner.temp }}/ios-artifacts
+      - name: Compare XCFramework and qualify SDK links
+        run: python3 tools/ci/ios_gate/link.py "$RUNNER_TEMP/ios-artifacts"
+      - name: Run the same hosted XCTest on macOS and iOS
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
+        run: |
+          command -v xcodegen || brew install xcodegen
+          python3 tools/ci/ios_gate/test.py "$RUNNER_TEMP/ios-artifacts" "$RUNNER_TEMP/ios-results"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ios-simulator-gate-test-results
+          path: ${{ runner.temp }}/ios-results
+          if-no-files-found: ignore
+          retention-days: 3
+
+  ios_comparison:
+    name: Measure both iOS counter hosts
+    needs: ios_inputs
+    if: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (inputs.control || 'none') == 'none' }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert arm64 macOS 26
+        run: tools/ci/mac_assert.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-simulator-gate-inputs
+          path: ${{ runner.temp }}/ios-artifacts
+      - name: Verify relaunch durability and measure the two arms
+        run: |
+          command -v xcodegen || brew install xcodegen
+          python3 tools/ci/ios_gate/compare.py "$RUNNER_TEMP/ios-artifacts"
 
   aggregate:
     name: Strict Mac CI result

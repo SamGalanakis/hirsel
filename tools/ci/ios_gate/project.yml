@@ -1,0 +1,60 @@
+name: HirselSimulatorGate
+options:
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+packages:
+  SimGate:
+    path: SimGate
+targets:
+  GateHost:
+    type: application
+    platform: [iOS, macOS]
+    sources: [Host.swift]
+    dependencies:
+      - package: SimGate
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-gate
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: "-"
+  GateTests:
+    type: bundle.unit-test
+    platform: [iOS, macOS]
+    sources:
+      - Tests.swift
+      - AbiTests.swift
+      - AbiTests.h
+      - Workers.c
+      - TLSTests.swift
+      - SimGate/Tests/SimGateTests
+      - path: SimGate/projection.json
+        buildPhase: resources
+      - path: TLS
+        buildPhase: resources
+    dependencies:
+      - target: GateHost
+      - package: SimGate
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: org.hirsel.simulator-gate.tests
+        SWIFT_OBJC_BRIDGING_HEADER: AbiTests.h
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: "-"
+schemes:
+  Gate-iOS:
+    build:
+      targets:
+        GateHost_iOS: all
+        GateTests_iOS: [test]
+    test:
+      targets: [GateTests_iOS]
+  Gate-macOS:
+    build:
+      targets:
+        GateHost_macOS: all
+        GateTests_macOS: [test]
+    test:
+      targets: [GateTests_macOS]

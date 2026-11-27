@@ -74,7 +74,7 @@ private final class RuntimeEnd: @unchecked Sendable {
 }
 
 public struct Runtime: @unchecked Sendable {
-    private let handle: hirsel_runtime
+    let handle: hirsel_runtime
 
     public static func start(
         grants: String,
@@ -182,7 +182,7 @@ private func sessionState(_ context: UnsafeMutableRawPointer?) -> SessionState? 
 }
 
 public struct Session: @unchecked Sendable {
-    fileprivate let handle: hirsel_session
+    let handle: hirsel_session
     fileprivate let state: SessionState
 
     public var api: API { API(session: self) }
@@ -405,6 +405,13 @@ final class CallBox: @unchecked Sendable {
     private var result: Result<Data, Error>?
 
     init(abandon: @escaping @Sendable () -> hirsel_status) { self.abandon = abandon }
+
+    var issued: Bool {
+        lock.withLock {
+            if case .issued = state { return true }
+            return false
+        }
+    }
 
     func run(register: @Sendable () -> hirsel_status) async throws -> Data {
         return try await withTaskCancellationHandler {

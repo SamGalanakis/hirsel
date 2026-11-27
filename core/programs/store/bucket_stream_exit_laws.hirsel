@@ -31,7 +31,7 @@ fn exit_backup_rows(parent: Dir, target: Dir, tasks: Tasks, c: Clock, r: Random)
     let mut opts = bucket_law_options(false)
     opts.group_bytes = 65536
     let restored_dir = disk_test_directory(parent)
-    match restore(target, restored_dir, c, opts) {
+    match restore(tasks, target, restored_dir, c, r, opts, Latest, restore_attempt(r)) {
         Ok(_) => (),
         Error(_) => fail("L90-E: restore(backup) failed"),
     }

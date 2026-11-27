@@ -76,13 +76,13 @@ fn runner_online_backup_copies_without_stopping_head(d: Dir, c: Clock, r: Random
     }
     // Restore both backups and verify each opens with the exact store identity, head, and rows.
     let dir1 = result.unwrap(std.dir.narrow(scratch_dir, name1))
-    let stamp1 = result.unwrap(store.restore(dir1, restored1_dir, c, opts))
-    if stamp1.head != expected_head1 || stamp1.store_hi != expected_id.hi || stamp1.store_lo != expected_id.lo {
+    let stamp1 = result.unwrap(store.restore(tasks, dir1, restored1_dir, c, r, opts, Latest, store.restore_attempt(r)))
+    if stamp1.point.main_version != expected_head1 || stamp1.point.token.parent != expected_id || stamp1.child == expected_id {
         fail("first restored stamp disagreed with live head")
     }
     let dir2 = result.unwrap(std.dir.narrow(scratch_dir, name2))
-    let stamp2 = result.unwrap(store.restore(dir2, restored2_dir, c, opts))
-    if stamp2.head != expected_head1 {
+    let stamp2 = result.unwrap(store.restore(tasks, dir2, restored2_dir, c, r, opts, Latest, store.restore_attempt(r)))
+    if stamp2.point.main_version != expected_head1 {
         fail("second restored stamp disagreed with live head")
     }
     let mut reopened = store.open(tasks, restored1_dir, c, r, opts)?

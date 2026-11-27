@@ -1,0 +1,305 @@
+pub type Restored: send {
+    child: StoreId,
+    point: RestorePoint,
+    attempt: Inline[u8, 16]
+}
+
+fn restore_origin_for(point: RestorePoint, attempt: Inline[u8, 16]) -> manifest.RestoreOrigin {
+    manifest.RestoreOrigin(parent: store_key_to_rep(point.token.parent), binding_id: point.token.binding_id, branch: point.branch, version: point.version, at: point.at, boundary: point.token.boundary, attempt)
+}
+
+fn restore_same_origin(m: manifest.PageManifest, o: manifest.RestoreOrigin) -> bool {
+    let Some(saved) = view m.origin else {
+        return false
+    }
+    saved.parent == o.parent && saved.binding_id == o.binding_id && saved.branch == o.branch && saved.version == o.version && saved.at == o.at && saved.boundary == o.boundary && saved.attempt == o.attempt
+}
+
+// Stage the parent under the destination fence. The ordinary writer folds the verified
+// suffix into a checkpoint. Its new segment and any parent journal frames stay private.
+fn restore_copy_backup(from: Dir, private_dir: Dir, point: RestorePoint) -> Result[ExportStamp, DeployError] waits {
+    let raw_manifest = deploy_result(failure_result_from_rep(manifest.read_page_manifest_bytes(from)))?
+    if std.check.xxh3(raw_manifest, 0, list.len(raw_manifest)) != point.token.boundary.base_digest {
+        return Error(ExportMismatch)
+    }
+    let (parent, take input) = deploy_result(disk_read_page_manifest("MANIFEST", raw_manifest))?
+    let mut m = take input
+    let key = store_key_to_rep(parent)
+    let b = point.token.boundary
+    if parent != point.token.parent || m.generation != b.base_ordinal {
+        return Error(ExportMismatch)
+    }
+    let packs = deploy_result(failure_result_from_rep(manifest.validate_receipt_packs(from, key, "MANIFEST", m)))?
+    for seq in packs {
+        let path = deploy_result(failure_result_from_rep(manifest.paged_pack_path(seq)))?
+        transfer_result(transfer.copy_restore_file(from, private_dir, path))?
+    }
+    let terminal = b.unit
+    let end = if b.frame_end == 0 {
+        72u64
+    } else {
+        b.frame_end
+    }
+    for seq in m.first_live .. terminal {
+        let path = deploy_result(failure_result_from_rep(manifest.journal_path(seq, "")))?
+        transfer_result(transfer.copy_restore_file(from, private_dir, path))?
+    }
+    let last_path = deploy_result(failure_result_from_rep(manifest.journal_path(terminal, "")))?
+    deploy_result(failure_result_from_rep(transfer.copy_export_file(from, private_dir, last_path, Some(end))))?
+    let mut stamp = read_export_stamp(from)?
+    stamp.terminal = terminal
+    stamp.end = end
+    stamp.head = point.main_version
+    stamp.next_table = m.next_table
+    restore_scratch_manifest(private_dir, key, take m, stamp)?
+    Ok(take stamp)
+}
+
+fn restore_scratch_manifest(private_dir: Dir, key: types.StoreKey, take image: manifest.PageManifest, stamp: ExportStamp) -> Result[(), DeployError] waits {
+    let mut m = take image
+    m.prev_first = m.first_live
+    m.binding_id = 0
+    deploy_result(failure_result_from_rep(manifest.disk_publish_manifest(private_dir, key, m)))?
+    let raw = deploy_result(export_bytes(stamp))?
+    deploy_result(failure_result_from_rep(manifest.disk_write_synced(private_dir, "EXPORT", raw)))?
+    Ok(())
+}
+
+fn restore_fold(tasks: Tasks, private_dir: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, stamp: ExportStamp) -> Result[(), DeployError] waits {
+    let parent = point.token.parent
+    let recovered = open_copied(private_dir, c, stamp.attempt, options, false)?
+    let _ = take recovered
+    deploy_result(failure_result_from_rep(manifest.disk_io(host.remove(private_dir, "EXPORT"))))?
+    let (_, take checkpoint_image) = deploy_result(read_page_manifest_file(private_dir))?
+    if stamp.terminal == checkpoint_image.first_live && stamp.end == 72 {
+        return Ok(())
+    }
+    let mut selected_options: Options = clone(options)
+    selected_options.create = false
+    selected_options.expect = Some(parent)
+    let mut db = deploy_result(open(tasks, private_dir, c, r, selected_options))?
+    if version(snapshot(db)) != point.main_version {
+        return Error(ExportMismatch)
+    }
+    // Preserve the captured pin set, including any deployment pin. An ordinary
+    // discretionary checkpoint is allowed to retire an orphan deployment pin.
+    let saved = deploy_result(cut_install(mut db, RemovePins(list.new())))?
+    deploy_result(durable(mut db, saved))?
+    deploy_result(close(take db))
+}
+
+fn restore_write_foundation(private_dir: Dir, to: Dir, child: StoreId, point: RestorePoint, origin: manifest.RestoreOrigin) -> Result[(), Error] waits {
+    let (parent, take image) = read_page_manifest_file(private_dir)?
+    if parent != point.token.parent {
+        return Error(Foreign)
+    }
+    let mut m = take image
+    if m.branches[0u64].version != point.main_version || m.branches[0u64].at != point.main_at {
+        return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Order)))
+    }
+    let old = store_key_to_rep(parent)
+    let new_id = store_key_to_rep(child)
+    let packs = failure_result_from_rep(manifest.validate_receipt_packs(private_dir, old, "MANIFEST", m))?
+    for seq in packs {
+        failure_result_from_rep(manifest.reseal_restore_pack(private_dir, to, old, new_id, seq))?
+    }
+    m.generation = 1
+    m.first_live = 1
+    m.prev_first = 1
+    m.binding_id = 0
+    m.main_transition = false
+    m.origin = Some(origin)
+    m.sweep = manifest.SweepCursor(position: 0, epoch: 0, digest: 0)
+    let path = failure_result_from_rep(manifest.journal_path(1, ""))?
+    let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: new_id, role: 2, seq: 1), 0, 0)))?
+    failure_result_from_rep(manifest.disk_write_synced(to, path, header))?
+    failure_result_from_rep(manifest.disk_publish_manifest(to, new_id, m))?
+    let (observed, take installed) = read_page_manifest_file(to)?
+    if observed != child || !restore_same_origin(installed, origin) {
+        return Error(Foreign)
+    }
+    let _ = validate_export_manifest(to, observed, take installed, true, true)?
+    let Some(jhdr) = failure_result_from_rep(manifest.journal_header(to, new_id, 1, None))? else {
+        return Error(failure_from_rep(format.disk_fault(path, 0, Header)))
+    }
+    if jhdr.prev_end != 0 {
+        return Error(failure_from_rep(format.disk_fault(path, 0, Header)))
+    }
+    Ok(())
+}
+
+fn restore_attempt_dir(attempt: Inline[u8, 16]) -> String {
+    let mut hi = 0u64
+    let mut lo = 0u64
+    for i in 0u64 .. 8 {
+        hi = (hi << 8) | int.widen(attempt[i])
+        lo = (lo << 8) | int.widen(attempt[8 + i])
+    }
+    let mut name = string.from("restore-")
+    string.push(mut name, format.archive_store_hex(types.StoreKey(hi, lo)))
+    take name
+}
+
+fn restore_check_initial_files(to: Dir, work: String, locked: bool) -> Result[(), DeployError] waits {
+    let mut listing = scratch_result(failure_result_from_rep(manifest.disk_io(host.entries(to, None))))?
+    let mut buf: Bytes = list.with_capacity(4096)
+    loop {
+        list.clear(mut buf)
+        if scratch_result(failure_result_from_rep(manifest.disk_io(host.next_entries(mut listing, mut buf))))? == 0 {
+            return Ok(())
+        }
+        let mut pos = 0u64
+        while pos < list.len(buf) {
+            let len: u16 = list.word_le(buf, pos + 1)
+            let start = pos + 3
+            pos = start + int.widen(len)
+            let name = list.slice(buf, start, pos)
+            if name != string.as_bytes(work) && (!locked || name != string.as_bytes("LOCK")) {
+                return Error(Scratch(Exists("restore target")))
+            }
+        }
+    }
+}
+
+fn restore_reserve_directory(to: Dir, work: String, point: RestorePoint, origin: manifest.RestoreOrigin, r: Random) -> Result[(StoreId, bool), DeployError] waits {
+    if deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))? {
+        let bytes_in = scratch_result(failure_result_from_rep(manifest.disk_read_file(to, "EXPORT", 4096)))?
+        let (id, take fence) = match manifest.disk_read_page_manifest("EXPORT", bytes_in) {
+            Ok(take decoded) => take decoded,
+            Error(_) => return Error(Scratch(Exists("restore target"))),
+        }
+        if !restore_same_origin(fence, origin) {
+            return Error(Scratch(Exists("restore target")))
+        }
+        return Ok((store_key_from_rep(id), false))
+    }
+    if deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))? {
+        let (id, take published) = deploy_result(read_page_manifest_file(to))?
+        if !restore_same_origin(published, origin) {
+            return Error(Scratch(Exists("restore target")))
+        }
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+        return Ok((id, true))
+    }
+    restore_check_initial_files(to, work, true)?
+    let private_dir = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
+    let contents = match std.dir.list(private_dir, None) {
+        Ok(take children) => take children,
+        Error(Io(err)) => return Error(Scratch(Io(err))),
+        Error(NotUtf8) => return Error(Scratch(Exists("restore target"))),
+    }
+    for member in contents {
+        if member.name != "reservation" {
+            return Error(Scratch(Exists("restore target")))
+        }
+        let raw = scratch_result(failure_result_from_rep(manifest.disk_read_file(private_dir, "reservation", 4096)))?
+        let (_, take saved) = match manifest.disk_read_page_manifest("reservation", raw) {
+            Ok(take pair) => take pair,
+            Error(_) => return Error(Scratch(Exists("restore target"))),
+        }
+        if !restore_same_origin(saved, origin) {
+            return Error(Scratch(Exists("restore target")))
+        }
+    }
+    let id = deploy_result(failure_result_from_rep(types.capacity(types.disk_identity(r))))?
+    if id == store_key_to_rep(point.token.parent) {
+        return Error(Store(Foreign))
+    }
+    let mut fence = manifest.page_manifest_empty(types.named_limits(None))
+    fence.origin = Some(origin)
+    let raw = deploy_result(failure_result_from_rep(manifest.disk_page_manifest_bytes(id, fence)))?
+    scratch_result(failure_result_from_rep(manifest.disk_write_synced(private_dir, "reservation", raw)))?
+    let mut source = string.from(work)
+    string.push(mut source, "/reservation")
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.rename(to, source, "EXPORT"))))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+    Ok((store_key_from_rep(id), false))
+}
+
+fn restore_directory_locked(tasks: Tasks, mut input: RestoreInput, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16], work: String) -> Result[Restored, DeployError] waits {
+    let origin = restore_origin_for(point, attempt)
+    let (child, published) = restore_reserve_directory(to, work, point, origin, r)?
+    if !published {
+        match host.remove_tree(to, work) {
+            Ok(_) => (),
+            Error(NotFound) => (),
+            Error(problem) => return Error(Scratch(Io(problem))),
+        }
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
+        let private_dir = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
+        let stamp = match input {
+            RestoreDir(d) => restore_copy_backup(d, private_dir, point)?,
+            RestoreBucket(mut src, ms) => restore_copy_archive(mut src, private_dir, point, ms)?,
+        }
+        restore_fold(tasks, private_dir, c, r, options, point, stamp)?
+        deploy_result(restore_write_foundation(private_dir, to, child, point, origin))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(to, work))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.remove(to, "EXPORT"))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+    }
+    Ok(Restored(child, point, attempt))
+}
+
+pub fn restore_attempt(r: Random) -> Inline[u8, 16] {
+    let mut bytes_out: Bytes = list.with_capacity(16)
+    host.random(r, mut bytes_out)
+    let mut attempt: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        attempt[i] = bytes_out[i]
+    }
+    attempt
+}
+
+pub fn restore(tasks: Tasks, from: Dir, to: Dir, c: Clock, r: Random, options: Options, target: RestoreTarget, attempt: Inline[u8, 16]) -> Result[Restored, DeployError] waits {
+    let RestorePresent(point) = plan_backup_restore(from, target)? else {
+        return Error(ExportMismatch)
+    }
+    let mut input = RestoreDir(from)
+    restore_directory(tasks, mut input, to, c, r, options, point, attempt)
+}
+
+type RestoreInput = RestoreDir(Dir) | RestoreBucket(std.object.Client, u64)
+
+pub fn restore_from_archive(tasks: Tasks, take sink: std.object.Client, parent: StoreId, to: Dir, c: Clock, r: Random, options: Options, target: RestoreTarget, attempt: Inline[u8, 16], op_ms: u64) -> Result[Restored, DeployError] waits {
+    let mut src = take sink
+    let RestorePresent(point) = deploy_result(plan_archive_restore(mut src, parent, target, op_ms))? else {
+        return Error(ExportMismatch)
+    }
+    let mut input = RestoreBucket(take src, op_ms)
+    restore_directory(tasks, mut input, to, c, r, options, point, attempt)
+}
+
+fn restore_directory(tasks: Tasks, mut input: RestoreInput, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16]) -> Result[Restored, DeployError] waits {
+    let work = restore_attempt_dir(attempt)
+    let fenced = deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))?
+    let published = deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))?
+    if fenced || published {
+        let origin = restore_origin_for(point, attempt)
+        let check = if fenced {
+            let raw = scratch_result(failure_result_from_rep(manifest.disk_read_file(to, "EXPORT", 4096)))?
+            manifest.disk_read_page_manifest("EXPORT", raw)
+        } else {
+            manifest.read_page_manifest_file(to)
+        }
+        match take check {
+            Ok((_, take m)) if restore_same_origin(m, origin) => (),
+            _ => return Error(Scratch(Exists("restore target"))),
+        }
+    } else {
+        let resuming = match host.open_dir(to, work) {
+            Ok(_) => true,
+            Error(NotFound) => false,
+            Error(err) => return Error(Scratch(Io(err))),
+        }
+        if !resuming {
+            transfer_result(transfer.require_empty(to, "restore target"))?
+            scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
+            scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+        }
+    }
+    let lock = deploy_result(failure_result_from_rep(journal.disk_lock(to, c, 0)))?
+    let answer = restore_directory_locked(tasks, mut input, to, c, r, options, point, attempt, work)
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take lock))))?
+    take answer
+}

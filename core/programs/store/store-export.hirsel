@@ -359,41 +359,6 @@ fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
     Ok(take stamp)
 }
 
-// §15.3 R1-R5. EXPORT is copied first and removed last, so an ordinary open
-// refuses `to` (ExportDirectory) until the copy has been validated by the
-// prepare opener. The restored store keeps the source's identity.
-pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportStamp, DeployError] waits {
-    transfer_result(transfer.require_empty(to, "restore target"))?
-    let stamp = read_export_stamp(from)?
-    transfer_result(transfer.copy_restore_file(from, to, "EXPORT"))?
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
-    transfer_result(transfer.copy_restore_file(from, to, "MANIFEST"))?
-    let (id, take page_record) = deploy_result(read_page_manifest_file(to))?
-    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || page_record.first_live > stamp.terminal || page_record.next_table > stamp.next_table {
-        return Error(ExportMismatch)
-    }
-    let mut packs = capture.capture_packs(from, store_key_to_rep(id), page_record, false, 0)
-    let counts = deploy_result(failure_result_from_rep(capture.capture_lists(mut packs, page_record)))?
-    let slots = capture.capture_add(counts.rows, counts.pages)
-    let need_bytes = capture.capture_add(capture.CAPTURE_PATH + capture.CAPTURE_SCRATCH, capture.capture_mul(capture.CAPTURE_LIST_ROW, slots))
-    let selected = deploy_result(failure_result_from_rep(types.capacity(bound bytes need_bytes {
-        failure_result_from_rep(capture.check_inventory(from, store_key_to_rep(id), page_record, slots))
-    })))?
-    let inventory = deploy_result(take selected)?
-    for pack in inventory {
-        transfer_result(transfer.copy_restore_file(from, to, deploy_result(failure_result_from_rep(manifest.paged_pack_path(pack.seq)))?))?
-    }
-    for seq in page_record.first_live .. stamp.terminal {
-        transfer_result(transfer.copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ""))))?))?
-    }
-    transfer_result(transfer.copy_restore_file(from, to, scratch_result(failure_result_from_rep(types.capacity(manifest.disk_path("j-", stamp.terminal, ""))))?))?
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
-    let _validated = open_copied(to, c, stamp.attempt, options, false)?
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove(to, "EXPORT"))))?
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
-    Ok(take stamp)
-}
-
 // Replays the copied journal from offset `from` of segment `first` through
 // `limit` of `terminal`. A full open starts at 72; a catch-up round starts
 // where the previous round ended (STORE-SPEC §3.5a "Catch-up"), and applies

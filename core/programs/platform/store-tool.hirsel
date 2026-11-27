@@ -455,8 +455,17 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
         Ok(take sized) => take sized,
         Error(_) => return refused(err, "Full"),
     }
-    match store.restore(from, to, c, options) {
-        Ok(take stamp) => finished(out, "restored", stamp),
+    match store.restore(tasks, from, to, c, r, options, Latest, store.restore_attempt(r)) {
+        Ok(receipt) => {
+            let mut line = string.from("restored ")
+            string.push(mut line, id_hex(receipt.child.hi, receipt.child.lo))
+            string.push(mut line, " head ")
+            string.push_u64(mut line, receipt.point.main_version)
+            string.push(mut line, " from ")
+            string.push(mut line, id_hex(receipt.point.token.parent.hi, receipt.point.token.parent.lo))
+            string.push(mut line, "\n")
+            say(out, line)
+        },
         Error(e) => refused(err, deploy_refusal(e)),
     }
 }

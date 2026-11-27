@@ -50,11 +50,11 @@ fn l96_listed_tiered_packs(db: Db) -> List[(u64, u8)] {
     take found
 }
 
-fn l96_same_bytes_table(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, t: Table[u64, Bytes]) -> Result[u64, Error] waits {
+fn l96_same_bytes_table(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, t: Table[u64, Bytes], child_rows: Table[u64, Bytes]) -> Result[u64, Error] waits {
     let left_reader = reader(left, VALUE_LIMIT + 1048576)?
     let right_reader = reader(right, VALUE_LIMIT + 1048576)?
     let mut expected = scan(left_reader, at_left, t, Unbounded, Unbounded)?
-    let mut actual = scan(right_reader, at_right, t, Unbounded, Unbounded)?
+    let mut actual = scan(right_reader, at_right, child_rows, Unbounded, Unbounded)?
     let mut matched = 0u64
     loop {
         let want = next(left_reader, mut expected)?
@@ -76,11 +76,11 @@ fn l96_len_keys(_k: u64, v: Bytes) -> Result[List[u64], Capacity] {
 }
 
 // Every entry of the index, with its primary row, read from each side.
-fn l96_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, Bytes, ()]) -> Result[u64, Error] waits {
+fn l96_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, Bytes, ()], child_idx: Index[u64, u64, Bytes, ()]) -> Result[u64, Error] waits {
     let left_reader = reader(left, READER_PIN_MIN)?
     let right_reader = reader(right, READER_PIN_MIN)?
     let mut expected = find(left_reader, at_left, ix, Unbounded, Unbounded)?
-    let mut actual = find(right_reader, at_right, ix, Unbounded, Unbounded)?
+    let mut actual = find(right_reader, at_right, child_idx, Unbounded, Unbounded)?
     let mut matched = 0u64
     loop {
         let want = next(left_reader, mut expected)?
@@ -179,27 +179,26 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
             fail("L96 (a): copied class-3/4 pack is not byte-identical")
         }
     }
-    let stamp = result.unwrap(restore(target, restored, c, clone(options)))
-    if stamp.head != version(leased) {
+    let stamp = result.unwrap(restore(tasks, target, restored, c, r, clone(options), Latest, restore_attempt(r)))
+    if stamp.point.main_version != version(leased) || stamp.child == db.store {
         fail("L96 (a): restored stamp head differs from leased snapshot")
     }
-    for (seq, _) in tiered_packs {
-        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
-        let want = failure_result_from_rep(manifest.disk_read_file(target, path, 1048576))?
-        let got = failure_result_from_rep(manifest.disk_read_file(restored, path, 1048576))?
-        if got != want {
-            fail("L96 (a): restored class-3/4 pack is not byte-identical")
-        }
-    }
     let mut twin = open(tasks, restored, c, r, clone(options))?
+    let mut child_schema = declare(twin, Open)?
+    let mut child_decl = declare_table(mut child_schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let child_idx = index(mut child_schema, mut child_decl, "by_len", Many, code.describe(l96_len_keys), std.codec.key_u64())?
+    let child_rows = finish(mut child_schema, take child_decl)?
+    let child_meta_decl = declare_table(mut child_schema, "meta", std.codec.key_u64(), std.codec.of_u64())?
+    let child_meta = finish(mut child_schema, take child_meta_decl)?
+    let _ = seal(mut twin, take child_schema)?
     let now = snapshot(twin)
     if version(now) != version(leased) {
         fail("L96 (a): twin head differs from leased snapshot")
     }
-    if l96_same_bytes_table(db, leased, twin, now, rows)? != 15 {
+    if l96_same_bytes_table(db, leased, twin, now, rows, child_rows)? != 15 {
         fail("L96 (a): restored Tiered table row count mismatch")
     }
-    if l96_same_index(db, leased, twin, now, by_len)? != 15 {
+    if l96_same_index(db, leased, twin, now, by_len, child_idx)? != 15 {
         fail("L96 (a): restored Tiered index entry count mismatch")
     }
     if residency_mode(twin, by_len.id)? != (IndexCollection, ResidentTiered) {
@@ -208,7 +207,7 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
     let left_r = reader(db, VALUE_LIMIT + 1048576)?
     let right_r = reader(twin, VALUE_LIMIT + 1048576)?
     for k in 0u64 .. 16 {
-        if get(left_r, leased, meta, k)? != get(right_r, now, meta, k)? {
+        if get(left_r, leased, meta, k)? != get(right_r, now, child_meta, k)? {
             fail("L96 (a): restored Memory table differs from source")
         }
     }
@@ -233,7 +232,7 @@ fn test_l96_a_tiered_table_backup_restore_and_offline(d: Dir, c: Clock, r: Rando
     if off_stamp.head != closed_head {
         fail("L96 (a): offline backup head mismatch")
     }
-    let _ = result.unwrap(restore(offline_target, offline_restored, c, clone(options)))
+    let _ = result.unwrap(restore(tasks, offline_target, offline_restored, c, r, clone(options), Latest, restore_attempt(r)))
     let reopened = open(tasks, offline_restored, c, r, clone(options))?
     if version(snapshot(reopened)) != closed_head {
         fail("L96 (a): offline restored head mismatch")
@@ -299,7 +298,7 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
         }
     }
     close(take db2)?
-    let _ = result.unwrap(restore(b1, r1, c, clone(run_opts)))
+    let _ = result.unwrap(restore(tasks, b1, r1, c, r, clone(run_opts), Latest, restore_attempt(r)))
     let restored_db = open(tasks, r1, c, r, clone(run_opts))?
     let rd = reader(restored_db, VALUE_LIMIT + 1048576)?
     let snap = snapshot(restored_db)
@@ -385,7 +384,7 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
             failure_result_from_rep(transfer.copy_export_file(target, partial_copy, listed.name, None))?
         }
     }
-    match restore(partial_copy, disk_test_directory(d), c, clone(run_opts)) {
+    match restore(tasks, partial_copy, disk_test_directory(d), c, r, clone(run_opts), Latest, restore_attempt(r)) {
         Error(Scratch(Io(NotFound))) => (),
         _ => fail("L96 (c) E2: restore accepted an image without EXPORT"),
     }
@@ -398,8 +397,8 @@ fn test_l96_c_export_restore_crash_table(d: Dir, c: Clock, r: Random, tasks: Tas
         _ => fail("L96 (c) R3: ordinary open accepted a directory holding EXPORT"),
     }
     // E3 + R5: complete restore removes EXPORT and opens cleanly at H.
-    let restored_stamp = result.unwrap(restore(target, full_restore, c, clone(run_opts)))
-    if restored_stamp.head != head_h || failure_result_from_rep(journal.disk_exists(full_restore, "EXPORT"))? {
+    let restored_stamp = result.unwrap(restore(tasks, target, full_restore, c, r, clone(run_opts), Latest, restore_attempt(r)))
+    if restored_stamp.point.main_version != head_h || failure_result_from_rep(journal.disk_exists(full_restore, "EXPORT"))? {
         fail("L96 (c) R5: restore head mismatch or EXPORT survived")
     }
     let twin = open(tasks, full_restore, c, r, clone(run_opts))?
@@ -493,7 +492,7 @@ fn test_l96_d_corrupt_incoming_cold_pointer_at_r4(d: Dir, c: Clock, r: Random, t
         let _ = result.unwrap(export_copy(take job))
         release_export(mut db, attempt)
         l96_corrupt_cold_incoming_ptr(backup_dir, id, cold_ptr, mutate_stamp)?
-        match restore(backup_dir, restore_dir, c, clone(options)) {
+        match restore(tasks, backup_dir, restore_dir, c, r, clone(options), Latest, restore_attempt(r)) {
             Error(Store(Corrupt(_))) => (),
             _ => fail("L96 (d): R4 did not reject mismatched incoming Cold pointer as Corrupt"),
         }
@@ -533,7 +532,7 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     let mut unfunded = result.unwrap(sized(Directory, 268435456u64))
     unfunded.cache_bytes = 0
     unfunded.writer_pin_bytes = 0
-    match restore(tiered_backup, disk_test_directory(d), c, unfunded) {
+    match restore(tasks, tiered_backup, disk_test_directory(d), c, r, unfunded, Latest, restore_attempt(r)) {
         Error(Store(Missing(what))) if what == "cache_bytes" => (),
         _ => fail("L96 (e): Tiered image R4 did not refuse unfunded plan"),
     }
@@ -557,10 +556,10 @@ fn test_l96_e_tiered_and_last_conversion_admission(d: Dir, c: Clock, r: Random, 
     // resident_limit passes, exact - 1 refuses Full(Resident(Capacity)).
     let mut exact_opts: Options = clone(zero_opts)
     exact_opts.resident_limit = resident_exact
-    let _ = result.unwrap(restore(conv_backup, conv_restored, c, exact_opts))
+    let _ = result.unwrap(restore(tasks, conv_backup, conv_restored, c, r, exact_opts, Latest, restore_attempt(r)))
     let mut below_opts: Options = clone(zero_opts)
     below_opts.resident_limit = resident_exact - 1
-    match restore(conv_backup, disk_test_directory(d), c, below_opts) {
+    match restore(tasks, conv_backup, disk_test_directory(d), c, r, below_opts, Latest, restore_attempt(r)) {
         Error(Store(Full(Resident(Capacity(requested, available))))) if requested == resident_exact && available == resident_exact - 1 => (),
         _ => fail("L96 (e): last-conversion R4 did not match exact resident_limit admission"),
     }
@@ -607,9 +606,10 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
         fail("L100 (c) (a): pack P missing or altered in backup")
     }
     close(take db_a)?
-    let _ = result.unwrap(restore(bak_a, res_a, c, clone(run_opts)))
+    let _ = result.unwrap(restore(tasks, bak_a, res_a, c, r, clone(run_opts), Latest, restore_attempt(r)))
     let mut twin_a = open(tasks, res_a, c, r, clone(run_opts))?
-    l100_pin_check_reads(twin_a, rows_a, clone(v1), clone(v2))?
+    let child_rows_a = table(mut twin_a, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l100_pin_check_reads(twin_a, child_rows_a, clone(v1), clone(v2))?
     for _ in 0u64 .. 8 {
         if !compact_listed(twin_a, pack_a) {
             break
@@ -619,7 +619,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
     if compact_listed(twin_a, pack_a) {
         fail("L100 (c) (a): probe on restored store did not retire P")
     }
-    l100_pin_check_reads(twin_a, rows_a, clone(v1), clone(v2))?
+    l100_pin_check_reads(twin_a, child_rows_a, clone(v1), clone(v2))?
     l96_full_scrub_clean(mut twin_a)?
     close(take twin_a)?
     // Subcase 2: L100 (b) before reopen, plus Subcase 3 (absent P -> Unsupported(0x0023) at R4).
@@ -641,7 +641,7 @@ fn test_l100_c_backup_restore_zero_live_pin_and_idle(d: Dir, c: Clock, r: Random
         fail("L100 (c) (b): pack P missing or altered in backup")
     }
     close(take db_b)?
-    let _ = result.unwrap(restore(bak_b, res_b, c, clone(run_opts)))
+    let _ = result.unwrap(restore(tasks, bak_b, res_b, c, r, clone(run_opts), Latest, restore_attempt(r)))
     let mut twin_b = open(tasks, res_b, c, r, clone(run_opts))?
     let _ = checkpoint(mut twin_b)?
     if compact_listed(twin_b, pack_b) || failure_result_from_rep(journal.disk_exists(res_b, failure_result_from_rep(manifest.paged_pack_path(pack_b))?))? {

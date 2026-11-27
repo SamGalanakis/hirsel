@@ -83,5 +83,65 @@ fn restore_law_archived(d: Dir, sim: BucketSim, tasks: Tasks, r: Random) -> Resu
     if obj_tip.version != version(snapshot(obj_db)) || obj_tip.token.boundary.unit != ocur.ordinal {
         fail("L-A4: wrong Bucket physical boundary")
     }
+    let target_dir = disk_test_directory(d)
+    let granted = arch_law_sink_client(sim, tasks, 111, "restore-archive/obj/")?
+    let receipt = match restore_from_archive(tasks, take granted, obj_id, target_dir, sim.time, r, opts_for_archive_child(), Boundary(obj_tip.token),[9; 16], DF_OP_MS) {
+        Ok(take created) => take created,
+        Error(Store(take e)) => return Error(take e),
+        Error(Scratch(take e)) => return Error(take e),
+        Error(_) => fail("Bucket archive restore failed"),
+    }
+    let mut child = open(tasks, target_dir, sim.time, r, opts_for_archive_child())?
+    if receipt.child == obj_id || bucket_law_rows(mut child)? != 2 {
+        fail("Bucket archive did not recover two rows under the child ID")
+    }
+    close(take child)?
     close(take obj_db)
+}
+
+fn opts_for_archive_child() -> Options {
+    result.unwrap(sized(Directory, 2147483648u64))
+}
+
+@test
+fn test_la5_backup_fresh_child(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let source_dir = disk_test_directory(d)
+    let exported = disk_test_directory(d)
+    let child_dir = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let mut db = deploy_result(open(tasks, source_dir, c, r, opts))?
+    let parent = db.store
+    let rows = deploy_result(archive_hold_table(mut db))?
+    let _ = deploy_result(archive_hold_put(mut db, rows, 1, 17, 10))?
+    let wanted = version(snapshot(db))
+    let _ = deploy_result(archive_hold_put(mut db, rows, 2, 34, 10))?
+    let backup_attempt = exit_attempt(23)
+    let job = begin_backup(mut db, exported, clone(backup_attempt))?
+    let _ = export_copy(take job)?
+    release_export(mut db, backup_attempt)
+    let attempt: Inline[u8, 16] =[19; 16]
+    let result_child = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
+    let retry = restore(tasks, exported, child_dir, c, r, opts, Version(0, wanted), attempt)?
+    if result_child.child == parent || retry.child != result_child.child {
+        fail("restore did not reserve a fresh persistent child identity")
+    }
+    let mut child = deploy_result(open(tasks, child_dir, c, r, opts))?
+    if child.store != result_child.child || version(snapshot(child)) != wanted {
+        fail("reopened child differs from selected interior commit")
+    }
+    let read_child = deploy_result(reader(child, 0))?
+    match get(read_child, snapshot(child), rows, 1u64) {
+        Error(Foreign) => (),
+        _ => fail("parent table worked on child"),
+    }
+    let child_rows = deploy_result(table(mut child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    if let None = deploy_result(get(read_child, snapshot(child), child_rows, 1u64))? {
+        fail("selected row missing")
+    }
+    if let Some(_) = deploy_result(get(read_child, snapshot(child), child_rows, 2u64))? {
+        fail("child included later row")
+    }
+    let _ = deploy_result(archive_hold_put(mut child, child_rows, 3, 51, 10))?
+    deploy_result(close(take child))?
+    deploy_result(close(take db))
 }

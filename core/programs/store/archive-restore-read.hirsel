@@ -17,7 +17,7 @@ fn restore_base_ref(row: format.ArchiveBaseRowRep) -> pages.HistoryRef {
 
 fn restore_base_token(parent: StoreId, kind: u8, row: format.ArchiveBaseRowRep, binding_id: u64) -> RestoreToken {
     let boundary = manifest.RestoreBoundary(source_kind: kind, base_ordinal: row.base_ordinal, base_digest: row.digest, unit: row.first_unit, epoch: row.epoch, unit_digest: row.digest, frame_end: 0)
-    RestoreToken(parent, binding_id, capture_attempt:[0; 16], boundary)
+    RestoreToken(parent, binding_id, capture_attempt: [0; 16], boundary)
 }
 
 fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, kind: u8, row: format.ArchiveBaseRowRep, deadline: u64) -> Result[(manifest.PageManifest, history.HistoryActivation), Error] waits {
@@ -33,7 +33,7 @@ fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, kind: 
         if owner != id || parsed.generation != row.base_ordinal {
             return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
         }
-        (take parsed, history.HistoryActivation(number: 0, binding:[0; 32]))
+        (take parsed, history.HistoryActivation(number: 0, binding: [0; 32]))
     } else {
         if row.len > 112 + 16 + 8213 + 16 + 1048576 {
             return Error(failure_from_rep(format.disk_fault("archive-index", 72, Malformed)))
@@ -62,7 +62,7 @@ fn restore_range(mut sink: std.object.Client, key: String, lo: u64, hi: u64, dea
     Ok((meta, take raw))
 }
 
-fn restore_archive_entries(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, end: pages.HistoryRef, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+fn restore_entry_chain(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, end: pages.HistoryRef, deadline: u64) -> Result[List[history.HistoryLink], Error] waits {
     let start = restore_base_ref(row)
     if end.seq < start.seq {
         return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
@@ -82,74 +82,92 @@ fn restore_archive_entries(mut sink: std.object.Client, parent: StoreId, row: fo
     if !history.history_ref_matches(unit, start) {
         return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
     }
-    for i in 0u64 .. list.len(suffix) {
-        unit = history.history_length(suffix[i], start.seq + i + 1)
-        let key = restore_object_key(parent, "e-", unit)?
-        let (meta, take prefix) = restore_range(mut sink, key, 0, 112, deadline)?
-        if meta.size != unit.len {
-            return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
+    Ok(take suffix)
+}
+
+fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, unit: pages.HistoryRef, deadline: u64, mut state: S, visit: scoped fn(mut S, u16, u16, u64, Bytes) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let key = restore_object_key(parent, "e-", unit)?
+    let (meta, take prefix) = restore_range(mut sink, key, 0, 112, deadline)?
+    if meta.size != unit.len {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
+    }
+    let (ctx, _) = failure_result_from_rep(history.history_entry_context(key, store_key_to_rep(parent), unit, prefix))?
+    let mut digest = std.check.start()
+    std.check.add(mut digest, prefix, 0, 112)
+    let mut pos = 112u64
+    let mut substantive = false
+    while pos < unit.len {
+        if unit.len - pos < 16 {
+            return Error(failure_from_rep(format.disk_fault(key, pos, Truncated)))
         }
-        let (ctx, _) = failure_result_from_rep(history.history_entry_context(key, store_key_to_rep(parent), unit, prefix))?
-        let mut digest = std.check.start()
-        std.check.add(mut digest, prefix, 0, 112)
-        let mut pos = 112u64
-        let mut token = walk.base
-        token.boundary.unit = unit.seq
-        token.boundary.epoch = unit.epoch
-        token.boundary.unit_digest = unit.digest
-        let mut substantive = false
-        while pos < unit.len {
-            if unit.len - pos < 16 {
-                return Error(failure_from_rep(format.disk_fault(key, pos, Truncated)))
-            }
-            let (part, take hdr) = restore_range(mut sink, key, pos, pos + 16, deadline)?
-            if part.etag != meta.etag {
+        let (part, take hdr) = restore_range(mut sink, key, pos, pos + 16, deadline)?
+        if part.etag != meta.etag {
+            return Error(Lost)
+        }
+        let fh = failure_result_from_rep(manifest.disk_read_frame_head(key, hdr, pos))?
+        if fh.size > unit.len - pos - 16 {
+            return Error(failure_from_rep(format.disk_fault(key, pos, Truncated)))
+        }
+        let claim = fh.kind == 0x0040 && pos == 112
+        if !claim {
+            failure_result_from_rep(manifest.disk_check_frame_kind(key, ctx, fh.kind, fh.flags, pos))?
+        }
+        let frame_end = pos + 16 + fh.size
+        let payload: Bytes = if fh.size == 0 {
+            list.new()
+        } else {
+            let (chunk, take bytes_in) = restore_range(mut sink, key, pos + 16, frame_end, deadline)?
+            if chunk.etag != meta.etag {
                 return Error(Lost)
             }
-            let fh = failure_result_from_rep(manifest.disk_read_frame_head(key, hdr, pos))?
-            if fh.size > unit.len - pos - 16 {
-                return Error(failure_from_rep(format.disk_fault(key, pos, Truncated)))
-            }
-            let claim = fh.kind == 0x0040 && pos == 112
-            if !claim {
-                failure_result_from_rep(manifest.disk_check_frame_kind(key, ctx, fh.kind, fh.flags, pos))?
-            }
-            let frame_end = pos + 16 + fh.size
-            let payload: Bytes = if fh.size == 0 {
-                list.new()
-            } else {
-                let (chunk, take bytes_in) = restore_range(mut sink, key, pos + 16, frame_end, deadline)?
-                if chunk.etag != meta.etag {
-                    return Error(Lost)
-                }
-                take bytes_in
-            }
-            if fh.checksum != failure_result_from_rep(types.capacity(format.disk_check(ctx, pos, hdr, payload)))? {
-                return Error(failure_from_rep(format.disk_fault(key, pos, Checksum)))
-            }
-            std.check.add(mut digest, hdr, 0, 16)
-            std.check.add(mut digest, payload, 0, fh.size)
-            token.boundary.frame_end = frame_end
-            if claim {
-                if fh.flags != 1 || frame_end != unit.len || fh.size != 24 || format.read_le(payload, 0, 8) != unit.epoch {
-                    return Error(failure_from_rep(format.disk_fault(key, pos, Malformed)))
-                }
-                substantive = true
-                restore_note(mut walk, token, 0, false)
-            } else if format.journal_event_kind(fh.kind) {
-                let ev = journal_decode(key, fh.kind, payload)?
-                restore_scan_event(mut walk, token, key, take ev)?
-                substantive = true
-            } else if manifest.disk_kind_limit(fh.kind) != None {
+            take bytes_in
+        }
+        if fh.checksum != failure_result_from_rep(types.capacity(format.disk_check(ctx, pos, hdr, payload)))? {
+            return Error(failure_from_rep(format.disk_fault(key, pos, Checksum)))
+        }
+        std.check.add(mut digest, hdr, 0, 16)
+        std.check.add(mut digest, payload, 0, fh.size)
+        if claim {
+            if fh.flags != 1 || frame_end != unit.len || fh.size != 24 || format.read_le(payload, 0, 8) != unit.epoch {
                 return Error(failure_from_rep(format.disk_fault(key, pos, Malformed)))
-            } else {
-                restore_note(mut walk, token, 0, false)
             }
-            pos = frame_end
+            substantive = true
+            visit(mut state, fh.kind, fh.flags, frame_end, payload)?
+        } else if format.journal_event_kind(fh.kind) {
+            visit(mut state, fh.kind, fh.flags, frame_end, payload)?
+            substantive = true
+        } else if manifest.disk_kind_limit(fh.kind) != None {
+            return Error(failure_from_rep(format.disk_fault(key, pos, Malformed)))
+        } else {
+            visit(mut state, fh.kind, fh.flags, frame_end, payload)?
         }
-        if !substantive || std.check.finish(digest) != unit.digest {
-            return Error(failure_from_rep(format.disk_fault(key, 112, Checksum)))
-        }
+        pos = frame_end
+    }
+    if !substantive || std.check.finish(digest) != unit.digest {
+        return Error(failure_from_rep(format.disk_fault(key, 112, Checksum)))
+    }
+    Ok(())
+}
+
+fn restore_archive_entries(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, end: pages.HistoryRef, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+    let suffix = restore_entry_chain(mut sink, parent, row, end, deadline)?
+    for i in 0u64 .. list.len(suffix) {
+        let unit = history.history_length(suffix[i], row.base_ordinal + i + 1)
+        restore_read_entry(mut sink, parent, unit, deadline, mut walk, scoped fn(mut scan_state: RestoreScan, kind: u16, flags: u16, frame_end: u64, payload: Bytes) -> Result[(), Error] {
+            let mut token = scan_state.base
+            token.boundary.unit = unit.seq
+            token.boundary.epoch = unit.epoch
+            token.boundary.unit_digest = unit.digest
+            token.boundary.frame_end = frame_end
+            if format.journal_event_kind(kind) {
+                let key = restore_object_key(parent, "e-", unit)?
+                let ev = journal_decode(key, kind, payload)?
+                restore_scan_event(mut scan_state, token, key, take ev)?
+            } else {
+                restore_note(mut scan_state, token, 0, false)
+            }
+            Ok(())
+        })?
     }
     Ok(())
 }

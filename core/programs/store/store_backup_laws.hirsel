@@ -12,11 +12,11 @@ fn backup_law_delete(mut db: Db, t: Table[u64, u64], k: u64) -> bool waits {
 
 // Both ways: every row of `t` at `left` is at `right` in the same key order
 // with the same value, and `right` has no extra row.
-fn backup_law_same_rows(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, t: Table[u64, u64]) -> Result[u64, DeployError] waits {
+fn backup_law_same_rows(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, t: Table[u64, u64], twin_table: Table[u64, u64]) -> Result[u64, DeployError] waits {
     let left_reader = result.unwrap(reader(left, 0u64))
     let right_reader = result.unwrap(reader(right, 0u64))
     let mut expected = deploy_result(scan(left_reader, at_left, t, Unbounded, Unbounded))?
-    let mut actual = deploy_result(scan(right_reader, at_right, t, Unbounded, Unbounded))?
+    let mut actual = deploy_result(scan(right_reader, at_right, twin_table, Unbounded, Unbounded))?
     let mut matched = 0u64
     loop {
         let want = deploy_result(next(left_reader, mut expected))?
@@ -32,9 +32,9 @@ fn backup_law_same_rows(left: Db, at_left: Snapshot, right: Db, at_right: Snapsh
 }
 
 // Full-scan both-ways check over every index entry in key order.
-fn backup_law_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, u64, ()]) -> Result[u64, DeployError] waits {
+fn backup_law_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, ix: Index[u64, u64, u64, ()], twin_index: Index[u64, u64, u64, ()]) -> Result[u64, DeployError] waits {
     let mut expected = deploy_result(find(result.unwrap(reader(left, 0u64)), at_left, ix, Unbounded, Unbounded))?
-    let mut actual = deploy_result(find(result.unwrap(reader(right, 0u64)), at_right, ix, Unbounded, Unbounded))?
+    let mut actual = deploy_result(find(result.unwrap(reader(right, 0u64)), at_right, twin_index, Unbounded, Unbounded))?
     let mut matched = 0u64
     loop {
         let want = deploy_result(next(law_reader(expected.capture), mut expected))?
@@ -50,11 +50,11 @@ fn backup_law_same_index(left: Db, at_left: Snapshot, right: Db, at_right: Snaps
 }
 
 // Full-scan both-ways check over every retained log entry in sequence order.
-fn backup_law_same_log(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, l: Log[u64]) -> Result[u64, DeployError] waits {
+fn backup_law_same_log(left: Db, at_left: Snapshot, right: Db, at_right: Snapshot, l: Log[u64], twin_log: Log[u64]) -> Result[u64, DeployError] waits {
     let left_reader = result.unwrap(reader(left, 0u64))
     let right_reader = result.unwrap(reader(right, 0u64))
     let mut expected = deploy_result(log_scan(left_reader, at_left, l, Unbounded, Unbounded))?
-    let mut actual = deploy_result(log_scan(right_reader, at_right, l, Unbounded, Unbounded))?
+    let mut actual = deploy_result(log_scan(right_reader, at_right, twin_log, Unbounded, Unbounded))?
     let mut matched = 0u64
     loop {
         let want = deploy_result(next(left_reader, mut expected))?
@@ -109,22 +109,22 @@ fn backup_law_schema(mut schema: Declare) -> Result[(Table[u64, u64], Index[u64,
     Ok((items, ix, other, meta, events))
 }
 
-fn backup_law_check_logical(source: Db, leased: Snapshot, twin: Db, now: Snapshot, items: Table[u64, u64], ix: Index[u64, u64, u64, ()], other: Table[u64, u64], meta: Cell[u64], events: Log[u64], expect_items: u64, expect_other: u64, expect_log: u64) -> Result[(), DeployError] waits {
-    if version(now) != version(leased) || twin.store.hi != source.store.hi || twin.store.lo != source.store.lo {
+fn backup_law_check_logical(source: Db, leased: Snapshot, twin: Db, now: Snapshot, items: Table[u64, u64], ix: Index[u64, u64, u64, ()], other: Table[u64, u64], meta: Cell[u64], events: Log[u64], twin_handles: (Table[u64, u64], Index[u64, u64, u64, ()], Table[u64, u64], Cell[u64], Log[u64]), expect_items: u64, expect_other: u64, expect_log: u64) -> Result[(), DeployError] waits {
+    if version(now) != version(leased) || twin.store == source.store {
         return Error(ExportMismatch)
     }
-    if backup_law_same_rows(source, leased, twin, now, items)? != expect_items || backup_law_same_rows(source, leased, twin, now, other)? != expect_other {
+    if backup_law_same_rows(source, leased, twin, now, items, twin_handles.0)? != expect_items || backup_law_same_rows(source, leased, twin, now, other, twin_handles.2)? != expect_other {
         return Error(ExportMismatch)
     }
-    if backup_law_same_index(source, leased, twin, now, ix)? != expect_items {
+    if backup_law_same_index(source, leased, twin, now, ix, twin_handles.1)? != expect_items {
         return Error(ExportMismatch)
     }
     let want_meta = deploy_result(cell_get(result.unwrap(reader(source, 0u64)), leased, meta))?
-    let got_meta = deploy_result(cell_get(result.unwrap(reader(twin, 0u64)), now, meta))?
+    let got_meta = deploy_result(cell_get(result.unwrap(reader(twin, 0u64)), now, twin_handles.3))?
     if want_meta != got_meta {
         return Error(ExportMismatch)
     }
-    if backup_law_same_log(source, leased, twin, now, events)? != expect_log {
+    if backup_law_same_log(source, leased, twin, now, events, twin_handles.4)? != expect_log {
         return Error(ExportMismatch)
     }
     Ok(())
@@ -214,20 +214,19 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         Error(Scratch(Exists(_))) => (),
         _ => return Error(ExportMismatch),
     }
-    let stamp = restore(target, restored, c, options)?
-    if stamp.head != version(leased) {
+    let stamp = restore(tasks, target, restored, c, r, options, Latest, restore_attempt(r))?
+    if stamp.point.main_version != version(leased) || stamp.child == db.store {
         return Error(ExportMismatch)
     }
     let mut twin = deploy_result(open(tasks, restored, c, r, options))?
     let mut twin_schema = deploy_result(declare(twin, Open))?
-    let (twin_items, twin_ix, twin_other, twin_meta, twin_events) = deploy_result(backup_law_schema(mut twin_schema))?
+    let twin_handles = deploy_result(backup_law_schema(mut twin_schema))?
     let _ = deploy_result(seal(mut twin, take twin_schema))?
     let now = snapshot(twin)
-    let _ = (twin_items, twin_ix, twin_other, twin_meta, twin_events)
-    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, 39u64, 41u64, 5u64)?
+    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, twin_handles, 39u64, 41u64, 5u64)?
     let gone = disk_test_directory(d)
     disk_io_deploy(host.remove(target, "EXPORT"))?
-    match restore(target, gone, c, options) {
+    match restore(tasks, target, gone, c, r, options, Latest, restore_attempt(r)) {
         Error(Scratch(Io(NotFound))) => (),
         _ => return Error(ExportMismatch),
     }
@@ -272,16 +271,16 @@ fn bucket_backup_restore_body(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: Bu
         return Error(ExportMismatch)
     }
     let dir_options = result.unwrap(sized(Directory, 2147483648u64))
-    let stamp = restore(target, restored, c, dir_options)?
-    if stamp.head != version(leased) {
+    let stamp = restore(tasks, target, restored, c, r, dir_options, Latest, restore_attempt(r))?
+    if stamp.point.main_version != version(leased) || stamp.child == db.store {
         return Error(ExportMismatch)
     }
     let mut twin = deploy_result(open(tasks, restored, c, r, dir_options))?
     let mut twin_schema = deploy_result(declare(twin, Open))?
-    let _ = deploy_result(backup_law_schema(mut twin_schema))?
+    let twin_handles = deploy_result(backup_law_schema(mut twin_schema))?
     let _ = deploy_result(seal(mut twin, take twin_schema))?
     let now = snapshot(twin)
-    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, 23u64, 24u64, 3u64)?
+    backup_law_check_logical(db, leased, twin, now, items, ix, other, meta, events, twin_handles, 23u64, 24u64, 3u64)?
     deploy_result(close(take twin))?
     deploy_result(close(take db))
 }
@@ -364,7 +363,7 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
     if failure_result_from_rep(manifest.disk_io(host.stat(source, terminal)))?.size != original_terminal.size || failure_result_from_rep(journal.disk_end(source, store_key_to_rep(id), seq))? != Some(stale) || failure_result_from_rep(manifest.read_page_manifest_bytes(source))? != original_manifest {
         fail("backup changed the source")
     }
-    let _ = result.unwrap(restore(target, restored, c, options))
+    let _ = result.unwrap(restore(tasks, target, restored, c, r, options, Latest, restore_attempt(r)))
     let twin = open(tasks, restored, c, r, options)?
     let read = reader(twin, 0)?
     let snap = snapshot(twin)
@@ -411,7 +410,7 @@ fn backup_writer_route(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Optio
     if stamp.head != head || list.len(page_record.pins) != 0 {
         fail("writer backup lost the head or retained the orphan import pin")
     }
-    let _ = result.unwrap(restore(target, restored, c, options))
+    let _ = result.unwrap(restore(tasks, target, restored, c, r, options, Latest, restore_attempt(r)))
     let twin = open(tasks, restored, c, r, options)?
     let snap = snapshot(twin)
     if version(snap) != head {
@@ -458,8 +457,8 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
     }
     failure_result_from_rep(manifest.disk_write_synced(target, extra, b"stray"))?
     failure_result_from_rep(manifest.disk_write_synced(target, temp, b"temporary"))?
-    let restored_stamp = result.unwrap(restore(target, restored, c, options))
-    if !transfer.same_stamp(export_stamp_to_rep(take stamp), export_stamp_to_rep(take restored_stamp)) || failure_result_from_rep(journal.disk_exists(restored, extra))? || failure_result_from_rep(journal.disk_exists(restored, temp))? {
+    let restored_stamp = result.unwrap(restore(tasks, target, restored, c, r, options, Latest, restore_attempt(r)))
+    if restored_stamp.point.main_version != stamp.head || restored_stamp.point.token.parent != StoreId(hi: stamp.store_hi, lo: stamp.store_lo) || restored_stamp.child == restored_stamp.point.token.parent || failure_result_from_rep(journal.disk_exists(restored, extra))? || failure_result_from_rep(journal.disk_exists(restored, temp))? {
         fail("restore copied unlisted files or changed the stamp")
     }
     let raw = failure_result_from_rep(manifest.disk_read_file(source, pack, 1048576))?
@@ -484,7 +483,7 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
             },
             _ => fail("backup accepted a mutilated listed pack"),
         }
-        match restore(target, incomplete, c, options) {
+        match restore(tasks, target, incomplete, c, r, options, Latest, restore_attempt(r)) {
             Error(Store(Corrupt(found))) if damage == 1 && found.file == pack => (),
             Error(Scratch(Io(NotFound))) if damage != 1 => (),
             _ => fail("restore accepted a mutilated listed pack"),
@@ -513,15 +512,15 @@ fn backup_offline_routes_and_packs(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     backup_mutilations(d, c, r, tasks, options)
 }
 
-fn l96_memory_exact_and_below(target: Dir, d: Dir, c: Clock, options: Options, resident_exact: u64) -> Result[(), DeployError] waits {
+fn l96_memory_exact_and_below(tasks: Tasks, r: Random, target: Dir, d: Dir, c: Clock, options: Options, resident_exact: u64) -> Result[(), DeployError] waits {
     let mut exact_opts: Options = clone(options)
     exact_opts.resident_limit = resident_exact
     let restored_ok = disk_test_directory(d)
-    let _stamp = restore(target, restored_ok, c, exact_opts)?
+    let _stamp = restore(tasks, target, restored_ok, c, r, exact_opts, Latest, restore_attempt(r))?
     let mut below_opts: Options = clone(options)
     below_opts.resident_limit = resident_exact - 1
     let restored_bad = disk_test_directory(d)
-    match restore(target, restored_bad, c, below_opts) {
+    match restore(tasks, target, restored_bad, c, r, below_opts, Latest, restore_attempt(r)) {
         Error(Store(Full(Resident(Capacity(requested, available))))) if requested == resident_exact && available == resident_exact - 1 => (),
         _ => return Error(ExportMismatch),
     }
@@ -569,7 +568,7 @@ fn test_l96_memory_backup_admission_and_budget(d: Dir, c: Clock, r: Random, task
     }
     let _ = export_copy(take job)?
     release_export(mut db, attempt)
-    l96_memory_exact_and_below(target, d, c, options, resident_exact)?
+    l96_memory_exact_and_below(tasks, r, target, d, c, options, resident_exact)?
     // Tight copy task budget: binary-search the exact byte boundary for the
     // spawned copy task and verify exact passes while exact - 1 fails.
     let mut low = 0u64

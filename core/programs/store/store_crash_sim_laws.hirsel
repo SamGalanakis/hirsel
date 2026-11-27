@@ -623,7 +623,7 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
             return Error(csim_fail(st, take text))
         },
     }
-    match restore(exported.dir, restored, c, clone(options)) {
+    match restore(tasks, exported.dir, restored, c, r, clone(options), Latest, restore_attempt(r)) {
         Ok(_) => (),
         Error(Store(e)) => return csim_error(mut st, "restore", e, None),
         Error(Scratch(e)) => return csim_error(mut st, "restore", e, None),
@@ -637,7 +637,11 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
         Ok(take t) => take t,
         Error(e) => return csim_error(mut st, "open of the restored backup", e, None),
     }
-    let got = match csim_read(twin, rows, snapshot(twin)) {
+    let child_rows = match table(mut twin, "rows", std.codec.key_u64(), std.codec.of_bytes()) {
+        Ok(take found) => take found,
+        Error(take err) => return csim_error(mut st, "restored table", take err, None),
+    }
+    let got = match csim_read(twin, child_rows, snapshot(twin)) {
         Ok(take got) => take got,
         Error(bad) => {
             if csim_fault_active(st) {
@@ -689,7 +693,7 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
     let (c, _hand) = provide.clock(0, 0)
     let r = provide.random(world_seed)
     let write_faults = plan.faults.corrupt + plan.faults.misdirect + plan.faults.lost_write > 0
-    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
     list.push(mut st.history, csim_empty())
     // A clean setup mount: the store directory and the one table.
     let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)

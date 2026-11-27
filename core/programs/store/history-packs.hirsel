@@ -106,9 +106,13 @@ fn history_locator_rows(mut client: std.object.Client, id: types.StoreKey, check
 }
 
 pub fn history_locator(mut client: std.object.Client, head: HistoryHead, mark: HistoryMark, raw: Bytes, deadline: u64) -> Result[HistoryLocator, types.Failure] waits {
+    history_locator_at(mut client, head.store, head.checkpoint, mark, raw, deadline)
+}
+
+pub fn history_locator_at(mut client: std.object.Client, id: types.StoreKey, checkpoint: pages.HistoryRef, mark: HistoryMark, raw: Bytes, deadline: u64) -> Result[HistoryLocator, types.Failure] waits {
     let mut state = empty_history_locator()
-    let file = history_read_key("e-", head.checkpoint)?
-    history_locator_rows(mut client, head.store, head.checkpoint, file, mark.depth, list.slice(raw, mark.locate_at, mark.locate_end), mut state, deadline)?
+    let file = history_read_key("e-", checkpoint)?
+    history_locator_rows(mut client, id, checkpoint, file, mark.depth, list.slice(raw, mark.locate_at, mark.locate_end), mut state, deadline)?
     Ok(take state)
 }
 

@@ -112,6 +112,9 @@ std = { major = 1 }
 "archive-format.hirsel" = "format"
 "archive-restore-origin.hirsel" = "manifest"
 "archive-restore-pack.hirsel" = "manifest"
+"archive-restore-directory.hirsel" = "store"
+"archive-restore-copy.hirsel" = "store"
+"archive-restore-copy-entries.hirsel" = "store"
 "archive-restore-index.hirsel" = "history"
 "archive-restore-log.hirsel" = "history"
 "archive-restore-plan.hirsel" = "store"
@@ -1117,4 +1120,7 @@ grants = ["Clock", "Random", "Tasks", "Stdout"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_la4_archive_target_resolution"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_la5_backup_fresh_child"]
 limit = 536870912

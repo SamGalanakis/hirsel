@@ -1,0 +1,139 @@
+fn restore_output(mut file: HostFile, data: Bytes) -> Result[(), Error] waits {
+    match host.write(mut file, data) {
+        Ok(()) => Ok(()),
+        Error(err) => Error(Io(err.error)),
+    }
+}
+
+fn restore_stream_unit(mut src: std.object.Client, key: String, mut file: HostFile, parent: StoreId, pack: pages.HistoryRef, object_header: bool, deadline: u64) -> Result[(), Error] waits {
+    let mut pos = 0u64
+    let mut digest = std.check.start()
+    while pos < pack.len {
+        let end = pos + order.min(65536u64, pack.len - pos)
+        let (meta, take raw) = restore_range(mut src, key, pos, end, deadline)?
+        if meta.size != pack.len {
+            return Error(Lost)
+        }
+        std.check.add(mut digest, raw, 0, list.len(raw))
+        if pos == 0 && object_header {
+            let ctx = failure_result_from_rep(history.history_object_context(key, store_key_to_rep(parent), 3, pack, raw))?
+            let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
+            restore_output(mut file, header)?
+            restore_output(mut file, list.slice(raw, 72, list.len(raw)))?
+        } else {
+            restore_output(mut file, raw)?
+        }
+        pos = end
+    }
+    if std.check.finish(digest) != pack.digest {
+        return Error(failure_from_rep(format.disk_fault(key, 0, Checksum)))
+    }
+    Ok(())
+}
+
+fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, ref: pages.HistoryRef, objects: bool, deadline: u64) -> Result[(), Error] waits {
+    let key = if objects {
+        restore_object_key(parent, "p-", ref)?
+    } else {
+        format.archive_key(store_key_to_rep(parent), format.archive_log_pack_rel(ref.seq, ref.digest))
+    }
+    let path = failure_result_from_rep(manifest.paged_pack_path(ref.seq))?
+    let mut output = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
+    restore_stream_unit(mut src, key, mut output, parent, ref, objects, deadline)?
+    failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take output)))
+}
+
+fn restore_copy_log(mut src: std.object.Client, dir: Dir, parent: StoreId, row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
+    let mut seq = row.first_unit
+    loop {
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        let mut output = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
+        let limit = if seq < b.unit {
+            restore_sealed_end(mut src, parent, seq + 1, deadline)?
+        } else {
+            b.frame_end
+        }
+        if limit == 0 {
+            let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 2, seq)
+            restore_output(mut output, failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?)?
+        }
+        let mut pos = 0u64
+        while pos < limit {
+            let key = restore_segment_key(parent, seq, pos)
+            let (meta, _) = restore_range(mut src, key, 0, 1, deadline)?
+            let mut offset = 0u64
+            let mut digest = std.check.start()
+            while offset < meta.size {
+                let hi = offset + order.min(65536u64, meta.size - offset)
+                let (part, take raw) = restore_range(mut src, key, offset, hi, deadline)?
+                if part.etag != meta.etag {
+                    return Error(Lost)
+                }
+                std.check.add(mut digest, raw, 0, list.len(raw))
+                let width = order.min(list.len(raw), int.saturating_sub(limit - pos, offset))
+                if width > 0 {
+                    restore_output(mut output, list.slice(raw, 0, width))?
+                }
+                offset = hi
+            }
+            if seq == b.unit && meta.size >= limit - pos && std.check.finish(digest) != b.unit_digest {
+                return Error(failure_from_rep(format.disk_fault(key, pos, Checksum)))
+            }
+            pos += order.min(meta.size, limit - pos)
+        }
+        failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
+        failure_result_from_rep(manifest.disk_io(host.close(take output)))?
+        if seq == b.unit {
+            return Ok((seq, order.max(72u64, limit)))
+        }
+        seq += 1
+    }
+}
+
+fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoint, op_ms: u64) -> Result[ExportStamp, DeployError] waits {
+    let parent = point.token.parent
+    let id = store_key_to_rep(parent)
+    let b = point.token.boundary
+    let due = std.object.deadline_after_ms(src, op_ms)
+    let Some((take head, _)) = deploy_result(failure_result_from_rep(history.archive_head_fetch(mut src, id, due)))? else {
+        return Error(Store(Lost))
+    }
+    if head.binding_id != point.token.binding_id {
+        return Error(Store(Foreign))
+    }
+    let chain_index = deploy_result(failure_result_from_rep(history.archive_restore_index(mut src, head, due)))?
+    let mut found: Option[format.ArchiveBaseRowRep] = None
+    let objects = b.source_kind == format.ARCHIVE_SOURCE_OBJECTS
+    for page_ref in chain_index.pages {
+        let page = deploy_result(failure_result_from_rep(history.archive_index_page(mut src, id, head.source_kind, page_ref, due)))?
+        for row in page.bases {
+            if row.base_ordinal == b.base_ordinal && row.digest == b.base_digest {
+                if !row.pack_continuation {
+                    found = Some(format.archive_base_summary(row))
+                }
+                for p in row.packs {
+                    let ref = pages.HistoryRef(seq: p.seq, epoch: p.epoch, len: p.len, digest: p.digest)
+                    deploy_result(restore_copy_pack(mut src, dir, parent, ref, objects, due))?
+                }
+            }
+        }
+    }
+    let Some(take row) = take found else {
+        return Error(Expired)
+    }
+    let (take m, evidence) = deploy_result(restore_archive_manifest(mut src, parent, head.source_kind, row, due))?
+    if evidence.number != point.activation || evidence.binding != point.binding {
+        return Error(ExportMismatch)
+    }
+    let (terminal, end) = if objects {
+        deploy_result(restore_copy_entries(mut src, dir, parent, row, b, due))?
+    } else {
+        deploy_result(restore_copy_log(mut src, dir, parent, row, b, due))?
+    }
+    let mut nonce: Bytes = list.with_capacity(16)
+    list.fill(mut nonce, 16, 0u8)
+    let stamp = ExportStamp(attempt: take nonce, store_hi: id.hi, store_lo: id.lo, opened: terminal, branch: 0, head: point.main_version, next_table: m.next_table, activation: point.activation, binding: export_binding_bytes(point.binding), terminal, end)
+    restore_scratch_manifest(dir, id, take m, stamp)?
+    Ok(take stamp)
+}

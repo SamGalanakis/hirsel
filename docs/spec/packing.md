@@ -411,7 +411,9 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
    **quarantined**: this host refuses to load it again (`Quarantined`). The handler
    resolves the PC and records the first such fault on the execution; the quarantine and
    the span name, which is read from the module by digest, are the reporter's work outside
-   the handler, after the pool has stopped.
+   the handler, after the pool has stopped. The reporter goes by the recorded digest and
+   never resolves the PC again: by then the image may be dead and its address another
+   image's.
 
    - **Signals.** A process that has a loader takes `SIGSEGV`, `SIGBUS`, `SIGILL`,
      `SIGTRAP` and `SIGFPE` through the runtime's one fault handler, under the rules of

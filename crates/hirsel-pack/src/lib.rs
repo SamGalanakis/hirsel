@@ -89,8 +89,8 @@ pub struct Report {
     /// The first 16 bytes of the faulting module's digest and the fault's offset in its
     /// text. `None` when the PC was in the text of an image that had already died.
     pub hit: Option<([u8; 16], u32)>,
-    /// The module digest this host now refuses to load. `None` when the image had died,
-    /// or died before this report.
+    /// The module digest this host now refuses to load. `None` when no image owned the
+    /// PC.
     pub quarantined: Option<ContentHash>,
 }
 
@@ -110,9 +110,13 @@ impl Report {
 pub fn report(execution: &Execution) -> Option<Report> {
     let fault = execution.code_fault()?;
     let loader = *LOADER.lock().unwrap();
-    let quarantined = loader
-        .and_then(|loader| loader.fault(fault.pc))
-        .map(|(digest, _)| digest);
+    // By the image the handler recorded: the address may be another image's by now.
+    let quarantined = loader.zip(fault.hit).and_then(|(loader, hit)| {
+        loader.fault(hirsel_code::Hit {
+            digest: hit.digest,
+            offset: hit.offset,
+        })
+    });
     Some(Report {
         pc: fault.pc,
         hit: fault.hit.map(|hit| (hit.digest, hit.offset)),

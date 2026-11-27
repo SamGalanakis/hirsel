@@ -34,6 +34,15 @@ unsafe impl Signature for Fill {
 
 const IDENTITY: ContentHash = ContentHash([0xaa; 32]);
 
+/// The laws share the process's one loader, and one of them calls a recycled address,
+/// so they run one at a time.
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ALONE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn loader() -> &'static Loader {
     static LOADER: OnceLock<&'static Loader> = OnceLock::new();
     LOADER.get_or_init(|| start(config(Mask::PURE, 16 << 20, 1 << 20)).unwrap())
@@ -198,21 +207,25 @@ fn stopped(result: Result<u8, EndReason>) -> Vec<u8> {
 /// and the process goes on to run other loaded code.
 #[test]
 fn a_fault_in_loaded_code_stops_its_execution_names_its_image_and_quarantines_it() {
+    let _alone = alone();
     for (seed, name, (text, at)) in [(1, "wild", wild()), (2, "trap", trap())] {
         let bytes = root(seed, name, text);
         let digest = hirsel_mod::digest(&bytes);
         let code = load::<Root>(&bytes).unwrap();
         let execution = Execution::contained();
         assert_eq!(stopped(run(&execution, code.entry().0)), b"Code");
+        // The report may come after the image has died and been reclaimed.
+        let pc = code.text() + at as usize;
+        drop(code);
+        loader().reclaim();
         let report = report(&execution).unwrap();
-        assert_eq!(report.pc, code.text() + at as usize);
+        assert_eq!(report.pc, pc);
         assert_eq!(report.hit, Some((digest.0[..16].try_into().unwrap(), at)));
         assert_eq!(report.quarantined, Some(digest));
         assert_eq!(
             report.span(&hirsel_mod::Module::parse(&bytes).unwrap()),
             Some(name)
         );
-        drop(code);
         assert!(matches!(load::<Root>(&bytes), Err(Refusal::Quarantined)));
     }
     let code = load::<Root>(&root(3, "sound", sound())).unwrap();
@@ -225,6 +238,7 @@ fn a_fault_in_loaded_code_stops_its_execution_names_its_image_and_quarantines_it
 /// execution with `Code`, and the report names no image and quarantines none.
 #[test]
 fn a_stale_code_address_stops_its_execution_and_names_no_image() {
+    let _alone = alone();
     let bytes = root(4, "stale", sound());
     let code = load::<Root>(&bytes).unwrap();
     let (entry, text) = (code.entry().0, code.text());
@@ -232,6 +246,10 @@ fn a_stale_code_address_stops_its_execution_and_names_no_image() {
     loader().reclaim();
     let execution = Execution::contained();
     assert_eq!(stopped(run(&execution, entry)), b"Code");
+    // Images loaded before the report may take the dead one's address. None of them
+    // faulted, so none is quarantined.
+    let later: Vec<Vec<u8>> = (0..4).map(|n| root(8 + n, "later", sound())).collect();
+    let held: Vec<Code<Root>> = later.iter().map(|bytes| load(bytes).unwrap()).collect();
     assert_eq!(
         report(&execution),
         Some(Report {
@@ -240,6 +258,8 @@ fn a_stale_code_address_stops_its_execution_and_names_no_image() {
             quarantined: None
         })
     );
+    drop(held);
+    assert!(later.iter().all(|bytes| load::<Root>(bytes).is_ok()));
     // The module itself did nothing wrong, so it still loads.
     assert!(load::<Root>(&bytes).is_ok());
 }
@@ -248,6 +268,7 @@ fn a_stale_code_address_stops_its_execution_and_names_no_image() {
 /// the `memset` row fills the bytes it is given. A row this image lacks has no address.
 #[test]
 fn a_row_import_binds_to_the_named_symbol_of_this_image() {
+    let _alone = alone();
     let (text, fixups) = jump();
     let row = hirsel_mod::row("memset").unwrap();
     let bytes = module(
@@ -271,6 +292,7 @@ fn a_row_import_binds_to_the_named_symbol_of_this_image() {
 /// text offset and digest prefix, and an address outside any image gives nothing.
 #[test]
 fn a_sampled_stack_resolves_its_loaded_code_frames() {
+    let _alone = alone();
     let bytes = root(6, "sampled", sound());
     let digest = hirsel_mod::digest(&bytes).0;
     let code = load::<Root>(&bytes).unwrap();

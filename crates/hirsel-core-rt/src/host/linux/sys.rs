@@ -484,7 +484,7 @@ pub(crate) unsafe fn fault_pc(signal: libc::c_int, context: *mut libc::c_void) -
         let uc = &*context.cast::<libc::ucontext_t>();
         let pc = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as usize;
         // A breakpoint trap reports the address after its one byte.
-        Some(pc - usize::from(signal == libc::SIGTRAP))
+        Some(pc.wrapping_sub(usize::from(signal == libc::SIGTRAP)))
     }
     #[cfg(target_arch = "aarch64")]
     // SAFETY: Linux aarch64 ucontext_t layout.

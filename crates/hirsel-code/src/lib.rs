@@ -444,22 +444,21 @@ impl Loader {
         self.0.table.resolve(pc)
     }
 
-    /// Record a hardware fault at `pc`: when it is in loaded code, its image's digest
-    /// is quarantined, so this host loads it no more (PACK-9). The fault reporter calls
-    /// this outside its signal handler, after the pool has stopped.
-    pub fn fault(&self, pc: usize) -> Option<(ContentHash, u32)> {
-        let hit = self.resolve(pc)?;
-        // No reclaim here: it could retire the image the hit names before it is found.
+    /// Record a hardware fault in the image `hit` names, as the fault handler resolved
+    /// it: the module's digest is quarantined, so this host loads it no more (PACK-9).
+    /// The fault reporter calls this outside its signal handler, after the pool has
+    /// stopped. It goes by the digest and never by the address, which another image may
+    /// own by then.
+    pub fn fault(&self, hit: Hit) -> Option<ContentHash> {
         let mut slab = self.0.slab.lock().unwrap();
-        let at = pc - self.0.base - hit.offset as usize;
-        let digest = slab
-            .cohorts
-            .values()
-            .flat_map(|cohort| &cohort.images)
-            .find(|(row, _)| row.start as usize == at)
-            .map(|(_, digest)| *digest)?;
+        let named = |digest: &&ContentHash| digest.0[..16] == hit.digest;
+        let live = slab.cohorts.values().flat_map(|cohort| &cohort.images);
+        let digest = *live
+            .map(|(_, digest)| digest)
+            .find(named)
+            .or_else(|| slab.admitted.values().find(named))?;
         slab.quarantined.insert(digest);
-        Some((digest, hit.offset))
+        Some(digest)
     }
 
     /// The bytes of every image in a cohort that is not yet recycled.

@@ -736,17 +736,21 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
         (&short(&code)[..], &at.to_le_bytes()[..])
     );
 
+    // The reporter quarantines by the digest the handler recorded. The image may be
+    // dead and reclaimed by then, and its address another image's.
     let pc = code.text() + at as usize;
-    assert_eq!(loader.fault(pc), Some((code.digest(), at)));
-    assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
-    assert_eq!(loader.fault(&loader as *const Loader as usize), None);
-    // A fault in an image whose last handle is gone, before the loader retires it, is
-    // still that image's.
-    let digest = code.digest();
+    let (digest, recorded) = (code.digest(), loader.resolve(pc).unwrap());
     drop(code);
-    assert_eq!(loader.fault(pc), Some((digest, at)));
+    assert_eq!(loader.resolve(pc), Some(recorded));
     loader.reclaim();
-    assert_eq!((loader.resolve(pc), loader.fault(pc)), (None, None));
+    assert_eq!(loader.resolve(pc), None);
+    assert_eq!(loader.fault(recorded), Some(digest));
+    assert_eq!(load(&loader, &bytes).err(), Some(Refusal::Quarantined));
+    let unknown = Hit {
+        digest: [0x77; 16],
+        offset: 0,
+    };
+    assert_eq!(loader.fault(unknown), None);
     assert_eq!(loader.resolve(wide.text() + (2 << 20)), hit(&wide, 2 << 20));
 }
 

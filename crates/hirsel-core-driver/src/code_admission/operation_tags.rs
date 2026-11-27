@@ -1,8 +1,9 @@
 use super::{Backend, BackendSemantics, EngineTag, NativeSemantics};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::{
-    AddressBase, AddressId, AddressInfo, Arg, Block, Body, CallId, CallSite, Callee, HostOp, Inst,
-    Module, Param, PoolRange, RtOp, SigId, Terminator, Ty, TypeId, ValueId, Wait, normal, text,
+    AddressBase, AddressId, AddressInfo, Arg, Block, Body, CallId, CallSite, Callee, FuncId,
+    HostOp, Inst, Module, Param, PoolRange, RtOp, SigId, Terminator, Ty, TypeId, ValueId, Wait,
+    normal, text,
 };
 use hirsel_core_layout::flow;
 use std::collections::BTreeSet;
@@ -105,23 +106,35 @@ fn runtime_probes() -> Module {
     let mut source = String::from(
         "core v1\ntype t0 = own \"Payload\" { a: u64, b: u64, c: u64 }\nsig g0 = () -> ()\n",
     );
-    for i in 0..operations.len() {
+    let operation_count = operations.len();
+    for i in 0..operation_count {
         writeln!(
             source,
             "inst n{i} = test@0/admission/operation_{i} [] []\nfn f{i} = n{i} g0 {{\nb0:\nreturn\n}}"
         )
         .unwrap();
     }
+    writeln!(
+        source,
+        "inst n{operation_count} = test@0/admission/spawn_unit_adapter [] []\nfn f{operation_count} = n{operation_count} g0 {{\nb0:\nreturn\n}}"
+    )
+    .unwrap();
     let mut module = text::parse(&source).unwrap();
     for (function, op) in module.functions.iter_mut().zip(operations) {
         let sig = op.signature();
         let signature = SigId(module.signatures.len() as u32);
         let mut body = Body::default();
-        let args = sig.params.iter().map(|param| {
+        let args = sig.params.iter().enumerate().map(|(index, param)| {
             let value = ValueId(body.values.len() as u32);
             match *param {
                 Param::Value(ty) => {
                     body.values.push(ty);
+                    if index == 2 && matches!(op, RtOp::SpawnUnit { .. }) {
+                        body.insts.push(Inst::FunctionRef {
+                            result: value,
+                            function: FuncId(operation_count as u32),
+                        });
+                    }
                     Arg::Value(value)
                 }
                 Param::Address { place, .. } => {

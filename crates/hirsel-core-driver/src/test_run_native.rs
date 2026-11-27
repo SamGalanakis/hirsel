@@ -1977,7 +1977,7 @@ fn package_l3_frozen_does_not_open_an_archive() {
     law.write(&store_path, damaged);
     PackageLaw::refuse(law.run(&["check", "app", "--frozen"]), &refusal("is damaged in", &format!("url:{url}")));
     std::fs::remove_file(law.path(&store_path)).unwrap();
-
+    std::fs::remove_dir(law.path(&store_path).parent().unwrap()).unwrap();
     law.app("app", &format!("[dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"vendor/jx.hpkg\" }}\nstd = {{ major = 1 }}\n"));
     let archive = "app/vendor/jx.hpkg";
     law.write(archive, std::fs::read(law.path("vendor/jx.hpkg")).unwrap());

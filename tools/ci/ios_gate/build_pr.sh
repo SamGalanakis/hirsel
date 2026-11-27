@@ -10,8 +10,6 @@ workspace="$checkout/comparison"
 app="$workspace/app"
 llvm="$checkout/tools/buck2/toolchains/llvm-files"
 export LLVM_SYS_231_PREFIX="$llvm"
-export MACOSX_DEPLOYMENT_TARGET=26.0
-export IPHONEOS_DEPLOYMENT_TARGET=18.0
 
 cd "$checkout"
 git init -q
@@ -30,9 +28,12 @@ git -C "$host" checkout --detach FETCH_HEAD
 rustup toolchain install --no-self-update
 rustup target add aarch64-apple-ios-sim
 python3 tools/buck2/bootstrap_llvm.py
-cargo build --locked --release -p hirsel-core-driver --bin hirsel
-cargo rustc --locked --release -p hirsel-core-rt --lib --features standalone --crate-type staticlib
-cargo rustc --locked --release -p hirsel-core-rt --lib --features standalone --crate-type staticlib --target aarch64-apple-ios-sim
+env -u IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET=26.0 \
+  cargo build --locked --release -p hirsel-core-driver --bin hirsel
+env -u IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET=26.0 \
+  cargo rustc --locked --release -p hirsel-core-rt --lib --features standalone --crate-type staticlib
+env -u MACOSX_DEPLOYMENT_TARGET IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+  cargo rustc --locked --release -p hirsel-core-rt --lib --features standalone --crate-type staticlib --target aarch64-apple-ios-sim
 
 # The host repo's installation script expects these paths in its compiler checkout.
 mkdir -p target/macos-release/runtimes/default target/ios-runtime/aarch64-apple-ios-sim/release

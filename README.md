@@ -56,9 +56,9 @@ pub fn main(out: Stdout) -> Result[(), WriteError] waits {
 </details>
 
 Every outside effect enters as a parameter (`Stdout`, `Dir`, `Clock`, `Net`, `Tasks`),
-every allocation is charged against an explicit byte limit, and every function checks
-locally against the signatures it names. No imports, no methods, no garbage collector, no
-lifetime annotations.
+every charged program allocation is bounded by an explicit logical byte limit, and every
+function checks locally against the signatures it names. No imports, no methods, no garbage
+collector, no lifetime annotations.
 
 ## Install
 
@@ -66,12 +66,11 @@ lifetime annotations.
 curl -fsSL https://hirsel.ai/install.sh | sh
 ```
 
-The installer runs on **Linux x86_64** with **glibc 2.28+** and on **macOS arm64
-(Apple Silicon)** with **macOS 26+**. The installed toolchain ships Linux x86_64/aarch64
-and macOS arm64 targets. Re-run the installer to upgrade, or set `HIRSEL_VERSION` to pin
-a release. The supported channel is `curl | sh`: macOS binaries are ad-hoc signed, not
-notarized, so a browser-downloaded tarball needs `xattr -dr com.apple.quarantine <dir>`
-after unpacking.
+The installer runs on **Linux x86_64** (glibc 2.28+) and **macOS arm64 (Apple Silicon,
+macOS 26+)**, shipping Linux x86_64/aarch64 and macOS arm64 targets. Re-run the installer
+to upgrade, or set `HIRSEL_VERSION` to pin a release. The supported channel is `curl | sh`:
+macOS binaries are ad-hoc signed, not notarized, so a browser-downloaded tarball needs
+`xattr -dr com.apple.quarantine <dir>` after unpacking.
 
 Start a project with the installed binary:
 
@@ -85,19 +84,21 @@ hirsel run
 See [docs/PRIMER.md](docs/PRIMER.md) for the language in one page,
 [docs/COOKBOOK.md](docs/COOKBOOK.md) for tested recipes, and
 [docs/building.md](docs/building.md) for CLI options, capabilities, recording/replay, and
-building from source.
+installed-toolchain details.
 
 ## For Coding Agents
 
 > **Authority rule:** Always run `hirsel primer` from your installed binary as the exact
 > authority for your installed version.
 
-Hirsel's CLI is designed as a self-contained feedback loop for agents:
+Hirsel's CLI is a self-contained feedback loop for agents:
 
 - `hirsel primer` — prints the exact language primer matching your installed compiler.
-- `hirsel explain RULE` (`--list`, `--json`) — when the compiler refuses code it prints a short rule code (e.g. `OWN-7`); `hirsel explain OWN-7` prints the rule and a refused example.
-- `hirsel inspect --core --interface` / `hirsel inspect --std --interface` — lists every public core and `std` declaration with exact parameter modes (`mut`, `take`).
+- `hirsel explain RULE` (`--list`, `--json`) — prints the exact rule and a refused example for any compiler rule code (e.g. `OWN-7`).
+- `hirsel inspect --core --interface` / `hirsel inspect --std --interface` — lists every public `core` and `std` declaration with exact parameter modes (`mut`, `take`).
 - `hirsel check --json` — machine-readable diagnostics with rule IDs, spans, and causal sites.
+- `hirsel fmt --check .` / `hirsel fmt .` — canonical zero-config formatting.
+- `hirsel audit --json` — reports the resolved dependencies and their [authority](docs/spec/packages.md#11-dependency-authority).
 - [hirsel.ai/llms.txt](https://hirsel.ai/llms.txt) — concise agent index.
 - [hirsel.ai/llms-full.txt](https://hirsel.ai/llms-full.txt) — single-file agent bundle (intro, primer, cookbook, std API index, and skill).
 - [skills/hirsel/SKILL.md](skills/hirsel/SKILL.md) — ready-to-use agent skill for editing, checking, and fixing Hirsel packages.
@@ -105,7 +106,7 @@ Hirsel's CLI is designed as a self-contained feedback loop for agents:
 ## Toolchain packages
 
 The Hirsel toolchain ships `std` and the [package archives](core/programs/toolchain-packages.toml)
-in `core-packages/`. Bind them by major version in `hirsel.toml`.
+in `core-packages/`. Bind them by major version in `hirsel.toml`:
 
 ```text
 [dependencies]
@@ -115,26 +116,29 @@ runner = { major = 1 }
 ```
 
 - [std](core/std/API-INDEX.md) — standard library: files, directories, HTTP server/client, router, JSON, codecs, simulation (`std.sim`), property testing (`std.prop`), and crypto.
-- [store](core/programs/store/) — copy-on-write B+tree durable store: typed tables, secondary/unique/aggregate indexes, TTL expiry, projections, transactions, snapshots, and replay.
-- [runner](core/programs/runner/) — durable calls, live diff subscriptions, Rooms, TypeScript SDK generation ([sdk/client/README.md](sdk/client/README.md)), and place hosting.
+- [store](core/programs/store/) — copy-on-write B+tree durable store: typed tables, secondary/unique/aggregate indexes, Tiered residency, TTL expiry, projections, transactions, snapshots, point-in-time archival, and replay.
+- [runner](core/programs/runner/) — durable calls, live diff subscriptions, Rooms, TypeScript/Swift/JSON SDK generation ([sdk/client/README.md](sdk/client/README.md)), and place hosting.
 - [platform](core/programs/platform/) — deployed place management, cutovers, and recovery.
 - [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
 - [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
-- [cli](core/programs/cli/) — argument parsing, help and shell completion.
+- [cli](core/programs/cli/) — argument parsing, help, tables, and shell completion.
 - [quic](core/programs/quic/) — QUIC v1 endpoint and UDP driver.
 - [webtransport](core/programs/webtransport/) and [moq](core/programs/moq/) — WebTransport sessions over HTTP/3 and a Media over QUIC endpoint and relay.
 - Real-time media and networking (**pure Hirsel, no `Foreign` code**): [webrtc_sfu](core/programs/webrtc_sfu/) (WebRTC SFU with simulcast, VP9/AV1 SVC, dynacast, Opus RED, and E2EE routing), [dtls](core/programs/dtls/) (sans-IO DTLS 1.2), [srtp](core/programs/srtp/) (SRTP/SRTCP), [rtp](core/programs/rtp/) (RTP/RTCP, RTX, BWE, pacing, RED), [rtp_jitter](core/programs/rtp_jitter/) (jitter buffer), [turn](core/programs/turn/) (TURN client/relay), [stun_ice](core/programs/stun_ice/) (STUN and ICE-lite), [sframe](core/programs/sframe/) (RFC 9605 SFrame E2EE), [media_bits](core/programs/media_bits/) (codec bitstream parsers), [media_container](core/programs/media_container/) (Ogg/MP4/WebM containers), and [media_record](core/programs/media_record/) (room publication recorder).
 
 ## Built on top, in Hirsel
 
-Additional first-party packages in this repository (bind locally with `path = "..."` in
-`[dependencies]`):
+Additional first-party packages live under `core/programs/` with scoped names (`hirsel.ai/<name>`).
+Bind members of the same workspace with `{ package = "...", major = 1, path = "..." }`.
+Use `hirsel pack` to create an archive and `hirsel add` to verify and bind it by its SHA-256
+content root. The compiler checks dependency `authority` ceilings declared in `hirsel.toml`,
+and `hirsel.lock` v2 records the resolved dependencies.
 
 **Pure Hirsel libraries (no `Foreign` code):**
 
 - [video_packager](core/programs/video_packager/) — CMAF, HLS, and DASH media packaging.
 - [image_core](core/programs/image_core/) — image probing, transforms, and PNG, QOI, GIF, and AVIF codecs.
-- [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
+- [vector](core/programs/vector/) — exact and IVF-RaBitQ top-k nearest neighbours over a `store` table, read from a transaction.
 - [hybrid](core/programs/hybrid/) — exact reciprocal rank fusion of ranked lists, such as `search` and `vector` results.
 - [spatial](core/programs/spatial/) — Hilbert-curve spatial indexing over a `store` table.
 - [postgres](core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
@@ -180,7 +184,7 @@ Run the package examples from the repository root with the `hirsel` binary:
 
 ```sh
 hirsel test core/programs/postgres --filter select_answer
-hirsel test core/programs/sqlite --filter sum_orders --grant Foreign=sqlite@1/sqlite/Sqlite
+hirsel test core/programs/sqlite --filter sum_orders --grant Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite
 hirsel test core/programs/mcp --filter read_tool_catalog
 hirsel test core/programs/search --filter find_document
 hirsel test core/programs/video_packager --filter hls_cmaf

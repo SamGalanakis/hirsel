@@ -7,7 +7,7 @@ coding agent. Its fixed goals:
 - every definition checked only against the signatures it uses;
 - one way per job;
 - all authority passed as parameters (capabilities);
-- reference counting with no lifetime variables;
+- value semantics with optional reference counting and no lifetime variables;
 - deterministic behaviour outside capabilities.
 
 The [specification](spec/index.md) defines the language, its tasks and its
@@ -21,15 +21,17 @@ macOS 26+) with `curl -fsSL https://hirsel.ai/install.sh | sh`. The installed to
 ships the Linux x86_64/aarch64 and macOS arm64 targets. Re-run the installer
 to upgrade, or set `HIRSEL_VERSION` to pin a specific release tag.
 The supported install channel is `curl | sh`. macOS binaries are ad-hoc signed, not
-notarized. A browser-downloaded tarball keeps the browser's quarantine attribute, so run
+notarized; a browser-downloaded tarball keeps the browser's quarantine attribute, so run
 `xattr -dr com.apple.quarantine <dir>` after unpacking it.
-An installation is a relocatable prefix containing `hirsel`, the published `core` and `std` images
-(including prebuilt release standard-library objects), the toolchain packages, target runtime archives,
-the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`, and the LLVM libraries
-shipped with the compiler. Installed toolchains use the bundled link kit and do **not** require
-host C development packages (`libc6-dev` / `libgcc-N-dev`). Host C development packages are only
-needed when linking with a custom `--cc` driver outside the bundled link kit. If any link input is
-missing, Hirsel names the first missing input before invoking the linker.
+
+An installation is a relocatable prefix containing `hirsel`, the published `core` and `std`
+images (including prebuilt release standard-library objects), the toolchain packages, target
+runtime archives, the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`,
+and the LLVM libraries shipped with the compiler. Installed toolchains use the bundled link
+kit and do **not** require host C development packages (`libc6-dev` / `libgcc-N-dev`). Host
+C development packages are only needed when linking with a custom `--cc` driver outside the
+bundled link kit. If any link input is missing, Hirsel names the first missing input before
+invoking the linker.
 
 The toolchain packages are package archives in `core-packages/<name>-<major>.hpkg`: `store@1`
 and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `srtp@1`,
@@ -43,9 +45,8 @@ completion, [its README](../core/programs/cli/README.md)). A program binds one b
 for example `webrtc_sfu = { major = 1 }` in its `[dependencies]`. The toolchain supplies it with
 every toolchain package it binds, so a program outside the repository builds against the WebRTC
 SFU, TURN, SFrame, the recorder, the platform, search, MCP and cli from the installed prefix and
-nothing else
-([Packages](spec/packages.md), section 2). `buck2 build //:hirsel-toolchain` packs each one
-from its directory under `core/programs/`, binding its dependencies by major.
+nothing else ([Packages](spec/packages.md), section 2). `buck2 build //:hirsel-toolchain` packs
+each one from its directory under `core/programs/`, binding its dependencies by major.
 
 `hirsel --version` prints the toolchain version, compiler identity and registered
 runtime archive identities by target.
@@ -114,19 +115,17 @@ hirsel build
 A package is a directory of `.hirsel` files. `check`, `test`, `run` and `build`
 default to the current directory. `new` creates a runnable `main`, a test and its
 limit in `hirsel.toml`. With `--lib` it also creates `lib.hirsel`.
-`hirsel check DIR` checks every
-definition and declaration in it; `--json` prints the outcome, its diagnostics, its
-incomplete features and its resource refusals. When the compiler refuses code it prints a
-short rule code; `hirsel explain RULE` prints the rule and a refused example, and
-`hirsel explain --list` lists them all.
+`hirsel check DIR` checks every definition and declaration in it; `--json` prints the
+outcome, diagnostics, incomplete features, and resource refusals. When the compiler refuses
+code it prints a short rule code; `hirsel explain RULE` prints the rule and a refused
+example, and `hirsel explain --list` lists them all.
 
-`hirsel fmt FILE` formats one file in place. `hirsel fmt DIR` formats every
-`.hirsel` file in the directory tree. A source refusal prevents writes to the
-whole batch. `hirsel fmt --stdin` reads one source from standard input and sends
-the formatted bytes to standard output. `--check` exits 1 when the input differs
-from its formatted form. For a file or directory it lists differing paths, and
-for stdin it writes no formatted bytes. Use `--signatures` for core declarations
-that omit function bodies.
+`hirsel fmt FILE` formats one file in place. `hirsel fmt DIR` formats every `.hirsel` file
+in the directory tree; a source refusal prevents writes to the whole batch.
+`hirsel fmt --stdin` reads one source from standard input and sends formatted bytes to
+standard output. `--check` exits 1 when the input differs from its formatted form (listing
+differing paths for a file or directory, and writing no formatted bytes for stdin). Use
+`--signatures` for core declarations that omit function bodies.
 
 ## Build and run
 
@@ -141,6 +140,7 @@ positions are reported either way.
 
 ```sh
 hirsel build app --release --limit 1048576 -o hello
+# When main takes Dir and Stdout parameters (see Primer §11):
 hirsel run app --dir . --grant Stdout -- input.txt normal
 ```
 
@@ -149,10 +149,12 @@ hirsel run app --dir . --grant Stdout -- input.txt normal
 `--grant KIND` grants `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Process`, or
 `Tasks`, as well as parameterized rules for `Net` (TCP/UDP/TLS/Resolve and Unix-domain
 sockets, [Net sockets](spec/net.md)), `Env` ([Env](../core/std/api/env.md)), `Secret`,
-`Cred`, `Foreign`, and `Exec` (run `hirsel help run` for exact syntax). A run missing grants does not start (status 103) and names every
-ungranted parameter at once, one ``not started: grant `NAME` ...`` line each in parameter order;
-an ungranted `Foreign` interface is refused before native code is emitted, one
-`not granted: Foreign[D]` line per interface. Everything after `--` is passed to the program as `Args`.
+`Cred`, `Foreign`, and `Exec` (run `hirsel help run` for exact syntax). A run missing grants
+does not start (status 103) and names every ungranted parameter at once, one
+``not started: grant `NAME` ...`` line each in parameter order; an ungranted `Foreign`
+interface is refused before native code is emitted, one `not granted: Foreign[D]` line per
+interface. Everything after `--` is passed to the program as `Args`.
+
 A package whose `hirsel.toml` declares `limit`, `dirs` or `grants` in `[program]`
 ([packages](spec/packages.md)) builds and runs under them, and `--limit`, `--dir` and
 `--grant` are refused; `Foreign` and `Exec` approvals still come from the command line.
@@ -171,9 +173,8 @@ appears for a relative grant.
 
 The installation invokes its own `bin/ld.lld` using the link recipe captured at
 packaging. `--cc PROGRAM` selects a C driver to supply another recipe.
-`--target aarch64-unknown-linux-gnu` builds
-for AArch64; `run` and `test` then need `--emulator QEMU` and `--sysroot DIR` for the
-AArch64 runtime libraries.
+`--target aarch64-unknown-linux-gnu` builds for AArch64; `run` and `test` then need
+`--emulator QEMU` and `--sysroot DIR` for the AArch64 runtime libraries.
 
 ## Record and replay
 
@@ -183,12 +184,13 @@ file may hold bearer tokens and other credentials, so choose a path that does
 not exist yet.
 
 ```sh
+# When app's main takes Dir and Stdout parameters:
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json
 hirsel replay app --tape session.tape
 hirsel tape show session.tape --include-credentials
 hirsel replay app --tape session.tape --diagnose
 hirsel build app --recording -o app-rec
-hirsel test app --limit 67108864 --replay
+hirsel test app --replay
 ```
 
 Recording is an optional switch, off by default, independent of `--release`
@@ -220,18 +222,19 @@ in the executable for self-contained symbolization.
 ## Run tests
 
 ```sh
-hirsel test app --limit 1048576 --grant Stdout
+hirsel test app
 ```
 
 `hirsel test` discovers each `@test` function ([test functions](spec/programs.md#prog-4-tests))
 in the package and runs each execution in its own process. A package whose
-`hirsel.toml` declares its tests' run configuration runs under it, and
-`--limit`, `--dir` and `--grant` are refused. Use the `limit`, `dirs` and
-`grants` keys in `[tests]`. Otherwise `--limit BYTES` is
-mandatory and is each test run's root limit; `--dir` and `--grant` configure
-capabilities as for `run`. A test receives only the grants its parameters take.
+`hirsel.toml` declares `[tests]` (including the scaffold from `hirsel new`) runs under that
+configuration, and `--limit`, `--dir` and `--grant` are refused — set `limit`, `dirs` and
+`grants` in `[tests]` instead. Without `[tests]`, `--limit BYTES` is mandatory and `--dir`
+and `--grant` configure capabilities as for `run`. Each test receives only the grants its
+parameters take.
+
 `--filter TEXT` selects tests whose full definition path contains TEXT.
-`--exact DEFINITION` matches a full path such as `local/app@1/main/smoke`. Repeat
+`--exact DEFINITION` matches a full path such as `local/app@1/tests/test_twice`. Repeat
 `--exact` to select multiple paths. The two selectors are mutually exclusive.
 `--test-timeout SECONDS` bounds each test's execution. An earlier failure does
 not stop later tests, and no matching test exits 2.
@@ -253,17 +256,17 @@ row. `hirsel laws check app` checks lock currency without running tests, and
 `hirsel laws write app` refreshes its static columns.
 `--locked` keeps its package meaning.
 
-Additional CLI commands cover package workflows (`lock`, `fetch`, `pack`, `publish`,
-`--locked`, `--frozen`; [Packages](spec/packages.md)), inspection and profiling
-(`inspect`, `prof`, `primer`; [Profiling](spec/profiling.md)), resident builds
-(`serve`, `--resident`), TypeScript SDK generation and RPC calls (`sdk ts`, `call`),
-and platform hosting (`host`, `launcher`, `register`, `deploy`, `manifest show`;
-[Launch](spec/launch.md), [CLI](spec/cli.md)).
+Additional CLI commands cover package workflows (`add`, `update`, `audit`, `lock`, `fetch`,
+`pack`, `publish`, `--locked`, `--frozen`; [Packages](spec/packages.md)), inspection and
+profiling (`inspect`, `prof`, `primer`; [Profiling](spec/profiling.md)), resident builds
+(`serve`, `--resident`), SDK generation and RPC calls (`sdk ts`, `sdk json`, `sdk swift`,
+`call`), and platform hosting (`host`, `launcher`, `register`, `deploy`, `decide`,
+`manifest show`; [Launch](spec/launch.md), [CLI](spec/cli.md)).
 
 Use `hirsel host --state DIR --admission FILE --max-places N --lifecycle managed|leader`
 on Linux. `--max-places` is a required positive count of live groups with no
-default. Linux requires an explicit lifecycle. `managed` requires a delegated
-cgroup v2 subtree. `leader` tracks direct children using pidfds. On macOS the mode
+default. Linux requires an explicit lifecycle: `managed` requires a delegated
+cgroup v2 subtree, and `leader` tracks direct children using pidfds. On macOS the mode
 defaults to `leader` and startup refuses `managed`. `--idle-ms` defaults to 30000.
 The launcher starts the `platform_main` image embedded in the released executable.
 [Host startup](spec/launch.md#starting-the-host) describes direct launcher use.
@@ -272,8 +275,12 @@ The launcher starts the `platform_main` image embedded in the released executabl
 `hirsel store stats DIR` adds byte charges, journal and pack details, and the
 last complete scrub round when available. Both can read alongside a live writer.
 `hirsel store verify DIR` checks a copy captured from a stopped store.
-`hirsel store verify DIR --release EXE` also checks indexes that the release
-binds against their tables. See [Store operator commands](../core/programs/store/STORE-SPEC.md#156-hirsel-store-inspect-stats-verify-and-repair-store-14-v2127).
+`hirsel store verify DIR --release EXE` also checks indexes that the release binds against
+their tables. `hirsel store repair DIR --release EXE` repairs those indexes in place with
+the store stopped. See [Store checks and repair](../core/programs/store/STORE-SPEC.md#156-hirsel-store-inspect-stats-verify-and-repair-store-14-v2127).
+
+`hirsel store backup` captures an offline or live-host backup. `hirsel store restore`
+restores into an empty or new destination. See [Store backup and restore](../core/programs/store/STORE-SPEC.md#154-hirsel-store-backup-and-hirsel-store-restore).
 
 The WebRTC SFU's `signal.serve_pool` serves rooms over a shared pool of media units
 and sockets. `Pool` names the room order and report channels, the unit byte and
@@ -288,5 +295,3 @@ and exit **2** (rule refusals exit **1**). In `--json` mode these appear under t
 `resources` array as `{primary, message}`. See
 [internal compiler limits](internal/compiler-limits.md) for parser guard and stack-budget
 details.
-
-

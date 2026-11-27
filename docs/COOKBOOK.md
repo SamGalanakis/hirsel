@@ -9,8 +9,9 @@ installed binary as the exact authority for your installed version.
 
 `std.config` reads flags from `Args` and environment variables from an optional `Env`
 grant in a single pass. Every key (`APP_PORT`) maps automatically to one CLI flag
-(`--app-port` <!-- doc-ref: external -->), and `std.config.finish` reports all errors at once without leaking secret
-values.
+(`--app-port` <!-- doc-ref: external -->). `std.config.finish` collects errors up to the
+configured cap (collapsing further errors into `More(n)`) while masking environment values
+and recognized flag values in diagnostics.
 
 ```hirsel
 type Settings {
@@ -53,22 +54,40 @@ hirsel run --grant 'Env=APP_HOST,APP_PORT,APP_VERBOSE' --grant Stdout -- --app-p
 ## 2. Files, confined directories, and bounded reads
 
 Every filesystem operation goes through a `Dir` capability granted with `--dir`. Use
-`std.dir.narrow` to attenuate authority to a subdirectory before handing it to helper
-code, and wrap untrusted reads in `bound bytes` + `isolate` so an oversized file raises a
-catchable `Capacity` failure instead of exhausting process memory.
+`std.dir.narrow` to attenuate authority to a subdirectory before handing it to helper code.
+To cap untrusted file sizes before decoding, read into a fixed-capacity buffer with
+`std.file.read_into` plus a one-byte probe (since `std.file.read_string` grows to EOF, and
+`isolate` wraps non-waiting pure work such as `bound bytes` transforms):
 
 ```hirsel
-fn write_and_read(root: Dir) -> Result[String, std.file.Error] waits {
+type ReadLimitError = Io(IoError) | TooLarge(u64) | NotUtf8
+
+fn read_string_at_most(d: Dir, path: String, max_bytes: u64) -> Result[String, ReadLimitError] waits {
+  let mut file = std.file.open(d, path, Read) ?=> Io
+  let mut data: Bytes = list.with_capacity(max_bytes)
+  while list.len(data) < max_bytes {
+    let n = std.file.read_into(mut file, mut data) ?=> Io
+    if n == 0 {
+      break
+    }
+  }
+  let mut extra: Bytes = list.with_capacity(1)
+  let more = std.file.read_into(mut file, mut extra) ?=> Io
+  if more != 0 {
+    return Error(TooLarge(max_bytes))
+  }
+  std.file.close(take file) ?=> Io
+  match string.from_utf8(take data) {
+    Ok(take text) => Ok(take text),
+    Error(_) => Error(NotUtf8),
+  }
+}
+
+fn write_and_read(root: Dir, max_bytes: u64) -> Result[String, ReadLimitError] waits {
   let _ = std.dir.create_dir(root, "data")
-  let sub = match std.dir.narrow(root, "data") {
-    Ok(d) => d,
-    Error(e) => return Error(Io(e)),
-  }
-  match std.file.write(sub, "greeting.txt", b"hello from hirsel\n") {
-    Ok(()) => {},
-    Error(e) => return Error(Io(e)),
-  }
-  std.file.read_string(sub, "greeting.txt")
+  let sub = std.dir.narrow(root, "data") ?=> Io
+  std.file.write(sub, "greeting.txt", b"hello from hirsel\n") ?=> Io
+  read_string_at_most(sub, "greeting.txt", max_bytes)
 }
 
 fn bounded_copy(input: String, limit: u64) -> bool {
@@ -82,9 +101,13 @@ fn bounded_copy(input: String, limit: u64) -> bool {
 
 @test
 fn directory_round_trip(files: Dir) -> Result[(), ()] waits {
-  let text = result.unwrap(write_and_read(files))
+  let text = result.unwrap(write_and_read(files, 64))
   if text != "hello from hirsel\n" {
     fail("unexpected file contents")
+  }
+  match write_and_read(files, 8) {
+    Error(TooLarge(8)) => {},
+    _ => fail("expected TooLarge(8)"),
   }
   if !bounded_copy(text, 256) || bounded_copy(text, 8) {
     fail("unexpected byte bound verdict")
@@ -185,7 +208,8 @@ grants = ["Clock", "Tasks", "Net=Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/3
 Bind `store` in `hirsel.toml` with `store = { major = 1 }` (toolchain package). Declare
 tables and secondary indexes inside a `store.declare` block, seal the schema, write rows
 atomically inside `store.run`, and query immutable snapshots with `store.get` and
-`store.find`.
+`store.find`. For durable on-disk storage, pass a directory capability to
+`store.open(tasks, dir, clock, random, opts)`.
 
 ```hirsel
 type Account: send {
@@ -276,8 +300,8 @@ under `[tests]` in `hirsel.toml`.
 ## 5. Task fan-out over channels and isolated units
 
 Tasks within a unit share nothing except values moved through `task.spawn`, channels, and
-`Arc`. For strict memory-budget isolation across units, use `task.spawn_unit` with `cross`
-payloads and `Shared[T]` for immutable cross-unit sharing.
+`Arc`. For separate memory budgets, use `task.spawn_unit` with `cross` payload and result
+types. Use `Shared[T]` to share immutable values between units.
 
 ```hirsel
 type Work: send {
@@ -329,11 +353,15 @@ fn fan_out_and_unit(tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
+Add `grants = ["Tasks"]` under `[tests]` in `hirsel.toml`, then run `hirsel test`.
+
 ## 6. Deterministic `sim` clock/network testing and property laws
 
-Hirsel's virtual providers (`provide.net`, `std.sim.world`, `std.sim.net`) let tests
-simulate fragmented packets, latency, and virtual time with zero host sockets and full
-seed determinism. Pair them with `std.prop` laws to fuzz and shrink counterexamples.
+Hirsel's virtual providers (`provide.net`, `std.sim.world`, `std.sim.net`) simulate
+fragmented packets, latency, and virtual time with zero host sockets and full seed
+determinism. Read the active campaign seed with `std.sim.world.test_seed(env)` so
+`--sim --seeds N` sweeps distinct seeds, and pair simulated tests with `std.prop` laws to
+fuzz and shrink counterexamples.
 
 ```hirsel
 type SimLink: send {
@@ -389,8 +417,12 @@ fn echo_once(take l_in: Listener) waits {
 }
 
 @test
-fn simulated_network_round_trip(tasks: Tasks) -> Result[(), ()] waits {
-  let (w_in, c) = std.sim.world.new(42, 0, 0)
+fn simulated_network_round_trip(tasks: Tasks, env: Env) -> Result[(), ()] waits {
+  let seed = match std.sim.world.test_seed(env) {
+    Some(n) => n,
+    None => 42,
+  }
+  let (w_in, c) = std.sim.world.new(seed, 0, 0)
   let mut world = take w_in
   let plan = std.sim.world.detach(mut world)
   let (n, port) = provide.net(bytes 16384)
@@ -442,10 +474,11 @@ fn law_addition_commutes() -> Result[(), ()] {
 }
 ```
 
-Run across seeds or check law strength:
+Add `grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]` under `[tests]` in `hirsel.toml`, then
+sweep seeds or inspect law strength:
 
 ```sh
-hirsel test --sim --seeds 10
+hirsel test --sim --seeds 10 --filter simulated_network_round_trip
 hirsel test --laws
 ```
 
@@ -516,19 +549,43 @@ fn simd_and_step_budget() -> Result[(), ()] {
 ### Find the hot spot with `hirsel prof`
 
 Profile before tuning, and never tune from `objdump` output. `prof run` builds the package,
-runs it with the same grants, flags and `--` arguments that `hirsel run` takes, and samples
-it into a `.hprof` file:
+runs it with the same grants, flags, and `--` arguments that `hirsel run` takes, and samples
+it into a `.hprof` file. On a fresh package whose `main.hirsel` defines `work` and takes
+`out: Stdout` (with `tests.hirsel` cleared):
+
+```hirsel
+fn work(n: u64) -> u64 {
+    let mut x: u64 = 1
+    let mut i: u64 = 0
+    while i < n {
+        x = x ^ (x << 7)
+        x = x ^ (x >> 9)
+        i += 1
+    }
+    x
+}
+
+pub fn main(out: Stdout) -> Result[(), WriteError] waits {
+    let mut line = string.new()
+    string.push_u64(mut line, work(5_000_000))
+    string.push(mut line, "\n")
+    stdout.write(out, line)
+}
+```
+
+Capture two runs and query them:
 
 ```sh
 # Choose a logical root limit in bytes for your workload. This example uses 64 MiB.
-hirsel prof run . --release --limit 67108864 --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
-hirsel prof top run1.hprof --limit 10            # hottest functions, per event
-hirsel prof annotate run1.hprof main.hirsel:42   # periods and compiler remarks for one line
-hirsel prof callers run1.hprof local/app@1/main/work   # who calls one definition (package@major/module/fn)
-hirsel prof diff run1.hprof run2.hprof           # what a change moved
+hirsel prof run . --release --limit 67108864 --grant Stdout --pmu cycles,branch-misses --out run1.hprof
+hirsel prof run . --release --limit 67108864 --grant Stdout --pmu cycles,branch-misses --out run2.hprof
+hirsel prof top run1.hprof --limit 10                          # hottest functions, per event
+hirsel prof annotate run1.hprof local/app@1/main/work          # periods and remarks by definition (or file:line)
+hirsel prof callers run1.hprof local/app@1/main/work           # who calls one definition
+hirsel prof diff run1.hprof run2.hprof                         # what a change moved
 ```
 
 `top` names each row by its definition path, or by `file:line` for inlined code, and ranks by
 `self_total`, the sampled event periods. Read `verdict` and `warnings` first: `degraded` means
 samples were lost or stacks failed to unwind, so trust the ranking but not small differences.
-`--out` refuses an existing file, so give each run a new name.
+`--out` refuses an existing file, so give each capture a fresh path.

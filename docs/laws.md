@@ -202,16 +202,14 @@ build. Otherwise the test is executed.
 
 ## Output
 
-`hirsel test --laws` adds a strength column, and a line per row below each test:
+`hirsel test --laws` reports the strength of each test and shows its observed rows.
 
 ```text
-ok   store.tests.search_space   executed   held 512/0
-       all  search_space#1  held (run 512, discarded 0)
-       sometimes  hit_limit  37
-ok   store.tests.swallowed      executed   truncated
-       all  swallowed#1  truncated (run 100, discarded 0; cases=100)
-ok   store.tests.model_lease    executed   to depth 6
-       model.explore  model_lease#1  to depth 6 (depth=6); witnessed elected 4
+pass executed local/app@1/tests/law_addition_commutes sampled (2.900 ms)
+  search  law_addition_commutes#1  sampled (100 cases; cases=100)
+  no reach declared
+pass executed local/app@1/tests/simulated_network_round_trip none (1.577 ms)
+  no reach declared
 ```
 
 The test's strength is its weakest row, with `none` when it has no rows. `--json` adds a

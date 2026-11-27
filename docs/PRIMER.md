@@ -31,19 +31,20 @@ ada grace 2
 
 Outcome: success.
 
-Every outside effect comes in as a parameter: `main` writes only because it receives
-`Stdout`. The entry `main` may wait with or without the `waits` marker. It returns
-`Result[(), E]`: `Ok(())` exits 0, and `Error(e)` exits 1 after writing `error: ` and `e`
-as Hirsel source on stderr.
+Every outside effect enters as a parameter: `main` writes only because it receives
+`Stdout`. `main` may wait with or without the `waits` marker. It returns `Result[(), E]`:
+`Ok(())` exits 0, `Error(Exit(status: n))` exits with status `n` without printing an error
+value, and any other `Error(e)` exits 1 after writing `error: ` and `e` as Hirsel source on
+stderr.
 
 ## 2. What is not there
 
 Hirsel has **no imports, no methods, no traits and no turbofish**.
 
-- `list`, `string`, `map`, `int`, `option`, `rc` and the rest are core modules. You call
-  their functions by path, `list.push(mut xs, 1)`, never `xs.push(1)`. Another module of
-  your package is `wal.append(..)` and a std module is `std.json.parse(..)`, all with no
-  `use`. A std module that extends a core module merges into it, so `list.sort` is std's.
+- `list`, `string`, `map`, `int`, `option`, `rc` and the rest are core modules. Call their
+  functions by path — `list.push(mut xs, 1)`, never `xs.push(1)`. Another module of your
+  package is `wal.append(..)` and a std module is `std.json.parse(..)`, all with no `use`.
+  A std module that extends a core module merges into it, so `list.sort` is std's.
   Run `hirsel inspect --core --interface` for core and `hirsel inspect --std --interface`
   for std, including its extensions to core. `hirsel explain clock` points to both
   listings. For sockets, look for `host.listen` in `hirsel inspect --core --interface`.
@@ -81,10 +82,10 @@ fn origin() -> Point { Point(x: 0, y: 0) }
 ```
 
 A record is built with every field labelled, in order, and `match` is exhaustive.
-Every top-level function writes its whole signature. Inside a
-body a type flows only forward, from a written type, a parameter or the result type. It
-never flows back from a later use. An unsuffixed literal needs an expected type,
-and a generic call needs its type parameters fixed by that one call:
+Every top-level function writes its whole signature. Inside a body a type flows only
+forward, from a written type, a parameter or the result type — never backward from a later
+use. An unsuffixed literal needs an expected type, and a generic call needs its type
+parameters fixed by that one call:
 
 ```hirsel
 fn total(xs: List[u64]) -> u64 {
@@ -102,11 +103,11 @@ fn f() -> u64 { let x = 7; x }                            // refused: 7 has no e
 fn g() -> u64 { list.len(list.new()) }                    // refused: element type T is unknown
 ```
 
-Type arguments are never written at a call. To fix them, write the binding's type
-(`let xs: List[u64] = list.new()`) or ascribe `(e : T)`. An ascription is not a cast.
+Type arguments are never written at a call. Fix them with a binding type
+(`let xs: List[u64] = list.new()`) or an ascription `(e : T)`. An ascription is not a cast.
 
 Tuples, records and sequences compare lexicographically, so order by two keys
-with one comparison rather than an `if` on the first key:
+with one comparison rather than nested `if`s:
 
 ```hirsel
 fn sorted_pairs(ks: List[u64], vs: List[u64]) -> bool {
@@ -151,12 +152,12 @@ fn f(take s: String) -> String { let t = s; s }           // refused: s was move
 ```
 
 A counted payload is immutable except through `rc.with_unique` and `arc.with_unique`, so
-sharing is safe. A scoped value cannot be stored in an own type's field,
-put in a collection or returned past what it reads.
+sharing is safe. A scoped value cannot sit in an own type's field, enter a collection, or
+return past what it reads.
 
 ## 5. Views, `mut` and `take`
 
-A parameter's mode says what the callee gets, and the call site repeats it:
+A parameter's mode states what the callee gets, and the call site repeats it:
 
 ```hirsel
 fn len(xs: List[u64]) -> u64 { list.len(xs) }             // a view, for the call
@@ -169,11 +170,10 @@ fn eat(take xs: List[u64]) {}
 fn f(take xs: List[u64]) { eat(xs) }                      // refused: moving place needs take xs
 ```
 
-`take` is written where a place of a moving type is moved, and a fresh value is passed
-bare. A view is read-only and lasts for a lexical extent: to the end of its block when
-bound by `let`, of its arm or loop body when bound by a pattern, and of its statement as a
-temporary. While it lives, nothing may
-write the place it views:
+Write `take` when moving from a place of a moving type; pass a fresh value bare. A view is
+read-only and lasts for a lexical extent: to the end of its block when bound by `let`, of
+its arm or loop body when bound by a pattern, and of its statement as a temporary. While it
+lives, nothing may write the place it views:
 
 ```hirsel
 type Inbox { items: List[String] }
@@ -183,13 +183,13 @@ fn f(mut m: Inbox) {
 }
 ```
 
-A function that returns a view names its anchor:
+A function returning a view names its anchor:
 `fn first(xs: List[String]) -> Option[View[String]] in xs`.
 
 ## 6. Errors and failures
 
-Expected failures are `Result` values. `e?` returns the `Error` unchanged, so the error
-types must match exactly. `e ?=> m` converts the error on the way out:
+Expected failures are `Result` values. `e?` returns the `Error` unchanged, so error types
+must match exactly. `e ?=> m` converts the error on the way out:
 
 ```hirsel
 type ReadError = Parse(ParseError) | Short(u64)
@@ -202,23 +202,23 @@ fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
 fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: unused Result
 ```
 
-Discard a result explicitly with `let _ = e`. A **failure** is not a value. Integer
-overflow, an index out of bounds, `fail("msg")`, `option.unwrap(None)` and a refused
-allocation (`Capacity`) each clean every scope and end the task. A failure in `main`'s
-task exits 101 and prints the cause chain. `isolate(fn() -> R { .. })`
-catches a failure as `Ok(Error(causes))`, and it undoes nothing.
+Discard a `Result` explicitly with `let _ = e`. A **failure** is not a value: integer
+overflow, out-of-bounds indexing, `fail("msg")`, `option.unwrap(None)`, and a refused
+allocation (`Capacity`) clean every scope and end the task. A failure in `main`'s task
+exits 101 and prints the cause chain. `isolate(fn() -> R { .. })` catches a failure in a
+non-waiting closure as `Ok(Error(causes))` without undoing prior mutations.
 
 ## 7. Memory: `bound bytes`, `bound steps`, `bytes[T]`, `region`, `@compact`, `Inline`, and `Simd`
 
-Every allocation is charged against a byte limit. `bound bytes n { .. }` runs its body
-under a new limit of `n` and returns `Result[T, Capacity]`. The `Error` means only that
-the `n` itself was refused. An allocation the body cannot fit raises the failure
-`Capacity`, which `isolate` catches. `bound steps n { .. }` bounds
-computation steps independently of memory and returns `Result[T, OutOfTime]`.
-`bytes[T]` evaluates at compile time to `T`'s logical byte size under `charge-v1`, usable
-in `const` and generic functions alongside `charge.*` sizing helpers. `region r { .. }` opens a region:
-region data in it is freed at once when the block exits, and no value naming `r` may
-leave it.
+Every charged program allocation counts against a logical byte limit (provider-side host
+buffers stay outside the logical budget unless specified). `bound bytes n { .. }` runs its
+body under a sublimit `n` and returns `Result[T, Capacity]`: `Error` means `n` itself could
+not be admitted, while an over-budget allocation inside the body raises `Capacity` (caught
+by `isolate`). `bound steps n { .. }` caps loop back-edges and calls independently of memory
+and returns `Result[T, OutOfTime]`. `bytes[T]` evaluates at compile time to `T`'s logical
+byte size under `charge-v1`, usable in `const` and generic code alongside `charge.*`
+helpers. `region r { .. }` opens a region whose data frees all at once on exit; no value
+naming `r` may escape.
 
 ```hirsel run
 fn requested(causes: Causes) -> u64 {
@@ -266,14 +266,14 @@ pub fn main(out: Stdout) -> Result[(), WriteError] waits {
 
 Outcome: success.
 
-The list grows to 4 elements, then doubles, and each growth holds the old and the new
-storage at once. Under 4096 bytes all 100 pushes fit. Under 64 bytes, growing from 4 to 8
-elements needs 32 + 64 bytes, so that push fails with `requested` 64.
+The list grows to 4 elements, then doubles, holding old and new storage together during each
+growth. Under 4096 bytes all 100 pushes fit; under 64 bytes, growing from 4 to 8 needs
+32 + 64 bytes, so that push fails with `requested` 64.
 
-`@compact(W) type` declares region data: one contiguous blob with offsets `W` wide,
-built in place through `build_in`'s `Dest` or `build_stream_in`'s `Writer`, and immutable
-once published. Its
-fields are scalars, `Text`, spans, links and other compact types, never own values:
+`@compact(W) type` declares region data: one contiguous blob with `W`-wide offsets, built in
+place through `build_in`'s `Dest` or `build_stream_in`'s `Writer`, and immutable once
+published. Its fields are scalars, `Text`, spans, links, and other compact types — never own
+values:
 
 ```hirsel
 @compact(u32) type Entry { id: u64, name: Text, scores: FixedSpan[u32] }
@@ -320,9 +320,10 @@ fn bounded_sum(n: u64) -> Result[u64, OutOfTime] {
 
 Files, directories, network, clocks, randomness, standard streams, environment variables,
 secrets, credentials, foreign interfaces, child processes (`Exec`), and tasks are reached
-only through capability parameters (full list in [capabilities](https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/capabilities.md)). A function
-holds exactly the authority it is passed, and no constant holds any.
-`main`'s parameters are granted at launch with `--grant` and `--dir`.
+only through capability parameters (full list in [capabilities](https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/capabilities.md)).
+A function holds exactly the authority it is passed, and no constant holds any. `main`'s
+parameters are granted at launch with `--grant` and `--dir`, or declared in `[program]` in
+`hirsel.toml` (`Args` comes from arguments after `--` and needs no grant flag).
 
 ```hirsel
 fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
@@ -332,11 +333,9 @@ fn stamp() -> u64 { host.mono_ns() }                      // refused: missing Cl
 ```
 
 Capability arguments stay explicit: there is no implicit context. Three habits keep them
-short. Capture an authority at construction when a value keeps using it: std's
-`config.new(source: Option[Env], a: Args, max_errors: u64)` stores the optional `Env` in
-its `Reader` for getters to use when a flag is absent, as `store.Db` keeps its `Clock`. When
-three or more capabilities travel together, pass one small record of them. Give a leaf only the field it
-needs, so its signature still names its whole authority.
+short: capture an authority at construction when a value keeps using it (`std.config.new`
+stores its optional `Env`, `store.Db` keeps its `Clock`), group three or more travelling
+capabilities into one small record, and pass each leaf only the field it actually needs.
 
 ```hirsel
 type Caps { out: Stdout, clock: Clock, tasks: Tasks }
@@ -347,13 +346,13 @@ fn report(caps: Caps) -> Result[(), WriteError] waits {
 fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
 ```
 
-Any function but `main` is `waits` exactly when it calls something that is `waits`, and
-a needless `waits` is refused too. A waiting call may observe cancellation.
-Tasks share nothing: `task.spawn(tasks, bytes n, take payload, f)` moves a
-`send` payload into a new task, and channels carry values between tasks.
-To isolate work into a separate **unit** (sharing no mutable memory and charging
-transferred `List`/`String` content to the helper's limit), use `task.spawn_unit` with
-`cross` payload/result types and `Shared[T]` for immutable cross-unit sharing:
+Any function except `main` is `waits` exactly when it calls something that is `waits`, and
+a needless `waits` is refused. A waiting call may observe cancellation. Tasks share nothing:
+`task.spawn(tasks, bytes n, take payload, f)` moves a `send` payload into a new task, and
+channels carry values between tasks. To isolate work into a separate **unit** (no shared
+mutable memory, charging transferred `List`/`String` bytes to the helper's limit), use
+`task.spawn_unit` with `cross` payload and result types. Use `Shared[T]` to share immutable
+values between units.
 
 ```hirsel
 fn unit_len(take xs: List[u64]) -> u64 { list.len(xs) }
@@ -369,8 +368,9 @@ fn twice(x: u64) -> u64 waits { x * 2 }                   // refused: waits with
 
 ## 9. Tests and packages
 
-A `@test` function takes only capabilities and returns `Result[(), E]`. Each test runs as
-its own run:
+A `@test` function takes only capabilities and returns `Result[(), E]`. Each test runs in
+its own process; add `grants = ["Stdout"]` to `[tests]` in `hirsel.toml` when a test takes
+`Stdout` (such as `greets` below):
 
 ```hirsel
 fn twice(n: u64) -> u64 { n + n }
@@ -401,38 +401,42 @@ limit = 67108864
 "tests.hirsel" = "tests"
 ```
 
-Each `[sources]` entry maps a file to a module, and `[tests]` gives every test its root
-limit and grants. A definition is private to its module unless marked `pub`, and test
-sources call the package's `pub` definitions by module path, as in `main.twice(21)`.
+`local/*` names are workspace-only; published packages use scoped names (`HOST/NAME` or
+`HOST/TENANT/NAME`, such as `hirsel.ai/sqlite`) with SemVer versions, SHA-256 content roots
+pinned in `hirsel.lock` (v2), and per-dependency `authority` ceilings checked by
+`hirsel audit`. Each `[sources]` entry maps a file to a module, and `[tests]` gives every
+test its root limit and grants. Definitions are private to their module unless marked `pub`,
+and test sources call the package's `pub` definitions by module path (e.g. `main.twice(21)`).
 
 ## 10. The loop
 
 ```sh
 hirsel new app && cd app
 hirsel check                       # check program and test sources
-hirsel explain RULE                # explain the rule code a refusal prints, with an example
-hirsel test                        # every @test, each in its own process
-hirsel run --grant Stdout -- a b   # build and run; grants are explicit
+hirsel explain LANG-11             # explain a compiler rule code, with an example
+hirsel test                        # run every @test, each in its own process
+hirsel run -- a b                  # build and run (pass --grant KIND when main takes grants)
+hirsel run . --record run.tape     # record a run into an owner-only tape
 hirsel replay . --tape run.tape    # replay a recording with no host grants
-hirsel build --release --limit 1048576 -o program  # a native executable
-hirsel prof run --release --limit 1048576 .        # sample CPU or replay memory into .hprof
-hirsel prof top FILE.hprof         # hottest functions and source lines; profile before tuning
+hirsel build --release --limit 1048576 -o program  # build a native executable
+hirsel prof run --release --limit 1048576 .        # sample CPU into profile.hprof
+hirsel prof top profile.hprof      # hottest functions and source lines; profile before tuning
+hirsel prof replay . --tape run.tape --mem=sampled --out replay.hprof  # sample replay memory
 hirsel inspect --core --interface  # public core declarations
 hirsel inspect --std --interface   # public std declarations
-hirsel fmt .                       # canonical formatting
+hirsel fmt --check .               # check canonical formatting (hirsel fmt . writes in place)
 ```
 
-When `check` refuses, read its rule code and site first, and run `hirsel explain` for the
-rule's exact statement. Fix that site, then check
-again. Look up an operation with `hirsel inspect --core --interface` or
-`hirsel inspect --std --interface`. `hirsel primer` (or `hirsel explain primer`) prints this document.
+When `check` refuses, read its rule code and site first, then run `hirsel explain RULE` for
+the exact statement. Look up operations with `hirsel inspect --core --interface` or
+`hirsel inspect --std --interface`. `hirsel primer` (or `hirsel explain primer`) prints this
+document.
 
 ## 11. A command that reads a file
 
-Replace `main.hirsel` in a package created with `hirsel new` and empty its
-generated `tests.hirsel`. This example keeps its test beside `main`. Index zero in
-`Args` is the first argument after `--`. The `Dir` grants access to names under
-the directory supplied with `--dir`.
+Replace `main.hirsel` in a package created with `hirsel new` and empty its generated
+`tests.hirsel`. This example keeps its test beside `main`. Index zero in `Args` is the first
+argument after `--`, and `Dir` confines access to paths under the directory passed to `--dir`.
 
 ```hirsel
 pub fn main(argv: Args, files: Dir, out: Stdout) -> Result[(), Exit] waits {
@@ -456,8 +460,8 @@ fn reads_utf8(files: Dir, out: Stdout) -> Result[(), ()] waits {
 }
 ```
 
-In `hirsel.toml`, set these keys in the existing `[tests]` table. The test
-starts in an empty directory, so `dirs = ["."]` grants that directory.
+In `hirsel.toml`, set these keys in the existing `[tests]` table. Each test starts in an
+empty temporary directory, so `dirs = ["."]` grants that scratch directory:
 
 ```text
 [tests]
@@ -474,8 +478,8 @@ hirsel test
 
 ## 12. An HTTP server and client test
 
-Replace `main.hirsel` in a new package and empty its generated `tests.hirsel`.
-The test listens on port zero and connects to the bound address returned by `host.listen`.
+Replace `main.hirsel` in a new package and empty its generated `tests.hirsel`. The test
+listens on port zero and connects to the bound address returned by `host.listen`.
 
 ```hirsel
 fn hello(req: std.http.Request, scratch: Region, mut out: std.http.Responder, state: ()) -> Result[std.http.Outcome, std.http.HandlerError] {
@@ -527,9 +531,8 @@ fn get_hello(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
-In the test manifest, port zero requests an ephemeral port, so the loopback
-Listen grant covers the full port range. Connect also covers the range where
-the OS can select the server port.
+In the test manifest, port zero requests an ephemeral port, so the loopback Listen grant
+covers `0-65535` and Connect covers `1-65535`:
 
 ```text
 [tests]
@@ -544,11 +547,10 @@ hirsel run --grant Clock --grant Tasks --grant 'Net=Listen 127.0.0.1/32 8080-808
 
 ## 13. A test with a simulated clock
 
-A virtual clock starts at a reading you choose. `clock.deadline_after_ms`
-takes an absolute monotonic reading in nanoseconds first and a duration in
-milliseconds second. For example, `clock.deadline_after_ms(2_000_000, 5)`
-returns `7_000_000`. A test can advance the clock to a pending deadline without
-sleeping for that duration on the host.
+A virtual clock starts at a reading you choose. `clock.deadline_after_ms` takes an absolute
+monotonic reading in nanoseconds first and a duration in milliseconds second — so
+`clock.deadline_after_ms(2_000_000, 5)` returns `7_000_000`. A test advances the clock to
+the next pending deadline without sleeping on the host.
 
 ```hirsel
 fn wait(take c: Clock) -> u64 waits {
@@ -572,6 +574,5 @@ fn wakes_at_the_deadline(tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
-Save this as `tests.hirsel` in the package from `hirsel new`. Add `grants =
-["Tasks"]` to its `[tests]` table and run `hirsel test`. The test creates its
-own `Clock` with `provide.clock`.
+Save this as `tests.hirsel` in the package from `hirsel new`, add `grants = ["Tasks"]` to
+`[tests]`, and run `hirsel test`. The test creates its own `Clock` with `provide.clock`.

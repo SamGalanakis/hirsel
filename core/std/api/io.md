@@ -10,11 +10,11 @@ reusable buffer. `read_until_lf` appends through the delimiter or EOF.
 allocation, buffer growth and partial host effects for each operation.
 
 **Input sources.** `pub type Input = File(HostFile) | Stdin(Stdin)` is the one source
-type for every reader in this module. `lines(take src: Input, cap)` and
-`buffered_input(take src: Input, cap)` take it, and on `Capacity` they return the
-source unchanged as `(Capacity, Input)`. A `File` source reads through `host.read`. A
-`Stdin` source reads through `stdin.read` with deadline `Never`, so it is a
-cancellation point while it waits. `io.Error` is
+type for every buffered reader in this module. `lines(take src: Input, cap: u64) -> Lines`
+and `buffered_input(take src: Input, cap: u64) -> BufferedInput` take ownership of the source.
+If buffer allocation raises `Capacity`, cleanup closes the source. A `File` source reads
+through `host.read`. A `Stdin` source reads through `stdin.read` with deadline `Never`, so it
+is a cancellation point while it waits. `io.Error` is
 `Io(IoError) | Stdin(StdinError) | Capacity(Capacity) | NotUtf8`, and each arm comes
 from the source that produced it. `read_all(i: Stdin) -> Result[Bytes, Error] waits`
 reads to end of input. It grows by GROWTH from 4096 bytes under the current limit, as

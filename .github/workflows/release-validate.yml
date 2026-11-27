@@ -20,6 +20,8 @@ jobs:
           persist-credentials: false
       - name: Resolve and install the latest release on Linux
         id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$HOME"
@@ -72,6 +74,7 @@ jobs:
           persist-credentials: false
       - name: Install the latest release on macOS
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.linux.outputs.version }}
         run: |
           export HOME="$RUNNER_TEMP/install-home"

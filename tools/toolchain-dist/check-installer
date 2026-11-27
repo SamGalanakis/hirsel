@@ -8,6 +8,7 @@ mkdir "$work/bin" "$work/home"
 python3 "$root/tools/toolchain-dist/product.py" installer > "$work/install.sh"
 export HOME="$work/home" PATH="$work/bin:$PATH"
 export HIRSEL_INSTALL_DIR="$work/home/.hirsel" HIRSEL_DOWNLOAD_BASE='' HIRSEL_VERSION=''
+export GH_TOKEN='' GITHUB_TOKEN='' EXPECTED_API_AUTH=''
 export RELEASES="$work/releases" NEXT_RELEASES="$work/next-releases" EXPECTED_TAG=''
 export HOST_OS=Linux HOST_ARCH=x86_64 HOST_GLIBC=2.28 HOST_MACOS=26.0 TRANSLATED=0
 
@@ -37,13 +38,29 @@ EOF
 
 cat > "$work/bin/curl" <<'EOF'
 #!/bin/sh
-for url do :; done
+auth=''
+prev=''
+for arg do
+    if [ "$prev" = '-H' ]; then
+        case "$arg" in
+            'Authorization: '*) auth=$arg ;;
+        esac
+    fi
+    case "$arg" in
+        --header='Authorization: '*) auth=${arg#--header=} ;;
+    esac
+    prev=$arg
+    url=$arg
+done
 case "$url" in
     'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=1')
+        [ "$auth" = "${EXPECTED_API_AUTH:-}" ] || exit 1
         cat "$RELEASES" ;;
     'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=2')
+        [ "$auth" = "${EXPECTED_API_AUTH:-}" ] || exit 1
         cat "$NEXT_RELEASES" ;;
     "https://github.com/SamGalanakis/hirsel/releases/download/$EXPECTED_TAG/SHA256SUMS")
+        [ -z "$auth" ] || exit 1
         printf '%064d  hirsel-%s-x86_64-unknown-linux-gnu.tar.gz\n' 0 "$EXPECTED_TAG" ;;
     *) exit 1 ;;
 esac
@@ -98,7 +115,9 @@ awk 'BEGIN {
     print "]"
 }' > "$RELEASES"
 printf '%s\n' '[{"tag_name":"v1.10.0"}, {"tag_name":"v1.2.3"}]' > "$NEXT_RELEASES"
-check_tag v1.10.0
+GH_TOKEN='' GITHUB_TOKEN='' EXPECTED_API_AUTH='' check_tag v1.10.0
+GH_TOKEN='gh-secret-token' GITHUB_TOKEN='gha-ignored' EXPECTED_API_AUTH='Authorization: Bearer gh-secret-token' check_tag v1.10.0
+GH_TOKEN='' GITHUB_TOKEN='gha-secret-token' EXPECTED_API_AUTH='Authorization: Bearer gha-secret-token' check_tag v1.10.0
 
 rm "$RELEASES"
 HIRSEL_VERSION=1.2.3 check_tag v1.2.3

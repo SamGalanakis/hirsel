@@ -139,15 +139,30 @@ case "${platform%%-*}" in
 esac
 
 fetch() {
+    auth_token=
+    case "$1" in
+        https://api.github.com/*) auth_token=${GH_TOKEN:-${GITHUB_TOKEN:-}} ;;
+    esac
     case "$1" in
         # Stream to the calling shell so snap curl never opens a file itself.
         https://*)
-            if command -v curl >/dev/null 2>&1 &&
-                curl --proto '=https' --tlsv1.2 --retry 3 -fsSL "$1" > "$2"; then
-                return 0
+            if command -v curl >/dev/null 2>&1; then
+                if [ -n "$auth_token" ]; then
+                    curl --proto '=https' --tlsv1.2 --retry 3 -fsSL \
+                        -H "Authorization: Bearer $auth_token" "$1" > "$2" && return 0
+                else
+                    curl --proto '=https' --tlsv1.2 --retry 3 -fsSL "$1" > "$2" && return 0
+                fi
             fi
-            command -v wget >/dev/null 2>&1 &&
-                wget --https-only -qO- "$1" > "$2" ;;
+            if command -v wget >/dev/null 2>&1; then
+                if [ -n "$auth_token" ]; then
+                    wget --https-only -qO- --header="Authorization: Bearer $auth_token" "$1" > "$2"
+                else
+                    wget --https-only -qO- "$1" > "$2"
+                fi
+            else
+                return 1
+            fi ;;
         file:///*) cat "${1#file://}" > "$2" ;;
         *) return 1 ;;
     esac

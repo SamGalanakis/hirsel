@@ -229,24 +229,42 @@ impl PackageStore {
         fetched: &mut BTreeSet<String>,
     ) -> Result<crate::package_resolve::Libraries, Box<dyn std::error::Error>> {
         let mut libraries = crate::package_resolve::Libraries::new();
-        for batch in frames.chunks(self.frame_workers) {
-            let results = std::thread::scope(|scope| {
-                let jobs: Vec<_> = batch
-                    .iter()
-                    .map(|frame| scope.spawn(|| self.registry_frame(frame, |_| Ok(()))))
-                    .collect();
-                jobs.into_iter()
-                    .map(|job| job.join().expect("registry frame worker"))
-                    .collect::<Vec<_>>()
-            });
-            for (frame, result) in batch.iter().zip(results) {
-                let (library, source) =
-                    result.map_err(|error| -> Box<dyn std::error::Error> { error })?;
-                self.install_entry(frame.root, &library.encoded)
-                    .map_err(|error| format!("{}: admitting {source}: {error}", frame.id))?;
-                libraries.insert(frame.root, library);
-                fetched.insert(source);
-            }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut results = std::thread::scope(|scope| {
+            let worker = || {
+                use std::sync::atomic::Ordering;
+                let mut results = Vec::new();
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(frame) = frames.get(index) else {
+                        break;
+                    };
+                    let result = self.registry_frame(frame, |_| Ok(()));
+                    if result.is_err() {
+                        // Every earlier request already has a worker. Finish
+                        // those to preserve the resolver's first refusal.
+                        next.fetch_max(frames.len(), Ordering::Relaxed);
+                    }
+                    results.push((index, result));
+                }
+                results
+            };
+            let jobs: Vec<_> = (0..frames.len().min(self.frame_workers))
+                .map(|_| scope.spawn(worker))
+                .collect();
+            jobs.into_iter()
+                .flat_map(|job| job.join().expect("registry frame worker"))
+                .collect::<Vec<_>>()
+        });
+        results.sort_unstable_by_key(|(index, _)| *index);
+        for (index, result) in results {
+            let frame = &frames[index];
+            let (library, source) =
+                result.map_err(|error| -> Box<dyn std::error::Error> { error })?;
+            self.install_entry(frame.root, &library.encoded)
+                .map_err(|error| format!("{}: admitting {source}: {error}", frame.id))?;
+            libraries.insert(frame.root, library);
+            fetched.insert(source);
         }
         Ok(libraries)
     }

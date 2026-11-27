@@ -13,7 +13,7 @@
 //!
 //! `signed/` is read only through a remote session (`crate::remote`), which only
 //! a build or test request opens. The launcher and runner host open none.
-use super::{Store, collect, wrote};
+use super::{Store, collect};
 use hirsel_core_ids::ContentHash;
 use std::io;
 
@@ -190,8 +190,7 @@ impl Store {
         let Some(signed) = verify(bytes, kind, key, listed) else {
             return Ok(None);
         };
-        self.publish(&self.signed_path(signed.signer, key), [bytes])?;
-        wrote("record");
+        self.publish(&self.signed_path(signed.signer, key), "record", [bytes])?;
         Ok(Some(signed))
     }
 }

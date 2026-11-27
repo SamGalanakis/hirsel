@@ -1,5 +1,5 @@
 use crate::{
-    CheckProduct, CheckRequest, ContentHash, CorpusManifest, Driver, Meter, ModuleInput, Site,
+    CheckProduct, CheckRequest, ContentHash, CorpusManifest, Meter, ModuleInput, Site,
     reachability, request_record,
 };
 use hirsel_core_ids::DefPath;
@@ -279,4 +279,24 @@ pub(super) fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) 
         g.message = format!("{}: {}", ctx.description, g.message);
         keep
     });
+}
+
+impl Driver {
+    pub(super) fn check_store(&self, path: &std::path::Path) -> io::Result<crate::Store> {
+        if self.package_check {
+            Ok(crate::Store::for_package_check())
+        } else {
+            crate::Store::new(path)
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Driver {
+    pub(crate) package_check: bool,
+    #[cfg(test)]
+    pub(crate) layers: crate::layers::Probe,
+    /// Each body builds every row it names, as `closure_laws` compares copies with.
+    #[cfg(test)]
+    pub(crate) fresh_rows: bool,
 }

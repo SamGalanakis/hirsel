@@ -189,6 +189,37 @@ fn g6_cli_named_add_update_audit() {
     fs::rename(dir.join("verified"), cache).unwrap();
 
     let fix = catalog.publish(NAME, "0.3.1", LIB, NOW - 7200, BTreeMap::new());
+    // A valid locator and a matching bundle cannot authorize a frame under a
+    // signed fork or an expired head, even when their HTTP reads race.
+    server.take();
+    server.serve(
+        HOST,
+        "/log/checkpoint",
+        note(
+            HOST,
+            Log::Release,
+            1,
+            merkle(&catalog.rows[1..2]),
+            Some(NOW),
+        ),
+    );
+    assert!(run(&["update", "j@0.3.1"], 2).contains("does not extend"));
+    assert!(!server.take().0.iter().any(|p| p.contains("/c/")));
+    assert_eq!(snapshot(dir), pinned);
+    server.serve(
+        HOST,
+        "/log/checkpoint",
+        note(
+            HOST,
+            Log::Release,
+            2,
+            merkle(&catalog.rows),
+            Some(NOW - 86_401),
+        ),
+    );
+    assert!(run(&["update", "j@0.3.1"], 2).contains("freshness"));
+    assert!(!server.take().0.iter().any(|p| p.contains("/c/")));
+    assert_eq!(snapshot(dir), pinned);
     catalog.publish(NAME, "0.4.0", LIB, NOW - 7200, BTreeMap::new());
     status.push(
         serde_json::to_vec(&json!([
@@ -463,7 +494,7 @@ fn g6_cli_named_add_update_audit() {
 }
 
 #[test]
-fn cold_floor_proofs_share_connections_with_frame_fetches() {
+fn cold_floor_proofs_reuse_the_authenticated_release_bundle() {
     let server = Server::start();
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
@@ -508,11 +539,17 @@ fn cold_floor_proofs_share_connections_with_frame_fetches() {
         .filter(|(_, p)| p.contains("/c/"))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(hints.len(), 24);
-    assert_eq!(frames.len(), 25);
     assert!(
-        hints[0] < frames[24],
-        "all frames preceded the first child proof"
+        hints.is_empty(),
+        "proved pins performed discovery: {hints:?}"
+    );
+    assert_eq!(frames.len(), 25);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|p| p.contains("/log/tile/entries/"))
+            .count(),
+        1
     );
     assert!(
         (2..=crate::package_store::REGISTRY_WORKERS).contains(&connections),

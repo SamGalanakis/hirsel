@@ -7,7 +7,7 @@ use crate::package_store::PackageStore;
 use crate::package_workspace::Workspace;
 use crate::reachability::authority::{Card, Cards, carried_names, names};
 use crate::{CheckRequest, Driver};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -19,9 +19,72 @@ pub(crate) struct Checked {
     pub(crate) authority: Vec<String>,
 }
 
+/// Published libraries have already been hashed and verified in this resolution.
+/// Workspace and toolchain sources, including tests, are hashed from their capture.
+fn check_key(
+    request: &CheckRequest,
+    verified: &BTreeMap<crate::PackageId, Root>,
+) -> std::io::Result<Option<crate::ContentHash>> {
+    let mut packages = Vec::new();
+    for package in &request.inputs.packages {
+        let published = verified.get(&package.package).is_some_and(|root| {
+            package.namespace.as_ref().and_then(|ns| ns.root) == Some(crate::ContentHash(root.0))
+        });
+        let mut sources = Vec::new();
+        for source in &package.sources {
+            let Some(captured) = &source.captured else {
+                return Ok(None);
+            };
+            sources.push((
+                source,
+                source.name(request.manifest.as_deref())?,
+                captured.test,
+                (!published || captured.test)
+                    .then(|| crate::ContentHash::of_bytes(&captured.bytes)),
+            ));
+        }
+        packages.push((
+            &package.package,
+            &package.dependencies,
+            &package.namespace,
+            package.toolchain,
+            sources,
+        ));
+    }
+    let inputs = crate::encode(&(
+        crate::compiler_identity(),
+        &request.inputs.core,
+        &request.entry,
+        packages,
+        crate::request_record::Limits::current(),
+    ))?;
+    Ok(Some(crate::ContentHash::of_parts(
+        "hirsel.package-authority.v1",
+        [&inputs[..]],
+    )))
+}
+
+#[derive(Serialize, Deserialize)]
+struct Authority {
+    cards: Cards,
+    facts: crate::reachability::authority::Facts,
+}
+
 pub(crate) fn check(resolved: &Resolution, selected: Option<&Id>) -> Result<Checked, Failure> {
     let mut checked = Checked::default();
-    let mut driver = Driver::default();
+    let mut driver = Driver {
+        package_check: true,
+        ..Default::default()
+    };
+    let verified = resolved
+        .published
+        .iter()
+        .filter(|(id, root)| {
+            !resolved.workspace.members.contains_key(*id) && resolved.libraries.contains_key(*root)
+        })
+        .map(|(id, root)| (id.compiler_id(), *root))
+        .collect();
+    let cache = crate::store::Store::cas(&crate::store::collect::user())?;
     let store = crate::store::default_path(&resolved.workspace.directory);
     for id in resolved
         .workspace
@@ -30,7 +93,27 @@ pub(crate) fn check(resolved: &Resolution, selected: Option<&Id>) -> Result<Chec
         .filter(|id| selected.is_none_or(|selected| *id == selected))
     {
         let app = PackageDir::from_resolution(resolved, id, true)?;
-        let request = CheckRequest::from_app(app, None, &store)?;
+        let mut request = CheckRequest::from_app(app, None, &store)?;
+        request.inputs.normalise(request.manifest.as_deref());
+        let key = check_key(&request, &verified)?;
+        if let Some(key) = key
+            && let Some(bytes) = cache.get(key)?
+            && let Some(authority) = crate::decode::<Authority>(&bytes)
+        {
+            let result = crate::reachability::authority::enforce(&authority.facts, &request.inputs);
+            if !matches!(result, Ok(false)) {
+                if let Err(error) = result {
+                    let error = error.to_string();
+                    if !checked.authority.contains(&error) {
+                        checked.authority.push(error);
+                    }
+                }
+                for (id, card) in authority.cards {
+                    checked.cards.entry(id).or_default().merge(&card);
+                }
+                continue;
+            }
+        }
         let product = driver.check_for_authority(request)?;
         if !product.accepted() {
             for refusal in &product.diagnostics {
@@ -47,6 +130,12 @@ pub(crate) fn check(resolved: &Resolution, selected: Option<&Id>) -> Result<Chec
                 eprintln!("{}: {}", product.render_site(&gap.primary)?, gap.message);
             }
             return Err(format!("{id} does not check").into());
+        }
+        if let Some(key) = key {
+            cache.put_keyed(
+                key,
+                &crate::encode(&(&product.authority_cards, &product.authority))?,
+            )?;
         }
         if let Some(error) = &product.authority_refusal
             && !checked.authority.contains(error)

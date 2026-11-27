@@ -208,6 +208,15 @@ impl Registry {
     }
 
     pub(crate) fn open(&mut self, name: &str, pin: Option<&Origin>) -> Result<Origin, Failure> {
+        self.open_logs(name, pin, true)
+    }
+
+    fn open_logs(
+        &mut self,
+        name: &str,
+        pin: Option<&Origin>,
+        selecting: bool,
+    ) -> Result<Origin, Failure> {
         let client = self.store.registry(name, pin)?;
         let origin = client.route().origin().clone();
         if !self.logs.contains_key(&origin) {
@@ -218,18 +227,26 @@ impl Registry {
                 accepted
                     .get_or_init(|| {
                         client
-                            .release_checkpoint(self.now)
+                            .release_head(self.now, selecting)
                             .map_err(|e| e.to_string())
                     })
                     .clone()
                     .map_err(Into::into)
             };
-            let (release, statuses) = std::thread::scope(|scope| {
-                let worker = scope.spawn(checkpoint);
+            let cached = self.store.transport.is_offline();
+            let (release, statuses, candidates) = std::thread::scope(|scope| {
+                let release = scope.spawn(checkpoint);
+                let candidates = selecting.then(|| {
+                    scope.spawn(|| {
+                        let bytes = client.hint_bytes(name, cached);
+                        client.check_hints(&checkpoint()?, name, cached, bytes?)
+                    })
+                });
                 let statuses = self.store.status_for(&client, self.now, Some(&checkpoint));
                 (
-                    worker.join().expect("registry release checkpoint worker"),
+                    release.join().expect("release checkpoint worker"),
                     statuses,
+                    candidates.map(|job| job.join().expect("release hint worker")),
                 )
             });
             let release = release.map_err(boxed)?;
@@ -239,6 +256,16 @@ impl Registry {
                 );
             }
             let statuses = statuses.map_err(boxed)?;
+            if let Some(rows) = candidates {
+                self.names
+                    .insert(name.into(), Self::versions(rows.map_err(boxed)?));
+            }
+            for leaf in client.cached_releases(&release).map_err(boxed)? {
+                self.proved
+                    .entry((origin.clone(), leaf.id().name.clone()))
+                    .or_default()
+                    .insert((leaf.version().clone(), leaf.root()));
+            }
             self.logs
                 .insert(origin.clone(), LogState { release, statuses });
         }
@@ -248,22 +275,26 @@ impl Registry {
     fn candidates(&mut self, name: &str, origin: &Origin) -> Result<(), Failure> {
         if !self.names.contains_key(name) {
             let client = self.store.registry(name, Some(origin))?;
-            let mut versions = BTreeMap::new();
-            for (hint, leaf) in client
+            let rows = client
                 .verified_hints(&self.logs[origin].release, name)
-                .map_err(boxed)?
-            {
-                versions.insert(
+                .map_err(boxed)?;
+            self.names.insert(name.into(), Self::versions(rows));
+        }
+        Ok(())
+    }
+
+    fn versions(rows: Vec<(crate::registry_fetch::Hint, Release)>) -> BTreeMap<Version, Candidate> {
+        rows.into_iter()
+            .map(|(hint, leaf)| {
+                (
                     hint.version,
                     Candidate {
                         leaf,
                         covering: hint.covering_size,
                     },
-                );
-            }
-            self.names.insert(name.into(), versions);
-        }
-        Ok(())
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn select(
@@ -579,6 +610,12 @@ impl Registry {
                 }
             }
         }
+        pins.retain(|key, required| {
+            !self
+                .proved
+                .get(key)
+                .is_some_and(|known| required.is_subset(known))
+        });
         if pins.is_empty() {
             return Resolution::resolve_cached(
                 overlay,
@@ -658,7 +695,7 @@ impl Registry {
             let lib = &res.libraries[&root];
             if let Some(origin) = &carrier {
                 if logged {
-                    self.open(&id.name, Some(origin))?;
+                    self.open_logs(&id.name, Some(origin), false)?;
                     pins.entry((origin.clone(), id.name.clone()))
                         .or_default()
                         .insert((lib.content.version.clone(), root));
@@ -680,7 +717,7 @@ impl Registry {
                 } = binding
                     && carrier.is_some()
                 {
-                    let origin = self.open(&child.name, None)?;
+                    let origin = self.open_logs(&child.name, None, false)?;
                     let floor = Version {
                         major: child.major,
                         minor: *minor,

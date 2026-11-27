@@ -107,15 +107,36 @@ impl<'a> Client<'a> {
     }
 
     fn hints(&self, head: &Checkpoint, name: &str, cached: bool) -> Result<Vec<(Hint, Release)>> {
+        self.release_log(head)?;
+        let bytes = self.hint_bytes(name, cached)?;
+        self.check_hints(head, name, cached, bytes)
+    }
+
+    pub(crate) fn hint_bytes(&self, name: &str, cached: bool) -> Result<Vec<u8>> {
         self.require_name(name)?;
-        let log = self.release_log(head)?;
-        let cache_key = format!("versions/{}", hex(&Sha256::digest(name)));
         let bytes = if cached {
-            log.cached(&cache_key, EVIDENCE_LIMIT)?
+            self.log(Log::Release)
+                .cached(&Self::hint_key(name), EVIDENCE_LIMIT)?
         } else {
             self.read(&format!("versions/{name}"), EVIDENCE_LIMIT)?
-        }
-        .ok_or_else(|| format!("no version hints for {name} at {}", self.route.origin()))?;
+        };
+        bytes
+            .ok_or_else(|| format!("no version hints for {name} at {}", self.route.origin()).into())
+    }
+
+    fn hint_key(name: &str) -> String {
+        format!("versions/{}", hex(&Sha256::digest(name)))
+    }
+
+    pub(crate) fn check_hints(
+        &self,
+        head: &Checkpoint,
+        name: &str,
+        cached: bool,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<(Hint, Release)>> {
+        self.require_name(name)?;
+        let log = self.release_log(head)?;
         let rows: Vec<(String, String, String)> = serde_json::from_slice(&bytes)?;
         let invalid = || format!("invalid version hint for {name}");
         if serde_json::to_vec(&rows)? != bytes {
@@ -149,7 +170,7 @@ impl<'a> Client<'a> {
             }
         }
         if !cached && !accepted.is_empty() {
-            log.store_object(&cache_key, &serde_json::to_vec(&accepted)?)?;
+            log.store_object(&Self::hint_key(name), &serde_json::to_vec(&accepted)?)?;
         }
         Ok(verified.into_values().collect())
     }
@@ -185,6 +206,10 @@ impl<'a> Client<'a> {
     }
 
     pub(crate) fn release_checkpoint(&self, now: u64) -> Result<Checkpoint> {
+        self.release_head(now, false)
+    }
+
+    pub(crate) fn release_head(&self, now: u64, selecting: bool) -> Result<Checkpoint> {
         let log = self.log(Log::Release);
         if self.transport.is_offline() {
             let (head, _) = log
@@ -196,11 +221,26 @@ impl<'a> Client<'a> {
         let _guard = log.lock()?;
         let saved = log.saved()?;
         let prior = saved.as_ref().map(|(head, _)| head);
-        let current = log.current(prior, now)?;
+        let current = log.current(prior, now, selecting)?;
         if prior.is_none_or(|prior| prior.note() != current.note()) {
             log.save(&current, &[])?;
         }
         Ok(current)
+    }
+
+    pub(crate) fn cached_releases(&self, head: &Checkpoint) -> Result<Vec<Release>> {
+        let log = self.release_log(head)?;
+        if !head.single_bundle() {
+            return Ok(Vec::new());
+        }
+        Ok(head
+            .bundle_releases(|path| {
+                let bytes = log
+                    .cached(path, BUNDLE_LIMIT)
+                    .map_err(|_| Error::MissingObject)?;
+                bytes.ok_or(Error::MissingObject)
+            })
+            .unwrap_or_default())
     }
 
     pub(crate) fn release(
@@ -320,7 +360,7 @@ impl<'a> Client<'a> {
                 .check_fresh(now)?;
             return Ok(replay);
         }
-        let head = log.current(saved.as_ref().map(|(h, _)| h), now)?;
+        let head = log.current(saved.as_ref().map(|(h, _)| h), now, false)?;
         if replay
             .checkpoint()
             .is_some_and(|prior| prior.note() == head.note())
@@ -547,15 +587,29 @@ impl LogCache<'_> {
         Ok(Some((head, snapshot.to_vec())))
     }
 
-    fn current(&self, previous: Option<&Checkpoint>, now: u64) -> Result<Checkpoint> {
+    fn current(
+        &self,
+        previous: Option<&Checkpoint>,
+        now: u64,
+        selecting: bool,
+    ) -> Result<Checkpoint> {
         let path = format!("{}/checkpoint", self.log.prefix());
         let note = self
             .client
             .read(&path, NOTE_LIMIT)?
             .ok_or(Error::MissingObject)?;
+        let candidate = self.trust().authenticate(&note)?;
         let checked = self.prove(|objects| {
-            self.trust()
-                .accept(&note, previous, now, |path| objects.read(path))
+            candidate.accept_after(previous, now, |path| {
+                if selecting && candidate.single_bundle() {
+                    // This same bundle is needed for selection. Its authenticated
+                    // leaves supply the level-zero hashes for the consistency proof.
+                    if let Ok(tile) = candidate.release_tile(|path| objects.read(path)) {
+                        return Ok(tile);
+                    }
+                }
+                objects.read(path)
+            })
         });
         self.record_conflict(checked)
     }

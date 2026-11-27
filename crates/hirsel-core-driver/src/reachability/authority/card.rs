@@ -4,24 +4,24 @@ use hirsel_core_front::{DeclBody, Program, TyId, TyKind};
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_ir::Identity;
 use hirsel_core_resolve::{CorpusManifest, SourceId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type Cards = BTreeMap<PackageId, Card>;
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Card {
     pub(crate) exports: BTreeMap<String, Export>,
     pub(crate) reached: Reached,
 }
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Export {
     pub(crate) carried: Carried,
     pub(crate) reached: Reached,
 }
 
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Carried {
     pub(crate) takes: u32,
     pub(crate) returns: u32,
@@ -29,7 +29,7 @@ pub(crate) struct Carried {
 
 const FUNCTION: u32 = 1 << 31;
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Reached {
     pub(crate) kinds: u32,
     pub(crate) provided: u32,

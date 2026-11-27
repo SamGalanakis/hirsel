@@ -2,6 +2,7 @@
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 pub mod call;
 mod checked;
+pub use checked::Driver;
 pub mod cli;
 pub mod cli_tools;
 pub mod code_admission;
@@ -373,15 +374,6 @@ impl CheckProduct {
     }
 }
 
-#[derive(Default)]
-pub struct Driver {
-    #[cfg(test)]
-    pub(crate) layers: layers::Probe,
-    /// Each body builds every row it names, as `closure_laws` compares copies with.
-    #[cfg(test)]
-    pub(crate) fresh_rows: bool,
-}
-
 /// An item in one source file: the file's occurrence and the item's ordinal
 /// in it. A site's anchor key; two files of one module never share one.
 pub(crate) type ItemAt = (SourceId, u32);
@@ -576,7 +568,7 @@ impl Driver {
             reachable_only,
             &request.entry,
         ))?);
-        let store = Store::new(&request.store)?;
+        let store = self.check_store(&request.store)?;
         meter.finish("load/request identity and store");
         let record = record.map(|record| (record, record.key(snapshot)));
         if let Some((record, key)) = record {

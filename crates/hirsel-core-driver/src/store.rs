@@ -30,6 +30,8 @@ use twox_hash::XxHash3_64;
 
 #[path = "blob.rs"]
 mod blob;
+#[path = "check_records.rs"]
+mod check_records;
 #[path = "collect.rs"]
 pub(crate) mod collect;
 #[path = "layer.rs"]
@@ -38,6 +40,8 @@ mod layer;
 pub(crate) mod remote;
 #[path = "signed.rs"]
 pub(crate) mod signed;
+#[path = "store_head.rs"]
+mod store_head;
 
 /// The most bytes one `write` hands the page cache. The kernel sizes the
 /// folios it allocates for a buffered write to the write's length, so one
@@ -294,6 +298,7 @@ impl ArchiveWriter {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    records: Option<Arc<check_records::Records>>,
     image: bool,
     /// A content store's collection handle (`collect`); `None` for a flat one.
     cas: Option<collect::Cas>,
@@ -372,16 +377,25 @@ impl Drop for Scratch {
 }
 impl Store {
     pub fn new(root: &Path) -> io::Result<Self> {
+        let store = Self::flat(root, None);
         fs::create_dir_all(root)?;
-        let store = Self {
+        store.sweep()?;
+        Ok(store)
+    }
+
+    fn flat(root: &Path, records: Option<Arc<check_records::Records>>) -> Self {
+        Self {
             root: root.to_owned(),
+            records,
             image: false,
             cas: None,
             shipped: None,
             origin: LOCAL,
-        };
-        store.sweep()?;
-        Ok(store)
+        }
+    }
+
+    pub(super) fn for_package_check() -> Self {
+        Self::flat(Path::new(""), Some(Arc::new(check_records::Records::new())))
     }
     pub(crate) fn image(root: &Path) -> io::Result<Self> {
         let mut store = Self::new(root)?;
@@ -481,7 +495,18 @@ impl Store {
     }
     /// Write the byte slices to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
-    fn publish<const N: usize>(&self, path: &Path, parts: [&[u8]; N]) -> io::Result<()> {
+    fn publish<const N: usize>(
+        &self,
+        path: &Path,
+        kind: &str,
+        parts: [&[u8]; N],
+    ) -> io::Result<()> {
+        if let Some(records) = &self.records {
+            return records.write(path, &parts);
+        }
+        if self.cas.is_none() && check_records::identical(path, &parts) {
+            return Ok(());
+        }
         self.publish_to(|file| {
             write_bounded(file, &parts)?;
             Ok((path, ()))
@@ -489,6 +514,7 @@ impl Store {
         if let Some(cas) = &self.cas {
             cas.wrote(parts.iter().map(|part| part.len()).sum());
         }
+        wrote(kind);
         Ok(())
     }
     /// Write a cache file to a locked temporary. The writer names the
@@ -597,9 +623,7 @@ impl Store {
             trailer[8..16].copy_from_slice(&check.finish().to_le_bytes());
         }
         trailer[16..].copy_from_slice(&key.0);
-        self.publish(&self.path(key), [&header, payload, &trailer])?;
-        wrote("record");
-        Ok(())
+        self.publish(&self.path(key), "record", [&header, payload, &trailer])
     }
     /// This store with its frames carrying `origin` (`signed`).
     pub(crate) fn origin(mut self, origin: ContentHash) -> Self {
@@ -649,83 +673,13 @@ impl Store {
         }
         Ok(Body::split(bytes, key, image.as_ref()))
     }
-    /// A body record's head and `ir_hash`, read under its address without
-    /// its IR.
-    ///
-    /// A head read checks BODY_MAGIC, VERSION, both lengths, the exact file
-    /// length, the trailer address and the prefix checksum over exactly the
-    /// head bytes. It returns only fields the prefix covers, and nothing
-    /// derived from IR. `get_body` alone checks the IR and decodes it.
-    pub(crate) fn get_body_head(&self, key: ContentHash) -> io::Result<Option<Head>> {
-        let image = crate::meter::ImageRead::start(self.image);
-        let mut file = match File::open(self.path(key)) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        crate::meter::count(crate::meter::Count::FilesOpened, 1);
-        if let Some(image) = &image {
-            image.opened();
-        }
-        let size = file.metadata()?.len();
-        let mut header = [0u8; BODY_HEADER];
-        if size < BODY_HEADER as u64 || file.read_exact(&mut header).is_err() {
-            return Ok(None);
-        }
-        if &header[..8] != BODY_MAGIC || header[8..12] != VERSION.to_le_bytes() {
-            return Ok(None);
-        }
-        let (head_len, ir_len) = (word(&header, 12), word(&header, 20));
-        let Some(prefix) = (BODY_HEADER as u64)
-            .checked_add(head_len)
-            .and_then(|n| n.checked_add(32))
-        else {
-            return Ok(None);
-        };
-        if prefix
-            .checked_add(ir_len)
-            .and_then(|n| n.checked_add(BODY_TRAILER as u64))
-            != Some(size)
-        {
-            return Ok(None);
-        }
-        let Ok(prefix) = usize::try_from(prefix) else {
-            return Ok(None);
-        };
-        let mut trailer = [0u8; BODY_TRAILER];
-        file.seek(SeekFrom::Start(size - BODY_TRAILER as u64))?;
-        file.read_exact(&mut trailer)?;
-        if trailer[16..] != key.0 {
-            return Ok(None);
-        }
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(prefix).map_err(io::Error::other)?;
-        bytes.extend_from_slice(&header);
-        bytes.resize(prefix, 0);
-        file.seek(SeekFrom::Start(BODY_HEADER as u64))?;
-        file.read_exact(&mut bytes[BODY_HEADER..])?;
-        if let Some(image) = &image {
-            image.bytes(BODY_TRAILER + (prefix - BODY_HEADER));
-        }
-        let sum = || checksum(&bytes);
-        let check = match &image {
-            Some(image) => image.digest(prefix, sum),
-            None => sum(),
-        };
-        if check != word(&trailer, 0) {
-            return Ok(None);
-        }
-        let ir_hash = ContentHash(bytes[prefix - 32..].try_into().unwrap());
-        bytes.truncate(prefix - 32);
-        Ok(Some(Head {
-            bytes,
-            head: BODY_HEADER..prefix - 32,
-            ir_hash,
-        }))
-    }
     /// Remove a record whose IR failed its check behind a valid head, so the
     /// next request misses it and checks the body again.
     pub(crate) fn remove_damaged(&self, key: ContentHash) -> io::Result<()> {
+        if let Some(records) = &self.records {
+            records.remove(&self.path(key));
+            return Ok(());
+        }
         match fs::remove_file(self.path(key)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -739,6 +693,9 @@ impl Store {
         image: Option<&crate::meter::ImageRead>,
         limit: Option<u64>,
     ) -> io::Result<Option<Vec<u8>>> {
+        if let Some(records) = &self.records {
+            return records.read(path, limit);
+        }
         let mut file = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -772,9 +729,7 @@ impl Store {
     }
     /// Publish one framed record under its address.
     pub(crate) fn write_framed(&self, hash: ContentHash, bytes: &[u8]) -> io::Result<()> {
-        self.publish(&self.path(hash), [bytes])?;
-        wrote("record");
-        Ok(())
+        self.publish(&self.path(hash), "record", [bytes])
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
         let Some((mut bytes, end)) = self.checked(key)? else {
@@ -844,10 +799,18 @@ impl Store {
         }
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
-        let bytes = match fs::read(self.selection_path(name)) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+        let path = self.selection_path(name);
+        let bytes = if let Some(records) = &self.records {
+            let Some(bytes) = records.read(&path, None)? else {
+                return Ok(None);
+            };
+            bytes
+        } else {
+            match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            }
         };
         crate::meter::count(crate::meter::Count::FilesOpened, 1);
         let end = 32 + name.len();
@@ -868,9 +831,7 @@ impl Store {
         bytes.extend_from_slice(name.as_bytes());
         let check = checksum(&bytes);
         bytes.extend_from_slice(&check.to_le_bytes());
-        self.publish(&self.selection_path(name), [&bytes])?;
-        wrote("selection");
-        Ok(())
+        self.publish(&self.selection_path(name), "selection", [&bytes])
     }
 }
 

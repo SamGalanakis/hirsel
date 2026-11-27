@@ -505,7 +505,18 @@ fn run_at(
     }
     let old = workspace
         .with_manifests(cwd, &[], false)?
-        .and_then(|before| Resolution::resolve(before, store.clone(), true).ok());
+        .and_then(|before| {
+            // Reuse this command's verified captures for the old graph. A
+            // cooldown trial can hold uninstalled entries, so resolve that
+            // comparison against the store alone.
+            let captured = if young.is_empty() {
+                trial.libraries.clone()
+            } else {
+                Libraries::new()
+            };
+            Resolution::resolve_cached(before, store.clone(), true, captured, &mut BTreeSet::new())
+                .ok()
+        });
     let mut report = Report::new(
         &trial,
         &workspace.selections,

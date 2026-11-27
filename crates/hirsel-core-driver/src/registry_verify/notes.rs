@@ -146,22 +146,8 @@ impl Trust {
         now: u64,
         mut read_tile: impl FnMut(&str) -> Result<Vec<u8>, Error>,
     ) -> Result<Checkpoint, Error> {
-        let candidate = self.authenticate(note)?;
-        if let Some(previous) = previous {
-            if candidate.policy != previous.policy {
-                return Err(Error::Trust);
-            }
-            if candidate.size < previous.size
-                || (candidate.size == previous.size && candidate.root != previous.root)
-            {
-                return Err(conflict(previous, &candidate));
-            }
-        }
-        candidate.check_fresh(now)?;
-        if let Some(previous) = previous {
-            candidate.extends(previous, &mut read_tile)?;
-        }
-        Ok(candidate)
+        self.authenticate(note)?
+            .accept_after(previous, now, &mut read_tile)
     }
 
     pub(crate) fn owns(&self, checkpoint: &Checkpoint) -> bool {
@@ -291,6 +277,29 @@ impl Checkpoint {
 
     pub(crate) fn witness_times(&self) -> Option<[u64; 2]> {
         self.times
+    }
+
+    pub(crate) fn accept_after(
+        &self,
+        previous: Option<&Self>,
+        now: u64,
+        mut read_tile: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Self, Error> {
+        if let Some(previous) = previous {
+            if self.policy != previous.policy {
+                return Err(Error::Trust);
+            }
+            if self.size < previous.size
+                || (self.size == previous.size && self.root != previous.root)
+            {
+                return Err(conflict(previous, self));
+            }
+        }
+        self.check_fresh(now)?;
+        if let Some(previous) = previous {
+            self.extends(previous, &mut read_tile)?;
+        }
+        Ok(self.clone())
     }
 
     pub(crate) fn extends(

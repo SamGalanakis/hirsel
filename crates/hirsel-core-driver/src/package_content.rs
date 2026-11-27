@@ -737,6 +737,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Library {
     pub(crate) content: Content,
     pub(crate) encoded: Bytes,

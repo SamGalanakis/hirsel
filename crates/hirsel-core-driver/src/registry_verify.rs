@@ -154,6 +154,54 @@ impl Checkpoint {
         self.parse_release(index, &row)
     }
 
+    pub(crate) fn single_bundle(&self) -> bool {
+        self.log() == Log::Release && (1..=tiles::WIDTH).contains(&self.size())
+    }
+
+    fn single_release_bundle(
+        &self,
+        mut read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Vec<u8>, Error> {
+        if !self.single_bundle() {
+            return Err(Error::Bundle);
+        }
+        tiles::included_bundle(self.size(), self.root(), 0, &mut read)
+    }
+
+    pub(crate) fn release_tile(
+        &self,
+        read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Vec<u8>, Error> {
+        let bytes = self.single_release_bundle(read)?;
+        Ok(tiles::bundle_entries(&bytes, self.size(), 0)?
+            .into_iter()
+            .flat_map(tiles::leaf)
+            .collect())
+    }
+
+    pub(crate) fn bundle_releases(
+        &self,
+        read: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<Vec<Release>, Error> {
+        let bytes = self.single_release_bundle(read)?;
+        let mut labels = std::collections::BTreeMap::new();
+        for (index, bytes) in tiles::bundle_entries(&bytes, self.size(), 0)?
+            .into_iter()
+            .enumerate()
+        {
+            let row = entry_json(bytes)?;
+            if row[0] == "release" {
+                let leaf = self.parse_release(index as u64, &row)?;
+                let label = (leaf.id().clone(), leaf.version().clone());
+                if labels.insert(label, leaf).is_some() {
+                    // Let targeted discovery diagnose conflicting release locators.
+                    return Err(Error::ReleaseClaim);
+                }
+            }
+        }
+        Ok(labels.into_values().collect())
+    }
+
     /// Recover a locator from authenticated history when a derived hint is absent.
     pub(crate) fn release_by_root(
         &self,

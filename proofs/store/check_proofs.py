@@ -44,21 +44,27 @@ WORKERS = str(min(8, os.cpu_count() or 1))
 BOUNDS = {
     "retention": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE",
+        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
     },
     # The fork row and its lineage cells (review 3177 F3). One key and no crash
     # keep it tractable; the crash interleavings are the retention bound's.
     "retention_fork": {
         "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "0",
-        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "TRUE",
+        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "TRUE", "WithBuild": "FALSE",
     },
     "retention_export": {
         "NKeys": "2", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "FALSE", "WithExport": "TRUE", "WithFork": "FALSE",
+        "WithAnchors": "FALSE", "WithExport": "TRUE", "WithFork": "FALSE", "WithBuild": "FALSE",
     },
     "retention_anchor": {
         "NKeys": "1", "MaxStamp": "3", "MaxPack": "3", "MaxCrash": "1",
-        "WithAnchors": "TRUE", "WithExport": "FALSE", "WithFork": "FALSE",
+        "WithAnchors": "TRUE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
+    },
+    # The hot Tiered build pin (STORE-SPEC v2.169 as amended by v2.171): one key of
+    # the built collection plus the untouched collection U.
+    "retention_build": {
+        "NKeys": "1", "MaxStamp": "4", "MaxPack": "3", "MaxCrash": "1",
+        "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "TRUE",
     },
     "catchup": {
         "Vals": '{"a", "b", "c"}', "MaxWrites": "4", "MaxDemote": "2", "MaxCrash": "1",
@@ -80,6 +86,7 @@ BASELINES = [
     ("retention-v2164", "StoreRetention", "v2164", "retention", False),
     ("retention-v2164-fork", "StoreRetention", "v2164", "retention_fork", True),
     ("retention-count3157", "StoreRetention", "count3157", "retention", False),
+    ("retention-v2164-build", "StoreRetention", "v2164", "retention_build", False),
     ("catchup-v2161", "StoreCatchUp", "v2161", "catchup", False),
     ("janitor", "StoreJanitor", None, "janitor", False),
     ("retention-v2164-export", "StoreRetention", "v2164", "retention_export", True),
@@ -104,6 +111,8 @@ COVERS = [
     ("NoDrainNotIdle", "retention_fork"), ("NoDrainSkipped", "retention_fork"),
     ("NoUnforkQueued", "retention_fork"), ("NoCellFiled", "retention_fork"),
     ("NoCellMoved", "retention_fork"),
+    ("NoBuildMovesU", "retention_build"), ("NoGraftLeavesPinFrame", "retention_build"),
+    ("NoOrphanDropped", "retention_build"),
 ]
 
 PYTHON_MODELS = [
@@ -248,7 +257,8 @@ def trace_tlc(path, mutant, tmp, rows=None):
     norm.write_text("".join(json.dumps(r) + "\n" for r in rows))
     consts = {"NKeys": "1", "MaxStamp": "2", "MaxPack": str(max(1, packs)),
               "MaxCrash": str(sum(r["kind"] == "reopen" for r in rows)),
-              "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "Track": "FALSE",
+              "WithAnchors": "FALSE", "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE",
+              "Track": "FALSE",
               "Rules": '"v2164"', "Mutant": f'"{mutant}"'}
     cfg = Path(tmp) / f"{tag}.cfg"
     cfg.write_text("SPECIFICATION TraceSpec\nCONSTANTS\n" +

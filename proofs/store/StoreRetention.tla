@@ -32,11 +32,17 @@
  *   "count3157"     review 3157's alternative, which v2.161 rejects as sound but
  *                   costlier: idle progress is a count apart from the probe cursor,
  *                   and the first non-idle cut restarts it at row 0, as a third reset.
+ * WithBuild adds §13.10a "Hot Tiered builds" (v2.169 as amended by v2.171): a
+ * second collection U the plan leaves untouched, and a hot Migrate whose target
+ * replaces the main collection. The build writes into a working map under the
+ * owner-3 `build` pin through its own build cuts, and one graft cut publishes the
+ * working map, drops the pin and queues the source's old Cold base.
  * Mutant names one seeded one-rule bug, or "none". README.md lists them.
  *)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-CONSTANTS NKeys, MaxStamp, MaxPack, MaxCrash, Rules, Mutant, WithAnchors, WithExport, WithFork, Track
+CONSTANTS NKeys, MaxStamp, MaxPack, MaxCrash, Rules, Mutant, WithAnchors, WithExport, WithFork,
+          WithBuild, Track
 
 ASSUME Rules \in {"v2157", "v2157_restart", "count3157", "v2164"}
 
@@ -56,6 +62,9 @@ MemRefs == [x \in Keys |-> Mem]
 NoRoot == [on |-> FALSE, refs |-> MemRefs, w |-> 0]
 NoFork == [on |-> FALSE, w |-> 0, res |-> "M", refs |-> MemRefs]
 NoCursor == [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE]
+\* Writer memory of a hot build: its working map of the target, and the staging
+\* head's root of the untouched collection U.
+NoBuild == [on |-> FALSE, work |-> MemRefs, stage |-> Mem]
 
 MinOf(S) == CHOOSE x \in S : \A y \in S : x <= y
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
@@ -65,7 +74,8 @@ RECURSIVE Sorted(_)
 Sorted(S) == IF S = {} THEN <<>> ELSE <<MinOf(S)>> \o Sorted(S \ {MinOf(S)})
 
 VARIABLES
-    head,       \* the writer's live main head: [res, refs]; may hold Hot pages
+    head,       \* the writer's live main head: [res, refs, u]; may hold Hot pages
+                \* (u: the root frame of the untouched collection U, WithBuild only)
     gen,        \* the published MANIFEST generation (durable)
     packRows,   \* pack -> PACK_INDEX rows (stamps); immutable once written
     files,      \* pack files present on disk
@@ -74,6 +84,7 @@ VARIABLES
     cursor,     \* writer memory: probe cursor per pack (rows probed; known = rows whose offset is known)
     snap,       \* writer memory: one process-local Snapshot with its lease
     export,     \* writer memory: the export lease and the image it copied
+    bld,        \* writer memory: a hot Tiered build in progress (WithBuild)
     acked,      \* pin names whose pin the caller saw acknowledged (caller knowledge, survives crashes)
     pending,    \* ack_before_publish mutant only: a pin acked but not yet cut
     fault,      \* a promotion read a frame whose file was gone
@@ -82,7 +93,7 @@ VARIABLES
                 \* else only "idleNoRetire" (IdleProgress), so baselines add no states
     crashes
 
-vars == <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export,
+vars == <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, bld,
           acked, pending, fault, rewind, ev, crashes>>
 
 -----------------------------------------------------------------------------
@@ -91,8 +102,8 @@ vars == <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export,
 RootRefs(root) == IF root.on THEN {root.refs[x] : x \in Keys} ELSE {}
 
 DurableRefs(g) ==
-    {g.hrefs[x] : x \in Keys} \cup RootRefs(g.pin) \cup RootRefs(g.anchor) \cup RootRefs(g.fork)
-    \cup g.queue
+    {g.hrefs[x] : x \in Keys} \cup {g.hu} \cup RootRefs(g.pin) \cup RootRefs(g.anchor)
+    \cup RootRefs(g.fork) \cup RootRefs(g.build) \cup g.queue
 
 DurableColdRefs(g) == {r \in DurableRefs(g) : r.k = "C"}
 
@@ -104,24 +115,27 @@ Watermarks(pinOn, pinW, forkOn, forkW) ==
     (IF pinOn THEN {pinW} ELSE {}) \cup (IF forkOn THEN {forkW} ELSE {})
 
 \* §13.6 "Tiered-idle cuts": no holder root has a Tiered descriptor, the candidate
-\* queue is empty and there is no anchor. A pin is always of a Tiered Snapshot here;
-\* the fork's child is a branch head with its own residency.
+\* queue is empty and there is no anchor. A pin is always of a Tiered Snapshot here,
+\* and the build pin always holds Tiered collections; the fork's child is a branch
+\* head with its own residency.
 IsIdleGen(g) == g.hres # "T" /\ ~g.pin.on /\ ~(g.fork.on /\ g.fork.res = "T")
-                /\ g.queue = {} /\ ~g.anchor.on
+                /\ g.queue = {} /\ ~g.anchor.on /\ ~g.build.on
 
 -----------------------------------------------------------------------------
 Init ==
-    /\ head = [res |-> "T", refs |-> [x \in Keys |-> Hot(x)]]
-    /\ gen = [hres |-> "T", hrefs |-> MemRefs, pin |-> NoRoot, queue |-> {},
-              anchor |-> NoRoot, fork |-> NoFork, cells |-> {},
+    /\ head = [res |-> "T", refs |-> [x \in Keys |-> Hot(x)],
+               u |-> IF WithBuild THEN Hot(NKeys + 1) ELSE Mem]
+    /\ gen = [hres |-> "T", hrefs |-> MemRefs, hu |-> Mem, pin |-> NoRoot, queue |-> {},
+              anchor |-> NoRoot, fork |-> NoFork, build |-> NoRoot, cells |-> {},
               listed |-> {}, live |-> [p \in Packs |-> {}]]
     /\ packRows = [p \in Packs |-> <<>>]
     /\ files = {}
     /\ nextPack = 1
-    /\ nextStamp = NKeys + 1
+    /\ nextStamp = IF WithBuild THEN NKeys + 2 ELSE NKeys + 1
     /\ cursor = [p \in Packs |-> NoCursor]
     /\ snap = [on |-> FALSE, refs |-> MemRefs, leased |-> {}, w |-> 0]
     /\ export = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
+    /\ bld = NoBuild
     /\ acked = {}
     /\ pending = FALSE
     /\ fault = FALSE
@@ -132,38 +146,42 @@ Init ==
 -----------------------------------------------------------------------------
 \* Commits and Snapshots (between cuts).
 
+\* A hot Migrate holds `mut db` from staging to publish (§13.10a "Why not chunked
+\* publishing commits"), so no commit, Snapshot or pin runs during a build.
 Write(x) ==
-    /\ head.res = "T"
+    /\ head.res = "T" /\ ~bld.on
     /\ nextStamp <= MaxStamp
     /\ head' = [head EXCEPT !.refs[x] = Hot(nextStamp)]
     /\ nextStamp' = nextStamp + 1
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<gen, packRows, files, nextPack, cursor, snap, export, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<gen, packRows, files, nextPack, cursor, snap, export, bld, acked, pending, fault, crashes>>
 
 \* §13.5 holder leases: a Snapshot that reaches Cold slots leases its generation;
 \* AP16's Remove defers a pack while a lease names a generation that lists it.
+\* The build pin shares no page with main and is never promoted, so the build
+\* bound (WithBuild) leaves Snapshots out; the other bounds check them.
 Capture ==
-    /\ head.res = "T"
+    /\ head.res = "T" /\ ~bld.on /\ ~WithBuild
     /\ ~snap.on
     /\ snap' = [on |-> TRUE, refs |-> head.refs, leased |-> gen.listed, w |-> nextStamp]
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, bld, acked, pending, fault, crashes>>
 
 DropSnap ==
     /\ snap.on
     /\ snap' = [snap EXCEPT !.on = FALSE, !.leased = {}]
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, export, bld, acked, pending, fault, crashes>>
 
 \* Mutant ack_before_publish: `pin` answers before its cut publishes (§1.9 says the
 \* ticket is the cut's generation).
 RequestPin ==
     /\ Mutant = "ack_before_publish"
-    /\ snap.on /\ ~gen.pin.on /\ ~pending
+    /\ snap.on /\ ~gen.pin.on /\ ~pending /\ ~bld.on
     /\ pending' = TRUE
     /\ acked' = acked \cup {"s"}
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, bld, fault, crashes>>
 
 -----------------------------------------------------------------------------
 \* The cut. op is the holder change H; sel is a pack newly chosen for a
@@ -184,9 +202,20 @@ RequestPin ==
 \* `delete_branch` of the child: its Cold roots that no other holder shares go to
 \* the candidate queue as added rows (§13.6 "Deferred frees"), and the row goes
 \* with it (ghost rows are abstracted: the model has one branch id per queue row).
+\*
+\* op "build" is a build cut (§13.10a "Hot Tiered builds"): its only holder change
+\* sets the owner-3 build pin to the working map (ReplacePin over a listed pin, an
+\* orphan included, else AddPin), and T2 emits the map's Hot pages. The build then
+\* continues from the pin's tree as the cut published it. op "graft" is the publish:
+\* main's collection takes the working map, U takes main's current root (it is
+\* untouched: its plan slot equals the staging head's), the pin is dropped and the
+\* source's old Cold base is queued as released roots (§13.6a step 3). Pin frames
+\* the working map left out are then in neither main nor a pin. A cut that changes
+\* no holder ("plain") drops an orphan build pin (§3.5a "Orphans", v2.171). While a
+\* build runs, its cuts are the only cuts.
 
 Ops == {"plain", "pin", "unpin", "toMemory", "toTiered", "archive", "unarchive",
-        "fork", "unfork"}
+        "fork", "unfork", "build", "graft"}
 
 \* v2.164: the packs a Tiered-idle cut retires with probe_budget = 1. It takes
 \* listed class-3/4 packs in sequence order and finishes one it starts, so one
@@ -207,6 +236,7 @@ Cut(op, sel, dr, pg) ==
     /\ (op = "unarchive") => gen.anchor.on
     /\ (op = "fork") => (WithFork /\ ~gen.fork.on)
     /\ (op = "unfork") => gen.fork.on
+    /\ (op \in {"build", "graft"}) <=> bld.on
     /\ sel \in {0} \cup {p \in gen.listed : ~cursor[p].on}
     /\ (~pg => sel = 0)
     \* Only branch where the choice can matter: a skipped drain needs an installed
@@ -218,7 +248,16 @@ Cut(op, sel, dr, pg) ==
         hRes == CASE op = "toMemory" -> "M" [] op = "toTiered" -> "T" [] OTHER -> head.res
         hRefs0 == CASE op = "toMemory" -> MemRefs
                     [] op = "toTiered" -> [x \in Keys |-> Hot(nextStamp + x - 1)]
+                    [] op = "graft" -> bld.work
                     [] OTHER -> head.refs
+        \* U goes Memory with main. The graft takes U's current root; mutant
+        \* graft_stale_root takes the staging head's, which a build cut's probe may
+        \* have moved (review 3228 F3).
+        uRef0 == CASE op = "toMemory" -> Mem
+                   [] op = "graft" /\ Mutant = "graft_stale_root" -> bld.stage
+                   [] OTHER -> head.u
+        buildOn == CASE op = "build" -> TRUE [] op \in {"graft", "plain"} -> FALSE [] OTHER -> gen.build.on
+        buildRefs0 == IF op = "build" THEN bld.work ELSE gen.build.refs
         stampOut == IF op = "toTiered" THEN nextStamp + NKeys ELSE nextStamp
         pinOn == CASE op = "pin" -> TRUE [] op = "unpin" -> FALSE [] OTHER -> gen.pin.on
         pinW == IF op = "pin" THEN snap.w ELSE gen.pin.w
@@ -231,15 +270,18 @@ Cut(op, sel, dr, pg) ==
         forkW == IF op = "fork" THEN nextStamp ELSE gen.fork.w
         \* ---- the candidate queue's added rows (T8 step 3) ----
         \* §13.8: Tiered -> Memory hands the old Cold root to the queue.
-        addMem == IF op = "toMemory" THEN {r \in {head.refs[x] : x \in Keys} : r.k = "C"} ELSE {}
+        addMem == IF op = "toMemory" THEN {r \in {head.refs[x] : x \in Keys} \cup {head.u} : r.k = "C"} ELSE {}
+        \* The graft supersedes the source: its old Cold base goes to the queue.
+        addGraft == IF op = "graft" THEN {r \in {head.refs[x] : x \in Keys} : r.k = "C"} ELSE {}
         \* `delete_branch`: the child's released Cold roots no published holder shares.
-        keepRefs == {hRefs0[x] : x \in Keys}
+        keepRefs == {hRefs0[x] : x \in Keys} \cup {uRef0}
+                    \cup (IF buildOn THEN {buildRefs0[x] : x \in Keys} ELSE {})
                     \cup (IF pinOn THEN {gen.pin.refs[x] : x \in Keys} ELSE {})
                     \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
         addFork == IF op = "unfork"
                    THEN {r \in {gen.fork.refs[x] : x \in Keys} : r.k = "C" /\ r \notin keepRefs}
                    ELSE {}
-        added == addMem \cup addFork
+        added == addMem \cup addFork \cup addGraft
         qPart == gen.queue \cup added            \* installed rows plus this cut's added rows
         \* ---- Tiered-idle: a property of the generation this cut publishes ----
         \* §13.6 "Tiered-idle cuts": no holder root (branch head, pin, import pin)
@@ -256,6 +298,7 @@ Cut(op, sel, dr, pg) ==
                    /\ (Mutant # "idle_ignores_forks" => ~(forkOn /\ forkRes = "T"))
                    /\ queueEmpty
                    /\ ~anchorOn
+                   /\ ~buildOn
         v2164Idle == Rules = "v2164" /\ idleGen
         \* count3157 (and the restart reading) drop an idle-advanced cursor at a non-idle cut.
         resetIdle == Rules \in {"count3157", "v2157_restart"} /\ ~idleGen
@@ -283,7 +326,8 @@ Cut(op, sel, dr, pg) ==
                         LET r == snap.refs[x] IN
                         r.k = "C" /\ Found(r.s) = {} /\ r.p \notin gen.listed /\ r.p \notin files
         \* ---- T2: emit every Hot page of every published root into the fresh pack ----
-        roots1 == {hRefs0[x] : x \in Keys}
+        roots1 == {hRefs0[x] : x \in Keys} \cup {uRef0}
+                  \cup (IF buildOn THEN {buildRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF pinOn THEN {pinRefs1[x] : x \in Keys} ELSE {})
                   \cup (IF anchorOn THEN {anchorRefs0[x] : x \in Keys} ELSE {})
                   \cup (IF forkOn THEN {forkRefs0[x] : x \in Keys} ELSE {})
@@ -296,8 +340,11 @@ Cut(op, sel, dr, pg) ==
         pinRefs2 == [x \in Keys |-> Seal(pinRefs1[x])]
         anchorRefs2 == [x \in Keys |-> Seal(anchorRefs0[x])]
         forkRefs2 == [x \in Keys |-> Seal(forkRefs0[x])]
+        uRef2 == Seal(uRef0)
+        buildRefs2 == [x \in Keys |-> Seal(buildRefs0[x])]
         \* ---- AP16 item 3: one probe step (probe_budget = 1, shared in pack order) ----
-        named == {hRefs2[x] : x \in Keys}
+        named == {hRefs2[x] : x \in Keys} \cup {uRef2}
+                 \cup (IF buildOn THEN {buildRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF pinOn THEN {pinRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF anchorOn THEN {anchorRefs2[x] : x \in Keys} ELSE {})
                  \cup (IF forkOn THEN {forkRefs2[x] : x \in Keys} ELSE {})
@@ -318,6 +365,8 @@ Cut(op, sel, dr, pg) ==
         pinRefs3 == [x \in Keys |-> Move(pinRefs2[x])]
         anchorRefs3 == [x \in Keys |-> Move(anchorRefs2[x])]
         forkRefs3 == [x \in Keys |-> Move(forkRefs2[x])]
+        uRef3 == Move(uRef2)
+        buildRefs3 == [x \in Keys |-> Move(buildRefs2[x])]
         finishes == tp # 0 /\ row = Len(packRows[tp])
         idleRetired == IF pg /\ v2164Idle THEN IdleTake(gen.listed, cur0) ELSE {}
         \* ---- §13.6 "Deferred frees": drain one installed row this cut did not move ----
@@ -325,11 +374,13 @@ Cut(op, sel, dr, pg) ==
         drained == IF ~dr \/ eligible = {} THEN {} ELSE {CHOOSE r \in eligible : TRUE}
         queueOut == {Move(r) : r \in qPart} \ drained
         \* ---- accounting: `live` and cells are advisory (§13.6 "What drifts") ----
-        holderOut == {hRefs3[x] : x \in Keys}
+        holderOut == {hRefs3[x] : x \in Keys} \cup {uRef3}
+                     \cup (IF buildOn THEN {buildRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF pinOn THEN {pinRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF anchorOn THEN {anchorRefs3[x] : x \in Keys} ELSE {})
                      \cup (IF forkOn THEN {forkRefs3[x] : x \in Keys} ELSE {})
-        replaced == {r \in {gen.hrefs[x] : x \in Keys} : r.k = "C" /\ r \notin holderOut /\ r \notin added}
+        replaced == {r \in {gen.hrefs[x] : x \in Keys} \cup {gen.hu} :
+                        r.k = "C" /\ r \notin holderOut /\ r \notin added}
         killed == {r \in drained \cup replaced : r \notin holderOut}
         \* §13.6 "Filing a kill" against B_new: dead when no holder watermark is
         \* above the stamp, else into the newest holder's cell.
@@ -390,19 +441,32 @@ Cut(op, sel, dr, pg) ==
                 \cup (IF filedCells # {} THEN {"cellFiled"} ELSE {})
                 \cup (IF dropMoved # {} THEN {"cellMoved"} ELSE {})
                 \cup (IF idleGen /\ (pinOn \/ forkOn) /\ cellsOut # {} THEN {"idleHolderCells"} ELSE {})
+                \cup (IF op = "build" /\ matched /\ loc = uRef2 THEN {"buildMovesU"} ELSE {})
+                \cup (IF op = "graft" /\ \E r \in RootRefs(gen.build) : r.k = "C" /\ r \notin holderOut
+                      THEN {"graftLeavesPinFrame"} ELSE {})
+                \cup (IF op = "plain" /\ gen.build.on THEN {"orphanDropped"} ELSE {})
        IN
         /\ (needFresh => nextPack <= MaxPack)
         /\ (v2164Idle => sel = 0)
-        /\ gen' = [hres |-> hRes, hrefs |-> hRefs3,
+        /\ gen' = [hres |-> hRes, hrefs |-> hRefs3, hu |-> uRef3,
                    pin |-> IF pinOn THEN [on |-> TRUE, refs |-> pinRefs3, w |-> pinW] ELSE NoRoot,
                    queue |-> queueOut,
                    anchor |-> IF anchorOn THEN [on |-> TRUE, refs |-> anchorRefs3, w |-> 0] ELSE NoRoot,
                    fork |-> IF forkOn THEN [on |-> TRUE, w |-> forkW, res |-> forkRes, refs |-> forkRefs3]
                             ELSE NoFork,
+                   build |-> IF buildOn THEN [on |-> TRUE, refs |-> buildRefs3, w |-> 0] ELSE NoRoot,
                    cells |-> cellsOut,
-                   listed |-> (gen.listed \ retired) \cup (IF needFresh THEN {fresh} ELSE {}),
+                   \* Mutant build_unlisted: a build step's frames go into a pack outside the
+                   \* cut's list (lane 3220's live child_cut_tiered).
+                   listed |-> (gen.listed \ retired)
+                              \cup (IF needFresh /\ ~(Mutant = "build_unlisted" /\ op = "build")
+                                    THEN {fresh} ELSE {}),
                    live |-> live1]
-        /\ head' = [res |-> hRes, refs |-> hRefs3]
+        /\ head' = [res |-> hRes, refs |-> hRefs3, u |-> uRef3]
+        \* After a build cut the build continues from the pin's tree as published.
+        /\ bld' = CASE op = "build" -> [bld EXCEPT !.work = buildRefs3]
+                   [] op = "graft" -> NoBuild
+                   [] OTHER -> bld
         /\ packRows' = IF needFresh THEN [packRows EXCEPT ![fresh] = freshRows] ELSE packRows
         /\ files' = IF needFresh THEN files \cup {fresh} ELSE files
         /\ nextPack' = IF needFresh THEN nextPack + 1 ELSE nextPack
@@ -417,6 +481,40 @@ Cut(op, sel, dr, pg) ==
         /\ pending' = (IF op = "pin" THEN FALSE ELSE pending)
         /\ UNCHANGED <<snap, export, crashes>>
 -----------------------------------------------------------------------------
+\* A hot Tiered build between its cuts (§13.10a "Hot Tiered builds"). Staging keeps
+\* the head's map, so the untouched collection's staging root is remembered.
+BeginBuild ==
+    /\ WithBuild /\ ~bld.on /\ head.res = "T"
+    /\ bld' = [on |-> TRUE, work |-> MemRefs, stage |-> head.u]
+    /\ rewind' = "none" /\ ev' = {}
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, acked, pending, fault, crashes>>
+
+\* A build step writes target row x as a Hot page with a writer stamp (one stamp
+\* authority, v2.171), copying on write over the pin's tree.
+BuildWrite(x) ==
+    /\ bld.on /\ nextStamp <= MaxStamp
+    /\ bld' = [bld EXCEPT !.work[x] = Hot(nextStamp)]
+    /\ nextStamp' = nextStamp + 1
+    /\ rewind' = "none" /\ ev' = {}
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, cursor, snap, export, acked, pending, fault, crashes>>
+
+\* The working map leaves a pin frame out: a chain's intermediate collection or a
+\* scratch run that the next pin and the graft do not name.
+BuildDrop(x) ==
+    /\ bld.on /\ bld.work[x] # Mem
+    /\ bld' = [bld EXCEPT !.work[x] = Mem]
+    /\ rewind' = "none" /\ ev' = {}
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, acked, pending, fault, crashes>>
+
+\* Every error return forgets the build and publishes nothing; a listed build pin
+\* is now an orphan (§13.10a "Refusals").
+BuildAbort ==
+    /\ bld.on
+    /\ bld' = NoBuild
+    /\ rewind' = "none" /\ ev' = {}
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, export, acked, pending, fault, crashes>>
+
+-----------------------------------------------------------------------------
 \* AP16 Remove: delete a delisted pack's file once no lease names it.
 RemoveFile(p) ==
     /\ p \in files \ gen.listed
@@ -425,7 +523,7 @@ RemoveFile(p) ==
           /\ ~(export.on /\ p \in export.lease)
     /\ files' = files \ {p}
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, nextPack, nextStamp, cursor, snap, export, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, nextPack, nextStamp, cursor, snap, export, bld, acked, pending, fault, crashes>>
 
 \* §13.10a (v2.157, D-ZL-2): the export lease names every listed class-3/4 pack.
 BeginExport ==
@@ -435,30 +533,32 @@ BeginExport ==
                     ELSE gen.listed
        IN export' = [on |-> TRUE, lease |-> lease, listed |-> gen.listed, copied |-> FALSE, image |-> {}]
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, bld, acked, pending, fault, crashes>>
 
 \* The copy task copies each leased pack byte for byte while the store serves.
 CopyDone ==
     /\ export.on /\ ~export.copied
     /\ export' = [export EXCEPT !.copied = TRUE, !.image = export.lease \cap files]
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, bld, acked, pending, fault, crashes>>
 
 ReleaseExport ==
     /\ export.on /\ export.copied
     /\ export' = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
     /\ rewind' = "none" /\ ev' = {}
-    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, acked, pending, fault, crashes>>
+    /\ UNCHANGED <<head, gen, packRows, files, nextPack, nextStamp, cursor, snap, bld, acked, pending, fault, crashes>>
 
 \* Crash and reopen: writer memory is lost (cursors, Snapshots and their leases,
-\* the export attempt). Open removes every delisted pack (§3.5 step 5). The head's
-\* commits are in the journal and come back through replay (§13.7).
+\* the export attempt, a hot build; a listed build pin is an orphan). Open removes
+\* every delisted pack (§3.5 step 5). The head's commits are in the journal and come
+\* back through replay (§13.7).
 Crash ==
     /\ crashes < MaxCrash
     /\ crashes' = crashes + 1
     /\ cursor' = [p \in Packs |-> NoCursor]
     /\ snap' = [on |-> FALSE, refs |-> MemRefs, leased |-> {}, w |-> 0]
     /\ export' = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
+    /\ bld' = NoBuild
     /\ pending' = FALSE
     /\ files' = files \cap gen.listed
     /\ rewind' = "none" /\ ev' = {}
@@ -468,6 +568,9 @@ Next ==
     \/ \E x \in Keys : Write(x)
     \/ Capture
     \/ DropSnap
+    \/ BeginBuild
+    \/ \E x \in Keys : BuildWrite(x) \/ BuildDrop(x)
+    \/ BuildAbort
     \/ RequestPin
     \/ \E op \in Ops, sel \in {0} \cup Packs, dr \in BOOLEAN, pg \in BOOLEAN : Cut(op, sel, dr, pg)
     \/ \E p \in Packs : RemoveFile(p)
@@ -540,5 +643,8 @@ NoDrainSkipped      == "drainSkipped" \notin ev      \* the drain does not run (
 NoUnforkQueued      == "unforkQueued" \notin ev      \* delete_branch hands Cold roots to the queue
 NoCellFiled         == "cellFiled" \notin ev         \* a kill is filed into a holder cell
 NoCellMoved         == "cellMoved" \notin ev         \* a dropped boundary moves a cell down
+NoBuildMovesU       == "buildMovesU" \notin ev       \* a build cut's probe relocates untouched U
+NoGraftLeavesPinFrame == "graftLeavesPinFrame" \notin ev \* the graft leaves a pin frame unnamed
+NoOrphanDropped     == "orphanDropped" \notin ev     \* a holder-free cut drops an orphan build pin
 
 =============================================================================

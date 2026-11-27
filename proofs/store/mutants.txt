@@ -15,6 +15,8 @@ StoreRetention v2164 idle_predicts_drain   retention_fork   RetainReachable    r
 StoreRetention v2164 idle_keeps_cells      retention_fork   CellsListed        a Tiered-idle retirement keeps the retiring pack's lineage cells (review 3177 F3; §13.6 "Probe completion and retirement", T8 step 7)
 StoreRetention v2164 idle_selected_only    retention_fork   IdleProgress       an idle cut takes only packs a probe selected, v2.161 before review 3177 F2 (§13.6 "A Tiered-idle cut decides whole packs")
 StoreRetention v2164 idle_ignores_forks    retention_fork   RetainReachable    the idle predicate ignores a fork child whose head is Tiered (§13.6 "Tiered-idle cuts": every branch head)
+StoreRetention v2164 build_unlisted        retention_build  RetainReachable    a build step writes its frames into a pack outside the cut's list, as 3220's live child_cut_tiered did (§13.10a "Hot Tiered builds": no build writes a pack outside a cut)
+StoreRetention v2164 graft_stale_root      retention_build  RetainReachable    the graft publishes an untouched collection's staging-time root after a build cut's probe moved it (§13.10a "Re-base rule", review 3228 F3)
 StoreCatchUp   v2161 fold_superseded       catchup          HolderNoCorrupt    a demotion folds the reopened overlay into its empty root (§13.7 D-D7-5)
 StoreCatchUp   v2161 steps_after_tail      catchup          NoFalseCorrupt     catch-up applies a round's steps after its frames, not at their versions (§3.5a "Replay")
 StoreCatchUp   v2161 lease_drops_segments  catchup          InstallExact       the export lease keeps no segment a cut covered (§3.5a "Copy the tail")

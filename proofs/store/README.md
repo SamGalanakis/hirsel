@@ -77,14 +77,15 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 | `StoreRetention` v2164, fork row on, one key, one crash (run once by hand, not in the runner) | no error; 3,662,469 distinct states, depth 26, about 60 min |
 | `StoreRetention` v2164, export lease on (`--deep`) | not rerun since the v2.164 fold (1,403,440 distinct states under the v2161 model) |
 | `StoreRetention` v2164, anchors on, one key (`--deep`) | not rerun since the v2.164 fold (944,626 distinct states under the v2161 model) |
+| `StoreRetention` v2164, build pin on (`retention_build`) | no error; 302,662 distinct states, depth 23, about 4 min |
 | `StoreRetention` count3157 (3157's rejected rule) | no error; 633,996 distinct states, depth 23, about 10 min |
 | `StoreRetention` v2157 | `RetainReachable` violated: the 3160 hole (`traces/tiered-idle-v2157.txt`) |
 | `StoreRetention` v2157_restart | `Progress` violated (`traces/tiered-idle-v2157-restart.txt`) |
 | `StoreCatchUp` v2161 | no error; 577,192 distinct states, depth 15, about 7 s |
 | `StoreCatchUp` v2157 | `SupersedePremise`, `NoFalseCorrupt` and `BackfillNoneEmpty` violated: 3150 F1 (`traces/catchup-f1-*.txt`) |
 | `StoreJanitor` | no error; 229,799 distinct states, depth 19, 2 s |
-| Mutants | 17 of 17 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
-| Reachability witnesses | 11 of 11 reached on `retention_fork` with `Track = TRUE`, each in under 3 s |
+| Mutants | 19 of 19 caught under the current rules, each in under 3 s; `idle_predicts_drain` is review 3177 F1's broken reading (`traces/idle-predicts-drain-f1.txt`) |
+| Reachability witnesses | 14 of 14 reached with `Track = TRUE`, each in under 3 s: 11 on `retention_fork`, and 3 on `retention_build` (a build cut's probe moves U, the graft leaves a pin frame out, a holder-free cut drops an orphan pin) |
 | Python models (§3.9) | 7 of 7 pass; `model_v221_scope.py` takes about 28 s |
 | Whole default run | 1,030 s (shared host; the two retention baselines are most of it) |
 
@@ -109,29 +110,26 @@ demotion's step installs the empty root under that overlay, leaving the child's 
 TLC runs with several workers, so `--save-traces` can write a different shortest trace on another
 run.
 
-## Pending model change: the build pin (STORE-SPEC v2.169, amended v2.171)
+## The build pin (STORE-SPEC v2.169, amended v2.171)
 
-v2.169 (§13.10a "Hot Tiered builds") adds a holder that neither model has. It is an owner-3 pin of fresh Hot pages that is never promoted, emitted by its own cuts, and grafted onto main by one `ReplaceMain` cut that drops it. The abstraction above, where one Snapshot pin stands for every pin, does not cover it: the import pin's own graft is not modelled either. So under the standing rule, `StoreRetention.tla` changes before the M3b-S5b implementation lane starts (DESIGN-v2 §4.4a gate):
+§13.10a "Hot Tiered builds" adds a holder: an owner-3 `build` pin of fresh pages, never promoted, set by its own build cuts and grafted onto main by one `ReplaceMain` cut that drops it. `StoreRetention` models it under `WithBuild` (bound `retention_build`: one key of the built collection plus an untouched collection U, one crash; Snapshots are left out of this bound because the pin shares no page with main):
 - **Ops.**
-  - `build`: a cut whose only holder change sets the build pin to a root of fresh stamps it emits plus a subset of the previous pin's frames, since pin k + 1 is copy-on-write over pin k (v2.171, review 3228 F7).
-  - `graft`: one cut that sets main's head to the working map (a subset of the pin's frames plus fresh stamps the cut emits, v2.171, review 3228 F1), drops the pin, and queues main's old Cold base as released roots. Pin frames the graft leaves out (a replaced tail, a chain's intermediate collection, a scratch run) are in neither main nor a pin afterwards.
-  - The crash then reopen drops an orphan pin at the first holder-free cut.
-  - A second collection that the plan leaves untouched, so that a probe at a `build` cut can relocate it.
-- **Invariants.** The existing ones, unchanged: RetainReachable, SnapReadable, ImageComplete, AckedDurable, IdleReachesNoFrame, ProbeClaim, Progress, CellsListed, IdleProgress.
-- **Mutants**, each required to violate one of them:
-  - `graft_queues_pin`: the graft queues the pin's frames as released, so the drain retires frames main now names, which violates RetainReachable.
-  - `graft_stale_root`: the graft publishes the untouched collection's staging-time root after a `build` cut's probe moved it, which violates RetainReachable.
-  - `build_unlisted`: a `build` step writes its frames into a pack outside the cut's list (lane 3220's live `child_cut_tiered`). A crash then reopen removes the unlisted pack while the durable pin still names it, which violates RetainReachable.
-  - `build_replace_frees_shared`: a `build` that replaces the pin releases every frame of the old pin, including those the new pin still names, which violates RetainReachable (v2.171, review 3228 F7).
+  - `BeginBuild` keeps the staging head's root of U. `BuildWrite` writes a target row as a Hot page with a writer stamp, and `BuildDrop` leaves a pin frame out of the working map (a replaced tail, a chain's intermediate collection or a scratch run). `BuildAbort` is any error return: it forgets the build and leaves a listed pin as an orphan. No commit, Snapshot or pin runs during a build, because the call holds `mut db`.
+  - `build`: a cut whose only holder change sets the build pin to the working map, which is fresh stamps the cut emits plus a subset of the previous pin's frames (review 3228 F7). The build continues from the pin's tree as the cut published it, and the probe may relocate U and the pin's frames.
+  - `graft`: one cut that sets main's collection to the working map (review 3228 F1), gives U main's current root (untouched, so judged against the staging head), drops the pin and queues the source's old Cold base as released roots. Pin frames the graft leaves out are in neither main nor a pin afterwards.
+  - A crash forgets the build. A holder-free (`plain`) cut drops an orphan pin.
+- **Invariants.** The existing ones, unchanged. A listed build pin is a Tiered holder, so no generation that lists one is Tiered-idle.
+- **Mutants.** `build_unlisted` (3220's live `child_cut_tiered`) and `graft_stale_root` (review 3228 F3) are in `mutants.txt`, and RetainReachable catches each.
+- **Not model cases: release accounting.** 3231 listed two more mutants: `graft_queues_pin` (the graft queues the pin's frames as released) and `build_replace_frees_shared` (a `build` that replaces the pin releases every frame of the old pin, including those the new pin still names). Both survive the full `retention_build` bound, at 322,600 and 368,931 distinct states. In this model a durable frame is lost in only three ways: a probe finishes its pack while no participating root names the frame, a Tiered-idle cut takes its pack, or open removes an unlisted file. Queueing a frame adds a participating root, and the drain only files kills, which are advisory (D-ZL-1). So no §13.6 rule lets the drain retire a frame that main or a pin still names. Both mistakes are accounting drift (`live` and the cells), not loss, and no safety invariant can see them. L102 checks the build's accounting instead.
 - **`StoreCatchUp.tla` is unchanged.** The build pin exists only inside a hot `Migrate`, and the publish's lease step is `Drift`, so no catch-up round replays a hot build.
-- **Outside the model.** Hot pages and stamp counters are not modelled, so review 3228's F1 (a graft that drops the Hot tail) and F2 (split stamp counters) are L102 cases (`graft_installed_pin`, `plan_counter_rollback`), not mutants.
-- **Not a model case.** An orphan rule keyed on `import` alone keeps a crashed build's pin listed forever. That is a liveness failure, and the models check only safety, so L102 (c) catches it instead.
+- **Outside the model.** Hot pages and stamp counters are not modelled. So review 3228's F1 (a graft that drops the Hot tail) and F2 (split stamp counters) are L102 cases (`graft_installed_pin`, `plan_counter_rollback`), not mutants.
+- **Not a model case: liveness.** An orphan rule keyed on `import` alone would keep a crashed build's pin listed forever. That is a liveness failure, and the models check only safety, so L102 (c) catches it instead.
 
 ## What is abstracted
 
 - **One collection, small bounds.** `StoreRetention` has one Tiered collection of `NKeys` rows, one frame per row, a few stamps and packs, one crash. Pages, offsets, BLOB frames and the class-3/4 split are not modelled: a frame is a stamp at a PACK_INDEX row.
 - **Budgets of 1.** `probe_budget` and `FreeBudget` are 1 row per cut, so a probe spans cuts, which is where both holes live. Larger budgets change only the step count.
-- **Holders.** One pin name stands for every pin of a Snapshot (the import pin and `ImportPin` follow the same promotion and probe rules), and one live-head fork of main stands for the fork rows (its child's head is frozen at the fork). One Snapshot at a time. Anchors are optional (`WithAnchors`), and the export lease too (`WithExport`).
+- **Holders.** One pin name stands for every pin of a Snapshot (the import pin and `ImportPin` follow the same promotion and probe rules), and one live-head fork of main stands for the fork rows (its child's head is frozen at the fork). One Snapshot at a time. Anchors are optional (`WithAnchors`), and so are the export lease (`WithExport`) and the hot build's owner-3 `build` pin (`WithBuild`, above).
 - **Accounting.** `live` and the deadlists are advisory (D-ZL-1). The model keeps `live` and retires only by a finished probe or a Tiered-idle cut, so the mutant that retires on zero live shows why. Lineage cells are holder cells of main's chain, one per frame (`k` the holder watermark, the pack, the stamp), filed, dropped and relocated as §13.6 says; origin cells, `m` keys and byte counts are abstracted (a frame's stamp stands for its `m`). Fork ghost rows are abstracted: `unfork` removes the row with the child's head. Recount probes, `repair_cuts` and `compact_ratio` arithmetic are abstracted: any listed pack without a cursor may be selected at any cut.
 - **Reachability witnesses.** `ev` records what the last cut did. Baselines keep only the tag `IdleProgress` reads, so it adds no states. `check_proofs.py` reruns with `Track = TRUE` and requires TLC to violate each `No…` witness in the module, so each new behaviour (an idle retirement, of an unselected pack, of a pack with a cursor, of a pack with cells; an idle generation with a holder and cells; a dropped idle step; the drain emptying the queue at a non-idle cut; a skipped drain; `unfork` queueing roots; a filed and a moved cell) occurs.
 - **Cuts are atomic.** A cut is one action in §13.6a's order. A crash inside a cut is the state before the MANIFEST rename (§3.6), which equals no cut. The pre-rename durability steps are `python/model_v2.py`'s and `model_v29_refusal.py`'s job.

@@ -1,6 +1,8 @@
 //! Internal formatter entry used by the formatting gate; the user CLI lives in the driver.
 hirsel_guard::install!();
-use hirsel_core_syntax::{FormatAction, ParseMode, Symbols, format, format_files, parse_bytes};
+use hirsel_core_syntax::{
+    FormatAction, ParseMode, Symbols, format_files, format_verified, parse_bytes,
+};
 use std::{io::Write, path::PathBuf, process::ExitCode};
 fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut paths = vec![];
@@ -64,8 +66,9 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     let path = &paths[0];
     let bytes = std::fs::read(path)?;
-    let parsed = parse_bytes(&bytes, mode, &mut Symbols::default());
-    let Some(text) = format(&parsed) else {
+    let mut symbols = Symbols::default();
+    let parsed = parse_bytes(&bytes, mode, &mut symbols);
+    let Some(text) = format_verified(&parsed, mode, &mut symbols)? else {
         for d in &parsed.diagnostics {
             let (line, column) = position(&bytes, d.primary.start as usize);
             eprintln!(

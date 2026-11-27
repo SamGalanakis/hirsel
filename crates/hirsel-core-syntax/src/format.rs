@@ -12,24 +12,18 @@ pub fn format(parsed: &ParseOutput) -> Option<String> {
     if !parsed.diagnostics.is_empty() || parsed.resource_refusal.is_some() {
         return None;
     }
+    let file = &parsed.syntax;
+    let tokens = &file.tree.tokens;
+    let mut roles = default_roles(tokens.len());
     let mut out = String::new();
-    for item in parsed.syntax.items() {
+    for item in file.items() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&item_text(&item));
+        out.push_str(&item_text(&item, &mut roles));
     }
-    let start = parsed
-        .syntax
-        .tree
-        .tokens
-        .partition_point(|t| t.span.start < parsed.syntax.trailing_start);
-    let tokens = &parsed.syntax.tree.tokens[start..];
-    let tail = print(
-        &parsed.syntax.source,
-        tokens,
-        &vec![Role::default(); tokens.len()],
-    );
+    let start = tokens.partition_point(|t| t.span.start < file.trailing_start);
+    let tail = print(&file.source, &tokens[start..], &roles[start..]);
     out.push_str(&tail);
     Some(out)
 }
@@ -137,16 +131,31 @@ struct Role {
     inline_semicolon: bool,
 }
 
-fn item_text(item: &Item) -> String {
+fn default_roles(len: usize) -> Vec<Role> {
+    #[cfg(test)]
+    ROLE_SLOTS_INITIALIZED.with(|slots| slots.set(slots.get() + len));
+    vec![Role::default(); len]
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROLE_SLOTS_INITIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_role_slots_initialized() -> usize {
+    ROLE_SLOTS_INITIALIZED.with(|slots| slots.replace(0))
+}
+
+fn item_text(item: &Item, roles: &mut [Role]) -> String {
     let tree = &item.tree;
-    let mut roles = vec![Role::default(); tree.tokens.len()];
     for i in item.range.nodes.start as usize..item.range.nodes.end as usize {
         let node = &tree.nodes[i];
         let children = tree.children(NodeId(i as u32));
         let range = node.origin.tokens.start as usize..node.origin.tokens.end as usize;
         match node.kind {
             NodeKind::Block | NodeKind::Fields => {
-                indent_between(&mut roles, range.start, range.end - 1);
+                indent_between(roles, range.start, range.end - 1);
                 for &child in children {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -156,7 +165,7 @@ fn item_text(item: &Item) -> String {
                 let open = (subject.origin.tokens.end as usize..range.end)
                     .find(|&t| tree.tokens[t].kind == TokenKind::LBrace)
                     .unwrap();
-                indent_between(&mut roles, open, range.end - 1);
+                indent_between(roles, open, range.end - 1);
                 for &child in &children[1..] {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -216,7 +225,7 @@ fn item_text(item: &Item) -> String {
             }
             _ => continue,
         };
-        trailing_comma_list(tree, &mut roles, range.start, range.end - 1, entries);
+        trailing_comma_list(tree, roles, range.start, range.end - 1, entries);
     }
     print(
         item.text,

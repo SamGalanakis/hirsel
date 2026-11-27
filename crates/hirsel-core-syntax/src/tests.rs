@@ -1,3 +1,5 @@
+mod formatter;
+
 use super::*;
 fn parse(text: &str, mode: ParseMode) -> ParseOutput {
     crate::parse(text, mode, &mut Symbols::default())
@@ -67,31 +69,62 @@ fn formatter_canonical_blocks_lists_and_attributes() {
 }
 
 #[test]
-fn formatter_trailing_commas_break_lists() {
-    for (input, expected, mode) in [
-        (
-            "fn f(a:u64,b:u64,){g(a,b,);g(\na,b\n)}",
-            "fn f(\n    a: u64,\n    b: u64,\n) {\n    g(\n        a,\n        b,\n    );\n    g(a, b)\n}\n",
-            ParseMode::Source,
-        ),
-        (
-            "pub fn f[T,](a:fn(u64,u64,),b:Box[(T,),],)->(u64,u64,)",
-            "pub fn f[\n    T,\n](\n    a: fn(\n        u64,\n        u64,\n    ),\n    b: Box[\n        (\n            T,\n        ),\n    ],\n) -> (\n    u64,\n    u64,\n)\n",
-            ParseMode::Signatures,
-        ),
-        (
-            "fn f(){g(// first\n(1,2,), // pair\n// next\n[3,4,], // last\n)}",
-            "fn f() {\n    g(\n        // first\n        (\n            1,\n            2,\n        ), // pair\n        // next\n        [\n            3,\n            4,\n        ], // last\n    )\n}\n",
-            ParseMode::Source,
-        ),
-        (
-            "type Shape = Point(u64,u64,)\nfn f(s:Shape){match s{Point((x,y,),z,)=>g([x;2],z)}}",
-            "type Shape = Point(\n    u64,\n    u64,\n)\n\nfn f(s: Shape) {\n    match s {\n        Point(\n            (\n                x,\n                y,\n            ),\n            z,\n        ) => g([x; 2], z)\n    }\n}\n",
-            ParseMode::Source,
-        ),
-    ] {
-        assert_eq!(formatted(input, mode), expected, "{input}");
+fn formatter_editor_readiness() {
+    use crate::format::take_role_slots_initialized;
+    use std::fmt::Write;
+
+    let work = [4_000, 16_000].map(|items| {
+        let mut source = String::new();
+        for i in 0..items {
+            writeln!(source, "fn f{i}() {{}}\n").unwrap();
+        }
+        source.pop();
+        let parsed = parse(&source, ParseMode::Source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.syntax.items().count(), items);
+
+        take_role_slots_initialized();
+        assert_eq!(format(&parsed).as_deref(), Some(source.as_str()));
+        let tokens = parsed.syntax.tree.tokens.len();
+        let slots = take_role_slots_initialized();
+        eprintln!(
+            "{items} items, {} bytes, {tokens} tokens, {slots} role slots",
+            source.len()
+        );
+        (items, tokens, slots)
+    });
+    for (items, tokens, slots) in work {
+        assert!(
+            slots <= tokens,
+            "{items} items initialized {slots} role slots for {tokens} tokens"
+        );
     }
+
+    assert_eq!(
+        formatted(
+            "fn f(){let a=[1,2];a [0]}\r\n/// g\r\nfn g(){f([// open\r\n3, // entry\r\n], // close\r\n)}\r\n// tail",
+            ParseMode::Source,
+        ),
+        concat!(
+            "fn f() {\n    let a =[1, 2];\n    a[0]\n}\n\n",
+            "/// g\nfn g() {\n    f(\n        [\n            // open\n",
+            "            3, // entry\n        ], // close\n    )\n}\n// tail\n",
+        ),
+    );
+    assert_eq!(
+        formatted("pub fn f(x:u64)->u64", ParseMode::Foreign),
+        "pub fn f(x: u64) -> u64\n",
+    );
+    let mode = ParseMode::Foreign;
+    let mut symbols = Symbols::default();
+    let parsed = crate::parse("pub fn f(x:u64)->u64{1}", mode, &mut symbols);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == "FFI-2" && d.message == "a foreign function has no body")
+    );
+    assert_eq!(format_verified(&parsed, mode, &mut symbols).unwrap(), None);
 }
 
 #[test]
@@ -172,39 +205,6 @@ fn formatter_refuses_invalid_or_incomplete_source() {
     assert!(format(&parsed).is_none());
 }
 
-#[test]
-fn formatter_equivalence_refuses_candidate_that_changes_syntax_or_trivia() {
-    let mode = ParseMode::Source;
-    for (original, candidate, reason) in [
-        ("fn f() {}", "fn f() {", "did not parse cleanly"),
-        ("fn f() { 1 }", "fn f() { 2 }", "changed tokens or comments"),
-        (
-            "// written\nfn f() {}",
-            "// rewritten\nfn f() {}",
-            "changed tokens or comments",
-        ),
-        (
-            "fn f() { return\n(x) }",
-            "fn f() { return (x) }",
-            "changed the syntax tree",
-        ),
-        (
-            "fn f() {} /// doc\nfn g() {}",
-            "fn f() {}\n/// doc\nfn g() {}",
-            "changed item comment attachment",
-        ),
-    ] {
-        let original = parse(original, mode);
-        assert!(original.diagnostics.is_empty());
-        let error =
-            crate::format::verify_format(&original, candidate, mode, &mut Symbols::default())
-                .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("internal formatter error: formatted source {reason}")
-        );
-    }
-}
 fn good(text: &str) -> SyntaxFile {
     let p = parse(text, ParseMode::Source);
     assert_eq!(p.diagnostics, vec![], "{text}");

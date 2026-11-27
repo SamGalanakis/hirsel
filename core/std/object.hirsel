@@ -1368,12 +1368,16 @@ fn pool_loop(take setup: Pool) waits {
 
 type LaneMessage: send = Work(Job, Option[Sender[LaneEvent]]) | Ask(Job, Sender[Result[Value, Error]]) | Reap
 
-type LaneEvent: send = Finished(Reply) | LaneFailed
+// Ordinary calls share the channel `start` paid for. A call takes only the reply
+// with its ticket (unique per client) or its lane's failure; a cancelled call's
+// reply is discarded by later calls.
+type LaneEvent: send = Finished(Reply) | LaneFailed(u64)
 
 resource type LaneOutput: send {
+    lane: u64,
     tx: Sender[LaneEvent]
 } drop(output) {
-    let _ = channel.try_send(output.tx, LaneFailed)
+    let _ = channel.try_send(output.tx, LaneFailed(output.lane))
 }
 
 const REFRESH_WINDOW_MS: u64 = 300000
@@ -2097,6 +2101,7 @@ pub opaque type Requests: send {
     lane_bytes: u64,
     output: Receiver[LaneEvent],
     next: u64,
+    serial: u64,
     random: Random,
     entropy: Bytes,
     path: String,
@@ -2322,7 +2327,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
             list.push(mut send_credentials, take updates)
             Some(take notices)
         }
-        let events = match LaneOutput(tx: channel.sender(tx)) {
+        let events = match LaneOutput(lane: index, tx: channel.sender(tx)) {
             Ok(take output_handle) => take output_handle,
             Error(_) => return Error(TooLarge),
         }
@@ -2351,7 +2356,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
     let monitor = RequestMonitor(lanes: take reports, renewal: take renewal_report)
-    let requests = Requests(bucket: take bucket, simulated: false, proven: verified_loopback, lanes: take inputs, lane_bytes, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c, monitor: take monitor)
+    let requests = Requests(bucket: take bucket, simulated: false, proven: verified_loopback, lanes: take inputs, lane_bytes, output: take output, next: 0, serial: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c, monitor: take monitor)
     let lifetime = Workers(lanes: take workers, resolver: take resolver, renewal: take renewal)
     Ok(Client(requests: take requests, workers: Some(take lifetime)))
 }
@@ -2409,6 +2414,33 @@ fn receive(output: Receiver[LaneEvent]) -> Reply waits {
     }
 }
 
+// Anything queued when a call starts belongs to a call that stopped waiting.
+fn draw_tickets(mut c: Client, count: u64) -> u64 {
+    while let Ok(_) = channel.try_receive(c.requests.output) {}
+    let first = c.requests.serial
+    c.requests.serial += count
+    first
+}
+
+// A failure of a lane in `lane_lo .. lane_hi` may have taken a ticket's job.
+fn receive_ticket(c: Client, first: u64, count: u64, lane_lo: u64, lane_hi: u64) -> Reply waits {
+    loop {
+        match channel.receive(c.requests.output) {
+            Ok(Finished(take reply)) => {
+                if reply.ticket >= first && reply.ticket - first < count {
+                    return take reply
+                }
+            },
+            Ok(LaneFailed(lane)) => {
+                if lane >= lane_lo && lane < lane_hi {
+                    fail("object lane failed while owning a request")
+                }
+            },
+            Error(_) => fail("object lane failed while owning a request"),
+        }
+    }
+}
+
 fn next_lane(mut c: Client) -> u64 {
     let index = c.requests.next
     c.requests.next = (index + 1) % list.len(c.requests.lanes)
@@ -2417,9 +2449,12 @@ fn next_lane(mut c: Client) -> u64 {
 
 fn run(mut c: Client, take request: Job) -> Reply waits {
     let index = next_lane(mut c)
-    let mut reply = match submit(c.requests.lanes[index], index, take request) {
+    let ticket = draw_tickets(mut c, 1)
+    let mut job = take request
+    job.ticket = ticket
+    let mut reply = match submit(c.requests.lanes[index], index, take job) {
         Some(take result) => take result,
-        None => receive(c.requests.output),
+        None => receive_ticket(c, ticket, 1, index, index + 1),
     }
     c.requests.path = replace(mut reply.path, string.from(""))
     take reply
@@ -2563,7 +2598,7 @@ pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) ->
         list.push(mut queued, Some(take request))
         list.push(mut results, None)
     }
-    let replies = run_batch(c, take queued, streams)
+    let replies = run_batch(mut c, take queued, streams)
     let mut at = 0u64
     for take one in replies {
         let Reply(result: take status, data: take data, ..) = option.unwrap(take one)
@@ -2918,7 +2953,7 @@ fn first_error(mut current: Result[(), Error], take next: Error) {
     }
 }
 
-fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut replies: List[Option[Reply]], mut next: u64) -> bool waits {
+fn dispatch_next(c: Client, first: u64, lane_index: u64, mut jobs: List[Option[Job]], mut replies: List[Option[Reply]], mut next: u64) -> bool waits {
     while next < list.len(jobs) {
         let ticket = next
         next += 1
@@ -2926,7 +2961,7 @@ fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut re
             fail("object batch dispatched a job twice")
         }
         let mut request = take pending
-        request.ticket = ticket
+        request.ticket = first + ticket
         let returned = submit(c.requests.lanes[lane_index], lane_index, take request)
         if let Some(take reply) = take returned {
             let _ = list.set(mut replies, ticket, Some(take reply))
@@ -2937,25 +2972,27 @@ fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut re
     false
 }
 
-fn run_batch(c: Client, take queued: List[Option[Job]], streams: u64) -> List[Option[Reply]] waits {
+fn run_batch(mut c: Client, take queued: List[Option[Job]], streams: u64) -> List[Option[Reply]] waits {
     let mut jobs = take queued
+    let first = draw_tickets(mut c, list.len(jobs))
     let mut replies: List[Option[Reply]] = list.with_capacity(list.len(jobs))
     for _ in 0u64 .. list.len(jobs) {
         list.push(mut replies, None)
     }
     let mut next = 0u64
     let mut active = 0u64
-    for lane_index in 0u64 .. order.min(streams, order.min(list.len(c.requests.lanes), list.len(jobs))) {
-        if dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
+    let width = order.min(streams, order.min(list.len(c.requests.lanes), list.len(jobs)))
+    for lane_index in 0u64 .. width {
+        if dispatch_next(c, first, lane_index, mut jobs, mut replies, mut next) {
             active += 1
         }
     }
     while active > 0 {
-        let reply = receive(c.requests.output)
+        let reply = receive_ticket(c, first, list.len(jobs), 0, width)
         let lane_index = reply.lane
-        let ticket = reply.ticket
+        let ticket = reply.ticket - first
         let _ = list.set(mut replies, ticket, Some(take reply))
-        if !dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
+        if !dispatch_next(c, first, lane_index, mut jobs, mut replies, mut next) {
             active -= 1
         }
     }
@@ -2981,7 +3018,7 @@ pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns
         list.push(mut queued, Some(take request))
     }
     let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(c, take queued, list.len(c.requests.lanes))
+    let rv = run_batch(mut c, take queued, list.len(c.requests.lanes))
     let mut i = 0u64
     for take slot in rv {
         let Reply(result: take outcome, data: take data, ..) = option.unwrap(take slot)
@@ -3116,7 +3153,7 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
         list.push(mut queued, Some(take request))
     }
     let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(c, take queued, list.len(c.requests.lanes))
+    let rv = run_batch(mut c, take queued, list.len(c.requests.lanes))
     let mut i = 0u64
     for take slot in rv {
         let Reply(result: take part, data: take data, ..) = option.unwrap(take slot)

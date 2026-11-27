@@ -32,7 +32,15 @@ the same bucket and returns the previous one. The prefix only names keys:
 the credentials, endpoint and lanes stay the client's, and openers made
 earlier keep their prefix.
 
-`isolated_request` pre-encodes an object path for the supplied prefix and key. Use it with the client that prepared it. `fetch_isolated` and `store_if_isolated` send each request with its own reply channel, including during cancellation cleanup when the ordinary client receiver may still hold another reply. The supplied deadline covers queue admission and the reply. If it passes after the lane accepted the request, the lane owns the request storage and the prepared request expires. An isolated conditional PUT reports that outcome as uncertain. `ISOLATED_REPLY_BYTES` is the charge for one reply channel.
+Ordinary calls share one reply channel per client, paid for by `start`, so a
+call charges nothing to the caller's limit for its reply. Each request carries
+a ticket that never repeats on its client, and a call takes only the reply
+with its own ticket, or the failure of the lane holding its request. A call
+cancelled while a lane holds its request leaves that reply behind. A later call
+discards it, and discards anything still queued when it starts. A batch
+(`fetch_ranges`, `parts`, `fetch_parts`) draws one ticket per job.
+
+`isolated_request` pre-encodes an object path for the supplied prefix and key. Use it with the client that prepared it. `fetch_isolated` and `store_if_isolated` send each request with its own reply channel and use the pre-encoded storage instead of the client's path buffer, so cancellation cleanup can call them inside a finalizer grant. The supplied deadline covers queue admission and the reply. If it passes after the lane accepted the request, the lane owns the request storage and the prepared request expires. An isolated conditional PUT reports that outcome as uncertain. `ISOLATED_REPLY_BYTES` is the charge for one reply channel.
 
 `split` moves the request state and the worker lifetime out of a client.
 `Requests` can move to another task, where `attach(requests, None)` makes it a client again. On the opening task, pass the original Workers to `attach` to restore the split client.

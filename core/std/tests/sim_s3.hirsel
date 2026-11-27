@@ -489,6 +489,11 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
 }
 
 fn object_network_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16, address: Addr, take net_model: sim.net.Network, cut: Option[sim.s3.Cut]) -> (object.Client, Clock, Task[sim.s3.Report], Task[()]) waits {
+    let (take client, time, _, take server, take driver) = object_service_fixture(tasks, seed, tape, dialect, address, take net_model, cut, list.new())
+    (take client, time, take server, take driver)
+}
+
+fn object_service_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16, address: Addr, take net_model: sim.net.Network, cut: Option[sim.s3.Cut], take holds: List[sim.s3.Hold]) -> (object.Client, Clock, sim.s3.Endpoint, Task[sim.s3.Report], Task[()]) waits {
     let key = signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
     let mut faults: List[sim.s3.Fault] = list.with_capacity(16)
@@ -512,7 +517,7 @@ fn object_network_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16, a
     let mut scripts: List[List[u64]] = list.with_capacity(1)
     list.push(mut scripts, take words)
     let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
-    let config = sim.s3.Config(address, cut, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let config = sim.s3.Config(address, cut, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, holds: take holds, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
     let (world, time) = sim.world.new(seed, 0, 1369353600000)
     let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
     let (endpoint, server_task) = sim.s3.start_service(tasks, take config, take plan, time, 131072, 8388608)
@@ -521,7 +526,7 @@ fn object_network_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16, a
     let bucket = object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
     let credentials_set = cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
     let client = result.unwrap(object.start_simulated(endpoint, tasks, take bucket, take credentials_set, time, provide.random(seed), object.LaneConfig(requested_lanes: 0, lane_bytes: 1048576), 1000000000))
-    (take client, time, take server_task, take driver)
+    (take client, time, endpoint, take server_task, take driver)
 }
 
 // expect: run object_peer_fallback(tasks) = true
@@ -925,4 +930,67 @@ fn crash_drops_in_flight_put(tasks: Tasks) -> bool waits {
     let observed = result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
     crashed && written == Some(200) && missing == Some(404) && seen == Some(200) && !map.contains(observed.objects, "a") && has_saved(observed, "b", "payload")
+}
+
+type StaleReplyChild: send {
+    requests: object.Requests,
+    out: Sender[Bytes]
+}
+
+// The cleanup a cancelled call leaves behind: a finalizer that reads "b" on
+// the same client and reports the bytes it was answered with.
+resource type ReadsAfterCancel grant bytes 65536 {
+    client: object.Client,
+    out: Sender[Bytes]
+} drop(old) {
+    let (_, take seen) = object.fetch(mut old.client, "b", list.with_capacity(16), OBJECT_END)
+    let _ = channel.try_send(old.out, take seen)
+}
+
+fn stale_reply_child(take input: StaleReplyChild) waits {
+    let StaleReplyChild(requests: take requests, out: take out) = take input
+    let mut reader = result.unwrap(ReadsAfterCancel(client: object.attach(take requests, None), out: take out))
+    let _ = object.fetch(mut reader.client, "a", list.with_capacity(16), OBJECT_END)
+    fail("the held GET of a returned before its cancellation")
+}
+
+// A reply belongs to the call that issued its request. The child's GET of "a"
+// is held until the service sees the GET of "b", and "b" is held until 2 s, so
+// a's reply is ready first. The child is cancelled while its GET of "a" waits,
+// and its finalizer then reads "b" on the same client; it must be answered with
+// b's bytes, never with the cancelled call's reply.
+// expect: run cancelled_call_keeps_its_reply(tasks) = true
+fn cancelled_call_keeps_its_reply(tasks: Tasks) -> bool waits {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut net_model = sim.net.new(sim.net.defaults())
+    let mut ips: List[Ip] = list.with_capacity(1)
+    list.push(mut ips, address.ip)
+    sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take ips)
+    let mut holds: List[sim.s3.Hold] = list.with_capacity(2)
+    list.push(mut holds, sim.s3.Hold(method: "GET", key: "a", from: 1, count: 1, until: Requested("GET", "b", 1), then: Apply))
+    list.push(mut holds, sim.s3.Hold(method: "GET", key: "b", from: 1, count: 1, until: At(2000000000), then: Apply))
+    let (client, _, endpoint, server, driver) = object_service_fixture(tasks, 47, "0000000000000000", 412, address, take net_model, None, take holds)
+    let mut c = take client
+    let (wrote_a, _) = object.store(mut c, "a", string.into_bytes(string.from("alpha")), OBJECT_END)
+    let (wrote_b, _) = object.store(mut c, "b", string.into_bytes(string.from("bravo")), OBJECT_END)
+    let (take requests, take workers) = object.split(take c)
+    let (out, seen): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
+    let mut running = task.spawn(tasks, bytes 1048576, StaleReplyChild(requests: take requests, out: take out), stale_reply_child)
+    result.unwrap(sim.s3.requested(endpoint, "GET", "a", 1))
+    task.cancel(mut running)
+    let _ = task.join(take running)
+    let answered = channel.receive(seen)
+    let _ = take workers
+    let _ = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    let (Ok(_), Ok(_)) = (wrote_a, wrote_b) else {
+        fail("the fixture could not store a and b")
+    }
+    let Ok(got) = answered else {
+        fail("the finalizer's read of b sent no bytes")
+    }
+    if got == string.as_bytes("alpha") {
+        fail("the read of b took the cancelled call's reply for a")
+    }
+    got == string.as_bytes("bravo")
 }

@@ -56,9 +56,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 3150,
-    "raise_revision": 16,
-    "reason": "hardcoded-batch2-groupb-3083"
+    "lines": 3175,
+    "raise_revision": 17,
+    "reason": "std-object-stale-reply-3277"
   },
   "core/std/omap.hirsel": {
     "lines": 1398,

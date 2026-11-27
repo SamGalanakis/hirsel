@@ -140,6 +140,7 @@ fn startup_refusals(backend: Backend) {
         .unwrap();
     assert!(product.accepted());
     options.directories.clear();
+    options.grant_mask = 1 << 4;
     // MEM-19's logical task record and primary cause cell charge: 256 + 32.
     // These hand-derived boundary cases also prove that refusal is before main.
     for limit in [0, 287] {

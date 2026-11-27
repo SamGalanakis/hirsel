@@ -715,26 +715,27 @@ pub fn main() -> Result[(), Exit] {
         .unwrap();
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
     // Record runtimes use the release layout (FrameRecord is one pointer).
-    // Its owned Context, also repr(C): current, events, steps, run; the hash key,
-    // fast salt and strong key; two flags padded to a word; cancel_shield,
-    // finalizing, bound_depth, primary; causes; task_record; active_resource,
-    // host_files; isolates, step_bounds, step_slice_tail, regions, heap,
-    // frame_lists, spare_isolate_cell, foreign, contained, root_limit and
-    // root_refusal. Instances is a Vec on Linux and a unit struct on Apple.
+    // Context's first cache line holds current, events, steps, stack_limit,
+    // map_fast_salt, heap_heads and execution. Next come the two map keys,
+    // run and stack_floor, flags padded to a word, four state words, causes,
+    // task_record, two pointers, two Vecs, two step IDs, eight state words,
+    // contained instances (a Linux Vec) and the glue Vec.
     let instances = match crate::host::HOST_TARGET.os() {
         hirsel_core_layout::Os::Linux => 3 * 8,
         hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => 0,
     };
-    let context = 4 * 8 + (32 + 16 + 32) + 8 + 4 * 8 + 16 + 16 + 2 * 8 + 2 * 24 + 8 * 8 + instances;
-    // Four flags and polls_left; context pointer and owned Context; run and
-    // ready pointers; waiters, waiting_on and two wait links; timer; operation
-    // and four all/warm links; warm, channel tape and state padded; id.
-    let task_header = 8 + 8 + context + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8;
+    let context_fields: i64 = 64 + 2 * 32 + 2 * 8 + 8 + 4 * 8 + 2 * 16 + 2 * 8
+        + 2 * 24 + 2 * 8 + 8 * 8 + instances + 24;
+    let cache_aligned = |bytes: i64| (bytes + 63) / 64 * 64;
+    // Task's flags, polls_left and context pointer precede the aligned owned
+    // Context. Then run and ready, waiters and links, timer, operation and four
+    // all/warm links, warm/channel/state flags and id.
+    let task_header = 64 + cache_aligned(context_fields) + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8;
     // Group; stack; sp and body; input and result pointers; storage Layout;
     // TaskLayout. The root uses separate 16-byte input and 24-byte result stores.
     let task_entry = 24 + 24 + 16 + 2 * 8 + 16 + 64;
     let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8;
-    let task = task_header + task_entry + task_tail;
+    let task = cache_aligned(task_header + task_entry + task_tail);
     let retained = 16 + 56 + 16 + 24 + task + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
     let runtime_peaks = [

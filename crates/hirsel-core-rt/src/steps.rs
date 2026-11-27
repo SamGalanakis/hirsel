@@ -191,6 +191,9 @@ fn rewindow(context: &mut Context, change: impl FnOnce(&mut Context)) {
 
 /// Return the unspent window to the innermost account, keeping slice phase.
 fn flush(context: &mut Context) {
+    if context.steps < 0 {
+        return;
+    }
     rewindow(context, |context| {
         if let Some(current) = context.step_bounds.last() {
             let window = window_left(context);
@@ -208,10 +211,12 @@ fn draw(context: &mut Context) -> u64 {
     let window = s.available().min(context.step_slice_tail);
     s.left -= window;
     drop(s);
-    rewindow(context, |context| {
-        context.step_slice_tail -= window;
-        context.steps += window as i64;
-    });
+    if window != 0 {
+        rewindow(context, |context| {
+            context.step_slice_tail -= window;
+            context.steps += window as i64;
+        });
+    }
     window
 }
 

@@ -785,33 +785,26 @@ pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u64) -> Allocation {
-    // SAFETY: caller owns this context; no operation between selecting and
-    // consuming the free-list head can suspend or invoke a provider.
-    unsafe {
-        let task = &mut *context;
-        let Some(slot) = task.current.reusable_slot() else {
-            return limit_enter_refill(context, bytes);
-        };
+    // SAFETY: the running task owns this context.
+    scope_allocation(context, limit_enter(unsafe { &mut *context }, bytes))
+}
+
+#[inline]
+pub(crate) fn limit_enter(task: &mut Context, bytes: u64) -> Result<(), Capacity> {
+    let result = if let Some(slot) = task.current.reusable_slot() {
+        // No operation between selecting and consuming the slot can suspend
+        // on success. A refused admission does not consume the selected slot.
         let result = task.current.enter_reused(bytes, slot);
         if result.is_ok() {
             task.bound_depth = task.bound_depth.wrapping_add(1);
         }
-        #[cfg(feature = "prof")]
-        crate::mem_prof::byte_scope(task.limit_record().addr(), bytes, result.as_ref().err());
-        scope_allocation(context, result)
-    }
-}
-#[cold]
-unsafe extern "C" fn limit_enter_refill(context: *mut Context, bytes: u64) -> Allocation {
-    // SAFETY: this is the same task-exclusive entry with an empty record pool.
-    let result = unsafe { &mut *context }.limit_enter(bytes);
+        result
+    } else {
+        task.limit_enter(bytes)
+    };
     #[cfg(feature = "prof")]
-    crate::mem_prof::byte_scope(
-        unsafe { (*context).limit_record().addr() },
-        bytes,
-        result.as_ref().err(),
-    );
-    scope_allocation(context, result)
+    crate::mem_prof::byte_scope(task.limit_record().addr(), bytes, result.as_ref().err());
+    result
 }
 #[inline(always)]
 fn scope_allocation(context: *mut Context, result: Result<(), Capacity>) -> Allocation {

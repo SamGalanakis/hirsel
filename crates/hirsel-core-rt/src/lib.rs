@@ -174,7 +174,7 @@ pub struct Context {
     pub(crate) active_resource: *mut causes::Resource,
     pub(crate) host_files: *mut host_file::Files,
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
-    pub(crate) step_bounds: Vec<steps::Bound>,
+    pub(crate) step_bounds: steps::Bounds,
     /// This task's unspent step account ids ([`steps::Ids`]).
     pub(crate) step_ids: steps::Ids,
     #[cfg(feature = "testing")]
@@ -268,7 +268,7 @@ impl Context {
             current,
             events: 0,
             steps: steps::initial_unbounded_steps(),
-            step_bounds: Vec::new(),
+            step_bounds: steps::Bounds::default(),
             step_ids: steps::Ids::default(),
             heap_heads: std::ptr::null(),
             execution: run_stop::current_execution().map_or(std::ptr::null(), std::ptr::from_ref),

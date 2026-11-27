@@ -7,7 +7,8 @@ use crate::{
 pub const ISOLATE_CELL: u64 = 32;
 
 pub struct Reservation {
-    pub(crate) cell: Option<Box<Cell>>,
+    payer: crate::limit::ReservedPayer,
+    storage: Box<std::mem::MaybeUninit<Cell>>,
     pub(crate) saved: Causes,
     pub(crate) obligation: *mut causes::Resource,
     pub(crate) used: bool,
@@ -30,10 +31,13 @@ pub struct IsolateCatch {
     pub status: u8,
 }
 
-fn release_unused(context: &mut Context, cell: Option<Box<Cell>>) {
-    if context.spare_isolate_cell.is_none() {
-        context.spare_isolate_cell = cell.map(Cell::recycle);
-    }
+fn release_unused(
+    context: &mut Context,
+    payer: crate::limit::ReservedPayer,
+    storage: Box<std::mem::MaybeUninit<Cell>>,
+) {
+    payer.refund(&context.current);
+    context.spare_isolate_cell.get_or_insert(storage);
 }
 
 /// Reserve the isolate's cause cell. Refusal is a value and leaves the context
@@ -43,13 +47,12 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
     // SAFETY: the engine owns this task context exclusively at every runtime row.
     unsafe {
         let context = &mut *context;
-        let available = context.available();
-        let payer = match context.current.isolate_reserve(ISOLATE_CELL) {
+        let payer = match context.current.isolate_reserve() {
             Ok(payer) => payer,
-            Err(_) => {
+            Err(capacity) => {
                 return IsolateEnter {
                     entered: false,
-                    available,
+                    available: capacity.available,
                 };
             }
         };
@@ -58,7 +61,8 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
             .take()
             .unwrap_or_else(Box::new_uninit);
         let reservation = Reservation {
-            cell: Some(Box::write(storage, Cell::reserved(payer))),
+            payer,
+            storage,
             saved: std::mem::take(&mut context.causes),
             obligation: context.active_resource,
             used: false,
@@ -81,7 +85,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_leave(context: *mut Context) {
         let context = &mut *context;
         let reservation = context.isolates.pop().expect("isolate leave without enter");
         crate::stack::restore(context, reservation.stack_limit);
-        release_unused(context, reservation.cell);
+        release_unused(context, reservation.payer, reservation.storage);
         context.causes = reservation.saved;
     }
 }
@@ -93,7 +97,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
     // SAFETY: the handler is entered only after the body's cleanup completed.
     unsafe {
         let context = &mut *context;
-        let mut reservation = context.isolates.pop().expect("isolate catch without enter");
+        let reservation = context.isolates.pop().expect("isolate catch without enter");
         crate::stack::restore(context, reservation.stack_limit);
         let caught = std::mem::take(&mut context.causes);
         let cancelled = caught.iter().next().is_some_and(|cause| {
@@ -102,7 +106,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
                     && crate::steps::is_active(context, cause.message.data.addr() as u64))
         });
         if cancelled {
-            release_unused(context, reservation.cell);
+            release_unused(context, reservation.payer, reservation.storage);
             let mut restored = reservation.saved;
             restored.append_chain(caught);
             context.causes = restored;
@@ -117,17 +121,17 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
         }
         let used = reservation.used;
         if used {
-            let cell = reservation
-                .cell
-                .take()
-                .expect("used isolate without reservation cell");
+            let cell = Box::write(
+                reservation.storage,
+                Cell::reserved(reservation.payer.into_cell()),
+            );
             if context.active_resource.is_null() {
                 context.primary = Some(cell);
             } else {
                 (*context.active_resource).cell = Some(cell);
             }
         } else {
-            release_unused(context, reservation.cell);
+            release_unused(context, reservation.payer, reservation.storage);
         }
         context.causes = reservation.saved;
         IsolateCatch {

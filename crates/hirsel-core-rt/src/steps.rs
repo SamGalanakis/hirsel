@@ -21,8 +21,12 @@
 //! accumulates for settlement at close, but cannot fund another step.
 use crate::{Context, causes};
 use hirsel_core_ids::work_steps::Work;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+
+mod account;
+pub(crate) use account::{Account, Bound, Bounds};
+use account::{Balance, promote, release};
 
 pub const UNBOUNDED: i64 = 1 << 62;
 /// EMB-3: in contained/embed mode, tasks without an explicit `bound steps`
@@ -69,25 +73,6 @@ pub(crate) fn initial_unbounded_steps() -> i64 {
         EMBED_QUANTUM
     } else {
         UNBOUNDED
-    }
-}
-
-pub(crate) struct Account {
-    id: u64,
-    /// The account this one returns its credit to; a helper's root has none.
-    parent: Option<Arc<Account>>,
-    state: Mutex<State>,
-}
-
-struct State {
-    left: u64,
-    interest: u32,
-    exhausted: bool,
-}
-
-impl State {
-    fn available(&self) -> u64 {
-        if self.exhausted { 0 } else { self.left }
     }
 }
 
@@ -154,48 +139,6 @@ pub unsafe extern "C" fn hirsel_core_test_step_report(
     steps
 }
 
-impl Account {
-    fn open(ids: &mut Ids, left: u64, parent: Option<Arc<Account>>) -> Arc<Self> {
-        Arc::new(Self {
-            id: ids.take(),
-            parent,
-            state: Mutex::new(State {
-                left,
-                interest: 1,
-                exhausted: false,
-            }),
-        })
-    }
-
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-/// Drop one interest in `account`; the last closes it and passes its credit
-/// to its funder. Returns a closed root's unused credit.
-fn release(account: &Arc<Account>) -> Option<u64> {
-    let mut account = account.clone();
-    loop {
-        let left = {
-            let mut s = account.state();
-            s.interest -= 1;
-            if s.interest != 0 {
-                return None;
-            }
-            s.left
-        };
-        let Some(parent) = account.parent.clone() else {
-            return Some(left);
-        };
-        parent.state().left += left;
-        account = parent;
-    }
-}
-
-/// One participation in an account.
-pub(crate) struct Bound(Arc<Account>);
-
 fn window_left(context: &Context) -> u64 {
     context.steps.max(0) as u64
 }
@@ -221,9 +164,9 @@ fn flush(context: &mut Context) {
         return;
     }
     rewindow(context, |context| {
-        if let Some(current) = context.step_bounds.last() {
-            let window = window_left(context);
-            current.0.state().left += window;
+        let window = window_left(context);
+        if let Some(current) = context.step_bounds.last_mut() {
+            current.with_balance(|b| b.left += window);
             context.step_slice_tail += window;
             context.steps -= window as i64;
         }
@@ -232,11 +175,12 @@ fn flush(context: &mut Context) {
 
 /// Lend the running fiber the rest of its slice the innermost account funds.
 fn draw(context: &mut Context) -> u64 {
-    let current = context.step_bounds.last().expect("a step account");
-    let mut s = current.0.state();
-    let window = s.available().min(context.step_slice_tail);
-    s.left -= window;
-    drop(s);
+    let current = context.step_bounds.last_mut().expect("a step account");
+    let window = current.with_balance(|b| {
+        let window = b.available().min(context.step_slice_tail);
+        b.left -= window;
+        window
+    });
     if window != 0 {
         rewindow(context, |context| {
             context.step_slice_tail -= window;
@@ -248,21 +192,23 @@ fn draw(context: &mut Context) -> u64 {
 
 /// The fiber is leaving the CPU: it holds no credit while it does not run.
 pub(crate) fn suspend(context: &mut Context) {
-    flush(context);
+    if matches!(context.step_bounds.last(), Some(Bound::Shared(_))) {
+        flush(context);
+    }
 }
 
 pub(crate) fn remaining(context: &Context) -> Option<u64> {
     context
         .step_bounds
         .last()
-        .map(|current| current.0.state().available() + window_left(context))
+        .map(|current| current.available() + window_left(context))
 }
 
 /// A same-unit child participates in the spawner's innermost account.
-pub(crate) fn share(child: &mut Context, parent: &Context) {
-    if let Some(current) = parent.step_bounds.last() {
-        current.0.state().interest += 1;
-        child.step_bounds.push(Bound(current.0.clone()));
+pub(crate) fn share(child: &mut Context, parent: &mut Context) {
+    if let Some(account) = promote(&mut parent.step_bounds) {
+        account.participate();
+        child.step_bounds.push(Bound::Shared(account));
         child.step_slice_tail = SLICE;
         child.steps = 0;
     }
@@ -271,12 +217,8 @@ pub(crate) fn share(child: &mut Context, parent: &Context) {
 /// A flow stage's private copy of the wiring task's remaining steps (MEM-30).
 pub(crate) fn copy(stage: &mut Context, parent: &Context) {
     if let Some(left) = remaining(parent) {
-        stage
-            .step_bounds
-            .push(Bound(Account::open(&mut stage.step_ids, left, None)));
         stage.step_slice_tail = SLICE;
-        stage.steps = 0;
-        draw(stage);
+        open_inline(stage, left);
     }
 }
 
@@ -284,11 +226,11 @@ pub(crate) fn copy(stage: &mut Context, parent: &Context) {
 /// account the handle keeps open until it settles.
 pub(crate) fn grant(context: &mut Context) -> Option<(Arc<Account>, u64)> {
     flush(context);
-    let donor = context.step_bounds.last()?.0.clone();
+    let donor = promote(&mut context.step_bounds)?;
     let grant = {
         let mut s = donor.state();
-        let grant = s.available() / 2;
-        s.left -= grant;
+        let grant = s.balance.available() / 2;
+        s.balance.left -= grant;
         s.interest += 1;
         grant
     };
@@ -299,8 +241,9 @@ pub(crate) fn grant(context: &mut Context) -> Option<(Arc<Account>, u64)> {
 /// A helper's root context starts with its private grant, the account
 /// returned to read its residual once the helper's unit is done.
 pub(crate) fn install_grant(context: &mut Context, grant: Option<u64>) -> Option<Arc<Account>> {
-    let account = Account::open(&mut context.step_ids, grant?, None);
-    context.step_bounds.push(Bound(account.clone()));
+    let left = grant?;
+    let account = Account::new(context.step_ids.take(), Balance::new(left), None);
+    context.step_bounds.push(Bound::Shared(account.clone()));
     context.step_slice_tail = SLICE;
     context.steps = 0;
     draw(context);
@@ -311,21 +254,21 @@ pub(crate) fn install_grant(context: &mut Context, grant: Option<u64>) -> Option
 /// a participant still holds is not returned.
 pub(crate) fn residual(root: &Account) -> u64 {
     let s = root.state();
-    if s.interest == 0 { s.left } else { 0 }
+    if s.interest == 0 { s.balance.left } else { 0 }
 }
 
 /// The owner consumed or abandoned a helper's handle: its residual goes to the
 /// donor once, and the handle's interest goes.
 pub(crate) fn settle(donor: Arc<Account>, residual: u64) {
-    donor.state().left += residual;
-    release(&donor);
+    donor.state().balance.left += residual;
+    release(donor);
 }
 
 /// A task ended: its interest in each account still on its stack.
 pub(crate) fn end(context: &mut Context) {
     flush(context);
-    while let Some(Bound(account)) = context.step_bounds.pop() {
-        release(&account);
+    while let Some(bound) = context.step_bounds.pop() {
+        bound.close(0, context.step_bounds.last_mut());
     }
     context.steps = initial_unbounded_steps();
 }
@@ -335,22 +278,26 @@ pub(crate) fn end(context: &mut Context) {
 pub(crate) fn shares(a: &Context, b: &Context) -> bool {
     a.step_bounds
         .iter()
-        .any(|x| b.step_bounds.iter().any(|y| Arc::ptr_eq(&x.0, &y.0)))
+        .any(|x| b.step_bounds.iter().any(|y| x.id() == y.id()))
 }
 
 pub(crate) fn is_active(context: &Context, id: u64) -> bool {
-    context.step_bounds.iter().any(|bound| bound.0.id == id)
+    context.step_bounds.iter().any(|bound| bound.id() == id)
 }
 
-fn leave(context: &mut Context) {
+pub(crate) fn leave(context: &mut Context) {
     #[cfg(feature = "prof")]
     if let Some(left) = remaining(context) {
         crate::mem_prof::step_remaining(left);
         crate::mem_prof::scope_exit(1);
     }
-    flush(context);
-    let Bound(account) = context.step_bounds.pop().expect("an open step scope");
-    release(&account);
+    let window = window_left(context);
+    rewindow(context, |context| {
+        context.step_slice_tail += window;
+        context.steps -= window as i64;
+        let bound = context.step_bounds.pop().expect("an open step scope");
+        bound.close(window, context.step_bounds.last_mut());
+    });
     if context.step_bounds.is_empty() {
         context.steps = initial_unbounded_steps();
     } else {
@@ -381,37 +328,48 @@ pub unsafe extern "C" fn hirsel_core_step_enter_at(
         .as_mut()
         .and_then(|obs| obs.inject.take())
         .unwrap_or(steps);
-    let parent = context.step_bounds.last().map(|b| b.0.clone());
-    if let Some(current) = &parent {
+    if !context.step_bounds.is_empty() {
         flush(context);
-        let mut s = current.state();
-        if s.available() < steps {
+        let current = context.step_bounds.last_mut().unwrap();
+        let admitted = current.with_balance(|b| {
+            if b.available() < steps {
+                #[cfg(feature = "prof")]
+                crate::mem_prof::step_remaining(b.available());
+                return false;
+            }
+            b.left -= steps;
+            #[cfg(feature = "prof")]
+            crate::mem_prof::step_remaining(b.left);
+            true
+        });
+        if !admitted {
             #[cfg(feature = "testing")]
             if let Some(obs) = &mut context.step_observation {
                 obs.refusal.get_or_insert(_site);
             }
             #[cfg(feature = "prof")]
-            {
-                crate::mem_prof::step_remaining(s.available());
-                crate::mem_prof::scope_enter(1, 0, steps, true);
-            }
-            drop(s);
+            crate::mem_prof::scope_enter(1, 0, steps, true);
             draw(context);
             return false;
         }
-        s.left -= steps;
-        s.interest += 1;
-        #[cfg(feature = "prof")]
-        crate::mem_prof::step_remaining(s.left);
-    } else {
-        context.steps = 0;
     }
-    let account = Account::open(&mut context.step_ids, steps, parent);
-    context.step_bounds.push(Bound(account));
-    draw(context);
+    open_inline(context, steps);
     #[cfg(feature = "prof")]
     crate::mem_prof::scope_enter(1, 0, steps, false);
     true
+}
+
+/// Install the first window directly. Only a published account needs a lock.
+fn open_inline(context: &mut Context, steps: u64) {
+    let window = steps.min(context.step_slice_tail);
+    rewindow(context, |context| {
+        context.step_bounds.push(Bound::Inline {
+            id: context.step_ids.take(),
+            balance: Balance::new(steps - window),
+        });
+        context.step_slice_tail -= window;
+        context.steps = window as i64;
+    });
 }
 
 /// # Safety
@@ -428,7 +386,7 @@ pub unsafe extern "C" fn hirsel_core_step_leave(context: *mut Context) {
 pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
     // SAFETY: the caller owns this task and an entered scope.
     let context = unsafe { &mut *context };
-    let id = context.step_bounds.last().expect("an open step scope").0.id;
+    let id = context.step_bounds.last().expect("an open step scope").id();
     let caught = context.causes.iter().next().is_some()
         && context
             .causes
@@ -548,9 +506,9 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
         if let Some(obs) = &mut ctx.step_observation {
             obs.refusal.get_or_insert(site);
         }
-        let current = ctx.step_bounds.last().unwrap();
-        current.0.state().exhausted = true;
-        let id = current.0.id;
+        let current = ctx.step_bounds.last_mut().unwrap();
+        current.with_balance(|b| b.exhausted = true);
+        let id = current.id();
         #[cfg(feature = "prof")]
         crate::mem_prof::step_refused();
         ctx.steps = 0;
@@ -567,6 +525,33 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
 mod tests {
     use super::*;
 
+    #[test]
+    fn nested_spawn_refunds_only_after_the_last_participant() {
+        let mut parent = Context::new(4096);
+        let mut child = Context::new(4096);
+        // SAFETY: each charged step runs with exclusive access to its task.
+        unsafe {
+            assert!(hirsel_core_step_enter(&mut parent, 100));
+            assert!(take_many(&mut parent, 7, 1));
+            assert!(hirsel_core_step_enter(&mut parent, 60));
+            assert!(take_many(&mut parent, 9, 2));
+            let id = parent.step_bounds.last().unwrap().id();
+            share(&mut child, &mut parent);
+            assert!(is_active(&child, id));
+            suspend(&mut parent);
+            assert!(take_many(&mut child, 11, 3));
+            suspend(&mut child);
+            leave(&mut parent);
+            assert_eq!(remaining(&parent), Some(33));
+            let (donor, half) = grant(&mut child).unwrap();
+            assert_eq!(half, 20);
+            end(&mut child);
+            assert_eq!(remaining(&parent), Some(33));
+            settle(donor, half - 3);
+            assert_eq!(remaining(&parent), Some(70));
+        }
+    }
+
     /// A caught `OutOfTime` names its account by id, so two accounts that are
     /// ever open in one process never share one, whichever tasks opened them and
     /// however many ranges those tasks went through.
@@ -582,7 +567,7 @@ mod tests {
                             // SAFETY: this thread owns the context.
                             unsafe {
                                 assert!(hirsel_core_step_enter(&mut context, 1));
-                                let id = context.step_bounds.last().unwrap().0.id;
+                                let id = context.step_bounds.last().unwrap().id();
                                 hirsel_core_step_leave(&mut context);
                                 id
                             }

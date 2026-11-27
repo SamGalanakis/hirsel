@@ -26,25 +26,25 @@ pub unsafe extern "C" fn hirsel_core_contain_enter(
 ) -> Entered {
     // SAFETY: each entry is called under the contract of its own row.
     unsafe {
-        let limit = || {
-            let entered = abi::hirsel_core_limit_enter(context, bytes);
-            (!entered.pointer.is_null(), entered.capacity.available)
-        };
         if order == 0 {
-            let (admitted, room) = limit();
-            if !admitted {
-                return Entered { layers: 0, room };
+            if let Err(capacity) = abi::limit_enter(&mut *context, bytes) {
+                return Entered {
+                    layers: 0,
+                    room: capacity.available,
+                };
             }
             let layers = 1 + u64::from(steps::hirsel_core_step_enter_at(context, steps, site));
-            Entered { layers, room }
+            Entered { layers, room: 0 }
         } else {
             if !steps::hirsel_core_step_enter_at(context, steps, site) {
                 return Entered { layers: 0, room: 0 };
             }
-            let (admitted, room) = limit();
-            Entered {
-                layers: 1 + u64::from(admitted),
-                room,
+            match abi::limit_enter(&mut *context, bytes) {
+                Ok(()) => Entered { layers: 2, room: 0 },
+                Err(capacity) => Entered {
+                    layers: 1,
+                    room: capacity.available,
+                },
             }
         }
     }
@@ -61,8 +61,8 @@ pub unsafe extern "C" fn hirsel_core_contain_leave(context: *mut Context, mut la
         // SAFETY: each entry is called under the contract of its own row.
         unsafe {
             match layers & 15 {
-                1 => abi::hirsel_core_limit_exit(context),
-                2 => steps::hirsel_core_step_leave(context),
+                1 => (*context).limit_exit(),
+                2 => steps::leave(&mut *context),
                 3 => isolate::hirsel_core_isolate_leave(context),
                 layer => panic!("contain leave layer {layer}"),
             }

@@ -5,7 +5,7 @@ use crate::Context;
 /// The one cross-task memory path. Spawn has admitted record + cell + result +
 /// reservation as one charge. Neither attaching nor hand-over admits again.
 pub(crate) fn task_child(
-    parent: *const Context,
+    parent: *mut Context,
     record: &mut crate::block::Block,
     bytes: u64,
     task: u64,
@@ -23,7 +23,7 @@ pub(crate) fn task_child(
     }
     context.primary = Some(crate::causes::Cell::prepaid(primary));
     // SAFETY: the running parent owns its step accounts (MEM-30: shared).
-    crate::steps::share(&mut context, unsafe { &*parent });
+    crate::steps::share(&mut context, unsafe { &mut *parent });
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
     // SAFETY: the immutable key was set before the parent started.

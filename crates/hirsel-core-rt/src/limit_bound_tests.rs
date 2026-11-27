@@ -412,7 +412,7 @@ fn a_frame_charge_returns_to_its_limit_after_a_scope_outranks_the_body_record() 
     ctx.limit_enter(4096).unwrap();
     let scope = ctx.current.payer.get();
     let result = Block::new(&ctx, Some(16), 16, 8).unwrap();
-    ctx.current.isolate_reserve(32).unwrap().finish_reserved(32);
+    ctx.current.isolate_reserve().unwrap().refund(&ctx.current);
     ctx.limit_exit();
     assert!(ctx.current.payer.get() == scope, "the scope's record leads");
     // SAFETY: the same body returns the 48 bytes it admitted.

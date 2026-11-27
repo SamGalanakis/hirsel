@@ -7,6 +7,8 @@
 use crate::Capacity;
 #[path = "limit_admit.rs"]
 mod admit;
+mod isolate;
+pub(crate) use isolate::ReservedPayer;
 #[path = "limit_refunds.rs"]
 mod refunds;
 use refunds::{Inbox, Post, Queue, Remote, closed};
@@ -686,30 +688,6 @@ impl Payer {
             payer: Cell::new(payer),
         }
     }
-
-    /// Hand a reservation's record over to the scope it leads to, returning the
-    /// cell's charge with it. The record is its own root until this handover
-    /// and its cell is its only charge, so the charge goes back to the record's
-    /// balance and the merge hands it to the live limit together with the unused
-    /// bytes (MEM-20), whichever task drops the cell: never to the inbox of the
-    /// task that reserved it, which may have ended.
-    pub(crate) fn finish_reserved(self, charge: u64) {
-        // SAFETY: the cell owns this unmerged record; no other handle charges it.
-        unsafe {
-            let r = &mut *self.local();
-            debug_assert!((*self.links()).parent.is_none() && r.outstanding == charge);
-            r.available += charge;
-            r.outstanding = 0;
-        }
-        let funding = Funding {
-            payer: Cell::new(self),
-        };
-        // The hand-over merges the record or leaves a prepaid queue pin for
-        // the recipient. The reservation cell releases its own pin in either case.
-        funding.end();
-        funding.payer.get().forest().release(self);
-        std::mem::forget(funding);
-    }
 }
 /// Safe task-local scope handle. Allocations retain bytes, never these handles.
 #[repr(C)]
@@ -718,28 +696,6 @@ pub struct Funding {
     pub(crate) payer: Cell<Payer>,
 }
 impl Funding {
-    /// Reserve an isolate cell without replacing the context's current scope.
-    /// The returned payer is a child record whose charge is later installed in
-    /// an obligation or refunded and merged back into this scope.
-    ///
-    /// Unlike `enter`, the context keeps its own pin on this scope, so the
-    /// record's parent edge takes a pin of its own: the cell may outlive the
-    /// scope (a caught failure's replacement cell lives until the task's
-    /// Context drops), and the merge releases that edge when the cell finishes.
-    pub(crate) fn isolate_reserve(&mut self, bytes: u64) -> Result<Payer, Capacity> {
-        let live = self.reserve_scope(bytes)?;
-        let domain = unsafe { self.payer.get().0.as_ref().domain };
-        let forest = unsafe { &mut *domain.as_ref().forest.get() };
-        forest.retain(self.payer.get());
-        let payer = forest.take(domain, live);
-        unsafe {
-            let record = &mut *payer.local();
-            record.available = 0;
-            record.outstanding = bytes;
-        }
-        Ok(payer)
-    }
-
     pub fn root(capacity: u64) -> Self {
         let owner = crate::tasks::current_id();
         let mut remote = Remote::new();

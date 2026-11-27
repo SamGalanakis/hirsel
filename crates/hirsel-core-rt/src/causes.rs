@@ -7,10 +7,7 @@ use crate::{
     limit::{Funding, Payer},
 };
 use hirsel_core_layout::charge;
-use std::{
-    mem::{ManuallyDrop, MaybeUninit},
-    ptr,
-};
+use std::{mem::ManuallyDrop, ptr};
 
 pub const OVERFLOW: u8 = 0;
 pub const BOUNDS: u8 = 1;
@@ -136,15 +133,6 @@ impl Cell {
             cause: Cause::default(),
             next: ptr::null_mut(),
         }
-    }
-
-    pub(crate) fn recycle(cell: Box<Self>) -> Box<MaybeUninit<Self>> {
-        // SAFETY: both boxes own the same allocation with the same layout.
-        let mut storage = unsafe { Box::from_raw(Box::into_raw(cell).cast::<MaybeUninit<Self>>()) };
-        // SAFETY: the cell is still initialized. Its destructor settles the
-        // old payer before this allocation can be used for a new reservation.
-        unsafe { storage.as_mut_ptr().drop_in_place() };
-        storage
     }
 
     pub(crate) fn startup(funding: Payer) -> Box<Self> {

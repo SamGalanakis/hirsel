@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "scope": "Linux installation prefix (//:hirsel-toolchain): every shipped file is classified by `files`. Crate inventories are link inputs (Rust and bundled C/assembly, before dead-code elimination) of the compiler and the runtime archive; build scripts and proc-macro executables are build tools, not linked libraries. Native libraries are the llvm-23.lock pins, with the notices of the source tree they are built from and of the C and C++ runtimes they link statically. Upstream library notices can conservatively cover other targets.",
+  "scope": "Linux installation prefix (//:hirsel-toolchain): every shipped file is classified by `files`. Crate inventories are link inputs (Rust and bundled C/assembly, before dead-code elimination) of the compiler, runtime archive and Exec helper. Build scripts and proc-macro executables are build tools, not linked libraries. Native libraries are the llvm-23.lock pins, with the notices of the source tree they are built from and of the C and C++ runtimes they link statically. Upstream library notices can conservatively cover other targets.",
   "files": {
     "hirsel": {
       "crates": "root//:hirsel-core-driver-bin-hirsel",
@@ -11,6 +11,11 @@
       "crates": "root//:hirsel-core-rt-archives",
       "package": "hirsel-core-rt",
       "contents": "the runtime archive a program links, per target"
+    },
+    "runtime/*/*/hirsel-exec-helper": {
+      "crates": "root//:hirsel-exec-helpers",
+      "package": "hirsel-exec-helper",
+      "contents": "the executable that supervises embedded Exec children, per desktop target"
     },
     "hirsel-core-toolchain.json": {
       "contents": "the installation record"

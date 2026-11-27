@@ -9,6 +9,7 @@
 export_file(name = "notices.py", mode = "reference", visibility = ["PUBLIC"])
 
 export_file(name = "toolchain_programs.py", visibility = ["PUBLIC"])
+export_file(name = "link_exec_helper.py", visibility = ["PUBLIC"])
 
 export_file(name = "product.toml", mode = "reference", visibility = ["PUBLIC"])
 

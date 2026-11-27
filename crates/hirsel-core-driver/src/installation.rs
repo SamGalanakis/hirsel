@@ -12,6 +12,7 @@
 //! ROOT/link/<target>.json           the bundle-relative link recipe
 //! ROOT/link/kit/                   the startup objects and link-only libraries
 //! ROOT/runtime/<target>/<hash>/     runtime archives
+//! ROOT/runtime/<target>/<hash>/hirsel-exec-helper   embedded Exec helper
 //! ROOT/core-packages/               core and std images
 //! ROOT/core-packages/<name>-1.hpkg  toolchain package sources: store, runner, the
 //!                                   WebRTC stack, sframe, media_container,
@@ -33,8 +34,10 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+mod exec_helper;
+
 const FILE: &str = "hirsel-core-toolchain.json";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 /// The installed compiler's name in its prefix.
 const EXECUTABLE: &str = "hirsel";
 
@@ -111,6 +114,7 @@ impl Flavour {
 struct Registration {
     products: BTreeMap<String, PathBuf>,
     runtimes: BTreeMap<(Flavour, String), PathBuf>,
+    exec_helpers: BTreeMap<String, PathBuf>,
     /// Each linked target's recipe, relative to the root.
     links: BTreeMap<String, PathBuf>,
 }
@@ -120,6 +124,7 @@ struct RegistrationFile {
     version: u32,
     products: BTreeMap<String, PathBuf>,
     runtimes: Vec<RuntimeRow>,
+    exec_helpers: BTreeMap<String, PathBuf>,
     links: BTreeMap<String, PathBuf>,
 }
 
@@ -167,6 +172,7 @@ impl Registration {
         Ok(Some(Self {
             products: file.products,
             runtimes,
+            exec_helpers: file.exec_helpers,
             links: file.links,
         }))
     }
@@ -184,6 +190,7 @@ impl Registration {
                     path,
                 })
                 .collect(),
+            exec_helpers: self.exec_helpers,
             links: self.links,
         };
         let mut temp = tempfile::NamedTempFile::new_in(root)?;
@@ -268,6 +275,13 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
+    /// Resolve the registered desktop Exec helper for an embedded launch.
+    pub fn exec_helper(&self, target: &str) -> Option<PathBuf> {
+        self.registration
+            .exec_helpers
+            .get(target)
+            .map(|path| self.root.join(path))
+    }
     /// Open a registered library product by its package identity. A registered
     /// path that is missing or damaged is an installation error; callers must
     /// not silently fall back to source for a named installed product.
@@ -305,6 +319,17 @@ pub fn register<'a>(
     runtimes: impl IntoIterator<Item = (Flavour, (&'a [u8], &'a str))>,
     link: Option<(&str, &Path)>,
 ) -> io::Result<()> {
+    register_product(root, name, image, runtimes, link, None)
+}
+
+fn register_product<'a>(
+    root: &Path,
+    name: &str,
+    image: &CoreImage,
+    runtimes: impl IntoIterator<Item = (Flavour, (&'a [u8], &'a str))>,
+    link: Option<(&str, &Path)>,
+    exec_helper: Option<(&[u8], &str)>,
+) -> io::Result<()> {
     let root = crate::product::normalized(root);
     std::fs::create_dir_all(&root)?;
     let mut registration = Registration::read(&root)?.unwrap_or_default();
@@ -331,6 +356,13 @@ pub fn register<'a>(
         registration
             .runtimes
             .insert((flavour, target.to_owned()), relative);
+        if flavour == Flavour::EMBEDDED {
+            registration.exec_helpers.remove(target);
+        }
+    }
+    if let Some((bytes, target)) = exec_helper {
+        let path = exec_helper::install(&root, bytes, target)?;
+        registration.exec_helpers.insert(target.to_owned(), path);
     }
     if let Some((target, recipe)) = link {
         registration
@@ -415,6 +447,7 @@ pub struct Environment {
     pub prof_recording_runtime: Option<PathBuf>,
     pub observed_runtime: Option<PathBuf>,
     pub observed_recording_runtime: Option<PathBuf>,
+    pub exec_helper: Option<PathBuf>,
 }
 pub(crate) fn print_environment(report: &Environment) {
     println!("version: {}", report.version);
@@ -515,6 +548,7 @@ pub fn environment(
             .and_then(|installed| installed.runtime(target, Flavour::OBSERVED)),
         observed_recording_runtime: installed
             .and_then(|installed| installed.runtime(target, Flavour::OBSERVED_RECORDING)),
+        exec_helper: installed.and_then(|installed| installed.exec_helper(target)),
     })
 }
 
@@ -683,6 +717,17 @@ pub fn publish(
     link_kit: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
+    publish_product(root, std, runtimes, link_kit, None, meter)
+}
+
+pub(crate) fn publish_product(
+    root: &Path,
+    std: bool,
+    runtimes: BTreeMap<Flavour, (&Path, &str)>,
+    link_kit: Option<&Path>,
+    exec_helper: Option<&Path>,
+    meter: &mut Meter,
+) -> io::Result<PackageProduct> {
     let root = crate::product::normalized(root);
     let executable = runtimes.get(&Flavour::PLAIN).map(|(_, target)| *target);
     let linked = executable.or_else(|| {
@@ -697,6 +742,9 @@ pub fn publish(
             })
             .map(|(_, target)| *target)
     });
+    let exec_helper = exec_helper
+        .map(|path| exec_helper::read(path, runtimes.get(&Flavour::EMBEDDED).map(|row| row.1)))
+        .transpose()?;
     let runtimes = runtimes
         .into_iter()
         .map(|(flavour, (path, target))| {
@@ -748,7 +796,7 @@ pub fn publish(
         }
         _ => None,
     };
-    register(
+    register_product(
         &root,
         if std { "std" } else { "core" },
         &product.image,
@@ -757,6 +805,9 @@ pub fn publish(
             .map(|(flavour, (bytes, target))| (*flavour, (bytes.as_slice(), *target))),
         link.as_ref()
             .map(|(target, recipe)| (*target, recipe.as_path())),
+        exec_helper
+            .as_ref()
+            .map(|(bytes, target)| (bytes.as_slice(), *target)),
     )?;
     // Sight the installed toolchain's inputs now, as a request finds them,
     // so the first request a window after the install promotes them instead

@@ -253,6 +253,10 @@ one Supervisor implementation; no in-process embedded variant exists.
 - **The helper image.** The helper is `hirsel-exec-helper`, an executable the toolchain
   builds from the same sources and release as the runtime archive and ships beside it. It
   carries no set-ID bit, file capability or entitlement of its own.
+  A desktop toolchain installs it at `runtime/<target>/<content-hash>/hirsel-exec-helper`
+  and records its prefix-relative path by target in `hirsel-core-toolchain.json`'s
+  `exec_helpers` map. `hirsel env --json --target TARGET` resolves that target's
+  installed path as `exec_helper`.
   Its `main` runs the Supervisor and nothing else; it never runs the host's code, so no
   initializer, lock or startup work of the host's runs in it. A static library has no
   location of its own, so the host names the image: `exec_helper` in `hirsel_embed_config`

@@ -35,6 +35,7 @@ flags! {
     CallStream ["--stream"] "32-HEX" => "Send once at position zero on this saved stream ID.";
     Recording ["--recording"] => "Include recording support. Set HIRSEL_RECORD when running the executable to record.";
     EmbedRuntime ["--embed-runtime"] "ARCHIVE" => "Install the embedded runtime slot.";
+    ExecHelper ["--exec-helper"] "EXECUTABLE" => "Install the desktop Exec helper for the embedded runtime.";
     RecordingRuntime ["--recording-runtime"] "ARCHIVE" => "Install this recording runtime archive alongside --runtime.";
     ProfRuntime ["--prof-runtime"] "ARCHIVE" => "Install the profiling runtime archive alongside --runtime.";
     ProfRecordingRuntime ["--prof-recording-runtime"] "ARCHIVE" => "Install the combined profiling and recording runtime archive.";

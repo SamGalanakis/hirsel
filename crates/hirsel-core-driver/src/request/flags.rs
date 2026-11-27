@@ -16,6 +16,7 @@ pub(super) struct CompilerFlags {
     pub(super) profile_front: bool,
     pub(super) image_path: Option<PathBuf>,
     pub(super) install_root: Option<PathBuf>,
+    pub(super) exec_helper: Option<PathBuf>,
     pub(super) link_kit: Option<PathBuf>,
     pub(super) core_product: Option<PathBuf>,
     pub(super) source_core: bool,
@@ -102,6 +103,7 @@ impl CompilerFlags {
                         .additional_runtimes
                         .insert(Flavour::EMBEDDED, PathBuf::from(value));
                 }
+                Opt::ExecHelper(value) => flags.exec_helper = Some(PathBuf::from(value)),
                 Opt::RecordingRuntime(value) => {
                     flags
                         .additional_runtimes

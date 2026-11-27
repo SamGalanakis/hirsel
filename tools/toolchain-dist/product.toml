@@ -11,9 +11,9 @@ runner = "macos-26"
 llvm_library = "lib/libLLVM.23.1.dylib"
 
 [runtime_targets]
-x86_64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-x86_64" }
-aarch64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-aarch64" }
-aarch64-apple-darwin = { platform = "root//tools/buck2:runtime-darwin" }
+x86_64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-x86_64", exec_helper = true }
+aarch64-unknown-linux-gnu = { platform = "root//tools/buck2:runtime-aarch64", exec_helper = true }
+aarch64-apple-darwin = { platform = "root//tools/buck2:runtime-darwin", exec_helper = true }
 aarch64-apple-ios = { platform = "root//tools/buck2:runtime-ios", slots = ["embed-runtime"] }
 aarch64-apple-ios-sim = { platform = "root//tools/buck2:runtime-ios-sim", slots = ["embed-runtime"] }
 

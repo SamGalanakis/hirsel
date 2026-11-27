@@ -12,7 +12,7 @@ names the crate from any package directory, locally or on the pool, and so do
 CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
-load("@root//tools/toolchain-dist:product.bzl", "EMBED_RUNTIME_TARGETS", "HOSTS", "RUNTIME_TARGETS")
+load("@root//tools/toolchain-dist:product.bzl", "EMBED_RUNTIME_TARGETS", "EXEC_HELPER_TARGETS", "HOSTS", "RUNTIME_TARGETS")
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
 load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
@@ -240,6 +240,12 @@ def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manif
         exec_compatible_with = _compile_constraints(name),
         visibility = ["PUBLIC"],
     )
+    if bin_name == "hirsel-exec-helper" and package_name == bin_name:
+        # The same Rust main, archived so the distribution can cross-link it
+        # against the pinned desktop link kits.
+        archive = name + "-archive"
+        hirsel_library(archive, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition)
+        _hirsel_exec_helpers(archive)
 
 def native_tool_inputs():
     """The unpacked toolchains a native test reads, as `HIRSEL_TOOLCHAIN_<TARGET>`: the
@@ -670,8 +676,9 @@ def _toolchain_bundle_impl(ctx):
     ] + [
         '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" ' +
         " ".join(['--{} "${{{}}}"'.format(slot, i + 2) for i, slot in enumerate(ctx.attrs.runtimes)]) +
-        ' > /dev/null; shift {}'.format(len(ctx.attrs.runtimes) + 1)
-        for _ in RUNTIME_TARGETS
+        (' --exec-helper "${{{}}}"'.format(len(ctx.attrs.runtimes) + 2) if triple in EXEC_HELPER_TARGETS else '') +
+        ' > /dev/null; shift {}'.format(len(ctx.attrs.runtimes) + (2 if triple in EXEC_HELPER_TARGETS else 1))
+        for triple in RUNTIME_TARGETS
     ] + [
         '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" --embed-runtime "$2" > /dev/null; shift 2'
         for _ in EMBED_RUNTIME_TARGETS
@@ -686,6 +693,8 @@ def _toolchain_bundle_impl(ctx):
         runtimes.append(triple)
         for dep in ctx.attrs.runtimes.values():
             runtimes.append(dep[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
+        if triple in EXEC_HELPER_TARGETS:
+            runtimes.append(ctx.attrs.exec_helpers[DefaultInfo].sub_targets[triple][DefaultInfo].default_outputs[0])
     for triple in EMBED_RUNTIME_TARGETS:
         runtimes.append(triple)
         runtimes.append(ctx.attrs.embed_runtime[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
@@ -711,6 +720,7 @@ hirsel_toolchain_bundle = rule(
         "hirsel": attrs.dep(),
         "runtimes": attrs.dict(attrs.string(), attrs.dep(), sorted = False),
         "embed_runtime": attrs.dep(),
+        "exec_helpers": attrs.dep(),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
         "_product": attrs.source(default = "root//tools/toolchain-dist:product.toml"),
@@ -963,6 +973,42 @@ _core_runtime_archives = rule(
     },
 )
 
+def _exec_helpers_impl(ctx):
+    outputs = {}
+    views = {}
+    kit = ctx.attrs._kit[DefaultInfo].default_outputs[0]
+    for triple, dep in ctx.attrs.archives.items():
+        archive = _runtime_without_debug(ctx, dep, triple + "/main.a")
+        name = triple + "/hirsel-exec-helper"
+        binary = ctx.actions.declare_output(name)
+        ctx.actions.run(
+            cmd_args("python3", ctx.attrs._link, kit, triple, archive, binary.as_output()),
+            category = "exec_helper_link",
+            identifier = triple,
+        )
+        outputs[name] = binary
+        views[triple] = [DefaultInfo(default_output = binary)]
+    return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, outputs), sub_targets = views)]
+
+_exec_helpers = rule(
+    impl = _exec_helpers_impl,
+    attrs = {
+        "archives": attrs.dict(attrs.string(), attrs.dep(providers = [MergedLinkInfo, RustLinkInfo])),
+        "_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
+        "_link": attrs.source(default = "root//tools/toolchain-dist:link_exec_helper.py"),
+        "_parts": attrs.source(default = "//tools/buck2:runtime_parts.py"),
+        "_llvm": attrs.dep(default = "toolchains//:clang"),
+    },
+)
+
+def _hirsel_exec_helpers(archive):
+    archives = {}
+    for triple, platform in EXEC_HELPER_TARGETS.items():
+        name = "hirsel-exec-helper-" + runtime_target_key(triple)
+        native.configured_alias(name = name, actual = ":" + archive, platform = platform)
+        archives[triple] = ":" + name
+    _exec_helpers(name = "hirsel-exec-helpers", archives = archives, visibility = ["PUBLIC"])
+
 def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", delegated_cgroup = False):
     files_env = {
         "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
@@ -1041,29 +1087,34 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", 
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-shard-1"] + host_targets)
 
-def hirsel_driver_archive_test(name, data, selection, ios = False):
-    _rust_test(
-        name = name,
+def hirsel_driver_archive_test(name, data, selection, ios = False, installed_exec = None):
+    common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",
-        args = selection,
-        data = data,
         cwd = "crates/hirsel-core-driver",
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
+        exec_compatible_with = [budget_constraint("host")],
+        request = _request("hirsel-core-driver-unittest"),
+    )
+    if installed_exec:
+        _rust_test(name = name + "-inventory", args = ["--list"], **common)
+    _rust_test(
+        name = name,
+        args = selection,
+        data = data,
         files_env = {
             "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
             "HIRSEL_DEV_TEST_DRIVER": "//:hirsel-core-driver-bin-hirsel",
-            "HIRSEL_EXEC_HELPER": "//:hirsel-exec-helper-bin-hirsel-exec-helper",
             "HIRSEL_ARCHIVE_RUST": "toolchains//:test-rustc",
             "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
             "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu",
-        } | ({"HIRSEL_IOS_RUNTIMES": "//:hirsel-core-rt-ios-embed-archives"} if ios else {}),
+        } | ({"HIRSEL_IOS_RUNTIMES": "//:hirsel-core-rt-ios-embed-archives"} if ios else {})
+          | ({"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"} if installed_exec else {}),
+        extra_env = {"HIRSEL_TEST_DEDICATED_CASE": installed_exec} if installed_exec else {},
         labels = ["local-execution", "requires-openat2"],
-        exec_compatible_with = [budget_constraint("host")],
-        pool = False,
         test_binary = name,
-        request = _request("hirsel-core-driver-unittest"),
         visibility = ["PUBLIC"],
+        **common
     )
 
 def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic", binary = "hirsel-llvm-unittest", cwd = "crates/hirsel-llvm", extra_env = {}):

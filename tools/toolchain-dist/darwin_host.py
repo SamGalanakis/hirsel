@@ -163,6 +163,11 @@ def file_class(relative):
         # Rust's std links libiconv on Apple targets; the compiler uses no name from it.
         return dict(filetype=MH_EXECUTE, dylibs={LIBSYSTEM, SYSTEM['CoreFoundation'], SYSTEM['Security'], LIBICONV},
                     rpaths=[], init=None)
+    if re.fullmatch(rf'runtime/{re.escape(TARGET)}/[0-9a-f]{{64}}/hirsel-exec-helper', relative):
+        # Signed nested code. A sandboxed app signs its own copy with the App
+        # Sandbox inherit entitlement (EMB-3).
+        return dict(filetype=MH_EXECUTE, dylibs={*SYSTEM.values(), LIBICONV},
+                    subset=True, rpaths=[], init=None)
     if relative == 'bin/ld.lld':
         return dict(filetype=MH_EXECUTE, dylibs={LIBSYSTEM, LIBCXX, LIBZ, LIBLLVM_ID},
                     rpaths=['@loader_path/../lib'], init=None)
@@ -592,6 +597,11 @@ def build(output, work, release_tag):
     driver_env = dict(env, TMPDIR=str(rustc_tmp), HIRSEL_RELINK_DIR=str(relink_dir),
                       HIRSEL_RUSTC_TMP=str(rustc_tmp))
     run(['cargo', 'rustc', *driver, '--', '-C', f'linker={wrapper}'], cwd=ROOT, env=driver_env)
+    helper = 'hirsel-exec-helper'
+    run(['cargo', 'build', '--locked', '--profile', 'dist', '--target', TARGET,
+         '--jobs', '8', '-p', helper, '--bin', helper], cwd=ROOT, env=env)
+    helper_image = work / 'target' / TARGET / 'dist' / helper
+    run(['/usr/bin/codesign', '--force', '--sign', '-', helper_image])
     archives = runtimes(work, env)
     kit = link_kit_tree(work)
     compiler = work / 'target/dist/hirsel'
@@ -604,7 +614,8 @@ def build(output, work, release_tag):
     run([compiler, 'core-product', '--install', output], env=install, stdout=subprocess.DEVNULL)
     run([compiler, 'std-product', '--install', output,
          *[option for slot, archive in archives.items() for option in (f'--{slot}', archive)],
-         '--target', TARGET, '--link-kit', kit], env=install, stdout=subprocess.DEVNULL)
+         '--target', TARGET, '--link-kit', kit, '--exec-helper', helper_image],
+        env=install, stdout=subprocess.DEVNULL)
     programs = ROOT / 'tools/toolchain-dist/toolchain_programs.py'
     packages = tomllib.loads((ROOT / 'core/programs/toolchain-packages.toml').read_text())['packages']
     run([sys.executable, programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',

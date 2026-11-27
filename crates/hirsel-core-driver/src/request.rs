@@ -159,6 +159,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         profile_front,
         image_path,
         install_root,
+        exec_helper,
         link_kit,
         mut core_product,
         mut source_core,
@@ -619,9 +620,6 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         return conclude(Outcome::Exit(0));
     }
     if command == "core-product" || command == "std-product" {
-        if link_kit.is_some() && install_root.is_none() {
-            return Err("--link-kit requires --install".into());
-        }
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {
             (
@@ -633,7 +631,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 if let Some(path) = runtime {
                     additional_runtimes.insert(Flavour::PLAIN, path);
                 }
-                crate::installation::publish(
+                crate::installation::publish_product(
                     root,
                     command == "std-product",
                     additional_runtimes
@@ -641,6 +639,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                         .map(|(flavour, path)| (*flavour, (path.as_path(), target.as_str())))
                         .collect(),
                     link_kit.as_deref(),
+                    exec_helper.as_deref(),
                     &mut meter,
                 )?
             } else if command == "std-product" {

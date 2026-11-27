@@ -4,8 +4,11 @@
 def core_gates(out, call, Raw, libc_deps):
     archive_data = Raw('glob(["core/core/**", "core/std/**", "core/programs/store/**", "core/programs/runner/**", "crates/hirsel-core-rt/testdata/embed_place/**", "crates/hirsel-core-rt/testdata/embed_exec/**"]) + ["crates/hirsel-core-driver/Cargo.toml"]')
     out.append("\n" + call("hirsel_driver_archive_test", name="core-driver-archive-laws",
-        selection=["--include-ignored", "--exact", "test_run::link_only::archive_laws::embedded_archive_laws", "test_run::link_only::archive_laws::embedded_exec_laws",
+        selection=["--include-ignored", "--exact", "test_run::link_only::archive_laws::embedded_archive_laws",
                    "native::archive::tests::audit_only_exempts_optional_imports_from_the_runtime"],
+        data=archive_data))
+    out.append("\n" + call("hirsel_driver_archive_test", name="core-driver-installed-exec-laws",
+        installed_exec="test_run::link_only::archive_laws::embedded_exec_laws", selection=["--include-ignored"],
         data=archive_data))
     out.append("\n" + call("hirsel_driver_archive_test", name="core-driver-ios-archive-laws", ios=True,
         selection=["--include-ignored", "--exact", "test_run::link_only::archive_laws::ios::ios_system_archives_carry_the_target_platform_and_floor",

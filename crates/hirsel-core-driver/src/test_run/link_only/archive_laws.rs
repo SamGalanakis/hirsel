@@ -523,6 +523,16 @@ fn embedded_archive_laws() {
 fn embedded_exec_laws() {
     let work = tempfile::tempdir().unwrap();
     let work = work.path();
+    let prefix = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_TOOLCHAIN_BUNDLE").unwrap())
+        .canonicalize()
+        .unwrap();
+    let installed = crate::installation::Installed::discover(&prefix.join("hirsel"))
+        .unwrap()
+        .unwrap();
+    let target = crate::host::HOST_TARGET.triple();
+    let helper = installed.exec_helper(target).unwrap();
     let policy = work.join("exec.toml");
     let profile = |name: &str, image: &str, args: &str| {
         let digest = passed(Command::new("sha256sum").arg(image));
@@ -538,7 +548,7 @@ fn embedded_exec_laws() {
         profile("true", "/usr/bin/true", "[]") + &profile("sleep", "/usr/bin/sleep", "[\"1000\"]"),
     )
     .unwrap();
-    let fixture = Fixture::stage(
+    let mut fixture = Fixture::stage(
         work,
         "embed_exec",
         &[],
@@ -552,17 +562,15 @@ fn embedded_exec_laws() {
             "Stderr".into(),
         ],
     );
+    fixture.runtime = installed
+        .runtime(target, crate::installation::Flavour::EMBEDDED)
+        .unwrap();
     let archive = work.join("lib/libplace.a");
     fixture.build("staticlib", &archive, &fixture.store, 1 << 30, false);
     let host = fixture.link(EXEC_HOST, &archive, &fixture.adjacent());
     let manifest = passed(Command::new(&host).current_dir(work));
     let fp = work.join("fingerprint");
     fs::write(&fp, manifest_fingerprint(&manifest).unwrap()).unwrap();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let helper = root
-        .join(std::env::var_os("HIRSEL_EXEC_HELPER").unwrap())
-        .canonicalize()
-        .unwrap();
     let fake = work.join("fake-helper");
     let fake_source = work.join("fake-helper.c");
     fs::write(&fake_source, EXEC_FAKE_HELPER).unwrap();

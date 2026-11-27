@@ -371,7 +371,7 @@ def render(recorded, darwin_scope=None):
         out.append(f'| `{entry["path"]}` | {entry["contents"]} | {notices} |')
     out += ['', '## Rust crates', '']
     if darwin_scope:
-        out += ['Registry crates that supply the compiler and runtime link inputs in Cargo\'s Darwin dependency graph.',
+        out += ['Registry crates that supply the compiler, runtime and Exec helper link inputs in Cargo\'s Darwin dependency graph.',
                 '', '| Crate | License | Linked into | Cargo.lock checksum |',
                 '|---|---|---|---|']
     else:
@@ -609,7 +609,7 @@ def collect_darwin(bundle, llvm_tree):
     files[llvm] = dict(native='darwin_llvm', contents="the compiler's LLVM library")
     files['libexec/hirsel/*.dSYM/*'] = dict(contents='detached debug information for the platform executables')
     sources.update(
-        scope='Apple Silicon macOS installation prefix. Crate notices cover the compiler and runtime link inputs.',
+        scope='Apple Silicon macOS installation prefix. Crate notices cover the compiler, runtime and Exec helper link inputs.',
         rust_lock='rust-toolchain.toml',
         host_runtimes={},
         external=[dict(component='macOS libSystem, CoreFoundation, Security, libiconv, libc++ and libz',

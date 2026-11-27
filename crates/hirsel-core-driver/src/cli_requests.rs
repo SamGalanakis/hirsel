@@ -233,6 +233,7 @@ pub enum CompilerOption {
     Dir(String),
     Emulator(String),
     EmbedRuntime(String),
+    ExecHelper(String),
     Emit(String),
     Entry(String),
     ExpectVerdict(String),

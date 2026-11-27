@@ -301,10 +301,14 @@ class DistributionBuild(unittest.TestCase):
                                  embedded=embedded, path=archive.as_posix()))
                 lines.append(f'{label} {target} {content}')
             registration = prefix / 'hirsel-core-toolchain.json'
-            registration.write_text(json.dumps(dict(runtimes=rows)))
+            relative = Path('runtime') / target / ('a' * 64) / 'hirsel-exec-helper'
+            (prefix / relative).parent.mkdir()
+            (prefix / relative).touch(mode=0o755)
+            helpers = {target: relative.as_posix()}
+            registration.write_text(json.dumps(dict(runtimes=rows, exec_helpers=helpers)))
             passed = subprocess.CompletedProcess([], 0, '\n'.join(lines), '')
             build.accept_fresh(passed, prefix, {target})
-            registration.write_text(json.dumps(dict(runtimes=rows[:-1])))
+            registration.write_text(json.dumps(dict(runtimes=rows[:-1], exec_helpers=helpers)))
             with self.assertRaisesRegex(ValueError, 'runtime target/flavour mismatch'):
                 build.accept_fresh(passed, prefix, {target})
 

@@ -5,6 +5,13 @@ supported runtime targets and feature variants, and the installed helper
 entries and socket names. To render the standalone installer from this checkout,
 run `python3 tools/toolchain-dist/product.py installer > install.sh`.
 
+Each bundle ships `hirsel-exec-helper` for the desktop targets of its runtime
+archives. The Linux build links those helpers with the pinned link kit. For
+an embedded launch, read `exec_helper` from `hirsel env --json --target TARGET`
+and pass the absolute path in `hirsel_embed_config.exec_helper`. If a macOS
+app uses App Sandbox, copy the helper into the app as nested code, sign it with
+the App Sandbox inherit entitlement, and pass the path of that copy.
+
 The `//tools/buck2:dist` platform and Cargo `--profile dist` use fat LTO and
 one codegen unit. The CLI already uses mimalloc v3 (`mimalloc 0.1.52`,
 `libmimalloc-sys 0.1.49`, Buck2's v3/static.c fixup). Developer dev/release,
@@ -78,8 +85,8 @@ derives it from Cargo.lock, Cargo metadata, the Buck link graph,
 installation (by default it builds `//:hirsel-toolchain`). The archive is
 `HIRSEL_LLVM_SOURCE_ARCHIVE`, or the copy under `$XDG_CACHE_HOME/hirsel/llvm-source`,
 downloaded from `source_url` and checked against `source_sha256` when absent.
-`notice-sources.json` classifies shipped files in `files`. The compiler and
-runtime archives name their workspace packages and link roots. The LLVM library,
+`notice-sources.json` classifies shipped files in `files`. The compiler,
+runtime archives and Exec helper name their workspace packages and link roots. The LLVM library,
 linker and archive tools name their native pins. A native pin's notices are the
 LLVM source tree's license and copyright-bearing files (`native_text_rule`) and the texts of the C and C++
 runtimes it links statically. The manylinux_2_28 build host's AlmaLinux
@@ -160,13 +167,13 @@ the compiler in Cargo's `dist` profile against the pinned LLVM tree, the standal
 and embed runtime archives (fat-LTO staticlibs of `hirsel-core-rt` against the trace-only std, with
 `tools/buck2/profile.bzl`'s runtime flags), and the Darwin link kit's text stubs. The
 bundle ships `hirsel`, the linker and archive tools, and `lib/libLLVM.23.1.dylib` from the pinned
-tree, the runtimes and link kit for `aarch64-apple-darwin` only, the core and std
+tree, the runtimes, Exec helper and link kit for `aarch64-apple-darwin` only, the core and std
 images, the toolchain packages and the helpers in `libexec/hirsel/`. The last two
 come from `toolchain_programs.py`, which Buck2's bundle runs too. Every Mach-O is
 built with `MACOSX_DEPLOYMENT_TARGET` from `link_kit.DARWIN_FLOOR` and carries an
 ad-hoc signature. The bundle includes `notices/` and `hirsel-build.json` with the
-compiler, core package and notice digests. Its crate notices cover the compiler
-and runtime's Darwin link inputs.
+compiler, core package and notice digests. Its crate notices cover the compiler,
+runtime and Exec helper's Darwin link inputs.
 
 Release smoke builds with the Mac bundle's own runtime. For the byte comparison,
 it also links the same demo using the Darwin runtime archive from the Linux

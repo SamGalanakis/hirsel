@@ -22,8 +22,11 @@ def runtime_product_bzl(reads, starlark, header):
                  if "slots" not in row}
     embed_platforms = {triple: row["platform"] for triple, row in product["runtime_targets"].items()
                        if "embed-runtime" in row.get("slots", [])}
+    exec_helper_platforms = {triple: row["platform"] for triple, row in product["runtime_targets"].items()
+                             if row.get("exec_helper")}
     return (header + f"RUNTIME_TARGETS = {starlark(platforms, 0)}\n"
             + f"EMBED_RUNTIME_TARGETS = {starlark(embed_platforms, 0)}\n"
+            + f"EXEC_HELPER_TARGETS = {starlark(exec_helper_platforms, 0)}\n"
             + f"HOSTS = {starlark(product['hosts'], 0)}\n")
 
 
@@ -57,6 +60,7 @@ def distribution_gates(out, call, Raw, reads, slots):
                             runtimes={flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
                                       for flag, slot in slots.items()},
                             embed_runtime="//:hirsel-core-rt-ios-embed-archives",
+                            exec_helpers="//:hirsel-exec-helpers",
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))

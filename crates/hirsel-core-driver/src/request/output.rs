@@ -45,6 +45,12 @@ pub(super) fn validate_target_and_flags(
         output
     };
     admit_target(&flags.target, kind)?;
+    if flags.link_kit.is_some() && flags.install_root.is_none() {
+        return Err("--link-kit requires --install".into());
+    }
+    if flags.exec_helper.is_some() && (flags.install_root.is_none() || flags.image_path.is_some()) {
+        return Err("--exec-helper requires --install without --image".into());
+    }
     if output != OutputKind::StaticLibrary {
         return Ok(());
     }

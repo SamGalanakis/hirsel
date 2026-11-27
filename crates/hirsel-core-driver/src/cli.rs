@@ -238,7 +238,7 @@ commands! {
             Install, LinkKit, HELP, Json, Name, Runtime, Target, Store, Metrics, Image;
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
         Compiler(CompilerOption), None:
-            EmbedRuntime, RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
+            EmbedRuntime, ExecHelper, RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
             Install, LinkKit, HELP, Json, Name, Runtime, Target, Store, Metrics, Image;
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
         New(NewOption), One: HELP, Lib;

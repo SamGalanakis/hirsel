@@ -866,14 +866,14 @@ fn u5_replays_at_another_worker_count() {
     crate::openat2_required::require();
 
     let run = |program: &Path, argv: &[&str], record: Option<&Path>, workers: &str| {
-        // A run that hangs on the pool ends 124 and fails with its case.
-        let mut cmd = std::process::Command::new("timeout");
-        cmd.arg("120").arg(program).args(argv).env("HIRSEL_UNTIED", workers);
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(argv).env("HIRSEL_UNTIED", workers);
         match record {
             Some(path) => cmd.env("HIRSEL_RECORD", path),
             None => cmd.env_remove("HIRSEL_RECORD"),
         };
-        let output = cmd.output().unwrap();
+        let (output, timed_out) = crate::test_run::capture(&mut cmd, Some(std::time::Duration::from_secs(120))).unwrap();
+        assert!(!timed_out, "{program:?} at {workers} workers exceeded 120 seconds: {output:?}");
         (
             output.status.code(),
             String::from_utf8(output.stdout).unwrap(),

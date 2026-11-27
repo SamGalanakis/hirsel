@@ -2308,14 +2308,14 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
 /// step against an empty store; returns the failures.
 fn run_case(case: &Case) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+    let canonical = dir.path().canonicalize().unwrap();
+    let root = canonical.as_path();
     let exe = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(std::env::var_os("HIRSEL_DEV_TEST_DRIVER").expect("driver artifact"))
         .canonicalize()
         .unwrap();
-    let copy = root.join("copied-driver");
-    let primed_store = root.join("primed-store");
+    let (primed_store, copy) = (root.join("primed-store"), root.join("copied-driver"));
     let mut failures = vec![];
     let mut before = String::new();
     for (n, step) in case.steps.iter().enumerate() {
@@ -2416,13 +2416,13 @@ fn stored_executable(root: &Path) -> Vec<PathBuf> {
 fn opt(step: Step, args: &[&str]) -> Step {
     with(step, |s| s.args.extend(args.iter().map(|a| (*a).to_owned())))
 }
-/// A C driver that runs the pinned clang with a different build-id style.
+/// A C driver that runs the pinned clang with a different runtime search path.
 fn other_cc(root: &Path) {
     let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
     let cc = root.join("other-cc");
     crate::executable::write(
         &cc,
-        format!("#!/bin/sh\nexec {} -Wl,--build-id=md5 \"$@\"\n", clang.display()).as_bytes(),
+        format!("#!/bin/sh\nexec '{}' -Wl,-rpath,request-test \"$@\"\n", clang.display()).as_bytes(),
         0o755,
     )
     .unwrap();

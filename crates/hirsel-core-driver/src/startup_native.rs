@@ -537,35 +537,38 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
     let profile = dir.path().join("profiles.toml");
-    let mut executable = [0u8; 192];
-    executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
-    executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
-    let machine = match crate::host::HOST_TARGET {
-        hirsel_core_layout::Target::X86_64Linux => 62u16,
-        hirsel_core_layout::Target::Aarch64Linux
-        | hirsel_core_layout::Target::Aarch64Darwin
-        | hirsel_core_layout::Target::Aarch64Ios
-        | hirsel_core_layout::Target::Aarch64IosSim => 183,
+    let (executable, interpreter) = match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::MachO => (std::fs::read("/bin/echo").unwrap(), None),
+        hirsel_core_layout::ObjectFormat::Elf => {
+            let interpreter = c"/oracle/loader";
+            let mut executable = [0u8; 192];
+            executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+            executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+            let machine = match crate::host::HOST_TARGET.arch() {
+                hirsel_core_layout::Arch::X86_64 => 62u16,
+                hirsel_core_layout::Arch::Aarch64 => 183,
+            };
+            executable[18..20].copy_from_slice(&machine.to_le_bytes());
+            executable[20..24].copy_from_slice(&1u32.to_le_bytes());
+            executable[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // entry
+            executable[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+            executable[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+            executable[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+            executable[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
+            executable[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+            executable[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+            executable[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
+            executable[96..104].copy_from_slice(&192u64.to_le_bytes());
+            executable[104..112].copy_from_slice(&192u64.to_le_bytes());
+            executable[120..124].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
+            executable[128..136].copy_from_slice(&176u64.to_le_bytes());
+            let loader = interpreter.to_bytes_with_nul();
+            executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
+            executable[176..176 + loader.len()].copy_from_slice(loader);
+            (executable.to_vec(), Some(interpreter))
+        }
     };
-    executable[18..20].copy_from_slice(&machine.to_le_bytes());
-    executable[20..24].copy_from_slice(&1u32.to_le_bytes());
-    executable[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // entry
-    executable[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
-    executable[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
-    executable[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
-    executable[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
-    executable[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
-    executable[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
-    executable[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
-    executable[96..104].copy_from_slice(&192u64.to_le_bytes());
-    executable[104..112].copy_from_slice(&192u64.to_le_bytes());
-    executable[120..124].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
-    executable[128..136].copy_from_slice(&176u64.to_le_bytes());
-    let interpreter = c"/oracle/loader";
-    let loader = interpreter.to_bytes_with_nul();
-    executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
-    executable[176..176 + loader.len()].copy_from_slice(loader);
-    std::fs::write(&image, executable).unwrap();
+    std::fs::write(&image, &executable).unwrap();
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&executable));
     let policy = format!(
         "[git]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
@@ -580,8 +583,9 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
     assert_eq!(
         lines,
         [format!(
-            "exec: git: image {}, sha256 {pin}, interpreter /oracle/loader, policy {}\n",
+            "exec: git: image {}, sha256 {pin}, interpreter {}, policy {}\n",
             image.display(),
+            interpreter.map_or("none", |name| name.to_str().unwrap()),
             hirsel_core_ids::hex::encode(&expected),
         )]
     );
@@ -634,7 +638,7 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
     let canonical = CString::new(std::fs::canonicalize(&image).unwrap().as_os_str().as_bytes()).unwrap();
     assert_eq!(pinned.path.as_ref(), canonical.as_c_str());
     assert!(pinned.pin.verify(&pinned.path).is_ok());
-    assert_eq!(pinned.interpreter.as_deref(), Some(interpreter));
+    assert_eq!(pinned.interpreter.as_deref(), interpreter);
     std::fs::write(&image, b"#!/bin/sh\n").unwrap();
     assert!(pinned.pin.verify(&pinned.path).is_err());
     assert!(
@@ -649,4 +653,21 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
     assert!(
         matches!(PinnedImage::open(&script.profiles["git"]), Err(reason) if reason.contains("without a #! line"))
     );
+}
+
+fn build_copy_filter(image: &Path) {
+    // macOS kills relocated system executables. Pin a native copy filter built
+    // in the work directory so deleting that directory removes the host image.
+    let source = image.with_extension("c");
+    std::fs::write(&source, r#"#include <stdio.h>
+int main(void) {
+    int c;
+    while ((c = getchar()) != EOF) {
+        if (putchar(c) == EOF) return 1;
+    }
+    return ferror(stdin) || fflush(stdout);
+}
+"#).unwrap();
+    let options = native_options(Backend::Cranelift, image.parent().unwrap());
+    command(Command::new(options.link.driver()).arg(&source).arg("-o").arg(image)).unwrap();
 }

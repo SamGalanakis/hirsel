@@ -8,6 +8,8 @@ use hirsel_core_ids::DefPath;
 mod cache;
 mod coverage;
 mod launch;
+#[cfg(test)]
+pub(crate) use launch::capture;
 mod laws;
 mod link_only;
 mod replay;

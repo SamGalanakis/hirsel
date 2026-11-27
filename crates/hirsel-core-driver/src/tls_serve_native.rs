@@ -562,7 +562,9 @@ mod tls_serve_laws {
             verified(&output);
             assert_eq!(digest(&leaf(&output)), sha256.trim());
             assert!(
-                output.contains(&format!("Peer signature type: {signature}")),
+                output.lines().filter_map(|line| line.strip_prefix("Peer signature type: ")).any(|value| {
+                    value.eq_ignore_ascii_case(signature) || (signature == "RSA-PSS" && matches!(value, "rsa_pss_rsae_sha256" | "rsa_pss_rsae_sha384" | "rsa_pss_rsae_sha512"))
+                }),
                 "{key}: {output}"
             );
             server.finish();

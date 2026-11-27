@@ -262,21 +262,17 @@ mod assembly_environment {
             )
         };
         let original = assemble(&options);
-        let marker = dir.path().join("marker");
-        std::fs::write(&marker, b"recipe runtime archive B3\0").unwrap();
-        let editor = options.link.driver().with_file_name("llvm-objcopy");
-        let status = Command::new(editor)
-            .arg("--add-section")
-            .arg(format!(".rodata.recipe_runtime={}", marker.display()))
-            .args([
-                "--set-section-flags",
-                ".rodata.recipe_runtime=alloc,load,readonly,data",
-            ])
-            .arg(&input)
-            .arg(&options.runtime)
-            .status()
-            .unwrap();
-        assert!(status.success(), "prepare the changed runtime fixture");
+        // Edit a linked startup diagnostic in place. Its bytes reach the image
+        // on both object formats, and the archive member offsets remain valid.
+        let diagnostic = b"not started: ";
+        assert!(original.0.windows(diagnostic.len()).any(|word| word == diagnostic));
+        let mut archive = std::fs::read(&input).unwrap();
+        let mut remaining = archive.as_mut_slice();
+        while let Some(at) = remaining.windows(diagnostic.len()).position(|word| word == diagnostic) {
+            remaining[at] = b'N';
+            remaining = &mut remaining[at + diagnostic.len()..];
+        }
+        std::fs::write(&options.runtime, archive).unwrap();
         let warm = assemble(&options);
         options.cas = dir.path().join("cold");
         let cold = assemble(&options);
@@ -284,8 +280,8 @@ mod assembly_environment {
             warm.0, cold.0,
             "warm runtime assembly must match the cold executable"
         );
-        assert_ne!(
-            original.0, cold.0,
+        assert!(
+            original.0 != cold.0,
             "the runtime edit reaches the executable"
         );
         assert_eq!(original.1.recipe, cold.1.recipe);

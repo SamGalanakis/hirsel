@@ -3851,7 +3851,7 @@ fn exec_unix_recording_replays_without_host_resources() {
     let work = dir.path().join("work");
     std::fs::create_dir(&work).unwrap();
     let image = work.join("image");
-    std::fs::copy("/bin/cat", &image).unwrap();
+    build_copy_filter(&image);
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
     let policy = work.join("policy.toml");
     // The recording must split a valid profile snapshot larger than a tape block.

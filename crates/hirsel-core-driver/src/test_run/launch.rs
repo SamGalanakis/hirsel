@@ -240,7 +240,10 @@ fn execute(
     Ok((output, timed_out, start.elapsed()))
 }
 
-fn capture(command: &mut Command, timeout: Option<Duration>) -> io::Result<(Output, bool)> {
+pub(crate) fn capture(
+    command: &mut Command,
+    timeout: Option<Duration>,
+) -> io::Result<(Output, bool)> {
     let Some(timeout) = timeout else {
         return command.output().map(|output| (output, false));
     };

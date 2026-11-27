@@ -355,15 +355,21 @@ pub(crate) fn source_site(binary: &std::path::Path, site: u64) -> Option<String>
         return None;
     }
     let file = ReadCache::new(std::fs::File::open(binary).ok()?);
-    let elf = object::File::parse(&file).ok()?;
-    let files = match crate::native_debug::object_format(elf.format()).ok()? {
-        hirsel_core_layout::ObjectFormat::Elf => elf.symbol_by_name(SOURCE_FILES)?,
+    let image = object::File::parse(&file).ok()?;
+    let data = match crate::native_debug::object_format(image.format()).ok()? {
+        hirsel_core_layout::ObjectFormat::Elf => {
+            let files = image.symbol_by_name(SOURCE_FILES)?;
+            image
+                .section_by_index(files.section_index()?)
+                .ok()?
+                .data_range(files.address(), files.size())
+                .ok()??
+        }
+        // Mach-O has no symbol sizes. The entry emits the table into its own section.
         hirsel_core_layout::ObjectFormat::MachO => {
-            elf.symbol_by_name(&format!("_{SOURCE_FILES}"))?
+            image.section_by_name("__hirsel_sites")?.data().ok()?
         }
     };
-    let section = elf.section_by_index(files.section_index()?).ok()?;
-    let data = section.data_range(files.address(), files.size()).ok()??;
     let word = |row: &[u8], at| u64::from_le_bytes(row[at..at + 8].try_into().unwrap());
     // The first path starts immediately after the file rows.
     let rows_end = word(data.get(..SOURCE_ROW_BYTES)?, 0) as usize;

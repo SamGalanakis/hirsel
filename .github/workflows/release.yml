@@ -113,15 +113,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/profiles" "$RUNNER_TEMP/release" \
             "$RUNNER_TEMP/ci-cache/cargo" "$RUNNER_TEMP/ci-cache/rustup" \
             "$RUNNER_TEMP/ci-cache/bolt-tools" "$RUNNER_TEMP/ci-cache/xdg/hirsel/llvm-source"
-          HOST_UID=$(id -u)
-          HOST_GID=$(id -g)
           # shellcheck disable=SC2086 # DOCKER_OPTIONS is a word list.
           docker run $DOCKER_OPTIONS \
             -v "$GITHUB_WORKSPACE:/src" \
             -v "$RUNNER_TEMP/profiles:/profiles" \
             -v "$RUNNER_TEMP/release:/release" \
             -v "$RUNNER_TEMP/ci-cache:/cache" \
-            -e TARGET -e HOST_UID -e HOST_GID \
+            -e TARGET -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
             "$IMAGE" bash -euxo pipefail -c '
               cleanup() {
                 if [[ -x .buck2/bin/buck2 ]]; then

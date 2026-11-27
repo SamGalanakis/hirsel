@@ -2,6 +2,7 @@
 //! sync, file status, clocks, confined paths, child processes), with one provider per host
 //! OS chosen at compile time. Readiness lives in `hirsel_core_net::ready`. No
 //! runtime site waits on an address yet, so the seam has no address wait.
+pub(crate) mod compiler;
 #[cfg(target_vendor = "apple")]
 mod darwin;
 pub(crate) mod envelope;

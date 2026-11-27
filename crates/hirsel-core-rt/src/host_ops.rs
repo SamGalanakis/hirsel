@@ -399,3 +399,67 @@ unsafe fn clock_wait(
         drive(context, provider, &mut request, None)
     }
 }
+
+/// Dispatch the private compiler row and install the exact-sized owned answer.
+/// # Safety
+/// The checked caller borrows the input and lends a fresh empty Bytes carrier
+/// until the explicit Compiler provider has delivered its result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_check_library(
+    context: *mut Context,
+    compiler: u64,
+    input: *const crate::process::View,
+    output: *mut Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let buffer = *input;
+        let mut reply = Vec::<u8>::new();
+        let mut row = request(
+            CHECK_LIBRARY,
+            0,
+            site,
+            Buffer {
+                data: buffer.data.cast_mut(),
+                len: buffer.len,
+                capacity: 0,
+            },
+        );
+        row.path = (&raw mut reply).cast();
+        row.handle = hirsel_core_capability_handle(context, compiler);
+        let provider = hirsel_core_capability_provider(context, compiler);
+        let outcome = crate::provider::hirsel_core_host(context, provider, &mut row);
+        if outcome.status != 0 {
+            return outcome;
+        }
+        if outcome.error != IoError::OK || (outcome.value == 0 && reply.is_empty()) {
+            return Outcome {
+                value: 9,
+                ..Default::default()
+            };
+        }
+        if reply.is_empty() {
+            return outcome;
+        }
+        let len = reply.len();
+        let ctx = &*context;
+        let charge = hirsel_core_layout::charge::seq(len as u64, 1);
+        match crate::block::allocate(ctx, ctx.payer(), charge, len, 8, crate::block::PLAIN) {
+            Ok(data) => {
+                std::ptr::copy_nonoverlapping(reply.as_ptr(), data.as_ptr(), len);
+                *output = Buffer {
+                    data: data.as_ptr(),
+                    len,
+                    capacity: len,
+                };
+                outcome
+            }
+            Err(capacity) => Outcome {
+                value: capacity.requested,
+                written: capacity.available,
+                error: IoError { tag: 1, code: 0 },
+                ..Default::default()
+            },
+        }
+    }
+}

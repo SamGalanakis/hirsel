@@ -514,6 +514,9 @@ unsafe extern "C" fn invoke(
         let mut cred_grants = startup.cred_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
+            if req.kind == entry::COMPILER {
+                return stopped(run, "Compiler grant recording and replay are unavailable");
+            }
             let source = entry::hirsel_core_entry_grant(config, req.kind, req.index);
             let value = if req.kind == entry::ARGS {
                 let mut argv = Vec::new();

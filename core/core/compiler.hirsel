@@ -1,0 +1,284 @@
+/// Registry admission checks canonical library bytes in a confined compiler worker.
+/// Roots are the 64 lowercase hexadecimal digits of a Phase 0 library digest.
+pub type LibraryEntry {
+    root: String,
+    content: Bytes
+}
+
+pub type HistoryRow {
+    origin: String,
+    identity: String,
+    version: String,
+    root: String
+}
+
+pub type CheckLibrary {
+    root: String,
+    content: Bytes,
+    closure: List[LibraryEntry],
+    history: List[HistoryRow]
+}
+
+pub type Header {
+    identity: String,
+    version: String,
+    charge: String
+}
+
+pub type Binding = Toolchain(alias: String, id: String) | Exact(alias: String, id: String, tested_root: String) | Floor(alias: String, id: String, tested_root: String, bound_version: String)
+
+pub type PackageId {
+    name: String,
+    version: String
+}
+
+pub type InterfaceItem {
+    definition: String,
+    name: String,
+    kind: String,
+    signature: String,
+    doc: Option[String]
+}
+
+pub type InterfaceModule {
+    path: List[String],
+    extends_core: bool,
+    items: List[InterfaceItem]
+}
+
+pub type InterfaceV1 {
+    version: u32,
+    package: PackageId,
+    modules: List[InterfaceModule]
+}
+
+pub type Carried {
+    takes: List[String],
+    returns: List[String]
+}
+
+pub type Reached {
+    kinds: List[String],
+    provided: List[String],
+    contained: List[String],
+    unresolved: Option[String]
+}
+
+pub type Verdict = Pure | Conditional | Unknown | Kinds(List[String])
+
+pub type Card {
+    carried: Map[String, Carried],
+    reached: Map[String, Reached],
+    verdict: Verdict
+}
+
+pub type CheckedLibrary {
+    root: String,
+    header: Header,
+    bindings: List[Binding],
+    interface: InterfaceV1,
+    authority: Card
+}
+
+pub type ResourceLimit = Input | Cpu | Wall | Memory | Output
+
+pub type Refusal = Rejected(String) | Unsupported(String) | Limit(ResourceLimit) | Busy | Unavailable(String)
+
+// This private row receives only component lengths and bytes. It writes one
+// complete reply to the empty owned carrier before returning its refusal tag.
+fn check(c: Compiler, request: Bytes, mut reply: Bytes) -> u64 waits
+
+fn put_bytes(mut out: Bytes, b: Bytes) {
+    list.put_word_le(mut out, list.len(b))
+    list.append(mut out, b)
+}
+
+fn put_text(mut out: Bytes, s: String) {
+    put_bytes(mut out, string.as_bytes(s))
+}
+
+pub fn check_library(c: Compiler, request: CheckLibrary) -> Result[CheckedLibrary, Refusal] waits {
+    let mut total = list.len(request.content)
+    if total > 67108864 || list.len(request.closure) >= 4096 {
+        return Error(Limit(Input))
+    }
+    for entry in request.closure {
+        let size = list.len(entry.content)
+        if size > 67108864 || size > 536870912 - total {
+            return Error(Limit(Input))
+        }
+        total = total + size
+    }
+    let mut metadata: u64 = 4
+    for row in request.history {
+        let row_size = 44 + string.byte_len(row.origin) + string.byte_len(row.identity) + string.byte_len(row.version)
+        if row_size > 67108864 - metadata {
+            return Error(Limit(Input))
+        }
+        metadata = metadata + row_size
+    }
+    if string.byte_len(request.root) != 64 {
+        return Error(Rejected("invalid head digest"))
+    }
+    let mut input: Bytes = list.new()
+    put_text(mut input, request.root)
+    put_bytes(mut input, request.content)
+    list.put_word_le(mut input, list.len(request.closure))
+    for entry in request.closure {
+        if string.byte_len(entry.root) != 64 {
+            return Error(Rejected("invalid closure digest"))
+        }
+        put_text(mut input, entry.root)
+        put_bytes(mut input, entry.content)
+    }
+    list.put_word_le(mut input, list.len(request.history))
+    for row in request.history {
+        if string.byte_len(row.root) != 64 {
+            return Error(Rejected("invalid history digest"))
+        }
+        put_text(mut input, row.origin)
+        put_text(mut input, row.identity)
+        put_text(mut input, row.version)
+        put_text(mut input, row.root)
+    }
+    let mut reply: Bytes = list.new()
+    let tag = check(c, input, mut reply)
+    if tag == 0 {
+        let mut at: u64 = 0
+        return Ok(read_library(reply, mut at))
+    }
+    if tag == 1 {
+        return Error(Rejected(result.unwrap(string.from_utf8(take reply))))
+    }
+    if tag == 2 {
+        return Error(Unsupported(result.unwrap(string.from_utf8(take reply))))
+    }
+    if tag == 3 {
+        return Error(Limit(Input))
+    }
+    if tag == 4 {
+        return Error(Limit(Cpu))
+    }
+    if tag == 5 {
+        return Error(Limit(Wall))
+    }
+    if tag == 6 {
+        return Error(Limit(Memory))
+    }
+    if tag == 7 {
+        return Error(Limit(Output))
+    }
+    if tag == 8 {
+        return Error(Busy)
+    }
+    Error(Unavailable(result.unwrap(string.from_utf8(take reply))))
+}
+
+fn byte(b: Bytes, mut at: u64) -> u8 {
+    let v = b[at]
+    at = at + 1
+    v
+}
+
+fn count(b: Bytes, mut at: u64) -> u64 {
+    let n: u32 = list.word_le(b, at)
+    at = at + 4
+    int.widen(n)
+}
+
+fn read_text(b: Bytes, mut at: u64) -> String {
+    let n = count(b, mut at)
+    let mut out: Bytes = list.with_capacity(n)
+    list.append(mut out, list.slice(b, at, at + n))
+    at = at + n
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn optional_text(b: Bytes, mut at: u64) -> Option[String] {
+    if byte(b, mut at) == 0 {
+        None
+    } else {
+        Some(read_text(b, mut at))
+    }
+}
+
+fn strings(b: Bytes, mut at: u64) -> List[String] {
+    let n = count(b, mut at)
+    let mut xs: List[String] = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        list.push(mut xs, read_text(b, mut at))
+    }
+    take xs
+}
+
+fn read_binding(b: Bytes, mut at: u64) -> Binding {
+    let tag = byte(b, mut at)
+    let local = read_text(b, mut at)
+    let id = read_text(b, mut at)
+    if tag == 0 {
+        return Toolchain(alias: take local, id: take id)
+    }
+    let root = read_text(b, mut at)
+    if tag == 1 {
+        Exact(alias: take local, id: take id, tested_root: take root)
+    } else {
+        Floor(alias: take local, id: take id, tested_root: take root, bound_version: read_text(b, mut at))
+    }
+}
+
+fn read_interface(b: Bytes, mut at: u64) -> InterfaceV1 {
+    let version: u32 = list.word_le(b, at)
+    at = at + 4
+    let pkg = PackageId(name: read_text(b, mut at), version: read_text(b, mut at))
+    let n = count(b, mut at)
+    let mut modules: List[InterfaceModule] = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        let path = strings(b, mut at)
+        let extends = byte(b, mut at) != 0
+        let size = count(b, mut at)
+        let mut items: List[InterfaceItem] = list.with_capacity(size)
+        for _ in 0u64 .. size {
+            list.push(mut items, InterfaceItem(definition: read_text(b, mut at), name: read_text(b, mut at), kind: read_text(b, mut at), signature: read_text(b, mut at), doc: optional_text(b, mut at)))
+        }
+        list.push(mut modules, InterfaceModule(path: take path, extends_core: extends, items: take items))
+    }
+    InterfaceV1(version: version, package: take pkg, modules: take modules)
+}
+
+fn read_card(b: Bytes, mut at: u64) -> Card {
+    let mut carried: Map[String, Carried] = map.new()
+    let nc = count(b, mut at)
+    for _ in 0u64 .. nc {
+        let key = read_text(b, mut at)
+        map.insert(mut carried, take key, Carried(takes: strings(b, mut at), returns: strings(b, mut at)))
+    }
+    let mut reached: Map[String, Reached] = map.new()
+    let nr = count(b, mut at)
+    for _ in 0u64 .. nr {
+        let key = read_text(b, mut at)
+        map.insert(mut reached, take key, Reached(kinds: strings(b, mut at), provided: strings(b, mut at), contained: strings(b, mut at), unresolved: optional_text(b, mut at)))
+    }
+    let tag = byte(b, mut at)
+    let verdict: Verdict = if tag == 0 {
+        Pure
+    } else if tag == 1 {
+        Conditional
+    } else if tag == 2 {
+        Unknown
+    } else {
+        Kinds(strings(b, mut at))
+    }
+    Card(carried: take carried, reached: take reached, verdict: take verdict)
+}
+
+fn read_library(b: Bytes, mut at: u64) -> CheckedLibrary {
+    let root = read_text(b, mut at)
+    let head = Header(identity: read_text(b, mut at), version: read_text(b, mut at), charge: read_text(b, mut at))
+    let n = count(b, mut at)
+    let mut bindings: List[Binding] = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        list.push(mut bindings, read_binding(b, mut at))
+    }
+    let api = read_interface(b, mut at)
+    CheckedLibrary(root: take root, header: take head, bindings: take bindings, interface: take api, authority: read_card(b, mut at))
+}

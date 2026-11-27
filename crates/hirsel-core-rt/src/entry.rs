@@ -46,6 +46,7 @@ pub const SECRET: u8 = 11;
 pub const FOREIGN: u8 = 12;
 pub const EXEC: u8 = 13;
 pub const CRED: u8 = 14;
+pub const COMPILER: u8 = 15;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
@@ -188,7 +189,9 @@ pub struct EnvOperations {
 }
 
 #[unsafe(no_mangle)]
-pub static hirsel_core_os_env_ops: EnvOperations = EnvOperations { load: load_env };
+pub static hirsel_core_os_env_ops: EnvOperations = EnvOperations {
+    load: launch_options::load_env,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -258,6 +261,7 @@ pub struct OsProcess {
     secrets: Vec<crate::secret::Granted>,
     _creds: Vec<crate::cred::Granted>,
     _env: Option<Box<crate::env::Env>>,
+    _compiler: Option<Box<crate::host::compiler::Binding>>,
     _exec: Option<crate::exec::Launch>,
     stdin: Option<Box<crate::stdin::Stream>>,
     grants: Vec<u64>,
@@ -319,30 +323,6 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
     }
 }
 pub(crate) use launch_options::prepare_hex;
-
-unsafe fn load_env(
-    input: &OsConfig,
-    describe_mode: bool,
-) -> Result<Option<Box<crate::env::Env>>, StartupError> {
-    // SAFETY: the launcher pins the pattern and Secret source tables.
-    unsafe {
-        let patterns = std::str::from_utf8(bytes(input.env_patterns))
-            .ok()
-            .and_then(hirsel_core_net::EnvPatterns::parse)
-            .ok_or(StartupError::EnvPatterns)?;
-        for i in 0..input.secret_grants_len {
-            let source = bytes((*input.secret_grants.add(i))[1]);
-            if let Ok(source) = std::str::from_utf8(source)
-                && let Some(hirsel_core_net::SecretSource::Env(name)) =
-                    hirsel_core_net::SecretSource::parse(source)
-                && patterns.covers(name)
-            {
-                return Err(StartupError::EnvSecretOverlap(name.to_owned()));
-            }
-        }
-        Ok((!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns))))
-    }
-}
 
 impl OsProcess {
     #[cfg(feature = "record")]
@@ -605,6 +585,13 @@ impl OsProcess {
             } else {
                 None
             };
+            let compiler = (!describe_mode && input.grant_mask & (1 << COMPILER) != 0).then(|| {
+                crate::host::compiler::Binding::new(
+                    std::env::var_os("HIRSEL_COMPILER_WORKER")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| "/usr/local/bin/hirsel".into()),
+                )
+            });
             let mut metadata = Vec::new();
             let mut secrets = Vec::new();
             let mut creds = Vec::new();
@@ -680,7 +667,7 @@ impl OsProcess {
                         terminal: false,
                     });
                 }
-                for kind in NET..=TASKS {
+                for kind in (NET..=TASKS).chain([COMPILER]) {
                     if input.grant_mask & (1 << kind) != 0 {
                         metadata.push(Grant {
                             kind,
@@ -690,6 +677,7 @@ impl OsProcess {
                                 provider_pointer
                             },
                             handle: match kind {
+                                COMPILER => compiler.as_ref().unwrap().handle(),
                                 NET => net_rules.as_ref().unwrap().handle(),
                                 STDIN => std::ptr::from_ref(stdin.as_deref().unwrap()) as u64,
                                 ENV => env.as_ref().unwrap().handle(),
@@ -772,6 +760,7 @@ impl OsProcess {
                 secrets,
                 _creds: creds,
                 _env: env,
+                _compiler: compiler,
                 _exec: exec,
                 stdin,
                 grants: Vec::with_capacity(input.parameters_len),

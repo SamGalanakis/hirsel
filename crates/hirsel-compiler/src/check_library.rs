@@ -20,7 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-const WORKER_ARG: &str = "__check-library";
+/// Internal worker entry recognized by the driver and its contract evaluator.
+pub const WORKER_ARG: &str = "__check-library";
 const WIRE_MAGIC: &[u8; 4] = b"HCL1";
 const UNSUPPORTED_PREFIX: &str = "check_library: unsupported: ";
 const LIMIT_INPUT_PREFIX: &str = "check_library: limit: input: ";

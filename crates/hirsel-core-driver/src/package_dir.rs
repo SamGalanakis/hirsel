@@ -115,8 +115,8 @@ impl Grants {
             self.mask |= 1 << 7;
         } else {
             let kind = crate::grant_kind(value)
-                .filter(|kind| (1..=9).contains(kind))
-                .ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
+                .filter(|kind| (1..=9).contains(kind) || *kind == hirsel_core_ir::release_recipe::GrantKind::Compiler as u8)
+                .ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process, Tasks or Compiler; use --dir for Dir; Args is always present")?;
             self.mask |= 1 << kind;
         }
         Ok(())

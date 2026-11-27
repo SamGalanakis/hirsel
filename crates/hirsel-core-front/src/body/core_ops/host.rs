@@ -1,7 +1,41 @@
-//! A host stat result written into its Result case.
+//! Host row lowering for directory rights, registry admission and stat results.
 use super::*;
 
 impl Cx<'_, '_, '_> {
+    pub(super) fn runtime_read_only_dir(&mut self, dir: ValueId, n: NodeId) -> Option<ValueId> {
+        let ty = Ty::Scalar(Scalar::U64);
+        let rights = self.konst(ty, hirsel_core_ids::host_op::DIR_READ_ONLY, n)?;
+        let output = self.value(ty);
+        self.inst(
+            Inst::Binary {
+                result: output,
+                op: BinaryOp::BitOr,
+                left: dir,
+                right: rights,
+                fail: None,
+            },
+            n,
+        );
+        Some(output)
+    }
+
+    pub(super) fn runtime_check_library(
+        &mut self,
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let args = [
+            Arg::Value(vals[0]?),
+            Arg::Value(vals[1]?),
+            Arg::Value(vals[2]?),
+        ];
+        let [value, error, _, available] =
+            self.runtime_row(RtOp::Host(HostOp::CheckLibrary), &args, n)?;
+        let fits = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.raise_unless(fits, value, available, n);
+        Some(value)
+    }
+
     pub(super) fn runtime_stat(
         &mut self,
         ty: TyId,

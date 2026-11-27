@@ -251,7 +251,7 @@ def host_parameter(case):
     ):
         if pattern in case.call:
             return parameters, ''
-    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env')]:
+    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env'), ('compiler', 'Compiler')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
             return name + ':' + kind, name
@@ -305,10 +305,11 @@ def check_metering(run, *, first=None, reference=None):
     return dict(steps=counts, floor=floor, used=used, refusal_sites=sites)
 
 
-def evaluator_meter(resident, inputs, entry, case, progress, observation):
+def evaluator_meter(resident, inputs, entry, case, progress, observation, compiler_worker=None):
     def run(limit):
         result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions,
-                                   progress=progress, meter=True, meter_limit=limit, root_limit=case.root_limit)
+                                   progress=progress, meter=True, meter_limit=limit, root_limit=case.root_limit,
+                                   compiler_worker=compiler_worker)
         report = json.loads(result.stdout)
         if limit is None:
             _, cause = observation(case, result)
@@ -349,3 +350,50 @@ def contract_dir_fixture(case_name, host, scratch):
     (host / 'link').symlink_to('../secret.txt')
     (host / 'dirlink').symlink_to('..', target_is_directory=True)
     (host / 'abslink').symlink_to('/etc/passwd')
+
+
+def authority_contract(compiler, runtime, libraries, scratch, run, cc=None):
+    """Exercise launch-grant and dependency-ceiling refusal for core.compiler."""
+    project = scratch / 'authority'
+    app, dep = project / 'app', project / 'dep'
+    for directory in (app, dep):
+        directory.mkdir(parents=True)
+    (project / 'hirsel.toml').write_text('[workspace]\nmembers = ["app", "dep"]\n')
+    for directory in (app, dep):
+        (directory / 'hirsel.toml').write_text(
+            f'[package]\nname = "fixture.test/{directory.name}"\nversion = "1.0.0"\n'
+            'charge = "charge-v1"\n[sources]\n"api.hirsel" = "api"\n')
+    (dep / 'api.hirsel').write_text(
+        'pub fn inspect(c: Compiler, request: compiler.CheckLibrary) -> bool waits {\n'
+        '    if let Error(Rejected(_)) = compiler.check_library(c, request) { true } else { false }\n}\n')
+    (app / 'api.hirsel').write_text(
+        'pub fn main(admission: Compiler) -> Result[(), Exit] waits {\n'
+        '    let request = compiler.CheckLibrary(root: "", content: b"", closure: list.new(), history: list.new())\n'
+        '    if dep.api.inspect(admission, request) { Ok(()) } else { fail("missing refusal") }\n}\n')
+    manifest = app / 'hirsel.toml'
+    prefix = manifest.read_text() + (
+        '[program]\nmodule = "api"\nfunction = "main"\nlimit = 67108864\n{grants}\n[dependencies]\n'
+        'dep = { package = "fixture.test/dep", major = 1, path = "../dep", authority = ')
+    common = [str(app), '--libraries', str(libraries), '--store', str(scratch / 'ceiling-store'),
+              '--package-store', str(scratch / 'packages')]
+
+    def policy(grants, ceiling):
+        manifest.write_text(prefix.replace('{grants}', f'grants = [{grants}]') + f'["{ceiling}"] }}\n')
+
+    policy('"Compiler"', 'Compiler')
+    launch = [str(compiler), 'run', *common, '--runtime', str(runtime)]
+    if cc:
+        launch.extend(['--cc', str(cc)])
+    allowed = run(launch, capture_output=True)
+    if allowed.returncode:
+        return f'Compiler ceiling refused granted launch: {allowed.stderr!r}'
+    policy('', 'Compiler')
+    missing = run(launch, capture_output=True)
+    if missing.returncode != 103 or b"not started: grant `admission`" not in missing.stderr:
+        return f'missing Compiler launch grant: {missing.returncode}, {missing.stderr!r}'
+    policy('"Compiler"', 'Exec')
+    denied = run([str(compiler), 'check', *common], capture_output=True)
+    if (denied.returncode != 2 or b'dependencies.dep: fixture.test/dep@1 reaches Compiler' not in denied.stderr
+            or b'CheckLibrary' not in denied.stderr):
+        return f'Exec-only dependency ceiling: {denied.returncode}, {denied.stderr!r}'
+    return None

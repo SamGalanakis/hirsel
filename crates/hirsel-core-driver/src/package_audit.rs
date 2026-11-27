@@ -5,7 +5,7 @@ use crate::package_lock::make_rows;
 use crate::package_resolve::Resolution;
 use crate::package_store::PackageStore;
 use crate::package_workspace::Workspace;
-use crate::reachability::authority::{Card, Cards, names};
+use crate::reachability::authority::{Card, Cards, carried_names, names};
 use crate::{CheckRequest, Driver};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -123,8 +123,8 @@ pub(crate) fn project_card(card: &Card) -> CardProjection<'_> {
                 (
                     export.as_str(),
                     CarriedProjection {
-                        takes: names(carried.takes),
-                        returns: names(carried.returns),
+                        takes: carried_names(carried.takes),
+                        returns: carried_names(carried.returns),
                     },
                 )
             })
@@ -163,8 +163,8 @@ fn print_card(card: &Card) {
         if carried.takes | carried.returns != 0 {
             println!(
                 "    {name}: takes [{}], returns [{}]",
-                names(carried.takes).join(", "),
-                names(carried.returns).join(", ")
+                carried_names(carried.takes).join(", "),
+                carried_names(carried.returns).join(", ")
             );
         }
     }

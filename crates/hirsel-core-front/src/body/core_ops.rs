@@ -41,6 +41,7 @@ pub(crate) enum Kernel {
     StringList(&'static str),
     Unique,
     Host(HostOp),
+    CheckLibrary,
     ReadOnlyDir,
     Net(HostOp),
     Media(HostOp),
@@ -445,22 +446,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .runtime_row(RtOp::Host(op), &[Arg::Value(vals[0]?)], n)
                 .map(|v| v[0]),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
-            Kernel::ReadOnlyDir => {
-                let ty = Ty::Scalar(Scalar::U64);
-                let rights = self.konst(ty, hirsel_core_ids::host_op::DIR_READ_ONLY, n)?;
-                let output = self.value(ty);
-                self.inst(
-                    Inst::Binary {
-                        result: output,
-                        op: BinaryOp::BitOr,
-                        left: vals[0]?,
-                        right: rights,
-                        fail: None,
-                    },
-                    n,
-                );
-                Some(output)
-            }
+            Kernel::ReadOnlyDir => self.runtime_read_only_dir(vals[0]?, n),
+            Kernel::CheckLibrary => self.runtime_check_library(vals, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::Media(op) => self.runtime_media(op, f, vals, result, n),
             Kernel::SecretSeal => self.runtime_secret_seal(f, vals, result, n),

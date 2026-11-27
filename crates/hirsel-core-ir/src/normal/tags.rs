@@ -590,6 +590,7 @@ tags!(HostOp {
     190 => StdinTerminal,
     191 => StderrTerminal,
     192 => StderrSize,
+    193 => CheckLibrary,
 });
 
 tags!(RaiseCause {

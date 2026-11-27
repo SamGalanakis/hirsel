@@ -3,7 +3,7 @@ use super::*;
 use hirsel_core_ir::{Callee, FuncId, HostOp, Inst, Module, RtOp, release_recipe::GrantKind};
 
 mod card;
-pub(crate) use card::{Card, Cards, Verdict, carried, names};
+pub(crate) use card::{Card, Cards, Verdict, carried, carried_names, names};
 use hirsel_core_materialize::Resolver;
 use std::collections::VecDeque;
 

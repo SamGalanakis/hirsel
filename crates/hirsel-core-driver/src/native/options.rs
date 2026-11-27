@@ -46,6 +46,15 @@ pub struct NativeOptions {
 }
 
 impl NativeOptions {
+    pub(crate) fn compiler_worker(&self) -> Option<PathBuf> {
+        if self.grant_mask & (1 << hirsel_core_ir::release_recipe::GrantKind::Compiler as u8) == 0 {
+            return None;
+        }
+        std::env::var_os("HIRSEL_COMPILER_WORKER")
+            .map(PathBuf::from)
+            .or_else(|| crate::installation::compiler_executable().ok())
+    }
+
     pub(crate) fn llvm_release(&self) -> bool {
         matches!(self.backend, Backend::Llvm) && self.optimize
     }

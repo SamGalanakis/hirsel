@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{
     entry::{
-        ARGS, CLOCK, DIR, EXEC, FOREIGN, Grant, NET, PROCESS, RANDOM, SECRET, STDERR, STDIN,
-        STDOUT, TASKS,
+        ARGS, CLOCK, COMPILER, DIR, EXEC, FOREIGN, Grant, NET, PROCESS, RANDOM, SECRET, STDERR,
+        STDIN, STDOUT, TASKS,
     },
     os::{OsProvider, hirsel_core_os_directory_ops},
     process::{Config, View},
@@ -244,6 +244,7 @@ struct EmbedProcessState {
     sources: *const crate::abi_sites::SourceTable,
     os: Option<Box<OsProvider>>,
     _provider: Box<Provider>,
+    _compiler: Option<Box<crate::host::compiler::Binding>>,
     _stop: Box<EmbedStopProvider>,
     _metadata: Box<[Grant]>,
     _net_rules: Option<crate::net::RulesStorage>,
@@ -397,7 +398,9 @@ fn build_embed_process(
             terminal: false,
         });
     }
-    for kind in NET..=TASKS {
+    let compiler = (resolved.grant_mask & (1 << COMPILER) != 0)
+        .then(|| crate::host::compiler::Binding::new("/usr/local/bin/hirsel".into()));
+    for kind in (NET..=TASKS).chain([COMPILER]) {
         if resolved.grant_mask & (1 << kind) != 0 {
             metadata.push(Grant {
                 kind,
@@ -406,7 +409,9 @@ fn build_embed_process(
                 } else {
                     provider_ptr
                 },
-                handle: if kind == NET {
+                handle: if kind == COMPILER {
+                    compiler.as_ref().unwrap().handle()
+                } else if kind == NET {
                     net_rules.as_ref().map_or(0, |r| r.handle())
                 } else {
                     0
@@ -462,6 +467,7 @@ fn build_embed_process(
         sources: program.sources,
         os: Some(os),
         _provider: provider,
+        _compiler: compiler,
         _stop: stop_provider,
         _metadata: metadata,
         _net_rules: net_rules,

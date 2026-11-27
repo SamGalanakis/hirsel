@@ -28,7 +28,10 @@ mod cleanup;
 mod crc;
 mod field_steps;
 mod metering;
-pub use metering::{StepMeter, run_args, run_args_with_meter, run_entry, run_entry_with_meter};
+pub use metering::{
+    CompilerGrant, StepMeter, run_args, run_args_with_meter, run_entry, run_entry_with_grants,
+    run_entry_with_meter, run_injected,
+};
 mod flat;
 mod footprint;
 mod frame;
@@ -187,6 +190,7 @@ pub struct MapObservation {
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
+    compiler: Option<CompilerGrant>,
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
@@ -1232,29 +1236,6 @@ pub fn run_launch(
     )
     .0
 }
-/// Deterministic admission refusal for native/evaluator agreement fixtures.
-pub fn run_injected(
-    m: &Module,
-    f: FuncId,
-    args: &[u64],
-    limit: u64,
-    injection: Option<(usize, bool)>,
-) -> Report {
-    run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            core: Core {
-                injection,
-                ..Core::default()
-            },
-            ..WorldInput::default()
-        },
-    )
-    .0
-}
 /// Harness-owned socket descriptors and explicit rules. Never constructed by source code.
 #[derive(Default)]
 pub struct Network {
@@ -1340,6 +1321,7 @@ pub fn run_host_stdio(
 
 #[derive(Default)]
 struct WorldInput<'a> {
+    compiler: Option<CompilerGrant>,
     core: Core<'a>,
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
@@ -1919,6 +1901,7 @@ impl<'m> Machine<'m> {
     fn new(m: &'m Module, recipes: Vec<RecipeRow>, limit: u64, input: &WorldInput<'_>) -> Self {
         let host = WorldHost {
             world: World {
+                compiler: input.compiler.clone(),
                 launch: Some(input.launch.cloned().unwrap_or_else(|| {
                     hirsel_core_ids::launch::Metadata::source(
                         "",

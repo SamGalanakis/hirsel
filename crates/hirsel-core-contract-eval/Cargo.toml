@@ -12,6 +12,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+hirsel-compiler = { path = "../hirsel-compiler" }
 hirsel-core-driver = { path = "../hirsel-core-driver" }
 hirsel-core-materialize = { path = "../hirsel-core-materialize" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }

@@ -1,7 +1,7 @@
 use super::{Captured, Id, Rebound, Resolution};
 use crate::package_lock::{make_rows, old_rows};
 use crate::package_manifest::Selections;
-use crate::reachability::authority::{Card, Cards, Verdict, names};
+use crate::reachability::authority::{Card, Cards, Verdict, carried_names, names};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,6 +44,13 @@ struct Delta<T = &'static str> {
 }
 
 impl Delta {
+    fn carried(before: u32, after: u32) -> Self {
+        Self {
+            added: carried_names(after & !before),
+            removed: carried_names(before & !after),
+        }
+    }
+
     fn of(before: u16, after: u16) -> Self {
         Self {
             added: names(after & !before),
@@ -81,8 +88,8 @@ impl Diff {
                 ExportDiff {
                     change,
                     reached: Delta::of(left.reached.kinds, right.reached.kinds),
-                    takes: Delta::of(left.carried.takes, right.carried.takes),
-                    returns: Delta::of(left.carried.returns, right.carried.returns),
+                    takes: Delta::carried(left.carried.takes, right.carried.takes),
+                    returns: Delta::carried(left.carried.returns, right.carried.returns),
                     provided: Delta::of(left.reached.provided, right.reached.provided),
                     contained: Delta {
                         added: right

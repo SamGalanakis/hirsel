@@ -18,6 +18,7 @@ use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 pub mod check_library;
+pub mod grant;
 mod host;
 
 pub use check_library::{

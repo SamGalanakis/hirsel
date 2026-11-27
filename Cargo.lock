@@ -938,6 +938,7 @@ dependencies = [
 name = "hirsel-core-contract-eval"
 version = "0.1.0"
 dependencies = [
+ "hirsel-compiler",
  "hirsel-core-driver",
  "hirsel-core-eval",
  "hirsel-core-ids",
@@ -1159,6 +1160,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "foldhash",
+ "hirsel-compiler",
  "hirsel-core-contained",
  "hirsel-core-ids",
  "hirsel-core-layout",

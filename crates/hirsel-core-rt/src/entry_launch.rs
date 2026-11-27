@@ -1,5 +1,7 @@
 //! Options read before the first program argument.
-use super::{FromRawFd, Metadata, OsStr, OsStrExt, OwnedFd, Path, StartupError, io};
+use super::{
+    FromRawFd, Metadata, OsConfig, OsStr, OsStrExt, OwnedFd, Path, StartupError, bytes, io,
+};
 
 pub(super) struct LaunchOptions<'a> {
     pub(super) n_place: u64,
@@ -305,4 +307,28 @@ fn prepare_hex_bytes(text: &[u8]) -> io::Result<Vec<u8>> {
     text.chunks_exact(2)
         .map(|pair| Ok(digit(pair[0])? * 16 + digit(pair[1])?))
         .collect()
+}
+
+pub(super) unsafe fn load_env(
+    input: &OsConfig,
+    describe_mode: bool,
+) -> Result<Option<Box<crate::env::Env>>, StartupError> {
+    // SAFETY: the launcher pins the pattern and Secret source tables.
+    unsafe {
+        let patterns = std::str::from_utf8(bytes(input.env_patterns))
+            .ok()
+            .and_then(hirsel_core_net::EnvPatterns::parse)
+            .ok_or(StartupError::EnvPatterns)?;
+        for i in 0..input.secret_grants_len {
+            let source = bytes((*input.secret_grants.add(i))[1]);
+            if let Ok(source) = std::str::from_utf8(source)
+                && let Some(hirsel_core_net::SecretSource::Env(name)) =
+                    hirsel_core_net::SecretSource::parse(source)
+                && patterns.covers(name)
+            {
+                return Err(StartupError::EnvSecretOverlap(name.to_owned()));
+            }
+        }
+        Ok((!describe_mode).then(|| Box::new(crate::env::Env::snapshot(patterns))))
+    }
 }

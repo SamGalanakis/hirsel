@@ -5,6 +5,7 @@ impl HostOp {
         match self {
             Self::Connect => "hirsel_core_host_connect",
             Self::Resolve => "hirsel_core_host_resolve",
+            Self::CheckLibrary => "hirsel_core_check_library",
             Self::CredFetch => "hirsel_core_cred_fetch",
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",

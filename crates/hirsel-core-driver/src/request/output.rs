@@ -1,7 +1,34 @@
 use super::flags::CompilerFlags;
-use super::{Meter, Outcome, Output, Path, PathBuf, ReachableOutput};
+use super::{Meter, Outcome, PathBuf};
 use crate::installation::Flavour;
 use hirsel_core_layout::{OutputKind, Target};
+
+use crate::BuildProduct;
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub(super) struct Output<'a> {
+    pub(super) accepted: bool,
+    pub(super) root: String,
+    pub(super) files: usize,
+    pub(super) checked_definitions: usize,
+    pub(super) rechecked: usize,
+    pub(super) source_bytes: usize,
+    pub(super) diagnostics: Vec<crate::Diagnostic<'a>>,
+    pub(super) incomplete: Vec<crate::IncompleteDiagnostic<'a>>,
+    pub(super) resources: Vec<crate::ResourceDiagnostic<'a>>,
+    pub(super) image: Option<String>,
+    pub(super) native: Option<BuildProduct>,
+    pub(super) stopped: Option<String>,
+    pub(super) reachable: Option<ReachableOutput<'a>>,
+}
+#[derive(Serialize)]
+pub(super) struct ReachableOutput<'a> {
+    pub(super) bodies: usize,
+    pub(super) declarations: usize,
+    pub(super) census: std::collections::BTreeMap<&'a str, usize>,
+    pub(super) first_stops: &'a [crate::GapStop],
+}
 
 pub(super) fn render_check_diagnostics(
     product: &crate::CheckProduct,
@@ -120,7 +147,7 @@ pub(super) fn answer_hit(
     command: &str,
     json: bool,
     sources: &crate::SourceFiles,
-    output_path: Option<&Path>,
+    options: Option<&crate::NativeOptions>,
     runner: &crate::Runner,
     run_args: Vec<String>,
     record_path: Option<&str>,
@@ -133,7 +160,7 @@ pub(super) fn answer_hit(
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
     let rendered = hit.render();
     let mut stopped = None;
-    let native = match (output_path, &hit.executable) {
+    let native = match (options.map(|n| n.output.as_path()), &hit.executable) {
         (Some(path), Some(binary)) => {
             let product = hit.build(path).expect("a stored executable has its build");
             match binary.deliver(path) {
@@ -183,6 +210,7 @@ pub(super) fn answer_hit(
         json,
         sources,
         runner,
+        options.and_then(crate::NativeOptions::compiler_worker),
         run_args,
         record_path,
         replay_outputs,

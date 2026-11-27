@@ -8,13 +8,12 @@ use crate::native::recipe_build::Publication;
 use crate::product::ProductLibraries;
 use crate::store::remote::Remote;
 use crate::{
-    Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
-    NativeOptions, operator_cli,
+    Backend, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter, NativeOptions,
+    operator_cli,
 };
 use hirsel_core_layout::OutputKind;
 use hirsel_core_resolve::CorpusManifest;
 use packages::{PackageInput, PackageStages};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 mod dispatch;
@@ -22,35 +21,11 @@ mod flags;
 pub use dispatch::main;
 mod lean;
 mod output;
-use output::{admit_target, output_kind};
+use output::{Output, ReachableOutput, admit_target, output_kind};
 mod packages;
 mod release;
 use flags::CompilerFlags;
 pub(crate) use release::local_admission_limits;
-#[derive(Serialize)]
-struct Output<'a> {
-    accepted: bool,
-    root: String,
-    files: usize,
-    checked_definitions: usize,
-    rechecked: usize,
-    source_bytes: usize,
-    diagnostics: Vec<crate::Diagnostic<'a>>,
-    incomplete: Vec<crate::IncompleteDiagnostic<'a>>,
-    resources: Vec<crate::ResourceDiagnostic<'a>>,
-    image: Option<String>,
-    native: Option<BuildProduct>,
-    stopped: Option<String>,
-    reachable: Option<ReachableOutput<'a>>,
-}
-#[derive(Serialize)]
-struct ReachableOutput<'a> {
-    bodies: usize,
-    declarations: usize,
-    census: std::collections::BTreeMap<&'a str, usize>,
-    first_stops: &'a [crate::GapStop],
-}
-
 fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let emit = invocation
         .options
@@ -961,7 +936,7 @@ fn run_compiler_request(
                 command,
                 json,
                 &sources,
-                native.map(|n| n.output.as_path()),
+                native,
                 &runner,
                 run_args,
                 record_path.as_deref(),
@@ -1191,6 +1166,7 @@ fn run_compiler_request(
                             json,
                             &sources,
                             &runner,
+                            options.compiler_worker(),
                             run_args,
                             record_path.as_deref(),
                             replay_outputs.as_deref(),
@@ -1327,6 +1303,9 @@ fn run_compiler_request(
         json,
         &sources,
         &runner,
+        native_options
+            .as_ref()
+            .and_then(NativeOptions::compiler_worker),
         run_args,
         record_path.as_deref(),
         replay_outputs.as_deref(),

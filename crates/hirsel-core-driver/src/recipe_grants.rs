@@ -5,9 +5,9 @@ use super::{EntryParameter, NativeOptions, NativeStop};
 use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind, Recipe};
 use std::collections::BTreeSet;
 
-pub(crate) const GRANT_NAMES: [&str; 15] = [
+pub(crate) const GRANT_NAMES: [&str; 16] = [
     "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-    "Args", "Secret", "Foreign", "Exec", "Cred",
+    "Args", "Secret", "Foreign", "Exec", "Cred", "Compiler",
 ];
 
 pub(super) fn kind(name: &str) -> Option<u8> {

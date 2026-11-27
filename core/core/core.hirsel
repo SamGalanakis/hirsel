@@ -140,6 +140,8 @@ pub opaque type Exec
 
 pub opaque type Cred
 
+pub opaque type Compiler
+
 pub type CredError = Room(key_id: u64, token: u64) | Net(NetError) | Token(IoError) | Status(u16) | Malformed
 
 pub opaque resource type Proc

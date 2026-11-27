@@ -19,6 +19,7 @@ const INSTRUCTIONS: u64 = 1_000_000_000;
 
 /// What one law's run is given: its budget, whether it records events and its launch identity.
 struct Setting {
+    compiler_worker: Option<std::path::PathBuf>,
     instructions: u64,
     root_limit: u64,
     events: bool,
@@ -112,7 +113,11 @@ fn run(
         Some(sources) => sources.item_sites(&module.items)?,
         None => Vec::new(),
     };
-    let (report, checked) = eval::run_entry_with_meter(
+    let compiler = setting.compiler_worker.map(|worker| {
+        let service = hirsel_compiler::grant::Designation::new(worker);
+        std::sync::Arc::new(move |bytes: &[u8]| service.check(bytes)) as eval::CompilerGrant
+    });
+    let (report, checked) = eval::run_entry_with_grants(
         module,
         function,
         &handles,
@@ -126,6 +131,7 @@ fn run(
         setting.launch.as_ref(),
         None,
         setting.meter,
+        compiler,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -212,6 +218,7 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 entry,
                 input["program_entry"].as_bool().unwrap_or(false),
                 Setting {
+                    compiler_worker: input["compiler_worker"].as_str().map(Into::into),
                     instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
                     root_limit: input["root_limit"].as_u64().unwrap_or(u64::MAX),
                     launch,
@@ -264,10 +271,13 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
     }
 }
 fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == [hirsel_compiler::check_library::WORKER_ARG] {
+        hirsel_core_driver::request::main(args);
+    }
     std::panic::set_hook(Box::new(|_| {}));
     let store = tempfile::tempdir().expect("evaluator store");
     let mut driver = Driver::default();
-    let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() == 2 {
         let report = request(
             &mut driver,

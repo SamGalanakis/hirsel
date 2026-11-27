@@ -189,6 +189,7 @@ impl FunctionEmitter<'_> {
             | HostOp::UdpLocalAddr
             | HostOp::NetNarrowUnix
             | HostOp::Resolve
+            | HostOp::CheckLibrary
             | HostOp::CredFetch
             | HostOp::TlsConnect
             | HostOp::TlsHello

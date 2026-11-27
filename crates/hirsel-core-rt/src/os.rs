@@ -628,6 +628,16 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     // SAFETY: these operations pin the Exec call and its callback table.
     unsafe {
         match ((*request).operation, (*request).mode) {
+            (CHECK_LIBRARY, _) => {
+                return Step {
+                    outcome: crate::tasks::host_operation(
+                        state,
+                        request,
+                        crate::host::compiler::issue,
+                    ),
+                    ..Step::default()
+                };
+            }
             (EXEC_SPAWN, _) => {
                 let spawn = crate::exec_runtime::operations(request).spawn;
                 return Step {

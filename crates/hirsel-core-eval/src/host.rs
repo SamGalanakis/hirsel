@@ -222,7 +222,31 @@ impl Machine<'_> {
             | HostOp::StdinSecret => {
                 unreachable!()
             }
-            // The model world grants no Cred (TLS-7), so no call reaches here.
+            HostOp::CheckLibrary => {
+                let reply = self
+                    .host
+                    .world
+                    .compiler
+                    .as_ref()
+                    .filter(|_| a[0] == 0)
+                    .map(|check| check(self.carrier_bytes(a[1])));
+                let (tag, bytes) =
+                    reply.unwrap_or_else(|| (9, b"compiler service is unavailable".to_vec()));
+                let size = bytes.len() as u64;
+                if size != 0 {
+                    let limit = t.limits.last().unwrap().clone();
+                    let charge = hirsel_core_layout::charge::seq(size, 1).unwrap();
+                    if let Err(available) = self.admit(&limit, charge) {
+                        return Ok(vec![charge, 1, 0, available]);
+                    }
+                    let ptr = self.block(size, Some(limit), charge, None);
+                    self.put(ptr, &bytes);
+                    self.store(a[2], 8, ptr);
+                    self.store(a[2] + 8, 8, size);
+                    self.store(a[2] + 16, 8, size);
+                }
+                vec![tag, 0, 0, 0]
+            }
             HostOp::CredFetch => unreachable!("a model world has no Cred"),
             HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
                 return self.exec_call(t, op, a);

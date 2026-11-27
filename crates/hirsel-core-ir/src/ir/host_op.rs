@@ -177,6 +177,7 @@ pub enum HostOp {
     StdinTerminal = 256,
     StderrTerminal = 257,
     StderrSize = 258,
+    CheckLibrary = hirsel_core_ids::host_op::CHECK_LIBRARY as isize,
 }
 
 mod authority;
@@ -340,6 +341,7 @@ impl HostOp {
         HostOp::WriteAt,
         HostOp::Resolve,
         HostOp::CredFetch,
+        HostOp::CheckLibrary,
         HostOp::NetNarrowResolve,
         HostOp::UnixConnect,
         HostOp::UnixListen,
@@ -405,6 +407,7 @@ impl HostOp {
         let op = self;
         let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
         match op {
+            HostOp::CheckLibrary => (vec![V(u64_), V(p), V(p)], outcome),
             HostOp::Connect => (
                 vec![
                     V(u64_),

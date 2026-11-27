@@ -165,6 +165,7 @@ pub(super) fn finish(
     json: bool,
     sources: &crate::SourceFiles,
     runner: &crate::Runner,
+    compiler_worker: Option<PathBuf>,
     run_args: Vec<String>,
     record_path: Option<&str>,
     replay_outputs: Option<&str>,
@@ -224,6 +225,9 @@ pub(super) fn finish(
                     .flatten()
                     .map(|record| ("HIRSEL_RECORD".into(), record.into()))
                     .into_iter()
+                    .chain(
+                        compiler_worker.map(|path| ("HIRSEL_COMPILER_WORKER".into(), path.into())),
+                    )
                     .collect();
                 let mode = if command == "replay" {
                     crate::tape_cli::outputs::Mode::Replay(replay_outputs.map(PathBuf::from))

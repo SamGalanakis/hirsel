@@ -26,7 +26,7 @@ import time
 import tomllib
 
 from std_contracts import (Contract, discover, evaluator_meter, host_parameter, matches_filter,
-                           native_meter, reached_sites, test_module, contract_dir_fixture)
+                           native_meter, reached_sites, test_module, contract_dir_fixture, authority_contract)
 from case_progress import Case
 # library_sources and wait_load are re-exported for the bench scripts.
 from contract_exec import Evaluator, first_stop, library_sources, native_build, source_manifest, wait_load  # noqa: F401
@@ -260,6 +260,7 @@ def wrapper(case, port=None, metering=False):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
+    call = call.replace('(compiler)', '(native_compiler)')
     call = call.replace('(clock, tasks)', '(native_clock,native_tasks)')
     call = call.replace('(unix, dir, tasks)', '(native_net,native_dir,native_tasks)')
     call = call.replace('(exec, tasks)', '(native_exec,native_tasks)')
@@ -496,7 +497,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                cause='stay on host walker until R8b')
                     save_row(rows, row, output)
                     continue
-                if engine == 'evaluator' and host_parameter(case)[0] and not host_parameter(case)[0].endswith((':Tasks', ':Clock')):
+                if engine == 'evaluator' and host_parameter(case)[0] and not host_parameter(case)[0].endswith((':Tasks', ':Clock', ':Compiler')):
                     row.update(applicable=False, passed=None, native_only=True,
                                cause='native-only: entry takes a host capability')
                     save_row(rows, row, output)
@@ -635,10 +636,14 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 elif case.argv is not None:
                     command.extend(['--entry', entry])
                 else:
-                    command.extend(['--test-timeout', str(timeout), '--dir', str(host)])
+                    command.extend(['--test-timeout', str(timeout)])
+                    if '(compiler)' not in case.call:
+                        command.extend(['--dir', str(host)])
+                compiler_worker = (compiler or evaluator) if '(compiler)' in case.call else None
                 if evaluating:
                     law_started = time.monotonic()
-                    result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions, progress=progress)
+                    result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions, progress=progress,
+                                               compiler_worker=compiler_worker)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')
@@ -646,7 +651,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         row['revision'] = None
                     row['seconds'] = round(time.monotonic() - law_started, 3)
                     if compare_revisions:
-                        grants = [capability for capability in ('Tasks', 'Clock')
+                        grants = [capability for capability in ('Tasks', 'Clock', 'Compiler')
                                   if simulated and capability == 'Tasks' or not simulated and ':' + capability in host_parameter(case)[0]]
                         built = native_build(compiler, runtime, inputs, entry, 'cranelift', work / 'revision-store',
                                              scratch / 'revision-program', limit=case.root_limit, grants=grants,
@@ -689,6 +694,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 # All engines read this manifest's checkout sources, as the
                 # resident evaluator does, including temporary @test bodies.
                 command.append('--source-core')
+                if '(compiler)' in case.call:
+                    command.extend(['--grant', 'Compiler'])
                 if '(out)' in case.call:
                     command.extend(['--grant', 'Stdout'])
                 if '(err)' in case.call:
@@ -780,6 +787,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         if cause:
                             row['cause'] = f'with {name}={value}: {cause}'
                             break
+                if row['cause'] is None and case.name == 'core.compiler:admission':
+                    row['cause'] = authority_contract(compiler, runtime, root / 'core', scratch, progress.run, cc)
                 row['passed'] = row['cause'] is None
                 if coverage_out and row['passed'] and coverage_out.exists():
                     profiles.setdefault((row['test'], row['file']), {})[(engine, profile)] = reached_sites(coverage_out)
@@ -789,7 +798,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     key = (row['test'], row['file'])
                     try:
                         if key not in evaluator_meters:
-                            evaluator_meters[key] = evaluator_meter(resident, inputs, entry, case, progress, evaluator_observation)
+                            evaluator_meters[key] = evaluator_meter(resident, inputs, entry, case, progress, evaluator_observation,
+                                                                  compiler_worker)
                         reference = evaluator_meters[key]
                         if initial_meter is None:
                             raise ValueError('native runtime produced no step report (use the testing runtime archive)')

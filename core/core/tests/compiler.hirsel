@@ -1,0 +1,89 @@
+// Canonical C v3 head and exact child, framed per packages §1.
+fn fixture() -> compiler.CheckLibrary {
+    let leaf = compiler.LibraryEntry(root: "76ae24ce4d9a71210574fcf579054da206f4f2d70b109aa4908233a7e4bb3126", content: b"\x03\x17github.com/example/leaf\x01\x00\x00\x00\x09charge-v1\x00\x01\x0bleaf.hirsel\x01\x04leaf\x1apub fn one() -> u64 { 1 }\x0a\x00")
+    let mut deps: List[compiler.LibraryEntry] = list.new()
+    list.push(mut deps, take leaf)
+    compiler.CheckLibrary(root: "1deb571bbd582801213907f7455641123c0d84ee447d76c51f48ce8f20028abc", content: b"\x03\x1agithub.com/example/checked\x01\x00\x00\x00\x09charge-v1\x01\x03dep\x17github.com/example/leaf\x01\x01v\xae$\xceM\x9aq!\x05t\xfc\xf5y\x05M\xa2\x06\xf4\xf2\xd7\x0b\x10\x9a\xa4\x90\x823\xa7\xe4\xbb1&\x01\x0echecked.hirsel\x01\x07checkedc/// Carries both designations.\x0apub fn inspect(c: Compiler, f: fn(u64) -> u64) -> u64 { dep.one() }\x0a\x00", closure: take deps, history: list.new())
+}
+
+// expect: run admission(compiler) = true
+fn admission(c: Compiler) -> bool waits {
+    let request = fixture()
+    let checked = match compiler.check_library(c, request) {
+        Ok(value) => take value,
+        Error(Rejected(why)) => fail(take why),
+        Error(Unsupported(why)) => fail(take why),
+        Error(Unavailable(why)) => fail(take why),
+        Error(_) => fail("valid fixture refused")
+    }
+    if checked.root != "1deb571bbd582801213907f7455641123c0d84ee447d76c51f48ce8f20028abc" || checked.header.identity != "github.com/example/checked@1" || checked.header.version != "1.0.0" || checked.header.charge != "charge-v1" {
+        fail("header")
+    }
+    if list.len(checked.bindings) != 1 {
+        fail("binding count")
+    }
+    let binding: compiler.Binding = clone(checked.bindings[0u64])
+    let Exact(alias: alias, id: id, tested_root: tested) = take binding else {
+        fail("binding tag")
+    }
+    if alias != "dep" || id != "github.com/example/leaf@1" || tested != "76ae24ce4d9a71210574fcf579054da206f4f2d70b109aa4908233a7e4bb3126" {
+        fail("binding values")
+    }
+    let api: compiler.InterfaceV1 = clone(checked.interface)
+    if api.version != 1 || api.package.name != "github.com/example/checked" || api.package.version != "1" || list.len(api.modules) != 1 {
+        fail("interface version and package")
+    }
+    let m: compiler.InterfaceModule = clone(api.modules[0u64])
+    if list.len(m.path) != 1 || m.path[0u64] != "checked" || m.extends_core || list.len(m.items) != 1 {
+        fail("interface module")
+    }
+    let item: compiler.InterfaceItem = clone(m.items[0u64])
+    if item.name != "inspect" || item.kind != "function" || item.definition != "github.com/example/checked@1/checked/inspect" || item.signature != "pub fn inspect(c: Compiler, f: fn(u64) -> u64) -> u64" {
+        fail("interface item")
+    }
+    let doc_field: Option[String] = clone(item.doc)
+    let Some(doc) = take doc_field else {
+        fail("missing doc")
+    }
+    if doc != "Carries both designations." {
+        fail("item doc")
+    }
+    let card: compiler.Card = clone(checked.authority)
+    let verdict: compiler.Verdict = clone(card.verdict)
+    let Conditional = take verdict else {
+        fail("authority verdict")
+    }
+    if map.len(card.carried) != 1 || map.len(card.reached) != 1 {
+        fail("card sizes")
+    }
+    let Some(carried) = map.get(card.carried, "checked/inspect") else {
+        fail("export carried")
+    }
+    if list.len(carried.takes) != 2 || carried.takes[0u64] != "Compiler" || carried.takes[1u64] != "function" || list.len(carried.returns) != 0 {
+        fail("carried function and compiler")
+    }
+    let Some(reached) = map.get(card.reached, "checked/inspect") else {
+        fail("export reached")
+    }
+    let reason: Option[String] = clone(reached.unresolved)
+    let None = take reason else {
+        fail("unresolved export")
+    }
+    if list.len(reached.kinds) + list.len(reached.provided) + list.len(reached.contained) != 0 {
+        fail("reached authority")
+    }
+    let mut invalid = fixture()
+    invalid.content = b"invalid C"
+    let Error(Rejected(_)) = compiler.check_library(c, invalid) else {
+        fail("invalid C accepted")
+    }
+    let mut large = fixture()
+    for _ in 0u64 .. 4096 {
+        list.push(mut large.closure, compiler.LibraryEntry(root: "", content: b""))
+    }
+    if let Error(Limit(Input)) = compiler.check_library(c, large) {
+        true
+    } else {
+        false
+    }
+}

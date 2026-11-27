@@ -38,6 +38,7 @@ impl HostOp {
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
             HostOp::Resolve => "host_resolve",
+            HostOp::CheckLibrary => "check_library",
             HostOp::CredFetch => "cred_fetch",
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",

@@ -190,7 +190,7 @@ impl<'a> Plan<'a> {
             &binding.parameters,
             options,
         )?;
-        let mut ordinals = [0u64; 15];
+        let mut ordinals = [0u64; crate::native::recipe_grants::GRANT_NAMES.len()];
         let mut grant_mask = options.grant_mask;
         let parameters = binding
             .parameters

@@ -1,6 +1,33 @@
 //! MEM-30 accounting and the fixture entry points that observe it.
 use super::*;
 
+/// Deterministic admission refusal for native/evaluator agreement fixtures.
+pub fn run_injected(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    injection: Option<(usize, bool)>,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            core: Core {
+                injection,
+                ..Core::default()
+            },
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
+/// A host's explicit registry compiler designation in the evaluator. Its
+/// callback accepts and returns the private core.compiler row's value bytes.
+pub type CompilerGrant = std::sync::Arc<dyn Fn(&[u8]) -> (u64, Vec<u8>) + Send + Sync>;
+
 /// Run an entry with the root task's startup charge and teardown, as the native
 /// process entry does. The limit must cover startup. May record CONC-10 events.
 /// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
@@ -55,12 +82,49 @@ pub fn run_entry_with_meter(
     error_text: Option<ErrorText<'_>>,
     meter: Option<StepMeter>,
 ) -> (Report, Checked) {
+    run_entry_with_grants(
+        m,
+        f,
+        args,
+        limit,
+        nans,
+        destination,
+        instructions,
+        revisions,
+        events,
+        sites,
+        launch,
+        error_text,
+        meter,
+        None,
+    )
+}
+
+/// As run_entry_with_meter, with an explicitly supplied registry check service.
+#[allow(clippy::too_many_arguments)]
+pub fn run_entry_with_grants(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    nans: Nans,
+    destination: Option<&mut [u8]>,
+    instructions: u64,
+    revisions: &Revisions,
+    events: bool,
+    sites: &[u64],
+    launch: Option<&hirsel_core_ids::launch::Metadata>,
+    error_text: Option<ErrorText<'_>>,
+    meter: Option<StepMeter>,
+    compiler: Option<CompilerGrant>,
+) -> (Report, Checked) {
     run_world(
         m,
         f,
         args,
         limit,
         WorldInput {
+            compiler,
             core: Core {
                 nans,
                 instructions,

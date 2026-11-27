@@ -4,8 +4,8 @@
 //! Reads zero environment variables, zero current working directory, and zero
 //! inherited file descriptors.
 use crate::entry::{
-    ARGS, CLOCK, CRED, DIR, ENV, EXEC, FOREIGN, NET, PROCESS, RANDOM, Requirement, SECRET, STDERR,
-    STDIN, STDOUT, TASKS,
+    ARGS, CLOCK, COMPILER, CRED, DIR, ENV, EXEC, FOREIGN, NET, PROCESS, RANDOM, Requirement,
+    SECRET, STDERR, STDIN, STDOUT, TASKS,
 };
 use hirsel_core_ids::launch::{XDG_FORMS, valid_app};
 use hirsel_core_layout::{Os, Target};
@@ -182,6 +182,7 @@ pub(crate) fn resolve_embedded_grants(
                 grant_mask |= 1 << SECRET;
             } else {
                 match token {
+                    "Compiler" => grant_mask |= 1 << COMPILER,
                     "Clock" => grant_mask |= 1 << CLOCK,
                     "Random" => grant_mask |= 1 << RANDOM,
                     "Tasks" => grant_mask |= 1 << TASKS,
@@ -250,7 +251,7 @@ pub(crate) fn resolve_embedded_grants(
                     return Err(format!("GrantMissing(Net:{name})"));
                 }
             }
-            CLOCK | RANDOM | TASKS | STDOUT | STDERR | STDIN | FOREIGN => {
+            CLOCK | RANDOM | TASKS | STDOUT | STDERR | STDIN | FOREIGN | COMPILER => {
                 if grant_mask & (1 << req.kind) == 0 {
                     return Err(format!("GrantMissing({name})"));
                 }

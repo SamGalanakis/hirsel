@@ -36,8 +36,10 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None, meter=False, meter_limit=None, root_limit=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None, meter=False, meter_limit=None, root_limit=None, compiler_worker=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
+        if compiler_worker is not None:
+            request["compiler_worker"] = str(compiler_worker)
         if events:
             # CONC-10 events are recorded only on request (22f95498).
             request["events"] = True

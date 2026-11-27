@@ -2579,7 +2579,7 @@ pub fn spare() -> u64 { 0u64 }
         interface,
         serde_json::json!({
             "version": 1,
-            "package": {"name": "counter", "version": "2"},
+            "package": {"name": "local/counter", "version": "2"},
             "modules": [{"path": ["counter"], "extends_core": false, "items": [
                 {"definition": "local/counter@2/counter/main", "name": "main", "kind": "function", "signature": "pub fn main() -> Result[(), Exit]"},
                 {"definition": "local/counter@2/counter/count", "name": "count", "kind": "function", "signature": "pub fn count() -> u64"},

@@ -521,6 +521,7 @@ fn a_user_package_named_runner_is_not_a_place() {
         CheckRequest::directory(&workspace.join("app"), &root.join("core"), &dir.path().join("member-store"))
             .unwrap();
     assert!(request.inputs.packages.iter().all(|package| !package.toolchain));
+    let entry = request.entry.clone().unwrap();
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();

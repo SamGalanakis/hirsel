@@ -30,6 +30,12 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     if capture.head.entry.seq != 4 || capture.head.checkpoint.seq != 4 || capture.head.floor != 4 || capture.head.activation != 1 || capture.head.binding[31] != 42 {
         fail("checkpoint did not atomically publish the floor, activation and binding")
     }
+    let mut mismatched = capture.head
+    mismatched.binding[0] = 43
+    match failure_result_from_rep(history.history_checkpoint(mut new_reader, mismatched, source.deadline)) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("checkpoint accepted a head with another activation binding"),
+    }
     // Older checkpoints and groups are not needed by the new capture.
     match std.object.erase(mut source.client, old_checkpoint, source.deadline) {
         Ok(()) => (),
@@ -59,7 +65,7 @@ fn object_locator_boundary(mut source: history.ObjectPackRead, head: history.His
     }
     let ctx = format.DiskContext(store: head.store, role: 2, seq: 5)
     let retained = history.HistoryRetention(floor: 5, earlier: list.new())
-    let mark_entry = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, head.entry, manifest, retained, split))?
+    let mark_entry = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, head.entry, manifest, retained, split, history.HistoryActivation(number: 0, binding:[0; 32])))?
     let mark = failure_result_from_rep(history.history_read_mark("test checkpoint", head.store, mark_entry, workspace.packet))?
     let mut observed = head
     observed.checkpoint = mark_entry
@@ -96,7 +102,7 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let manifest = pages.HistoryRef(seq: 1, epoch: 1, len: 88, digest: 7)
     let kept = history.HistoryRetention(floor: 20, earlier: list.new())
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 20)
-    let prior_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, parent, manifest, kept, previous))?
+    let prior_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, parent, manifest, kept, previous, history.HistoryActivation(number: 0, binding:[0; 32])))?
     let base = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: store_key_to_rep(id)), activation: 0, entry: prior_cut, checkpoint: prior_cut, floor: 20, binding:[0; 32], origin: None)
     let mark = failure_result_from_rep(history.history_read_mark("locator at 20", store_key_to_rep(id), prior_cut, workspace.packet))?
     let inherited = failure_result_from_rep(history.history_locator(mut client, base, mark, workspace.packet, deadline))?
@@ -108,7 +114,7 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     }
     let current_ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 24)
     let retained = history.HistoryRetention(floor: 24, earlier: list.new())
-    let current_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, current_ctx, 1, 1, prior_cut, manifest, retained, updated))?
+    let current_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, current_ctx, 1, 1, prior_cut, manifest, retained, updated, history.HistoryActivation(number: 0, binding:[0; 32])))?
     let mut captured = base
     captured.entry = current_cut
     captured.checkpoint = current_cut

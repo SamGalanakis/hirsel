@@ -273,7 +273,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     }
     let ctx = format.DiskContext(store: store_key_to_rep(StoreId(hi: 1, lo: 2)), role: 6, seq: 3)
     let mut prepared_file = result.unwrap(failure_result_from_rep(transfer.open_frames(d, "PREPARED", ctx)))
-    let meta = transfer.PreparedMeta(base: transfer.ExportStampRep(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: transfer.PreparedTargetRep(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456, limits: None), next_table: 1, changes: 0, ranges: 0)
+    let meta = transfer.PreparedMeta(base: transfer.ExportStampRep(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, binding: export_binding_bytes([0; 32]), terminal: 3, end: 72), target: transfer.PreparedTargetRep(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456, limits: None), next_table: 1, changes: 0, ranges: 0)
     let codec: std.codec.Codec[transfer.PreparedMeta] = std.codec.of()
     result.unwrap(failure_result_from_rep(transfer.write_prepared_frame(mut prepared_file, 0x0081, codec, meta)))
     result.unwrap(failure_result_from_rep(transfer.finish_frames(take prepared_file)))

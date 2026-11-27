@@ -36,7 +36,7 @@ pub fn backup_offline(take p: PreparedBackup, take attempt: Bytes) -> Result[Opt
         scratch_result(failure_result_from_rep(capture.copy_backup_journal(mut selected.state, target)))
     } ?=> |cause| BackupCheck(CheckBudget(cause))
     written ?=> BackupDeploy
-    let stamp = ExportStamp(attempt: take attempt, store_hi: capture.prepared_id(selected.state).hi, store_lo: capture.prepared_id(selected.state).lo, opened: terminal, branch: 0, head: head, next_table: capture.prepared_manifest(selected.state).next_table, activation: 0, terminal: terminal, end: end)
+    let stamp = ExportStamp(attempt: take attempt, store_hi: capture.prepared_id(selected.state).hi, store_lo: capture.prepared_id(selected.state).lo, opened: terminal, branch: 0, head: head, next_table: capture.prepared_manifest(selected.state).next_table, activation: 0, binding: export_binding_bytes([0; 32]), terminal: terminal, end: end)
     let raw = scratch_result(export_bytes(stamp)) ?=> BackupDeploy
     scratch_result(failure_result_from_rep(manifest.disk_write_synced(target, "EXPORT", raw))) ?=> BackupDeploy
     scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(target)))) ?=> BackupDeploy

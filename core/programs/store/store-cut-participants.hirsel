@@ -10,6 +10,7 @@ pub scoped type CutInput[in installed, in proposed] {
     limits: types.LimitsRep,
     fence: u32,
     binding_id: u64,
+    origin: Option[RestoreOrigin],
     next_branch: u32,
     next_table: u32
 }
@@ -152,7 +153,11 @@ pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutIn
         CutReplaceMain(_, _, _, tables, _, _) => tables,
         _ => input.next_table
     }
-    let manifest = PageManifest(generation: generation, fence: input.fence, inline: input.heads[0u64].roots.collections.inline, limits: input.limits, next_stamp: next_stamp, next_branch: input.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, binding_id: input.binding_id, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
+    let main_transition = match input.change {
+        CutReplaceMain(_, _, _, _, _, _) => true,
+        _ => false,
+    }
+    let manifest = PageManifest(generation: generation, fence: input.fence, inline: input.heads[0u64].roots.collections.inline, limits: input.limits, next_stamp: next_stamp, next_branch: input.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: published_tree_pointer(layout.locations, layout.lists.roots.lineage), deferred_frees: published_tree_pointer(layout.locations, layout.lists.roots.deferred), deferred_next: layout.lists.roots.deferred_next, binding_id: input.binding_id, main_transition, origin: input.origin, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), branches: list.new(), pins: list.new())
     let context = format.DiskContext(store: input.store, role: 1, seq: generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest_fields(mut raw, manifest)?
@@ -167,7 +172,7 @@ pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutIn
     let mut slot = 0u64
     visit_cut_heads(input, mut raw, scoped fn(mut buffer: Bytes, head: pages.Head, _roots: pages.Roots, head_version: u64, at: u64) -> Result[(), types.Failure] {
         slot += 1
-        append_page_manifest_branch(mut buffer, head.id, head.name, head.parent, head.forked_at, head_version, at, published_page_roots(layout.locations, published[slot - 1]))
+        append_page_manifest_branch(mut buffer, head.id, head.name, head.parent, head.forked_at, head_version, at, published_page_roots(layout.locations, published[slot - 1]), head.id == 0 && main_transition)
     })?
     let pins = list.len(input.pins)
     let pin_count = match input.change {
@@ -189,5 +194,5 @@ pub fn fill_cut_manifest[in installed, in proposed](mut raw: Bytes, input: CutIn
         }
     }
     write_seal(mut raw, context, input.fence)?
-    Ok(())
+    append_restore_origin(mut raw, context, input.origin)
 }

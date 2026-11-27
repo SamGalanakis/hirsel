@@ -386,7 +386,7 @@ fn writer_state_bytes() -> u64 {
 
 // The largest pack or MANIFEST file a cut writes (§3.9).
 fn cut_output_bytes(pack: u64, l: StoreLimits) -> u64 {
-    order.max(pack, manifest.page_manifest_file_size(manifest.manifest_limit(limits_to_rep(l)), 1))
+    order.max(pack, manifest.page_manifest_file_size(manifest.manifest_limit(limits_to_rep(l)), 1) + manifest.RESTORE_ORIGIN_FRAME)
 }
 
 fn history_workspace_bytes(packet: u64, compare: u64) -> Option[u64] {
@@ -401,7 +401,7 @@ const CUT_HISTORY_RETAIN_LIMIT: u64 = 255
 fn cut_history_packet_room() -> u64 {
     // CHECKPOINT carries up to one root locator's rows and retain (a u8)
     // checkpoint references. This also covers one locator chunk.
-    189 + format.BINDING_BYTES + (4 * bytes[u64]) * (history.HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
+    229 + format.BINDING_BYTES + (4 * bytes[u64]) * (history.HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
 }
 
 fn bucket_cut_parts(pack: u64, l: StoreLimits) -> WriterParts {

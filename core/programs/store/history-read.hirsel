@@ -5,6 +5,7 @@ pub type HistoryLink {
 }
 
 pub type HistoryMark {
+    activation: HistoryActivation,
     manifest: pages.HistoryRef,
     floor: u64,
     retained: List[pages.HistoryRef],
@@ -137,7 +138,7 @@ pub fn history_read_mark(path: String, id: types.StoreKey, reference: pages.Hist
     history_object_digest(path, reference, raw)?
     let mark = manifest.history_frame(path, ctx, raw, 112, 0x0090)?
     let size = mark.end - mark.payload
-    if size < 45 || size > 8173 {
+    if size < 85 || size > 8213 {
         return Error(format.disk_fault(path, 112, Malformed))
     }
     let row = list.slice(raw, mark.payload, mark.end)
@@ -145,7 +146,7 @@ pub fn history_read_mark(path: String, id: types.StoreKey, reference: pages.Hist
     let floor = format.read_le(row, 32, 8)
     let depth = row[40]
     let row_count = format.read_le(row, 41, 4)
-    if page_record.seq == 0 || page_record.epoch == 0 || page_record.epoch > reference.epoch || page_record.len < 88 || page_record.len > manifest.MANIFEST_LIMIT + 88 + 20 || depth > 3 || row_count > 254 || size != 45 + 32 * row_count {
+    if page_record.seq == 0 || page_record.epoch == 0 || page_record.epoch > reference.epoch || page_record.len < 88 || page_record.len > manifest.MANIFEST_LIMIT + 88 + 20 + manifest.RESTORE_ORIGIN_FRAME || depth > 3 || row_count > 254 || size != 85 + 32 * row_count {
         return Error(format.disk_fault(path, 112, Malformed))
     }
     let mut retained = manifest.disk_allocation(scoped fn() -> Result[List[pages.HistoryRef], types.Failure] {
@@ -153,7 +154,7 @@ pub fn history_read_mark(path: String, id: types.StoreKey, reference: pages.Hist
     })?
     let mut final_item = 0u64
     for i in 0u64 .. row_count {
-        let at = 45 + 32 * i
+        let at = 85 + 32 * i
         let earlier = pages.HistoryRef(seq: format.read_le(row, at, 8), epoch: format.read_le(row, at + 8, 8), len: format.read_le(row, at + 24, 8), digest: format.read_le(row, at + 16, 8))
         if earlier.seq <= final_item || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
             return Error(format.disk_fault(path, 112, Malformed))
@@ -173,7 +174,12 @@ pub fn history_read_mark(path: String, id: types.StoreKey, reference: pages.Hist
     if locator.end != list.len(raw) || (locator.end - locator.payload) > 1048576 || (locator.end - locator.payload) % 32 != 0 {
         return Error(format.disk_fault(path, mark.end, Malformed))
     }
-    Ok(HistoryMark(manifest: page_record, floor, retained: take retained, depth, locate_at: locator.payload, locate_end: locator.end))
+    let mut binding: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        binding[i] = row[53 + i]
+    }
+    let activation = HistoryActivation(number: format.read_le(row, 45, 8), binding)
+    Ok(HistoryMark(activation, manifest: page_record, floor, retained: take retained, depth, locate_at: locator.payload, locate_end: locator.end))
 }
 
 pub fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(HistoryMark, Bytes), types.Failure] waits {
@@ -182,7 +188,7 @@ pub fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, dead
     let mark = manifest.disk_allocation(scoped fn() -> Result[HistoryMark, types.Failure] {
         history_read_mark(name, head.store, head.checkpoint, raw)
     })?
-    if mark.floor != head.floor {
+    if mark.floor != head.floor || mark.activation.number != head.activation || mark.activation.binding != head.binding {
         return Error(format.disk_fault(name, 112, Malformed))
     }
     Ok((take mark, take raw))

@@ -347,7 +347,7 @@ fn witness_cut(id: StoreId, pair: history.HistoryPair, pos: u64, predecessor: pa
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = history.HistoryRetention(floor: pos, earlier: list.new())
     let locate = history.HistoryLocateRoot(depth: 0, rows: list.new())
-    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate))?
+    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate, history.HistoryActivation(number: 0, binding:[0; 32])))?
     let header = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }

@@ -30,7 +30,7 @@ pub fn paged_pack_path(seq: u64) -> Result[String, types.Failure] {
     })
 }
 
-pub const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
+pub const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + RESTORE_ORIGIN_FRAME + UNKNOWN_ROOM
 
 fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -> Result[(), types.Failure] {
     if kind == 0x0001 {
@@ -66,6 +66,7 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
 
 pub fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(types.StoreKey, PageManifest), types.Failure] {
     let header = disk_read_header(path, raw, 1, None, None)?
+    let mut origin: Option[RestoreOrigin] = None
     let mut found: Option[PageManifest] = None
     let mut fence: u32 = 0
     let mut room = 0u64
@@ -81,6 +82,11 @@ pub fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(types.StoreK
             if fence == 0 {
                 return Error(format.disk_fault(path, at, Malformed))
             }
+        } else if frame.kind == RESTORE_ORIGIN_KIND {
+            if let Some(_) = origin {
+                return Error(format.disk_fault(path, at, Malformed))
+            }
+            origin = Some(decode_restore_origin(path, frame, payload, header.context.store)?)
         } else {
             disk_page_kind(path, at, frame.kind, 0x0031, frame.flags)?
             if frame.kind == 0x0031 {
@@ -105,6 +111,7 @@ pub fn disk_read_page_manifest(path: String, raw: Bytes) -> Result[(types.StoreK
     }
     let mut manifest = take record
     manifest.fence = fence
+    manifest.origin = origin
     Ok((header.context.store, take manifest))
 }
 
@@ -113,7 +120,7 @@ pub fn disk_page_manifest_bytes(id: types.StoreKey, m: PageManifest) -> Result[B
     if size > manifest_limit(m.limits) {
         return Error(Limit(Manifest))
     }
-    let mut raw: Bytes = list.with_capacity(page_manifest_file_size(size, m.fence))
+    let mut raw: Bytes = list.with_capacity(page_manifest_file_size(size, m.fence) + restore_origin_bytes(m.origin))
     fill_page_manifest_file(mut raw, id, m)?
     Ok(take raw)
 }
@@ -126,7 +133,8 @@ pub fn fill_page_manifest_file(mut raw: Bytes, id: types.StoreKey, m: PageManife
     let context = format.DiskContext(store: id, role: 1, seq: m.generation)
     begin_page_manifest_file(mut raw, context)?
     append_page_manifest(mut raw, m)?
-    seal_page_manifest_file(mut raw, context, m.fence)
+    seal_page_manifest_file(mut raw, context, m.fence)?
+    append_restore_origin(mut raw, context, m.origin)
 }
 
 pub fn begin_page_manifest_file(mut raw: Bytes, context: format.DiskContext) -> Result[(), types.Failure] {

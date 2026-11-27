@@ -7,6 +7,7 @@ pub type ExportStampRep: codec + send {
     head: u64,
     next_table: u32,
     activation: u64,
+    binding: Bytes,
     terminal: u64,
     end: u64
 }

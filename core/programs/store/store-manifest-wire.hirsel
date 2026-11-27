@@ -53,6 +53,8 @@ pub type PageManifest: shareable + send {
     deferred_frees: std.page.PagePtr,
     deferred_next: u64,
     binding_id: u64,
+    main_transition: bool,
+    origin: Option[RestoreOrigin],
     sweep: SweepCursor,
     pack_root: std.page.PagePtr,
     branches: List[LocatedBranch],
@@ -64,7 +66,7 @@ pub fn page_manifest_empty(limits: types.LimitsRep) -> PageManifest {
     let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
     list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
-    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, binding_id: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
+    PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, binding_id: 0, main_transition: false, origin: None, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
 }
 
 pub fn page_manifest_size(m: PageManifest) -> u64 {
@@ -125,7 +127,7 @@ pub fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[()
     Ok(())
 }
 
-pub fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: pages.LocatedRoots) -> Result[(), types.Failure] {
+pub fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: pages.LocatedRoots, main_transition: bool) -> Result[(), types.Failure] {
     types.capacity(format.le(mut raw, int.widen(id), 4))?
     types.capacity(format.disk_put_name(mut raw, name))?
     types.capacity(format.le(mut raw, int.widen(parent), 4))?
@@ -133,7 +135,11 @@ pub fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent
     types.capacity(format.le(mut raw, head, 8))?
     types.capacity(format.le(mut raw, at, 8))?
     put_located_roots(mut raw, roots)
-    types.capacity(format.le(mut raw, 0, 1))
+    types.capacity(format.le(mut raw, if main_transition {
+        2u64
+    } else {
+        0u64
+    }, 1))
 }
 
 pub fn append_page_manifest_pin(mut raw: Bytes, owner: pages.PinOwner, name: String, branch_id: u32, held_at: u64, roots: pages.LocatedRoots, watermark: u64) -> Result[(), types.Failure] {
@@ -160,7 +166,7 @@ fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), types.Fai
     append_page_manifest_fields(mut raw, m)?
     types.capacity(format.le(mut raw, list.len(m.branches), 4))?
     for item in m.branches {
-        append_page_manifest_branch(mut raw, item.id, item.name, item.parent, item.forked_at, item.version, item.at, item.roots)?
+        append_page_manifest_branch(mut raw, item.id, item.name, item.parent, item.forked_at, item.version, item.at, item.roots, item.id == 0 && m.main_transition)?
     }
     types.capacity(format.le(mut raw, list.len(m.pins), 4))?
     for held in m.pins {
@@ -265,6 +271,7 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
         return Error(format.disk_fault(file, at, Malformed))
     }
     let mut branches: List[LocatedBranch] = list.with_capacity(branch_count)
+    let mut main_transition = false
     for i in 0u64 .. branch_count {
         let id: u32 = int.truncate(format.disk_number(file, raw, mut at, 4)?)
         if (i == 0 && id != 0) || (i != 0 && id <= branches[i - 1].id) {
@@ -282,6 +289,9 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
         match format.disk_number(file, raw, mut at, 1)? {
             0 => (),
             1 => return Error(Unsupported(0x0031)),
+            2 if id == 0 => {
+                main_transition = true
+            },
             _ => return Error(format.disk_fault(file, at - 1, Malformed)),
         }
         list.push(mut branches, LocatedBranch(id: id, name: take name, parent: parent, forked_at: forked_at, version: head, at: wall, roots: roots))
@@ -307,7 +317,7 @@ pub fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[Pag
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, binding_id: binding_id, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
+    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, binding_id: binding_id, main_transition, origin: None, sweep: sweep, pack_root: pack_root, branches: take branches, pins: take pins))
 }
 
 pub fn manifest_account(m: PageManifest) -> u64 {
@@ -352,5 +362,5 @@ pub fn cut_manifest_size[in installed, in proposed](input: CutInput[in installed
         CutReplacePin(slot, held, _) => input.record_bytes - pin_root_bytes(input.pins[slot].name, input.pins[slot].roots) + pin_root_bytes(held.name, held.roots),
         _ => input.record_bytes,
     }
-    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, input.fence)
+    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, input.fence) + restore_origin_bytes(input.origin)
 }

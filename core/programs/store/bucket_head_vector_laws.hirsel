@@ -1,6 +1,6 @@
 // STORE L60. Little-endian fields and XXH3 frame checks were derived
 // independently of the store encoder.
-// L60 wire vectors use §2.1, the current-format (13) §2.3 HEADER, §12.2 and libxxhash.
+// L60 wire vectors use §2.1, the current-format (14) §2.3 HEADER, §12.2 and libxxhash.
 @test
 fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     let config = history.object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")

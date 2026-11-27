@@ -1,0 +1,80 @@
+// Physical coordinates of a verified founding base or a frame in its successor chain.
+// frame_end is zero for the base and otherwise names the end in the native unit.
+pub type RestoreBoundary: key + shareable + send {
+    source_kind: u8,
+    base_ordinal: u64,
+    base_digest: u64,
+    unit: u64,
+    epoch: u64,
+    unit_digest: u64,
+    frame_end: u64
+}
+
+pub type RestoreOrigin: shareable + send {
+    parent: types.StoreKey,
+    binding_id: u64,
+    branch: u32,
+    version: u64,
+    at: u64,
+    boundary: RestoreBoundary,
+    attempt: Inline[u8, 16]
+}
+
+pub const RESTORE_ORIGIN_KIND: u16 = 0x0071
+
+pub const RESTORE_ORIGIN_PAYLOAD: u64 = 109
+
+pub const RESTORE_ORIGIN_FRAME: u64 = 16 + RESTORE_ORIGIN_PAYLOAD
+
+pub fn restore_origin_bytes(origin: Option[RestoreOrigin]) -> u64 {
+    match origin {
+        Some(_) => RESTORE_ORIGIN_FRAME,
+        None => 0u64,
+    }
+}
+
+pub fn append_restore_origin(mut raw: Bytes, ctx: format.DiskContext, origin: Option[RestoreOrigin]) -> Result[(), types.Failure] {
+    let Some(o) = origin else {
+        return Ok(())
+    }
+    let mut body: Bytes = list.new()
+    types.capacity(list.try_reserve(mut body, RESTORE_ORIGIN_PAYLOAD))?
+    list.put_word_le(mut body, o.parent.hi)
+    list.put_word_le(mut body, o.parent.lo)
+    list.put_word_le(mut body, o.binding_id)
+    list.put_word_le(mut body, o.branch)
+    list.put_word_le(mut body, o.version)
+    list.put_word_le(mut body, o.at)
+    let b = o.boundary
+    list.push(mut body, b.source_kind)
+    list.put_word_le(mut body, b.base_ordinal)
+    list.put_word_le(mut body, b.base_digest)
+    list.put_word_le(mut body, b.unit)
+    list.put_word_le(mut body, b.epoch)
+    list.put_word_le(mut body, b.unit_digest)
+    list.put_word_le(mut body, b.frame_end)
+    for i in 0u64 .. 16 {
+        list.push(mut body, o.attempt[i])
+    }
+    let frame = types.capacity(format.disk_seal(ctx, list.len(raw), RESTORE_ORIGIN_KIND, 1, body))?
+    types.capacity(list.try_reserve(mut raw, list.len(frame)))?
+    list.append(mut raw, frame)
+    Ok(())
+}
+
+fn decode_restore_origin(file: String, frame: format.DiskFrame, payload: Bytes, child: types.StoreKey) -> Result[RestoreOrigin, types.Failure] {
+    if frame.flags != 1 || list.len(payload) != RESTORE_ORIGIN_PAYLOAD {
+        return Error(format.disk_fault(file, frame.payload, Malformed))
+    }
+    let parent = types.StoreKey(hi: format.read_le(payload, 0, 8), lo: format.read_le(payload, 8, 8))
+    let source_kind = payload[44]
+    let b = RestoreBoundary(source_kind, base_ordinal: format.read_le(payload, 45, 8), base_digest: format.read_le(payload, 53, 8), unit: format.read_le(payload, 61, 8), epoch: format.read_le(payload, 69, 8), unit_digest: format.read_le(payload, 77, 8), frame_end: format.read_le(payload, 85, 8))
+    if parent == child || b.base_ordinal == 0 || b.unit == 0 || source_kind > format.ARCHIVE_SOURCE_OBJECTS {
+        return Error(format.disk_fault(file, frame.payload, Malformed))
+    }
+    let mut attempt: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        attempt[i] = payload[93 + i]
+    }
+    Ok(RestoreOrigin(parent, binding_id: format.read_le(payload, 16, 8), branch: int.truncate(format.read_le(payload, 24, 4)), version: format.read_le(payload, 28, 8), at: format.read_le(payload, 36, 8), boundary: b, attempt))
+}

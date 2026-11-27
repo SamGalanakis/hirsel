@@ -75,7 +75,7 @@ fn fork_limit_image(d: Dir, id: StoreId, attempt: Bytes, name: String, end: u64)
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 1)
     deploy_result(failure_result_from_rep(manifest.disk_write_synced(d, "j-1", result.unwrap(format.disk_header_bytes(ctx, 0, 0)))))?
     deploy_result(fork_test_append(d, id, 1, 72, 1, name))?
-    let stamp = ExportStamp(attempt: result.unwrap(failure_result_from_rep(types.copied(attempt))), store_hi: id.hi, store_lo: id.lo, opened: 1, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 1, end: end)
+    let stamp = ExportStamp(attempt: result.unwrap(failure_result_from_rep(types.copied(attempt))), store_hi: id.hi, store_lo: id.lo, opened: 1, branch: 0, head: 0, next_table: 1, activation: 0, binding: export_binding_bytes([0; 32]), terminal: 1, end: end)
     deploy_result(failure_result_from_rep(manifest.disk_write_synced(d, "EXPORT", deploy_result(export_bytes(stamp))?)))
 }
 

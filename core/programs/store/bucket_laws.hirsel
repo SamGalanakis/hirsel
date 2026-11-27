@@ -512,12 +512,12 @@ fn bucket_m2_law_retained() -> Result[(), Error] {
     let twenty_four = pages.HistoryRef(seq: 24, epoch: 2, len: 189, digest: 24)
     let mut earlier: List[pages.HistoryRef] = list.with_capacity(1)
     list.push(mut earlier, ten)
-    let before = history.HistoryMark(manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
+    let before = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding:[0; 32]), manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
     let cut = failure_result_from_rep(object_writer.history_retain(before, twenty, 24, 1))?
     if cut.floor != 24 || list.len(cut.earlier) != 0 {
         fail("retain 1 kept an older checkpoint")
     }
-    let short = history.HistoryMark(manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
+    let short = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding:[0; 32]), manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
     let widened = failure_result_from_rep(object_writer.history_retain(short, twenty_four, 28, 3))?
     if widened.floor != 24 || list.len(widened.earlier) != 1 || widened.earlier[0].seq != 24 {
         fail("raising retain revived a checkpoint")
@@ -591,6 +591,7 @@ fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: pages.HistoryRef,
     list.put_word_le(mut raw, 1u64)
     list.push(mut raw, 0u8)
     list.put_word_le(mut raw, 0u32)
+    list.fill(mut raw, 40, 0u8)
     failure_result_from_rep(types.capacity(format.history_seal(mut raw, ctx, 112, 0x0090)))?
     let at = list.len(raw)
     list.fill(mut raw, 16, 0u8)

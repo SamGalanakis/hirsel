@@ -585,7 +585,7 @@ fn retention_fixture(d: Dir, predecessor: history.HistoryHead) -> Result[Retenti
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = history.HistoryRetention(floor: 2, earlier: list.new())
     let locate = history.HistoryLocateRoot(depth: 0, rows: take refs)
-    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate))?
+    let entry_ref = failure_result_from_rep(history.history_checkpoint_packet(mut raw_entry, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate, history.HistoryActivation(number: 0, binding:[0; 32])))?
     let mut selected = predecessor
     selected.entry = entry_ref
     selected.checkpoint = entry_ref

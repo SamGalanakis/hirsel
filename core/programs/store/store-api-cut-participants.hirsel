@@ -43,7 +43,11 @@ fn cut_input(db: Db, delta: HolderDelta) -> manifest.CutInput[in db, in delta] {
         },
         None => 0u64,
     }
-    manifest.CutInput(heads: pages.holder_heads(db.holders), pins: pages.holder_pins(db.holders), change: change, record_bytes: pages.holder_record_bytes(db.holders), lease_span: lease_span, store: store_key_to_rep(db.store), limits: limits_to_rep(db.limits), fence: catalog.current_fence(db.schema), binding_id: binding_id, next_branch: pages.holder_next_branch(db.holders), next_table: catalog.next_table_id(db.schema))
+    let origin = match view db.disk {
+        Some(state) => manifest.pack_restore_origin(state.packs),
+        None => None,
+    }
+    manifest.CutInput(heads: pages.holder_heads(db.holders), pins: pages.holder_pins(db.holders), change: change, record_bytes: pages.holder_record_bytes(db.holders), lease_span: lease_span, store: store_key_to_rep(db.store), limits: limits_to_rep(db.limits), fence: catalog.current_fence(db.schema), binding_id: binding_id, origin: origin, next_branch: pages.holder_next_branch(db.holders), next_table: catalog.next_table_id(db.schema))
 }
 
 fn cut_participants(db: Db, delta: HolderDelta) -> Result[manifest.CutParticipants, Error] {

@@ -455,8 +455,8 @@ fn transfer_result[T](take result: Result[T, transfer.DeployFailure]) -> Result[
 }
 
 fn export_stamp_to_rep(take stamp: ExportStamp) -> transfer.ExportStampRep {
-    let ExportStamp(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, terminal, end) = take stamp
-    transfer.ExportStampRep(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, terminal, end)
+    let ExportStamp(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, binding: take schema_binding, terminal, end) = take stamp
+    transfer.ExportStampRep(attempt: take attempt, store_hi, store_lo, opened, branch: branch_id, head, next_table, activation, binding: take schema_binding, terminal, end)
 }
 
 fn prepared_target_to_rep(take target: PreparedTarget) -> transfer.PreparedTargetRep {

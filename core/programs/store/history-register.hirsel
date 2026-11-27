@@ -208,7 +208,7 @@ pub fn history_genesis_packet(mut raw: Bytes, id: types.StoreKey, kind: u8, mani
     let ctx = format.DiskContext(store: id, role: 2, seq: 1)
     let none = pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
     let retained = HistoryRetention(floor: 1, earlier: list.new())
-    history_checkpoint_packet(mut raw, ctx, 1, kind, none, manifest, retained, locator)
+    history_checkpoint_packet(mut raw, ctx, 1, kind, none, manifest, retained, locator, HistoryActivation(number: 0, binding:[0; 32]))
 }
 
 // The tag no object carries: If-Match with it must fail on every key.
@@ -253,7 +253,7 @@ pub fn history_publish_genesis(mut client: std.object.Client, id: types.StoreKey
 
 // With `attach` the head is a streamed genesis's (§12.11.5): no step 5a probe.
 pub fn history_publish_base(mut client: std.object.Client, id: types.StoreKey, holder: types.StoreKey, kind: u8, authority: Bytes, manifest: pages.HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64, take attach: Option[format.Attach]) -> Result[HistoryRegister, types.Failure] waits {
-    let bytes_wanted = 189 + 32 * list.len(locator.rows)
+    let bytes_wanted = 229 + 32 * list.len(locator.rows)
     list.clear(mut buffers.packet)
     list.clear(mut buffers.compare)
     types.capacity(list.try_reserve(mut buffers.packet, bytes_wanted + format.BINDING_BYTES))?

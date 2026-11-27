@@ -414,8 +414,8 @@ fn bucket_m2_link_recovery_run(c: Clock, tasks: Tasks, seed_grant: Env) -> Resul
     let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_recover(tasks, sim))
     let _ = bucket_law_finish(take sim)
     checked?
-    // Format 13: MANIFEST_LIMIT 236 + 16,777,216, then 88 envelope and 20 FENCE bytes.
-    let wire_limit = 236u64 + 16777216 + 88 + 20
+    // Format 14 permits an envelope, a FENCE and a 125-byte RESTORE_ORIGIN.
+    let wire_limit = 236u64 + 16777216 + 88 + 20 + 125
     let test_id = StoreId(hi: 9, lo: 10)
     let mut raw: Bytes = list.with_capacity(1024)
     let largest = pages.HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)

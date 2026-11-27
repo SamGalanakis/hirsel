@@ -232,7 +232,7 @@ pub type RoundMeta: codec + send {
 }
 
 pub fn same_stamp(a: ExportStampRep, b: ExportStampRep) -> bool {
-    a.attempt == b.attempt && a.store_hi == b.store_hi && a.store_lo == b.store_lo && a.opened == b.opened && a.branch == b.branch && a.head == b.head && a.next_table == b.next_table && a.activation == b.activation && a.terminal == b.terminal && a.end == b.end
+    a.attempt == b.attempt && a.store_hi == b.store_hi && a.store_lo == b.store_lo && a.opened == b.opened && a.branch == b.branch && a.head == b.head && a.next_table == b.next_table && a.activation == b.activation && a.binding == b.binding && a.terminal == b.terminal && a.end == b.end
 }
 
 // Writes ROUND: the meta frame, then one frame per op in key order.

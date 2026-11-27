@@ -280,7 +280,8 @@ pub fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0031 => Some(MANIFEST_LIMIT),
         0x0040 => Some(format.CLAIM_BYTES),
         0x0070 => Some(4),
-        0x0080 => Some(128),
+        0x0071 => Some(RESTORE_ORIGIN_PAYLOAD),
+        0x0080 => Some(164),
         0x0081 => Some(1048832),
         0x0082 => Some(2097480),
         0x0083 => Some(20),
@@ -317,7 +318,7 @@ pub fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[format.
 }
 
 pub fn disk_check_frame_kind(file: String, ctx: format.DiskContext, kind: u16, flags: u16, at: u64) -> Result[(), types.Failure] {
-    if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (((kind >= 0x0081 && kind <= 0x0085) || kind == 0x008B) && ctx.role != 6) {
+    if ((kind == 0x0040 || kind == 0x0070 || kind == 0x0071) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (((kind >= 0x0081 && kind <= 0x0085) || kind == 0x008B) && ctx.role != 6) {
         return Error(format.disk_fault(file, at, Malformed))
     }
     if let None = disk_kind_limit(kind) {
@@ -477,6 +478,7 @@ pub fn remove_numbered(d: Dir, prefix_name: String, seq: u64, both: bool, mut na
 }
 
 pub opaque type PackDiskState: send {
+    origin: Option[RestoreOrigin],
     next_pack: u64,
     locations: PageLocations,
     lists: PagedLists,
@@ -488,11 +490,11 @@ pub opaque type PackDiskState: send {
 }
 
 pub fn genesis_pack_disk() -> PackDiskState {
-    PackDiskState(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), scrubs: list.new())
+    PackDiskState(origin: None, next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), scrubs: list.new())
 }
 
 pub fn recovered_pack_disk(m: PageManifest, take locations: PageLocations, take lists: PagedLists, take owners: Map[IncomingEdge, u64], take forked: List[LineageFork]) -> PackDiskState {
-    PackDiskState(next_pack: m.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, scrubs: list.new())
+    PackDiskState(origin: m.origin, next_pack: m.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, scrubs: list.new())
 }
 
 pub fn retired_pack_disk(layout: PagedCutLayout, holders: List[HeldPage], take locations: PageLocations, take carried: List[u64], deferred: Option[u64]) -> PackDiskState {
@@ -504,13 +506,18 @@ pub fn retired_pack_disk(layout: PagedCutLayout, holders: List[HeldPage], take l
         }
     }
     let installed_lists: PagedLists = clone(layout.lists.roots)
-    PackDiskState(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new(), scrubs: list.new())
+    PackDiskState(origin: None, next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new(), scrubs: list.new())
 }
 
 pub fn install_pack_cut(mut previous: PackDiskState, take candidate: PackDiskState) {
     let mut installing = take candidate
+    installing.origin = previous.origin
     installing.scrubs = replace(mut previous.scrubs, list.new())
     previous = take installing
+}
+
+pub fn pack_restore_origin(state: PackDiskState) -> Option[RestoreOrigin] {
+    state.origin
 }
 
 pub fn pack_next(state: PackDiskState) -> u64 {

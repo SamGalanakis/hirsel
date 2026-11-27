@@ -31,7 +31,7 @@ fn history_mark_ref(mut raw: Bytes, item: pages.HistoryRef) {
     list.put_word_le(mut raw, item.len)
 }
 
-pub fn history_checkpoint_packet(mut raw: Bytes, ctx: format.DiskContext, epoch: u64, kind: u8, predecessor: pages.HistoryRef, manifest: pages.HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot) -> Result[pages.HistoryRef, types.Failure] {
+pub fn history_checkpoint_packet(mut raw: Bytes, ctx: format.DiskContext, epoch: u64, kind: u8, predecessor: pages.HistoryRef, manifest: pages.HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot, activation: HistoryActivation) -> Result[pages.HistoryRef, types.Failure] {
     history_packet_header(mut raw, ctx, epoch, kind, predecessor)?
     list.fill(mut raw, 16, 0u8)
     history_mark_ref(mut raw, manifest)
@@ -39,6 +39,10 @@ pub fn history_checkpoint_packet(mut raw: Bytes, ctx: format.DiskContext, epoch:
     list.push(mut raw, locator.depth)
     let earlier_count: u32 = int.narrow(list.len(retained.earlier))
     list.put_word_le(mut raw, earlier_count)
+    list.put_word_le(mut raw, activation.number)
+    for i in 0u64 .. 32 {
+        list.push(mut raw, activation.binding[i])
+    }
     for older in retained.earlier {
         history_mark_ref(mut raw, older)
     }
@@ -154,19 +158,20 @@ pub fn history_publish_checkpoint(mut client: std.object.Client, mut register: H
     let mut candidate = register.head
     let seq = history_next_id(candidate.entry.seq)?
     let ctx = format.DiskContext(store: candidate.store, role: 2, seq)
-    let width = 189 + 32 * (list.len(retained.earlier) + list.len(locator.rows))
+    let width = 229 + 32 * (list.len(retained.earlier) + list.len(locator.rows))
     list.clear(mut workspace.packet)
     types.capacity(list.try_reserve(mut workspace.packet, width + format.BINDING_BYTES))?
     list.clear(mut workspace.compare)
     types.capacity(list.try_reserve(mut workspace.compare, width))?
-    let base = history_checkpoint_packet(mut workspace.packet, ctx, candidate.pair.epoch, candidate.authority_kind, candidate.entry, manifest, retained, locator)?
-    candidate.entry = base
-    candidate.checkpoint = base
-    candidate.floor = retained.floor
     if let Some(changed) = activation_update {
         candidate.activation = changed.number
         candidate.binding = changed.binding
     }
+    let activation = HistoryActivation(number: candidate.activation, binding: candidate.binding)
+    let base = history_checkpoint_packet(mut workspace.packet, ctx, candidate.pair.epoch, candidate.authority_kind, candidate.entry, manifest, retained, locator, activation)?
+    candidate.entry = base
+    candidate.checkpoint = base
+    candidate.floor = retained.floor
     let previous = replace(mut register.attach, take attach)
     let written = history_register_publish(mut client, mut register, candidate, authority, mut workspace, deadline, fn(ignored: u64) {})
     if let Ok(HistoryApplied(_)) = written {

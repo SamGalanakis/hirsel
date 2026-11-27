@@ -143,7 +143,7 @@ pub fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-pub const DISK_FORMAT: u64 = 13
+pub const DISK_FORMAT: u64 = 14
 
 pub type DiskContext {
     store: types.StoreKey,

@@ -487,3 +487,31 @@ fn test_la10_directory_thirteen_handoff_cuts(d: Dir, c: Clock, r: Random, tasks:
     let _ = sim_disk_unmount(take re_dir, take re_server)
     Ok(())
 }
+
+@test
+fn test_la4_idle_adoption_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let a = disk_test_directory(d)
+    let b = disk_test_directory(d)
+    let mut src = open(tasks, a, c, r, archive_hold_options(true))?
+    let _ = archive_hold_table(mut src)?
+    let s = snapshot(src)
+    let (_, idle_ticket) = fork(mut src, "idle", s)?
+    durable(mut src, idle_ticket)?
+    close(take src)?
+    archive_hold_copy_dir(a, b)?
+    let mut left = open(tasks, a, c, r, archive_hold_options(false))?
+    let mut right = open(tasks, b, c, r, archive_hold_options(false))?
+    let ba = option.unwrap(branch(left, "idle"))
+    let bb = option.unwrap(branch(right, "idle"))
+    let ta = adopt(mut left, ba)?
+    let tb = delete_branch(mut right, bb)?
+    durable(mut left, ta)?
+    durable(mut right, tb)?
+    let (_, left_manifest) = read_page_manifest_file(a)?
+    let (_, right_manifest) = read_page_manifest_file(b)?
+    if !left_manifest.main_transition || right_manifest.main_transition || left_manifest.branches[0u64].version != right_manifest.branches[0u64].version || left_manifest.branches[0u64].at != right_manifest.branches[0u64].at {
+        fail("idle adoption and deletion must be distinguishable at the same main version and time")
+    }
+    close(take left)?
+    close(take right)
+}

@@ -330,7 +330,7 @@ pub fn read_export_base_descriptors(d: Dir, id: types.StoreKey) -> Result[Map[u3
     let manifest_raw = match host.open(d, "MANIFEST", Read) {
         Ok(take fd) => {
             let mut file = take fd
-            let limit = 72 + 16 + manifest.MANIFEST_LIMIT + 20 + manifest.UNKNOWN_ROOM
+            let limit = manifest.PAGE_MANIFEST_FILE_LIMIT
             let read_res = read_disk_file_bounded(mut file, "MANIFEST", limit)
             manifest.disk_io(host.close(take file))?
             read_res?

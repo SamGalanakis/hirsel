@@ -136,7 +136,7 @@ fn object_export_capture(db: Db, mut lane: object_writer.ObjectJournalSession, t
     }
     let source = transfer.ObjectExportCopy(journal: channel.sender(object_sender(disk_state(db))), health: object_writer.health_handle(object_state(db)), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(failure_result_from_rep(types.copied(attempt)))?
-    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation, terminal: head.checkpoint.seq, end: journal_end)
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: catalog.next_table_id(db.schema), activation, binding: export_binding_bytes(head.binding), terminal: head.checkpoint.seq, end: journal_end)
     let lease = arc.new(manifest.ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     object_writer.hold_export(mut lane, take names, take stop)
     Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))

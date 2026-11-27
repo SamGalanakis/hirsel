@@ -45,7 +45,7 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     failure_result_from_rep(catalog.over_ceiling(base.account, options.resident_limit))?
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
     let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
-    let limit = order.max(options.pack_bytes, manifest.page_manifest_file_size(manifest.MANIFEST_LIMIT, 1))
+    let limit = order.max(options.pack_bytes, manifest.page_manifest_file_size(manifest.MANIFEST_LIMIT, 1) + manifest.RESTORE_ORIGIN_FRAME)
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit))?
     let no_packs = history.empty_history_locator()
     let (take layout, take refs) = failure_result_from_rep(object_writer.history_write_page_cut(mut client, store_key_to_rep(draft.store), 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline))?

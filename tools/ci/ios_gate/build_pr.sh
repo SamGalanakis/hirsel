@@ -16,8 +16,12 @@ export IPHONEOS_DEPLOYMENT_TARGET=18.0
 cd "$checkout"
 git init -q
 git remote add origin https://github.com/SamGalanakis/hirsel.git
+pr_commit=65a6f54ae9e7c11eea8934cbfa11c502aa856a49
 git fetch --depth=1 origin pull/11/head
-git checkout --detach 65a6f54ae9e7c11eea8934cbfa11c502aa856a49
+if [[ "$(git rev-parse FETCH_HEAD)" != "$pr_commit" ]]; then
+  git fetch --depth=1 origin "$pr_commit"
+fi
+git checkout --detach "$pr_commit"
 git init -q "$host"
 git -C "$host" remote add origin https://github.com/gillesmag/hirsel-ios.git
 git -C "$host" fetch --depth=1 origin 30f36dae1a78c76a06fac86e97bb9276ac8b827f

@@ -40,7 +40,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             let index_name = declaration_index_name(key)?
             let table_name = match map.get(names, record.owner) {
                 Some(found) => string.from(found),
-                None => return Error(malformed(0)),
+                None => return Error(failure_from_rep(pages.malformed(0))),
             }
             let form = match index_meta.shape {
                 Entries(kind) => IndexForm(kind),
@@ -48,7 +48,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             }
             (take index_name, take table_name, form, copied_state(index_meta.state)?)
         } else {
-            let own = catalog_collection_name(key, descriptor_kind_byte(catalog_kind(record.record)))?
+            let own = catalog_collection_name(key, pages.descriptor_kind_byte(catalog_kind(record.record)))?
             map.insert(mut names, record.id, string.from(own))
             let form: EntryForm = match record.record {
                 CatalogCell => CellForm,
@@ -59,7 +59,7 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
         }
         let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, prefix(record.id)?) {
             Some((_, map_value)) => {
-                let descriptor = collection_descriptor(map_value)
+                let descriptor = pages.collection_descriptor(map_value)
                 (descriptor.rows, descriptor.row_bytes, descriptor.residency == ResidentTiered)
             },
             None => (0u64, 0u64, false),

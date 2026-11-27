@@ -312,19 +312,19 @@ fn staged_row_layout_charge() -> Result[(), Error] {
     // DataRows is 8 + 2*100 + 24 = 232. DataOps adds three 24-byte maps.
     // CallSection is 145 + (8 + 49) = 202. Staged has two DataOps and
     // the optional section, or 2*304 + 8 + 202 = 818.
-    if bytes[DataRows] != 232 || bytes[DataOps] != 304 || bytes[Staged] != 818 {
+    if bytes[pages.DataRows] != 232 || bytes[pages.DataOps] != 304 || bytes[pages.Staged] != 818 {
         return Error(Missing("staged row logical size changed"))
     }
-    let mut ops = empty_ops()
-    push_data_row(mut ops.rows, format.DataOp(key: list.new(), value: None, trim: None, prior: None))
-    let staged = Staged(ops: take ops, stream_ops: empty_ops(), call: None)
+    let mut ops = pages.empty_ops()
+    pages.push_data_row(mut ops.rows, format.DataOp(key: list.new(), value: None, trim: None, prior: None))
+    let staged = pages.Staged(ops: take ops, stream_ops: pages.empty_ops(), call: None)
     let before = writer_law_room()
     let frozen = arc.new(take staged)
     if before - writer_law_room() != 832 {
         return Error(Missing("one-row frozen draft charge changed"))
     }
     let before_list = writer_law_room()
-    let mut folded: List[Staged] = list.new()
+    let mut folded: List[pages.Staged] = list.new()
     list.push(mut folded, result.unwrap(arc.try_unwrap(take frozen)))
     if before_list + 832 - writer_law_room() != 3272 || list.len(folded) != 1 {
         return Error(Missing("one-row folded draft charge changed"))

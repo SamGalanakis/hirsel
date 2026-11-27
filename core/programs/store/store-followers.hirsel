@@ -14,7 +14,7 @@ pub fn followers() -> Followers {
 
 type FollowCapture: shareable + send {
     store: StoreId,
-    state: Arc[State],
+    state: Arc[pages.State],
     resident: u64,
     remote: Option[ObjectFollowHead],
     log_id: u64,
@@ -59,8 +59,8 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
     follower_response(take answer)?
 }
 
-fn follow_capture(id: StoreId, take state: State, resident: u64, take remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
-    let shared = failure_result_from_rep(types.capacity(bound bytes option.unwrap(charge.counted(bytes[State])) {
+fn follow_capture(id: StoreId, take state: pages.State, resident: u64, take remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
+    let shared = failure_result_from_rep(types.capacity(bound bytes option.unwrap(charge.counted(bytes[pages.State])) {
         arc.new(take state)
     }))?
     let mut held = take remote
@@ -91,7 +91,7 @@ fn same_capture_key(a: LogCaptureKey, b: LogCaptureKey) -> bool {
     a.manifest == b.manifest && a.first == b.first && a.count == b.count && a.end_image == b.end_image && a.torn_tail == b.torn_tail
 }
 
-fn behind_branch(candidate: State, published: State) -> Option[u32] {
+fn behind_branch(candidate: pages.State, published: pages.State) -> Option[u32] {
     let mut behind: Option[u32] = if candidate.next_branch < published.next_branch {
         Some(candidate.next_branch)
     } else {
@@ -327,7 +327,7 @@ pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
     None
 }
 
-fn capture_tip(captured: FollowCapture, b: Branch) -> Result[View[Tip], Error] in captured {
+fn capture_tip(captured: FollowCapture, b: Branch) -> Result[View[pages.Tip], Error] in captured {
     if !types.same(captured.store.hi, captured.store.lo, b.store.hi, b.store.lo) {
         return Error(Foreign)
     }
@@ -344,12 +344,12 @@ fn capture_tip(captured: FollowCapture, b: Branch) -> Result[View[Tip], Error] i
     }
 }
 
-fn follower_tip(f: Follower, b: Branch) -> Result[View[Tip], Error] in f {
+fn follower_tip(f: Follower, b: Branch) -> Result[View[pages.Tip], Error] in f {
     capture_tip(f.capture, b)
 }
 
-fn follower_snapshot(captured: FollowCapture, tip: Tip, opened: u64) -> Snapshot {
-    Snapshot(store: captured.store, open: opened, branch: tip.id, head: tip.head, roots: share_roots(tip.roots), watermark: captured.watermark, bases: tail_bases(captured.state.pins))
+fn follower_snapshot(captured: FollowCapture, tip: pages.Tip, opened: u64) -> Snapshot {
+    Snapshot(store: captured.store, open: opened, branch: tip.id, head: tip.head, roots: pages.share_roots(tip.roots), watermark: captured.watermark, bases: pages.tail_bases(captured.state.pins))
 }
 
 pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error] {
@@ -546,9 +546,9 @@ fn read_only_checkpoint(d: Dir, id: StoreId, take manifest: PageManifest) -> Res
     let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
         Ok(std.page.empty(0, 0, Collection))
     })?
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let state = disk_allocation(scoped fn() -> Result[State, Error] {
-        let holders = attach_manifest_holders(selected, pages, empty_collection)
+    let page_nodes = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[pages.State, Error] {
+        let holders = attach_manifest_holders(selected, page_nodes, empty_collection)
         failure_result_from_rep(types.capacity(manifest_state(selected, holders)))
     })?
     journal_replay_manifest(take state, selected)

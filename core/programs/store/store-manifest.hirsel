@@ -168,16 +168,7 @@ fn seal_page_manifest_file(mut raw: Bytes, context: format.DiskContext, level_nu
     Ok(())
 }
 
-type PagePack: shareable + send {
-    class: u8,
-    frames: u32,
-    live: u64,
-    // PAGE/BLOB payload total for Memory packs, whole object size for Tiered packs.
-    payload_bytes: u64,
-    index: u64
-}
-
-fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
+fn pack_record(path: String, at: u64, raw: Bytes) -> Result[pages.PagePack, Error] {
     if list.len(raw) != 29 {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
@@ -189,7 +180,7 @@ fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
     if live_bytes > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
-    Ok(PagePack(class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
+    Ok(pages.PagePack(class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
 }
 
 type LoadedPack {
@@ -295,7 +286,7 @@ fn disk_check_stamp(path: String, at: u64, raw: Bytes, slot_order: u64, next_sta
     Ok(())
 }
 
-fn disk_load_page_pack(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64) -> Result[LoadedPack, Error] waits {
+fn disk_load_page_pack(d: Dir, id: StoreId, seq: u64, pack: pages.PagePack, next_stamp: u64) -> Result[LoadedPack, Error] waits {
     let path = paged_pack_path(seq)?
     let limit = if pack.class == 0 {
         PAGE_LIMIT
@@ -385,12 +376,12 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
     Ok(Some(list.word_le(stamp_bytes, checked_pack.stamp_at)))
 }
 
-fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
+fn index_page_pack(path: String, id: StoreId, seq: u64, pack: pages.PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
     let header = disk_read_header(path, raw, 3, Some(seq), Some(id))?
     index_pack_frames(path, header.context, pack, next_stamp, raw)
 }
 
-fn index_pack_frames(path: String, ctx: format.DiskContext, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
+fn index_pack_frames(path: String, ctx: format.DiskContext, pack: pages.PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], Error] {
     let expected_frames: u64 = int.widen(pack.frames)
     let mut frames: Map[u64, format.DiskFrame] = map.new()
     let mut checked_pack = pack_scan(pack.class, next_stamp)
@@ -412,7 +403,7 @@ fn index_pack_frames(path: String, ctx: format.DiskContext, pack: PagePack, next
     Ok(take frames)
 }
 
-fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[PagePack, Error] waits {
+fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List[u64]) -> Result[pages.PagePack, Error] waits {
     let path = failure_result_from_rep(types.capacity(disk_path("p-", seq, "")))?
     let opened = disk_io(host.open(d, path, Read))?
     let mut input = journal_input(take opened, false)?
@@ -445,7 +436,7 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     }
     let handle = format.take_journal_file(take input)
     disk_io(host.close(take handle))?
-    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
+    Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 // A zero child stamp is either an empty collection or an edge owned by the
@@ -534,7 +525,7 @@ fn settled_frame(inventory: RecoveryInventory, settled: SettledPacks, path: Stri
 }
 
 scoped type RecoveryInventory {
-    packs: View[Map[u64, PagePack]],
+    packs: View[Map[u64, pages.PagePack]],
     next_stamp: u64,
     allow_tiered: bool
 }
@@ -629,7 +620,7 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
     graph_add(mut graph, ptr.stamp, ReadPage(take image, take kids, take blobs))
 }
 
-fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: LocatedRoots, collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), Error] {
+fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: pages.LocatedRoots, collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), Error] {
     resolve_data_page(packs, inventory, settled, roots.collections, CollectionMap, None, collect_cold, mut cold_roots, mut graph)?
     resolve_data_page(packs, inventory, settled, roots.streams, Unprefixed, None, false, mut cold_roots, mut graph)?
     resolve_data_page(packs, inventory, settled, roots.catalog, Unprefixed, None, false, mut cold_roots, mut graph)?
@@ -641,7 +632,7 @@ fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory,
 
 type ValidatedPageManifest {
     manifest: PageManifest,
-    inventory: Map[u64, PagePack],
+    inventory: Map[u64, pages.PagePack],
     lineage: Lineage,
     graph: PageGraph,
     allow_tiered: bool
@@ -768,7 +759,7 @@ fn parse_pack_filename(raw: Bytes, from: u64, end: u64) -> Option[(u64, bool)] {
 // Reclaim every canonical p-<seq>.tmp and every canonical p-<seq> absent from
 // the validated positive inventory (L ∪ C) in O(1) memory, closing the
 // directory stream before unlinking each sorted batch (v2.145, AP21 step 5).
-fn cleanup_dead_packs(d: Dir, inventory: Map[u64, PagePack], mut name: String) -> Result[(), Error] waits {
+fn cleanup_dead_packs(d: Dir, inventory: Map[u64, pages.PagePack], mut name: String) -> Result[(), Error] waits {
     let (take buf_init, take batch_init) = disk_allocation(fn() -> Result[(Bytes, List[(u64, bool)]), Error] {
         Ok((list.with_capacity(1024), list.with_capacity(64)))
     })?

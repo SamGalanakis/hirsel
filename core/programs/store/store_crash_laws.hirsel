@@ -23,9 +23,9 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         Error(NotFound) => return Ok(scenario == "genesis" && !required_new),
         Error(take e) => return Error(take e)
     }
-    if scenario == "genesis" && db.heads[0].head == 0 {
+    if scenario == "genesis" && pages.holder_heads(db.holders)[0].head == 0 {
         trust_store(mut db)?
-        let empty = page_row_count(db.heads[0].roots.collections) == 0 && page_row_count(db.heads[0].roots.catalog) == 0
+        let empty = page_row_count(pages.holder_heads(db.holders)[0].roots.collections) == 0 && page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) == 0
         close(take db)?
         return Ok(empty && !required_new)
     }
@@ -36,7 +36,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     for k in 0u64 .. 96 {
         let found = get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)?
         let old_value: Option[u64] = if scenario == "genesis" {
-            if k + 1 < db.heads[0].head {
+            if k + 1 < pages.holder_heads(db.holders)[0].head {
                 Some(k + 1)
             } else {
                 None
@@ -66,12 +66,12 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         good = old
         match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
             Ok(take added) => {
-                if added.id != 2 || db.heads[0].head != 98 {
+                if added.id != 2 || pages.holder_heads(db.holders)[0].head != 98 {
                     good = false
                 }
             },
             Error(Missing(_)) => {
-                if db.heads[0].head != 97 || required_new {
+                if pages.holder_heads(db.holders)[0].head != 97 || required_new {
                     good = false
                 }
             },
@@ -82,12 +82,12 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     } else if scenario == "refusal" {
         good = old
         let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
-        if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) {
+        if !old || pages.holder_heads(db.holders)[0].head < 98 || pages.holder_heads(db.holders)[0].head > 100 || (required_new && pages.holder_heads(db.holders)[0].head != 100) {
             good = false
         }
         match get(result.unwrap(reader(db, 0u64)), snapshot(db), big, 1)? {
             Some(value) => {
-                if db.heads[0].head != 99 || string.byte_len(value) != 1048566 {
+                if pages.holder_heads(db.holders)[0].head != 99 || string.byte_len(value) != 1048566 {
                     good = false
                 }
                 for byte in string.as_bytes(value) {
@@ -96,7 +96,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
                     }
                 }
             },
-            None => if db.heads[0].head == 99 {
+            None => if pages.holder_heads(db.holders)[0].head == 99 {
                 good = false
             }
         }
@@ -111,7 +111,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         }
         let listed = list.len(index_catalog(db, t.id)?)
         let mut whole = false
-        if moved && listed == 1 && db.heads[0].head == 98 {
+        if moved && listed == 1 && pages.holder_heads(db.holders)[0].head == 98 {
             let mut decl = declare(db, Open)?
             let mut indexed = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
             let ix = index(mut decl, mut indexed, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
@@ -131,7 +131,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             whole = whole && expect == 96
         }
         let added = table(mut db, "added", std.codec.key_u64(), std.codec.of_u64())
-        let before = old && listed == 0 && db.heads[0].head == 97
+        let before = old && listed == 0 && pages.holder_heads(db.holders)[0].head == 97
         good = match take added {
             Ok(created) => whole && created.id == 4,
             Error(Missing(_)) => before && !required_new,
@@ -165,9 +165,9 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             None => 0u64
         }
         let known = (b_head == 0) || (has_pin && b_head == 97) || b_head == 98
-        good = good && old && db.heads[0].head == 97 && known && (!required_new || (!has_pin && b_head == 98))
+        good = good && old && pages.holder_heads(db.holders)[0].head == 97 && known && (!required_new || (!has_pin && b_head == 98))
     } else if scenario == "genesis" {
-        good = old && db.heads[0].head >= 1 && db.heads[0].head <= 97 && (!required_new || db.heads[0].head == 97)
+        good = old && pages.holder_heads(db.holders)[0].head >= 1 && pages.holder_heads(db.holders)[0].head <= 97 && (!required_new || pages.holder_heads(db.holders)[0].head == 97)
     }
     trust_store(mut db)?
     close(take db)?
@@ -398,7 +398,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }
     if installed {
         let other = system_table(db, "other", std.codec.key_u64(), std.codec.of_u64())?
-        if list.len(index_catalog(db, other.id)?) != 1 || page_row_count(db.heads[0].roots.streams) != 0u64 {
+        if list.len(index_catalog(db, other.id)?) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.streams) != 0u64 {
             return Ok(false)
         }
         let _ = declare_after(mut db, Migrate)?

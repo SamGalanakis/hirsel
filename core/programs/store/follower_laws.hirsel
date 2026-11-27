@@ -168,7 +168,7 @@ fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim, plan: Foll
         fail("L85: a replay with a bad final GROUP was admitted")
     }
     let kept = snapshot_follower(active, main_line)?
-    if version(kept) != 128 || kept.watermark != saved.watermark || tree_stamp(kept.roots.streams) != tree_stamp(saved.roots.streams) {
+    if version(kept) != 128 || kept.watermark != saved.watermark || pages.tree_stamp(kept.roots.streams) != pages.tree_stamp(saved.roots.streams) {
         fail("L85: a partial replay changed the published capture")
     }
     close_follower_service(take service)?
@@ -255,7 +255,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
             fail("L85: the exactly funded destination did not read its object")
         }
     }
-    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
+    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: pages.HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
     // 171 links at three u64 fields each need 4,104 bytes.
     let suffix = option.unwrap(charge.seq(bytes[HistoryLink], observed.entry.seq - object_ref.seq))
     let denied = failure_result_from_rep(types.capacity(bound bytes 4096 {
@@ -275,9 +275,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
         fail("L85: 170 suffix rows did not fit")
     }
     let mut locator = empty_history_locator()
-    let excessive = HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
+    let excessive = pages.HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
     map.insert(mut locator.rows, 1, excessive)
-    let pack = PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
+    let pack = pages.PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
     let bad = failure_result_from_rep(types.capacity(bound bytes key_room {
@@ -339,7 +339,7 @@ fn follower_overlap_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Re
         }
     }
     let after = snapshot_follower(replica, main_line)?
-    if version(after) != version(before) || after.watermark != before.watermark || tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) || get(reading, after, rows, 1)? != Some(10u64) {
+    if version(after) != version(before) || after.watermark != before.watermark || pages.tree_stamp(before.roots.collections) != pages.tree_stamp(after.roots.collections) || get(reading, after, rows, 1)? != Some(10u64) {
         fail("L85: a resident refusal changed the published capture")
     }
     close_follower_service(take service)?
@@ -808,7 +808,7 @@ fn follower_cancel_apply(take job: FollowerCancelApply) waits {
 }
 
 fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[FollowCapture], Error] {
-    let state = failure_result_from_rep(types.capacity(main_state(empty_roots(), at_version, 0)))?
+    let state = failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), at_version, 0)))?
     follow_capture(id, take state, 0, None, 0, at_version)
 }
 

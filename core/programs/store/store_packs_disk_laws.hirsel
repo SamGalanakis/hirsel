@@ -1,4 +1,4 @@
-fn locate_page_cut(mut manifest: PageManifest, layout: PagedCutLayout, roots: List[PageRoots], next_stamp: u64, account: u64) {
+fn locate_page_cut(mut manifest: PageManifest, layout: PagedCutLayout, roots: List[pages.PageRoots], next_stamp: u64, account: u64) {
     for slot in 0u64 .. list.len(manifest.branches) {
         manifest.branches[slot].roots = published_page_roots(layout.locations, roots[slot])
     }
@@ -18,7 +18,7 @@ fn check_page_emission() -> Result[(), Error] {
     let mut stamp = 1u64
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
-    page_result(std.page.insert(mut tree, key, string.as_bytes("x"), None, 1024, 1, mut stamp))?
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree, key, string.as_bytes("x"), None, 1024, 1, mut stamp)))?
     let mut known = new_page_locations()
     record_fresh_tree(mut known, tree, 0)?
     let mut emission = empty_cut_frames()
@@ -77,14 +77,14 @@ fn law_generation_locations(known: PageLocations) -> bool {
 fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let id = StoreId(hi: 1, lo: 2)
-    let mut roots = empty_roots()
+    let mut roots = pages.empty_roots()
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
     let mut next_stamp = 1u64
-    put_page_row(mut roots.streams, key, string.as_bytes("x"), 1, mut next_stamp)?
+    failure_result_from_rep(pages.put_page_row(mut roots.streams, key, string.as_bytes("x"), 1, mut next_stamp))?
     let mut holders: List[HeldPage] = list.with_capacity(1)
     list.push(mut holders, HeldPage(source: HolderSource(0, 0, 1), root: arc.share(roots.streams.root)))
-    let mut all: List[PageRoots] = list.with_capacity(1)
+    let mut all: List[pages.PageRoots] = list.with_capacity(1)
     list.push(mut all, take roots)
     let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
     let installed = empty_paged_lists()
@@ -106,7 +106,7 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     }
     let (_, take selected) = read_selected_page_manifest(directory)?
     let loaded = rebuild_page_store(take selected, None)?
-    if loaded.manifest.generation != 2 || loaded.manifest.next_pack != 3 || loaded.manifest.account_memory != 78 || list.len(loaded.holders) != 1 || one_page_account(loaded.holders[0u64]) != 78 || !law_generation_locations(loaded.locations) {
+    if loaded.manifest.generation != 2 || loaded.manifest.next_pack != 3 || loaded.manifest.account_memory != 78 || list.len(loaded.holders) != 1 || pages.one_page_account(loaded.holders[0u64]) != 78 || !law_generation_locations(loaded.locations) {
         return Error(Foreign)
     }
     Ok(())
@@ -185,7 +185,7 @@ fn check_pack_membership_selection() -> Result[(), Error] {
             47 => (0u64, 8u64),
             _ => (8u64, 8u64),
         }
-        failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, seq, PagePack(class: class, frames: int.truncate(frames), live: 16 * live_bytes, payload_bytes: 16 * frames, index: 0), pack_edge_charge)))?
+        failure_result_from_rep(types.capacity(disk_index_put(mut installed.packs, seq, pages.PagePack(class: class, frames: int.truncate(frames), live: 16 * live_bytes, payload_bytes: 16 * frames, index: 0), pack_edge_charge)))?
         for slot in 0u64 .. live_bytes {
             let stamp = law_pack_stamp(seed, seq, slot)
             let ptr = std.page.PagePtr(pack: seq, offset: 72 + 32 * slot, len: 16, checksum: stamp, stamp: stamp)

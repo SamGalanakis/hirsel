@@ -1,0 +1,3 @@
+fn forge_holder_table() -> store.pages.HolderTable {
+    store.pages.HolderTable(heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: 0, next_pin: 0, next_branch: 1, next_node: 0, bases: None)
+}

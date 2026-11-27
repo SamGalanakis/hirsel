@@ -507,7 +507,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
         let mut index_key = deploy_result(prefix(due.id))?
         list.put_word_be(mut index_key, row.due)
         list.put_word_be(mut index_key, key)
-        let Some(_) = get_page_row(current.roots.collections, index_key) else {
+        let Some(_) = pages.get_page_row(current.roots.collections, index_key) else {
             fail("L51(e″): replaced index entry missing")
         }
     }
@@ -533,7 +533,7 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let attempt = install_fixture_bytes(16, 7)
     let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
-    let exported_rows = deploy_result(catalog_handle(source.db.store, source.db.heads[0].roots.catalog, "rewrite", std.codec.key_u64(), codec))?
+    let exported_rows = deploy_result(catalog_handle(source.db.store, pages.holder_heads(source.db.holders)[0].roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     let replaced = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace)))?
     write_prepared(mut source, replaced, scratch, rewrite_law_target())?
     let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
@@ -598,10 +598,10 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         let mut index_key = deploy_result(prefix(due.id))?
         list.put_word_be(mut index_key, deadline)
         list.put_word_be(mut index_key, key)
-        let Some(before) = get_page_row(prior.roots.collections, index_key) else {
+        let Some(before) = pages.get_page_row(prior.roots.collections, index_key) else {
             fail("L51(e″): seed index missing")
         }
-        let Some(after) = get_page_row(current.roots.collections, index_key) else {
+        let Some(after) = pages.get_page_row(current.roots.collections, index_key) else {
             fail("L51(e″): cut index missing")
         }
         if list.compare_bytes(before, after) != Equal {

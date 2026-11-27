@@ -47,7 +47,7 @@ pub fn journal_law_small_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     result.unwrap(close(take db))
     options.limits = None
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
-    if !types.same_limits(limits_to_rep(store_limits(reopened)), limits_to_rep(small)) || page_row_count(reopened.heads[0].roots.collections) != 2 {
+    if !types.same_limits(limits_to_rep(store_limits(reopened)), limits_to_rep(small)) || page_row_count(pages.holder_heads(reopened.holders)[0].roots.collections) != 2 {
         return false
     }
     if journal_small_commit(mut reopened, 65525) != 0u8 || journal_small_commit(mut reopened, 65524) != 1u8 {
@@ -86,7 +86,7 @@ pub fn journal_law_genesis_limits(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     result.unwrap(disk_io(host.close(take lock)))
     options.limits = None
     let db = result.unwrap(open(tasks, dir, c, r, options))
-    let kept = types.same_limits(limits_to_rep(store_limits(db)), limits_to_rep(small)) && db.heads[0].head == 0
+    let kept = types.same_limits(limits_to_rep(store_limits(db)), limits_to_rep(small)) && pages.holder_heads(db.holders)[0].head == 0
     result.unwrap(close(take db))
     kept
 }
@@ -405,7 +405,7 @@ fn journal_test_info_commits_and_clock_monotonic(d: Dir, r: Random, tasks: Tasks
     clock.set_wall(mut wall, 800)
     options.create = false
     let mut reopened = open(tasks, dir, time, r, options)?
-    if version(snapshot(reopened)) != ci4.id.version || reopened.heads[0].at != 1000 {
+    if version(snapshot(reopened)) != ci4.id.version || pages.holder_heads(reopened.holders)[0].at != 1000 {
         fail("L91 E3: reopen lost version or monotonic at")
     }
     close(take reopened)

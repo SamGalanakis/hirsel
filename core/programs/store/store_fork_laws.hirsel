@@ -596,7 +596,7 @@ pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
         return false
     }
     let cut = db.checkpointed
-    let next_id = db.next_branch
+    let next_id = pages.holder_next_branch(db.holders)
     match fork(mut db, "fork", held) {
         Error(Full(Resident(cap))) => if cap.requested != 448 || cap.available != 447 {
             return false
@@ -607,7 +607,7 @@ pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
     if let Some(_) = branch(db, "fork") {
         return false
     }
-    db.checkpointed == cut && db.next_branch == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(result.unwrap(reader(db, 0u64)), head, t, 1)) == Some(2u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), held, t, 1)) == Some(1u64)
+    db.checkpointed == cut && pages.holder_next_branch(db.holders) == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(result.unwrap(reader(db, 0u64)), head, t, 1)) == Some(2u64) && result.unwrap(get(result.unwrap(reader(db, 0u64)), held, t, 1)) == Some(1u64)
 }
 
 // L27(c). A pin of the empty table keeps the descriptor and catalog once.
@@ -742,14 +742,14 @@ fn mark_is(t: Ticket, n: u64) -> bool {
 
 // (position, state) of a stream on main, or (0, 0) when it has none.
 fn stream_now(db: Db, name: Bytes) -> (u64, u64) {
-    match get_page_row(db.heads[0].roots.streams, name) {
+    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, name) {
         Some(raw) => (format.read_le(raw, 0, 8), int.widen(raw[40])),
         None => (0, 0)
     }
 }
 
 fn stream_reply_is(db: Db, name: Bytes, want: Bytes) -> bool {
-    match get_page_row(db.heads[0].roots.streams, name) {
+    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, name) {
         Some(raw) => list.len(raw) >= 41 && list.slice(raw, 41, list.len(raw)) == want,
         None => false
     }

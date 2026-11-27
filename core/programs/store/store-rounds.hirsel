@@ -23,7 +23,7 @@ pub opaque type KeptImport: send {
     rewrites: List[ActivationRewrite],
     // The shipped ranges at `meta.base`: the pin's packed pages, plus the
     // pages each applied round wrote, which no holder references yet.
-    tree: PageTree,
+    tree: pages.PageTree,
     digest: Inline[u8, 32],
     round: u64
 }
@@ -57,7 +57,7 @@ type ShippedImport: send {
     round: u64,
     // Roots built by deferred Tiered index builds in `write_prepared`, handed
     // into `staged.plan` on the first catch-up round.
-    staged_roots: Option[(Roots, u64)]
+    staged_roots: Option[(pages.Roots, u64)]
 }
 
 pub opaque type ValidatedRound: send {
@@ -68,8 +68,8 @@ pub opaque type ValidatedRound: send {
 const ROUND_ROLE: u8 = 9
 
 fn import_pin_slot(db: Db) -> Option[u64] {
-    for slot in 0u64 .. list.len(db.pins) {
-        if db.pins[slot].owner == ImportPin {
+    for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
+        if pages.holder_pins(db.holders)[slot].owner == ImportPin {
             return Some(slot)
         }
     }
@@ -115,19 +115,19 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
             return Error(take problem)
         }
     }
-    let mut collections = new_page_tree(CollectionMap, db.heads[0u64].roots.collections.inline)
-    let private_from = deploy_result(stamp_after(db.next_node))?
+    let mut collections = pages.new_page_tree(CollectionMap, pages.holder_heads(db.holders)[0u64].roots.collections.inline)
+    let private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
     let mut next_stamp = private_from
     let mut ranges: List[KeptRange] = list.with_capacity(list.len(built))
     for shipped_range in built {
         if shipped_range.kind != 0 && shipped_range.residency == ResidentMemory {
             let key = deploy_result(prefix(shipped_range.id))?
-            deploy_result(put_collection(mut collections, key, shipped_range.tree, shipped_range.kind, private_from, mut next_stamp))?
+            deploy_result(failure_result_from_rep(pages.put_collection(mut collections, key, shipped_range.tree, shipped_range.kind, private_from, mut next_stamp)))?
         }
         list.push(mut ranges, KeptRange(id: shipped_range.id, kind: shipped_range.kind, residency: shipped_range.residency))
     }
-    deploy_result(canonical_tree(mut collections))?
-    db.next_node = next_stamp - 1
+    deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
+    pages.set_next_node(mut db.holders, next_stamp - 1)
     // The reservation's charge is now the pin's, which the cut accounts.
     db.ceiling = disk_state(db).options.resident_limit
     if has_tiered {
@@ -155,20 +155,20 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
 // Holds `collections` as the import pin, replacing any import pin still
 // held, and cuts: every page the kept trees gained since the last such cut is
 // packed while OLD serves. Returns the packed tree.
-fn hold_import(mut db: Db, take collections: PageTree) -> Result[PageTree, DeployError] waits {
+fn hold_import(mut db: Db, take collections: pages.PageTree) -> Result[pages.PageTree, DeployError] waits {
     let (take packed, _) = hold_import_emitted(mut db, take collections)?
     Ok(take packed)
 }
 
-fn hold_import_emitted(mut db: Db, take collections: PageTree) -> Result[(PageTree, Map[u64, std.page.PagePtr]), DeployError] waits {
-    let mut held = empty_roots()
+fn hold_import_emitted(mut db: Db, take collections: pages.PageTree) -> Result[(pages.PageTree, Map[u64, std.page.PagePtr]), DeployError] waits {
+    let mut held = pages.empty_roots()
     held.collections = take collections
-    let watermark = deploy_result(stamp_after(db.next_node))?
-    let Some(following) = int.checked_add(db.next_pin, 1) else {
+    let watermark = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
+    let Some(following) = int.checked_add(pages.holder_next_pin(db.holders), 1) else {
         return Error(Store(Limit(Ids)))
     }
-    let held_pin = Pin(owner: ImportPin, name: string.from("import"), branch: 0u32, version: db.heads[0u64].head, serial: db.next_pin, roots: take held, watermark: watermark)
-    db.next_pin = following
+    let held_pin = pages.Pin(owner: ImportPin, name: string.from("import"), branch: 0u32, version: pages.holder_heads(db.holders)[0u64].head, serial: pages.holder_next_pin(db.holders), roots: take held, watermark: watermark)
+    pages.set_next_pin(mut db.holders, following)
     let change = match import_pin_slot(db) {
         Some(stale) => ReplacePin(stale, take held_pin),
         None => AddPin(take held_pin),
@@ -182,19 +182,19 @@ fn hold_import_emitted(mut db: Db, take collections: PageTree) -> Result[(PageTr
         Some(take out) => take out,
         None => map.new(),
     }
-    Ok((share_page_tree(db.pins[slot].roots.collections), take stamps))
+    Ok((pages.share_page_tree(pages.holder_pins(db.holders)[slot].roots.collections), take stamps))
 }
 
 // Each range PREPARED ships, with the kind its catalog record gives it and its
 // residency in `collections`; a range with no record is dropped (kind 0).
-fn shipped_ranges(collections: PageTree, ranges: List[RangeChange]) -> Result[List[KeptRange], Error] {
+fn shipped_ranges(collections: pages.PageTree, ranges: List[RangeChange]) -> Result[List[KeptRange], Error] {
     let mut out: List[KeptRange] = list.with_capacity(list.len(ranges))
     for shipped_range in ranges {
         let (kind, residency) = match shipped_range.catalog {
             Some(raw) => {
-                let k = descriptor_kind_byte(catalog_kind(decode_catalog(raw)?.record))
+                let k = pages.descriptor_kind_byte(catalog_kind(decode_catalog(raw)?.record))
                 let res = match std.page.lookup(collections.root, prefix(shipped_range.id)?) {
-                    Some(desc) => collection_descriptor(desc).residency,
+                    Some(desc) => pages.collection_descriptor(desc).residency,
                     None => ResidentMemory,
                 }
                 (k, res)
@@ -233,7 +233,7 @@ fn kept_ranges(kept: KeptImport) -> Result[List[ImportedRange], DeployError] {
         let Some((slot, desc)) = std.page.collection_slot(kept.tree.root, key) else {
             return Error(Store(Missing("import range")))
         }
-        let fields = collection_descriptor(desc)
+        let fields = pages.collection_descriptor(desc)
         if fields.residency == ResidentMemory {
             let tree: Option[Arc[std.page.Page]] = match slot {
                 HotPage(child) => {
@@ -268,8 +268,8 @@ type Touch {
 }
 
 // Notes `key` before the round changes it in `tree`.
-fn note_touch(mut touched: List[Touch], tree: PageTree, key: Bytes) -> Result[(), Error] {
-    let prior = match get_page_row(tree, key) {
+fn note_touch(mut touched: List[Touch], tree: pages.PageTree, key: Bytes) -> Result[(), Error] {
+    let prior = match pages.get_page_row(tree, key) {
         Some(raw) => Some(failure_result_from_rep(types.copied(raw))?),
         None => None,
     }
@@ -283,7 +283,7 @@ fn note_touch(mut touched: List[Touch], tree: PageTree, key: Bytes) -> Result[()
 // The entries a round changed: each touched key's entry before the round
 // against the shipped ranges after it. An entry the round removed and wrote
 // back unchanged is not an op.
-fn round_ops(after: PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] {
+fn round_ops(after: pages.PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] {
     list.sort(mut touched, fn(a: Touch, b: Touch) -> Order {
         match bytes_order(a.key, b.key) {
             Equal => if a.seq < b.seq {
@@ -302,7 +302,7 @@ fn round_ops(after: PageTree, mut touched: List[Touch]) -> Result[List[RoundOp],
         if i != 0 && touched[i - 1].key == note.key {
             continue
         }
-        let new = get_page_row(after, note.key)
+        let new = pages.get_page_row(after, note.key)
         match new {
             Some(raw) => {
                 let had = match note.prior {
@@ -467,7 +467,7 @@ pub fn apply_round(mut db: Db, take checked: ValidatedRound) -> Result[u64, Depl
     }
     let mut tree = take kept_tree
     let dirty_bytes = disk_state(db).options.dirty_bytes
-    let mut private_from = deploy_result(stamp_after(db.next_node))?
+    let mut private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
     let mut next_stamp = private_from
     for take op in take ops {
         let RoundOp(key: take key, value: take value, prior: prior) = take op
@@ -478,33 +478,33 @@ pub fn apply_round(mut db: Db, take checked: ValidatedRound) -> Result[u64, Depl
         if deploy_result(table_is_tiered(tree, owner))? {
             apply_one_tiered_round_op(mut db, mut tree, take key, take value, prior, private_from, mut next_stamp)?
             if deploy_result(tiered_tree_hot_bytes(tree))? >= dirty_bytes {
-                deploy_result(canonical_tree(mut tree))?
-                db.next_node = next_stamp - 1
+                deploy_result(failure_result_from_rep(pages.canonical_tree(mut tree)))?
+                pages.set_next_node(mut db.holders, next_stamp - 1)
                 let packed_tree = hold_import(mut db, take tree)?
                 tree = take packed_tree
-                private_from = deploy_result(stamp_after(db.next_node))?
+                private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
                 next_stamp = private_from
             }
             continue
         }
-        let present = is_present(get_page_row(tree, key))
+        let present = is_present(pages.get_page_row(tree, key))
         match take value {
             Some(take raw) => {
                 if present != prior {
                     return Error(ImportMalformed)
                 }
-                deploy_result(put_page_row(mut tree, key, take raw, private_from, mut next_stamp))?
+                deploy_result(failure_result_from_rep(pages.put_page_row(mut tree, key, take raw, private_from, mut next_stamp)))?
             },
             None => {
                 if !present {
                     return Error(ImportMalformed)
                 }
-                let _ = deploy_result(remove_page_row(mut tree, key, private_from, mut next_stamp))?
+                let _ = deploy_result(failure_result_from_rep(pages.remove_page_row(mut tree, key, private_from, mut next_stamp)))?
             },
         }
     }
-    deploy_result(canonical_tree(mut tree))?
-    db.next_node = next_stamp - 1
+    deploy_result(failure_result_from_rep(pages.canonical_tree(mut tree)))?
+    pages.set_next_node(mut db.holders, next_stamp - 1)
     for total in meta.totals {
         if !ships(ranges, total.id) {
             return Error(ImportMalformed)
@@ -552,7 +552,7 @@ fn shipped_count(ranges: List[KeptRange]) -> u64 {
 }
 
 // Each shipped range's row count in `tree`, in range order.
-fn range_totals(tree: PageTree, ranges: List[KeptRange]) -> Result[List[RangeTotal], Error] {
+fn range_totals(tree: pages.PageTree, ranges: List[KeptRange]) -> Result[List[RangeTotal], Error] {
     let mut out: List[RangeTotal] = list.new()
     for shipped_range in ranges {
         if shipped_range.kind == 0 {
@@ -563,9 +563,9 @@ fn range_totals(tree: PageTree, ranges: List[KeptRange]) -> Result[List[RangeTot
     Ok(take out)
 }
 
-fn range_rows(tree: PageTree, id: u32) -> Result[u64, Error] {
+fn range_rows(tree: pages.PageTree, id: u32) -> Result[u64, Error] {
     match std.page.lookup(tree.root, prefix(id)?) {
-        Some(raw) => Ok(collection_descriptor(raw).rows),
+        Some(raw) => Ok(pages.collection_descriptor(raw).rows),
         None => Ok(0u64),
     }
 }
@@ -581,11 +581,11 @@ fn removed_pin(delta: HolderDelta) -> Option[u64] {
 
 // The installed state's account: the import pin the install cut drops holds
 // nothing main will not.
-fn install_account(db: Db, roots: Roots) -> Result[u64, DeployError] {
+fn install_account(db: Db, roots: pages.Roots) -> Result[u64, DeployError] {
     let mut s = deploy_result(failure_result_from_rep(types.capacity(current_state(db))))?
-    s.tips[0].roots = share_roots(roots)
-    list.retain(mut s.pins, scoped fn(held: Pin) -> bool {
+    s.tips[0].roots = pages.share_roots(roots)
+    list.retain(mut s.pins, scoped fn(held: pages.Pin) -> bool {
         held.owner != ImportPin
     })
-    deploy_result(failure_result_from_rep(types.capacity(state_account(s))))
+    deploy_result(failure_result_from_rep(types.capacity(pages.state_account(s))))
 }

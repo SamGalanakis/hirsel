@@ -25,16 +25,6 @@ pub type StoreCapacity: shareable + cross = Journal(Capacity) | Resident(Capacit
 
 pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Superseded(Claim) | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits) | Attached(Option[HostStreamId]) | Stream(StreamRefusal) | Latched(StreamLatch)
 
-type Roots = PageRoots
-
-fn empty_roots() -> Roots {
-    PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024), keyed: list.new())
-}
-
-fn share_roots(r: Roots) -> Roots {
-    PageRoots(collections: share_page_tree(r.collections), streams: share_page_tree(r.streams), catalog: share_page_tree(r.catalog), keyed: share_keyed_pages(r.keyed))
-}
-
 type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u64, u64) | ObjectBroken(Error)
 
 pub opaque type Db {
@@ -52,16 +42,9 @@ pub opaque type Db {
     skip_test_teardown: bool,
     disk: Option[DiskState],
     clock: Clock,
-    // Every live branch, main first, the rest ascending by id. A version is
-    // compared only with the head of the branch it belongs to (AA1, Z1).
-    heads: List[Head],
-    branch_names: Map[String, u32],
-    pins: List[Pin],
-    record_bytes: u64,
+    holders: pages.HolderTable,
+    followers: List[BranchFollower],
     limits: StoreLimits,
-    next_pin: u64,
-    next_branch: u32,
-    next_node: u64,
     next_table: u32,
     file_seq: u64,
     file_end: u64,
@@ -88,7 +71,6 @@ pub opaque type Db {
     attention_seq: u64,
     // The projector pins' roots, rebuilt on each pin change; every Snapshot and
     // Tx shares them as `read_tail`'s bases. Then the registered projectors (§1.14).
-    bases: TailBases,
     projectors: List[DeclaredProjector],
 }
 
@@ -97,67 +79,22 @@ pub type Branch {
     id: u32
 }
 
-type Head {
-    id: u32,
-    name: String,
-    parent: u32,
-    forked_at: u64,
-    roots: Roots,
-    head: u64,
-    at: u64,
-    following: Option[Latest[Snapshot]]
-}
-
-fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
-    Head(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at, following: None)
-}
-
 // I4: while a pin or another branch exists, an old row may stay reachable, so
 // commits charge conservatively until the next cut settles the account.
 // An import pin's pages are its own (§3.5a "The kept import"), so it retains nothing.
 fn retaining(db: Db) -> bool {
-    list.len(db.heads) > 1 || std.list.any(db.pins, fn(held: Pin) -> bool {
+    list.len(pages.holder_heads(db.holders)) > 1 || std.list.any(pages.holder_pins(db.holders), fn(held: pages.Pin) -> bool {
         held.owner != ImportPin
     })
 }
 
-// A branch as a cut, open and replay carry it: a Head without the readers'
-// handle (section 3.5 step 3).
-type Tip: shareable + send {
-    id: u32,
-    name: String,
-    parent: u32,
-    forked_at: u64,
-    roots: Roots,
-    head: u64,
-    at: u64
-}
-
-// Every branch's head and every pin: what one cut makes durable.
-type State: shareable + send {
-    tips: List[Tip],
-    pins: List[Pin],
-    next_branch: u32,
-    next_table: u32
-}
-
-fn main_state(take roots: Roots, head: u64, at: u64) -> Result[State, Capacity] {
-    let mut tips: List[Tip] = list.new()
-    list.push(mut tips, Tip(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at))
-    Ok(State(tips: take tips, pins: list.new(), next_branch: 1, next_table: 1))
-}
-
-fn tip_of(h: Head) -> Tip {
-    Tip(id: h.id, name: string.from(h.name), parent: h.parent, forked_at: h.forked_at, roots: share_roots(h.roots), head: h.head, at: h.at)
-}
-
 // Project the proposed holders into the checkpoint's input. The live holder
 // slots and the table-id counter still describe the installed generation.
-fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
-    let mut tips: List[Tip] = list.with_capacity(list.len(db.heads))
-    let mut kept: List[Pin] = list.with_capacity(list.len(db.pins))
+fn state_with_delta(db: Db, delta: HolderDelta) -> Result[pages.State, Capacity] {
+    let mut tips: List[pages.Tip] = list.with_capacity(list.len(pages.holder_heads(db.holders)))
+    let mut kept: List[pages.Pin] = list.with_capacity(list.len(pages.holder_pins(db.holders)))
     let mut tables = db.next_table
-    for slot in 0u64 .. list.len(db.heads) {
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
         if let RemoveHead(gone) = delta {
             if slot == gone {
                 continue
@@ -170,19 +107,19 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
                 }
             }
             if slot == 0 {
-                let h = db.heads[0u64]
-                list.push(mut tips, Tip(id: 0, name: string.from(h.name), parent: h.parent, forked_at: h.forked_at, roots: share_roots(proposed.roots), head: proposed.head, at: proposed.at))
+                let h = pages.holder_heads(db.holders)[0u64]
+                list.push(mut tips, pages.Tip(id: 0, name: string.from(h.name), parent: h.parent, forked_at: h.forked_at, roots: pages.share_roots(proposed.roots), head: proposed.head, at: proposed.at))
                 tables = proposed.tables
                 continue
             }
         }
-        list.push(mut tips, tip_of(db.heads[slot]))
+        list.push(mut tips, pages.tip_of(pages.holder_heads(db.holders)[slot]))
     }
     if let AddHead(added, _) = delta {
-        list.push(mut tips, tip_of(added))
+        list.push(mut tips, pages.tip_of(added))
     }
     let dropped = removed_pin(delta)
-    for slot in 0u64 .. list.len(db.pins) {
+    for slot in 0u64 .. list.len(pages.holder_pins(db.holders)) {
         if dropped == Some(slot) {
             continue
         }
@@ -190,47 +127,46 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
             if at == slot {
                 replacement
             } else {
-                view db.pins[slot]
+                pages.holder_pins(db.holders)[slot]
             }
         } else {
-            view db.pins[slot]
+            pages.holder_pins(db.holders)[slot]
         }
-        list.push(mut kept, share_pin(held)?)
+        list.push(mut kept, pages.share_pin(held)?)
     }
     if let AddPin(added) = delta {
-        list.push(mut kept, share_pin(added)?)
-        list.sort(mut kept, fn(a: Pin, b: Pin) -> Order {
+        list.push(mut kept, pages.share_pin(added)?)
+        list.sort(mut kept, fn(a: pages.Pin, b: pages.Pin) -> Order {
             pin_order(a.name, a.owner, b.name, b.owner)
         })
     }
-    Ok(State(tips: take tips, pins: take kept, next_branch: db.next_branch, next_table: tables))
+    Ok(pages.State(tips: take tips, pins: take kept, next_branch: pages.holder_next_branch(db.holders), next_table: tables))
 }
 
-fn current_state(db: Db) -> Result[State, Capacity] {
+fn current_state(db: Db) -> Result[pages.State, Capacity] {
     state_with_delta(db, NoHolderChange)
 }
 
 fn prepare_holder_slot(mut db: Db, delta: HolderDelta) -> Result[(), Error] {
     match delta {
-        AddHead(_, _) => {
-            failure_result_from_rep(types.capacity(map.try_reserve(mut db.branch_names, 1)))?
-            failure_result_from_rep(types.capacity(list.try_reserve(mut db.heads, 1)))
-        },
-        AddPin(_) => failure_result_from_rep(types.capacity(list.try_reserve(mut db.pins, 1))),
+        AddHead(_, _) => failure_result_from_rep(types.capacity(pages.reserve_head(mut db.holders))),
+        AddPin(_) => failure_result_from_rep(types.capacity(pages.reserve_pin(mut db.holders))),
         _ => Ok(()),
     }
 }
 
-fn install_head(mut db: Db, take added: Head, take indexed_name: String) {
-    db.record_bytes += branch_root_bytes(added.name, added.roots)
-    map.insert(mut db.branch_names, take indexed_name, added.id)
-    list.push(mut db.heads, take added)
+fn install_head(mut db: Db, take added: pages.Head, take indexed_name: String) {
+    let count_bytes = branch_root_bytes(added.name, added.roots)
+    pages.add_head(mut db.holders, take added, take indexed_name, count_bytes)
 }
 
 fn remove_head(mut db: Db, slot: u64) {
-    let removed = list.remove(mut db.heads, slot)
-    db.record_bytes -= branch_root_bytes(removed.name, removed.roots)
-    let _ = map.remove(mut db.branch_names, removed.name)
+    let head = pages.holder_heads(db.holders)[slot].id
+    let count_bytes = branch_root_bytes(pages.holder_heads(db.holders)[slot].name, pages.holder_heads(db.holders)[slot].roots)
+    pages.drop_head(mut db.holders, slot, count_bytes)
+    if let Some(follow_slot) = branch_follower_slot(db.followers, head) {
+        let _ = list.remove(mut db.followers, follow_slot)
+    }
 }
 
 fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
@@ -239,36 +175,31 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
         AddHead(take added, take name) => install_head(mut db, take added, take name),
         RemoveHead(slot) => remove_head(mut db, slot),
         AddPin(take added) => {
-            db.record_bytes += pin_root_bytes(added.name, added.roots)
+            let count_bytes = pin_root_bytes(added.name, added.roots)
             let mut slot = 0u64
-            while slot < list.len(db.pins) && pin_order(db.pins[slot].name, db.pins[slot].owner, added.name, added.owner) == Less {
+            while slot < list.len(pages.holder_pins(db.holders)) && pin_order(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].owner, added.name, added.owner) == Less {
                 slot += 1
             }
-            list.insert(mut db.pins, slot, take added)
-            db.bases = tail_bases(db.pins)
+            pages.add_pin(mut db.holders, slot, take added, count_bytes)
         },
         RemovePin(slot) => {
-            let removed = list.remove(mut db.pins, slot)
-            db.record_bytes -= pin_root_bytes(removed.name, removed.roots)
-            db.bases = tail_bases(db.pins)
+            let count_bytes = pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots)
+            pages.drop_pin(mut db.holders, slot, count_bytes)
         },
         ReplacePin(slot, take replacement) => {
-            db.record_bytes -= pin_root_bytes(db.pins[slot].name, db.pins[slot].roots)
-            db.record_bytes += pin_root_bytes(replacement.name, replacement.roots)
-            let _ = list.set(mut db.pins, slot, take replacement)
-            db.bases = tail_bases(db.pins)
+            let old_bytes = pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots)
+            let count_bytes = pin_root_bytes(replacement.name, replacement.roots)
+            pages.replace_pin(mut db.holders, slot, take replacement, old_bytes, count_bytes)
         },
         ReplaceMain(take proposed, gone) => {
             let ProposedMain(roots: take roots, head: head, at: at, tables: tables, drop_pin: drop_pin, ..) = take proposed
             if let Some(pin_slot) = drop_pin {
-                let removed = list.remove(mut db.pins, pin_slot)
-                db.record_bytes -= pin_root_bytes(removed.name, removed.roots)
+                let count_bytes = pin_root_bytes(pages.holder_pins(db.holders)[pin_slot].name, pages.holder_pins(db.holders)[pin_slot].roots)
+                pages.drop_import_pin(mut db.holders, pin_slot, count_bytes)
             }
-            db.record_bytes -= keyed_root_record_bytes(db.heads[0u64].roots.keyed)
-            db.record_bytes += keyed_root_record_bytes(roots.keyed)
-            db.heads[0u64].roots = take roots
-            db.heads[0u64].head = head
-            db.heads[0u64].at = at
+            let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+            let count_bytes = keyed_root_record_bytes(roots.keyed)
+            pages.replace_head(mut db.holders, 0, take roots, head, at, old_bytes, count_bytes)
             db.next_table = tables
             if let Some(slot) = gone {
                 remove_head(mut db, slot)
@@ -279,26 +210,11 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
     db.settled = db.changes
 }
 
-fn state_roots(s: State) -> Result[List[Roots], Capacity] {
-    let mut all: List[Roots] = list.with_capacity(list.len(s.tips) + list.len(s.pins))
-    for t in s.tips {
-        list.push(mut all, share_roots(t.roots))
-    }
-    for held in s.pins {
-        list.push(mut all, share_roots(held.roots))
-    }
-    Ok(take all)
-}
-
-fn state_account(s: State) -> Result[u64, Capacity] {
-    Ok(page_row_account(state_roots(s)?))
-}
-
 // A Memory cut counts row versions only. The page-image figure walks every
 // page, so `accounts` computes it when asked (§13.8).
-fn memory_cut_account(state: State) -> Result[u64, Error] {
+fn memory_cut_account(state: pages.State) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
-        Ok(page_row_account(failure_result_from_rep(types.capacity(state_roots(state)))?))
+        Ok(pages.page_row_account(failure_result_from_rep(types.capacity(pages.state_roots(state)))?))
     })
 }
 
@@ -313,7 +229,7 @@ fn branch_slot(db: Db, id: u32) -> Result[u64, u64] {
     if id == 0 {
         return Ok(0)
     }
-    list.binary_search_by(db.heads, scoped fn(h: Head) -> Order {
+    list.binary_search_by(pages.holder_heads(db.holders), scoped fn(h: pages.Head) -> Order {
         order.compare(h.id, id)
     })
 }
@@ -326,11 +242,11 @@ fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
 }
 
 fn head_snapshot(db: Db, i: u64) -> Snapshot {
-    snapshot_from(db, i, db.heads[i].head, db.heads[i].roots, int.saturating_add(db.next_node, 1))
+    snapshot_from(db, i, pages.holder_heads(db.holders)[i].head, pages.holder_heads(db.holders)[i].roots, int.saturating_add(pages.holder_next_node(db.holders), 1))
 }
 
-fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots, watermark: u64) -> Snapshot {
-    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots), watermark: watermark, bases: share_tail_bases(db.bases))
+fn snapshot_from(db: Db, i: u64, head: u64, roots: pages.Roots, watermark: u64) -> Snapshot {
+    Snapshot(store: db.store, open: open_number(db), branch: pages.holder_heads(db.holders)[i].id, head: head, roots: pages.share_roots(roots), watermark: watermark, bases: pages.share_tail_bases(pages.holder_bases(db.holders)))
 }
 
 pub type CallId {
@@ -396,50 +312,12 @@ pub type Page[K, V]: send {
 
 pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
-fn stage_value(take raw: Bytes, inline: u64) -> format.StagedValue {
-    if list.len(raw) <= inline {
-        PageValue(take raw)
-    } else {
-        BlobBody(arc.new(take raw))
-    }
-}
-
-// Small drafts scan. Larger ascending drafts search the rows directly.
-// Larger unordered drafts use the slot map.
-type DataOps: shareable + send {
-    rows: DataRows,
-    slots: Map[Bytes, u64],
-    cells: Map[u32, CellEdit],
-    logs: Map[u32, LogState]
-}
-
-const SCANNED_OPS: u64 = 8
-
-// A journaled draft starts open. The first inserted typed key supplies its row slot.
-// The two sentinels are outside the range of slots in a bounded COMMIT frame.
-const NO_FRAME_TAIL: u64 = 18446744073709551615
-
-const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
-
-fn empty_ops() -> DataOps {
-    DataOps(rows: new_data_rows(), slots: map.new(), cells: map.new(), logs: map.new())
-}
-
-// What enclosing transactions staged before a callback began, frozen so the
-// callback shares it instead of copying it (MEM-30's copy idiom without the
-// copy). Lookups check a transaction's own ops, then its layers newest first.
-type Staged: shareable + send {
-    ops: DataOps,
-    stream_ops: DataOps,
-    call: Option[format.CallSection]
-}
-
 pub opaque scoped type Tx {
     store: StoreId,
     indexes: View[IndexRegistry],
-    roots: Roots,
+    roots: pages.Roots,
     base_collection: Option[TxCollection],
-    bases: TailBases,
+    bases: pages.TailBases,
     ids: u64,
     private_from: u64,
     resident: u64,
@@ -462,12 +340,12 @@ pub opaque scoped type Tx {
     // The recorded limits (§11.1 AP4a) every check in the body reads.
     limits: StoreLimits,
     wrote: bool,
-    ops: DataOps,
+    ops: pages.DataOps,
     view_tree: core.Cell[Option[TxView]],
     info: CallInfo,
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
-    stream_ops: DataOps,
+    stream_ops: pages.DataOps,
     keyed: Option[format.KeyedDraft],
     extra_bytes: u64,
     call: Option[format.CallSection],
@@ -476,7 +354,7 @@ pub opaque scoped type Tx {
     // with the transactions it runs inside. `rows` and `streams` count the
     // distinct keys staged across `ops` and every layer: a key's slot is the
     // one it took when first staged, and a new key takes the next.
-    below: List[Arc[Staged]],
+    below: List[Arc[pages.Staged]],
     own: u64,
     rows: u64,
     cell_rows: u64,
@@ -489,9 +367,9 @@ pub opaque type Snapshot: shareable + send {
     open: u64,
     branch: u32,
     head: u64,
-    roots: Roots,
+    roots: pages.Roots,
     watermark: u64,
-    bases: TailBases
+    bases: pages.TailBases
 }
 
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
@@ -516,12 +394,12 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
     let mut db = empty_db(c, id, o)
-    list.push(mut db.heads, main_head(empty_roots(), 0, 0))
+    pages.init_main(mut db.holders)
     take db
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, skip_test_teardown: false, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, skip_test_teardown: false, disk: None, clock: c, holders: pages.empty_holders(), followers: list.new(), limits: limits_from_rep(types.named_limits(optional_limits_to_rep(o.limits))), next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: format.no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: size_or(o.streams_max, o.resident_limit / DEFAULT_STREAM_RESIDENT_BYTES), stream_sweep_after: None, drift: list.new(), attention_seq: 0, projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -573,10 +451,6 @@ pub fn snapshot_of(db: Db, b: Branch) -> Result[Snapshot, Error] {
     Ok(head_snapshot(db, i))
 }
 
-fn same_name(a: String, b: String) -> bool {
-    string.as_bytes(a) == string.as_bytes(b)
-}
-
 fn checked_name(name: String) -> Result[String, Error] {
     if string.byte_len(name) > 255 {
         return Error(Limit(Name))
@@ -585,10 +459,10 @@ fn checked_name(name: String) -> Result[String, Error] {
 }
 
 pub fn branch(db: Db, name: String) -> Option[Branch] {
-    if same_name(db.heads[0u64].name, name) {
+    if pages.same_name(pages.holder_heads(db.holders)[0u64].name, name) {
         return Some(main_branch(db))
     }
-    match map.get(db.branch_names, name) {
+    match map.get(pages.holder_branch_names(db.holders), name) {
         Some(id) => Some(Branch(store: db.store, id: id)),
         None => None,
     }
@@ -622,7 +496,7 @@ fn cut_install_emitted(mut db: Db, take delta: HolderDelta, mut emitted: Option[
         return disk_cut_with_limit_emitted(mut db, take delta, seal_page_manifest_file, target, pack_bytes, limit, mut timing, mut emitted)
     }
     prepare_holder_slot(mut db, delta)?
-    let proposed = disk_allocation(scoped fn() -> Result[State, Error] {
+    let proposed = disk_allocation(scoped fn() -> Result[pages.State, Error] {
         failure_result_from_rep(types.capacity(state_with_delta(db, delta)))
     })?
     let admission = match delta {
@@ -640,16 +514,16 @@ fn cut_install_emitted(mut db: Db, take delta: HolderDelta, mut emitted: Option[
     Ok(commit_ticket)
 }
 
-fn branch_root_bytes(name: String, roots: Roots) -> u64 {
-    branch_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
+fn branch_root_bytes(name: String, roots: pages.Roots) -> u64 {
+    pages.branch_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
 }
 
-fn pin_root_bytes(name: String, roots: Roots) -> u64 {
-    pin_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
+fn pin_root_bytes(name: String, roots: pages.Roots) -> u64 {
+    pages.pin_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
 }
 
 fn check_manifest_addition(db: Db, extra: u64) -> Result[(), Error] {
-    if extra > db.limits.meta - db.record_bytes {
+    if extra > db.limits.meta - pages.holder_record_bytes(db.holders) {
         Error(Limit(Manifest))
     } else {
         Ok(())
@@ -668,11 +542,11 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
         Error(Missing(_)) => return Error(Diverged(b.id)),
         Error(take e) => return Error(take e)
     }
-    if i == 0 || db.heads[i].parent != 0 || db.heads[0].head != db.heads[i].forked_at {
+    if i == 0 || pages.holder_heads(db.holders)[i].parent != 0 || pages.holder_heads(db.holders)[0].head != pages.holder_heads(db.holders)[i].forked_at {
         return Error(Diverged(b.id))
     }
-    let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node)))?
+    let merged = ProposedMain(roots: pages.share_roots(pages.holder_heads(db.holders)[i].roots), head: pages.holder_heads(db.holders)[i].head, at: pages.holder_heads(db.holders)[i].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, merged.head, merged.roots, pages.holder_next_node(db.holders))))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
     Ok(commit_ticket)
@@ -693,15 +567,27 @@ pub fn version(s: Snapshot) -> u64 {
     s.head
 }
 
+type BranchFollower {
+    head: u32,
+    latest: Latest[Snapshot]
+}
+
+fn branch_follower_slot(registered: List[BranchFollower], head: u32) -> Option[u64] {
+    std.list.position(registered, scoped fn(registered_head: BranchFollower) -> bool {
+        registered_head.head == head
+    })
+}
+
 pub fn follow(mut db: Db, b: Branch) -> Result[Latest[Snapshot], Error] {
     healthy(db)?
     let i = branch_index(db, b)?
-    if let Some(h) = db.heads[i].following {
-        return Ok(latest.handle(h))
+    let head = pages.holder_heads(db.holders)[i].id
+    if let Some(slot) = branch_follower_slot(db.followers, head) {
+        return Ok(latest.handle(db.followers[slot].latest))
     }
     let root = arc.new(head_snapshot(db, i))
     let h = latest.new(take root)
-    db.heads[i].following = Some(latest.handle(h))
+    list.push(mut db.followers, BranchFollower(head: head, latest: latest.handle(h)))
     Ok(take h)
 }
 
@@ -711,9 +597,9 @@ type Publication {
 
 // The followed snapshot is allocated before the commit, so publishing it
 // after the commit cannot fail.
-fn prepare_publication(db: Db, i: u64, head: u64, roots: Roots, last_stamp: u64) -> Result[Publication, Capacity] {
-    let followed = match db.heads[i].following {
-        Some(handle) => Some((latest.handle(handle), arc.new(snapshot_from(db, i, head, roots, int.saturating_add(last_stamp, 1))))),
+fn prepare_publication(db: Db, i: u64, head: u64, roots: pages.Roots, last_stamp: u64) -> Result[Publication, Capacity] {
+    let followed = match branch_follower_slot(db.followers, pages.holder_heads(db.holders)[i].id) {
+        Some(slot) => Some((latest.handle(db.followers[slot].latest), arc.new(snapshot_from(db, i, head, roots, int.saturating_add(last_stamp, 1))))),
         None => None
     }
     Ok(Publication(followed: take followed))
@@ -778,7 +664,7 @@ pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | N
 type ServeReply = KeptReply(Bytes) | StoreFailure(Error) | BodyStop(Stop)
 
 pub fn next_call_info(db: Db) -> CallInfo {
-    call_info(db.store, 0, db.heads[0].head + 1, host.wall_ms(db.clock), db.heads[0].at)
+    call_info(db.store, 0, pages.holder_heads(db.holders)[0].head + 1, host.wall_ms(db.clock), pages.holder_heads(db.holders)[0].at)
 }
 
 pub fn stream_retention_ms(db: Db) -> u64 {
@@ -796,7 +682,7 @@ fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError]
     if let Some(keyed) = complete.keyed {
         return serve_before(check_keyed_completion(db, complete, keyed))
     }
-    if let Some(raw) = get_page_row(db.heads[0].roots.streams, complete.stream) {
+    if let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, complete.stream) {
         let state = serve_before(stream_state(raw))?
         if state.p == complete.p && state.state == 1 && state.digest == complete.request {
             return Ok(())
@@ -1013,7 +899,7 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
     // A retry-capable call is bounded, so a body that loops on a caught
     // Missed ends at its bound and the driver reruns it (§13.3).
     if let None = steps {
-        if tiered_collections(db.heads[i].roots.collections.root) {
+        if pages.tiered_collections(pages.holder_heads(db.holders)[i].roots.collections.root) {
             return Error(Missing("steps"))
         }
     }
@@ -1059,10 +945,10 @@ fn maybe_checkpoint(mut db: Db) -> Result[(), Error] waits {
 // only its streams writes and its CALL section (F2).
 type Ran[R, A] {
     value: Result[R, A],
-    roots: Option[Roots],
-    edits: DataRows,
+    roots: Option[pages.Roots],
+    edits: pages.DataRows,
     order: format.DataOrder,
-    replies: DataRows,
+    replies: pages.DataRows,
     keyed: Option[format.KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
@@ -1088,16 +974,16 @@ type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A]) | Dra
 // A successful body or an application error with a reply to commit.
 type Prepared[R, A] {
     outcome: Result[R, A],
-    roots: Roots,
+    roots: pages.Roots,
     tiered: Option[u64],
     plan: Option[TieredWritePlan],
     live: u64,
     frame: Option[Bytes],
-    ops: DataRows,
+    ops: pages.DataRows,
     order: format.DataOrder,
     base_stamp: u64,
     frame_tail: u64,
-    stream_ops: DataRows,
+    stream_ops: pages.DataRows,
     keyed: Option[format.KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
@@ -1121,10 +1007,10 @@ fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
 fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
-    let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
+    let ci = call_info(db.store, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head + 1, wall, pages.holder_heads(db.holders)[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
-            let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
+            let staged = draft_body(db, db.indexes, pages.holder_heads(db.holders)[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
             let prepared = if let Some(_) = steps {
                 match prepare_metered_pages(issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
@@ -1134,7 +1020,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             } else {
                 take staged
             }
-            match frame_draft(db, db.heads[i].roots.collections, ci, rec, settlement, force_frame, take prepared) {
+            match frame_draft(db, pages.holder_heads(db.holders)[i].roots.collections, ci, rec, settlement, force_frame, take prepared) {
                 Ok(take framed) => take framed,
                 Error(problem) => RolledBack(Refused(Allocation(problem))),
             }
@@ -1154,8 +1040,8 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         return Latched
     }
     let high = cell.into_inner(take issued)
-    if high > db.next_node {
-        db.next_node = high
+    if high > pages.holder_next_node(db.holders) {
+        pages.set_next_node(mut db.holders, high)
     }
     let seen = log.finish(take reads)
     match take caught {
@@ -1169,13 +1055,13 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     }
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
-        Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
-        None => (None, NO_FRAME_TAIL),
+        Some(_) => (Some(42u64), pages.OPEN_FRAME_TAIL),
+        None => (None, pages.NO_FRAME_TAIL),
     }
     let observed_info: core.Cell[bool] = cell.new(false)
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: pages.share_roots(base), base_collection: None, bases: pages.share_tail_bases(pages.holder_bases(db.holders)), ids: pages.holder_next_node(db.holders), private_from: int.saturating_add(pages.holder_next_node(db.holders), 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1203,7 +1089,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 Some(_) => true,
                 None => false
             }
-            if !keep || (data_row_count(tx.stream_ops.rows) == 0 && !keyed_reply) {
+            if !keep || (pages.data_row_count(tx.stream_ops.rows) == 0 && !keyed_reply) {
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
             // F2 keeps the streams and CALL writes with the old data roots.
@@ -1212,11 +1098,11 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 Error(c) => return RolledBack(Refused(Allocation(c)))
             }
             tx.resident = live_bytes
-            tx.roots.collections = share_page_tree(base.collections)
-            tx.roots.catalog = share_page_tree(base.catalog)
-            tx.ops = empty_ops()
+            tx.roots.collections = pages.share_page_tree(base.collections)
+            tx.roots.catalog = pages.share_page_tree(base.catalog)
+            tx.ops = pages.empty_ops()
             tx.rows = 0
-            tx.frame_tail = NO_FRAME_TAIL
+            tx.frame_tail = pages.NO_FRAME_TAIL
             Error(take a)
         }
     }
@@ -1231,18 +1117,18 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     }
     let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
     let saw_info = cell.replace(observed_info, false)
-    let DataOps(cells: take cells, ..) = take ops
+    let pages.DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
-    let order = match data_order(rows) {
+    let order = match pages.data_order(rows) {
         Ok(take sorted) => take sorted,
         Error(problem) => return RolledBack(Refused(Allocation(problem))),
     }
-    let DataOps(rows: take stream_rows, ..) = take stream_ops
+    let pages.DataOps(rows: take stream_rows, ..) = take stream_ops
     let tiered = match attempt {
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: pages.tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
@@ -1268,8 +1154,8 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
     }
     let mut admits_rows = stream_edits.count_word != 0 || keyed_writes
     if !admits_rows {
-        for slot in 0u64 .. data_row_count(operations) {
-            let edit = data_row(operations, slot)
+        for slot in 0u64 .. pages.data_row_count(operations) {
+            let edit = pages.data_row(operations, slot)
             if let Some(_) = edit.value {
                 if tiered != None && tiered_data_key(roots.collections, edit.key) {
                     continue
@@ -1445,33 +1331,33 @@ fn test_db(c: Clock, cap: u64) -> Db {
 }
 
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
-    if let Some(slot) = op_slot(tx.stream_ops, key) {
-        return match data_row(tx.stream_ops.rows, slot).value {
+    if let Some(slot) = pages.op_slot(tx.stream_ops, key) {
+        return match pages.data_row(tx.stream_ops.rows, slot).value {
             Some(raw) => Some(format.staged_bytes(raw)),
             None => None,
         }
     }
     if let Some(at) = newest_layer(tx.below, true, key) {
         let layer = view tx.below[at]
-        if let Some(slot) = op_slot(layer.stream_ops, key) {
-            return match data_row(layer.stream_ops.rows, slot).value {
+        if let Some(slot) = pages.op_slot(layer.stream_ops, key) {
+            return match pages.data_row(layer.stream_ops.rows, slot).value {
                 Some(raw) => Some(format.staged_bytes(raw)),
                 None => None,
             }
         }
     }
-    get_page_row(tx.roots.streams, key)
+    pages.get_page_row(tx.roots.streams, key)
 }
 
 // The newest layer that staged `key`, a deletion included.
-fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u64] {
+fn newest_layer(below: List[Arc[pages.Staged]], streams: bool, key: Bytes) -> Option[u64] {
     let mut newest: Option[u64] = None
     let mut at = 0u64
     for layer in below {
         let found = if streams {
-            op_slot(layer.stream_ops, key)
+            pages.op_slot(layer.stream_ops, key)
         } else {
-            op_slot(layer.ops, key)
+            pages.op_slot(layer.ops, key)
         }
         if let Some(_) = found {
             newest = Some(at)
@@ -1481,39 +1367,11 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
     newest
 }
 
-// The frame bytes of the op staged for `key`, in `ops` or the newest layer.
-fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
-    if let Some(slot) = op_slot(ops, key) {
-        return format.data_op_size(data_row(ops.rows, slot), streams)
-    }
-    let mut size = 0u64
-    for layer in below {
-        let staged = if streams {
-            view layer.stream_ops
-        } else {
-            view layer.ops
-        }
-        if let Some(slot) = op_slot(staged, key) {
-            size = format.data_op_size(data_row(staged.rows, slot), streams)
-        }
-    }
-    size
-}
-
-fn stream_control_slot(ops: DataRows) -> Option[u64] {
-    for slot in 0u64 .. data_row_count(ops) {
-        if list.len(data_row(ops, slot).key) == 0u64 {
-            return Some(slot)
-        }
-    }
-    None
-}
-
-fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call: Option[format.CallView], settlement: Option[format.Settlement]) -> Result[(), Capacity] {
+fn encode_stream_ops(mut payload: Bytes, ops: pages.DataRows, stream_count: u64, call: Option[format.CallView], settlement: Option[format.Settlement]) -> Result[(), Capacity] {
     format.le(mut payload, 1, 1)?
     format.le(mut payload, stream_count, 4)?
-    let order = data_order(ops)?
-    for slot_order in 0u64 .. data_row_count(ops) {
+    let order = pages.data_order(ops)?
+    for slot_order in 0u64 .. pages.data_row_count(ops) {
         let operation = ordered_row(ops, order, slot_order)
         if list.len(operation.key) != 0u64 {
             format.encode_stream_op(mut payload, operation, call, settlement)?
@@ -1564,8 +1422,8 @@ pub opaque type Index[J, K, V, P]: shareable + send {
 }
 
 type PageRows[K, V]: send {
-    cursor: Option[CollectionCursor],
-    data: PageTree,
+    cursor: Option[pages.CollectionCursor],
+    data: pages.PageTree,
     decoder: RowDecoder[K, V]
 }
 
@@ -1770,8 +1628,8 @@ fn catalog_index_key(id: u32, name: String) -> Result[Bytes, Error] {
     Ok(take k)
 }
 
-fn catalog_entry_in(catalog: PageTree, k: Bytes) -> Result[Catalog, Error] {
-    match get_page_row(catalog, k) {
+fn catalog_entry_in(catalog: pages.PageTree, k: Bytes) -> Result[Catalog, Error] {
+    match pages.get_page_row(catalog, k) {
         Some(raw) => decode_catalog(raw),
         None => Error(Stale(0))
     }
@@ -1784,41 +1642,41 @@ fn stamp_after(final_item: u64) -> Result[u64, Error] {
     Ok(next_stamp)
 }
 
-fn define_store_collection(mut tree: PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
+fn define_store_collection(mut tree: pages.PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
     let first = stamp_after(final_item)?
     let mut next_stamp = first
     define_collection(mut tree, id, kind, first, mut next_stamp)?
-    canonical_tree(mut tree)?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
     final_item = next_stamp - 1
     Ok(())
 }
 
-fn bulk_store_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Row], mut final_item: u64) -> Result[(), Error] {
+fn bulk_store_collection(mut tree: pages.PageTree, id: u32, kind: u8, rows: List[std.page.Row], mut final_item: u64) -> Result[(), Error] {
     let first = stamp_after(final_item)?
     let mut next_stamp = first
     bulk_collection(mut tree, id, kind, rows, first, mut next_stamp)?
-    canonical_tree(mut tree)?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
     final_item = next_stamp - 1
     Ok(())
 }
 
-fn remove_store_row(mut tree: PageTree, key: Bytes, mut final_item: u64) -> Result[(), Error] {
+fn remove_store_row(mut tree: pages.PageTree, key: Bytes, mut final_item: u64) -> Result[(), Error] {
     let first = stamp_after(final_item)?
     let mut next_stamp = first
-    let _ = remove_page_row(mut tree, key, first, mut next_stamp)?
-    canonical_tree(mut tree)?
+    let _ = failure_result_from_rep(pages.remove_page_row(mut tree, key, first, mut next_stamp))?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
     final_item = next_stamp - 1
     Ok(())
 }
 
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     healthy(db)?
-    catalog_handle(db.store, db.heads[0].roots.catalog, named(name)?, take key, take value)
+    catalog_handle(db.store, pages.holder_heads(db.holders)[0].roots.catalog, named(name)?, take key, take value)
 }
 
 fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[(), Error] {
     let k = table_key(name)?
-    if let Some(_) = get_page_row(plan.roots.catalog, k) {
+    if let Some(_) = pages.get_page_row(plan.roots.catalog, k) {
         return Error(Exists(named(name)?))
     }
     let schema = std.codec.schema(value) ?=> |_| Schema(0)
@@ -1829,7 +1687,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
     let c = Catalog(record: CatalogTable, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
     let live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
-    let base = share_roots(plan.roots)
+    let base = pages.share_roots(plan.roots)
     let mut roots = catalog_insert(mut plan.next_node, base, k, raw)?
     define_store_collection(mut roots.collections, id, 1, mut plan.next_node)?
     plan.step_drift = true
@@ -1868,7 +1726,7 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
 
 fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
-    let mut c = match get_page_row(plan.roots.catalog, k) {
+    let mut c = match pages.get_page_row(plan.roots.catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
@@ -1898,7 +1756,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         c.next += 1
         let raw = encode_catalog(c)?
         let live_bytes = catalog_recharge(plan.live, plan.roots, key_handle, raw, plan.retained)
-        let base = share_roots(plan.roots)
+        let base = pages.share_roots(plan.roots)
         let roots = catalog_insert(mut plan.next_node, base, key_handle, raw)?
         let next_id = plan.next_table
         keep_schema(mut plan, take roots, live_bytes, next_id)?
@@ -1906,9 +1764,9 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     Ok(Table(store: plan.store, id: c.id, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved))
 }
 
-fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+fn catalog_handle[K, V](store_id: StoreId, catalog: pages.PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
-    let c = match get_page_row(catalog, k) {
+    let c = match pages.get_page_row(catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(take name))
     }
@@ -1931,8 +1789,8 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String,
     Error(Schema(int.widen(c.next)))
 }
 
-fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J], take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
-    let public = match get_page_row(catalog, k) {
+fn catalog_index_handle[J, K, V, P](catalog: pages.PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J], take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
+    let public = match pages.get_page_row(catalog, k) {
         Some(raw) => record_public(raw),
         None => false,
     }
@@ -1947,7 +1805,7 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
     for ix in indexes {
         list.push(mut ids, ix.id)
     }
-    let mut roots = share_roots(plan.roots)
+    let mut roots = pages.share_roots(plan.roots)
     let mut live_bytes = plan.live
     for id in ids {
         let charge = remove_store_collection(mut roots.collections, id, mut plan.next_node)?
@@ -1964,7 +1822,7 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
         }
         remove_store_row(mut roots.catalog, k, mut plan.next_node)?
     }
-    if let Some(raw) = get_page_row(plan.roots.catalog, catalog_key) {
+    if let Some(raw) = pages.get_page_row(plan.roots.catalog, catalog_key) {
         if !plan.retained {
             live_bytes = int.saturating_sub(live_bytes, entry(catalog_key, raw))
         }
@@ -1978,7 +1836,7 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
 
 // What a migrate builds before its cut: the new roots and the account.
 type Built {
-    roots: Roots,
+    roots: pages.Roots,
     live: u64,
     read: u64,
     written: u64
@@ -1991,8 +1849,8 @@ fn over_ceiling(live_bytes: u64, ceiling: u64) -> Result[(), Error] {
     Ok(())
 }
 
-fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) -> Result[bool, Error] {
-    let replaced = match get_page_row(roots.collections, p) {
+fn insert_row(mut ids: u64, mut roots: pages.Roots, take p: Bytes, take raw: Bytes) -> Result[bool, Error] {
+    let replaced = match pages.get_page_row(roots.collections, p) {
         Some(_) => true,
         None => false
     }
@@ -2006,15 +1864,15 @@ fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) ->
     if !exists {
         define_collection(mut roots.collections, list.word_be(p, 0), 1, first, mut next_stamp)?
     }
-    put_page_row(mut roots.collections, p, raw, first, mut next_stamp)?
-    canonical_tree(mut roots.collections)?
+    failure_result_from_rep(pages.put_page_row(mut roots.collections, p, raw, first, mut next_stamp))?
+    failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
     ids = next_stamp - 1
     Ok(replaced)
 }
 
 // AP13. Collect and admit the encoded workspace, sort the destination
 // records, then build the table and each index bottom up.
-fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes, value_limit: u64) -> Result[Built, Error] {
+fn migrate_build[K, V, K2, V2](source: pages.PageTree, take base: pages.Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes, value_limit: u64) -> Result[Built, Error] {
     let mut roots = take base
     let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
@@ -2088,7 +1946,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         }
         remove_store_row(mut roots.catalog, k, mut ids)?
     }
-    if let Some(raw) = get_page_row(roots.catalog, from.catalog_key) {
+    if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
         if !retained {
             live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
         }
@@ -2096,7 +1954,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     remove_store_row(mut roots.catalog, from.catalog_key, mut ids)?
     roots = catalog_insert(mut ids, roots, target, table_raw)?
     if !retained {
-        live_bytes = one_page_account(roots)
+        live_bytes = pages.one_page_account(roots)
     }
     over_ceiling(live_bytes, ceiling)?
     Ok(Built(roots: take roots, live: live_bytes, read: source_rows, written: written))
@@ -2106,12 +1964,12 @@ fn same_bytes(a: Bytes, b: Bytes) -> bool {
     a == b
 }
 
-fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
-    let mut edited = share_roots(roots)
+fn catalog_insert(mut ids: u64, roots: pages.Roots, k: Bytes, v: Bytes) -> Result[pages.Roots, Error] {
+    let mut edited = pages.share_roots(roots)
     let first = stamp_after(ids)?
     let mut next_stamp = first
-    put_page_row(mut edited.catalog, k, v, first, mut next_stamp)?
-    canonical_tree(mut edited.catalog)?
+    failure_result_from_rep(pages.put_page_row(mut edited.catalog, k, v, first, mut next_stamp))?
+    failure_result_from_rep(pages.canonical_tree(mut edited.catalog))?
     ids = next_stamp - 1
     Ok(take edited)
 }
@@ -2126,7 +1984,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
     }
     let target = table_key(to_name)?
     if !same_bytes(target, from.catalog_key) {
-        if let Some(_) = get_page_row(plan.roots.catalog, target) {
+        if let Some(_) = pages.get_page_row(plan.roots.catalog, target) {
             return Error(Exists(named(to_name)?))
         }
     }
@@ -2137,7 +1995,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
     let id = plan.next_table
     plan.step_drift = true
     if table_is_tiered(plan.roots.collections, from.id)? {
-        let mut roots = share_roots(plan.roots)
+        let mut roots = pages.share_roots(plan.roots)
         let mut ids = plan.next_node
         let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
         let fp = std.codec.fingerprint_of(schema)
@@ -2159,7 +2017,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
             }
             remove_store_row(mut roots.catalog, k, mut ids)?
         }
-        if let Some(raw) = get_page_row(roots.catalog, from.catalog_key) {
+        if let Some(raw) = pages.get_page_row(roots.catalog, from.catalog_key) {
             if !plan.retained {
                 live_bytes = int.saturating_sub(live_bytes, entry(from.catalog_key, raw))
             }
@@ -2203,7 +2061,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
         list.push(mut plan.pending_migrates, DeferredMigrate(from_id: from_id, to_id: id, to_name: named(to_name)?, olds: take old_ids, convert: take convert_row, preview_slot: preview_slot))
         return Ok(())
     }
-    let base = share_roots(plan.roots)
+    let base = pages.share_roots(plan.roots)
     let mut ids = plan.next_node
     let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to_name, to_key, to_value, f, id, meta.next, target, plan.value_limit)
     plan.next_node = ids
@@ -2242,7 +2100,7 @@ fn check_table_write[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let indexes = check_table_write(tx, t)?
-    let tail = tx.frame_tail == OPEN_FRAME_TAIL
+    let tail = tx.frame_tail == pages.OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
     std.codec.encode_key(t.key, k, mut p)
     put_impl(mut tx, t, indexes, take p, v, tail)
@@ -2289,11 +2147,11 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] wa
     snapshot_changes(r, a, b)
 }
 
-fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
+fn catalog_recharge(live_bytes: u64, roots: pages.Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
     let old_charge = if retained {
         0u64
     } else {
-        match get_page_row(roots.catalog, key) {
+        match pages.get_page_row(roots.catalog, key) {
             Some(old) => entry(key, old),
             None => 0
         }
@@ -2435,22 +2293,6 @@ fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expect
     Ok(format.DiskHeader(context: ctx, prev_end: previous))
 }
 
-fn encode_fork(context: format.DiskContext, offset: u64, head: Head, watermark: u64) -> Result[Bytes, Capacity] {
-    let size = 26 + string.byte_len(head.name)
-    let mut out: Bytes = list.with_capacity(16 + size + format.BINDING_BYTES)
-    format.le(mut out, 0x0013, 2)?
-    format.le(mut out, 1, 2)?
-    format.le(mut out, size, 4)?
-    format.le(mut out, 0, 8)?
-    format.le(mut out, int.widen(head.id), 4)?
-    format.le(mut out, int.widen(head.parent), 4)?
-    format.le(mut out, head.forked_at, 8)?
-    format.disk_put_name(mut out, head.name)?
-    format.le(mut out, watermark, 8)?
-    format.seal_frame(mut out, context, offset)?
-    Ok(take out)
-}
-
 fn disk_io[T](take r: Result[T, IoError]) -> Result[T, Error] {
     match take r {
         Ok(take x) => Ok(take x),
@@ -2488,7 +2330,7 @@ fn disk_remove_optional(d: Dir, path: String) -> Result[bool, Error] waits {
 type DiskLoaded: send {
     store: StoreId,
     manifest: PageManifest,
-    all: List[Roots],
+    all: List[pages.Roots],
     lists: PagedLists,
     locations: PageLocations
 }
@@ -2557,20 +2399,20 @@ type PreparedRow: codec + send {
     value: Bytes
 }
 
-fn catalog_changes(base: Roots, target: Roots) -> Result[List[CatalogChange], Error] {
+fn catalog_changes(base: pages.Roots, target: pages.Roots) -> Result[List[CatalogChange], Error] {
     let mut edits: List[CatalogChange] = list.new()
-    let mut before = open_page_range(base.catalog, None, true, false, None)?
+    let mut before = failure_result_from_rep(pages.open_page_range(base.catalog, None, true, false, None))?
     while let Some((take key, old_arc)) = next_page_range(mut before)? {
-        match get_page_row(target.catalog, key) {
+        match pages.get_page_row(target.catalog, key) {
             Some(new) => if list.compare_bytes(new, old_arc) != Equal {
                 list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: Some(failure_result_from_rep(types.copied(new))?)))
             },
             None => list.push(mut edits, CatalogChange(key: take key, before: Some(failure_result_from_rep(types.copied(old_arc))?), after: None)),
         }
     }
-    let mut after = open_page_range(target.catalog, None, true, false, None)?
+    let mut after = failure_result_from_rep(pages.open_page_range(target.catalog, None, true, false, None))?
     while let Some((take key, new)) = next_page_range(mut after)? {
-        let exists = match get_page_row(base.catalog, key) {
+        let exists = match pages.get_page_row(base.catalog, key) {
             Some(_) => true,
             None => false
         }
@@ -2624,25 +2466,25 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
     let mut expected = initial
     for change in changes_by_id {
         if previous >= change.id {
-            return Error(malformed(0u64))
+            return Error(failure_from_rep(pages.malformed(0u64)))
         }
         previous = change.id
         if change.id >= initial {
             if change.id != expected || expected == 4294967295u32 {
-                return Error(malformed(0u64))
+                return Error(failure_from_rep(pages.malformed(0u64)))
             }
             expected += 1
         }
     }
     if expected != advanced {
-        return Error(malformed(0u64))
+        return Error(failure_from_rep(pages.malformed(0u64)))
     }
     Ok(take changes_by_id)
 }
 
-fn entries_of(data: PageTree, id: u32) -> Result[PageRange, Error] {
+fn entries_of(data: pages.PageTree, id: u32) -> Result[pages.PageRange, Error] {
     if id == 4294967295u32 {
-        return Error(malformed(0u64))
+        return Error(failure_from_rep(pages.malformed(0u64)))
     }
     byte_cursor(data, Included(prefix(id)?), prefix(id + 1u32)?)
 }
@@ -2657,7 +2499,7 @@ fn checksum_row(mut checksum: std.check.Xxh3, key: Bytes, encoded: Bytes) -> Res
     Ok(())
 }
 
-fn range_inventory(data: PageTree, ranges: List[RangeChange]) -> Result[List[Inventory], Error] {
+fn range_inventory(data: pages.PageTree, ranges: List[RangeChange]) -> Result[List[Inventory], Error] {
     let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
     for desc in ranges {
         let mut cursor = entries_of(data, desc.id)?
@@ -2674,8 +2516,8 @@ fn range_inventory(data: PageTree, ranges: List[RangeChange]) -> Result[List[Inv
 
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = failure_result_from_rep(types.capacity(current_state(source.db)))?
-    state.tips[0].roots = share_roots(staged.plan.roots)
-    over_ceiling(failure_result_from_rep(types.capacity(state_account(state)))?, available_resident(source.db))
+    state.tips[0].roots = pages.share_roots(staged.plan.roots)
+    over_ceiling(failure_result_from_rep(types.capacity(pages.state_account(state)))?, available_resident(source.db))
 }
 
 fn db_target(db: Db) -> Option[TargetLimits] {
@@ -2816,7 +2658,7 @@ type PageDisk: send {
 type DiskStartup: send {
     store: StoreId,
     fence: u32,
-    state: State,
+    state: pages.State,
     live: u64,
     tiered: u64,
     resident_pages: u64,
@@ -2835,7 +2677,7 @@ type DiskStartup: send {
     limits: StoreLimits
 }
 
-fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, roots: LocatedRoots) {
+fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, roots: pages.LocatedRoots) {
     if roots.collections.stamp != 0 {
         map.insert(mut owners, HolderSource(kind, owner, 0), roots.collections.stamp)
     }
@@ -2865,20 +2707,20 @@ fn located_owners(manifest: PageManifest) -> Map[IncomingEdge, u64] {
 }
 
 // The branches and then the pins, in the manifest's order, which is `all`'s.
-fn manifest_state(m: PageManifest, all: List[Roots]) -> Result[State, Capacity] {
-    let mut tips: List[Tip] = list.with_capacity(list.len(m.branches))
+fn manifest_state(m: PageManifest, all: List[pages.Roots]) -> Result[pages.State, Capacity] {
+    let mut tips: List[pages.Tip] = list.with_capacity(list.len(m.branches))
     let mut k = 0u64
     for b in m.branches {
-        list.push(mut tips, Tip(id: b.id, name: string.from(b.name), parent: b.parent, forked_at: b.forked_at, roots: share_roots(all[k]), head: b.version, at: b.at))
+        list.push(mut tips, pages.Tip(id: b.id, name: string.from(b.name), parent: b.parent, forked_at: b.forked_at, roots: pages.share_roots(all[k]), head: b.version, at: b.at))
         k += 1
     }
-    let mut pins: List[Pin] = list.with_capacity(list.len(m.pins))
+    let mut pins: List[pages.Pin] = list.with_capacity(list.len(m.pins))
     for held in m.pins {
         let serial = list.len(pins)
-        list.push(mut pins, Pin(owner: held.owner, name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: share_roots(all[k]), watermark: held.watermark))
+        list.push(mut pins, pages.Pin(owner: held.owner, name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: pages.share_roots(all[k]), watermark: held.watermark))
         k += 1
     }
-    Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
+    Ok(pages.State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
 }
 
 fn check_expected_store(expected: Option[StoreId], found: StoreId) -> Result[(), Error] {
@@ -2900,7 +2742,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
             let loaded = disk_loaded(id, take validated)?
             // §13.8: a catalog with a Tiered collection opens only on a funded
             // plan, refused before the journal is read or a task is started.
-            if !tiered_open_funded(options) && holders_tiered(loaded.all) {
+            if !tiered_open_funded(options) && pages.holders_tiered(loaded.all) {
                 return Error(Missing("cache_bytes"))
             }
             take loaded
@@ -2917,13 +2759,13 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
             let mut creation = disk_creation_block()?
             let (take segment, take end_file, take header) = disk_new_segment(d, c, store_key_from_rep(id), 1, 0, mut creation)?
             disk_publish_manifest(d, store_key_from_rep(id), manifest)?
-            let genesis = failure_result_from_rep(types.capacity(main_state(empty_roots(), 0, 0)))?
-            let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-            return Ok(DiskStartup(store: store_key_from_rep(id), fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits)))))
+            let genesis = failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))?
+            let page_disk = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
+            return Ok(DiskStartup(store: store_key_from_rep(id), fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits)))))
         },
         Error(take problem) => return Error(take problem),
     }
-    let manifested = disk_allocation(scoped fn() -> Result[State, Error] {
+    let manifested = disk_allocation(scoped fn() -> Result[pages.State, Error] {
         failure_result_from_rep(types.capacity(manifest_state(loaded.manifest, loaded.all)))
     })?
     list.clear(mut loaded.all)
@@ -2939,7 +2781,7 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     check_stream_quota(state.tips[0u64].roots.streams, options.streams_max)?
     over_ceiling(live_bytes, options.resident_limit)?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
-        let roots = failure_result_from_rep(types.capacity(state_roots(state)))?
+        let roots = failure_result_from_rep(types.capacity(pages.state_roots(state)))?
         Ok(int.saturating_add(resident_images(roots, Some(view loaded.lists)), location_storage_charge(loaded.locations)))
     })?
     let Some(seq) = int.checked_add(last_seq, 1) else {
@@ -2952,8 +2794,8 @@ fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[DiskStart
     let mut creation = disk_creation_block()?
     let (take segment, take end_file, take header) = disk_new_segment(d, c, loaded.store, seq, last_end, mut creation)?
     let DiskLoaded(store: id, manifest: take manifest, lists: take lists, locations: take locations, ..) = take loaded
-    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, compaction: no_tiered_compaction())
-    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: manifest.limits))
+    let page_disk = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked, compaction: no_tiered_compaction())
+    Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: manifest.limits))
 }
 
 type DiskSession {
@@ -3068,15 +2910,15 @@ fn healthy(db: Db) -> Result[(), Error] {
     }
 }
 
-fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
-    let State(tips: take tips, pins: take pins, next_branch: next_branch, next_table: _) = take state
-    let mut heads: List[Head] = list.new()
+fn open_heads(mut db: Db, take state: pages.State) -> Result[(), Error] {
+    let pages.State(tips: take tips, pins: take pins, next_branch: next_branch, next_table: _) = take state
+    let mut heads: List[pages.Head] = list.new()
     let mut names: Map[String, u32] = map.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut heads, list.len(tips))))?
     failure_result_from_rep(types.capacity(map.try_reserve(mut names, list.len(tips) - 1)))?
     let mut total = 0u64
     for take t in take tips {
-        let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
+        let pages.Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
         total += branch_root_bytes(name, roots)
         if br != 0 {
             let key = disk_allocation(scoped fn() -> Result[String, Error] {
@@ -3084,18 +2926,13 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
             })?
             map.insert(mut names, take key, br)
         }
-        list.push(mut heads, Head(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at, following: None))
+        list.push(mut heads, pages.Head(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at))
     }
-    db.heads = take heads
-    db.branch_names = take names
     for stored in pins {
         total += pin_root_bytes(stored.name, stored.roots)
     }
-    db.record_bytes = total
-    db.next_pin = list.len(pins)
-    db.pins = take pins
-    db.bases = tail_bases(db.pins)
-    db.next_branch = next_branch
+    pages.restore_holders(mut db.holders, take heads, take names, take pins, total, next_branch)
+    list.clear(mut db.followers)
     Ok(())
 }
 
@@ -3158,7 +2995,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         let replay = capture_scan(id, take walk, take initial)?
         over_ceiling(journal_account(replay)?, options.resident_limit)?
         let main = view replay.state.tips[0u64]
-        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: capture_tail_bases(replay.state.pins)?)))
+        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: pages.share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: capture_tail_bases(replay.state.pins)?)))
     }
 }
 
@@ -3202,7 +3039,7 @@ fn open_checks(options: Options) -> Result[(), Error] {
 fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: JournalCadence, take session: DiskSession) -> Result[Db, Error] waits {
     let DiskSession(lock: take lock, startup: take startup) = take session
     let zero_extension = disk_io(host.zero_extension(d))?
-    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take pages, limits: limits) = take startup
+    let DiskStartup(store: id, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits) = take startup
     let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
         Ok(empty_db(c, id, options))
     })?
@@ -3211,7 +3048,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
     // The pager starts before the journal tasks, so a refusal leaves none. It
     // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
-    let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(pages.lists.deferred)) != 0 {
+    let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(page_disk.lists.deferred)) != 0 {
         let funding = TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
         let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
         Some(attach_tiered_pager(mut db, take link))
@@ -3220,7 +3057,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     }
     db.fence = fence
     db.limits = limits
-    db.next_node = next_node
+    pages.set_next_node(mut db.holders, next_node)
     db.next_table = next_table
     db.file_seq = seq
     db.tiered = tiered
@@ -3242,7 +3079,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: 
     } else {
         GatherFlush
     }
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_wake: take journal_wake, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take page_disk, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_wake: take journal_wake, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
     Ok(take db)
 }
 
@@ -3360,7 +3197,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     })?
     let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads, promote: promote) = take participants
     let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes)?
-    db.next_node = staged.stamp_end - 1
+    pages.set_next_node(mut db.holders, staged.stamp_end - 1)
     raise_materialized_pin(mut delta, staged)
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
@@ -3369,7 +3206,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     over_ceiling(base.account, available_resident(db))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?
-    let mut next_stamp = stamp_after(db.next_node)?
+    let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
     let prev_first = match disk_state(db).pages.deferred {
         Some(low) => low,
         None => disk_state(db).record_cut,
@@ -3397,25 +3234,25 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         fill_cut_manifest(mut manifest, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
     })
-    db.next_node = next_stamp - 1
+    pages.set_next_node(mut db.holders, next_stamp - 1)
     let prepared = match take attempt {
         Ok(take cut) => take cut,
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
-    let PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest) = take prepared
-    let settled_tiered = prepare_tiered_install(mut staged, pages.locations, generation, next_stamp)?
+    let PreparedDiskCut(pages: take prepared_pages, removals: take removals, manifest: take manifest) = take prepared
+    let settled_tiered = prepare_tiered_install(mut staged, prepared_pages.locations, generation, next_stamp)?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
-    let resident_pages = resident_location_charge(pages.locations)
+    let resident_pages = resident_location_charge(prepared_pages.locations)
     validate_cut_pages(d, id, manifest, target, disk_state(db).lease, disk_state(db).pages)?
     if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }
     let recorded_after = match delta {
         ReplaceMain(main, _) => main.head,
-        _ => db.heads[0u64].head
+        _ => pages.holder_heads(db.holders)[0u64].head
     }
-    write_disk(mut db.disk, take pages, scoped fn(mut state: DiskState, take installed: PageDisk) {
+    write_disk(mut db.disk, take prepared_pages, scoped fn(mut state: DiskState, take installed: PageDisk) {
         state.pages = take installed
         state.record_cut = seq
         state.recorded_after = recorded_after
@@ -3724,7 +3561,7 @@ fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, se
 }
 
 type JournalReplay {
-    state: State,
+    state: pages.State,
     immutable: bool,
     names: Map[String, u32],
     record_bytes: u64,
@@ -3739,7 +3576,7 @@ type JournalReplay {
     limits: StoreLimits
 }
 
-fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Result[JournalReplay, Error] {
+fn journal_replay(take state: pages.State, next_node: u64, limits: StoreLimits) -> Result[JournalReplay, Error] {
     let (take names, total) = disk_allocation(scoped fn() -> Result[(Map[String, u32], u64), Error] {
         let mut names: Map[String, u32] = map.new()
         failure_result_from_rep(types.capacity(map.try_reserve(mut names, list.len(state.tips))))?
@@ -3759,7 +3596,7 @@ fn journal_replay(take state: State, next_node: u64, limits: StoreLimits) -> Res
 
 fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
-        failure_result_from_rep(types.capacity(state_account(replay.state)))
+        failure_result_from_rep(types.capacity(pages.state_account(replay.state)))
     })
 }
 
@@ -3915,8 +3752,10 @@ fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
     for i in 0u64 .. rows {
         list.push(mut input, std.page.Row(key: types.key_word(i), value: result.unwrap(failure_result_from_rep(types.copied(raw))), charge: 94))
     }
-    result.unwrap(bulk_store_collection(mut db.heads[0].roots.collections, t.id, 1, input, mut db.next_node))
-    db.resident = one_page_account(db.heads[0].roots)
+    result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
+        bulk_store_collection(mut tree, t.id, 1, input, mut stamp)
+    }))
+    db.resident = pages.one_page_account(pages.holder_heads(db.holders)[0].roots)
 }
 
 fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {

@@ -104,7 +104,7 @@ fn replication_failure(node: String, seed: u64, entry_version: u64, cause: Strin
 // The reference hashes come from the proposed GROUP payloads after the
 // register confirms them. Each node's hashes come from its applied rows.
 // Recompute every prefix so a cold capture cannot inherit an old digest.
-fn replication_check(node: String, seed: u64, tip: Tip, held: u64, expected: List[Inline[u8, 32]]) {
+fn replication_check(node: String, seed: u64, tip: pages.Tip, held: u64, expected: List[Inline[u8, 32]]) {
     if tip.head != held || tip.id != 0 || held >= list.len(expected) {
         replication_failure(node, seed, held, "unexpected applied position")
     }
@@ -115,10 +115,10 @@ fn replication_check(node: String, seed: u64, tip: Tip, held: u64, expected: Lis
     }
     let mut hash: Inline[u8, 32] =[0u8; 32]
     for n in 1u64 .. held + 1 {
-        let Some(payload) = get_page_row(tree, replication_key(n)) else {
+        let Some(payload) = pages.get_page_row(tree, replication_key(n)) else {
             replication_failure(node, seed, n, "missing entry")
         }
-        let Some(marker) = get_page_row(tree, replication_key(128 + n)) else {
+        let Some(marker) = pages.get_page_row(tree, replication_key(128 + n)) else {
             replication_failure(node, seed, n, "missing order marker")
         }
         if list.len(marker) != 8 || format.read_le(marker, 0, 8) != (if n == held {

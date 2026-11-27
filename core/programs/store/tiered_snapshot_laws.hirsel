@@ -1,6 +1,6 @@
 fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64) -> Result[(), Error] waits {
     let id = prefix(collection)?
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take raw, inventory, place, take leaf, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L62: fixture has no collection")
@@ -18,26 +18,26 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         let kind = before[52u64]
         let descriptor = if kind == 4 {
             let limits = descriptor_bounds(before)
-            log_record(here, limits.first, limits.next, ResidentTiered)?
+            failure_result_from_rep(pages.log_record(here, limits.first, limits.next, ResidentTiered))?
         } else {
-            rooted_collection_record(here, kind, ResidentTiered)?
+            failure_result_from_rep(pages.rooted_collection_record(here, kind, ResidentTiered))?
         }
         (take raw, inventory, place, arc.share(here), take descriptor)
     }
     disk_write_synced(d, paged_pack_path(pack_seq)?, raw)?
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let first = draw
-    page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw))?
-    page_result(std.page.install_tiered_root(mut tree.root, id, ColdPage(place), mut draw))?
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, ColdPage(place), mut draw)))?
     let mut ids = pack_seq * 8
     let initial = match tree.paging {
         Some(previous) => std.omap.snapshot(previous.packs),
         None => std.omap.new(),
     }
-    let (take packs, _) = std.omap.insert(mut ids, initial, pack_seq, TieredPagerPack(inventory: inventory, object: None))
-    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    let (take packs, _) = std.omap.insert(mut ids, initial, pack_seq, pages.TieredPagerPack(inventory: inventory, object: None))
+    tree.paging = Some(arc.new(pages.TieredReadInventory(packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     // The collection's row charge moves from the Memory account to the
     // Tiered one, as a residency cut's install does (§1.1), so a committed
     // Tiered write settles its charge against it.
@@ -53,8 +53,8 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
 
 fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Result[(), Error] {
     let id = events.binding.id
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
-    let mut draw = stamp_after(db.next_node)?
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let trimmed = format.JournalOp(key: prefix(id)?, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
@@ -63,9 +63,10 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Res
     list.put_word_le(mut value, event_number)
     let appended = format.JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
-    db.heads[0u64].head += 1
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
+    let at = pages.holder_heads(db.holders)[0u64].at
+    pages.advance_head(mut db.holders, 0u64, at)
     Ok(())
 }
 
@@ -87,7 +88,7 @@ fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits
     if list.len(added) != 2 || added[0u64].tree_key != old_key || added[0u64].value != None || added[1u64].tree_key != new_key || published_log(events, added[1u64])? != Some(take thirteen) || list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) || removed[1u64].tree_key != new_key || removed[1u64].value != None {
         fail("L82: a moving window must recover entering rows from Cold pages and replay")
     }
-    db.heads[0u64].roots.collections = share_page_tree(before.roots.collections)
+    pages.set_head_collection(mut db.holders, 0u64, pages.share_page_tree(before.roots.collections))
     l62_replay_log_window(mut db, events, 14u32)?
     let mut forked = snapshot(db)
     forked.branch = 1
@@ -144,12 +145,12 @@ fn l62_borrowed_rows_survive_later_touches() -> Result[(), Error] {
     let mut leaf_entries: List[std.page.Entry] = list.new()
     list.push(mut leaf_entries, std.page.Entry(key: types.key_word(1), cell: InlineValue(string.into_bytes(string.from("inline")))))
     list.push(mut leaf_entries, std.page.Entry(key: types.key_word(2), cell: BlobValue(reference)))
-    let image = page_result(std.page.encode(leaf_entries, 0, 40, Collection))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(leaf_entries, 0, 40, Collection)))?
     let ptr = {
         let payload = std.page.payload(image)
         std.page.PagePtr(pack: 8, offset: 72, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: 40)
     }
-    let leaf = page_result(std.page.attach_cold(take image))?
+    let leaf = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
     let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut visible, (8, 72), arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))))
     map.insert(mut visible, (9, 72), arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take contents)))))
@@ -193,18 +194,18 @@ fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Re
 
 fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
     let collection = rows_handle.id
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 20u32)
     let inserted = format.JournalOp(key: log_key(collection, 2)?, value: Some(take stored), prior: 0, trim: None)
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
     let deleted = format.JournalOp(key: log_key(collection, 3)?, value: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     Ok(())
 }
 
@@ -416,16 +417,16 @@ fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[
 }
 
 fn l62_replay_index_owner(mut db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] {
-    let mut data = share_page_tree(db.heads[0u64].roots.collections)
-    let mut draw = stamp_after(db.next_node)?
+    let mut data = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 43u32)
     let edited = format.JournalOp(key: log_key(rows_handle.id, 1)?, value: Some(take stored), prior: 7, trim: None)
     replay_tiered_op("j-1", mut data, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), edited)?
-    db.heads[0u64].roots.collections = take data
-    db.next_node = draw - 1
+    pages.set_head_collection(mut db.holders, 0u64, take data)
+    pages.set_next_node(mut db.holders, draw - 1)
     Ok(())
 }
 

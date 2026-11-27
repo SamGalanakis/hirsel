@@ -59,39 +59,7 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[form
     Ok(take edits)
 }
 
-fn materialize_keyed_edits(mut roots: Roots, edits: List[format.KeyedEdit], private_from: u64, mut stamps: u64) -> Result[(), Error] {
-    if list.len(edits) == 0 {
-        return Ok(())
-    }
-    if list.len(roots.keyed) == 0 {
-        roots.keyed = new_keyed_pages(roots.streams.inline)
-    }
-    for edit in edits {
-        let slot: u64 = int.widen(edit.tree)
-        match edit.value {
-            Some(value) => put_page_row(mut roots.keyed[slot], edit.key, value, private_from, mut stamps)?,
-            None => {
-                let _ = remove_page_row(mut roots.keyed[slot], edit.key, private_from, mut stamps)?
-            },
-        }
-    }
-    if std.list.all(roots.keyed, fn(tree: PageTree) -> bool {
-        tree_stamp(tree) == 0
-    }) {
-        roots.keyed = list.new()
-    }
-    Ok(())
-}
-
-fn keyed_lookup(trees: List[PageTree], tree: u8, key: Bytes) -> Option[View[Bytes]] in trees {
-    if list.len(trees) == 0 {
-        return None
-    }
-    let slot: u64 = int.widen(tree)
-    get_page_row(trees[slot], key)
-}
-
-fn keyed_drafted_charge(roots: Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+fn keyed_drafted_charge(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
     let mut edit_index = list.len(edits)
     while edit_index != 0 {
         edit_index -= 1
@@ -103,13 +71,13 @@ fn keyed_drafted_charge(roots: Roots, edits: List[format.KeyedEdit], tree: u8, k
             }
         }
     }
-    match keyed_lookup(roots.keyed, tree, key) {
+    match pages.keyed_lookup(roots.keyed, tree, key) {
         Some(raw) => entry(key, raw),
         None => 0u64,
     }
 }
 
-fn keyed_draft_live(base: Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
+fn keyed_draft_live(base: pages.Roots, edits: List[format.KeyedEdit], retained: bool, current: u64) -> u64 {
     let mut total = current
     for slot in 0u64 .. list.len(edits) {
         let edit = view edits[slot]

@@ -38,9 +38,9 @@ fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> R
     if after_seed.head.floor < 2 {
         fail("retain-one seed checkpoint did not advance floor past entry 1")
     }
-    let dead_sweep = history_key("e-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xaaaa))
-    let dead_manifest = history_key("m-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xbbbb))
-    let dead_pack = history_key("p-", HistoryRef(seq: 50, epoch: 1, len: 1, digest: 0xcccc))
+    let dead_sweep = history_key("e-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xaaaa))
+    let dead_manifest = history_key("m-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 0xbbbb))
+    let dead_pack = history_key("p-", pages.HistoryRef(seq: 50, epoch: 1, len: 1, digest: 0xcccc))
     let mut sweep_bytes = string.into_bytes(string.from("sweep"))
     let mut manifest_bytes = string.into_bytes(string.from("manifest!"))
     let mut pack_bytes = string.into_bytes(string.from("pack-dead-123"))
@@ -70,8 +70,8 @@ fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> R
     durable(mut writer, receipt.ticket)?
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
     let current = history_decode_head(workspace.witness)?
-    let dead_live_range = history_key("e-", HistoryRef(seq: current.head.entry.seq, epoch: 2, len: 1, digest: 0xdddd))
-    let future_entry = history_key("e-", HistoryRef(seq: current.head.entry.seq + 1, epoch: 2, len: 1, digest: 0xeeee))
+    let dead_live_range = history_key("e-", pages.HistoryRef(seq: current.head.entry.seq, epoch: 2, len: 1, digest: 0xdddd))
+    let future_entry = history_key("e-", pages.HistoryRef(seq: current.head.entry.seq + 1, epoch: 2, len: 1, digest: 0xeeee))
     let mut orphan_bytes = string.into_bytes(string.from("orphan-live"))
     let mut future_bytes = string.into_bytes(string.from("future"))
     history_create(mut witness, dead_live_range, mut orphan_bytes, mut workspace.compare, deadline)?

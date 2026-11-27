@@ -1,4 +1,4 @@
-fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: u64, first: u64, frame_count: u64, value_bytes: u64) -> Result[(HistoryRef, PagePack, List[format.TieredTarget]), Error] waits {
+fn l84_write_blob_pack(mut client: std.object.Client, owner: StoreId, pack_seq: u64, first: u64, frame_count: u64, value_bytes: u64) -> Result[(pages.HistoryRef, pages.PagePack, List[format.TieredTarget]), Error] waits {
     let mut draft = begin_tiered_pack(owner, pack_seq, 4, frame_count * (value_bytes + 64) + 4096)?
     let mut written: List[format.TieredTarget] = list.new()
     for offset in 0u64 .. frame_count {
@@ -29,10 +29,10 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks, cache: Option[ObjectsC
     let (second, second_pack, take second_blobs) = l84_write_blob_pack(mut client, owner, 9, 42, 1, 1025)?
     let (large, large_pack, take large_blobs) = l84_write_blob_pack(mut client, owner, 10, 43, 1, 262144)?
     let mut ids = 0u64
-    let blank: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
-    let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, TieredPagerPack(inventory: first_pack, object: Some(first)))
-    let (take both, _) = std.omap.insert(mut ids, first_listed, second.seq, TieredPagerPack(inventory: second_pack, object: Some(second)))
-    let (take packs, _) = std.omap.insert(mut ids, both, large.seq, TieredPagerPack(inventory: large_pack, object: Some(large)))
+    let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, pages.TieredPagerPack(inventory: first_pack, object: Some(first)))
+    let (take both, _) = std.omap.insert(mut ids, first_listed, second.seq, pages.TieredPagerPack(inventory: second_pack, object: Some(second)))
+    let (take packs, _) = std.omap.insert(mut ids, both, large.seq, pages.TieredPagerPack(inventory: large_pack, object: Some(large)))
     let mut siblings: List[format.TieredTarget] = list.with_capacity(4)
     list.push(mut siblings, clone(first_blobs[1u64]))
     list.push(mut siblings, clone(first_blobs[0u64]))
@@ -73,9 +73,9 @@ fn l84_bucket_pager_paths(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
     let (first, first_pack, take first_blobs) = l84_write_blob_pack(mut client, owner, 8, 40, 2, 1025)?
     let (second, second_pack, take second_blobs) = l84_write_blob_pack(mut client, owner, 9, 42, 1, 1025)?
     let mut ids = 0u64
-    let blank: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
-    let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, TieredPagerPack(inventory: first_pack, object: Some(first)))
-    let (take packs, _) = std.omap.insert(mut ids, first_listed, second.seq, TieredPagerPack(inventory: second_pack, object: Some(second)))
+    let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, pages.TieredPagerPack(inventory: first_pack, object: Some(first)))
+    let (take packs, _) = std.omap.insert(mut ids, first_listed, second.seq, pages.TieredPagerPack(inventory: second_pack, object: Some(second)))
     let mut paths: List[TieredPath] = list.with_capacity(3)
     list.push(mut paths, TieredPath(target: clone(first_blobs[1u64]), key: types.key_word(41), values: ValuesNone))
     list.push(mut paths, TieredPath(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone))
@@ -109,8 +109,8 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
         let numbered = std.page.BlobRef(stamp: reference.stamp, len: reference.len, checksum: reference.checksum, pack: reference.pack, offset: reference.offset, body: int.truncate(row))
         list.push(mut rows, std.page.Entry(key: types.key_word(row + 1), cell: BlobValue(numbered)))
     }
-    let image = page_result(std.page.encode(rows, 0, 43, Collection))?
-    let page = page_result(std.page.attach_cold(take image))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 43, Collection)))?
+    let page = failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?
     let mut draft = begin_tiered_pack(owner, 9, 3, 8192)?
     let width = std.page.sealed_size(std.page.image_of(page))
     let frame = PackFrame(stamp: 43, size: width, body: PageBody(take page))
@@ -120,14 +120,14 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
         fail("L84: the leaf fits its pack")
     }
     let (take raw, leaf_pack) = finish_tiered_pack(take draft)?
-    let leaves = HistoryRef(seq: 9, epoch: 1, len: list.len(raw), digest: 88)
+    let leaves = pages.HistoryRef(seq: 9, epoch: 1, len: list.len(raw), digest: 88)
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let (take stored, _) = std.object.store(mut client, history_key("p-", leaves), take raw, deadline)
     let _ = stored ?=> |problem| Remote(problem)
     let mut ids = 0u64
-    let blank: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
-    let (take one, _) = std.omap.insert(mut ids, blank, blobs.seq, TieredPagerPack(inventory: blob_pack, object: Some(blobs)))
-    let (take packs, _) = std.omap.insert(mut ids, one, leaves.seq, TieredPagerPack(inventory: leaf_pack, object: Some(leaves)))
+    let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let (take one, _) = std.omap.insert(mut ids, blank, blobs.seq, pages.TieredPagerPack(inventory: blob_pack, object: Some(blobs)))
+    let (take packs, _) = std.omap.insert(mut ids, one, leaves.seq, pages.TieredPagerPack(inventory: leaf_pack, object: Some(leaves)))
     let mut input = PagerObjects(take client, BUCKET_LAW_OP_MS, None)
     let mut cache_state = new_tiered_cache(1048576)
     // (values, room, the delivered frames: the leaf (43), then the BLOBs of
@@ -178,8 +178,8 @@ fn l84_branch_scan_demands(reverse: bool) -> Result[(), Error] {
         let ptr = std.page.PagePtr(pack: 8 + child, offset: 72, len: 80, checksum: child, stamp: 40 + child)
         list.push(mut children, std.page.Entry(key: take separator, cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 86))))
     }
-    let image = page_result(std.page.encode(children, 1, 43, Collection))?
-    let root: std.page.Slot = HotPage(page_result(std.page.attach_cold(take image))?)
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(children, 1, 43, Collection)))?
+    let root: std.page.Slot = HotPage(failure_result_from_rep(pages.page_result(std.page.attach_cold(take image)))?)
     let visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let attempt = tiered_attempt(4096, 8)
     let failed = tiered_scan_edge(attempt, visible, root, None, types.key_word(1), None, reverse)

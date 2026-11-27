@@ -1,7 +1,7 @@
 // L41 and L51(l). Read AP3, AP8, AP14 and AP20 directly from the files.
 // The physical index is keyed by pack and offset: dead frames in a listed
 // pack may repeat a live stamp and still count toward that pack's totals.
-type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(PinOwner, String, u8) | LawList(u8)
+type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(pages.PinOwner, String, u8) | LawList(u8)
 
 type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRows
 
@@ -15,8 +15,8 @@ type LawLocationGraph {
     next_pack: u64,
     next_stamp: u64,
     physical: Map[(u64, u64), std.page.PagePtr],
-    packs: Map[u64, PagePack],
-    listed: Map[u64, PagePack],
+    packs: Map[u64, pages.PagePack],
+    listed: Map[u64, pages.PagePack],
     frames: Map[u64, LawLocationFrame],
     incoming: Map[(u64, LawLocationSource), u64]
 }
@@ -41,7 +41,7 @@ fn law_scan_location_pack(mut graph: LawLocationGraph, seq: u64, class: u8, raw:
     } else {
         0x0021u16
     }
-    let mut pack = PagePack(class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
+    let mut pack = pages.PagePack(class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
     let mut at = 72u64
     while at < list.len(raw) {
         let width: u32 = list.word_le(raw, at + 4)
@@ -101,7 +101,7 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
     if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
         fail("location law: listed pack row")
     }
-    let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
+    let pack = pages.PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
     map.insert(mut graph.listed, seq, pack)
 }
 
@@ -172,7 +172,7 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
     } else {
         fail("location law: missing physical frame")
     }
-    let mut pack: PagePack = clone(option.unwrap(map.get(graph.packs, ptr.pack)))
+    let mut pack: pages.PagePack = clone(option.unwrap(map.get(graph.packs, ptr.pack)))
     let width: u64 = int.widen(ptr.len)
     pack.live += width
     map.insert(mut graph.packs, ptr.pack, pack)
@@ -261,7 +261,7 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
     Ok(())
 }
 
-fn law_same_pack(a: PagePack, b: PagePack) -> bool {
+fn law_same_pack(a: pages.PagePack, b: pages.PagePack) -> bool {
     a.class == b.class && a.frames == b.frames && a.live == b.live && a.payload_bytes == b.payload_bytes && a.index == b.index
 }
 
@@ -300,7 +300,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let pins = format.read_le(raw, at, 4)
     at += 4
     for _ in 0u64 .. pins {
-        let owner = match raw[at] {
+        let owner: pages.PinOwner = match raw[at] {
             1 => ApplicationPin,
             2 => ProjectorPin,
             _ => fail("location law: pin owner"),
@@ -322,7 +322,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     if at != list.len(raw) {
         fail("location law: trailing MANIFEST bytes")
     }
-    let listed: Map[u64, PagePack] = clone(graph.listed)
+    let listed: Map[u64, pages.PagePack] = clone(graph.listed)
     for (seq, row) in listed {
         if !map.contains(graph.packs, seq) {
             let pack = disk_read_paged_file(d, paged_pack_path(seq)?, 67108864)?
@@ -349,10 +349,10 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     if disk_index_len(known.frames) != map.len(oracle.frames) || disk_index_len(known.packs) != map.len(oracle.packs) {
         fail("location law: inventory size")
     }
-    let mut pin_names: Map[u64, (PinOwner, String)] = map.new()
-    let mut seen_names: Map[(PinOwner, String), ()] = map.new()
-    for held in db.pins {
-        let key: (PinOwner, String) = (held.owner, clone(held.name))
+    let mut pin_names: Map[u64, (pages.PinOwner, String)] = map.new()
+    let mut seen_names: Map[(pages.PinOwner, String), ()] = map.new()
+    for held in pages.holder_pins(db.holders) {
+        let key: (pages.PinOwner, String) = (held.owner, clone(held.name))
         if map.contains(pin_names, held.serial) || map.contains(seen_names, key) {
             fail("location law: pin names and serials must be one-to-one")
         }
@@ -622,7 +622,7 @@ fn walk_entry(j: u64, primary: Option[u64]) -> Bytes {
 
 fn walk_stored(db: Db, id: u32, edited: Bytes) -> Result[Bytes, Error] {
     let p = logical_key(id, edited)?
-    match get_page_row(db.heads[0].roots.collections, p) {
+    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, p) {
         Some(v) => failure_result_from_rep(types.copied(v)),
         None => Error(Missing("walk fixture entry")),
     }
@@ -711,7 +711,7 @@ fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fa
     // Report mode (hirsel store verify) walks the index on past a finding, so
     // an entry wrong from both sides is reported again by the entries phase
     // (`also`); it changes nothing: every index still serves, no drift, no commit.
-    let head = fx.db.heads[0].head
+    let head = pages.holder_heads(fx.db.holders)[0].head
     let (reported, _) = walk_all(mut fx.db, fx.rows, Report, 3, walk_still)?
     if which == 3 {
         let mut sums_walked = false
@@ -742,7 +742,7 @@ fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fa
     if !walk_serves(fx.db, fx.bucket)? || !walk_serves(fx.db, fx.uniq)? || !walk_serves(fx.db, fx.cover)? {
         fail("§1.2 walker: a report walk demoted an index")
     }
-    if list.len(attention(fx.db)?.drift) != 0 || fx.db.heads[0].head != head {
+    if list.len(attention(fx.db)?.drift) != 0 || pages.holder_heads(fx.db.holders)[0].head != head {
         fail("§1.2 walker: a report walk wrote to the store")
     }
     let (found, _) = walk_all(mut fx.db, fx.rows, Repair, 3, walk_still)?

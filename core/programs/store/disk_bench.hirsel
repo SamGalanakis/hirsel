@@ -466,7 +466,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
     }
     let first_pack = disk_bench_next_pack(child)
     let original_shape: Table[u64, DiskAccount] = clone(t)
-    let original_head = db.heads[0].head
+    let original_head = pages.holder_heads(db.holders)[0].head
     if mode == "R6" {
         for i in 0u64 .. 64 {
             let k = splitmix64(i) % n
@@ -500,7 +500,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
         result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started
-    let stored_rows = page_row_count(holder[0].heads[0].roots.collections)
+    let stored_rows = page_row_count(pages.holder_heads(holder[0].holders)[0].roots.collections)
     let expected_count = if indexed {
         2 * n
     } else {
@@ -536,7 +536,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
     // Full values are verified after the phase counters and RSS have stopped.
     let sh = if migrating {
         let target = result.unwrap(table(mut holder[0], "migrated", std.codec.key_u64(), dictionary))
-        if holder[0].heads[0].head != original_head + 1 {
+        if pages.holder_heads(holder[0].holders)[0].head != original_head + 1 {
             fail("disk bench migrate version")
         }
         target

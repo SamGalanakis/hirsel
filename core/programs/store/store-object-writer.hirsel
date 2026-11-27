@@ -12,7 +12,7 @@ type ObjectWriterState {
     weak: Option[WeakWaiters],
     pair: HistoryPair,
     origin: Option[HistoryOrigin],
-    recovered: HistoryRef,
+    recovered: pages.HistoryRef,
     entries: u64,
     failed: Option[Error],
     // The host stream the Place is attached to (§12.11.5).
@@ -202,8 +202,8 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let mut blank = disk_allocation(fn() -> Result[HistoryOpenBase, Error] {
-        let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), archive_on: 0, pages: take pages))
+        let page_disk = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
+        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), archive_on: 0, pages: take page_disk))
     })?
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] {
         Ok(clone(options))
@@ -215,7 +215,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
             Ok(empty_db(c, id, options))
         })?
         open_heads(mut prepared, take state)?
-        prepared.next_node = replay.next_node
+        pages.set_next_node(mut prepared.holders, replay.next_node)
         prepared.limits = replay.limits
         prepared.next_table = replay.state.next_table
         prepared.resident = journal_account(replay)?
@@ -505,7 +505,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         cut_participants(db, delta)
     })?
     // objects@1 has no Tiered publisher (§13.6a); its open refuses a Tiered account.
-    failure_result_from_rep(types.require_memory_collections(holders_tiered(participants.roots), tiered_refusal_to_rep(Install)))?
+    failure_result_from_rep(types.require_memory_collections(pages.holders_tiered(participants.roots), tiered_refusal_to_rep(Install)))?
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
     over_ceiling(base.account, available_resident(db))?
     if let Some(wanted) = target {
@@ -515,7 +515,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         over_ceiling(base.account, wanted.resident)?
     }
     let manifest_bytes = cut_manifest_size(db, delta)
-    let mut next_stamp = stamp_after(db.next_node)?
+    let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
     let mut workspace = history_buffers(65536)?
     let cache_dir = pack_cache_directory(object_state(db).cache)
     let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
@@ -604,12 +604,12 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             },
         }
     })
-    db.next_node = next_stamp - 1
-    let (take pages, take locator, generation) = plan?
-    let resident_pages = resident_location_charge(pages.locations)
+    pages.set_next_node(mut db.holders, next_stamp - 1)
+    let (take candidate_pages, take locator, generation) = plan?
+    let resident_pages = resident_location_charge(candidate_pages.locations)
     let recorded_after = match delta {
         ReplaceMain(main, _) => main.head,
-        _ => db.heads[0].head,
+        _ => pages.holder_heads(db.holders)[0].head,
     }
     let dropped_attach = object_state(db).drop_attach_on_cut
     lane.archive_on = next_archive_on
@@ -620,7 +620,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         },
         None => None,
     }
-    write_disk(mut db.disk, (take pages, take locator), scoped fn(mut state: DiskState, take installation: (PageDisk, HistoryLocator)) {
+    write_disk(mut db.disk, (take candidate_pages, take locator), scoped fn(mut state: DiskState, take installation: (PageDisk, HistoryLocator)) {
         let (take installed, take installed_locator) = take installation
         state.pages = take installed
         state.record_cut = seq
@@ -689,7 +689,7 @@ pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] w
         }
         match channel.receive(pending) {
             Ok(Ok(())) => (),
-            Ok(Error(Behind(_))) => return Error(Behind(Position(store: db.store, branch: 0, version: db.heads[0].head))),
+            Ok(Error(Behind(_))) => return Error(Behind(Position(store: db.store, branch: 0, version: pages.holder_heads(db.holders)[0].head))),
             Ok(Error(take problem)) => return Error(take problem),
             Error(_) => {
                 journal_poll(mut db)?

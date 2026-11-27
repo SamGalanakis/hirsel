@@ -70,7 +70,7 @@ fn lcu_unique_entries(db: Db, id: u32) -> Result[List[(Bytes, u64)], Error] {
 }
 
 fn lcu_public(db: Db, id: u32) -> Result[bool, Error] {
-    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(index_prefix(0)?), index_prefix(4294967295u32)?)?
+    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(index_prefix(0)?), index_prefix(4294967295u32)?)?
     while let Some((_, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
         if record.id == id {
@@ -242,7 +242,7 @@ fn lcu_follow(mut db: Db, scratch: Dir, d: Dir, attempt: Bytes, mut source: Prep
 }
 
 fn lcu_no_import_pin(db: Db) -> bool {
-    !std.list.any(db.pins, fn(held: Pin) -> bool {
+    !std.list.any(pages.holder_pins(db.holders), fn(held: pages.Pin) -> bool {
         held.owner == ImportPin
     })
 }
@@ -311,9 +311,9 @@ fn lcu_check(db: Db, model: List[Option[u64]], by_v: u32, by_id: u32, unique: bo
 // none.
 fn lcu_import_leaf(db: Db) -> Result[std.page.PagePtr, DeployError] {
     let mut stamp = 0u64
-    for held in db.pins {
+    for held in pages.holder_pins(db.holders) {
         if held.owner == ImportPin {
-            stamp = tree_stamp(held.roots.collections)
+            stamp = pages.tree_stamp(held.roots.collections)
         }
     }
     if stamp == 0 {
@@ -354,7 +354,7 @@ fn lcu_build_round(mut db: Db, t: Table[u64, u64], n: u64, mut next_value: u64, 
 
 // The child's copy of OLD after a round is OLD at the round's cut.
 fn lcu_mirrors(db: Db, source: Preparation, by_v: u32) -> Result[(), DeployError] {
-    if list.len(deploy_result(catalog_changes(source.db.heads[0].roots, db.heads[0].roots))?) != 0 {
+    if list.len(deploy_result(catalog_changes(pages.holder_heads(source.db.holders)[0].roots, pages.holder_heads(db.holders)[0].roots))?) != 0 {
         fail("L-IX catch-up: the child's catalog is not OLD's at the cut")
     }
     if deploy_result(lix_entries(source.db, by_v))? != deploy_result(lix_entries(db, by_v))? {

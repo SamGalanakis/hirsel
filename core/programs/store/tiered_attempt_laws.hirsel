@@ -131,19 +131,19 @@ fn blob_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result
 fn cold_table(take opened: Db, table_id: u32) -> Result[(), Error] waits {
     let mut db = take opened
     let id = prefix(table_id)?
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("cold table: the fixture has its table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
+        (arc.share(here), failure_result_from_rep(pages.rooted_collection_record(here, before[52u64], ResidentTiered))?)
     }
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let first = draw
-    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
-    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     let _ = checkpoint(mut db)?
     close(take db)
 }
@@ -195,7 +195,7 @@ fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, 
     let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
         None => 0,
-    }, root_stamp: tree_stamp(s.roots.collections))
+    }, root_stamp: pages.tree_stamp(s.roots.collections))
     let mut pins = empty_tiered_pins(root, partition)
     let mut pending: Option[(format.TieredTarget, Error)] = None
     let mut attempts = 0u64

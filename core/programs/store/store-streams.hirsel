@@ -10,17 +10,17 @@ type CallerStreams {
 }
 
 fn stream_control(db: Db) -> Result[StreamControl, Error] {
-    let Some(raw) = get_page_row(db.heads[0].roots.streams, b"") else {
+    let Some(raw) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, b"") else {
         return Ok(StreamControl(max: db.streams_max, count: 0u64, expiry_floor: None))
     }
     decode_stream_control(raw)
 }
 
-fn check_stream_quota(tree: PageTree, declared: Option[u64]) -> Result[(), Error] {
+fn check_stream_quota(tree: pages.PageTree, declared: Option[u64]) -> Result[(), Error] {
     let Some(expected) = declared else {
         return Ok(())
     }
-    if let Some(raw) = get_page_row(tree, b"") {
+    if let Some(raw) = pages.get_page_row(tree, b"") {
         if decode_stream_control(raw)?.max != expected {
             return Error(Changed("streams_max"))
         }
@@ -33,7 +33,7 @@ fn decode_stream_control(raw: Bytes) -> Result[StreamControl, Error] {
     let saved_max = std.codec.take_u64(raw, mut at) ?=> Decode
     let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
     if at == list.len(raw) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let floor: Option[u64] = match (list.len(raw), raw[at]) {
         (17u64, 0u8) => None,
@@ -41,10 +41,10 @@ fn decode_stream_control(raw: Bytes) -> Result[StreamControl, Error] {
             at += 1u64
             Some(std.codec.take_u64(raw, mut at) ?=> Decode)
         },
-        _ => return Error(malformed(0)),
+        _ => return Error(failure_from_rep(pages.malformed(0))),
     }
     if saved_count > saved_max {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(StreamControl(max: saved_max, count: saved_count, expiry_floor: floor))
 }
@@ -63,14 +63,14 @@ fn write_stream_control(mut tx: Tx, control: StreamControl) -> Result[(), Error]
     stream_write(mut tx, list.new(), take raw, 0u64)
 }
 
-fn caller_streams(tree: PageTree, caller_prefix: Bytes) -> Result[CallerStreams, Error] {
-    let Some(raw) = get_page_row(tree, caller_prefix) else {
+fn caller_streams(tree: pages.PageTree, caller_prefix: Bytes) -> Result[CallerStreams, Error] {
+    let Some(raw) = pages.get_page_row(tree, caller_prefix) else {
         return Ok(CallerStreams(count: 0u64, floor: None))
     }
     let mut at = 0u64
     let saved_count = std.codec.take_u64(raw, mut at) ?=> Decode
     if at == list.len(raw) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let floor: Option[StreamId] = match (list.len(raw), raw[at]) {
         (9u64, 0u8) => None,
@@ -80,7 +80,7 @@ fn caller_streams(tree: PageTree, caller_prefix: Bytes) -> Result[CallerStreams,
             let n = std.codec.take_key_u64(raw, mut at) ?=> Decode
             Some(StreamId(t: t, n: n))
         },
-        _ => return Error(malformed(0)),
+        _ => return Error(failure_from_rep(pages.malformed(0))),
     }
     Ok(CallerStreams(count: saved_count, floor: floor))
 }
@@ -163,7 +163,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
             _ => Error(Missing("stream expiry")),
         }
     }
-    let existing = match get_page_row(db.heads[0].roots.streams, key) {
+    let existing = match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, key) {
         Some(raw) => Some(stream_state(raw)?),
         None => None,
     }
@@ -204,7 +204,7 @@ fn admit_stream(mut db: Db, name: StreamKey, key: Bytes, p: u64, digest: Request
 fn stream_changes(db: Db, caller: Caller, control: StreamControl) -> Result[StreamChanges, Error] {
     let mut caller_prefix: Bytes = list.new()
     failure_result_from_rep(types.capacity(caller_key(caller, mut caller_prefix)))?
-    let metadata = caller_streams(db.heads[0].roots.streams, caller_prefix)?
+    let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
     Ok(StreamChanges(caller_prefix: take caller_prefix, control: control, caller: metadata, deletes: list.new()))
 }
 
@@ -218,13 +218,13 @@ fn remove_front(mut edits: StreamChanges, take key: Bytes) {
 // possible quota victim and can be examined without extending the reclaim.
 fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: scoped[view] fn(StreamKey) -> bool) -> Result[Option[(Bytes, StreamId, bool)], Error] {
     let caller_prefix = failure_result_from_rep(types.copied(edits.caller_prefix))?
-    let mut rows = open_page_range(db.heads[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix))?
+    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
     for reclaimed in 0u64 .. 3u64 {
         let Some((take key, _)) = next_page_range(mut rows)? else {
             break
         }
         let Some(name) = optional_stream_key_from_rep(format.parse_stream_key(key)) else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let busy = stream_admit_held(db, key) || protected(name)
         if reclaimed == 2u64 || !stream_at_or_below(name.id.t, age) || busy {
@@ -256,16 +256,16 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
     let at = keyed_time(db)
     let mut caller_prefix: Bytes = list.new()
     failure_result_from_rep(types.capacity(caller_key(caller, mut caller_prefix)))?
-    let metadata = caller_streams(db.heads[0].roots.streams, caller_prefix)?
+    let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
     if metadata.count == 0u64 && metadata.floor == None {
         return Ok(0u64)
     }
     let mut control = stream_control(db)?
-    let mut rows = open_page_range(db.heads[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix))?
+    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(caller_prefix)), false, false, stream_prefix_end(caller_prefix)))?
     let mut deletes: List[Bytes] = list.with_capacity(metadata.count)
     for _ in 0u64 .. metadata.count {
         let Some((take key, _)) = next_page_range(mut rows)? else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         if stream_admit_held(db, key) {
             return Error(Held)
@@ -302,20 +302,20 @@ pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: sco
     let mut next_key = failure_result_from_rep(types.copied(cursor.key))?
     for _ in 0u64 .. 8u64 {
         let caller = {
-            let mut rows = open_page_range(db.heads[0].roots.streams, Some(clone(next_key)), true, false, Some(clone(b"\x02")))?
+            let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_key)), true, false, Some(clone(b"\x02"))))?
             let Some((take key, _)) = next_page_range(mut rows)? else {
                 return Ok(None)
             }
             if list.len(key) < 2u64 {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             let end = 2u64 + int.widen(key[1u64])
             if end > list.len(key) {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             let caller_key_bytes = list.slice(key, 0u64, end)
             let Some(take after) = stream_prefix_end(caller_key_bytes) else {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             next_key = take after
             Caller(issuer: 1u8, subject: failure_result_from_rep(types.copied(list.slice(key, 2u64, end)))?)
@@ -348,7 +348,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         Some(cursor) => (Some(clone(cursor.key)), cursor.inclusive),
         None => (None, false),
     }
-    let mut rows = open_page_range(db.heads[0].roots.streams, start, inclusive, false, None)?
+    let mut rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, start, inclusive, false, None))?
     let mut after: Option[StreamSweepCursor] = None
     let mut edits: List[StreamSweepEdit] = list.new()
     let mut deletes: List[Bytes] = list.new()
@@ -361,11 +361,11 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             continue
         }
         if list.len(key) < 2u64 {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let caller_end = 2u64 + int.widen(key[1u64])
         if caller_end > list.len(key) {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let caller_prefix = failure_result_from_rep(types.copied(list.slice(key, 0u64, caller_end)))?
         after = Some(StreamSweepCursor(key: clone(key), inclusive: false))
@@ -373,12 +373,12 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
                 break
             }
-            rows = open_page_range(db.heads[0].roots.streams, Some(clone(next_caller)), true, false, None)?
+            rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
             after = Some(StreamSweepCursor(key: take next_caller, inclusive: true))
             continue
         }
         if list.len(key) == caller_end {
-            let metadata = caller_streams(db.heads[0].roots.streams, key)?
+            let metadata = caller_streams(pages.holder_heads(db.holders)[0].roots.streams, key)?
             let old_floor = match metadata.floor {
                 Some(id) => stream_at_or_below(id.t, age),
                 None => true
@@ -392,13 +392,13 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             continue
         }
         let Some(name) = optional_stream_key_from_rep(format.parse_stream_key(key)) else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         if !stream_at_or_below(name.id.t, age) || stream_admit_held(db, key) || protected(name) {
             let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
                 break
             }
-            rows = open_page_range(db.heads[0].roots.streams, Some(clone(next_caller)), true, false, None)?
+            rows = failure_result_from_rep(pages.open_page_range(pages.holder_heads(db.holders)[0].roots.streams, Some(clone(next_caller)), true, false, None))?
             after = Some(StreamSweepCursor(key: take next_caller, inclusive: true))
             continue
         }
@@ -410,7 +410,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
             let latest_edit = option.unwrap(list.pop(mut edits))
             option.unwrap(latest_edit.metadata)
         } else {
-            caller_streams(db.heads[0].roots.streams, caller_prefix)?
+            caller_streams(pages.holder_heads(db.holders)[0].roots.streams, caller_prefix)?
         }
         metadata.count -= 1u64
         list.push(mut edits, StreamSweepEdit(caller_prefix: take caller_prefix, metadata: Some(metadata)))
@@ -477,7 +477,7 @@ type StreamState {
 
 fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
     if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let mut b: Inline[u8, 32] =[0u8; 32]
     for i in 0u64 .. 32 {
@@ -506,7 +506,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
     }
     let mut extra = 0u64
     if let Some(frame_bytes) = tx.frame_bytes {
-        let control_staged = old_data_op_size(tx.stream_ops, tx.below, true, b"") != 0u64
+        let control_staged = pages.old_data_op_size(tx.stream_ops, tx.below, true, b"") != 0u64
         let section_is_new = if list.len(key) == 0u64 {
             !control_staged
         } else {
@@ -522,7 +522,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
         } else {
             0u64
         }
-        extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 5 + list.len(key) + payload + call_size)
+        extra = int.saturating_add(tx.extra_bytes - pages.old_data_op_size(tx.stream_ops, tx.below, true, key), head + 5 + list.len(key) + payload + call_size)
         if int.saturating_add(frame_bytes, extra) - data_head - 16 > types.transaction_limit(limits_to_rep(tx.limits)) {
             return Error(Limit(Transaction))
         }
@@ -540,7 +540,7 @@ fn stream_edit(mut tx: Tx, take key: Bytes, take value: Option[Bytes], call_size
     let height = tree_height(tx.roots.streams)
     let _ = reserve_ids(mut tx, height)?
     let raw = match take value {
-        Some(take encoded) => Some(stage_value(take encoded, tx.roots.streams.inline)),
+        Some(take encoded) => Some(pages.stage_value(take encoded, tx.roots.streams.inline)),
         None => None,
     }
     let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, take raw, None)
@@ -652,9 +652,9 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
         return Ok(RequestMismatch)
     }
     if state.state == 2 {
-        let r = match get_page_row(db.heads[0].roots.streams, stream) {
+        let r = match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.streams, stream) {
             Some(raw) => stored_reply(raw)?,
-            None => return Error(malformed(0))
+            None => return Error(failure_from_rep(pages.malformed(0)))
         }
         return Ok(Duplicate(take r))
     }
@@ -748,35 +748,35 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
     }
 }
 
-fn byte_cursor(data: PageTree, take low: Bound[Bytes], high: Bytes) -> Result[PageRange, Error] {
+fn byte_cursor(data: pages.PageTree, take low: Bound[Bytes], high: Bytes) -> Result[pages.PageRange, Error] {
     let empty: Bytes = list.new()
     let (take start, inclusive) = match take low {
         Unbounded => (take empty, true),
         Included(take key) => (take key, true),
         Excluded(take key) => (take key, false),
     }
-    open_page_range(data, Some(take start), inclusive, false, Some(failure_result_from_rep(types.copied(high))?))
+    failure_result_from_rep(pages.open_page_range(data, Some(take start), inclusive, false, Some(failure_result_from_rep(types.copied(high))?)))
 }
 
-fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[PageRange, Error] {
-    open_page_range(data, Some(failure_result_from_rep(types.copied(high))?), false, true, Some(failure_result_from_rep(types.copied(low))?))
+fn reverse_byte_cursor(data: pages.PageTree, low: Bytes, high: Bytes) -> Result[pages.PageRange, Error] {
+    failure_result_from_rep(pages.open_page_range(data, Some(failure_result_from_rep(types.copied(high))?), false, true, Some(failure_result_from_rep(types.copied(low))?)))
 }
 
-fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_bytes(mut rows: pages.PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     next_page_range(mut rows)
 }
 
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
-fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
+fn stream_live(db: Db, streams: pages.PageTree, ops: pages.DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
     let mut live_bytes = db.resident
-    for slot in 0u64 .. data_row_count(ops.rows) {
-        let operation = data_row(ops.rows, slot)
+    for slot in 0u64 .. pages.data_row_count(ops.rows) {
+        let operation = pages.data_row(ops.rows, slot)
         let k = operation.key
         if let Some(raw) = operation.value {
             if !retained {
-                if let Some(old) = get_page_row(streams, k) {
+                if let Some(old) = pages.get_page_row(streams, k) {
                     live_bytes = int.saturating_sub(live_bytes, entry(k, old))
                 }
             }

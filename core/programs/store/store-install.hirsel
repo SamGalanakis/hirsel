@@ -35,7 +35,7 @@ pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
 fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], target_binding: Option[Inline[u8, 32]], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
     let staged = accept_cutover(mut db, request)?
     let base = view staged.meta.base
-    if db.heads[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
+    if pages.holder_heads(db.holders)[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
         return Error(Drift)
     }
     let target = view staged.meta.target
@@ -53,7 +53,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned_catalog(mut schema_change, staged.delta)?
     let ranges = kept_ranges(staged)?
     planned_ranges(mut schema_change, ranges)?
-    let has_tiered = tiered_collections(schema_change.roots.collections.root) || store_has_tiered(db)
+    let has_tiered = pages.tiered_collections(schema_change.roots.collections.root) || store_has_tiered(db)
     let started_pager = if has_tiered {
         match db.pager {
             Some(_) => false,

@@ -291,7 +291,7 @@ fn add_lineage_cell(mut cells: Map[LineageCell, u64], cell: LineageCell, bytes_k
     }
     let sum = map.get_or(cells, cell, 0u64)
     let Some(following) = int.checked_add(sum, bytes_killed) else {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     if sum == 0 {
         failure_result_from_rep(types.capacity(map.try_reserve(mut cells, 1)))?
@@ -300,14 +300,14 @@ fn add_lineage_cell(mut cells: Map[LineageCell, u64], cell: LineageCell, bytes_k
     Ok(())
 }
 
-fn subtract_pack_live(mut packs: DiskIndex[u64, PagePack], pack: u64, bytes_killed: u64) -> Result[(), Error] {
-    let _ = failure_result_from_rep(types.capacity(disk_index_update(mut packs, pack, pack_edge_charge, scoped fn(mut row: PagePack) {
+fn subtract_pack_live(mut packs: DiskIndex[u64, pages.PagePack], pack: u64, bytes_killed: u64) -> Result[(), Error] {
+    let _ = failure_result_from_rep(types.capacity(disk_index_update(mut packs, pack, pack_edge_charge, scoped fn(mut row: pages.PagePack) {
         row.live = int.saturating_sub(row.live, bytes_killed)
     })))?
     Ok(())
 }
 
-fn file_lineage_kill(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, PagePack], branch_id: u32, frame: ReplacedFrame) -> Result[(), Error] {
+fn file_lineage_kill(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, pages.PagePack], branch_id: u32, frame: ReplacedFrame) -> Result[(), Error] {
     let width: u64 = int.widen(frame.len)
     if let Some(cell) = lineage_kill_cell(lineage.forks, holders, branch_id, frame) {
         return add_lineage_cell(mut lineage.cells, cell, width)
@@ -315,7 +315,7 @@ fn file_lineage_kill(mut lineage: Lineage, holders: LineageHolders, mut packs: D
     subtract_pack_live(mut packs, frame.pack, width)
 }
 
-fn apply_lineage_drops(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, PagePack]) -> Result[(), Error] {
+fn apply_lineage_drops(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, pages.PagePack]) -> Result[(), Error] {
     let mut kept: Map[LineageCell, u64] = map.new()
     failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(lineage.cells))))?
     for (cell, live_bytes) in lineage.cells {
@@ -329,7 +329,7 @@ fn apply_lineage_drops(mut lineage: Lineage, holders: LineageHolders, mut packs:
     Ok(())
 }
 
-fn adopt_lineage_cells(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, PagePack], child: u32) -> Result[(), Error] {
+fn adopt_lineage_cells(mut lineage: Lineage, holders: LineageHolders, mut packs: DiskIndex[u64, pages.PagePack], child: u32) -> Result[(), Error] {
     let mut kept: Map[LineageCell, u64] = map.new()
     failure_result_from_rep(types.capacity(map.try_reserve(mut kept, map.len(lineage.cells))))?
     let main_watermarks = map.get(holders.watermarks, 0u32)
@@ -390,7 +390,7 @@ fn build_lineage_tree(rows: Lineage, mut next_stamp: u64) -> Result[Arc[std.page
     list.sort(mut built, fn(a: std.page.Row, b: std.page.Row) -> Order {
         order.compare(a.key, b.key)
     })
-    let tree = page_result(std.page.bulk(built, Unprefixed, 1024, mut next_stamp))?
+    let tree = failure_result_from_rep(pages.page_result(std.page.bulk(built, Unprefixed, 1024, mut next_stamp)))?
     match take tree {
         Some(take root) => Ok(take root),
         None => Ok(std.page.empty(0, 0, Unprefixed)),
@@ -418,16 +418,16 @@ fn queued_branch_ids(root: Arc[std.page.Page], mut out: List[u32]) -> Result[(),
 // 3's transfer: `holders` names each participant's branch (heads, then pins)
 // and `queued` this cut's added rows.
 fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List[DeferredFree]) -> Result[Lineage, Error] {
-    let pages = disk_state(db).pages
+    let page_disk = disk_state(db).pages
     let mut rows = disk_allocation(scoped fn() -> Result[Lineage, Error] {
-        Ok(clone(pages.lists.rows))
+        Ok(clone(page_disk.lists.rows))
     })?
-    failure_result_from_rep(types.capacity(map.try_reserve(mut rows.forks, list.len(pages.forked))))?
-    for fork_row in pages.forked {
+    failure_result_from_rep(types.capacity(map.try_reserve(mut rows.forks, list.len(page_disk.forked))))?
+    for fork_row in page_disk.forked {
         map.insert(mut rows.forks, fork_row.child, fork_row)
     }
     if let ReplaceMain(_, Some(slot)) = delta {
-        let _ = map.update(mut rows.forks, db.heads[slot].id, fn(mut fork_row: LineageFork) {
+        let _ = map.update(mut rows.forks, pages.holder_heads(db.holders)[slot].id, fn(mut fork_row: LineageFork) {
             fork_row.adopted = true
         })
     }
@@ -436,7 +436,7 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
     for branch_id in holders {
         list.push(mut dependents, branch_id)
     }
-    queued_branch_ids(pages.lists.deferred, mut dependents)?
+    queued_branch_ids(page_disk.lists.deferred, mut dependents)?
     prune_lineage_forks(mut rows.forks, dependents, list.new(), list.new(), queued)
     Ok(take rows)
 }
@@ -447,17 +447,17 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
 // drain's kills (step 4), then the drops. Anchors are empty until the archive
 // is published. `packs` is the cut's base inventory, settled once ahead of
 // retries.
-fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue: CutQueue, mut packs: DiskIndex[u64, PagePack]) -> Result[Lineage, Error] {
+fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue: CutQueue, mut packs: DiskIndex[u64, pages.PagePack]) -> Result[Lineage, Error] {
     let mut rows = take settled
     let mut pin_marks: List[(u32, u64)] = list.new()
-    visit_cut_pins(db, delta, mut pin_marks, scoped fn(mut out: List[(u32, u64)], held: Pin) -> Result[(), Error] {
+    visit_cut_pins(db, delta, mut pin_marks, scoped fn(mut out: List[(u32, u64)], held: pages.Pin) -> Result[(), Error] {
         failure_result_from_rep(types.capacity(list.try_reserve(mut out, 1)))?
         list.push(mut out, (held.branch, held.watermark))
         Ok(())
     })?
     let chain_holders = lineage_holders(rows.forks, pin_marks, list.new())
     if let ReplaceMain(_, Some(slot)) = delta {
-        adopt_lineage_cells(mut rows, chain_holders, mut packs, db.heads[slot].id)?
+        adopt_lineage_cells(mut rows, chain_holders, mut packs, pages.holder_heads(db.holders)[slot].id)?
     }
     for replaced in disk_state(db).tiered_dirty.replaced {
         for frame in replaced.frames {
@@ -478,7 +478,7 @@ fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue
 // §13.6 relocation: each re-emitted Cold ancestor's old copy is dead, unless
 // its pack retires at this cut. T8 step 7 deletes the cells that name a
 // retiring pack (step 6, moving them with their frames, is not built).
-fn settle_compaction(mut lineage: Lineage, queue: CutQueue, mut packs: DiskIndex[u64, PagePack]) -> Result[(), Error] {
+fn settle_compaction(mut lineage: Lineage, queue: CutQueue, mut packs: DiskIndex[u64, pages.PagePack]) -> Result[(), Error] {
     for (pack, bytes_moved) in queue.moved {
         if !list.contains(queue.retiring, pack) {
             subtract_pack_live(mut packs, pack, bytes_moved)?

@@ -84,7 +84,7 @@ pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] wait
         let Some(keep) = r.keep else {
             continue
         }
-        let roots = view db.heads[0].roots
+        let roots = pages.holder_heads(db.holders)[0].roots
         if let Error(_) = readable(roots, r.catalog_key, r.catalog_page, id) {
             continue
         }
@@ -129,7 +129,7 @@ fn descriptor_bounds(descriptor: Bytes) -> LogBounds {
     LogBounds(first: list.word_le(descriptor, 64), next: list.word_le(descriptor, 56))
 }
 
-fn committed_log_bounds(tree: PageTree, id: u32) -> Result[LogBounds, Error] {
+fn committed_log_bounds(tree: pages.PageTree, id: u32) -> Result[LogBounds, Error] {
     let key = prefix(id)?
     let Some(descriptor) = std.page.lookup(tree.root, key) else {
         return Error(Stale(id))
@@ -137,13 +137,7 @@ fn committed_log_bounds(tree: PageTree, id: u32) -> Result[LogBounds, Error] {
     Ok(descriptor_bounds(descriptor))
 }
 
-type LogState: shareable + send {
-    head: LogBounds,
-    limits: LogBounds,
-    height: u64
-}
-
-fn transaction_log_state(tx: Tx, id: u32) -> Result[LogState, Error] {
+fn transaction_log_state(tx: Tx, id: u32) -> Result[pages.LogState, Error] {
     if let Some(existing) = staged_log_state(tx, id) {
         return Ok(existing)
     }
@@ -153,15 +147,16 @@ fn transaction_log_state(tx: Tx, id: u32) -> Result[LogState, Error] {
         return Error(Stale(id))
     }
     let head = descriptor_bounds(descriptor)
-    let height = if collection_descriptor(descriptor).residency == ResidentTiered {
+    let height = if pages.collection_descriptor(descriptor).residency == ResidentTiered {
         transaction_write_height(tx, log_key(id, head.next)?)?
     } else {
         collection_write_height(tree, key)
     }
-    Ok(LogState(head: head, limits: head, height: height))
+    let staged_bounds = pages.LogBoundsRep(first: head.first, next: head.next)
+    Ok(pages.LogState(head: staged_bounds, limits: staged_bounds, height: height))
 }
 
-fn staged_log_state(tx: Tx, id: u32) -> Option[LogState] {
+fn staged_log_state(tx: Tx, id: u32) -> Option[pages.LogState] {
     if let Some(existing) = map.get(tx.ops.logs, id) {
         return Some(existing)
     }
@@ -177,7 +172,7 @@ fn staged_log_state(tx: Tx, id: u32) -> Option[LogState] {
 
 fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
     if let Some(existing) = staged_log_state(tx, id) {
-        return Ok(existing.limits)
+        return Ok(LogBounds(first: existing.limits.first, next: existing.limits.next))
     }
     committed_log_bounds(tx.roots.collections, id)
 }
@@ -210,7 +205,7 @@ pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
     let key = log_key(id, seq)?
     let _ = reserve_ids(mut tx, current.height)?
     let charge = memory_data_charge(tx, key, raw)
-    let staged = stage_value(take raw, tx.roots.collections.inline)
+    let staged = pages.stage_value(take raw, tx.roots.collections.inline)
     let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(take staged), None)
     current.limits.next = following
     map.insert(mut tx.ops.logs, id, current)
@@ -348,7 +343,7 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     let committed_high = log_key(id, order.min(upper, head.next))?
     // Staged appends are read through the tail, so a Tiered cursor stages none.
     let tiered = tx_tiered_rows(tx, id, committed_low, committed_high, false)?
-    let cursor: Option[CollectionCursor] = if let Some(_) = tiered {
+    let cursor: Option[pages.CollectionCursor] = if let Some(_) = tiered {
         None
     } else {
         collection_cursor(tx.roots.collections, id, committed_low, committed_high, false)?
@@ -366,20 +361,20 @@ fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, 
     }
     let key = log_key(tail.id, tail.seq)?
     let Some(raw) = transaction_row(tx, key)? else {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let body = arc.new(failure_result_from_rep(types.copied(raw))?)
     tail.seq += 1
     Ok(Some((take key, take body)))
 }
 
-fn apply_log_append(mut tree: PageTree, key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
+fn apply_log_append(mut tree: pages.PageTree, key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
     let collection = list.slice(key, 0, 4)
     let suffix = list.slice(key, 4, list.len(key))
     let inline = tree.inline
-    page_result(std.page.edit_collection(mut tree.root, collection, first, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+    failure_result_from_rep(pages.page_result(std.page.edit_collection(mut tree.root, collection, first, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
         std.page.append_row(mut root, suffix, value, shared, inline, first, mut stamps)
-    }))
+    })))
 }
 
 pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
@@ -433,23 +428,23 @@ fn trim_log_floor(mut tx: Tx, id: u32, seq: u64) -> Result[(), Error] {
     Ok(())
 }
 
-fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u64], first: u64, mut ids: u64) -> Result[u64, Error] {
+fn trim_log_page(mut tree: pages.PageTree, key: Bytes, floor: u64, expected: Option[u64], first: u64, mut ids: u64) -> Result[u64, Error] {
     let (take kept, next_seq, dropped) = {
         let Some((old, descriptor)) = std.page.collection_entry(tree.root, key) else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
-        let fields = collection_descriptor(descriptor)
+        let fields = pages.collection_descriptor(descriptor)
         if fields.kind != LogCollection || fields.residency != ResidentMemory {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let limits = descriptor_bounds(descriptor)
         let previous = fields.row_bytes
         if floor < limits.first {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         if let Some(amount) = expected {
             if amount > previous {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
         }
         let candidate = if floor >= limits.next {
@@ -459,26 +454,26 @@ fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u6
             arc.share(empty)
         } else {
             let suffix = types.key_word(floor)
-            page_result(std.page.cut_before(old, suffix, mut ids))?
+            failure_result_from_rep(pages.page_result(std.page.cut_before(old, suffix, mut ids)))?
         }
         let (rows, charge) = std.page.totals(candidate)
         let removed = order.min(floor, limits.next) - limits.first
         if rows != limits.next - limits.first - removed || charge > previous {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         (take candidate, order.max(floor, limits.next), previous - charge)
     }
     if let Some(amount) = expected {
         if dropped != amount {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
     }
-    let descriptor = log_record(kept, floor, next_seq, ResidentMemory)?
-    page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids))?
+    let descriptor = failure_result_from_rep(pages.log_record(kept, floor, next_seq, ResidentMemory))?
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids)))?
     Ok(dropped)
 }
 
-fn masked_log_append(states: Map[u32, LogState], key: Bytes) -> bool {
+fn masked_log_append(states: Map[u32, pages.LogState], key: Bytes) -> bool {
     if list.len(key) != 12 {
         return false
     }
@@ -490,8 +485,8 @@ fn masked_log_append(states: Map[u32, LogState], key: Bytes) -> bool {
     seq < state.limits.first
 }
 
-fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
-    let mut operations = new_data_rows()
+fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[pages.DataRows, Error] {
+    let mut operations = pages.new_data_rows()
     let first = draw
     let states = replace(mut tx.ops.logs, map.new())
     for (id, state) in states {
@@ -510,16 +505,16 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
             }
             removed
         }
-        push_data_row(mut operations, format.DataOp(key: take key, value: None, trim: Some(format.JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
+        pages.push_data_row(mut operations, format.DataOp(key: take key, value: None, trim: Some(format.JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
     }
-    if data_row_count(operations) == 0 {
-        return Ok(replace(mut tx.ops.rows, new_data_rows()))
+    if pages.data_row_count(operations) == 0 {
+        return Ok(replace(mut tx.ops.rows, pages.new_data_rows()))
     }
-    tx.frame_tail = NO_FRAME_TAIL
-    for slot in 0u64 .. data_row_count(tx.ops.rows) {
-        let op = data_row(tx.ops.rows, slot)
+    tx.frame_tail = pages.NO_FRAME_TAIL
+    for slot in 0u64 .. pages.data_row_count(tx.ops.rows) {
+        let op = pages.data_row(tx.ops.rows, slot)
         if !masked_log_append(states, op.key) {
-            push_data_row(mut operations, clone(op))
+            pages.push_data_row(mut operations, clone(op))
         }
     }
     Ok(take operations)
@@ -556,7 +551,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
     let tree = view after.roots.collections
     if let Some(inventory) = view tree.paging {
         let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
-        if collection_descriptor(descriptor).residency == ResidentTiered {
+        if pages.collection_descriptor(descriptor).residency == ResidentTiered {
             let rows = snapshot_tiered_span(r, after, inventory, low, high)?
             failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
             for take row in take rows {
@@ -574,7 +569,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
 
 // With a shared Cold Log root, only the retained suffix can differ. Dense
 // sequence bounds make the two overlay cursors advance in lockstep.
-fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
+fn shared_cold_window(mut out: ChangeOutput, before: pages.PageTree, after: pages.PageTree, id: u32, lo: u64, hi: u64) -> Result[bool, Error] {
     let key = prefix(id)?
     let Some((ColdPage(left), _)) = std.page.collection_slot(before.root, key) else {
         return Ok(false)
@@ -607,10 +602,10 @@ fn shared_cold_window(mut out: ChangeOutput, before: PageTree, after: PageTree, 
         let mut new = std.omap.range(new_log.entries, Included(log_key(id, start)?), Excluded(log_key(id, hi)?))
         let mut changed: List[Change] = list.new()
         for seq in start .. hi {
-            let Some((take old_key, ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
+            let Some((take old_key, pages.ReplayRow(now: ReplayPut(old_value), ..))) = std.omap.next(mut old) else {
                 return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
             }
-            let Some((take new_key, ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
+            let Some((take new_key, pages.ReplayRow(now: ReplayPut(take new_value), ..))) = std.omap.next(mut new) else {
                 return Error(failure_from_rep(format.disk_fault(path, left.offset, Malformed)))
             }
             if old_key != new_key || list.word_be(new_key, 4) != seq {

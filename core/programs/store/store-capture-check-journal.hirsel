@@ -56,7 +56,7 @@ fn check_journal_fork(mut state: CheckJournal, path: String, at: u64, raw: Bytes
         }
     }
     let keyed = state.branches[parent].keyed
-    let charge = branch_record_bytes(forked.name) + (if keyed {
+    let charge = pages.branch_record_bytes(forked.name) + (if keyed {
         KEYED_ROOT_RECORD_BYTES
     } else {
         0u64

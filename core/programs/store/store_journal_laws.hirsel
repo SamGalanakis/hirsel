@@ -19,20 +19,20 @@ pub fn journal_law_apply() -> bool {
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
             return false
         }
-        match get_page_row(replay.state.tips[0].roots.collections, key) {
+        match pages.get_page_row(replay.state.tips[0].roots.collections, key) {
             Some(v) => if decode_word(v) != head * 10 {
                 return false
             },
             None => return false
         }
-        match get_page_row(replay.state.tips[0].roots.streams, string.as_bytes("stream")) {
+        match pages.get_page_row(replay.state.tips[0].roots.streams, string.as_bytes("stream")) {
             Some(v) => if decode_word(v) != head {
                 return false
             },
             None => return false
         }
     }
-    let saved = share_page_tree(replay.state.tips[0].roots.collections)
+    let saved = pages.share_page_tree(replay.state.tips[0].roots.collections)
     let duplicate = format.JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), keyed: list.new(), call: None, payload: 0)
     match journal_apply("j-7", mut replay, Commit(take duplicate)) {
         Error(Corrupt(f)) => match f.why {
@@ -60,7 +60,7 @@ pub fn journal_law_apply() -> bool {
     if page_row_count(replay.state.tips[0].roots.catalog) != 0 || page_row_count(replay.state.tips[0].roots.streams) != 1 {
         return false
     }
-    match get_page_row(saved, key) {
+    match pages.get_page_row(saved, key) {
         Some(v) => decode_word(v) == 30,
         None => false
     }
@@ -86,7 +86,7 @@ fn journal_end_bytes(id: StoreId, seq: u64, end: u64) -> Bytes {
 }
 
 fn journal_initial() -> JournalReplay {
-    journal_main(empty_roots(), 0, 0, 0)
+    journal_main(pages.empty_roots(), 0, 0, 0)
 }
 
 fn read_journal_prefix(d: Dir, path: String, size: u64) -> Result[Bytes, Error] waits {
@@ -177,15 +177,15 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let id = db.store
     let seq = db.file_seq
     let baseline = db.resident
-    let wall = db.heads[0].at + 17
-    let next_node = db.next_node
+    let wall = pages.holder_heads(db.holders)[0].at + 17
+    let next_node = pages.holder_next_node(db.holders)
     result.unwrap(close(take db))
     let mut stored: Bytes = list.new()
     result.unwrap(format.le(mut stored, 0, 2))
     result.unwrap(format.le(mut stored, 70, 8))
     let key = result.unwrap(logical_key(1, types.key_word(7)))
-    let mut written: DataRows = new_data_rows()
-    push_data_row(mut written, format.DataOp(key: take key, value: Some(PageValue(take stored)), trim: None, prior: None))
+    let mut written: pages.DataRows = pages.new_data_rows()
+    pages.push_data_row(mut written, format.DataOp(key: take key, value: Some(PageValue(take stored)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, mut written, seq, 72))
     if list.len(raw) != 77 {
@@ -199,7 +199,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
     result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 149)))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.heads[0].head != 2 || reopened.heads[0].at != wall || reopened.resident != baseline + 94 || reopened.next_node <= next_node {
+    if pages.holder_heads(reopened.holders)[0].head != 2 || pages.holder_heads(reopened.holders)[0].at != wall || reopened.resident != baseline + 94 || pages.holder_next_node(reopened.holders) <= next_node {
         return false
     }
     if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 7)) != Some(70u64) {
@@ -419,7 +419,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.heads[0].head != ci.id.version + 1 || reopened.heads[0].at < ci.at {
+    if pages.holder_heads(reopened.holders)[0].head != ci.id.version + 1 || pages.holder_heads(reopened.holders)[0].at < ci.at {
         return false
     }
     if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 7)) != Some(70u64) || result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 8)) != Some(80u64) {
@@ -577,7 +577,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     if let Some(_) = result.unwrap(recorded(reopened, b, 1)) {
         return false
     }
-    if page_row_count(reopened.heads[0].roots.streams) != 1 {
+    if page_row_count(pages.holder_heads(reopened.holders)[0].roots.streams) != 1 {
         return false
     }
     result.unwrap(close(take reopened))
@@ -652,7 +652,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     result.unwrap(durable(mut db, final_item))
-    if disk_state(db).journaled != 100 || db.heads[0].head != 101 {
+    if disk_state(db).journaled != 100 || pages.holder_heads(db.holders)[0].head != 101 {
         return false
     }
     let (f, _) = result.unwrap(fork(mut db, "f", early))
@@ -706,14 +706,14 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(ExportMismatch)
     }
     let parent = snapshot(db)
-    let wall = db.heads[0].at
+    let wall = pages.holder_heads(db.holders)[0].at
     let (beta, _) = deploy_result(fork(mut db, "beta", parent))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 1u8)
     let fork_only = begin_export_copy(mut db, scratch, result.unwrap(failure_result_from_rep(types.copied(attempt))), 0)?
     let exported = export_copy(take fork_only)?
     let opened = open_export(exported.dir, c, attempt, options)?
-    if opened.db.next_branch != 2 || opened.db.heads[1].id != 1 || opened.db.heads[1].parent != 0 || opened.db.heads[1].forked_at != 2 || opened.db.heads[1].head != 2 || opened.db.heads[1].at != wall || tree_stamp(opened.db.heads[1].roots.collections) != tree_stamp(opened.db.heads[0].roots.collections) {
+    if pages.holder_next_branch(opened.db.holders) != 2 || pages.holder_heads(opened.db.holders)[1].id != 1 || pages.holder_heads(opened.db.holders)[1].parent != 0 || pages.holder_heads(opened.db.holders)[1].forked_at != 2 || pages.holder_heads(opened.db.holders)[1].head != 2 || pages.holder_heads(opened.db.holders)[1].at != wall || pages.tree_stamp(pages.holder_heads(opened.db.holders)[1].roots.collections) != pages.tree_stamp(pages.holder_heads(opened.db.holders)[0].roots.collections) {
         return Error(ExportMismatch)
     }
     let recovered = deploy_result(snapshot_of(opened.db, beta))?
@@ -755,7 +755,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     for image in[saved_calls.dir, covered_export.dir] {
         let recovered_image = open_export(image, c, attempt, options)?
-        if recovered_image.db.next_branch != 2 || recovered_image.db.heads[0].head != 3 || recovered_image.db.heads[1].head != 3 || recovered_image.db.heads[0].at != wall + 1 || recovered_image.db.heads[1].at != wall + 1 {
+        if pages.holder_next_branch(recovered_image.db.holders) != 2 || pages.holder_heads(recovered_image.db.holders)[0].head != 3 || pages.holder_heads(recovered_image.db.holders)[1].head != 3 || pages.holder_heads(recovered_image.db.holders)[0].at != wall + 1 || pages.holder_heads(recovered_image.db.holders)[1].at != wall + 1 {
             return Error(ExportMismatch)
         }
         let recovered_beta = deploy_result(snapshot_of(recovered_image.db, beta))?
@@ -788,14 +788,14 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let before = accounts(db)
     let old_generation = db.checkpointed
     let old_segment = db.file_seq
-    let old_stamp = db.next_node
+    let old_stamp = pages.holder_next_node(db.holders)
     let old_end = db.file_end
     let file = failure_result_from_rep(types.capacity(disk_path("j-", old_segment, "")))?
     let saved = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
     let raw = read_journal_prefix(child, file, old_end + 46)?
-    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    if format.read_le(raw, old_end, 2) != 19 || format.read_le(raw, old_end + 2, 2) != 1 || format.read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || pages.holder_next_node(db.holders) != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?
@@ -874,7 +874,7 @@ fn journal_test_fork_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let old = snapshot_of(again, empty)?
     let _ = delete_branch(mut again, empty)?
     let (historical, cut) = fork(mut again, "", old)?
-    if historical.id != 2 || again.heads[1].parent != 1 || again.heads[1].forked_at != 0 {
+    if historical.id != 2 || pages.holder_heads(again.holders)[1].parent != 1 || pages.holder_heads(again.holders)[1].forked_at != 0 {
         return Error(Foreign)
     }
     if let Journal(_, _, _) = cut.mark {
@@ -882,7 +882,7 @@ fn journal_test_fork_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     close(take again)?
     let restored = open(tasks, empty_dir, c, r, options)?
-    if option.unwrap(branch(restored, "")).id != 2 || restored.heads[1].parent != 1 {
+    if option.unwrap(branch(restored, "")).id != 2 || pages.holder_heads(restored.holders)[1].parent != 1 {
         return Error(Foreign)
     }
     close(take restored)?

@@ -9,7 +9,7 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 // Runs and commits without the I4 settle: the S1 laws' direct entry.
 fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
     let keep_reply: Option[fn(A) -> bool] = None
-    let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, 0)
+    let attempt = call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, db.writer_pin_bytes, 0)
     let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     match stage(mut db, i, wall, steps, keep_reply, attempt, no_pins, body) {
         Over(take o) => Ok(take o),
@@ -85,7 +85,7 @@ fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Resu
 
 fn get_raw(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     let p = logical_key(id, key)?
-    match get_page_row(s.roots.collections, p) {
+    match pages.get_page_row(s.roots.collections, p) {
         Some(v) => Ok(Some(failure_result_from_rep(types.copied(v))?)),
         None => Ok(None)
     }
@@ -101,7 +101,9 @@ fn decode_word(b: Bytes) -> u64 {
 
 fn raw_test_db(c: Clock, cap: u64) -> Db {
     let mut db = test_db(c, cap)
-    result.unwrap(define_store_collection(mut db.heads[0].roots.collections, 1, 1, mut db.next_node))
+    result.unwrap(pages.edit_head_collection_with_stamp(mut db.holders, 0, scoped fn(mut tree: pages.PageTree, mut stamp: u64) -> Result[(), Error] {
+        define_store_collection(mut tree, 1, 1, mut stamp)
+    }))
     db.resident = 126
     take db
 }
@@ -230,7 +232,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     }
     let held = snapshot(db)
     let before = version(held)
-    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[PageRange, Error] {
+    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[pages.PageRange, Error] {
         let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
         put_bytes(mut tx, 1, types.key_word(0), types.key_word(9999))?
         Ok(take rows)
@@ -358,7 +360,7 @@ pub fn law_resident(c: Clock) -> bool {
         },
         _ => return false
     }
-    if value_at(snapshot(db), 2) != 0 || db.heads[0].head != 1 {
+    if value_at(snapshot(db), 2) != 0 || pages.holder_heads(db.holders)[0].head != 1 {
         return false
     }
     let removed = execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[bool, Error] {
@@ -383,7 +385,7 @@ pub fn law_foreign(c: Clock) -> bool waits {
             fail("foreign body must not run")
         })
         match take outcome {
-            Error(Foreign) => if db.heads[0].head != 0 {
+            Error(Foreign) => if pages.holder_heads(db.holders)[0].head != 0 {
                 return false
             },
             _ => return false
@@ -474,18 +476,18 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn encode_commit(ci: CallInfo, mut ops: DataRows, seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let streams: DataRows = new_data_rows()
+fn encode_commit(ci: CallInfo, mut ops: pages.DataRows, seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let streams: pages.DataRows = pages.new_data_rows()
     encode_sections(ci, mut ops, streams, None, seq, offset)
 }
 
 @test
 fn journal_test_order_workspace() -> Result[(), ()] {
     let n = 10000u64
-    let mut ops = new_data_rows()
+    let mut ops = pages.new_data_rows()
     list.reserve(mut ops.rest, n - 2)
     for slot_order in 0u64 .. n {
-        push_data_row(mut ops, format.DataOp(key: types.key_word(n - slot_order), value: None, trim: None, prior: None))
+        pages.push_data_row(mut ops, format.DataOp(key: types.key_word(n - slot_order), value: None, trim: None, prior: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -495,7 +497,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
         8 * list.capacity(reserved)
     }
     let ordered = bound bytes room {
-        data_order(ops)
+        pages.data_order(ops)
     }
     let Ok(Ok(SortedSlots(take slots))) = take ordered else {
         return Error(())
@@ -511,9 +513,9 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     Ok(())
 }
 
-fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[format.CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let order = data_order(ops)?
-    encode_staged(ci, None, None, None, mut ops, order, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
+fn encode_sections(ci: CallInfo, mut ops: pages.DataRows, streams: pages.DataRows, call: Option[format.CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let order = pages.data_order(ops)?
+    encode_staged(ci, None, None, None, mut ops, order, pages.NO_FRAME_TAIL, streams, call, None, None, None, seq, offset, FRAME_LIMIT)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from
@@ -529,7 +531,7 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, types.key_word(1), types.key_word(11))?
         put_bytes(mut tx, 1, types.key_word(2), types.key_word(33))?
         let _ = delete_bytes(mut tx, 1, types.key_word(1))?
-        if data_row_count(tx.ops.rows) != 2 {
+        if pages.data_row_count(tx.ops.rows) != 2 {
             return Error(Foreign)
         }
         failure_result_from_rep(types.capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72)))
@@ -716,8 +718,8 @@ pub fn law_node_ids(c: Clock) -> bool {
         Ok(Failed(_)) => {},
         _ => return false
     }
-    let after_fault = db.next_node
-    if after_fault == 0 || db.heads[0].head != 0 {
+    let after_fault = pages.holder_next_node(db.holders)
+    if after_fault == 0 || pages.holder_heads(db.holders)[0].head != 0 {
         return false
     }
     let capacity_result = result.unwrap(bound bytes 512 {
@@ -732,14 +734,14 @@ pub fn law_node_ids(c: Clock) -> bool {
         Ok(Refused(_)) => {},
         _ => return false
     }
-    let after_capacity = db.next_node
-    if after_capacity <= after_fault || db.heads[0].head != 0 {
+    let after_capacity = pages.holder_next_node(db.holders)
+    if after_capacity <= after_fault || pages.holder_heads(db.holders)[0].head != 0 {
         return false
     }
     if !put_one(mut db, 2, 20) {
         return false
     }
-    tree_stamp(db.heads[0].roots.collections) > after_capacity
+    pages.tree_stamp(pages.holder_heads(db.holders)[0].roots.collections) > after_capacity
 }
 
 @test
@@ -753,15 +755,17 @@ fn test_node_ids(c: Clock) -> Result[(), ()] {
 
 fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
     healthy(db)?
-    catalog_entry_in(db.heads[0].roots.catalog, k)
+    catalog_entry_in(pages.holder_heads(db.holders)[0].roots.catalog, k)
 }
 
-fn catalog_put(mut db: Db, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
-    catalog_insert(mut db.next_node, roots, k, v)
+fn catalog_put(mut db: Db, roots: pages.Roots, k: Bytes, v: Bytes) -> Result[pages.Roots, Error] {
+    pages.edit_next_node(mut db.holders, scoped fn(mut stamp: u64) -> Result[pages.Roots, Error] {
+        catalog_insert(mut stamp, roots, k, v)
+    })
 }
 
 fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
-    index_catalog_in(db.heads[0].roots.catalog, id)
+    index_catalog_in(pages.holder_heads(db.holders)[0].roots.catalog, id)
 }
 
 fn typed_value(s: Snapshot, t: Table[u64, u64], k: u64) -> u64 waits {

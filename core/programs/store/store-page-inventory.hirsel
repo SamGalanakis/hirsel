@@ -1,0 +1,64 @@
+pub type TieredPagerPack: shareable + send {
+    inventory: PagePack,
+    object: Option[HistoryRef]
+}
+
+pub type TieredReadInventory: shareable + send {
+    packs: std.omap.OMap[u64, TieredPagerPack],
+    generation: u64,
+    // The generation's MANIFEST `next_stamp`: every frame its packs hold is
+    // below it (M6), including a promoted holder's materialized pages.
+    next_stamp: u64
+}
+
+pub type ReplayValue: shareable + send = ReplayPut(Arc[Bytes]) | ReplayAbsent
+
+pub type ReplayRow: shareable + send {
+    base: u32,
+    now: ReplayValue
+}
+
+pub type ReplayTrimEvidence: shareable + send {
+    lo: u64,
+    hi: u64,
+    cold_charge: u64
+}
+
+pub type ReplayOverlay: shareable + send {
+    entries: std.omap.OMap[Bytes, ReplayRow],
+    cold_next: Option[u64],
+    floor: Option[u64],
+    trims: std.omap.OMap[u64, ReplayTrimEvidence],
+    ids: u64,
+    charged: u64
+}
+
+pub type ReplayBranch: shareable + send {
+    collections: std.omap.OMap[u32, Arc[ReplayOverlay]],
+    fork_time: Option[std.omap.OMap[u32, Arc[ReplayOverlay]]],
+    ids: u64,
+    charged: u64
+}
+
+pub type PagePack: shareable + send {
+    class: u8,
+    frames: u32,
+    live: u64,
+    // PAGE/BLOB payload total for Memory packs, whole object size for Tiered packs.
+    payload_bytes: u64,
+    index: u64
+}
+
+pub type LocatedRoots: shareable + send {
+    collections: std.page.PagePtr,
+    streams: std.page.PagePtr,
+    catalog: std.page.PagePtr,
+    keyed: List[std.page.PagePtr]
+}
+
+pub type HistoryRef {
+    seq: u64,
+    epoch: u64,
+    len: u64,
+    digest: u64
+}

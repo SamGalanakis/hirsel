@@ -47,9 +47,9 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
         staged.plan.pending_indexes = list.new()
     }
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
-    let before = share_roots(source.db.heads[0].roots)
+    let before = pages.share_roots(pages.holder_heads(source.db.holders)[0].roots)
     let state = deploy_result(failure_result_from_rep(types.capacity(current_state(source.db))))?
-    let mut initial = deploy_result(journal_replay(take state, source.db.next_node, source.db.limits))?
+    let mut initial = deploy_result(journal_replay(take state, pages.holder_next_node(source.db.holders), source.db.limits))?
     initial.tiered.total = source.db.tiered
     let steps = read_steps(d, stamp)?
     let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, steps, take initial))?
@@ -69,8 +69,8 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
         list.push(mut row_changes, CatchUpChange(tree_key: deploy_result(failure_result_from_rep(types.copied(row.tree_key)))?, before: None, after: take after_val))
     }
     if list.len(deferred) != 0 {
-        let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: share_roots(before), watermark: source.db.next_node + 1, bases: no_tail_bases())
-        let after_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: stamp.head, roots: share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: no_tail_bases())
+        let before_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: base.head, roots: pages.share_roots(before), watermark: pages.holder_next_node(source.db.holders) + 1, bases: pages.no_tail_bases())
+        let after_snap = Snapshot(store: id, open: stamp.opened, branch: 0u32, head: stamp.head, roots: pages.share_roots(replayed.state.tips[0].roots), watermark: replayed.next_node + 1, bases: pages.no_tail_bases())
         let tiered_rows = catch_up_tiered_diffs(source.dir, id, source.db.writer_pin_bytes, before_snap, after_snap, deferred)?
         for take item in take tiered_rows {
             list.push(mut row_changes, take item)
@@ -94,11 +94,11 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     for take freed in take freed_rows {
         list.push(mut source.deferred_frees, take freed)
     }
-    source.db.next_node = staged.plan.next_node
+    pages.set_next_node(mut source.db.holders, staged.plan.next_node)
     source.stamp = take stamp
     source.shipped = Some(ShippedImport(ranges: take round_ranges, round: round, staged_roots: None))
     staged.base = declaration_base(source.db)
-    staged.base_rows = share_page_tree(source.db.heads[0].roots.collections)
+    staged.base_rows = pages.share_page_tree(pages.holder_heads(source.db.holders)[0].roots.collections)
     Ok(list.len(row_changes))
 }
 
@@ -110,7 +110,7 @@ fn follow_moves(mut plan: SchemaPlan, moved: List[CatalogChange], ranges: List[K
         let (Some(was), Some(now)) = (change.before, change.after) else {
             return Error(Drift)
         }
-        let untouched = match get_page_row(plan.roots.catalog, change.key) {
+        let untouched = match pages.get_page_row(plan.roots.catalog, change.key) {
             Some(raw) => catalog_bytes_equal(raw, was),
             None => false,
         }
@@ -140,7 +140,7 @@ fn follow_moves(mut plan: SchemaPlan, moved: List[CatalogChange], ranges: List[K
 // without a bound extractor, cannot be caught up from row changes.
 fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[CatchUpIndex], DeployError] {
     let mut found: List[CatchUpIndex] = list.new()
-    let mut records = deploy_result(open_page_range(plan.roots.catalog, None, true, false, None))?
+    let mut records = deploy_result(failure_result_from_rep(pages.open_page_range(plan.roots.catalog, None, true, false, None)))?
     while let Some((take key, raw)) = deploy_result(next_page_range(mut records))? {
         let record = deploy_result(decode_catalog(raw))?
         let mut shipped = false
@@ -187,7 +187,7 @@ fn catch_up_indexes(plan: SchemaPlan, ranges: List[KeptRange]) -> Result[List[Ca
 // written, so two rows that trade a Unique key do not collide on the way.
 // A Unique key two rows claim at the new head fails the round with Conflict,
 // as a full build of the same rows does.
-fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(), Error] waits {
+fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPlan, before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(), Error] waits {
     if list.len(shipped) == 0 || list.len(rows) == 0 {
         return Ok(())
     }
@@ -200,8 +200,8 @@ fn patch_index_ranges(mut ctx: ChildCutContext, opened: u64, mut plan: SchemaPla
     keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
-fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(Roots, u64, u64), Error] waits {
-    let mut roots = share_roots(plan.roots)
+fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindings: List[IndexRegistration], before: pages.PageTree, shipped: List[CatchUpIndex], rows: List[CatchUpChange], mut touched: List[Touch]) -> Result[(pages.Roots, u64, u64), Error] waits {
+    let mut roots = pages.share_roots(plan.roots)
     let mut live_bytes = plan.live
     let mut first = stamp_after(plan.next_node)?
     let mut next_stamp = first
@@ -224,7 +224,7 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
                     let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
                     take keys
                 },
-                None => match get_page_row(before, row.tree_key) {
+                None => match pages.get_page_row(before, row.tree_key) {
                     Some(raw) => {
                         let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
                         take keys
@@ -254,13 +254,13 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
                 if target_tiered {
                     child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayAbsent, first, mut next_stamp)?
                     if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
-                        canonical_tree(mut roots.collections)?
+                        failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
                         child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
                         first = stamp_after(next_stamp - 1)?
                         next_stamp = first
                     }
                 } else {
-                    let _ = remove_page_row(mut roots.collections, key, first, mut next_stamp)?
+                    let _ = failure_result_from_rep(pages.remove_page_row(mut roots.collections, key, first, mut next_stamp))?
                 }
             }
             if let Some(take value) = take current {
@@ -292,22 +292,22 @@ fn patch_entries(mut ctx: ChildCutContext, opened: u64, plan: SchemaPlan, bindin
         if target_tiered {
             child_apply_tiered_op(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, mut roots.collections, failure_result_from_rep(types.copied(key))?, ReplayPut(arc.new(failure_result_from_rep(types.copied(payload))?)), first, mut next_stamp)?
             if tiered_tree_hot_bytes(roots.collections)? >= ctx.dirty_bytes {
-                canonical_tree(mut roots.collections)?
+                failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
                 child_cut_tiered(mut roots.collections, ctx.dir, ctx.store, mut ctx.next_pack, ctx.pack_bytes, next_stamp - 1)?
                 first = stamp_after(next_stamp - 1)?
                 next_stamp = first
             }
         } else {
-            put_page_row(mut roots.collections, key, payload, first, mut next_stamp)?
+            failure_result_from_rep(pages.put_page_row(mut roots.collections, key, payload, first, mut next_stamp))?
         }
     }
-    canonical_tree(mut roots.collections)?
+    failure_result_from_rep(pages.canonical_tree(mut roots.collections))?
     Ok((take roots, live_bytes, next_stamp - 1))
 }
 
 // The charge of `key`'s entry when it belongs to `primary`. A Unique entry
 // another row holds is that row's, and stays.
-fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] waits {
+fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: pages.PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] waits {
     let Some(prior) = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)? else {
         return Ok(None)
     }
@@ -319,7 +319,7 @@ fn owned_entry_direct(ctx: ChildCutContext, opened: u64, tree: PageTree, key: By
     Ok(Some(entry(key, prior)))
 }
 
-fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: PageTree, key: Bytes) -> Result[(), Error] waits {
+fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64, tree: pages.PageTree, key: Bytes) -> Result[(), Error] waits {
     let prior = child_get_row(ctx.dir, ctx.store, ctx.writer_pin_bytes, opened, tree, key)?
     let seq = list.len(touched)
     let note = Touch(key: failure_result_from_rep(types.copied(key))?, seq: seq, prior: take prior)
@@ -328,7 +328,7 @@ fn note_touch_direct(mut touched: List[Touch], ctx: ChildCutContext, opened: u64
     Ok(())
 }
 
-fn round_ops_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64, after: PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] waits {
+fn round_ops_direct(d: Dir, id: StoreId, writer_pin_bytes: u64, opened: u64, after: pages.PageTree, mut touched: List[Touch]) -> Result[List[RoundOp], Error] waits {
     list.sort(mut touched, fn(a: Touch, b: Touch) -> Order {
         match bytes_order(a.key, b.key) {
             Equal => if a.seq < b.seq {

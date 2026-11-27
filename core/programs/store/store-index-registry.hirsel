@@ -149,7 +149,7 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
     let mut at = 0u64
     let width = take_le(raw, mut at, 4)?
     if width > list.len(raw) - at {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     Ok(at + width)
 }
@@ -223,7 +223,7 @@ fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[()
     Ok(())
 }
 
-fn find_index_name(catalog: PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
+fn find_index_name(catalog: pages.PageTree, table_id: u32, index_id: u32) -> Result[String, Error] {
     let mut cursor = byte_cursor(catalog, Included(index_prefix(table_id)?), index_prefix(table_id + 1)?)?
     while let Some((key, raw)) = next_bytes(mut cursor)? {
         if format.read_le(raw, 1, 4) == int.widen(index_id) {
@@ -271,7 +271,7 @@ fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind {
 
 fn catalog_index(catalog: Catalog) -> Result[View[IndexRecord], Error] in catalog {
     let CatalogIndex(index_record) = view catalog.record else {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(view index_record)
 }
@@ -281,7 +281,7 @@ fn set_index_state(mut catalog: Catalog, take state: IndexState) -> Result[(), E
         index_record.state = take state
         return Ok(())
     }
-    Error(malformed(0))
+    Error(failure_from_rep(pages.malformed(0)))
 }
 
 // What an index record's collection holds (§1.2): the entries of a Many or
@@ -337,13 +337,9 @@ fn record_public(raw: Bytes) -> bool {
     list.len(raw) > 0 && raw[list.len(raw) - 1] == 0u8
 }
 
-fn malformed(at: u64) -> Error {
-    Corrupt(Fault(file: "catalog", offset: at, why: Malformed))
-}
-
 fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
     if at > list.len(raw) || width > list.len(raw) - at {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     let n = format.read_le(raw, at, width)
     at += width
@@ -353,7 +349,7 @@ fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
 fn take_blob(raw: Bytes, mut at: u64) -> Result[Bytes, Error] {
     let n = take_le(raw, mut at, 4)?
     if n > list.len(raw) - at {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     let data = list.slice(raw, at, at + n)
     let out = failure_result_from_rep(types.copied(data))?
@@ -368,16 +364,16 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let owner: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let epoch = take_le(raw, mut at, 8)?
     if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let key = take_blob(raw, mut at)?
     if kind == 3 && list.len(key) != 0 {
-        return Error(malformed(17))
+        return Error(failure_from_rep(pages.malformed(17)))
     }
     if kind == 4 {
-        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| malformed(17)
+        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| failure_from_rep(pages.malformed(17))
         if key != expected {
-            return Error(malformed(17))
+            return Error(failure_from_rep(pages.malformed(17)))
         }
     }
     let schema_count = take_le(raw, mut at, 2)?
@@ -396,10 +392,10 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         2 => CatalogIndex(decode_index_record(raw, mut at)?),
         3 => CatalogCell,
         4 => CatalogLog,
-        _ => return Error(malformed(0)),
+        _ => return Error(failure_from_rep(pages.malformed(0))),
     }
     if at != list.len(raw) {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     Ok(Catalog(record: take record, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision))
 }
@@ -409,7 +405,7 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
         0 => Entries(Many),
         1 => Entries(Unique),
         2 => Sums,
-        _ => return Error(malformed(at - 1)),
+        _ => return Error(failure_from_rep(pages.malformed(at - 1))),
     }
     let mut payload_schemas: List[Bytes] = list.new()
     let payload_count = take_le(raw, mut at, 2)?
@@ -422,7 +418,7 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
         Some((take project_id, take project_revision))
     } else {
         if list.len(project_revision) > 0 {
-            return Error(malformed(at))
+            return Error(failure_from_rep(pages.malformed(at)))
         }
         None
     }
@@ -434,11 +430,11 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
             false
         }
         if payload_count != 0 || projected {
-            return Error(malformed(at))
+            return Error(failure_from_rep(pages.malformed(at)))
         }
     }
     if at >= list.len(raw) {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     let tag_at = list.len(raw) - 1
     let state: IndexState = match raw[tag_at] {
@@ -449,10 +445,10 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
             let first = take_blob(raw, mut at)?
             Failed(take first, take_blob(raw, mut at)?)
         },
-        _ => return Error(malformed(tag_at)),
+        _ => return Error(failure_from_rep(pages.malformed(tag_at))),
     }
     if at != tag_at {
-        return Error(malformed(at))
+        return Error(failure_from_rep(pages.malformed(at)))
     }
     at += 1
     Ok(IndexRecord(shape, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
@@ -460,7 +456,7 @@ fn decode_index_record(raw: Bytes, mut at: u64) -> Result[IndexRecord, Error] {
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     let mut raw: Bytes = list.new()
-    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(descriptor_kind_byte(catalog_kind(c.record))), 1)))?
+    failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(pages.descriptor_kind_byte(catalog_kind(c.record))), 1)))?
     failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.id), 4)))?
     failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(c.owner), 4)))?
     failure_result_from_rep(types.capacity(format.le(mut raw, c.epoch, 8)))?
@@ -662,7 +658,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     Ok(())
 }
 
-fn index_catalog_in(catalog: PageTree, id: u32) -> Result[List[Catalog], Error] {
+fn index_catalog_in(catalog: pages.PageTree, id: u32) -> Result[List[Catalog], Error] {
     let low = index_prefix(id)?
     let high = index_prefix(id + 1)?
     // The catalog is resident and flat, so its ranks count the table's index

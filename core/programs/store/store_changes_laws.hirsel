@@ -394,7 +394,7 @@ pub fn law_abort_budget(c: Clock) -> bool {
             _ => return false
         }
     }
-    db.heads[0].head == 0 && db.resident == 0
+    pages.holder_heads(db.holders)[0].head == 0 && db.resident == 0
 }
 
 @test
@@ -438,9 +438,9 @@ pub fn law_look(c: Clock) -> bool waits {
     let (_, ix) = result.unwrap(law_indexed(mut db, "look", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64()))
     let sh = view t
     let s = snapshot(db)
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     let live_bytes = db.resident
-    let high_water = db.next_node
+    let high_water = pages.holder_next_node(db.holders)
     let end = db.file_end
     let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
         look_query(tx, call_env.1, call_env.0)
@@ -453,7 +453,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || db.heads[0].head != head || db.resident != live_bytes || db.next_node != high_water || db.file_end != end {
+    if got.version != head || pages.holder_heads(db.holders)[0].head != head || db.resident != live_bytes || pages.holder_next_node(db.holders) != high_water || db.file_end != end {
         return false
     }
     let mut expected: List[Read] = list.new()
@@ -496,7 +496,7 @@ pub fn law_look(c: Clock) -> bool waits {
     let Ok(108) = view value.value else {
         return false
     }
-    if value.version != db.heads[0].head || !equal_reads(value.reads, expected) {
+    if value.version != pages.holder_heads(db.holders)[0].head || !equal_reads(value.reads, expected) {
         return false
     }
     law_lookup_top_one(mut db, t, ix)
@@ -558,7 +558,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         })
     })
     match take refused_query {
-        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && db.heads[0].head == 0 && db.resident == 0,
+        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && pages.holder_heads(db.holders)[0].head == 0 && db.resident == 0,
         _ => false
     }
 }
@@ -641,16 +641,16 @@ pub fn law_changes(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots), watermark: 1, bases: no_tail_bases())
+    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: pages.share_roots(b.roots), watermark: 1, bases: pages.no_tail_bases())
     if !check_delta(a, other_branch, before, after) {
         return false
     }
-    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots), watermark: 1, bases: no_tail_bases())
+    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: pages.share_roots(b.roots), watermark: 1, bases: pages.no_tail_bases())
     if !is_foreign(changes(law_reader(a), a, other_open)) {
         return false
     }
     let foreign = raw_test_db(c, 1073741824)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots), watermark: 1, bases: no_tail_bases())
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: pages.holder_heads(foreign.holders)[0].head, roots: pages.share_roots(pages.holder_heads(foreign.holders)[0].roots), watermark: 1, bases: pages.no_tail_bases())
     if !is_foreign(changes(law_reader(a), a, other_store)) {
         return false
     }
@@ -773,9 +773,9 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 pub fn law_changes_identity(c: Clock) -> bool waits {
     let db = test_db(c, 1073741824)
     let a = snapshot(db)
-    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots(), watermark: 1, bases: no_tail_bases())
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots(), watermark: 1, bases: no_tail_bases())
-    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots(), watermark: 1, bases: no_tail_bases())
+    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: pages.empty_roots(), watermark: 1, bases: pages.no_tail_bases())
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: pages.empty_roots(), watermark: 1, bases: pages.no_tail_bases())
+    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: pages.empty_roots(), watermark: 1, bases: pages.no_tail_bases())
     if !is_foreign(changes(law_reader(a), a, other_open)) || !is_foreign(changes(law_reader(a), a, other_store)) {
         return false
     }
@@ -799,7 +799,7 @@ fn info_helper(mut tx: Tx) -> u64 {
 pub fn law_info_mut(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     for _ in 0u64 .. 2 {
-        let expected = db.heads[0].head + 1
+        let expected = pages.holder_heads(db.holders)[0].head + 1
         let outcome = result.unwrap(run(mut db, None, expected, fn(mut tx, call_env) -> Result[bool, ()] {
             let direct = info(mut tx).id.version
             let indirect = info_helper(mut tx)

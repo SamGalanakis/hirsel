@@ -456,7 +456,7 @@ fn format12_manifest_law() -> Result[(), Error] {
     m.archive = std.page.PagePtr(pack: 5, offset: 100, len: 113, checksum: 14, stamp: 43)
     m.archive_drop = 77
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
-    let roots: LocatedRoots = clone(m.branches[0].roots)
+    let roots: pages.LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
     let raw = disk_page_manifest_bytes(id, m)?
     if raw != format12_manifest() {
@@ -484,7 +484,7 @@ fn format12_manifest_law() -> Result[(), Error] {
 }
 
 fn format12_archive_law() -> Result[(), Error] {
-    let row = ArchiveRange(start: 7, end: 15, segment: HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
+    let row = ArchiveRange(start: 7, end: 15, segment: pages.HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
     let archive_entry = encode_archive_range(row)
     let InlineValue(value) = view archive_entry.cell else {
         return Error(Foreign)

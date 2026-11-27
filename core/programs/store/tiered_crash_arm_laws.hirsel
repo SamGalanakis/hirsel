@@ -49,7 +49,7 @@ fn crash_arm_width(arm: CrashArm) -> u64 {
 fn crash_arm_check(d: Dir, db: Db, rows: Table[u64, Bytes], row_count: u64, width: u64, retired: u64, exact: bool) -> Result[(), Error] waits {
     let unlisted = !compact_listed(db, retired)
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
-    for slot in 0u64 .. list.len(db.heads) {
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
         let walk = compact_walk_from(d, db, compact_branch_root(db, slot, rows.id)?)?
         for (seq, _) in walk.live {
             if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
@@ -59,7 +59,7 @@ fn crash_arm_check(d: Dir, db: Db, rows: Table[u64, Bytes], row_count: u64, widt
         if unlisted && map.contains(walk.live, retired) {
             fail("§13.6 crash: no branch reaches the retired pack")
         }
-        let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+        let s = snapshot_of(db, Branch(store: db.store, id: pages.holder_heads(db.holders)[slot].id))?
         for key in 0u64 .. row_count {
             if get(read_handle, s, rows, key)? != Some(compact_value_of(key, 0, width)) {
                 fail("§13.6 crash: every branch reads every row")

@@ -91,7 +91,7 @@ pub fn sweep_expired(mut db: Db, limits: Limits) -> Result[Swept, Error] waits {
     if limits.rows == 0 {
         return Error(Limit(Transaction))
     }
-    if tiered_collections(db.heads[0].roots.collections.root) {
+    if pages.tiered_collections(pages.holder_heads(db.holders)[0].roots.collections.root) {
         return Error(Missing("steps"))
     }
     let now = keyed_time(db)
@@ -134,7 +134,7 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
     list.push(mut low, 2u8)
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
-    let roots = view db.heads[0].roots
+    let roots = pages.holder_heads(db.holders)[0].roots
     let mut records = byte_cursor(roots.catalog, Included(take low), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         if !record_public(raw) || declaration_index_name(key)? != EXPIRY_INDEX {
@@ -154,7 +154,7 @@ fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
         let mut due = byte_cursor(roots.collections, Included(prefix(record.id)?), high)?
         while let Some((take entry_key, _)) = next_bytes(mut due)? {
             let primary = failure_result_from_rep(types.copied(list.slice(entry_key, 12, list.len(entry_key))))?
-            let size = match get_page_row(roots.collections, logical_key(record.owner, primary)?) {
+            let size = match pages.get_page_row(roots.collections, logical_key(record.owner, primary)?) {
                 Some(row) => list.len(row),
                 None => 0u64,
             }

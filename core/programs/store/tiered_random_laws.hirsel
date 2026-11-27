@@ -175,16 +175,16 @@ fn random_walk_root(d: Dir, db: Db, s: Snapshot, rows: Table[u64, Bytes], mut wa
 
 // Runs after a cut, so every head's and pin's root is published.
 fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], marks: Option[Table[u64, Bytes]], model: RandomModel) -> Result[(), Error] waits {
-    if list.len(db.heads) != map.len(model.heads) {
+    if list.len(pages.holder_heads(db.holders)) != map.len(model.heads) {
         fail("L69 random: the store keeps exactly the model's branches")
     }
     let mut walk = CompactWalk(live: map.new(), places: map.new())
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
-    for slot in 0u64 .. list.len(db.heads) {
-        let Some(expected) = map.get(model.heads, db.heads[slot].id) else {
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
+        let Some(expected) = map.get(model.heads, pages.holder_heads(db.holders)[slot].id) else {
             fail("L69 random: every branch is one the model forked")
         }
-        let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+        let s = snapshot_of(db, Branch(store: db.store, id: pages.holder_heads(db.holders)[slot].id))?
         random_walk_root(d, db, s, rows, mut walk)?
         random_reads_both(read_handle, s, rows, marks, expected)?
         drop(take s)
@@ -232,11 +232,12 @@ fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Opt
 // shared with them while the move releases that tree.
 fn random_residency_round_trip(mut db: Db, rows: Table[u64, Bytes], model: RandomModel) -> Result[(), Error] waits {
     set_residency(mut db, rows.id, Memory)?
-    let Some(expected) = map.get(model.heads, db.heads[0u64].id) else {
+    let branch_id: u32 = pages.holder_heads(db.holders)[0u64].id
+    let Some(expected) = map.get(model.heads, branch_id) else {
         fail("L69 random: main is in the model")
     }
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
-    let s = snapshot_of(db, Branch(store: db.store, id: db.heads[0u64].id))?
+    let s = snapshot_of(db, Branch(store: db.store, id: branch_id))?
     random_reads(read_handle, s, rows, random_part(expected, false), RANDOM_ROWS)?
     drop(take s)
     drop(take read_handle)
@@ -263,22 +264,22 @@ fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) ->
         fail("L69 random: the fixture puts commit")
     }
     let id = prefix(rows.id)?
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L69 random: the fixture has no rows table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
+        (arc.share(here), failure_result_from_rep(pages.rooted_collection_record(here, before[52u64], ResidentTiered))?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L69 random: the rows table spans more than one leaf")
     }
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let first = draw
-    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
-    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     let _ = checkpoint(mut db)?
     close(take db)?
     Ok((rows, marks))
@@ -365,14 +366,14 @@ fn random_tx_reads(mut db: Db, id: u32, take env: RandomTxEnv) -> Result[(), Err
 
 // Head `pick`, or pin `pick - heads` in name order, with its model.
 fn random_side(db: Db, model: RandomModel, pick: u64) -> Result[(Snapshot, Map[u64, u8]), Error] {
-    if pick < list.len(db.heads) {
-        let id = db.heads[pick].id
+    if pick < list.len(pages.holder_heads(db.holders)) {
+        let id = pages.holder_heads(db.holders)[pick].id
         let Some(expected) = map.get(model.heads, id) else {
             fail("L69 random: every branch is one the model forked")
         }
         return Ok((snapshot_of(db, Branch(store: db.store, id))?, clone(expected)))
     }
-    let mut at = list.len(db.heads)
+    let mut at = list.len(pages.holder_heads(db.holders))
     for n in 0u64 .. 3 {
         let name = random_pin_name(n)
         let Some(expected) = map.get(model.pins, name) else {
@@ -565,7 +566,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
         map.insert(mut initial, MARK_BASE + key, 0u8)
     }
     let mut model = RandomModel(heads: map.new(), pins: map.new(), forks: 0, pinned_count: 0)
-    map.insert(mut model.heads, db.heads[0u64].id, take initial)
+    map.insert(mut model.heads, pages.holder_heads(db.holders)[0u64].id, take initial)
     // A Snapshot of main kept across later steps, then pinned as history.
     let mut history: Option[(Snapshot, Map[u64, u8])] = None
     let mut crashes = 0u64
@@ -582,8 +583,8 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
             swarm_pick(swarm, mut g)
         }
         if op == SWARM_PUT || op == SWARM_DELETE {
-            let slot = std.rand.below(mut g, list.len(db.heads))
-            let id = db.heads[slot].id
+            let slot = std.rand.below(mut g, list.len(pages.holder_heads(db.holders)))
+            let id = pages.holder_heads(db.holders)[slot].id
             let on_marks = std.rand.below(mut g, 4) == 0
             let key = std.rand.below(mut g, if on_marks {
                 MARK_ROWS
@@ -620,11 +621,11 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
                 },
             }
             map.insert(mut model.heads, id, take changed)
-        } else if op == SWARM_FORK && list.len(db.heads) < 4 {
-            let slot = std.rand.below(mut g, list.len(db.heads))
-            let from = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+        } else if op == SWARM_FORK && list.len(pages.holder_heads(db.holders)) < 4 {
+            let slot = std.rand.below(mut g, list.len(pages.holder_heads(db.holders)))
+            let from = snapshot_of(db, Branch(store: db.store, id: pages.holder_heads(db.holders)[slot].id))?
             let snap_model: Map[u64, u8] = {
-                let Some(parent) = map.get(model.heads, db.heads[slot].id) else {
+                let Some(parent) = map.get(model.heads, pages.holder_heads(db.holders)[slot].id) else {
                     fail("L69 random: the forked branch is in the model")
                 }
                 clone(parent)
@@ -637,10 +638,10 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
         } else if op == SWARM_PIN && map.len(model.pins) < 3 {
             let name = random_pin_name(model.pinned_count)
             if !map.contains(model.pins, name) {
-                let slot = std.rand.below(mut g, list.len(db.heads))
-                let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
+                let slot = std.rand.below(mut g, list.len(pages.holder_heads(db.holders)))
+                let s = snapshot_of(db, Branch(store: db.store, id: pages.holder_heads(db.holders)[slot].id))?
                 let snap_model: Map[u64, u8] = {
-                    let Some(held) = map.get(model.heads, db.heads[slot].id) else {
+                    let Some(held) = map.get(model.heads, pages.holder_heads(db.holders)[slot].id) else {
                         fail("L69 random: the pinned branch is in the model")
                     }
                     clone(held)
@@ -657,7 +658,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
             match take history {
                 None => {
                     let snap_model: Map[u64, u8] = {
-                        let Some(main_model) = map.get(model.heads, db.heads[0u64].id) else {
+                        let Some(main_model) = map.get(model.heads, pages.holder_heads(db.holders)[0u64].id) else {
                             fail("L69 random: main is in the model")
                         }
                         clone(main_model)
@@ -699,9 +700,9 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
                 // vopr probe
                 let _ = std.prop.sometimes("unpin", true)
             }
-        } else if op == SWARM_DROP && list.len(db.heads) > 1 {
-            let slot = 1 + std.rand.below(mut g, list.len(db.heads) - 1)
-            let id = db.heads[slot].id
+        } else if op == SWARM_DROP && list.len(pages.holder_heads(db.holders)) > 1 {
+            let slot = 1 + std.rand.below(mut g, list.len(pages.holder_heads(db.holders)) - 1)
+            let id = pages.holder_heads(db.holders)[slot].id
             let gone = Branch(store: db.store, id)
             let _ = delete_branch(mut db, gone)?
             let _ = map.remove(mut model.heads, id)
@@ -717,8 +718,8 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
             // vopr probe
             let _ = std.prop.sometimes("residency round trip", true)
         } else if op == SWARM_TX {
-            let slot = std.rand.below(mut g, list.len(db.heads))
-            let id = db.heads[slot].id
+            let slot = std.rand.below(mut g, list.len(pages.holder_heads(db.holders)))
+            let id = pages.holder_heads(db.holders)[slot].id
             let on_marks = std.rand.below(mut g, 2) == 0
             let n = if on_marks {
                 MARK_ROWS
@@ -766,7 +767,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
             // vopr probe
             let _ = std.prop.sometimes("transaction reads its staged writes", true)
         } else if op == SWARM_DIFF {
-            let sides = list.len(db.heads) + map.len(model.pins)
+            let sides = list.len(pages.holder_heads(db.holders)) + map.len(model.pins)
             let (take a, take a_model) = random_side(db, model, std.rand.below(mut g, sides))?
             let (take b, take b_model) = random_side(db, model, std.rand.below(mut g, sides))?
             let read_handle = reader(db, VALUE_LIMIT + 1048576)?
@@ -777,7 +778,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
             // vopr probe
             let _ = std.prop.sometimes("diff two heads or pins", true)
         } else if op == SWARM_SPAN || op == SWARM_SCAN {
-            let sides = list.len(db.heads) + map.len(model.pins)
+            let sides = list.len(pages.holder_heads(db.holders)) + map.len(model.pins)
             let (take s, take side_model) = random_side(db, model, std.rand.below(mut g, sides))?
             let on_marks = std.rand.below(mut g, 2) == 0
             let n = if on_marks {
@@ -827,11 +828,12 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables:
                 Tiered
             })?
             let _ = checkpoint(mut db)?
-            let Some(expected) = map.get(model.heads, db.heads[0u64].id) else {
+            let branch_id: u32 = pages.holder_heads(db.holders)[0u64].id
+            let Some(expected) = map.get(model.heads, branch_id) else {
                 fail("L69 random: main is in the model")
             }
             let read_handle = reader(db, VALUE_LIMIT + 1048576)?
-            let s = snapshot_of(db, Branch(store: db.store, id: db.heads[0u64].id))?
+            let s = snapshot_of(db, Branch(store: db.store, id: branch_id))?
             random_reads(read_handle, s, marks, random_part(expected, true), MARK_ROWS)?
             drop(take s)
             drop(take read_handle)
@@ -926,7 +928,7 @@ fn test_l69_pin_after_its_pack_retires(d: Dir, c: Clock, r: Random, tasks: Tasks
         map.insert(mut initial, key, 0u8)
     }
     let mut model = RandomModel(heads: map.new(), pins: map.new(), forks: 0, pinned_count: 1)
-    map.insert(mut model.heads, db.heads[0u64].id, clone(initial))
+    map.insert(mut model.heads, pages.holder_heads(db.holders)[0u64].id, clone(initial))
     map.insert(mut model.pins, clone("history"), take initial)
     let _ = pin(mut db, "history", s)?
     let _ = checkpoint(mut db)?

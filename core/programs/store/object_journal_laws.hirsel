@@ -223,8 +223,8 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
     let old = history_decode_head(workspace.witness)?
     let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
-    let orphan = history_key("e-", HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
-    let future = history_key("e-", HistoryRef(seq: 4, epoch: 1, len: 1, digest: 0x3344))
+    let orphan = history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let future = history_key("e-", pages.HistoryRef(seq: 4, epoch: 1, len: 1, digest: 0x3344))
     let mut candidate = string.into_bytes(string.from("x"))
     history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
     history_create(mut witness, future, mut candidate, mut workspace.compare, deadline)?
@@ -331,7 +331,7 @@ const RECLAIM_DELETE_ATTEMPTS: u64 = 5
 
 @test
 fn bucket_test_m2_reclaim_retry(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let orphan = history_key("e-", HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let orphan = history_key("e-", pages.HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
     let mut holds: List[std.sim.s3.Hold] = list.new()
     list.push(mut holds, std.sim.s3.Hold(method: "DELETE", key: clone(orphan), from: 1, count: RECLAIM_DELETE_ATTEMPTS, until: At(0), then: Drop))
     let sim = bucket_law_sim_holds(tasks, c, 535, None, list.new(), take holds, std.sim.world.plan(535))
@@ -354,7 +354,7 @@ fn bucket_test_m2_reclaim_retry(c: Clock, r: Random, tasks: Tasks) -> Result[(),
 }
 
 fn sweep_fixture_name(epoch: u64, digest: u64) -> String {
-    history_key("e-", HistoryRef(seq: 1, epoch, len: 1, digest))
+    history_key("e-", pages.HistoryRef(seq: 1, epoch, len: 1, digest))
 }
 
 fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -418,7 +418,7 @@ fn bucket_test_m2_sweep_cursor(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 }
 
 fn pending_pack_name(seq: u64, epoch: u64) -> String {
-    history_key("p-", HistoryRef(seq, epoch, len: 0, digest: seq))
+    history_key("p-", pages.HistoryRef(seq, epoch, len: 0, digest: seq))
 }
 
 fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
@@ -563,7 +563,7 @@ fn retention_case_label(case: RetentionCase) -> String {
 
 type RetentionFixture {
     selected: WitnessCut,
-    packs: List[(HistoryRef, Bytes)],
+    packs: List[(pages.HistoryRef, Bytes)],
     pack_name: String,
 }
 
@@ -574,8 +574,8 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     let mut manifest = take initial
     manifest.first_live = 2
     manifest.prev_first = 2
-    let mut objects: List[(HistoryRef, Bytes)] = list.with_capacity(map.len(inventory))
-    let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
+    let mut objects: List[(pages.HistoryRef, Bytes)] = list.with_capacity(map.len(inventory))
+    let mut refs: List[pages.HistoryRef] = list.with_capacity(map.len(inventory))
     let mut victim = string.new()
     for (seq, pack) in inventory {
         let path = paged_pack_path(seq)?
@@ -591,7 +591,7 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     if victim == "" {
         fail("L59: the fixture needs a class-1 pack")
     }
-    list.sort(mut refs, fn(a: HistoryRef, b: HistoryRef) -> Order {
+    list.sort(mut refs, fn(a: pages.HistoryRef, b: pages.HistoryRef) -> Order {
         order.compare(a.seq, b.seq)
     })
     let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?

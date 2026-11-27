@@ -22,7 +22,7 @@ pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
                 1 => Table(),
                 3 => Cell(),
                 4 => Log(),
-                _ => return Error(malformed(0)),
+                _ => return Error(failure_from_rep(pages.malformed(0))),
             }
             failure_result_from_rep(types.capacity(list.try_reserve(mut collections, 1)))?
             list.push(mut collections, CollectionInfo(name: take name, kind: kind))
@@ -31,7 +31,7 @@ pub fn list_collections(m: Migration) -> Result[List[CollectionInfo], Error] {
     Ok(take collections)
 }
 
-fn top_level_catalog(catalog: PageTree) -> Result[PageRange, Error] {
+fn top_level_catalog(catalog: pages.PageTree) -> Result[pages.PageRange, Error] {
     let mut upper: Bytes = list.new()
     list.push(mut upper, 2u8)
     byte_cursor(catalog, Included(table_key("")?), upper)
@@ -39,7 +39,7 @@ fn top_level_catalog(catalog: PageTree) -> Result[PageRange, Error] {
 
 type SchemaPlan: send {
     store: StoreId,
-    roots: Roots,
+    roots: pages.Roots,
     next_node: u64,
     next_table: u32,
     live: u64,
@@ -67,10 +67,10 @@ type SchemaPlan: send {
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: db.limits.value)
+    SchemaPlan(store: db.store, roots: pages.share_roots(pages.holder_heads(db.holders)[0].roots), next_node: pages.holder_next_node(db.holders), next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: db.limits.value)
 }
 
-fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
+fn keep_schema(mut plan: SchemaPlan, take roots: pages.Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
     over_ceiling(live_bytes, plan.ceiling)?
     plan.roots = take roots
     plan.live = live_bytes
@@ -210,7 +210,7 @@ pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(
         Ok(()) => None,
         Error(take problem) => Some(take problem),
     }
-    let catalog_delta = preview_catalog_changes(db.heads[0].roots.catalog, declared.plan.roots.catalog)?
+    let catalog_delta = preview_catalog_changes(pages.holder_heads(db.holders)[0].roots.catalog, declared.plan.roots.catalog)?
     let Declare(plan: SchemaPlan(preview: take records, ..), ..) = take declared
     Ok(MigrationPreview(changes: take catalog_delta, backfills: option.unwrap(take records), failure: take failure))
 }
@@ -221,15 +221,15 @@ fn catalog_collection_name(key: Bytes, kind: u8) -> Result[String, Error] {
     } else {
         1u64
     }
-    Ok(string.from_utf8(failure_result_from_rep(types.copied(list.slice(key, start, list.len(key))))?) ?=> |_| malformed(0u64))
+    Ok(string.from_utf8(failure_result_from_rep(types.copied(list.slice(key, start, list.len(key))))?) ?=> |_| failure_from_rep(pages.malformed(0u64)))
 }
 
-fn catalog_descriptions(catalog: PageTree) -> Result[List[DeclaredCollection], Error] {
-    let mut rows = open_page_range(catalog, None, true, false, None)?
+fn catalog_descriptions(catalog: pages.PageTree) -> Result[List[DeclaredCollection], Error] {
+    let mut rows = failure_result_from_rep(pages.open_page_range(catalog, None, true, false, None))?
     let mut descriptions: List[DeclaredCollection] = list.new()
     while let Some((key, raw)) = next_page_range(mut rows)? {
         let stored = decode_catalog(raw)?
-        let kind = descriptor_kind_byte(catalog_kind(stored.record))
+        let kind = pages.descriptor_kind_byte(catalog_kind(stored.record))
         let name = catalog_collection_name(key, kind)?
         list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind))
     }
@@ -244,7 +244,7 @@ fn catalog_positions(descriptions: List[DeclaredCollection]) -> Map[u32, u64] {
     take positions
 }
 
-fn preview_catalog_changes(before: PageTree, after: PageTree) -> Result[List[MigrationChange], Error] {
+fn preview_catalog_changes(before: pages.PageTree, after: pages.PageTree) -> Result[List[MigrationChange], Error] {
     let old = catalog_descriptions(before)?
     let new = catalog_descriptions(after)?
     let old_positions = catalog_positions(old)

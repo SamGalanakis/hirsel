@@ -68,8 +68,8 @@ fn resident_page_from_tiered(source: TieredPageSource, root: std.page.Slot, mut 
     }
     let stamp = issue_residency_stamp(mut next_stamp)?
     disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
-        let ready = page_result(std.page.encode(rows, height, stamp, Collection))?
-        page_result(std.page.attach(take ready, clone(children), clone(bodies)))
+        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, height, stamp, Collection)))?
+        failure_result_from_rep(pages.page_result(std.page.attach(take ready, clone(children), clone(bodies))))
     })
 }
 
@@ -129,7 +129,7 @@ pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] wai
     }
     healthy(db)?
     let key = prefix(id)?
-    let Some(std.page_descriptor.CollectionDescriptor(kind, residency, ..)) = collection_by_key(db.heads[0u64].roots.collections, key) else {
+    let Some(std.page_descriptor.CollectionDescriptor(kind, residency, ..)) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, key) else {
         return Error(Stale(id))
     }
     if kind == CellCollection {
@@ -233,7 +233,7 @@ fn residency_to_tiered(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
 fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
     let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
     let mut changed = take roots
-    let mut tree = share_page_tree(changed.collections)
+    let mut tree = pages.share_page_tree(changed.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, key) else {
             return Error(Stale(id))
@@ -244,13 +244,13 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
     }
     let first = stamp_after(ids)?
     let mut draw = first
-    page_result(std.page.insert(mut tree.root, clone(key), take descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
-    page_result(std.page.install_tiered_root(mut tree.root, key, HotPage(take root), mut draw))?
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, clone(key), take descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, key, HotPage(take root), mut draw)))?
     changed.collections = take tree
-    let head = db.heads[0u64].head + 1
-    let replacement = ProposedMain(roots: take changed, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, draw - 1)))?
-    db.next_node = draw - 1
+    let head = pages.holder_heads(db.holders)[0u64].head + 1
+    let replacement = ProposedMain(roots: take changed, head: head, at: pages.holder_heads(db.holders)[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, pages.holder_heads(db.holders)[0u64].roots, draw - 1)))?
+    pages.set_next_node(mut db.holders, draw - 1)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.restamp = Some(id)
     })
@@ -269,16 +269,16 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
 // of the schema commit's cut (`load_memory_residency`), so a refused or
 // failed load publishes nothing and the collection stays Tiered.
 fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
-    let charge = match std.page.lookup(db.heads[0u64].roots.collections.root, key) {
-        Some(descriptor) => collection_descriptor(descriptor).row_bytes,
+    let charge = match std.page.lookup(pages.holder_heads(db.holders)[0u64].roots.collections.root, key) {
+        Some(descriptor) => pages.collection_descriptor(descriptor).row_bytes,
         None => return Error(Stale(id)),
     }
     over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options))?
     let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
-    let head = db.heads[0u64].head + 1
-    let replacement = ProposedMain(roots: take roots, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
-    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, ids)))?
-    db.next_node = ids
+    let head = pages.holder_heads(db.holders)[0u64].head + 1
+    let replacement = ProposedMain(roots: take roots, head: head, at: pages.holder_heads(db.holders)[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: true)
+    let publication = failure_result_from_rep(types.capacity(prepare_publication(db, 0, head, pages.holder_heads(db.holders)[0u64].roots, ids)))?
+    pages.set_next_node(mut db.holders, ids)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.unload = Some(id)
     })
@@ -296,7 +296,7 @@ fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
 // step through the pager (`fold_frame_at` pins it on K), and every Hot page
 // and blob is copied, so the whole tree takes fresh stamps (v2.96). The old
 // tree is released as a dropped collection's is, so this cut's probe sees it.
-fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
+fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], unload: Option[u32], mut next_stamp: u64, mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
     let Some(id) = unload else {
         return Ok(false)
     }
@@ -319,6 +319,6 @@ fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut ro
     std.page_descriptor.set_collection_residency(mut descriptor, ResidentMemory)
     let private_from = next_stamp
     let inline = roots[0u64].collections.inline
-    page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp))?
+    failure_result_from_rep(pages.page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp)))?
     Ok(true)
 }

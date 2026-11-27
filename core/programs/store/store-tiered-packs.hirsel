@@ -73,13 +73,13 @@ fn add_tiered_pack_frame(mut draft: TieredPackDraft, frame: PackFrame, collectio
     Ok(Some(place))
 }
 
-fn finish_tiered_pack(take draft: TieredPackDraft) -> Result[(Bytes, PagePack), Error] {
+fn finish_tiered_pack(take draft: TieredPackDraft) -> Result[(Bytes, pages.PagePack), Error] {
     let TieredPackDraft(context, class, raw: take bytes_out, rows: take rows, live: live_bytes, ..) = take draft
     if list.len(rows) == 0 {
         fail("store: attempted to seal an empty Tiered pack")
     }
     let mut raw = take bytes_out
     let index_offset = append_pack_index(mut raw, context, rows)?
-    let pack = PagePack(class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
+    let pack = pages.PagePack(class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
     Ok((take raw, pack))
 }

@@ -17,7 +17,7 @@ type FrameLocation: shareable + send {
 // charged when it is added and refunded when its last incoming edge goes.
 type PageLocations: send {
     frames: DiskIndex[u64, FrameLocation],
-    packs: DiskIndex[u64, PagePack],
+    packs: DiskIndex[u64, pages.PagePack],
     members: DiskIndex[(u64, u64), ()],
     images: u64
 }
@@ -64,7 +64,7 @@ fn frame_edge_charge(record: FrameLocation) -> u64 {
     int.saturating_add(outgoing, incoming)
 }
 
-fn pack_edge_charge(_pack: PagePack) -> u64 {
+fn pack_edge_charge(_pack: pages.PagePack) -> u64 {
     0
 }
 
@@ -97,7 +97,7 @@ fn export_lease_pack_sequences(known: PageLocations) -> List[u64] {
     take result
 }
 
-fn published_page_pointer(known: PageLocations, root: PageTree) -> std.page.PagePtr {
+fn published_page_pointer(known: PageLocations, root: pages.PageTree) -> std.page.PagePtr {
     published_tree_pointer(known, root.root)
 }
 
@@ -112,12 +112,12 @@ fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std
     record.place
 }
 
-fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots {
+fn published_page_roots(known: PageLocations, roots: pages.PageRoots) -> pages.LocatedRoots {
     let mut keyed: List[std.page.PagePtr] = list.with_capacity(list.len(roots.keyed))
     for tree in roots.keyed {
         list.push(mut keyed, published_page_pointer(known, tree))
     }
-    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
+    pages.LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
 }
 
 fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
@@ -147,7 +147,7 @@ fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, imag
     Ok(())
 }
 
-fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
+fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
     add_page_source(mut known, roots.collections.stamp, HolderSource(kind, holder, 0))?
     add_page_source(mut known, roots.streams.stamp, HolderSource(kind, holder, 1))?
     add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))?
@@ -162,7 +162,7 @@ fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: L
 fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocations, Error] {
     let mut known = new_page_locations()
     for (seq, pack) in validated.inventory {
-        let mut loaded: PagePack = clone(pack)
+        let mut loaded: pages.PagePack = clone(pack)
         if loaded.class < 3 {
             loaded.live = 0
         }
@@ -175,7 +175,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         let Some(frame) = map.get(validated.graph.frames, stamp) else {
             fail("store: missing validated frame")
         }
-        let class = option.unwrap(failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: PagePack) -> u8 {
+        let class = option.unwrap(failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: pages.PagePack) -> u8 {
             let width: u64 = int.widen(ptr.len)
             pack.live += width
             pack.class
@@ -226,7 +226,7 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
         known.images -= frame_charge(location)
         if location.place.pack != 0 {
             let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge)))?
-            let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: PagePack) {
+            let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
                 let width: u64 = int.widen(location.place.len)
                 pack.live -= width
             })))?

@@ -1367,6 +1367,11 @@ attach_manifest_holders	store-page-recovery.hirsel	manifest	manifest	L4
 recovered_tiered_inventory	store-page-recovery.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
 rebuild_page_store	store-page-recovery.hirsel	manifest	history	L7	push-up manifest -> history (refs at layer 6)
 PageTree	store-pages.hirsel	pages	pages	L2
+HolderTable	store-holders.hirsel	pages	pages	L2	L2 holder state
+DATA_ROWS_UNORDERED	store-pages.hirsel	pages	pages	L2	3103 row-count flag
+data_row_count	store-pages.hirsel	pages	pages	L2	3103 row-count accessor
+rows_ascending	store-pages.hirsel	pages	pages	L2	3103 order accessor
+LogBoundsRep	store-page-ops.hirsel	pages	pages	L2	R2 representation for LogState
 PageRoots	store-pages.hirsel	pages	pages	L2
 KEYED_TREE_COUNT	store-pages.hirsel	pages	pages	L2
 new_keyed_pages	store-pages.hirsel	pages	pages	L2

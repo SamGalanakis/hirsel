@@ -284,7 +284,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     }
     result.unwrap(durable(mut db, ticket(complete)))
     let original_at = keyed_time(db) + 60000u64
-    db.heads[0].at = original_at
+    pages.set_head_at(mut db.holders, 0, original_at)
     let plan = Plan(n_e: 8192, s_e: 8192, reply_max: 4096)
     if room_refusal {
         db.ceiling = db.resident
@@ -315,7 +315,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
         return false
     }
     db.ceiling = options.resident_limit
-    db.heads[0].at = original_at + 1u64
+    pages.set_head_at(mut db.holders, 0, original_at + 1u64)
     for _ in 0u64 .. 2 {
         let advanced = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), ()] {
             let _ = info(mut tx)
@@ -340,7 +340,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
         return false
     }
     let ctx = call_info(reopened.store, 0, 2, original_at, original_at)
-    if found.settle != way || found.base != 1 || found.at != original_at || found.seed != ctx.seed || reopened.heads[0].at != original_at + 1u64 {
+    if found.settle != way || found.base != 1 || found.at != original_at || found.seed != ctx.seed || pages.holder_heads(reopened.holders)[0].at != original_at + 1u64 {
         return false
     }
     let duplicate = result.unwrap(admit_law_stream(mut reopened, stream, 0, request))

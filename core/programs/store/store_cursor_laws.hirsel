@@ -8,10 +8,12 @@ fn cursor_law_rows(mut db: Db, t: Table[u64, u64], row_count: u64) -> Result[(),
         let charge = entry(key, raw)
         list.push(mut rows, std.page.Row(key: take key, value: take raw, charge: charge))
     }
-    let first = db.next_node + 1
+    let first = pages.holder_next_node(db.holders) + 1
     let mut ids = first
-    bulk_collection(mut db.heads[0u64].roots.collections, t.id, 1, rows, first, mut ids)?
-    db.next_node = ids - 1
+    pages.edit_head_collection(mut db.holders, 0, scoped fn(mut tree: pages.PageTree) -> Result[(), Error] {
+        bulk_collection(mut tree, t.id, 1, rows, first, mut ids)
+    })?
+    pages.set_next_node(mut db.holders, ids - 1)
     Ok(())
 }
 
@@ -120,13 +122,13 @@ fn test_scan_cursor_parity(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] 
 @test
 fn test_cursor_carries_in_collection_bound(c: Clock) -> Result[(), Error] {
     let db = test_db(c, 1073741824)
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
-    let first = db.next_node + 1
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    let first = pages.holder_next_node(db.holders) + 1
     let mut ids = first
     let id = 255u32
     define_collection(mut tree, id, 1, first, mut ids)?
     let key = logical_key(id, b"\xff")?
-    put_page_row(mut tree, key, b"row", first, mut ids)?
+    failure_result_from_rep(pages.put_page_row(mut tree, key, b"row", first, mut ids))?
     let low = prefix(id)?
     let carried = prefix_after(key)?
     if list.len(carried) != 3 {

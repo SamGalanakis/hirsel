@@ -56,7 +56,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
     if !is_disk(db) {
         return Error(NotFound)
     }
-    let next_stamp = stamp_after(db.next_node)?
+    let next_stamp = stamp_after(pages.holder_next_node(db.holders))?
     let (take packs, take seqs) = disk_allocation(scoped fn() -> Result[(List[ScrubPack], List[u64]), Error] {
         let mut packs: List[ScrubPack] = list.new()
         let mut seqs: List[u64] = list.new()

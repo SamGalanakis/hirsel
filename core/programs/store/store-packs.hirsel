@@ -82,7 +82,7 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
             })))?)
             if old.pack != 0 {
                 let _ = failure_result_from_rep(types.capacity(disk_index_remove(mut known.members, (old.pack, frame.stamp), member_charge)))?
-                let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: PagePack) {
+                let _ = failure_result_from_rep(types.capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
                     let width: u64 = int.widen(old.len)
                     pack.live -= width
                 })))?
@@ -91,7 +91,7 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
             offset += 16 + frame.size
         }
         let frame_count: u32 = int.truncate(pack_plan.end - pack_plan.first)
-        let record = PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
+        let record = pages.PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
         failure_result_from_rep(types.capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge)))?
     }
     Ok(())
@@ -144,7 +144,7 @@ fn emit_located_frame(mut out: Bytes, context: format.DiskContext, frame: PackFr
         },
         PageBody(page) => {
             // The pack buffer already has room for the planned PAGE.
-            page_result(std.page.seal_located(mut out, page, frame.size, locate))?
+            failure_result_from_rep(pages.page_result(std.page.seal_located(mut out, page, frame.size, locate)))?
             // The PAGE stamp follows the first eight bytes of its payload.
             list.set_word_le(mut out, offset + 24, frame.stamp)
             std.check.xxh3(out, offset + 16, list.len(out))
@@ -227,7 +227,7 @@ fn write_pack_run(d: Dir, id: StoreId, layout: PackRun, mut known: PageLocations
     Ok(())
 }
 
-fn sparse_pack(known: PagePack) -> bool {
+fn sparse_pack(known: pages.PagePack) -> bool {
     known.live != 0 && known.frames > 1 && known.live < known.payload_bytes - known.live
 }
 
@@ -249,7 +249,7 @@ fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
     take moved
 }
 
-fn encode_pack_row(pack: PagePack) -> Bytes {
+fn encode_pack_row(pack: pages.PagePack) -> Bytes {
     let mut out: Bytes = list.with_capacity(29)
     list.push(mut out, pack.class)
     list.put_word_le(mut out, pack.frames)
@@ -290,7 +290,7 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: 
             }
             if listed {
                 let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-                let _ = page_result(std.page.remove(mut root, key, private_from, mut draw))?
+                let _ = failure_result_from_rep(pages.page_result(std.page.remove(mut root, key, private_from, mut draw)))?
             }
             list.push(mut retired, seq)
             continue
@@ -302,7 +302,7 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: 
         }
         if !unchanged {
             let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-            page_result(std.page.insert(mut root, key, raw, None, 1024, private_from, mut draw))?
+            failure_result_from_rep(pages.page_result(std.page.insert(mut root, key, raw, None, 1024, private_from, mut draw)))?
         }
     }
     Ok(take retired)
@@ -329,7 +329,7 @@ fn empty_paged_lists() -> PagedLists {
 fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, queued: List[DeferredFree], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[(), Error] {
     for row in queued {
         let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-        page_result(std.page.insert(mut root, types.key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        failure_result_from_rep(pages.page_result(std.page.insert(mut root, types.key_word(deferred_next), deferred_free_value(row), None, 1024, private_from, mut draw)))?
         deferred_next = stamp_after(deferred_next)?
     }
     Ok(())
@@ -393,11 +393,11 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     // The installed rows this cut's compaction moved take their new values.
     for (seq, row) in queue.rewritten {
         let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
-        page_result(std.page.insert(mut deferred_root, types.key_word(seq), deferred_free_value(row), None, 1024, private_from, mut draw))?
+        failure_result_from_rep(pages.page_result(std.page.insert(mut deferred_root, types.key_word(seq), deferred_free_value(row), None, 1024, private_from, mut draw)))?
     }
     for seq in queue.drained {
         let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
-        if !page_result(std.page.remove(mut deferred_root, types.key_word(seq), private_from, mut draw))? {
+        if !failure_result_from_rep(pages.page_result(std.page.remove(mut deferred_root, types.key_word(seq), private_from, mut draw)))? {
             fail("store: the drain consumed a row the queue lacks")
         }
     }
@@ -456,10 +456,10 @@ type PageRetryBase: send {
     account: u64
 }
 
-fn page_retry_base(installed: PageLocations, previous: Map[IncomingEdge, u64], holders: List[HeldPage], roots: List[PageRoots]) -> Result[PageRetryBase, Error] {
+fn page_retry_base(installed: PageLocations, previous: Map[IncomingEdge, u64], holders: List[HeldPage], roots: List[pages.PageRoots]) -> Result[PageRetryBase, Error] {
     disk_allocation(scoped fn() -> Result[PageRetryBase, Error] {
         let candidate = candidate_page_locations(installed, previous, holders)?
-        let account = page_row_account(roots)
+        let account = pages.page_row_account(roots)
         Ok(PageRetryBase(locations: take candidate, account: account))
     })
 }

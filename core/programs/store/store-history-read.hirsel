@@ -5,15 +5,15 @@ type HistoryLink {
 }
 
 type HistoryMark {
-    manifest: HistoryRef,
+    manifest: pages.HistoryRef,
     floor: u64,
-    retained: List[HistoryRef],
+    retained: List[pages.HistoryRef],
     depth: u8,
     locate_at: u64,
     locate_end: u64
 }
 
-fn history_object_context(path: String, id: StoreId, role: u8, reference: HistoryRef, raw: Bytes) -> Result[format.DiskContext, Error] {
+fn history_object_context(path: String, id: StoreId, role: u8, reference: pages.HistoryRef, raw: Bytes) -> Result[format.DiskContext, Error] {
     if list.len(raw) < 72 {
         return Error(failure_from_rep(format.disk_fault(path, 0, Truncated)))
     }
@@ -36,7 +36,7 @@ fn history_object_context(path: String, id: StoreId, role: u8, reference: Histor
     Ok(ctx)
 }
 
-fn history_object_digest(path: String, reference: HistoryRef, raw: Bytes) -> Result[(), Error] {
+fn history_object_digest(path: String, reference: pages.HistoryRef, raw: Bytes) -> Result[(), Error] {
     if list.len(raw) != reference.len {
         return Error(failure_from_rep(format.disk_fault(path, 0, Truncated)))
     }
@@ -46,7 +46,7 @@ fn history_object_digest(path: String, reference: HistoryRef, raw: Bytes) -> Res
     Ok(())
 }
 
-fn history_entry_context(path: String, id: StoreId, reference: HistoryRef, raw: Bytes) -> Result[(format.DiskContext, HistoryLink), Error] {
+fn history_entry_context(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes) -> Result[(format.DiskContext, HistoryLink), Error] {
     let ctx = history_object_context(path, id, 2, reference, raw)?
     let link = history_frame(path, ctx, raw, 72, 0x00B0)?
     if link.end != 112 {
@@ -63,11 +63,11 @@ fn history_entry_context(path: String, id: StoreId, reference: HistoryRef, raw: 
     Ok((ctx, prev))
 }
 
-fn history_length(link: HistoryLink, seq: u64) -> HistoryRef {
-    HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
+fn history_length(link: HistoryLink, seq: u64) -> pages.HistoryRef {
+    pages.HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
 }
 
-fn history_missing_object(path: String, reference: HistoryRef) -> Error {
+fn history_missing_object(path: String, reference: pages.HistoryRef) -> Error {
     let missing_seq = if string.starts_with(path, "e-") {
         Some(reference.seq)
     } else {
@@ -81,7 +81,7 @@ fn history_missing_object(path: String, reference: HistoryRef) -> Error {
     }
 }
 
-fn history_range(mut client: std.object.Client, path: String, reference: HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
+fn history_range(mut client: std.object.Client, path: String, reference: pages.HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
     list.clear(mut buffer)
     let (take result, take raw) = std.object.fetch_range(mut client, path, lo, hi, replace(mut buffer, list.new()), deadline)
     buffer = take raw
@@ -97,7 +97,7 @@ fn history_range(mut client: std.object.Client, path: String, reference: History
     }
 }
 
-fn history_read_key(lead: String, reference: HistoryRef) -> Result[String, Error] {
+fn history_read_key(lead: String, reference: pages.HistoryRef) -> Result[String, Error] {
     // The longest object key has 60 bytes. The String rounds up to 64.
     failure_result_from_rep(types.capacity(bound bytes 64 {
         history_key(lead, reference)
@@ -113,7 +113,7 @@ fn history_link_slots(rows: u64) -> Result[List[HistoryLink], Error] {
     Ok(take refs)
 }
 
-fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: HistoryRef, deadline: u64) -> Result[List[HistoryLink], Error] waits {
+fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: pages.HistoryRef, deadline: u64) -> Result[List[HistoryLink], Error] waits {
     let end = head.entry.seq
     if from.seq > end {
         return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
@@ -136,7 +136,7 @@ fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: Histor
     Ok(take refs)
 }
 
-fn history_read_object(mut client: std.object.Client, path: String, reference: HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
+fn history_read_object(mut client: std.object.Client, path: String, reference: pages.HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
     let mut raw = disk_read_buffer(reference.len)?
     match history_fetch(mut client, path, mut raw, deadline) {
         Ok(_) => (),
@@ -146,7 +146,7 @@ fn history_read_object(mut client: std.object.Client, path: String, reference: H
     Ok(take raw)
 }
 
-fn history_read_mark(path: String, id: StoreId, reference: HistoryRef, raw: Bytes) -> Result[HistoryMark, Error] {
+fn history_read_mark(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes) -> Result[HistoryMark, Error] {
     let (ctx, _) = history_entry_context(path, id, reference, raw)?
     history_object_digest(path, reference, raw)?
     let mark = history_frame(path, ctx, raw, 112, 0x0090)?
@@ -155,20 +155,20 @@ fn history_read_mark(path: String, id: StoreId, reference: HistoryRef, raw: Byte
         return Error(failure_from_rep(format.disk_fault(path, 112, Malformed)))
     }
     let row = list.slice(raw, mark.payload, mark.end)
-    let manifest = HistoryRef(seq: format.read_le(row, 0, 8), epoch: format.read_le(row, 8, 8), len: format.read_le(row, 24, 8), digest: format.read_le(row, 16, 8))
+    let manifest = pages.HistoryRef(seq: format.read_le(row, 0, 8), epoch: format.read_le(row, 8, 8), len: format.read_le(row, 24, 8), digest: format.read_le(row, 16, 8))
     let floor = format.read_le(row, 32, 8)
     let depth = row[40]
     let row_count = format.read_le(row, 41, 4)
     if manifest.seq == 0 || manifest.epoch == 0 || manifest.epoch > reference.epoch || manifest.len < 88 || manifest.len > MANIFEST_LIMIT + 88 + 20 || depth > 3 || row_count > 254 || size != 45 + 32 * row_count {
         return Error(failure_from_rep(format.disk_fault(path, 112, Malformed)))
     }
-    let mut retained = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
+    let mut retained = disk_allocation(scoped fn() -> Result[List[pages.HistoryRef], Error] {
         Ok(list.with_capacity(row_count))
     })?
     let mut final_item = 0u64
     for i in 0u64 .. row_count {
         let at = 45 + 32 * i
-        let earlier = HistoryRef(seq: format.read_le(row, at, 8), epoch: format.read_le(row, at + 8, 8), len: format.read_le(row, at + 24, 8), digest: format.read_le(row, at + 16, 8))
+        let earlier = pages.HistoryRef(seq: format.read_le(row, at, 8), epoch: format.read_le(row, at + 8, 8), len: format.read_le(row, at + 24, 8), digest: format.read_le(row, at + 16, 8))
         if earlier.seq <= final_item || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
             return Error(failure_from_rep(format.disk_fault(path, 112, Malformed)))
         }
@@ -233,14 +233,14 @@ fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: Histo
     history_decode_manifest(name, id, mark, checkpoint_seq, take raw)
 }
 
-fn history_check_claim(path: String, reference: HistoryRef, raw: Bytes, frame: format.DiskFrame) -> Result[(), Error] {
+fn history_check_claim(path: String, reference: pages.HistoryRef, raw: Bytes, frame: format.DiskFrame) -> Result[(), Error] {
     if frame.flags != 1 || frame.end != list.len(raw) || frame.end - frame.payload != 24 || format.read_le(raw, frame.payload, 8) != reference.epoch {
         return Error(failure_from_rep(format.disk_fault(path, 112, Malformed)))
     }
     Ok(())
 }
 
-fn history_apply_entry(path: String, id: StoreId, reference: HistoryRef, raw: Bytes, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
+fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
     let (ctx, _) = history_entry_context(path, id, reference, raw)?
     history_object_digest(path, reference, raw)?
     let frame = disk_frame_bytes(path, ctx, raw, 112)?

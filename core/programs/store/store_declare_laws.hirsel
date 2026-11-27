@@ -220,7 +220,7 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
             _ => return Error(MigrationFault),
         }
         let after = snapshot(db)
-        if version(before) != version(after) || tree_stamp(before.roots.catalog) != tree_stamp(after.roots.catalog) || tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) {
+        if version(before) != version(after) || pages.tree_stamp(before.roots.catalog) != pages.tree_stamp(after.roots.catalog) || pages.tree_stamp(before.roots.collections) != pages.tree_stamp(after.roots.collections) {
             return Error(MigrationFault)
         }
         return Ok(())
@@ -278,7 +278,7 @@ fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[
     list.put_word_be(mut logical, key)
     list.put_word_be(mut logical, key)
     let s = snapshot(db)
-    let Some(raw) = get_page_row(s.roots.collections, logical) else {
+    let Some(raw) = pages.get_page_row(s.roots.collections, logical) else {
         return Error(MigrationFault)
     }
     if list.len(raw) != 10 || format.read_le(raw, 0, 2) != 0 || format.read_le(raw, 2, 8) != expected {
@@ -394,20 +394,20 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
             if let CatalogIndex(mut index_meta) = record.record {
                 index_meta.projection = Some((failure_result_from_rep(types.copied(code.identity(code.describe(cover_sum))))?, take prior_revision))
             } else {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
         },
         _ => (),
     }
     let raw = encode_catalog(record)?
-    prior.roots = catalog_insert(mut prior.next_node, share_roots(prior.roots), ix.catalog_key, raw)?
+    prior.roots = catalog_insert(mut prior.next_node, pages.share_roots(prior.roots), ix.catalog_key, raw)?
     let mut fake_key = prefix(ix.id)?
     list.put_word_be(mut fake_key, 5u64)
     list.put_word_be(mut fake_key, 5u64)
     let mut fake_payload: Bytes = list.new()
     list.put_word_le(mut fake_payload, 0u16)
     list.put_word_le(mut fake_payload, 99u64)
-    let _ = put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node)?
+    let _ = failure_result_from_rep(pages.put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node))?
     prior.changed = true
     let _ = publish_schema_plan(mut db, take prior)?
     let now = drift_codec(drift)
@@ -535,9 +535,9 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
-    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, 0)
+    let attempt = call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, db.writer_pin_bytes, 0)
     let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
-    let staged = draft_body(db, db.indexes, db.heads[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
+    let staged = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, next_call_info(db), keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[(), Error] {
         tx.frame_bytes = Some(42)
         put_conflict_sequence(mut tx, items)
     })

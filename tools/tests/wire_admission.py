@@ -518,10 +518,17 @@ def cli_dev_restores_subscription():
         for package in ('store', 'runner'):
             original = root / 'core/programs' / package
             shutil.copytree(original, work / package, ignore=shutil.ignore_patterns('hirsel.lock', '.hirsel-*'))
+        libraries = work / 'libraries'
+        programs = libraries / 'programs'
+        programs.mkdir(parents=True)
+        for library in ('core', 'std'):
+            (libraries / library).symlink_to(root / 'core' / library, target_is_directory=True)
+        for package in ('store', 'runner'):
+            (programs / package).symlink_to(work / package, target_is_directory=True)
         source = server / 'main.hirsel'
         shutil.copyfile(root / 'core/programs/wire/dev.hirsel', source)
         command = [CLI['compiler'], 'dev', str(server), '--listen', '127.0.0.1:0',
-                   '--libraries', str(root / 'core'), '--source-core', '--source-std',
+                   '--libraries', str(libraries), '--source-core', '--source-std',
                    '--backend', 'cranelift', '--runtime', CLI['runtime']]
         with (work / 'stderr').open('w+') as log:
             dev = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True)

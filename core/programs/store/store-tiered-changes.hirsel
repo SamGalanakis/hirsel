@@ -24,7 +24,7 @@ fn snapshot_changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Erro
     if !snapshot_paged(a) && !snapshot_paged(b) {
         return compare_page_collections(a.roots.collections, b.roots.collections)
     }
-    if tree_stamp(a.roots.collections) == tree_stamp(b.roots.collections) {
+    if pages.tree_stamp(a.roots.collections) == pages.tree_stamp(b.roots.collections) {
         return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
     }
     let out = tiered_changes(r, a, b, None, None, None)?
@@ -225,7 +225,7 @@ fn tiered_diff_spans(r: Reader, a: Snapshot, b: Snapshot, diff: TieredRowDiff, l
     tiered_diff_overlay_spans(mut spans, b, diff.id, low, high)?
     let (_, before_descriptor) = option.unwrap(std.page.collection_slot(a.roots.collections.root, key))
     let (_, after_descriptor) = option.unwrap(std.page.collection_slot(b.roots.collections.root, key))
-    if collection_descriptor(before_descriptor).kind == LogCollection && collection_descriptor(after_descriptor).kind == LogCollection {
+    if pages.collection_descriptor(before_descriptor).kind == LogCollection && pages.collection_descriptor(after_descriptor).kind == LogCollection {
         let old = descriptor_bounds(before_descriptor)
         let new = descriptor_bounds(after_descriptor)
         tiered_diff_window_span(mut spans, diff.id, old.first, new.first, low, high)?
@@ -254,12 +254,12 @@ fn tiered_diff_paged(s: Snapshot, key: Bytes) -> bool {
         return false
     }
     match std.page.collection_slot(s.roots.collections.root, key) {
-        Some((_, descriptor)) => collection_descriptor(descriptor).residency != ResidentMemory,
+        Some((_, descriptor)) => pages.collection_descriptor(descriptor).residency != ResidentMemory,
         None => false,
     }
 }
 
-fn tiered_diff_root(tree: PageTree, key: Bytes) -> List[TieredDiffEdge] {
+fn tiered_diff_root(tree: pages.PageTree, key: Bytes) -> List[TieredDiffEdge] {
     let mut edges: List[TieredDiffEdge] = list.new()
     let (edge, _) = option.unwrap(std.page.collection_slot(tree.root, key))
     let slot: std.page.Slot = clone(edge)
@@ -447,7 +447,7 @@ fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: B
         return Ok(list.new())
     }
     if let Some(inventory) = view tree.paging {
-        if collection_descriptor(descriptor).residency != ResidentMemory {
+        if pages.collection_descriptor(descriptor).residency != ResidentMemory {
             let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
             let empty_hint: Bytes = list.new()
             return retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[List[(Bytes, Arc[Bytes])], Error] {

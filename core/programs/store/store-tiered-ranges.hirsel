@@ -49,7 +49,7 @@ fn tiered_bucket_range(path: String, target: format.TieredTarget, bytes_total: u
 
 // One pass over one immutable pack's ranges. Output windows retain the
 // caller's demand indices even when delivery order differs from byte order.
-fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[TieredDemand]) -> Result[List[TieredBucketWindow], Error] {
+fn tiered_bucket_windows(path: String, pack_ref: pages.HistoryRef, demands: List[TieredDemand]) -> Result[List[TieredBucketWindow], Error] {
     let demand_count = list.len(demands)
     let mut expanded: List[(TieredRange, u64)] = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut expanded, demand_count)))?
@@ -87,7 +87,7 @@ fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[Tiere
     Ok(take windows)
 }
 
-fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: HistoryRef, window: TieredRange, deadline: u64) -> Result[Bytes, Error] waits {
+fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: pages.HistoryRef, window: TieredRange, deadline: u64) -> Result[Bytes, Error] waits {
     let path = history_key("p-", pack_ref)
     let mut raw: Bytes = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut raw, window.hi - window.lo)))?
@@ -96,7 +96,7 @@ fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: HistoryRef
 }
 
 type TieredBucketGet: send {
-    pack_ref: HistoryRef,
+    pack_ref: pages.HistoryRef,
     window: TieredRange,
     deadline: u64
 }

@@ -39,7 +39,7 @@ pub fn declared_table[K, V](t: TableDecl[K, V]) -> Table[K, V] {
 }
 
 fn declaration_base(db: Db) -> DeclarationBase {
-    DeclarationBase(store: db.store, opened: open_number(db), version: db.heads[0].head, stamp: db.next_node, changes: db.changes, live: db.resident)
+    DeclarationBase(store: db.store, opened: open_number(db), version: pages.holder_heads(db.holders)[0].head, stamp: pages.holder_next_node(db.holders), changes: db.changes, live: db.resident)
 }
 
 fn follower_base(f: Follower) -> DeclarationBase {
@@ -70,7 +70,7 @@ fn validate_local_projector[K, V](d: Declare, decl: ProjectionDecl, source: Tabl
         return Error(Foreign)
     }
     readable(d.plan.roots, source.catalog_key, source.catalog_page, source.id)?
-    let Some(raw) = get_page_row(d.plan.roots.catalog, decl.rows.catalog_key) else {
+    let Some(raw) = pages.get_page_row(d.plan.roots.catalog, decl.rows.catalog_key) else {
         return Error(Missing("hirsel.projections"))
     }
     let record = decode_catalog(raw)?
@@ -133,7 +133,7 @@ pub fn bind_declaration[H](mut db: Db, mode: Mode, schema: fn(mut Declare) -> Re
 
 pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
     let key = table_key(name)?
-    Ok(match get_page_row(snap.roots.catalog, key) {
+    Ok(match pages.get_page_row(snap.roots.catalog, key) {
         Some(raw) => raw[0] == 1u8,
         None => false,
     })
@@ -146,7 +146,7 @@ fn read_only_base(source: ReadOnly) -> DeclarationBase {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: snap.store, roots: pages.share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 
@@ -184,7 +184,7 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: capture.store, roots: pages.share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 
@@ -268,7 +268,7 @@ fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.K
     }
     d.failed = true
     let lookup_key = table_key(name)?
-    let exists = match get_page_row(d.plan.roots.catalog, lookup_key) {
+    let exists = match pages.get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(record) => {
             if record[0] != 1 {
                 if let Migrate = d.mode {
@@ -323,16 +323,16 @@ fn active_table[K, V](d: Declare, t: TableDecl[K, V]) -> Result[(), Error] {
 
 fn declaration_index_name(key: Bytes) -> Result[String, Error] {
     let raw = failure_result_from_rep(types.copied(list.slice(key, 5, list.len(key))))?
-    let name = string.from_utf8(take raw) ?=> |_| malformed(0)
+    let name = string.from_utf8(take raw) ?=> |_| failure_from_rep(pages.malformed(0))
     Ok(take name)
 }
 
 fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
-    let mut roots = share_roots(plan.roots)
+    let mut roots = pages.share_roots(plan.roots)
     let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
     let mut live_bytes = plan.live
     if !plan.retained {
-        let Some(raw) = get_page_row(roots.catalog, key) else {
+        let Some(raw) = pages.get_page_row(roots.catalog, key) else {
             return Error(Stale(record.id))
         }
         live_bytes = int.saturating_sub(live_bytes, charge + entry(key, raw))
@@ -508,7 +508,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
 // The index record a declaration names, refusing a second declaration of
 // one index.
 fn existing_index_record(d: Declare, lookup_key: Bytes, name: String) -> Result[Option[Catalog], Error] {
-    let Some(raw) = get_page_row(d.plan.roots.catalog, lookup_key) else {
+    let Some(raw) = pages.get_page_row(d.plan.roots.catalog, lookup_key) else {
         return Ok(None)
     }
     let record = decode_catalog(raw)?
@@ -700,7 +700,7 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     db.indexes = take registry
     bind_retention(mut db, take retained)
     db.projectors = take registered
-    Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
+    Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, pages.holder_heads(db.holders)[0].head)))
 }
 
 pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error] {
@@ -725,7 +725,7 @@ pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
     failure_result_from_rep(types.require_memory_collections(m.tiered, tiered_refusal_to_rep(Migrate)))?
     declaration_name(name)?
     let key = table_key(name)?
-    let table_id = match get_page_row(m.plan.roots.catalog, key) {
+    let table_id = match pages.get_page_row(m.plan.roots.catalog, key) {
         Some(raw) => decode_catalog(raw)?.id,
         None => return Error(Missing(named(name)?)),
     }
@@ -740,13 +740,13 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
     let new_key = table_key(to)?
     let mut live_bytes = m.plan.live
     let value = {
-        let Some(raw) = get_page_row(m.plan.roots.catalog, old_key) else {
+        let Some(raw) = pages.get_page_row(m.plan.roots.catalog, old_key) else {
             return Error(Missing(named(from)?))
         }
         if old_key == new_key {
             return Ok(())
         }
-        if let Some(_) = get_page_row(m.plan.roots.catalog, new_key) {
+        if let Some(_) = pages.get_page_row(m.plan.roots.catalog, new_key) {
             return Error(Exists(named(to)?))
         }
         if !m.plan.retained {
@@ -754,7 +754,7 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
         }
         failure_result_from_rep(types.copied(raw))?
     }
-    let base = share_roots(m.plan.roots)
+    let base = pages.share_roots(m.plan.roots)
     let mut roots = catalog_insert(mut m.plan.next_node, base, new_key, value)?
     remove_store_row(mut roots.catalog, old_key, mut m.plan.next_node)?
     let next_table = m.plan.next_table

@@ -3,7 +3,7 @@ fn l88_leaf_pack(d: Dir, owner: StoreId, seq: u64) -> Result[std.page.PagePtr, E
     for row in 0u64 .. 3 {
         list.push(mut rows, std.page.Entry(key: types.key_word(row), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
-    let image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 40, Collection)))?
     l68_write_page_pack(d, owner, seq, 40, std.page.payload(image))
 }
 
@@ -84,14 +84,14 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let (parent, sibling) = l79_fold_parent(fixtures, owner, old)?
     let (probe_pack, probed_leaf) = l88_probe_pack(fixtures, owner)?
     let mut ids = 0u64
-    let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     for ptr in[old, moved, parent, sibling] {
         let width: u64 = int.widen(ptr.len)
-        let metadata = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
-        let (take revised, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: metadata, object: None))
+        let metadata = pages.PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let (take revised, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: metadata, object: None))
         packs = take revised
     }
-    let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, TieredPagerPack(inventory: probe_pack, object: None))
+    let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, pages.TieredPagerPack(inventory: probe_pack, object: None))
     let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
     let captured = TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
@@ -105,14 +105,14 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     checked
 }
 
-fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr), Error] waits {
+fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.PagePtr), Error] waits {
     let mut draft = begin_tiered_pack(owner, 7, 3, 4096)?
     let mut first = std.page.unlocated(0)
     for slot in 0u64 .. 4 {
         let mut rows: List[std.page.Entry] = list.with_capacity(1)
         list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(types.key_word(slot))))
-        let image = page_result(std.page.encode(rows, 0, 30 + slot, Collection))?
-        let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+        let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 30 + slot, Collection)))?
+        let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
         let width = std.page.sealed_size(std.page.image_of(page))
         let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
         let key = logical_key(9, types.key_word(slot))?
@@ -130,7 +130,7 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr)
     Ok((pack, first))
 }
 
-fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
+fn l88_probe_keeps_progress(captured: TieredPageSource, pack: pages.PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
     let mut cursor = start_tiered_probe(pack)
     let mut promotion = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
     for cut in 0u64 .. 4 {
@@ -180,23 +180,39 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     let old = std.page.PagePtr(pack: 7, offset: 72, len: 128, checksum: 19, stamp: 40)
     let current_location = std.page.PagePtr(pack: 11, offset: 72, len: 128, checksum: 19, stamp: 40)
     let mut draw = 80u64
-    db.heads[0u64].roots = l79_cut_table(old, 3, 258, mut draw)?
-    db.next_node = draw - 1
+    let cut = l79_cut_table(old, 3, 258, mut draw)?
+    let old_bytes_cut = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_cut = keyed_root_record_bytes(cut.keyed)
+    let head_cut = pages.holder_heads(db.holders)[0u64].head
+    let at_cut = pages.holder_heads(db.holders)[0u64].at
+    pages.replace_head(mut db.holders, 0u64, take cut, head_cut, at_cut, old_bytes_cut, count_bytes_cut)
+    pages.set_next_node(mut db.holders, draw - 1)
     let old_capture = snapshot(db)
     draw = 80
     let current = l79_cut_table(current_location, 3, 258, mut draw)?
-    db.heads[0u64].roots = share_roots(current)
+    let shared = pages.share_roots(current)
+    let old_bytes_shared = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_shared = keyed_root_record_bytes(shared.keyed)
+    let head_shared = pages.holder_heads(db.holders)[0u64].head
+    let at_shared = pages.holder_heads(db.holders)[0u64].at
+    pages.replace_head(mut db.holders, 0u64, take shared, head_shared, at_shared, old_bytes_shared, count_bytes_shared)
     l88_assert_current_pin(mut db, "relocated", old_capture, current_location)?
     let mut rows: List[std.page.Entry] = list.with_capacity(3)
     for slot in 0u64 .. 3 {
         list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
-    let image = page_result(std.page.encode(rows, 0, old.stamp, Collection))?
-    let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, old.stamp, Collection)))?
+    let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
     draw = 80
-    page_result(std.page.install_tiered_root(mut db.heads[0u64].roots.collections.root, prefix(9)?, HotPage(take page), mut draw))?
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, prefix(9)?, HotPage(take page), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0, take tree)
     let hot_capture = snapshot(db)
-    db.heads[0u64].roots = take current
+    let old_bytes_current = keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed)
+    let count_bytes_current = keyed_root_record_bytes(current.keyed)
+    let head_current = pages.holder_heads(db.holders)[0u64].head
+    let at_current = pages.holder_heads(db.holders)[0u64].at
+    pages.replace_head(mut db.holders, 0u64, take current, head_current, at_current, old_bytes_current, count_bytes_current)
     l88_assert_current_pin(mut db, "sealed", hot_capture, current_location)?
     close(take db)
 }
@@ -225,7 +241,7 @@ fn test_l88_pin_overlaid_empty_tiered_base(d: Dir, c: Clock, r: Random, tasks: T
     }
     close(take db)?
     let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
-    if let None = view reopened.heads[0u64].roots.collections.replay {
+    if let None = pages.holder_heads(reopened.holders)[0u64].roots.collections.replay {
         fail("L88: reopen must carry a replay overlay over the empty Tiered base")
     }
     let held = snapshot(reopened)

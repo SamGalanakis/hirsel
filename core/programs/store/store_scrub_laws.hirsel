@@ -316,17 +316,17 @@ fn check_test_pack(d: Dir, id: StoreId, seq: u64, image: std.page.Image, stale: 
 fn check_test_stamp(stamp: u64) -> Result[std.page.Image, Error] {
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(b"x")))
-    page_result(std.page.encode(rows, 0, stamp, Unprefixed))
+    failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, stamp, Unprefixed)))
 }
 
 fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(2)
-    let packed = encode_pack_row(PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
+    let packed = encode_pack_row(pages.PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
     list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(clone(packed))))
     if second {
         list.push(mut rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(take packed)))
     }
-    let image = page_result(std.page.encode(rows, 0, 2, Unprefixed))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 2, Unprefixed)))?
     check_test_pack(d, id, 3, image, false)
 }
 
@@ -350,7 +350,7 @@ fn check_test_packs(d: Dir, id: StoreId, mut m: PageManifest, damage: CheckDamag
     } else {
         first
     }
-    let roots = LocatedRoots(collections: std.page.unlocated(0), streams: std.page.unlocated(0), catalog: held, keyed: list.new())
+    let roots = pages.LocatedRoots(collections: std.page.unlocated(0), streams: std.page.unlocated(0), catalog: held, keyed: list.new())
     list.push(mut m.pins, LocatedPin(owner: ApplicationPin, name: "held", branch: 0, version: 0, roots: take roots, watermark: 3))
     if damage == RepeatedStamp {
         Ok(("p-2", 72u64, Malformed))
@@ -365,7 +365,7 @@ fn check_test_lineage(d: Dir, id: StoreId, mut m: PageManifest) -> Result[u64, E
     let edge = lineage_row(ForkRow(LineageFork(child: 1, parent: 0, watermark: 1, adopted: true)))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: clone(edge.key), cell: InlineValue(clone(edge.value))))
-    let image = page_result(std.page.encode(rows, 0, 1, Unprefixed))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 1, Unprefixed)))?
     m.lineage = capture_test_page(mut raw, ctx, image)?
     let at = list.len(raw)
     let _ = capture_test_page(mut raw, ctx, check_test_stamp(2)?)?

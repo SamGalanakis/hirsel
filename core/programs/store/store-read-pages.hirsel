@@ -71,13 +71,13 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
     if let Some(inventory) = view data.paging {
         let id = prefix(source)?
         if let Some((edge, descriptor)) = std.page.collection_slot(data.root, id) {
-            let tiered_rows = collection_descriptor(descriptor).residency == ResidentTiered
+            let tiered_rows = pages.collection_descriptor(descriptor).residency == ResidentTiered
             let tiered_owner = if source == decoder.table {
                 false
             } else {
                 let owner = std.page.lookup(data.root, prefix(decoder.table)?)
                 match owner {
-                    Some(record) => collection_descriptor(record).residency == ResidentTiered,
+                    Some(record) => pages.collection_descriptor(record).residency == ResidentTiered,
                     None => false
                 }
             }
@@ -125,12 +125,12 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
     }
     let mut cursor = take opened
     let leading = prefix(source)?
-    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
+    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: pages.CollectionCursor, previous: Option[Bytes], full: bool, remaining: Option[u64]) -> Result[SnapshotPageStep[K, V], Error] {
         let stepped = std.page.cursor_read(mut current.walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[SnapshotPageStep[K, V], Error] {
             if full {
                 return Ok(PageLimit)
             }
-            let key = collection_row_key(leading, suffix)
+            let key = pages.collection_row_key(leading, suffix)
             let row = advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
                 Ok(())
             })?

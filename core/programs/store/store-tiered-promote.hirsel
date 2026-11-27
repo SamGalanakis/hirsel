@@ -13,12 +13,12 @@ type TieredPromotionNeed: key = PromotionPageStamp(u64) | PromotionBlobStamp(u64
 
 type TieredPromotionHit: shareable + send = PromotedPage(std.page.Slot) | PromotedBlob(std.page.BlobSlot)
 
-fn promotion_collection_root(tree: PageTree, collection: u32) -> Result[Option[std.page.Slot], Error] {
+fn promotion_collection_root(tree: pages.PageTree, collection: u32) -> Result[Option[std.page.Slot], Error] {
     let key = prefix(collection)?
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, key) else {
         return Ok(None)
     }
-    if collection_descriptor(descriptor).residency != ResidentTiered {
+    if pages.collection_descriptor(descriptor).residency != ResidentTiered {
         return Ok(None)
     }
     Ok(Some(clone(edge)))
@@ -186,8 +186,8 @@ fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.page.
         return Ok(clone(root))
     }
     disk_allocation(scoped fn() -> Result[std.page.Slot, Error] {
-        let ready = page_result(std.page.encode(rows, height, stamp, Collection))?
-        let winner = page_result(std.page.attach(take ready, clone(children), clone(bodies)))?
+        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, height, stamp, Collection)))?
+        let winner = failure_result_from_rep(pages.page_result(std.page.attach(take ready, clone(children), clone(bodies))))?
         Ok(HotPage(take winner))
     })
 }
@@ -204,7 +204,7 @@ fn promotion_tiered_collections(root: Arc[std.page.Page], mut found: List[(u32, 
             promotion_tiered_collections(option.unwrap(std.page.child(root, slot)), mut found)?
             continue
         }
-        if unwrap_collection_descriptor(std.page.value_at(root, slot)).residency != ResidentTiered {
+        if pages.unwrap_collection_descriptor(std.page.value_at(root, slot)).residency != ResidentTiered {
             continue
         }
         let key = option.unwrap(std.page.key_at(image, slot))
@@ -230,7 +230,7 @@ fn promotion_queue_root(source: TieredPageSource, row: DeferredFree, mut roots_f
     Ok(())
 }
 
-fn promotion_has_overlay(tree: PageTree, collection: u32) -> bool {
+fn promotion_has_overlay(tree: pages.PageTree, collection: u32) -> bool {
     let Some(overlay) = view tree.replay else {
         return false
     }
@@ -249,7 +249,7 @@ fn promotion_has_overlay(tree: PageTree, collection: u32) -> bool {
 // a pack is the installed inventory's answer; the Snapshot's own inventory,
 // which its lease keeps readable, reads what it captured. A refusal here
 // refuses the cut: promotion is mandatory.
-fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
+fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
     let mut collections: List[(u32, std.page.Slot)] = list.new()
     promotion_tiered_collections(roots[at].collections.root, mut collections)?
     if list.len(collections) == 0 {
@@ -320,7 +320,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
         let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
             let mut candidate = arc.share(map_root)
             let mut draw = draw_from
-            page_result(std.page.install_tiered_root(mut candidate, key, resolved, mut draw))?
+            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, resolved, mut draw)))?
             Ok((take candidate, draw))
         })?
         map_root = take mapped
@@ -341,8 +341,8 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
 // same logical content. The materialization records nothing: the fold of
 // the Snapshot's own branch already queued what the overlay detaches and
 // filed what it replaces (mandatory candidate steps 2 and 3).
-fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], resolved_bases: Map[u32, std.page.Slot], mut tree: PageTree, mut next_stamp: u64) -> Result[bool, Error] waits {
-    let replayed: Option[Arc[ReplayBranch]] = clone(tree.replay)
+fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], resolved_bases: Map[u32, std.page.Slot], mut tree: pages.PageTree, mut next_stamp: u64) -> Result[bool, Error] waits {
+    let replayed: Option[Arc[pages.ReplayBranch]] = clone(tree.replay)
     let Some(take overlay) = take replayed else {
         return Ok(false)
     }
@@ -352,7 +352,7 @@ fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource
     let inline = tree.inline
     let mut folded = FoldMap(root: arc.share(tree.root), next_stamp: next_stamp, effects: None)
     let materialized = if let Some(collections) = std.omap.root(overlay.collections) {
-        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[pages.ReplayOverlay]) -> Result[(), Error] waits {
             let inherited = match overlay.fork_time {
                 Some(forked) => std.omap.get(forked, id),
                 None => None,
@@ -371,7 +371,7 @@ fn promotion_materialize(captured: TieredPageSource, installed: TieredPageSource
     Ok(true)
 }
 
-fn promotion_materialize_collection(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], resolved_bases: Map[u32, std.page.Slot], root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
+fn promotion_materialize_collection(captured: TieredPageSource, installed: TieredPageSource, captured_root: Arc[std.page.Page], resolved_bases: Map[u32, std.page.Slot], root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] waits {
     let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         prefix(id)
     })?
@@ -397,7 +397,7 @@ fn promotion_materialize_collection(captured: TieredPageSource, installed: Tiere
     let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
         let mut candidate = arc.share(root)
         let mut draw = next_stamp
-        page_result(std.page.install_tiered_root(mut candidate, key, ready, mut draw))?
+        failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, ready, mut draw)))?
         Ok((take candidate, draw))
     })?
     next_stamp = following

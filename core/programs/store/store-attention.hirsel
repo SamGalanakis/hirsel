@@ -26,7 +26,7 @@ pub fn accounts(db: Db) -> Accounts {
 // never understated (§13.8).
 fn memory_page_images(db: Db) -> u64 {
     let counted = isolate(scoped fn() -> Result[u64, Capacity] {
-        let roots = state_roots(current_state(db)?)?
+        let roots = pages.state_roots(current_state(db)?)?
         Ok(resident_images(roots, None))
     })
     match counted {
@@ -102,7 +102,7 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
     let mut out: List[IndexReport] = list.new()
-    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take first_key), end_key)?
+    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take first_key), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
         let state = copied_state(catalog_index(record)?.state)?
@@ -114,7 +114,7 @@ fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
 
 // Counts the drift a staged draft saw, by index, under the names its base
 // catalog gives them.
-fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
+fn count_drift(mut db: Db, catalog: pages.PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
     db.attention_seq = int.saturating_add(db.attention_seq, 1)
     for (owner, id) in seen {
         let mut found = false
@@ -137,7 +137,7 @@ fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[
 // A call a proven-wrong index failed (§I.3): counts the drift and, on main,
 // demotes each index it names in one schema commit.
 fn trip_drift(mut db: Db, i: u64, seen: List[(u32, u32)]) -> Result[(), Error] waits {
-    let catalog = share_page_tree(db.heads[i].roots.catalog)
+    let catalog = pages.share_page_tree(pages.holder_heads(db.holders)[i].roots.catalog)
     count_drift(mut db, catalog, seen)?
     if i != 0 {
         return Ok(())

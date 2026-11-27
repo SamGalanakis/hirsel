@@ -314,7 +314,7 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     Ok(())
 }
 
-fn check_roots(mut walk: CheckWalk, roots: LocatedRoots) -> Result[(), Error] waits {
+fn check_roots(mut walk: CheckWalk, roots: pages.LocatedRoots) -> Result[(), Error] waits {
     check_page(mut walk, roots.collections, 0, CollectionMap, None)?
     for root in[roots.streams, roots.catalog] {
         check_page(mut walk, root, 0, Unprefixed, None)?

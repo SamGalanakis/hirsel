@@ -31,7 +31,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         HistoryUnavailable => {},
         _ => return false
     }
-    if db.heads[0].head != 0 {
+    if pages.holder_heads(db.holders)[0].head != 0 {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 0, d)) {
@@ -40,7 +40,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != 1 || stream_now(db, s) != (0u64, 1u64) {
+    if pages.holder_heads(db.holders)[0].head != 1 || stream_now(db, s) != (0u64, 1u64) {
         return false
     }
     // S7: latest + 1 over an unreplied latest commits nothing.
@@ -60,7 +60,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != 1 {
+    if pages.holder_heads(db.holders)[0].head != 1 {
         return false
     }
     // The effect and its reply in one commit.
@@ -84,10 +84,10 @@ pub fn law_streams(c: Clock) -> bool waits {
         Committed(_) => {},
         _ => return false
     }
-    if db.heads[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) {
+    if pages.holder_heads(db.holders)[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) {
         return false
     }
-    match get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(1)))) {
+    match pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(1)))) {
         Some(v) => if decode_word(v) != 11 {
             return false
         },
@@ -105,7 +105,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != 2 {
+    if pages.holder_heads(db.holders)[0].head != 2 {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 1, d)) {
@@ -135,10 +135,10 @@ pub fn law_streams(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) {
+    if pages.holder_heads(db.holders)[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) {
         return false
     }
-    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
+    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 2, d)) {
@@ -218,7 +218,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != 5 || stream_now(db, s) != (2u64, 1u64) {
+    if pages.holder_heads(db.holders)[0].head != 5 || stream_now(db, s) != (2u64, 1u64) {
         return false
     }
     // AH2: below latest there is no digest to compare, whatever the bytes.
@@ -234,7 +234,7 @@ pub fn law_streams(c: Clock) -> bool waits {
             _ => return false
         }
     }
-    if db.heads[0].head != 5 {
+    if pages.holder_heads(db.holders)[0].head != 5 {
         return false
     }
     // Recording checks the admission, revision, and one-CALL-per-frame rule.
@@ -263,7 +263,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         Committed(_) => {},
         _ => return false
     }
-    if db.heads[0].head != 6 {
+    if pages.holder_heads(db.holders)[0].head != 6 {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 3, d)) {
@@ -413,7 +413,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let same_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 21)?;
-        Ok(data_row_count(tx.ops.rows))
+        Ok(pages.data_row_count(tx.ops.rows))
     }))
     match take same_j {
         Committed(done) => if done.value != 1 {
@@ -423,7 +423,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let changed_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 22)?;
-        Ok(data_row_count(tx.ops.rows))
+        Ok(pages.data_row_count(tx.ops.rows))
     }))
     match take changed_j {
         Committed(done) => done.value == 7,
@@ -468,7 +468,7 @@ fn test_staged_index_reads(c: Clock) -> Result[(), Error] waits {
         return Error(Foreign)
     }
     let held = snapshot(db)
-    let root = tree_stamp(held.roots.collections)
+    let root = pages.tree_stamp(held.roots.collections)
     let outcome = run(mut db, None, (copy_env(t), copy_env(ix)), fn(mut tx, call_env) -> Result[(), Error] {
         if !delete(mut tx, call_env.0, 1)? || fetch(tx, call_env.0, 1)? != None {
             return Error(Missing("staged delete"))
@@ -487,7 +487,7 @@ fn test_staged_index_reads(c: Clock) -> Result[(), Error] waits {
     if let Aborted(Undone(value: Foreign, ticket: None)) = outcome {
         let now = snapshot(db)
         let sh = view t
-        if version(now) == version(held) && tree_stamp(now.roots.collections) == root && get(result.unwrap(reader(db, 0u64)), now, sh, 1)? == Some(4u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 2)? == Some(9u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 3)? == None {
+        if version(now) == version(held) && pages.tree_stamp(now.roots.collections) == root && get(result.unwrap(reader(db, 0u64)), now, sh, 1)? == Some(4u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 2)? == Some(9u64) && get(result.unwrap(reader(db, 0u64)), now, sh, 3)? == None {
             return Ok(())
         }
     }

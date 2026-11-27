@@ -1,0 +1,94 @@
+fn capture_tail_bases(pins: List[pages.Pin]) -> Result[pages.TailBases, Error] {
+    disk_allocation(scoped fn() -> Result[pages.TailBases, Error] {
+        Ok(pages.tail_bases(pins))
+    })
+}
+
+/// The key codec of the table. Rows rank in the order of the bytes it
+/// writes, which is the order a package breaks ties in.
+pub fn key_codec[K, V](t: Table[K, V]) -> std.codec.Key[K] {
+    t.key
+}
+
+// One page of the tail, in source key order: each changed key with its row
+// in the Tx's view, or None where the Tx's view has no row. `next` is the
+// first unreturned key, which the next page passes as `resume`.
+pub type Tail[K, V] {
+    rows: List[(K, Option[V])],
+    next: Option[Bytes]
+}
+
+fn tiered_source(roots: pages.Roots, id: u32) -> Result[bool, Error] {
+    let Some(descriptor) = std.page.lookup(roots.collections.root, prefix(id)?) else {
+        return Ok(false)
+    }
+    Ok(pages.collection_descriptor(descriptor).residency == ResidentTiered)
+}
+
+// `read_tail`: the tail of `decl` over `source`, from `resume` (inclusive) or the source's
+// first key, within `l`. None when the projection has no published image of
+// `source` on the Tx's branch, or the Tx carries no pin at the image's
+// position (for example, a Snapshot pinned by the application): the
+// caller then has no base and reads the source itself. It never waits. It
+// records the projection row's key and the source span it covered, so a
+// commit that changes either conflicts with a `run` that read it. A Tiered
+// source is refused: its staged rows are not in the Tx's tree.
+pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume: Option[Bytes], l: Limits) -> Result[Option[Tail[K, V]], Error] {
+    page_limits(l)?
+    check_table_read(tx, source)?
+    if tiered_source(tx.roots, source.id)? {
+        return Error(Tiered(Tail))
+    }
+    let row = projection_row(tx, decl)?
+    let wanted_binding = Binding(store: tx.store, branch: tx.info.id.branch, table: source.id)
+    if row.binding != Some(wanted_binding) {
+        return Ok(None)
+    }
+    let Some(image) = row.image else {
+        return Ok(None)
+    }
+    let Some(bases) = view tx.bases else {
+        return Ok(None)
+    }
+    let Some(slot) = pages.tail_base(bases, decl.name, image.slot, image.position, wanted_binding.branch) else {
+        return Ok(None)
+    }
+    let base = view bases[slot]
+    let low = match resume {
+        Some(key) => failure_result_from_rep(types.copied(key))?,
+        None => prefix(source.id)?,
+    }
+    let high = prefix(source.id + 1)?
+    let mut out = change_output(Some(l))
+    if low < high {
+        let after = if pages.data_row_count(tx.ops.rows) == 0 && list.len(tx.below) == 0 {
+            pages.share_page_tree(tx.roots.collections)
+        } else {
+            transaction_collection_pages(tx)?
+        }
+        walk_page_changes(mut out, Some(view base.roots.collections), after, Some(clone(low)), Some(clone(high)))?
+    }
+    if let Some(_) = out.deferred {
+        return Error(Tiered(Tail))
+    }
+    if list.len(out.trimmed) > 0 || list.len(out.bounds) > 0 {
+        return Error(failure_from_rep(pages.malformed(0)))
+    }
+    let span_end = match out.next {
+        Some(key) => failure_result_from_rep(types.copied(key))?,
+        None => take high,
+    }
+    note_read(tx, Span(take low, take span_end))?
+    let ChangeOutput(rows: take found, next: take resume_at, ..) = take out
+    let mut rows: List[(K, Option[V])] = list.with_capacity(list.len(found))
+    for change in found {
+        let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
+        let key = decoded(std.codec.decode_key(source.key, raw_key))?
+        let value = match change.value {
+            Some(raw) => Some(row_value(source.readers, source.id, raw)?),
+            None => None,
+        }
+        list.push(mut rows, (take key, take value))
+    }
+    Ok(Some(Tail(rows: take rows, next: take resume_at)))
+}

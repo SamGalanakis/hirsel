@@ -65,7 +65,7 @@ pub fn claim_key_bytes(key: ClaimKey) -> Result[Bytes, Error] {
 
 /// The stored horizon for a replied claim, including the NEVER sentinel.
 pub fn claim_reply_expiry(db: Db, address: Bytes) -> Result[Option[u64], Error] {
-    let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, format.CLAIMS, address) else {
+    let Some(raw) = pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, format.CLAIMS, address) else {
         return Ok(None)
     }
     let row = claim_parse(raw)?
@@ -108,27 +108,27 @@ fn claim_address(key: ClaimKey) -> Result[ClaimAddress, Error] {
 
 fn claim_op_end(raw: Bytes) -> Result[u64, Error] {
     if list.len(raw) == 0 || raw[0u64] == 0 || raw[0u64] > 64 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let op: u64 = int.widen(raw[0u64])
     if op >= list.len(raw) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(op + 1)
 }
 
 fn claim_principal_end(raw: Bytes, op_end: u64) -> Result[u64, Error] {
     if list.len(raw) < op_end + 2 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let subject: u64 = int.widen(raw[op_end + 1])
     if subject > SUBJECT_MAX || list.len(raw) <= op_end + 2 + subject {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let principal_end = op_end + 2 + subject
     let width: u64 = int.widen(raw[principal_end])
     if width == 0 || list.len(raw) != principal_end + 1 + width {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(principal_end)
 }
@@ -144,11 +144,11 @@ fn claim_expiry(at: u64, retention_ms: u64) -> u64 {
 fn claim_parse(raw: Bytes) -> Result[ClaimRow, Error] {
     let width = list.len(raw)
     if width < 41 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let expiry: u64 = list.word_le(raw, 33)
     if (raw[0u64] == 1 && expiry != 0) || (raw[0u64] == 2 && expiry == 0) || (raw[0u64] != 1 && raw[0u64] != 2) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let mut digest_bytes: Inline[u8, 32] =[0u8; 32]
     for i in 0u64 .. 32u64 {
@@ -199,7 +199,7 @@ fn read_keyed_policy(raw: Bytes) -> Result[KeyedPolicy, Error] {
 
 pub fn keyed_policy(db: Db, op: Bytes) -> Result[Option[KeyedPolicy], Error] {
     let name = op_claim_key(op)?
-    match keyed_lookup(db.heads[0u64].roots.keyed, KEYED_OPS, name) {
+    match pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, KEYED_OPS, name) {
         Some(raw) => Ok(Some(read_keyed_policy(raw)?)),
         None => Ok(None),
     }
@@ -248,7 +248,7 @@ fn claim_index_key(prefix_bytes: Bytes, expiry: u64, key: Bytes) -> Result[Bytes
     Ok(take raw)
 }
 
-fn claim_count_after(roots: Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
+fn claim_count_after(roots: pages.Roots, edits: List[format.KeyedEdit], tree: u8, key: Bytes) -> u64 {
     let mut edit_index = list.len(edits)
     while edit_index != 0 {
         edit_index -= 1
@@ -260,7 +260,7 @@ fn claim_count_after(roots: Roots, edits: List[format.KeyedEdit], tree: u8, key:
             }
         }
     }
-    match keyed_lookup(roots.keyed, tree, key) {
+    match pages.keyed_lookup(roots.keyed, tree, key) {
         Some(raw) => list.word_le(raw, 0),
         None => 0u64
     }
@@ -277,7 +277,7 @@ fn set_claim_count(mut edits: List[format.KeyedEdit], tree: u8, key: Bytes, card
     append_claim_edit(mut edits, tree, key, take value)
 }
 
-fn forget_claim(roots: Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), Error] {
+fn forget_claim(roots: pages.Roots, mut edits: List[format.KeyedEdit], key: Bytes, expiry: u64) -> Result[(), Error] {
     let op_end = claim_op_end(key)?
     let principal_end = claim_principal_end(key, op_end)?
     let op = list.slice(key, 0, op_end)
@@ -300,7 +300,7 @@ fn claim_deletion_planned(edits: List[format.KeyedEdit], key: Bytes) -> bool {
     false
 }
 
-fn reclaim_claim_scope(roots: Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), Error] {
+fn reclaim_claim_scope(roots: pages.Roots, mut edits: List[format.KeyedEdit], tree: u8, prefix_bytes: Bytes, at: u64) -> Result[(), Error] {
     if list.len(roots.keyed) == 0 {
         return Ok(())
     }
@@ -317,7 +317,7 @@ fn reclaim_claim_scope(roots: Roots, mut edits: List[format.KeyedEdit], tree: u8
             break
         }
         if list.len(indexed) <= width + 8 {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let expiry: u64 = list.word_be(indexed, width)
         if !claim_expired(expiry, at) {
@@ -335,7 +335,7 @@ fn reclaim_claim_scope(roots: Roots, mut edits: List[format.KeyedEdit], tree: u8
 
 fn stage_claim_admit(mut tx: Tx, address: ClaimAddress, d: RequestDigest, args: Bytes, policy: KeyedPolicy, credit: format.KeyedCredit) -> Result[(), Error] {
     let mut edits: List[format.KeyedEdit] = list.new()
-    if let Some(raw) = keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
+    if let Some(raw) = pages.keyed_lookup(tx.roots.keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
         forget_claim(tx.roots, mut edits, address.full, row.expiry)?
     }
@@ -353,7 +353,7 @@ fn stage_claim_admit(mut tx: Tx, address: ClaimAddress, d: RequestDigest, args: 
     if op_count >= policy.keys_max {
         return Error(Full(Resident(Capacity(requested: op_count + 1, available: policy.keys_max))))
     }
-    if let None = keyed_lookup(tx.roots.keyed, KEYED_OPS, address.op) {
+    if let None = pages.keyed_lookup(tx.roots.keyed, KEYED_OPS, address.op) {
         append_claim_edit(mut edits, KEYED_OPS, address.op, Some(keyed_policy_bytes(policy)?))?
     }
     append_claim_edit(mut edits, format.CLAIMS, address.full, Some(claim_value(d, 0, args)))?
@@ -369,11 +369,11 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
     healthy(db)?
     let at = match supplied {
         Some(_) => keyed_time(db),
-        None => db.heads[0u64].at
+        None => pages.holder_heads(db.holders)[0u64].at
     }
     let address = claim_address(key)?
     let stored = keyed_policy(db, key.op)?
-    if let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, format.CLAIMS, address.full) {
+    if let Some(raw) = pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, format.CLAIMS, address.full) {
         let row = claim_parse(raw)?
         if !row.replied || !claim_expired(row.expiry, at) {
             if row.digest != d {
@@ -382,9 +382,9 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
             if row.replied {
                 return Ok(Duplicate(failure_result_from_rep(types.copied(list.slice(raw, 41, list.len(raw))))?))
             }
-            let committing = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0u64].head))
+            let committing = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, pages.holder_heads(db.holders)[0u64].head))
             let Some(take policy) = take stored else {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             let width = list.len(raw)
             return Ok(Ownerless(ClaimCompletion(ticket: committing, key: failure_result_from_rep(types.copied(address.full))?, request: d, policy: take policy, admitted_width: width)))
@@ -442,7 +442,7 @@ fn validate_claim_completion(db: Db, completion: ClaimCompletion) -> Result[(), 
     if !types.same(db.store.hi, db.store.lo, bound_ticket.store.hi, bound_ticket.store.lo) || open_number(db) != bound_ticket.open {
         return Error(Foreign)
     }
-    let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, format.CLAIMS, completion.key) else {
+    let Some(raw) = pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, format.CLAIMS, completion.key) else {
         return Error(Missing("claim"))
     }
     let row = claim_parse(raw)?
@@ -474,7 +474,7 @@ pub fn conclude_claim(mut db: Db, take completion: ClaimCompletion, reply_bytes:
 }
 
 fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Result[(), Error] {
-    let roots = view db.heads[0u64].roots
+    let roots = pages.holder_heads(db.holders)[0u64].roots
     if list.len(roots.keyed) == 0 {
         return Ok(())
     }
@@ -484,11 +484,11 @@ fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Resul
     let mut credit = format.no_keyed_credit()
     while let Some((take key, _)) = std.page.cursor_next_key(mut cursor, prefix_bytes) {
         let op_end = claim_op_end(key)?
-        let Some(raw_policy) = keyed_lookup(roots.keyed, KEYED_OPS, list.slice(key, 0, op_end)) else {
-            return Error(malformed(0))
+        let Some(raw_policy) = pages.keyed_lookup(roots.keyed, KEYED_OPS, list.slice(key, 0, op_end)) else {
+            return Error(failure_from_rep(pages.malformed(0)))
         }
-        let Some(raw_claim) = keyed_lookup(roots.keyed, format.CLAIMS, key) else {
-            return Error(malformed(0))
+        let Some(raw_claim) = pages.keyed_lookup(roots.keyed, format.CLAIMS, key) else {
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         let policy = read_keyed_policy(raw_policy)?
         credit = add_keyed_credit(credit, claim_terminal_credit(db.ceiling, policy, list.len(raw_claim)))
@@ -528,7 +528,7 @@ fn keyed_completion_credit(db: Db, completion: Completion) -> Option[format.Keye
 }
 
 fn check_keyed_completion(db: Db, completion: Completion, call_run: KeyedRun) -> Result[(), Error] {
-    let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, format.CLAIMS, completion.stream) else {
+    let Some(raw) = pages.keyed_lookup(pages.holder_heads(db.holders)[0u64].roots.keyed, format.CLAIMS, completion.stream) else {
         return Error(Missing("claim"))
     }
     let row = claim_parse(raw)?

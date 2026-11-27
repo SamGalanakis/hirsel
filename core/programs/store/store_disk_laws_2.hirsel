@@ -179,7 +179,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     let held = snapshot(db)
     let reader_before_close = result.unwrap(reader(db, 0u64))
-    let high = db.next_node
+    let high = pages.holder_next_node(db.holders)
     let commit_ticket = result.unwrap(checkpoint(mut db))
     match commit_ticket.mark {
         Cut(3) => {},
@@ -191,7 +191,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     result.unwrap(durable(mut db, commit_ticket))
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
-    if identity(reopened) != id || open_number(reopened) != 4 || version(snapshot(reopened)) != 2 || reopened.next_node < high {
+    if identity(reopened) != id || open_number(reopened) != 4 || version(snapshot(reopened)) != 2 || pages.holder_next_node(reopened.holders) < high {
         return false
     }
     if result.unwrap(get(result.unwrap(reader(reopened, 0u64)), snapshot(reopened), sh, 1)) != Some(10u64) || result.unwrap(get(reader_before_close, held, sh, 1)) != Some(10u64) {
@@ -287,7 +287,7 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
         fail("watermark: old insert did not commit")
     }
     let old = snapshot(db)
-    let old_id = tree_stamp(old.roots.collections)
+    let old_id = pages.tree_stamp(old.roots.collections)
     if old_id < manifest.next_stamp {
         fail("watermark: old node was below the cut")
     }
@@ -320,7 +320,7 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
         fail("watermark: new insert did not commit")
     }
     let new = snapshot(reopened)
-    let new_id = tree_stamp(new.roots.collections)
+    let new_id = pages.tree_stamp(new.roots.collections)
     if new_id != old_id {
         fail("watermark: fixture did not reissue the old node id")
     }
@@ -497,7 +497,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
         match take made {
             Ok(Error(Full(Allocation(_)))) => {
                 refusals += 1
-                if db.heads[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || db.next_table != 2 || page_row_count(db.heads[0].roots.catalog) != 1 || page_row_count(db.heads[0].roots.collections) != 512 {
+                if pages.holder_heads(db.holders)[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || db.next_table != 2 || page_row_count(pages.holder_heads(db.holders)[0].roots.catalog) != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 512 {
                     return false
                 }
                 let persisted = result.unwrap(disk_load(child, 1048576))
@@ -507,7 +507,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             },
             Ok(Ok(commit_ticket)) => {
                 successes += 1
-                if db.heads[0].head != 514 || db.checkpointed != 3 || db.next_table != 3 {
+                if pages.holder_heads(db.holders)[0].head != 514 || db.checkpointed != 3 || db.next_table != 3 {
                     return false
                 }
                 result.unwrap(durable(mut db, commit_ticket))
@@ -662,28 +662,28 @@ fn disk_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 // page image reachable from the heads, the pins and the two list roots,
 // each distinct blob body, and the location table's charges.
 fn law_resident_scan(db: Db) -> bool {
-    let mut roots: List[PageRoots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
-    for head in db.heads {
-        list.push(mut roots, share_roots(head.roots))
+    let mut roots: List[pages.PageRoots] = list.with_capacity(list.len(pages.holder_heads(db.holders)) + list.len(pages.holder_pins(db.holders)))
+    for head in pages.holder_heads(db.holders) {
+        list.push(mut roots, pages.share_roots(head.roots))
     }
-    for held in db.pins {
-        list.push(mut roots, share_roots(held.roots))
+    for held in pages.holder_pins(db.holders) {
+        list.push(mut roots, pages.share_roots(held.roots))
     }
     let images = resident_images(roots, Some(disk_state(db).pages.lists))
     accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(disk_state(db).pages.locations))
 }
 
 fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
-    let mut tree = new_page_tree(CollectionMap, 1024)
+    let mut tree = pages.new_page_tree(CollectionMap, 1024)
     let mut stamps = 1u64
     for id in 1u32 .. 5 {
         define_collection(mut tree, id, 1, 1, mut stamps)?
-        put_page_row(mut tree, logical_key(id, types.key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
+        failure_result_from_rep(pages.put_page_row(mut tree, logical_key(id, types.key_word(1))?, string.as_bytes("x"), 1, mut stamps))?
     }
     define_collection(mut tree, 5, 1, 1, mut stamps)?
     bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
     for id in 1u32 .. 5 {
-        if !remove_page_row(mut tree, logical_key(id, types.key_word(1))?, 1, mut stamps)? {
+        if !failure_result_from_rep(pages.remove_page_row(mut tree, logical_key(id, types.key_word(1))?, 1, mut stamps))? {
             return Error(Foreign)
         }
     }

@@ -1,4 +1,4 @@
-fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], data: PageTree, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] {
+fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], data: pages.PageTree, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] {
     let mut out = change_output(Some(limits))
     let beginning = list.slice(low, 0, order.min(4, list.len(low)))
     let mut collections = std.page.cursor_open(data.root, Some(failure_result_from_rep(types.copied(beginning))?), true, false)
@@ -8,7 +8,7 @@ fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
             break
         }
         let (edge, descriptor) = option.unwrap(std.page.collection_slot(data.root, id))
-        if collection_descriptor(descriptor).kind == LogCollection && low <= id {
+        if pages.collection_descriptor(descriptor).kind == LogCollection && low <= id {
             if !admit_change(mut out, id, 4)? {
                 break
             }
@@ -42,7 +42,7 @@ fn tiered_initial_changes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
     Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
 }
 
-fn snapshot_tiered_initial_changes(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] waits {
+fn snapshot_tiered_initial_changes(r: Reader, s: Snapshot, inventory: pages.TieredReadInventory, low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
     retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]]) -> Result[ChangePage, Error] {

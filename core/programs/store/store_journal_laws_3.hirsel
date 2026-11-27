@@ -3,16 +3,16 @@ pub fn journal_law_call_vector() -> bool {
     result.unwrap(format.le(mut value, 0, 2))
     list.fill(mut value, 32, 4u8)
     let key = result.unwrap(logical_key(1, types.key_word(7)))
-    let mut data: DataRows = new_data_rows()
-    push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    let mut data: pages.DataRows = pages.new_data_rows()
+    pages.push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let mut stream_value: Bytes = list.new()
     result.unwrap(format.le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
     result.unwrap(format.le(mut stream_value, 2, 1))
     list.fill(mut stream_value, 8, 3u8)
     let stream = law_stream_bytes(b"stream00", 0u64)
-    let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take stream_value)), trim: None, prior: None))
+    let mut streams: pages.DataRows = pages.new_data_rows()
+    pages.push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take stream_value)), trim: None, prior: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
@@ -121,8 +121,8 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     } else {
         8u64
     }, 3u8)
-    let mut streams: DataRows = new_data_rows()
-    push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take value)), trim: None, prior: None))
+    let mut streams: pages.DataRows = pages.new_data_rows()
+    pages.push_data_row(mut streams, format.DataOp(key: result.unwrap(failure_result_from_rep(types.copied(stream))), value: Some(PageValue(take value)), trim: None, prior: None))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
@@ -130,22 +130,23 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     let checked = CallRecord(key: take entry_key, args: take args, stream: option.unwrap(optional_stream_key_from_rep(format.parse_stream_key(stream))), revision: take revision, code: code_vector())
     call_checked(checked)?
     let call = Some(format.CallSection(record: call_record_to_rep(take checked), settlement: None))
-    let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
-    let mut data: DataRows = new_data_rows()
+    let ci = call_info(db.store, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head + 1, pages.holder_heads(db.holders)[i].at + 1, pages.holder_heads(db.holders)[i].at)
+    let mut data: pages.DataRows = pages.new_data_rows()
     let raw = result.unwrap(encode_sections(ci, mut data, streams, call, db.file_seq, db.file_end))
     let size = list.len(raw)
     let commit = {
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode_commit("fixture", payload))
     }
-    let mut replay = journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, db.next_node, db.limits)?
+    let mut replay = journal_replay(failure_result_from_rep(types.capacity(current_state(db)))?, pages.holder_next_node(db.holders), db.limits)?
     result.unwrap(journal_apply("fixture", mut replay, Commit(take commit)))
-    db.heads[i].roots = share_roots(replay.state.tips[i].roots)
-    db.heads[i].head = replay.state.tips[i].head
-    db.heads[i].at = replay.state.tips[i].at
-    db.next_node = replay.next_node
+    let roots = pages.share_roots(replay.state.tips[i].roots)
+    let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
+    let count_bytes = keyed_root_record_bytes(roots.keyed)
+    pages.replace_head(mut db.holders, i, take roots, replay.state.tips[i].head, replay.state.tips[i].at, old_bytes, count_bytes)
+    pages.set_next_node(mut db.holders, replay.next_node)
     db.changes += 1
-    db.resident = result.unwrap(state_account(replay.state))
+    db.resident = result.unwrap(pages.state_account(replay.state))
     db.file_end += size
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
@@ -164,19 +165,19 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     for size in[31u64, 33u64] {
         let mut wrong: Bytes = list.new()
         list.fill(mut wrong, size, 7u8)
-        let before = db.heads[0].head
+        let before = pages.holder_heads(db.holders)[0].head
         match journal_fixture_call(mut db, 0, refuse, Some(take wrong)) {
             Error(Missing(name)) => if name != "revision" {
                 return false
             },
             _ => return false
         }
-        if db.heads[0].head != before {
+        if pages.holder_heads(db.holders)[0].head != before {
             return false
         }
     }
     let _ = result.unwrap(journal_fixture_call(mut db, 0, refuse, Some(revision_vector())))
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     let br = main_branch(db)
     // The journal has not had a blocking turn since handoff. Only the
     // write barrier makes this answer independent of when it drains.
@@ -262,7 +263,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(durable(mut before, first))
     result.unwrap(close(take before))
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     // AH1 across a reopen: the digest replayed from the frame still binds
     // 0, so theirs mismatches with no frame and the re-commit keeps ours.
     let quiet = db.frame_seq
@@ -270,7 +271,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         RequestMismatch => {},
         _ => return false
     }
-    if db.frame_seq != quiet || db.heads[0].head != head {
+    if db.frame_seq != quiet || pages.holder_heads(db.holders)[0].head != head {
         return false
     }
     // §1.8 with a refused re-commit: admit reserves its open entry before it
@@ -284,14 +285,14 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         _ => return false
     }
     db.ceiling = limit
-    if db.heads[0].head != head {
+    if pages.holder_heads(db.holders)[0].head != head {
         return false
     }
     let again = match result.unwrap(admit_law_stream(mut db, s, 0, ours)) {
         Abandoned(t) => ticket(t),
         _ => return false
     }
-    if again.open != open_number(db) || again.open == first.open || db.heads[0].head != head + 1 {
+    if again.open != open_number(db) || again.open == first.open || pages.holder_heads(db.holders)[0].head != head + 1 {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 0, ours)) {
@@ -300,7 +301,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         },
         _ => return false
     }
-    if db.heads[0].head != head + 1 {
+    if pages.holder_heads(db.holders)[0].head != head + 1 {
         return false
     }
     match result.unwrap(admit_law_stream(mut db, s, 0, theirs)) {
@@ -325,7 +326,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         return false
     }
     let b = main_branch(db)
-    match result.unwrap(recorded(db, b, db.heads[0].head)) {
+    match result.unwrap(recorded(db, b, pages.holder_heads(db.holders)[0].head)) {
         Some(call) => if !stream_record_matches(s, call.record.stream) {
             return false
         },
@@ -348,13 +349,13 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Aborted(Undone(value: 5, ticket: Some(t))) => t,
         _ => return false
     }
-    match result.unwrap(recorded(db, b, db.heads[0].head)) {
+    match result.unwrap(recorded(db, b, pages.holder_heads(db.holders)[0].head)) {
         Some(call) => if !stream_record_matches(s, call.record.stream) {
             return false
         },
         None => return false
     }
-    if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
+    if let Some(_) = pages.get_page_row(pages.holder_heads(db.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(2)))) {
         return false
     }
     // I4 with a pin: three overwrites of key 9 leave obsolete charges.
@@ -376,7 +377,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(durable(mut db, final_item))
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
-    let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, 0)
+    let attempt = call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, db.writer_pin_bytes, 0)
     let no_pins: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     let figure = match stage(mut db, 0, wall, None, keep_reply, attempt, no_pins, fn(mut tx: Tx) -> Result[(), u64] {
         settle_body(mut tx, s)
@@ -401,13 +402,13 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         return false
     }
     db.ceiling = ceiling
-    let committed_at = db.heads[0].head
+    let committed_at = pages.holder_heads(db.holders)[0].head
     result.unwrap(close(take db))
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     if stream_now(after, s) != (2u64, 2u64) || !stream_reply_is(after, s, string.as_bytes("r2")) {
         return false
     }
-    match get_page_row(after.heads[0].roots.collections, result.unwrap(logical_key(1, types.key_word(9)))) {
+    match pages.get_page_row(pages.holder_heads(after.holders)[0].roots.collections, result.unwrap(logical_key(1, types.key_word(9)))) {
         Some(v) => if decode_word(v) != 5 {
             return false
         },
@@ -437,7 +438,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         HistoryUnavailable => {},
         _ => return false
     }
-    if after.frame_seq != still || after.heads[0].head != committed_at {
+    if after.frame_seq != still || pages.holder_heads(after.holders)[0].head != committed_at {
         return false
     }
     result.unwrap(close(take after))
@@ -489,7 +490,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         return false
     }
     let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    let before = db.heads[0].head
+    let before = pages.holder_heads(db.holders)[0].head
     let live_bytes = db.resident
     let frames = db.frame_seq
     let end = db.file_end
@@ -503,7 +504,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if db.heads[0].head != before || db.resident != live_bytes || db.frame_seq != frames || db.file_end != end {
+    if pages.holder_heads(db.holders)[0].head != before || db.resident != live_bytes || db.frame_seq != frames || db.file_end != end {
         return false
     }
     let main = main_branch(db)
@@ -526,7 +527,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if db.heads[0].head != before + 1 {
+    if pages.holder_heads(db.holders)[0].head != before + 1 {
         return false
     }
     let unbounded_bytes = db.file_end - open_end
@@ -543,7 +544,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if db.heads[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
+    if pages.holder_heads(db.holders)[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
         return false
     }
     result.unwrap(durable(mut db, final_item))
@@ -551,7 +552,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     let t2 = result.unwrap(table(mut after, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let s = snapshot(after)
-    let good = after.heads[0].head == before + 2 && step_row(s, t2, 7) == None && step_row(s, t2, 1) == Some(10u64) && step_row(s, t2, 8) == Some(80u64) && step_row(s, t2, 9) == Some(90u64)
+    let good = pages.holder_heads(after.holders)[0].head == before + 2 && step_row(s, t2, 7) == None && step_row(s, t2, 1) == Some(10u64) && step_row(s, t2, 8) == Some(80u64) && step_row(s, t2, 9) == Some(90u64)
     result.unwrap(close(take after))
     good
 }
@@ -607,7 +608,7 @@ pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             Committed(_) => {},
             _ => return false
         }
-        let head = db.heads[0].head
+        let head = pages.holder_heads(db.holders)[0].head
         match recorded(db, br, head) {
             Ok(None) => {},
             _ => return false
@@ -634,7 +635,7 @@ fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         }
     }
     let br = main_branch(db)
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     match recorded(db, br, head)? {
         None => {},
         Some(_) => fail("journal-ack record")
@@ -871,12 +872,12 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     }))
     match take done {
         Committed(x) => {
-            if !accepted || x.value != 15729082 + final_item || db.heads[0].head != 2 {
+            if !accepted || x.value != 15729082 + final_item || pages.holder_heads(db.holders)[0].head != 2 {
                 return false
             }
             result.unwrap(durable(mut db, x.ticket))
         },
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if accepted || db.heads[0].head != 1 || page_row_count(db.heads[0].roots.collections) != 0 {
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if accepted || pages.holder_heads(db.holders)[0].head != 1 || page_row_count(pages.holder_heads(db.holders)[0].roots.collections) != 0 {
             return false
         },
         _ => return false
@@ -903,14 +904,14 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
         }
     }
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.heads[0].head != (if accepted {
+    if pages.holder_heads(reopened.holders)[0].head != (if accepted {
         2u64
     } else {
         1u64
     }) {
         return false
     }
-    if page_row_count(reopened.heads[0].roots.collections) != (if accepted {
+    if page_row_count(pages.holder_heads(reopened.holders)[0].roots.collections) != (if accepted {
         16u64
     } else {
         0u64

@@ -15,7 +15,7 @@ fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         fail("second admit")
     }
     let _ = conclude_claim(mut db, take one, b"done")?
-    let expiry = db.heads[0u64].at + 10000
+    let expiry = pages.holder_heads(db.holders)[0u64].at + 10000
     let reserved = db.keyed_credit.resident
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
@@ -27,7 +27,7 @@ fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let replied = b"\x03pay\x02\x05alice\x03one"
     let admitted = b"\x03pay\x02\x05alice\x03two"
     {
-        let trees = view reopened.heads[0u64].roots.keyed
+        let trees = pages.holder_heads(reopened.holders)[0u64].roots.keyed
         if list.len(trees) != 7 || reopened.keyed_credit.resident != reserved {
             fail("checkpoint lost a keyed root or reserve")
         }
@@ -44,31 +44,31 @@ fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         let mut local: Bytes = clone(principal)
         list.put_word_be(mut local, expiry)
         list.append(mut local, replied)
-        let Some(done) = get_page_row(trees[1u64], replied) else {
+        let Some(done) = pages.get_page_row(trees[1u64], replied) else {
             fail("replied row missing")
         }
-        let Some(opened) = get_page_row(trees[1u64], admitted) else {
+        let Some(opened) = pages.get_page_row(trees[1u64], admitted) else {
             fail("open row missing")
         }
-        let Some(op_count) = get_page_row(trees[4u64], op) else {
+        let Some(op_count) = pages.get_page_row(trees[4u64], op) else {
             fail("op count missing")
         }
-        let Some(principal_count) = get_page_row(trees[5u64], principal) else {
+        let Some(principal_count) = pages.get_page_row(trees[5u64], principal) else {
             fail("principal count missing")
         }
         if done[0u64] != 2 || list.slice(done, 41, list.len(done)) != b"done" || opened[0u64] != 1 || list.slice(opened, 41, list.len(opened)) != b"args" || op_count != b"\x02\x00\x00\x00\x00\x00\x00\x00" || principal_count != op_count {
             fail("checkpoint changed claim rows or counts")
         }
-        if let None = get_page_row(trees[2u64], global) {
+        if let None = pages.get_page_row(trees[2u64], global) {
             fail("op expiry index missing")
         }
-        if let None = get_page_row(trees[3u64], local) {
+        if let None = pages.get_page_row(trees[3u64], local) {
             fail("principal expiry index missing")
         }
-        if let None = get_page_row(trees[6u64], admitted) {
+        if let None = pages.get_page_row(trees[6u64], admitted) {
             fail("open index missing")
         }
-        if let Some(_) = get_page_row(trees[6u64], replied) {
+        if let Some(_) = pages.get_page_row(trees[6u64], replied) {
             fail("replied claim remained open")
         }
     }
@@ -185,7 +185,7 @@ fn claim_reclaims_expired_front(c: Clock) -> Result[(), Error] waits {
         fail("first admit")
     }
     let _ = conclude_claim(mut db, take one, b"done")?
-    let expiry = db.heads[0u64].at + 10000
+    let expiry = pages.holder_heads(db.holders)[0u64].at + 10000
     let keep: Option[fn(Error) -> bool] = None
     let _ = store_body_at(mut db, 0, expiry, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         let _ = info(mut tx)
@@ -195,7 +195,7 @@ fn claim_reclaims_expired_front(c: Clock) -> Result[(), Error] waits {
         fail("principal reclaim")
     }
     let _ = conclude_claim(mut db, take two, b"done")?
-    let next_expiry = db.heads[0u64].at + 10000
+    let next_expiry = pages.holder_heads(db.holders)[0u64].at + 10000
     let _ = store_body_at(mut db, 0, next_expiry, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         let _ = info(mut tx)
         Ok(())
@@ -203,7 +203,7 @@ fn claim_reclaims_expired_front(c: Clock) -> Result[(), Error] waits {
     let Accepted(_) = admit_claim(mut db, third, digest, b"args", Some(take policy))? else {
         fail("op reclaim")
     }
-    let trees = view db.heads[0u64].roots.keyed
+    let trees = pages.holder_heads(db.holders)[0u64].roots.keyed
     let (rows, _) = std.page.totals(trees[1u64].root)
     let (op_expiries, _) = std.page.totals(trees[2u64].root)
     let (principal_expiries, _) = std.page.totals(trees[3u64].root)
@@ -445,7 +445,7 @@ fn claim_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> 
     claim_crash_mark(mut db, out, aborted)?
     // Both replies expire at their reply's at + 10000. Lift keyed time there,
     // so the next admission at a full scope reclaims both in its own commit.
-    let at = db.heads[0u64].at + 10000
+    let at = pages.holder_heads(db.holders)[0u64].at + 10000
     let keep: Option[fn(Error) -> bool] = None
     let lifted = store_body_at(mut db, 0, at, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
         let _ = info(mut tx)
@@ -497,7 +497,7 @@ fn claim_crash_expect(db: Db, floor: u64, rows: Table[u64, u64]) -> Result[bool,
     if get(read, snap, rows, 1u64)? != one || get(read, snap, rows, 2u64)? != None || get(read, snap, rows, 3u64)? != None {
         return Ok(false)
     }
-    let roots = view db.heads[0u64].roots.keyed
+    let roots = pages.holder_heads(db.holders)[0u64].roots.keyed
     if head == 1 {
         return Ok(list.len(roots) == 0)
     }
@@ -516,10 +516,10 @@ fn claim_crash_expect(db: Db, floor: u64, rows: Table[u64, u64]) -> Result[bool,
     } else {
         b"\x01\x00\x00\x00\x00\x00\x00\x00"
     }
-    let Some(per_op) = get_page_row(roots[4u64], b"\x03pay") else {
+    let Some(per_op) = pages.get_page_row(roots[4u64], b"\x03pay") else {
         return Ok(false)
     }
-    let Some(per_principal) = get_page_row(roots[5u64], b"\x03pay\x02\x05alice") else {
+    let Some(per_principal) = pages.get_page_row(roots[5u64], b"\x03pay\x02\x05alice") else {
         return Ok(false)
     }
     Ok(per_op == counted && per_principal == counted)
@@ -886,7 +886,7 @@ fn claim_dropped_op_clock_floor_and_skip(d: Dir, r: Random, tasks: Tasks) -> Res
     if let Some(_) = dropped {
         fail("L91 E4: expired claim reported as live")
     }
-    if db.frame_seq != seq_before + 1 || db.file_end <= end_before || db.heads[0].at != 12000 {
+    if db.frame_seq != seq_before + 1 || db.file_end <= end_before || pages.holder_heads(db.holders)[0].at != 12000 {
         fail("L91 E4: check_dropped_claim_ops did not commit clock-floor frame")
     }
     // Second call with wall == head.at writes 0 frames and 0 bytes.

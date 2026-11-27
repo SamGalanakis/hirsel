@@ -6,32 +6,33 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         return Ok(())
     }
     if let None = ran.keyed {
-        if data_row_count(ran.edits) == 0 && data_row_count(ran.replies) == 0 {
+        if pages.data_row_count(ran.edits) == 0 && pages.data_row_count(ran.replies) == 0 {
             return Ok(())
         }
     }
-    let (take candidate, after) = disk_allocation(scoped fn() -> Result[(Roots, u64), Error] {
+    let (take candidate, after) = disk_allocation(scoped fn() -> Result[(pages.Roots, u64), Error] {
         let Some(base) = view ran.roots else {
             fail("store: draft has no base roots")
         }
         let mut first = ran.first_stamp
-        if tree_stamp(base.collections) != tree_stamp(db.heads[i].roots.collections) {
-            let Some(fresh_start) = int.checked_add(db.next_node, 1) else {
+        if pages.tree_stamp(base.collections) != pages.tree_stamp(pages.holder_heads(db.holders)[i].roots.collections) {
+            let Some(fresh_start) = int.checked_add(pages.holder_next_node(db.holders), 1) else {
                 return Error(Limit(Ids))
             }
             first = fresh_start
         }
-        let mut roots = share_roots(base)
+        let mut roots = pages.share_roots(base)
         let mut stamp_out = first
         materialize_ordered_rows(mut roots.collections, ran.edits, ran.order, false, first, mut stamp_out)?
         materialize_rows(mut roots.streams, ran.replies, false, first, mut stamp_out)?
         if let Some(keyed) = ran.keyed {
-            materialize_keyed_edits(mut roots, keyed.edits, first, mut stamp_out)?
+            failure_result_from_rep(pages.materialize_keyed_edits(mut roots, keyed.edits, first, mut stamp_out))?
         }
-        canonical_roots(mut roots)?
+        failure_result_from_rep(pages.canonical_roots(mut roots))?
         Ok((take roots, stamp_out))
     })?
-    db.next_node = order.max(db.next_node, after - 1)
+    let next_node = order.max(pages.holder_next_node(db.holders), after - 1)
+    pages.set_next_node(mut db.holders, next_node)
     ran.roots = Some(take candidate)
     ran.prepared_roots = true
     Ok(())
@@ -44,18 +45,18 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     if let Some(_) = ran.keyed {
         return Ok(false)
     }
-    if let Some(_) = db.heads[i].following {
+    if let Some(_) = branch_follower_slot(db.followers, pages.holder_heads(db.holders)[i].id) {
         return Ok(false)
     }
-    let data_count = data_row_count(ran.edits)
-    let reply_count = data_row_count(ran.replies)
+    let data_count = pages.data_row_count(ran.edits)
+    let reply_count = pages.data_row_count(ran.replies)
     if data_count + reply_count == 0 || (reply_count != 0 && data_count + reply_count != 1) {
         return Ok(false)
     }
     let Some(take base) = replace(mut ran.roots, None) else {
         fail("store: draft has no base roots")
     }
-    if tree_stamp(base.collections) != tree_stamp(db.heads[i].roots.collections) {
+    if pages.tree_stamp(base.collections) != pages.tree_stamp(pages.holder_heads(db.holders)[i].roots.collections) {
         ran.roots = Some(take base)
         return Ok(false)
     }
@@ -63,19 +64,21 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     let changed_roots = if data_count != 0 {
         direct_data_edits(mut db, i, ran)?
     } else {
-        let op = data_row(ran.replies, 0u64)
+        let op = pages.data_row(ran.replies, 0u64)
         match view op.value {
             None => false,
             Some(raw) => {
-                let inline = db.heads[i].roots.streams.inline
                 let empty_key: Bytes = list.new()
-                let mut stamps = ran.first_stamp
-                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, format.staged_bytes(raw), inline, mut stamps)?
+                pages.edit_head_streams(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[bool, Capacity] {
+                    let inline = tree.inline
+                    let mut stamps = ran.first_stamp
+                    std.page.put_inline_unique(mut tree.root, empty_key, op.key, format.staged_bytes(raw), inline, mut stamps)
+                })?
             },
         }
     }
     if !changed_roots {
-        ran.roots = Some(share_roots(db.heads[i].roots))
+        ran.roots = Some(pages.share_roots(pages.holder_heads(db.holders)[i].roots))
     }
     Ok(changed_roots)
 }
@@ -86,37 +89,43 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
 // head's rows as they were. The paths take stamps in turn from first_stamp,
 // inside the interval the body reserved for them.
 fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, Capacity] {
-    let inline = db.heads[i].roots.collections.inline
+    pages.edit_head_collection(mut db.holders, i, scoped fn(mut tree: pages.PageTree) -> Result[bool, Capacity] {
+        direct_collection_edits(mut tree, ran.edits, ran.first_stamp)
+    })
+}
+
+fn direct_collection_edits(mut tree: pages.PageTree, edits: pages.DataRows, first_stamp: u64) -> Result[bool, Capacity] {
+    let inline = tree.inline
     // put_inline_unique takes no stamp above this bound; each path is far shorter than 512.
-    let rows = data_row_count(ran.edits)
-    if ran.first_stamp == 0 || rows > 1024 || ran.first_stamp > 18446744073709551103u64 - 512 * rows {
+    let rows = pages.data_row_count(edits)
+    if first_stamp == 0 || rows > 1024 || first_stamp > 18446744073709551103u64 - 512 * rows {
         return Ok(false)
     }
     for e in 0u64 .. rows {
-        let op = data_row(ran.edits, e)
+        let op = pages.data_row(edits, e)
         let Some(raw) = view op.value else {
             return Ok(false)
         }
         let collection = list.slice(op.key, 0, 4)
-        if collection_kind(db.heads[i].roots.collections, collection) == Some(CellCollection) {
+        if pages.collection_kind(tree, collection) == Some(CellCollection) {
             return Ok(false)
         }
         for prior in 0u64 .. e {
-            if list.compare_bytes(list.slice(data_row(ran.edits, prior).key, 0, 4), collection) == Equal {
+            if list.compare_bytes(list.slice(pages.data_row(edits, prior).key, 0, 4), collection) == Equal {
                 return Ok(false)
             }
         }
-        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline)? {
+        if !std.page.inline_unique_ready(mut tree.root, collection, list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline)? {
             return Ok(false)
         }
     }
-    let mut stamps = ran.first_stamp
-    for slot in 0u64 .. data_row_count(ran.edits) {
-        let op = data_row(ran.edits, slot)
+    let mut stamps = first_stamp
+    for slot in 0u64 .. pages.data_row_count(edits) {
+        let op = pages.data_row(edits, slot)
         let Some(raw) = view op.value else {
             fail("store: a checked direct edit lost its value")
         }
-        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline, mut stamps) {
+        match std.page.put_inline_unique(mut tree.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), format.staged_bytes(raw), inline, mut stamps) {
             Ok(true) => (),
             _ => fail("store: a checked direct edit did not apply"),
         }
@@ -142,7 +151,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         Error(take problem) => return Error(take problem),
     }
     if let Some(roots) = draft.roots {
-        let extra = int.saturating_sub(keyed_root_record_bytes(roots.keyed), keyed_root_record_bytes(db.heads[i].roots.keyed))
+        let extra = int.saturating_sub(keyed_root_record_bytes(roots.keyed), keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed))
         check_manifest_addition(db, extra)?
     }
     if let Some(_) = draft.tiered {
@@ -150,7 +159,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
             let Some(roots) = view draft.roots else {
                 fail("store: Tiered draft has no candidate")
             }
-            settled_tiered_bytes(db.tiered, retaining(db), db.heads[i].roots.collections, roots.collections, draft.edits)
+            settled_tiered_bytes(db.tiered, retaining(db), pages.holder_heads(db.holders)[i].roots.collections, roots.collections, draft.edits)
         }
         match total {
             Ok(n) => {
@@ -160,14 +169,14 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
             Error(take problem) => return Error(take problem),
         }
     }
-    if let None = db.heads[i].following {
+    if let None = branch_follower_slot(db.followers, pages.holder_heads(db.holders)[i].id) {
         return Ok(Ready(take draft, Publication(followed: None)))
     }
     let drafted_publication = disk_allocation(scoped fn() -> Result[Publication, Error] {
         let Some(roots) = view draft.roots else {
             fail("store: prepared draft has no roots")
         }
-        failure_result_from_rep(types.capacity(prepare_publication(db, i, db.heads[i].head + 1, roots, db.next_node)))
+        failure_result_from_rep(types.capacity(prepare_publication(db, i, pages.holder_heads(db.holders)[i].head + 1, roots, pages.holder_next_node(db.holders))))
     })
     let publication = match take drafted_publication {
         Ok(take plan) => take plan,
@@ -200,8 +209,8 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
     db.keyed_credit = draft_credit(db, ran)
     if i == 0u64 {
-        for reply_slot in 0u64 .. data_row_count(ran.replies) {
-            let drafted_reply = data_row(ran.replies, reply_slot)
+        for reply_slot in 0u64 .. pages.data_row_count(ran.replies) {
+            let drafted_reply = pages.data_row(ran.replies, reply_slot)
             if map.contains(db.admits, drafted_reply.key) {
                 let settled = match drafted_reply.value {
                     None => true,
@@ -214,7 +223,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         }
     }
     let Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, freed: take freed, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
-    let branch_id = db.heads[i].id
+    let branch_id = pages.holder_heads(db.holders)[i].id
     match db.disk {
         Some(mut state) => {
             if let Some(take written) = take freed {
@@ -232,20 +241,15 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         },
     }
     if let Some(take candidate) = take roots {
-        let PageRoots(collections: take collections, streams: take streams, catalog: take catalog, keyed: take keyed) = take candidate
-        install_page_tree(mut db.heads[i].roots.collections, take collections)
-        install_page_tree(mut db.heads[i].roots.streams, take streams)
-        install_page_tree(mut db.heads[i].roots.catalog, take catalog)
-        db.record_bytes -= keyed_root_record_bytes(db.heads[i].roots.keyed)
-        db.record_bytes += keyed_root_record_bytes(keyed)
-        db.heads[i].roots.keyed = take keyed
+        let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[i].roots.keyed)
+        let count_bytes = keyed_root_record_bytes(candidate.keyed)
+        pages.commit_roots(mut db.holders, i, take candidate, old_bytes, count_bytes)
     }
     db.resident = live_bytes
     if let Some(n) = tiered {
         db.tiered = n
     }
-    db.heads[i].head += 1
-    db.heads[i].at = ci.at
+    pages.advance_head(mut db.holders, i, ci.at)
     db.changes += 1
     if exact {
         db.settled = db.changes
@@ -256,7 +260,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     } else {
         db.frame_seq
     }
-    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head))
     match take value {
         Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: Some(ci), reads: take seen)),
         Error(take a) => Aborted(Undone(value: take a, ticket: Some(commit_ticket)))
@@ -270,7 +274,7 @@ fn commit_skipped[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> Outcome[R, A] {
     } else {
         db.frame_seq
     }
-    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head))
     match take value {
         Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: None, reads: take seen)),
         Error(_) => fail("store: skipped commit must return Ok"),
@@ -295,7 +299,7 @@ fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], sett
     if let Error(_) = prepared.outcome {
         return false
     }
-    if data_row_count(prepared.ops) != 0 || data_row_count(prepared.stream_ops) != 0 {
+    if pages.data_row_count(prepared.ops) != 0 || pages.data_row_count(prepared.stream_ops) != 0 {
         return false
     }
     if !keyed_draft_empty(db, prepared.keyed) {
@@ -313,21 +317,21 @@ fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], sett
     true
 }
 
-fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
+fn draft_row_account(db: Db, i: u64, proposed: pages.Roots) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
-        let mut roots: List[Roots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
-        for slot in 0u64 .. list.len(db.heads) {
+        let mut roots: List[pages.Roots] = list.with_capacity(list.len(pages.holder_heads(db.holders)) + list.len(pages.holder_pins(db.holders)))
+        for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
             let root = if slot == i {
-                share_roots(proposed)
+                pages.share_roots(proposed)
             } else {
-                share_roots(db.heads[slot].roots)
+                pages.share_roots(pages.holder_heads(db.holders)[slot].roots)
             }
             list.push(mut roots, take root)
         }
-        for held in db.pins {
-            list.push(mut roots, share_roots(held.roots))
+        for held in pages.holder_pins(db.holders) {
+            list.push(mut roots, pages.share_roots(held.roots))
         }
-        Ok(page_row_account(roots))
+        Ok(pages.page_row_account(roots))
     })
 }
 
@@ -416,7 +420,7 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
     }
 }
 
-fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+fn frame_draft[R, A](db: Db, base: pages.PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[format.Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
@@ -449,7 +453,7 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
         Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take staged) => {
             let mut prepared = take staged
-            if data_row_count(prepared.ops) == 0 && data_row_count(prepared.stream_ops) == 0 {
+            if pages.data_row_count(prepared.ops) == 0 && pages.data_row_count(prepared.stream_ops) == 0 {
                 if let None = prepared.keyed {
                     return Ok(Prepared(take prepared))
                 }
@@ -464,15 +468,15 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
             materialize_rows(mut prepared.roots.streams, prepared.stream_ops, false, first, mut draw)?
             if let Some(record) = attempt {
                 if let Some(take tiered_plan) = plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, prepared.order, draw)? {
-                    prepared.roots.collections = share_page_tree(tiered_plan.tree)
+                    prepared.roots.collections = pages.share_page_tree(tiered_plan.tree)
                     draw = tiered_plan.next_stamp
                     prepared.plan = Some(take tiered_plan)
                 }
             }
             if let Some(keyed) = prepared.keyed {
-                materialize_keyed_edits(mut prepared.roots, keyed.edits, first, mut draw)?
+                failure_result_from_rep(pages.materialize_keyed_edits(mut prepared.roots, keyed.edits, first, mut draw))?
             }
-            canonical_roots(mut prepared.roots)?
+            failure_result_from_rep(pages.canonical_roots(mut prepared.roots))?
             prepared.prepared_roots = true
             let drawn = draw - 1
             let high = cell.replace(issued, drawn)
@@ -486,25 +490,25 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
 
 // With `memory_only`, rows of Tiered collections are left to the Tiered
 // write plan, which stages them through the attempt's resolver.
-fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
-    let order = failure_result_from_rep(types.capacity(data_order(operations)))?
+fn materialize_rows(mut tree: pages.PageTree, operations: pages.DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+    let order = failure_result_from_rep(types.capacity(pages.data_order(operations)))?
     materialize_ordered_rows(mut tree, operations, order, memory_only, first, mut draw)
 }
 
-fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: format.DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
-    let collection_map = tree_domain(tree) == CollectionMap
+fn materialize_ordered_rows(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+    let collection_map = pages.tree_domain(tree) == CollectionMap
     let mut processed = 0u64
-    for slot_order in 0u64 .. data_row_count(operations) {
+    for slot_order in 0u64 .. pages.data_row_count(operations) {
         if slot_order < processed {
             continue
         }
         let op = ordered_row(operations, order, slot_order)
         if collection_map {
             let collection = list.slice(op.key, 0, 4)
-            if let Some(descriptor) = collection_by_key(tree, collection) {
+            if let Some(descriptor) = pages.collection_by_key(tree, collection) {
                 if descriptor.kind == TableCollection || descriptor.kind == IndexCollection {
                     processed = slot_order + 1
-                    while processed < data_row_count(operations) {
+                    while processed < pages.data_row_count(operations) {
                         let following = ordered_row(operations, order, processed)
                         if list.slice(following.key, 0, 4) != collection {
                             break
@@ -526,15 +530,15 @@ fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: for
     Ok(())
 }
 
-fn materialize_row(mut tree: PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     if let Some(_) = op.trim {
         return Ok(())
     }
     if memory_only && tiered_data_key(tree, op.key) {
         return Ok(())
     }
-    if tree_domain(tree) == CollectionMap {
-        let kind = collection_kind(tree, list.slice(op.key, 0, 4))
+    if pages.tree_domain(tree) == CollectionMap {
+        let kind = pages.collection_kind(tree, list.slice(op.key, 0, 4))
         if kind == Some(CellCollection) {
             return match op.value {
                 Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw),
@@ -551,24 +555,24 @@ fn materialize_row(mut tree: PageTree, op: format.DataOp, memory_only: bool, fir
         }
     }
     match op.value {
-        Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw),
-        Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw),
+        Some(PageValue(raw)) => failure_result_from_rep(pages.put_page_row(mut tree, op.key, raw, first, mut draw)),
+        Some(BlobBody(raw)) => failure_result_from_rep(pages.put_shared_page_row(mut tree, op.key, raw, first, mut draw)),
         None => {
-            let _ = remove_page_row(mut tree, op.key, first, mut draw)?
+            let _ = failure_result_from_rep(pages.remove_page_row(mut tree, op.key, first, mut draw))?
             Ok(())
         },
     }
 }
 
-fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
+fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.DataRows, order: format.DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
     let collection = list.slice(ordered_row(operations, order, start).key, 0, 4)
     let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
         visit_materialized_edit(operations, order, slot, visit)
     }
-    page_result(apply_collection_batch(mut tree, collection, (), edit_at, start, end, first, mut draw))
+    failure_result_from_rep(pages.page_result(pages.apply_collection_batch(mut tree, collection, (), edit_at, start, end, first, mut draw)))
 }
 
-fn visit_materialized_edit(operations: DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+fn visit_materialized_edit(operations: pages.DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
     let op = ordered_row(operations, order, slot)
     let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
         Some(PageValue(raw)) => Some((raw, None)),
@@ -576,20 +580,6 @@ fn visit_materialized_edit(operations: DataRows, order: format.DataOrder, slot: 
         None => None,
     }
     visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: None))
-}
-
-fn apply_collection_batch[T](mut tree: PageTree, collection: Bytes, source: T, edit_at: std.page.EditSource[T], start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), std.page.Error] {
-    let inline = tree.inline
-    let Some(empty_root) = view tree.empty_collection else {
-        fail("store: missing empty collection page")
-    }
-    std.page.edit_collection(mut tree.root, collection, first, mut draw, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-        std.page.apply_sorted_source(mut root, source, edit_at, start, end, inline, mut stamps)?
-        if std.page.count(std.page.image_of(root)) == 0 {
-            root = arc.share(empty_root)
-        }
-        Ok(())
-    })
 }
 
 fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {

@@ -14,12 +14,12 @@ fn claim_quota_reply(mut db: Db, key: ClaimKey, policy: KeyedPolicy) -> Result[(
 }
 
 fn claim_quota_full(mut db: Db, key: ClaimKey, policy: KeyedPolicy) -> bool waits {
-    let head = db.heads[0u64].head
+    let head = pages.holder_heads(db.holders)[0u64].head
     let refused = match admit_claim(mut db, key, request_digest(b"charge", b"args"), b"args", Some(clone(policy))) {
         Error(Full(Resident(_))) => true,
         _ => false,
     }
-    refused && db.heads[0u64].head == head
+    refused && pages.holder_heads(db.holders)[0u64].head == head
 }
 
 // L20 store half (http.md H9, K-6, K-7): each quota alone refuses with Full

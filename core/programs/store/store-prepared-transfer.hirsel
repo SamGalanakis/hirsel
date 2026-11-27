@@ -1,6 +1,6 @@
 // Ships the whole preparation; later catch-up rounds ship ROUND deltas onto it.
 pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
-    let mut built_roots = share_roots(staged.plan.roots)
+    let mut built_roots = pages.share_roots(staged.plan.roots)
     let mut built_next_node = staged.plan.next_node
     let mut extra_rewrites: List[ActivationRewrite] = list.new()
     let has_pending_indexes = list.len(staged.plan.pending_indexes) != 0
@@ -18,9 +18,9 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
             save_child_cut_pack(source, ctx.next_pack)
         }
     }
-    let delta = deploy_result(catalog_changes(source.db.heads[0].roots, built_roots))?
+    let delta = deploy_result(catalog_changes(pages.holder_heads(source.db.holders)[0].roots, built_roots))?
     let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.next_table))?
-    let has_tiered = tiered_collections(source.db.heads[0].roots.collections.root) || tiered_collections(built_roots.collections.root)
+    let has_tiered = pages.tiered_collections(pages.holder_heads(source.db.holders)[0].roots.collections.root) || pages.tiered_collections(built_roots.collections.root)
     let snap = snapshot_from(source.db, 0u64, source.stamp.head, built_roots, int.saturating_add(built_next_node, 1))
     let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
     for desc in ranges {
@@ -83,8 +83,8 @@ pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, 
         scratch_result(write_prepared_payload(mut file, 0x0085, raw))?
     }
     scratch_result(finish_frames(take file))?
-    let carried: Option[(Roots, u64)] = if has_pending_indexes {
-        Some((share_roots(built_roots), built_next_node))
+    let carried: Option[(pages.Roots, u64)] = if has_pending_indexes {
+        Some((pages.share_roots(built_roots), built_next_node))
     } else {
         None
     }
@@ -126,7 +126,7 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
                 CatalogIndex(IndexRecord(shape: Entries(Unique), ..)) => true,
                 _ => false,
             }
-            (descriptor_kind_byte(catalog_kind(meta.record)), meta.next, unique)
+            (pages.descriptor_kind_byte(catalog_kind(meta.record)), meta.next, unique)
         },
         None => {
             if desc.count != 0u64 {
@@ -254,14 +254,14 @@ fn validate_prepared_inner(owner: Option[View[Db]], d: Dir) -> Result[ValidatedI
         let base_descs = match owner {
             Some(db) => match disk_state(db).lease {
                 Some(lease) => deploy_result(base_descriptors_from_tree(lease.collections))?,
-                None => deploy_result(base_descriptors_from_tree(db.heads[0u64].roots.collections))?,
+                None => deploy_result(base_descriptors_from_tree(pages.holder_heads(db.holders)[0u64].roots.collections))?,
             },
             None => deploy_result(read_export_base_descriptors(d, store_key_from_rep(head.context.store)))?,
         }
         derive_range_residencies(base_descs, needed, source_map, meta.base.next_table, false)?
     }
     let inline_threshold = match owner {
-        Some(db) => db.heads[0u64].roots.collections.inline,
+        Some(db) => pages.holder_heads(db.holders)[0u64].roots.collections.inline,
         None => 256u64,
     }
     let mut ranges: List[ValidatedRange] = list.new()
@@ -355,7 +355,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
         for row in payload.rewrites {
             let id_key = deploy_result(prefix(row.id))?
             if let Some((_, desc)) = std.page.collection_slot(lease.collections.root, id_key) {
-                if collection_descriptor(desc).residency != ResidentMemory {
+                if pages.collection_descriptor(desc).residency != ResidentMemory {
                     has_cold_rewrite = true
                 }
             }
@@ -367,7 +367,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     }
     let current = disk_state(db).options.resident_limit
     // An import pin still held is stale: this import's keep replaces it.
-    let exact = install_account(db, share_roots(db.heads[0u64].roots))?
+    let exact = install_account(db, pages.share_roots(pages.holder_heads(db.holders)[0u64].roots))?
     let reserve_delta = if has_tiered && !store_has_tiered(db) {
         tiered_plan_reserve(disk_state(db).options)
     } else {
@@ -377,8 +377,8 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     if requested > current {
         return Error(Store(Full(Resident(Capacity(requested: requested, available: current)))))
     }
-    let low = db.next_node
-    let inline = db.heads[0u64].roots.collections.inline
+    let low = pages.holder_next_node(db.holders)
+    let inline = pages.holder_heads(db.holders)[0u64].roots.collections.inline
     let mut high = low
     for checked_range in payload.ranges {
         if checked_range.kind == 0 {
@@ -410,7 +410,7 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     if high == 18446744073709551615u64 {
         return Error(IdBound)
     }
-    db.next_node = high
+    pages.set_next_node(mut db.holders, high)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.imported = None
         state.reserving = Some(payload.digest)
@@ -442,7 +442,7 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
             list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: None, slot: None, rows: checked_range.count, charge: checked_range.row_bytes, count: checked_range.count, digest: checked_range.digest, residency: ResidentTiered))
             continue
         }
-        let built = deploy_result(page_result(std.page.bulk(checked_range.rows, Collection, inline, mut ids)))?
+        let built = deploy_result(failure_result_from_rep(pages.page_result(std.page.bulk(checked_range.rows, Collection, inline, mut ids))))?
         if ids - 1 > high {
             return Error(IdBound)
         }
@@ -488,7 +488,7 @@ fn catalog_bytes_equal(a: Bytes, b: Bytes) -> bool {
 fn planned_catalog(mut plan: SchemaPlan, delta: List[CatalogChange]) -> Result[(), DeployError] {
     for changed in delta {
         let agrees = {
-            let current = get_page_row(plan.roots.catalog, changed.key)
+            let current = pages.get_page_row(plan.roots.catalog, changed.key)
             match changed.before {
                 Some(expected) => match current {
                     Some(raw) => catalog_bytes_equal(raw, expected),
@@ -539,7 +539,7 @@ fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result
             deploy_result(put_collection_with_residency(mut plan.roots.collections, key, take slot, replaced.rows, replaced.charge, replaced.kind, replaced.residency, private_from, mut next_stamp))?
         }
     }
-    deploy_result(canonical_tree(mut plan.roots.collections))?
+    deploy_result(failure_result_from_rep(pages.canonical_tree(mut plan.roots.collections)))?
     plan.next_node = next_stamp - 1
     Ok(())
 }

@@ -36,19 +36,19 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     if data.place.pack != 1 || data.place.offset != 72 || list.len(data.incoming) != 1 || data.incoming[0u64] != HolderSource(0, 0, 1) || listed.place.pack != 2 || listed.place.offset != 72 || list.len(listed.incoming) != 1 || listed.incoming[0u64] != ListSource(0) {
         return Error(Foreign)
     }
-    let root_ptrs: LocatedRoots = clone(validated.manifest.branches[0u64].roots)
+    let root_ptrs: pages.LocatedRoots = clone(validated.manifest.branches[0u64].roots)
     let inline = validated.manifest.inline
     let ValidatedPageManifest(graph: take resolved, ..) = take validated
     let mut graph = take resolved
     let empty_collection = std.page.empty(0, 0, Collection)
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let roots = attach_page_roots(pages, root_ptrs, inline, empty_collection)
+    let page_nodes = attach_page_graph(mut graph, empty_collection)?
+    let roots = pages.attach_page_roots(page_nodes, root_ptrs, inline, empty_collection)
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
-    let Some(value) = get_page_row(roots.streams, key) else {
+    let Some(value) = pages.get_page_row(roots.streams, key) else {
         return Error(Foreign)
     }
-    if value != string.as_bytes("x") || one_page_account(roots) != 78 {
+    if value != string.as_bytes("x") || pages.one_page_account(roots) != 78 {
         return Error(Foreign)
     }
     // The checked pointer reads the inner PAGE. The file's only frame after
@@ -146,7 +146,7 @@ fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
     let manifest = format.DiskContext(store: store_key_to_rep(id), role: 1, seq: 1)
     failure_result_from_rep(types.capacity(format.history_append_header(mut raw, manifest, 2, 1)))?
     let old = format_header(manifest, raw, 9u32)?
-    let reference = HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
+    let reference = pages.HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
     match history_object_context("m-1", id, 1, reference, old) {
         Error(Unsupported(9)) => Ok(()),
         _ => Error(Missing("bucket object format refusal")),

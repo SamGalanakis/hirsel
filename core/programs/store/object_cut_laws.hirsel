@@ -44,10 +44,10 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
 
 // A root at the row limit fits directly. One more row needs two child
 // objects whose combined leaf rows are exactly the sorted input.
-fn object_locator_boundary(mut source: ObjectPackRead, head: HistoryHead, manifest: HistoryRef, mut workspace: HistoryBuffers) -> Result[(), Error] waits {
-    let mut input: List[HistoryRef] = list.with_capacity(32769)
+fn object_locator_boundary(mut source: ObjectPackRead, head: HistoryHead, manifest: pages.HistoryRef, mut workspace: HistoryBuffers) -> Result[(), Error] waits {
+    let mut input: List[pages.HistoryRef] = list.with_capacity(32769)
     for ordinal in 1u64 .. 32770 {
-        list.push(mut input, HistoryRef(seq: ordinal, epoch: 1, len: 96, digest: ordinal * 2))
+        list.push(mut input, pages.HistoryRef(seq: ordinal, epoch: 1, len: 96, digest: ordinal * 2))
     }
     let flat = history_make_locator(mut source.client, head.store, 5, 1, 1, clone(list.slice(input, 0, 32768)), mut workspace, source.deadline)?
     if flat.depth != 0 || list.len(flat.rows) != 32768 {
@@ -82,9 +82,9 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut workspace = history_buffers(1057000)?
-    let mut input: List[HistoryRef] = list.with_capacity(32770)
+    let mut input: List[pages.HistoryRef] = list.with_capacity(32770)
     for pack in 1u64 .. 32771 {
-        list.push(mut input, HistoryRef(seq: pack, epoch: 1, len: 96, digest: pack * 2))
+        list.push(mut input, pages.HistoryRef(seq: pack, epoch: 1, len: 96, digest: pack * 2))
     }
     let id = StoreId(hi: 2, lo: 7)
     let previous = history_make_locator(mut client, id, 20, 1, 1, clone(input), mut workspace, deadline)?
@@ -92,8 +92,8 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
         fail("the admitted locator has the wrong shape")
     }
     let unchanged = previous.rows[1]
-    let parent = HistoryRef(seq: 19, epoch: 1, len: 112, digest: 19)
-    let manifest = HistoryRef(seq: 1, epoch: 1, len: 88, digest: 7)
+    let parent = pages.HistoryRef(seq: 19, epoch: 1, len: 112, digest: 19)
+    let manifest = pages.HistoryRef(seq: 1, epoch: 1, len: 88, digest: 7)
     let kept = HistoryRetention(floor: 20, earlier: list.new())
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 20)
     let prior_cut = history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, parent, manifest, kept, previous)?
@@ -101,7 +101,7 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let mark = history_read_mark("locator at 20", id, prior_cut, workspace.packet)?
     let inherited = history_locator(mut client, base, mark, workspace.packet, deadline)?
     let mut located = empty_history_locator()
-    let changed: List[HistoryRef] = clone(list.slice(input, 1, 32770))
+    let changed: List[pages.HistoryRef] = clone(list.slice(input, 1, 32770))
     let updated = history_make_locator_reusing(mut client, id, 24, 1, 1, take changed, inherited, mut located, mut workspace, deadline)?
     if updated.depth != 1 || list.len(updated.rows) != 2 || updated.rows[0].seq != 24 || !history_ref_matches(updated.rows[1], unchanged) {
         fail("deleting an earlier row rewrote an unchanged chunk or misplaced it")
@@ -356,7 +356,7 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     if let Error(Remote(NotFound)) = history_fetch(mut witness, "head", mut workspace.witness, deadline) {} else {
         fail("the failed import published an intermediate empty store")
     }
-    let debris = history_key("p-", HistoryRef(seq: 1, epoch: 1, len: 1, digest: 77))
+    let debris = history_key("p-", pages.HistoryRef(seq: 1, epoch: 1, len: 1, digest: 77))
     let mut orphan = string.into_bytes(string.from("x"))
     deploy_result(history_create(mut witness, debris, mut orphan, mut workspace.compare, deadline))?
     let clean = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 3))?
@@ -598,7 +598,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     }
     let participants = cut_participants(draft, NoHolderChange)?
     let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
-    let mut next_stamp = stamp_after(draft.next_node)?
+    let mut next_stamp = stamp_after(pages.holder_next_node(draft.holders))?
     let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536)?
     let (take layout, take packed) = history_write_page_cut(mut source.client, held.head.store, held.head.pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline)?
@@ -617,7 +617,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     }
     let recovered = history_paged_capture(mut source, held.head, 1048576)?
     let tip = view recovered.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?, bases: no_tail_bases())
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: pages.share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?, bases: pages.no_tail_bases())
     if get(law_reader(snap), snap, rows, 7)? != Some(value) {
         fail("pack objects created by the cut lost the imported row")
     }

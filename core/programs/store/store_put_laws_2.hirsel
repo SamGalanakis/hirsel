@@ -75,7 +75,7 @@ fn agg_stored(db: Db, id: u32) -> Result[List[(Bytes, Bytes)], Error] {
 // The rows the aggregate claims: None for all (Public), Some(c) for rows
 // k <= c, and an empty model before the first chunk.
 fn agg_claimed(db: Db, a: Aggregate[u64]) -> Result[Option[Option[u64]], Error] {
-    let record = catalog_entry_in(db.heads[0].roots.catalog, a.catalog_key)?
+    let record = catalog_entry_in(pages.holder_heads(db.holders)[0].roots.catalog, a.catalog_key)?
     match catalog_index(record)?.state {
         Public => Ok(None),
         Backfilling(Some(cursor)) => {
@@ -346,7 +346,7 @@ fn frame_boundary_points() -> bool {
     let times: Inline[u64, 5] =[999, 999, 999, 1001, 0]
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
-    let mut ops: DataRows = new_data_rows()
+    let mut ops: pages.DataRows = pages.new_data_rows()
     let key = result.unwrap(logical_key(1, types.key_word(7)))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
@@ -354,7 +354,7 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    push_data_row(mut ops, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    pages.push_data_row(mut ops, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, mut ops, segments[i], offsets[i]))
@@ -510,16 +510,16 @@ fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
 fn cell_and_table_frame() -> bool {
     let expected: Inline[u8, 97] =[17, 0, 1, 0, 81, 0, 0, 0, 133, 115, 103, 32, 151, 58, 99, 70, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0, 2, 4, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0]
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 1), at: 30, seed: 0)
-    let mut cells: Map[u32, CellEdit] = map.new()
+    let mut cells: Map[u32, pages.CellEdit] = map.new()
     map.insert(mut cells, 1, CellDelete)
     for offset in 0u64 .. 2 {
-        let mut ops = new_data_rows()
+        let mut ops = pages.new_data_rows()
         if offset == 0 {
             seal_cell_edits(mut ops, cells)
         }
         for k in 1u64 .. 3 {
             let key = result.unwrap(logical_key(2, types.key_word(k)))
-            push_data_row(mut ops, format.DataOp(key: take key, value: None, trim: None, prior: None))
+            pages.push_data_row(mut ops, format.DataOp(key: take key, value: None, trim: None, prior: None))
         }
         if offset == 1 {
             seal_cell_edits(mut ops, cells)
@@ -552,7 +552,7 @@ fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
-    let Prepared(take candidate) = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
+    let Prepared(take candidate) = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
         let _ = append(mut tx, events, types.key_word(3))?
         trim_before(mut tx, events, 1)?
         put_bytes(mut tx, 1, types.key_word(1), types.key_word(11))?

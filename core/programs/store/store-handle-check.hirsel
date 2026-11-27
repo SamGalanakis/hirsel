@@ -8,7 +8,7 @@ fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
 // The catalog root page bytes a handle resolved against, for `readable`: empty
 // when the root is a branch or holds a BLOB cell, whose lookup reads more than
 // the root's bytes.
-fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
+fn catalog_page(catalog: pages.PageTree) -> Result[Arc[Bytes], Error] {
     let image = std.page.image_of(catalog.root)
     if std.page.level(image) != 0 {
         return Ok(arc.new(list.new()))
@@ -25,18 +25,18 @@ fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
 // lists the handle's id under its key and the lookup is skipped.
 // An index read also needs its record Public (§1.2). On the fast path the
 // record is the one the handle saw, so the handle's flag answers.
-fn index_readable(roots: Roots, key: Bytes, page: Bytes, id: u32, public: bool) -> Result[(), Error] {
+fn index_readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32, public: bool) -> Result[(), Error] {
     if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
         if public {
             return Ok(())
         }
         return Error(NotReady(declaration_index_name(key)?))
     }
-    let Some(raw) = get_page_row(roots.catalog, key) else {
+    let Some(raw) = pages.get_page_row(roots.catalog, key) else {
         return Error(Stale(id))
     }
     if list.len(raw) < 5 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     if format.read_le(raw, 1, 4) != int.widen(id) {
         return Error(Stale(id))
@@ -47,14 +47,14 @@ fn index_readable(roots: Roots, key: Bytes, page: Bytes, id: u32, public: bool) 
     Ok(())
 }
 
-fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
+fn readable(roots: pages.Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
     if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
         return Ok(())
     }
-    match get_page_row(roots.catalog, key) {
+    match pages.get_page_row(roots.catalog, key) {
         Some(raw) => {
             if list.len(raw) < 5 {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             if format.read_le(raw, 1, 4) == int.widen(id) {
                 Ok(())

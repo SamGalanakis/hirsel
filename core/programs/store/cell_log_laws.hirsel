@@ -43,7 +43,7 @@ fn malformed_descriptor(wire: Bytes) -> bool {
 fn cell_descriptor_cases() -> bool {
     let empty = std.page.empty(0, 0, Collection)
     let empty_wire = descriptor_fixture(3, 2, 0, 0, 0)
-    if !valid_descriptor(empty_wire) || result.unwrap(cell_record(empty, None)) != empty_wire {
+    if !valid_descriptor(empty_wire) || result.unwrap(failure_result_from_rep(pages.cell_record(empty, None))) != empty_wire {
         return false
     }
     let spilled = descriptor_fixture(3, 2, 9, 1, 334)
@@ -57,7 +57,7 @@ fn cell_descriptor_cases() -> bool {
         list.set_word_le(mut wire, 56, ilen)
         {
             let value = list.slice(wire, 58, 58 + width)
-            if !valid_descriptor(wire) || result.unwrap(cell_record(empty, Some(value))) != wire {
+            if !valid_descriptor(wire) || result.unwrap(failure_result_from_rep(pages.cell_record(empty, Some(value)))) != wire {
                 return false
             }
         }
@@ -83,11 +83,11 @@ fn log_descriptor_cases() -> bool {
     let mut wire = descriptor_fixture(4, 16, 0, 0, 0)
     list.set_word_le(mut wire, 56, 257u64)
     list.set_word_le(mut wire, 64, 257u64)
-    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, ResidentMemory)) != wire {
+    if !valid_descriptor(wire) || result.unwrap(failure_result_from_rep(pages.log_record(empty, 257, 257, ResidentMemory))) != wire {
         return false
     }
     wire[53] = 1
-    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, ResidentTiered)) != wire {
+    if !valid_descriptor(wire) || result.unwrap(failure_result_from_rep(pages.log_record(empty, 257, 257, ResidentTiered))) != wire {
         return false
     }
     list.set_word_le(mut wire, 64, 258u64)
@@ -334,7 +334,7 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let size = db.file_end
     let _ = cell_law_nested(mut db, cell, a, b, false)?
     cell_law_require(db.file_end == size, "net-zero cell has no op")?
-    cell_law_require(tree_stamp(snapshot(db).roots.collections) == tree_stamp(from.roots.collections), "net-zero cell stamp")?
+    cell_law_require(pages.tree_stamp(snapshot(db).roots.collections) == pages.tree_stamp(from.roots.collections), "net-zero cell stamp")?
     cell_law_require(list.len((changes(cell_reader, from, snapshot(db))?).rows) == 0, "net-zero cell diff")?
     let held_a = snapshot(db)
     let _ = pin(mut db, "a", held_a)?
@@ -591,8 +591,8 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     cell_law_require(db.resident == baseline + (602 - floor) * 1078, "trim subtracted exactly once")?
     let suffix_wire = read_journal_prefix(dir, path, db.file_end)?
     cell_law_require(format.word_be(suffix_wire, offset + 55) == 110 + (floor - 2) * 1078, "trim dropped wire charge")?
-    let mut bad = share_page_tree(held.roots.collections)
-    let mut draw = db.next_node + 1
+    let mut bad = pages.share_page_tree(held.roots.collections)
+    let mut draw = pages.holder_next_node(db.holders) + 1
     match trim_log_page(mut bad, id_key, floor, Some(1), 0, mut draw) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => return Error(Missing("wrong dropped charge refused")),
@@ -803,7 +803,7 @@ fn log_retain_sweep(c: Clock) -> Result[(), Error] waits {
 fn collection_descriptor_invalid_residency() -> Result[(), Error] {
     let mut wire = descriptor_fixture(1, 0, 0, 0, 0)
     wire[53] = 2
-    match page_result(std.page.decode(descriptor_page(wire), CollectionMap)) {
+    match failure_result_from_rep(pages.page_result(std.page.decode(descriptor_page(wire), CollectionMap))) {
         Error(Corrupt(Fault(why: Malformed, ..))) => Ok(()),
         _ => Error(Missing("collection descriptor residency refusal")),
     }

@@ -254,9 +254,13 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.fingerprint(new_codec())), schema: take writer))
     meta.schemas = take schemas
     let raw = result.unwrap(encode_catalog(meta))
-    let base = share_roots(db.heads[0].roots)
+    let base = pages.share_roots(pages.holder_heads(db.holders)[0].roots)
     let patched = result.unwrap(catalog_put(mut db, base, old.catalog_key, raw))
-    db.heads[0].roots = take patched
+    let old_bytes = keyed_root_record_bytes(pages.holder_heads(db.holders)[0].roots.keyed)
+    let count_bytes = keyed_root_record_bytes(patched.keyed)
+    let current_head = pages.holder_heads(db.holders)[0].head
+    let at = pages.holder_heads(db.holders)[0].at
+    pages.replace_head(mut db.holders, 0, take patched, current_head, at, old_bytes, count_bytes)
     let before_append = version(snapshot(db))
     let current = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
     // K1: adding a schema is one commit, opening it again commits nothing.
@@ -308,7 +312,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     if one.balance != 10 || one.bonus != 7 || two.balance != 20 || two.bonus != 9 {
         return false
     }
-    let epoch = db.heads[0].head
+    let epoch = pages.holder_heads(db.holders)[0].head
     let again = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
     if version(snapshot(db)) != epoch || again.readers.current != 1 {
         return false
@@ -318,7 +322,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
         Error(Schema(_)) => {},
         _ => return false
     }
-    db.heads[0].head == epoch
+    pages.holder_heads(db.holders)[0].head == epoch
 }
 
 // L34 (STORE-SPEC v2.23 AG3): the published value of a row is its value in the table's
@@ -748,12 +752,12 @@ fn reject_999(_k: u64, v: u64) -> Result[List[u64], Capacity] {
 }
 
 fn write_state(tx: Tx) -> (u64, u64, u64, Option[u64], u64, bool) {
-    let node = tree_stamp(tx.roots.collections)
+    let node = pages.tree_stamp(tx.roots.collections)
     (node, tx.ids, tx.resident, tx.frame_bytes, tx.rows, tx.wrote)
 }
 
 fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_limit: bool) -> bool waits {
-    let watermark = db.next_node
+    let watermark = pages.holder_next_node(db.holders)
     let out = result.unwrap(run(mut db, None, (copy_env(frame_limit), copy_env(t), copy_env(value)), fn(mut tx, call_env) -> Result[bool, Error] {
         let previous_extra = tx.extra_bytes
         let previous_frame = tx.frame_bytes
@@ -775,7 +779,7 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
         Ok(rejected && unchanged && fetch(tx, call_env.1, 1)? == Some(99u64))
     }))
     match take out {
-        Committed(done) => done.value && db.next_node == watermark,
+        Committed(done) => done.value && pages.holder_next_node(db.holders) == watermark,
         _ => false
     }
 }
@@ -946,7 +950,7 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         Error(ok && lookup_foreign && range_foreign)
     })
     match take out {
-        Ok(Aborted(Undone(value: true, ticket: None))) => b.heads[0].head == 0 && b.resident == 0,
+        Ok(Aborted(Undone(value: true, ticket: None))) => pages.holder_heads(b.holders)[0].head == 0 && b.resident == 0,
         _ => false
     }
 }

@@ -397,7 +397,7 @@ fn writer_state_bytes() -> u64 {
     let page = option.unwrap(charge.counted(bytes[std.page.Page]))
     // An empty format-3 image consists of its 24-byte header.
     let image = option.unwrap(charge.seq(bytes[u8], 24))
-    5 * (page + image) + option.unwrap(charge.seq(bytes[Head], 4))
+    5 * (page + image) + option.unwrap(charge.seq(bytes[pages.Head], 4))
 }
 
 // The largest pack or MANIFEST file a cut writes (§3.9).
@@ -607,14 +607,6 @@ pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
         return 0
     }
     sim_level_bytes(declaration.weak)
-}
-
-fn branch_record_bytes(name: String) -> u64 {
-    143 + string.byte_len(name)
-}
-
-fn pin_record_bytes(name: String) -> u64 {
-    130 + string.byte_len(name)
 }
 
 fn entry(key: Bytes, val: Bytes) -> u64 {

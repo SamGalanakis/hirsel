@@ -253,10 +253,10 @@ fn stream_settle_sealed(mut lane: ObjectJournalSession, group_bytes: u64, group_
 // Writes create-only archive segment `a-<cut_seq>-<epoch>-<digest>` (§13.9)
 // naming every chain entry in `[old.checkpoint.seq, cut_seq)` in ascending
 // position (history) order.
-fn history_write_archive_segment(mut client: std.object.Client, old: HistoryHead, cut_seq: u64, epoch: u64, authority_kind: u8, mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryRef, Error] waits {
+fn history_write_archive_segment(mut client: std.object.Client, old: HistoryHead, cut_seq: u64, epoch: u64, authority_kind: u8, mut workspace: HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, Error] waits {
     let suffix = history_suffix(mut client, old, old.checkpoint, deadline)?
-    let mut seg_refs: List[HistoryRef] = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
-        let mut list_refs: List[HistoryRef] = list.with_capacity(1 + list.len(suffix))
+    let mut seg_refs: List[pages.HistoryRef] = disk_allocation(scoped fn() -> Result[List[pages.HistoryRef], Error] {
+        let mut list_refs: List[pages.HistoryRef] = list.with_capacity(1 + list.len(suffix))
         list.push(mut list_refs, old.checkpoint)
         for i in 0u64 .. list.len(suffix) {
             list.push(mut list_refs, history_length(suffix[i], old.checkpoint.seq + 1 + i))
@@ -323,10 +323,10 @@ fn history_parse_archive_name(key: String) -> Option[HistoryName] {
 }
 
 // Decodes and validates an archive segment `a-<cut_seq>-<epoch>-<digest>`.
-fn history_decode_archive_segment(key: String, store: StoreId, reference: HistoryRef, raw: Bytes) -> Result[List[HistoryRef], Error] {
+fn history_decode_archive_segment(key: String, store: StoreId, reference: pages.HistoryRef, raw: Bytes) -> Result[List[pages.HistoryRef], Error] {
     let ctx = history_object_context(key, store, ROLE_ARCHIVE, reference, raw)?
     history_object_digest(key, reference, raw)?
-    let mut out: List[HistoryRef] = list.new()
+    let mut out: List[pages.HistoryRef] = list.new()
     let mut at = 72u64
     while at < list.len(raw) {
         let frame = disk_frame_bytes(key, ctx, raw, at)?
@@ -345,7 +345,7 @@ fn history_decode_archive_segment(key: String, store: StoreId, reference: Histor
             let ep = format.read_le(raw, off + 8, 8)
             let dig = format.read_le(raw, off + 16, 8)
             let len = format.read_le(raw, off + 24, 8)
-            list.push(mut out, HistoryRef(seq, epoch: ep, len, digest: dig))
+            list.push(mut out, pages.HistoryRef(seq, epoch: ep, len, digest: dig))
         }
         at = frame.end
     }

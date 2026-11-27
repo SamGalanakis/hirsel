@@ -302,7 +302,7 @@ fn call_page_source(db: Db) -> Result[TieredPageSource, Error] {
         Some(requests) => Some(view requests),
         None => None,
     }
-    tx_page_source(pager, db.heads[0].roots.collections)
+    tx_page_source(pager, pages.holder_heads(db.holders)[0].roots.collections)
 }
 
 // Abort and rerun for serve (§13.3, §13.3a): each attempt drafts at the head
@@ -313,10 +313,10 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
     let mut call = take carry
     let mut revoked = false
     loop {
-        let ci = call_info(db.store, 0, db.heads[0].head + 1, at, db.heads[0].at)
+        let ci = call_info(db.store, 0, pages.holder_heads(db.holders)[0].head + 1, at, pages.holder_heads(db.holders)[0].at)
         refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
         call.attempts += 1
-        let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, tiered_window(call.pins))
+        let attempt = call_attempt(pages.holder_heads(db.holders)[0].roots.collections.root, db.writer_pin_bytes, tiered_window(call.pins))
         let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, call.pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return decide_served(mut db, take complete, take rec, ci, take metered)
@@ -378,7 +378,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
                 return Ok(Parked(Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: ci)))
             },
         }
-        let unchanged = db.next_node
+        let unchanged = pages.holder_next_node(db.holders)
         return decide_served(mut db, take complete, take rec, ci, Ok(DraftedCall(stage: Over(Refused(refused)), next_id: unchanged)))
     }
 }
@@ -390,7 +390,7 @@ fn decide_served(mut db: Db, take complete: Completion, take rec: Option[CallRec
         Error(DraftStopped(take stop)) => return Ok(stopped_pending(untried(take complete, take rec, ci), take stop)),
         Ok(take draft) => take draft,
     }
-    db.next_node = next_id
+    pages.set_next_node(mut db.holders, next_id)
     let pending_run = Pending(completion: take complete, record: take rec, attempted: ci, stop: None)
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),

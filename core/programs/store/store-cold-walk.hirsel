@@ -1,7 +1,7 @@
 // §13.10a class-aware Cold reachable-edge walk for R4, leased cuts and the
 // install cut. Holds at most one frame buffer (<= 1,048,576 bytes or one
 // frame) at a time and no pin across frames.
-fn check_listed_tiered_present(d: Dir, packs: Map[u64, PagePack]) -> Result[(), Error] waits {
+fn check_listed_tiered_present(d: Dir, packs: Map[u64, pages.PagePack]) -> Result[(), Error] waits {
     for (seq, pack) in packs {
         if pack.class < 3 {
             continue
@@ -26,7 +26,7 @@ type ColdWalk {
     reached_by_pack: Map[u64, List[format.TieredFrameId]]
 }
 
-fn cold_check_pack_header(mut walk: ColdWalk, seq: u64, pack: PagePack, path: String) -> Result[(), Error] waits {
+fn cold_check_pack_header(mut walk: ColdWalk, seq: u64, pack: pages.PagePack, path: String) -> Result[(), Error] waits {
     if map.contains(walk.headers_checked, seq) {
         return Ok(())
     }
@@ -74,7 +74,7 @@ fn cold_record_reached(mut walk: ColdWalk, frame: format.TieredFrameId) -> Resul
     }
 }
 
-fn walk_cold_blob(mut walk: ColdWalk, packs: Map[u64, PagePack], reference: std.page.BlobRef, mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
+fn walk_cold_blob(mut walk: ColdWalk, packs: Map[u64, pages.PagePack], reference: std.page.BlobRef, mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
     let path = paged_pack_path(reference.pack)?
     if reference.stamp == 0 || reference.stamp >= walk.next_stamp || reference.len > BLOB_LIMIT - 8 {
         return Error(failure_from_rep(format.disk_fault(path, reference.offset, Malformed)))
@@ -109,7 +109,7 @@ fn walk_cold_blob(mut walk: ColdWalk, packs: Map[u64, PagePack], reference: std.
     cold_record_reached(mut walk, format.tiered_frame_id(TieredBlob(reference)))
 }
 
-fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.PagePtr, expected_level: Option[u8], mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
+fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, pages.PagePack], ptr: std.page.PagePtr, expected_level: Option[u8], mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         return Ok(())
     }
@@ -191,7 +191,7 @@ fn walk_cold_page(mut walk: ColdWalk, packs: Map[u64, PagePack], ptr: std.page.P
 
 // Verifies a touched unsettled class-3/4 pack's PACK_INDEX chain using one
 // frame buffer at a time and matches every reached edge against its row.
-fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, reached_in: List[format.TieredFrameId]) -> Result[(), Error] waits {
+fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: pages.PagePack, next_stamp: u64, reached_in: List[format.TieredFrameId]) -> Result[(), Error] waits {
     let path = paged_pack_path(seq)?
     let mut reached: List[format.TieredFrameId] = disk_allocation(scoped fn() -> Result[List[format.TieredFrameId], Error] {
         Ok(clone(reached_in))
@@ -298,7 +298,7 @@ fn verify_cold_pack_index(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_st
     Ok(())
 }
 
-fn walk_cold_reachable(d: Dir, id: StoreId, packs: Map[u64, PagePack], next_stamp: u64, settled_below: u64, cold_roots: List[std.page.PagePtr], deferred: List[DeferredFree], mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
+fn walk_cold_reachable(d: Dir, id: StoreId, packs: Map[u64, pages.PagePack], next_stamp: u64, settled_below: u64, cold_roots: List[std.page.PagePtr], deferred: List[DeferredFree], mut stamps: Map[u64, std.page.PagePtr]) -> Result[(), Error] waits {
     if list.len(cold_roots) == 0 && list.len(deferred) == 0 {
         return Ok(())
     }

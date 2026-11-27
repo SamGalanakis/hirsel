@@ -22,17 +22,17 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
     if let Some(_) = branch(db, name) {
         return Error(Exists(named(name)?))
     }
-    let id = db.next_branch
+    let id = pages.holder_next_branch(db.holders)
     if id == 4294967295 {
         return Error(Limit(Ids))
     }
     check_manifest_addition(db, branch_root_bytes(name, from.roots))?
     // A Snapshot carries no wall time; the branch it was taken on, if it is
     // still live, gives the at its CallInfo continues from (section 1.7).
-    let mut at = db.heads[0].at
+    let mut at = pages.holder_heads(db.holders)[0].at
     let mut live_bytes: Option[u64] = None
     if let Ok(slot) = branch_slot(db, from.branch) {
-        let h = db.heads[slot]
+        let h = pages.holder_heads(db.holders)[slot]
         at = h.at
         if capture_matches_head(from, h) {
             live_bytes = Some(slot)
@@ -41,12 +41,12 @@ fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error
     if let Some(slot) = live_bytes {
         return Ok(LiveFork(slot))
     }
-    db.next_branch += 1
+    pages.advance_branch(mut db.holders)
     if is_disk(db) {
         note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))?
     }
-    let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(Head, String), Error] {
-        Ok((Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None), string.from(name)))
+    let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(pages.Head, String), Error] {
+        Ok((pages.Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: pages.share_roots(from.roots), head: from.head, at: at), string.from(name)))
     })?
     Ok(CutFork(id, AddHead(take head, take indexed_name)))
 }
@@ -59,28 +59,27 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
             return Error(Full(Journal(over)))
         }
     }
-    let id = db.next_branch
-    let watermark = stamp_after(db.next_node)?
-    let (take head, take indexed_name, take frame) = disk_allocation(scoped fn() -> Result[(Head, String, Option[Bytes]), Error] {
-        let source = db.heads[parent]
-        let head = Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: share_roots(source.roots), head: source.head, at: source.at, following: None)
+    let id = pages.holder_next_branch(db.holders)
+    let watermark = stamp_after(pages.holder_next_node(db.holders))?
+    let (take head, take indexed_name, take frame) = disk_allocation(scoped fn() -> Result[(pages.Head, String, Option[Bytes]), Error] {
+        let source = pages.holder_heads(db.holders)[parent]
+        let head = pages.Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: pages.share_roots(source.roots), head: source.head, at: source.at)
         let frame: Option[Bytes] = if disk {
             let context = format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: db.file_seq)
-            Some(failure_result_from_rep(types.capacity(encode_fork(context, db.file_end, head, watermark)))?)
+            Some(failure_result_from_rep(types.capacity(pages.encode_fork(context, db.file_end, head, watermark)))?)
         } else {
             None
         }
         Ok((take head, string.from(name), take frame))
     })?
-    failure_result_from_rep(types.capacity(map.try_reserve(mut db.branch_names, 1)))?
-    failure_result_from_rep(types.capacity(list.try_reserve(mut db.heads, 1)))?
+    failure_result_from_rep(types.capacity(pages.reserve_head(mut db.holders)))?
     let store = db.store
     let opened = open_number(db)
     if disk {
         let preceding = Ticket(store: store, open: opened, mark: Journal(db.frame_seq, 0, 0))
         durable(mut db, preceding)?
     }
-    db.next_branch += 1
+    pages.advance_branch(mut db.holders)
     let exact = !retaining(db) || db.changes == db.settled
     let sequence = if let Some(take raw) = take frame {
         db.file_end += size

@@ -63,7 +63,7 @@ fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, 
     let Some(parsed) = history_parse_archive_name(short_name) else {
         fail("L90-E: archive segment key failed history_parse_archive_name")
     }
-    let seg_ref = HistoryRef(seq: parsed.seq, epoch: parsed.epoch, len: list.len(seg_raw), digest: parsed.digest)
+    let seg_ref = pages.HistoryRef(seq: parsed.seq, epoch: parsed.epoch, len: list.len(seg_raw), digest: parsed.digest)
     let seg_entries = history_decode_archive_segment(found_key, store, seg_ref, seg_raw)?
     if list.len(seg_entries) < 2 {
         fail("L90-E: archive segment named fewer than 2 entries")

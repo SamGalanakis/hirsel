@@ -11,43 +11,14 @@ pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
     })
 }
 
-fn tiered_collections(root: Arc[std.page.Page]) -> bool {
-    let image = std.page.image_of(root)
-    let slots = std.page.count(image)
-    if std.page.level(image) == 0 {
-        for slot in 0u64 .. slots {
-            // AP7 puts residency immediately after the collection kind.
-            if unwrap_collection_descriptor(std.page.value_at(root, slot)).residency == ResidentTiered {
-                return true
-            }
-        }
-    } else {
-        for slot in 0u64 .. slots {
-            if tiered_collections(option.unwrap(std.page.child(root, slot))) {
-                return true
-            }
-        }
-    }
-    false
-}
-
-fn holders_tiered(all: List[Roots]) -> bool {
-    for roots in all {
-        if tiered_collections(roots.collections.root) {
-            return true
-        }
-    }
-    false
-}
-
 fn store_has_tiered(db: Db) -> bool {
-    for head in db.heads {
-        if tiered_collections(head.roots.collections.root) {
+    for head in pages.holder_heads(db.holders) {
+        if pages.tiered_collections(head.roots.collections.root) {
             return true
         }
     }
-    for retained in db.pins {
-        if tiered_collections(retained.roots.collections.root) {
+    for retained in pages.holder_pins(db.holders) {
+        if pages.tiered_collections(retained.roots.collections.root) {
             return true
         }
     }

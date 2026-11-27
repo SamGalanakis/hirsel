@@ -9,7 +9,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
-        let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
+        let attempt = call_attempt(pages.holder_heads(db.holders)[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
         let staged = stage_with(mut db, i, wall, steps, keep_reply, force_frame, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return Ok(take staged)
@@ -29,22 +29,22 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             Some(AttemptMiss(_)) => {
                 // An inline call is held from its first miss (§13.3a "Inline calls").
                 revoke_parked(mut db)
-                deliver_call_miss(db, db.heads[i].roots.collections, state, mut pins, mut pending)?
+                deliver_call_miss(db, pages.holder_heads(db.holders)[i].roots.collections, state, mut pins, mut pending)?
             },
         }
     }
 }
 
 fn call_pin_root(db: Db, i: u64) -> TieredPinRoot {
-    tiered_pin_root(open_number(db), db.heads[i].id, db.heads[i].roots.collections)
+    tiered_pin_root(open_number(db), pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].roots.collections)
 }
 
-fn tiered_pin_root(opened: u64, branch_id: u32, tree: PageTree) -> TieredPinRoot {
+fn tiered_pin_root(opened: u64, branch_id: u32, tree: pages.PageTree) -> TieredPinRoot {
     let generation = match tree.paging {
         Some(inventory) => inventory.generation,
         None => 0,
     }
-    TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: tree_stamp(tree))
+    TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: pages.tree_stamp(tree))
 }
 
 fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)], root: TieredPinRoot) {
@@ -54,7 +54,7 @@ fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(format.TieredTar
     }
 }
 
-fn deliver_call_miss(db: Db, tree: PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
+fn deliver_call_miss(db: Db, tree: pages.PageTree, state: TieredTouchSet, mut pins: TieredPins, mut pending: Option[(format.TieredTarget, Error)]) -> Result[(), Error] waits {
     let SeekKey(sought) = view state.seek else {
         fail("store: a call's miss has no seek key")
     }
@@ -75,7 +75,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let draft = bound bytes plan.n_e {
                 let reads: core.Log[Read] = log.new()
                 let issued: core.Cell[u64] = cell.new(0)
-                let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                let staged = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, keyed_completion_credit(db, complete), body)
                 })
                 let finished = match prepare_metered_pages(issued, attempt, pins, take staged) {
@@ -87,7 +87,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             }
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
             // Encoding spends the call's steps and the head's frame bytes.
-            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, false, take result) {
+            let framed = match frame_draft(db, pages.holder_heads(db.holders)[0].roots.collections, ci, rec, None, false, take result) {
                 Ok(take finished) => take finished,
                 Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
             }
@@ -97,7 +97,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             perform()
         }
     })
-    let mut next_id = db.next_node
+    let mut next_id = pages.holder_next_node(db.holders)
     let staged: Stage[Bytes, ServeReply] = match take caught {
         Error(problem) => Over(Refused(Allocation(problem))),
         Ok(Error(take causes)) => match raised_capacity(causes) {
@@ -176,9 +176,9 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
         return Ok(None)
     }
-    let fields = collection_descriptor(descriptor)
+    let fields = pages.collection_descriptor(descriptor)
     if fields.residency != ResidentTiered {
-        return Ok(get_page_row(tree, key))
+        return Ok(pages.get_page_row(tree, key))
     }
     if fields.kind == LogCollection {
         if list.len(key) != 12 {
@@ -212,7 +212,7 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
 pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
     read_access(r, s)?
     if let None = steps {
-        if tiered_collections(s.roots.collections.root) {
+        if pages.tiered_collections(s.roots.collections.root) {
             return Error(Missing("steps"))
         }
     }
@@ -223,7 +223,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
         None => 0,
-    }, root_stamp: tree_stamp(s.roots.collections))
+    }, root_stamp: pages.tree_stamp(s.roots.collections))
     let mut pins = empty_tiered_pins(root, partition)
     let mut pending: Option[(format.TieredTarget, Error)] = None
     loop {
@@ -259,7 +259,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), base_collection: None, bases: share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+            let tx = Tx(store: s.store, indexes: view registry, roots: pages.share_roots(s.roots), base_collection: None, bases: pages.share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: pages.NO_FRAME_TAIL, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
             body(tx, env)
         }
         match steps {

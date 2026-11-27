@@ -133,7 +133,7 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
 fn count_stream_effect(mut db: Db, key: Bytes, effect: u64) -> Ticket waits {
     let saved = result.unwrap(run(mut db, None, (copy_env(key), effect), fn(mut tx, args) -> Result[(), Error] {
         let row = logical_key(1u32, types.key_word(args.1))?
-        let prior = match get_page_row(tx.roots.collections, row) {
+        let prior = match pages.get_page_row(tx.roots.collections, row) {
             Some(value) => decode_word(value),
             None => 0u64,
         }
@@ -202,7 +202,7 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     }
     for effect in[10u64, 20u64] {
         let row = result.unwrap(logical_key(1u32, types.key_word(effect)))
-        match get_page_row(after.heads[0].roots.collections, row) {
+        match pages.get_page_row(pages.holder_heads(after.holders)[0].roots.collections, row) {
             Some(value) if decode_word(value) == 1u64 => (),
             _ => return Error(effect),
         }
@@ -391,7 +391,7 @@ fn journal_late_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, cu
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let acked = journal_put_ticket(mut db, t, 0)?
     durable(mut db, acked)?
-    journal_note(out, db.heads[0].head)
+    journal_note(out, pages.holder_heads(db.holders)[0].head)
     result.unwrap(stdout.write(out, "ARM"))
     if cut {
         let rotated = checkpoint(mut db)?
@@ -418,10 +418,10 @@ fn journal_late_owner(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, ge
         let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     }
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let key = db.heads[0].head - 1
+    let key = pages.holder_heads(db.holders)[0].head - 1
     let owned = journal_put_ticket(mut db, t, key)?
     durable(mut db, owned)?
-    journal_note(out, db.heads[0].head)
+    journal_note(out, pages.holder_heads(db.holders)[0].head)
     close(take db)
 }
 
@@ -463,7 +463,7 @@ fn journal_late_read(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> R
     trust_store(mut db)?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = view t
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     if head < 2 || head < floor || head > 4 {
         return Ok(false)
     }

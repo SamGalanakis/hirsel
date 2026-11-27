@@ -1,4 +1,4 @@
-# Hirsel Store Module Architecture (`store@1`, v3.1)
+# Hirsel Store Module Architecture (`store@1`, v3.2)
 
 **Status:** Design only. No `.hirsel` source has moved. This is the normative cutover brief for `core/programs/store/`. v3.1 amends v3 (`2343476b`, `436a21b5`, with 3103's edits in `0585666d`) against astra's 3115 review; the disposition of its 11 findings, the placement scripts and the live-bug triage are in `hirsel-briefs/store-modules-amend-v31-3121/`. v3 revised v2 (`7d0cb44f`) against the 3107 review (REJECT). The store sources are unchanged since `ebcc4887`, and v3.1's facts are rechecked at `origin/main` `1e926f57` (line citations are at that commit); the §3.5 placement was recomputed at `3f6679cc`, which adds 11 private helpers. The `ebcc4887` tip includes the landed 3079 (`2d9e5e50`), 3082 (`f601b90a`) and 3080 (`979875cf`) lanes, the slot frame-limit change `1b1fc30f`, and the stream-quota change `10d42c7e`.
 **Supersedes:** v3 (`store-modules-design-v3-3108`), v2 (`7d0cb44f`, `store-modules-design-v2-3097`) and v1 (`1f71060f`).
@@ -288,6 +288,8 @@ Rules for reading the table:
 
 ### 3.5 Declaration-level placement (v3.1, Findings 5–7 of 3115)
 
+**v3.2 (L2).** `Head` carries branch data. The root keeps each live `Latest[Snapshot]` in `Db.followers`, keyed by head id and removed with the head. The root computes holder record sizes using `branch_root_bytes`, `pin_root_bytes` and `keyed_root_record_bytes`. Those helpers keep their L4 owners. `pages.HolderTable` takes the computed byte counts and updates them in the same operation as the holder change.
+
 v3 assigned owners by file and checked acyclicity by layer name. A body-level scan of the code v3 moves (`edge_scan.py` in `hirsel-briefs/store-modules-amend-v31-3121/`) finds 441 upward or same-layer references, 110 references to root-held privates and 47 to root public functions; 3115's eight rows are a sample of these. v3.1 replaces hand-listed exceptions with a computed placement, `place.py` in the same directory. It starts from v3's owners and a short list of fixed owners, then reaches a fixpoint:
 
 - **Fixed owners.** 3103's write-path cells (`DataRows`, `push_data_row`, `op_slot`, `apply_collection_batch` in `pages`) and the page tree with the plain data it names (`PageTree`, `PageRoots`, `Roots`, the tiered read inventory and replay-branch types, `Pin`, `PinOwner`, `Head`, `Tip`, `State`), which `pages.HolderTable` holds. `data_order` reads `DataRows` and is fixed beside it in `pages`. Nothing else is fixed.
@@ -366,6 +368,7 @@ pub opaque type Db {
     limits: StoreLimits,
     attention_seq: u64,
     holders: pages.HolderTable,
+    followers: List[BranchFollower],
     schema: catalog.SchemaState,
     indexes: indexes.IndexOwner,       // registry + drift; public IndexState/IndexDrift stay root (R1)
     pager: pager.PagerState,
@@ -405,6 +408,8 @@ type DiskState {
 - **`ReadOnly`, `SharedCapture`, `Follower`/`FollowerService`:** independent of `Db`.
 
 ### 4.3 `Db` (all 39 fields)
+
+L2 adds the root-owned follower list described in §3.5. Replacing or deleting a head removes the root's handle when the head id leaves the holder table.
 
 | # | Current `Db` field | Type | New owner | Invariant |
 |---|---|---|---|---|

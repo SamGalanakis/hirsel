@@ -46,8 +46,8 @@ fn diff_oracle_pair(seed: u64) -> Result[(), Error] {
     // Distinct page layouts put unchanged 12-byte rows inline on one side
     // and out of line on the other.
     let mut stamp = 1u64
-    let a = option.unwrap(page_result(std.page.bulk(before, Unprefixed, 16, mut stamp))?)
-    let b = option.unwrap(page_result(std.page.bulk(after, Unprefixed, 8, mut stamp))?)
+    let a = option.unwrap(failure_result_from_rep(pages.page_result(std.page.bulk(before, Unprefixed, 16, mut stamp)))?)
+    let b = option.unwrap(failure_result_from_rep(pages.page_result(std.page.bulk(after, Unprefixed, 8, mut stamp)))?)
     let mut resume: Option[Bytes] = Some(clone(low))
     let mut seen = 0u64
     loop {

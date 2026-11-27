@@ -6,7 +6,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
     let payload = history_config_bytes(config)?
     let test_id = StoreId(hi: 9, lo: 10)
-    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
+    let base = pages.HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
     let first = HistoryHead(authority_kind: 1, store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
     let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     history_encode_head(mut raw, first, payload)?
@@ -40,7 +40,7 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
         fail("epoch 2 Permit ORIGIN fields wrong")
     }
     let mut group = second
-    group.entry = HistoryRef(seq: 3, epoch: 2, len: 130, digest: 0x2702)
+    group.entry = pages.HistoryRef(seq: 3, epoch: 2, len: 130, digest: 0x2702)
     history_encode_head(mut raw, group, payload)?
     let dec_g = history_decode_head(raw)?
     let Some(og) = dec_g.head.origin else {
@@ -76,14 +76,14 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     // Current-format malformed heads: entry from future epoch, equal positions with
     // different refs, unknown authority style, and retired AUTHORITY kind 0x0050.
     let mut bad_future = first
-    bad_future.entry = HistoryRef(seq: 2, epoch: 2, len: 130, digest: 0x2702)
+    bad_future.entry = pages.HistoryRef(seq: 2, epoch: 2, len: 130, digest: 0x2702)
     history_encode_head(mut raw, bad_future, payload)?
     match history_decode_head(raw) {
         Error(Corrupt(Fault(file: f, offset: 72, why: Malformed))) if f == "head" => (),
         _ => fail("entry from a future epoch"),
     }
     let mut bad_same = first
-    bad_same.entry = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2702)
+    bad_same.entry = pages.HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2702)
     history_encode_head(mut raw, bad_same, payload)?
     match history_decode_head(raw) {
         Error(Corrupt(Fault(file: f, offset: 72, why: Malformed))) if f == "head" => (),

@@ -85,7 +85,7 @@ fn tiered_scan_siblings(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.P
     tiered_set_siblings(attempt, take found)
 }
 
-fn tiered_scan_overlay(edits: Arc[ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Arc[Bytes])] {
+fn tiered_scan_overlay(edits: Arc[pages.ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Arc[Bytes])] {
     let mut cursor = if reverse {
         std.omap.range_reverse(edits.entries, Included(clone(low)), Excluded(clone(high)))
     } else {
@@ -101,7 +101,7 @@ fn tiered_scan_overlay(edits: Arc[ReplayOverlay], low: Bytes, high: Bytes, rever
 
 // The closest overlay put caps the Cold search. A Cold key present in the
 // overlay is masked before its value is touched.
-fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, collection: u32, overlay: Option[View[Arc[ReplayOverlay]]], low: Bytes, high: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], edge: std.page.Slot, collection: u32, overlay: Option[View[Arc[pages.ReplayOverlay]]], low: Bytes, high: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let staged = if let Some(edits) = overlay {
         tiered_scan_overlay(edits, low, high, reverse)
     } else {
@@ -155,7 +155,7 @@ fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
     Ok(take staged)
 }
 
-fn tiered_snapshot_primary(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: PageTree, edge: std.page.Slot, primary: Bytes, owner: u32) -> Result[Arc[Bytes], Error] {
+fn tiered_snapshot_primary(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, edge: std.page.Slot, primary: Bytes, owner: u32) -> Result[Arc[Bytes], Error] {
     if let Some(row) = tiered_replayed_row(tree, primary) {
         let ReplayPut(value) = view row.now else {
             return Error(Stale(owner))
@@ -173,7 +173,7 @@ fn tiered_snapshot_primary(attempt: core.Cell[TieredTouchSet], visible: Map[Tier
     Ok(take value)
 }
 
-fn tiered_snapshot_row[K, V](attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: PageTree, decoder: RowDecoder[K, V], row_key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
+fn tiered_snapshot_row[K, V](attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, decoder: RowDecoder[K, V], row_key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
     let (take key, take owner) = decode_row_key(decoder, row_key, raw)?
     let keep = fn(observed: Bytes) -> Result[(), Error] {
         Ok(())
@@ -182,8 +182,8 @@ fn tiered_snapshot_row[K, V](attempt: core.Cell[TieredTouchSet], visible: Map[Ti
         let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(primary, 0, 4)) else {
             return Error(Stale(decoder.table))
         }
-        if collection_descriptor(descriptor).residency == ResidentMemory {
-            let Some(value) = get_page_row(tree, primary) else {
+        if pages.collection_descriptor(descriptor).residency == ResidentMemory {
+            let Some(value) = pages.get_page_row(tree, primary) else {
                 return Error(Stale(decoder.table))
             }
             return finish_row(decoder, take key, primary, value, remaining, keep)
@@ -198,7 +198,7 @@ fn tiered_snapshot_row[K, V](attempt: core.Cell[TieredTouchSet], visible: Map[Ti
 fn tiered_scan_bounds(descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes) -> Result[(Bytes, Bytes), Error] {
     let mut start = take low
     let mut stop = take high
-    if collection_descriptor(descriptor).kind == LogCollection {
+    if pages.collection_descriptor(descriptor).kind == LogCollection {
         let window = descriptor_bounds(descriptor)
         let first_key = log_key(collection, window.first)?
         let next_key = log_key(collection, window.next)?
@@ -212,7 +212,7 @@ fn tiered_scan_bounds(descriptor: Bytes, collection: u32, take low: Bytes, take 
     Ok((take start, take stop))
 }
 
-fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes, reverse: bool, decoder: RowDecoder[K, V]) -> Result[Option[(Bytes, (K, V))], Error] waits {
+fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: pages.PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes, reverse: bool, decoder: RowDecoder[K, V]) -> Result[Option[(Bytes, (K, V))], Error] waits {
     let (take start, take stop) = tiered_scan_bounds(descriptor, collection, take low, take high)?
     if start >= stop {
         return Ok(None)

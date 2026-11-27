@@ -26,23 +26,23 @@ fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, ap
         fail("L87: fixture appends did not commit")
     }
     let id = prefix(events.binding.id)?
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L87: the fixture has no Log")
         }
         let limits = descriptor_bounds(before)
-        (arc.share(here), log_record(here, limits.first, limits.next, ResidentTiered)?)
+        (arc.share(here), failure_result_from_rep(pages.log_record(here, limits.first, limits.next, ResidentTiered))?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L87: the fixture Log must span more than one leaf")
     }
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let first = draw
-    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
-    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     let _ = checkpoint(mut db)?
     close(take db)?
     Ok(events)
@@ -52,12 +52,12 @@ fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, ap
 // past that child's last row detaches, and the floor that does it.
 fn l87_first_leaf(d: Dir, db: Db, collection: u32) -> Result[(std.page.PagePtr, u64), Error] waits {
     let id = prefix(collection)?
-    let Some((ColdPage(root), _)) = std.page.collection_slot(db.heads[0u64].roots.collections.root, id) else {
+    let Some((ColdPage(root), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) else {
         fail("L87: the cut must leave the Log root Cold")
     }
     let path = paged_pack_path(root.pack)?
     let wire = disk_read_file(d, path, 1048576)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(db.next_node)?)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
     let page = fold_page(frame)
     let Some(ColdPage(leaf)) = std.page.child_slot(page, 0) else {
         fail("L87: the root's first child is a Cold leaf")
@@ -113,9 +113,9 @@ fn drain_directory(d: Dir, mut db: Db) -> Result[List[u64], Error] waits {
         let _ = checkpoint(mut db)?
         // A cut can replace the retirement-list pack at the same footprint.
         let current = drain_pack_sizes(d)?
-        let pages = disk_state(db).pages
-        let (queued, _) = std.page.totals(pages.lists.deferred)
-        if current == previous && queued == 0 && map.len(pages.compaction.probes) == 0 {
+        let page_ptrs = disk_state(db).pages
+        let (queued, _) = std.page.totals(page_ptrs.lists.deferred)
+        if current == previous && queued == 0 && map.len(page_ptrs.compaction.probes) == 0 {
             return Ok(take current)
         }
         previous = take current
@@ -305,7 +305,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     }
     let _ = checkpoint(mut db)?
     let id = prefix(collection)?
-    let root = match std.page.collection_slot(db.heads[0u64].roots.collections.root, id) {
+    let root = match std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) {
         Some((ColdPage(located), _)) => located,
         _ => fail("L87: the cut leaves the trimmed Log root Cold"),
     }
@@ -314,7 +314,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     {
         let path = paged_pack_path(root.pack)?
         let wire = disk_read_file(d, path, 1048576)?
-        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(db.next_node)?)?
+        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
         let page = fold_page(frame)
         let image = std.page.image_of(page)
         if std.page.level(image) != 1 || std.page.count(image) < 3 {
@@ -420,21 +420,21 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let events = l87_cold_log(d, c, r, tasks, floor, appended, 1100)?
     let mut db = open(tasks, d, c, r, l87_options(floor, 1)?)?
     let root = l69_cold_root(db, events.binding.id)?
-    let mut pages: List[std.page.PagePtr] = list.new()
+    let mut page_ptrs: List[std.page.PagePtr] = list.new()
     let mut blobs: List[(std.page.PagePtr, std.page.BlobRef)] = list.new()
-    list.push(mut pages, root)
+    list.push(mut page_ptrs, root)
     let mut walk = 0u64
-    while walk < list.len(pages) {
-        let ptr = pages[walk]
+    while walk < list.len(page_ptrs) {
+        let ptr = page_ptrs[walk]
         walk += 1
         let path = paged_pack_path(ptr.pack)?
         let wire = disk_read_file(d, path, 4194304)?
-        let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
+        let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
         let page = fold_page(frame)
         let image = std.page.image_of(page)
         for slot in 0u64 .. std.page.count(image) {
             match std.page.owning_edge(image, slot) {
-                Some(PageEdge(child)) => list.push(mut pages, child),
+                Some(PageEdge(child)) => list.push(mut page_ptrs, child),
                 Some(BlobEdge(body)) => list.push(mut blobs, (ptr, body)),
                 None => fail("L87: every fixture row is a blob"),
             }
@@ -444,7 +444,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         fail("L87: each body is a Cold blob")
     }
     let mut page_total = 0u64
-    for ptr in pages {
+    for ptr in page_ptrs {
         if ptr.pack != root.pack {
             fail("L87: one cut lays the Log's pages out in one class-3 pack")
         }
@@ -490,7 +490,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
                 TieredPage(target) => {
                     page_rows += 1
                     page_kept += int.widen(target.len)
-                    for ptr in pages {
+                    for ptr in page_ptrs {
                         if ptr == target {
                             hits += 1
                         }
@@ -530,7 +530,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         if list.len(queued) == 0 {
             break
         }
-        if cuts > 2 * list.len(pages) {
+        if cuts > 2 * list.len(page_ptrs) {
             fail("L87: the drain finishes")
         }
     }

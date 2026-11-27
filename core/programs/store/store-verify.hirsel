@@ -67,7 +67,7 @@ pub fn walk_coverage(db: Db) -> Result[List[IndexCoverage], Error] {
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
     let mut out: List[IndexCoverage] = list.new()
-    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take low), end_key)?
+    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take low), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         let record = decode_catalog(raw)?
         let coverage = if !record_public(raw) {
@@ -94,7 +94,7 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
     }
     let mut end_key: Bytes = list.new()
     list.push(mut end_key, 3u8)
-    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take low), end_key)?
+    let mut records = byte_cursor(pages.holder_heads(db.holders)[0].roots.catalog, Included(take low), end_key)?
     while let Some((take key, raw)) = next_bytes(mut records)? {
         if !record_public(raw) {
             continue
@@ -197,7 +197,7 @@ fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes,
 // The fold may span slices. Restart it if a commit changed the head,
 // so comparisons and repair never use totals from different versions.
 fn walk_sums(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding], direct: bool) -> Result[(), Error] waits {
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     match walk.sums {
         Some(fold) if fold.head == head => (),
         _ => {
@@ -255,10 +255,10 @@ fn fold_sum_row(mut fold: WalkSums, values: IndexValue) -> Result[(), Error] {
     Ok(())
 }
 
-type VerifyEntries = VerifyMemoryEntries(PageRange) | VerifyTieredEntries(List[(Bytes, Bytes)], u64)
+type VerifyEntries = VerifyMemoryEntries(pages.PageRange) | VerifyTieredEntries(List[(Bytes, Bytes)], u64)
 
 fn open_verify_entries(db: Db, id: u32, cursor: Option[Bytes], limit: u64, direct: bool) -> Result[VerifyEntries, Error] waits {
-    let data = view db.heads[0].roots.collections
+    let data = pages.holder_heads(db.holders)[0].roots.collections
     if table_is_tiered(data, id)? {
         let (take rows, _) = tiered_rows_after_mode(db, id, clone(cursor), limit, direct)?
         return Ok(VerifyTieredEntries(take rows, 0))
@@ -306,7 +306,7 @@ fn walk_point_source(db: Db, s: Snapshot, id: u32, direct: bool) -> Result[WalkP
 fn walk_point[R](db: Db, s: Snapshot, source: WalkPoint, key: Bytes, visit: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let tree = view s.roots.collections
     match source {
-        WalkResident => visit(get_page_row(tree, key)),
+        WalkResident => visit(pages.get_page_row(tree, key)),
         WalkReader(r) => snapshot_point(r, s, key, visit),
         WalkDirect(d) => {
             let Some(inventory) = view tree.paging else {
@@ -472,7 +472,7 @@ fn walk_check_entry_row(extractor: RegisteredIndex, entry_key: Bytes, raw: Bytes
 
 // The compiler inserts the verifier call in test builds.
 fn teardown_hook(db: Db) {
-    if list.len(db.heads) == 18446744073709551615u64 {
+    if list.len(pages.holder_heads(db.holders)) == 18446744073709551615u64 {
         fail("store trust teardown")
     }
 }
@@ -572,7 +572,7 @@ fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: Hist
 
 // Registered by the test launcher (`native_entry/start.rs`) only in `@test` builds.
 fn verify_teardown(db: Db) waits {
-    if db.skip_test_teardown || list.len(db.heads) == 0 {
+    if db.skip_test_teardown || list.len(pages.holder_heads(db.holders)) == 0 {
         return
     }
     if let Some(state) = view db.disk {

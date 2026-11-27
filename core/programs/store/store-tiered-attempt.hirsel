@@ -94,7 +94,7 @@ fn tiered_finish(take attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
 // such a call carries an attempt record and a Hot call allocates none. Its
 // scans read ahead by the call's window, as a Reader's do.
 fn call_attempt(root: Arc[std.page.Page], partition: u64, window: u64) -> Option[core.Cell[TieredTouchSet]] {
-    if tiered_collections(root) {
+    if pages.tiered_collections(root) {
         Some(tiered_attempt(partition, window))
     } else {
         None
@@ -457,7 +457,7 @@ fn tiered_plan_path(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCache
 
 // The leaf and any siblings that apply can need are resolved before encoding.
 // Reading the old width never resolves the old BLOB.
-fn tiered_plan_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: PageTree, logical: Bytes) -> Result[u32, Error] {
+fn tiered_plan_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, logical: Bytes) -> Result[u32, Error] {
     if tiered_stopped(attempt) {
         return Error(Missed)
     }
@@ -474,7 +474,7 @@ fn tiered_plan_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCach
     let key = list.slice(logical, 4, list.len(logical))
     let origin = tiered_point_page(attempt, visible, edge, None)?
     let leaf = tiered_plan_path(attempt, visible, origin, key)?
-    if collection_descriptor(descriptor).kind == LogCollection {
+    if pages.collection_descriptor(descriptor).kind == LogCollection {
         return Ok(0u32)
     }
     Ok(tiered_leaf_prior(leaf, key))
@@ -490,7 +490,7 @@ fn tiered_edit_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCache
     }
 }
 
-fn stage_tiered_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], key: Bytes, value: ReplayValue, inline: u64, rightmost: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
+fn stage_tiered_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], key: Bytes, value: pages.ReplayValue, inline: u64, rightmost: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
     if tiered_stopped(attempt) {
         return Error(Missed)
     }
@@ -519,7 +519,7 @@ fn stage_tiered_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCache
     if let Some(take problem) = take failure {
         return Error(take problem)
     }
-    page_result(take edited)?
+    failure_result_from_rep(pages.page_result(take edited))?
     next_stamp = following_stamp
     Ok(take working)
 }
@@ -529,7 +529,7 @@ fn stage_tiered_trim(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCach
         return Error(Missed)
     }
     if floor < limits.first {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     if floor >= limits.next {
         return Ok((arc.share(empty_root), before))
@@ -543,13 +543,13 @@ fn stage_tiered_trim(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCach
     if let Some(take problem) = take failure {
         return Error(take problem)
     }
-    let kept = page_result(take clipped)?
+    let kept = failure_result_from_rep(pages.page_result(take clipped))?
     let (rows, occupied) = std.page.totals(kept)
     let Some(dropped) = int.checked_sub(before, occupied) else {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     if rows != limits.next - floor {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     next_stamp = following_stamp
     Ok((take kept, dropped))

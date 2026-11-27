@@ -1,7 +1,7 @@
 hirsel.laws 1
-vector@1/tests/exact_charges src=ac4f180e1e02becc sig=56d6359272105251 run=b1818af2b24835d3 bug=bec4706c04aaf412 oracle=a60c4f805aa43718 rows=pending
-vector@1/tests/exact_top_k src=0d876763c8b576b1 sig=40144fd636cae3a8 run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=bad99df420b769cb rows=pending
-vector@1/tests/extremes src=843eda9597a72c6c sig=f1a009f97bfa18af run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=942efce730b65f50 rows=pending
+vector@1/tests/exact_charges src=ac4f180e1e02becc sig=629dabafa47975f1 run=b1818af2b24835d3 bug=bec4706c04aaf412 oracle=a60c4f805aa43718 rows=pending
+vector@1/tests/exact_top_k src=0d876763c8b576b1 sig=0189dcc8cf6e940a run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=bad99df420b769cb rows=pending
+vector@1/tests/extremes src=843eda9597a72c6c sig=7ee32dbf460d3aa8 run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=942efce730b65f50 rows=pending
 vector@1/tests/ivf_layout_version src=ee2432519be632cb sig=dab95901641e8cd3 run=b1818af2b24835d3 bug=fc2cbc736cb389f3 oracle=d20f0c9acf2ca886 rows=pending
-vector@1/tests/ivf_recall src=03148dcd646605f7 sig=c092b3d8a6454097 run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=d65554b07e0e965a rows=pending
-vector@1/tests/prefilter src=a1e2dbd494e67a49 sig=727a6f38759a0ce1 run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=ea7d41976400dacd rows=pending
+vector@1/tests/ivf_recall src=03148dcd646605f7 sig=16d085138ac3efaf run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=d65554b07e0e965a rows=pending
+vector@1/tests/prefilter src=a1e2dbd494e67a49 sig=2420967fe1450308 run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=ea7d41976400dacd rows=pending

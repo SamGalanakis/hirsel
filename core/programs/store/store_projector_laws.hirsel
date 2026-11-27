@@ -200,7 +200,7 @@ fn projected_row(db: Db, images: Table[(u32, u64), Slot], generations: List[Gene
 // a reader reads the tail: key to Some(value) or None for a delete.
 fn tail_rows(db: Db, fixture: ProjectorFixture, slot: u8) -> Result[Map[u64, Option[u64]], Error] waits {
     let mut rows: Map[u64, Option[u64]] = map.new()
-    let Some(take base) = owned_pin(db, ProjectorPin, projector_pin_name(fixture.decl.name, slot)) else {
+    let Some(take base) = owned_pin(db, ProjectorPin, pages.projector_pin_name(fixture.decl.name, slot)) else {
         return Error(MigrationFault)
     }
     let source: Table[u64, u64] = clone(fixture.source_table)
@@ -507,9 +507,9 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks, tiered: bool) -
     if !projection_matches_rebuild(mut reopened, loaded, 48)? {
         return Error(MigrationFault)
     }
-    for k in 0u64 .. list.len(reopened.pins) {
-        let name = reopened.pins[k].name
-        if !(same_name(name, "hirsel.projector.fixture.0") || same_name(name, "hirsel.projector.fixture.1") || same_name(name, "hirsel.projector.oracle.0") || same_name(name, "hirsel.projector.oracle.1")) {
+    for k in 0u64 .. list.len(pages.holder_pins(reopened.holders)) {
+        let name = pages.holder_pins(reopened.holders)[k].name
+        if !(pages.same_name(name, "hirsel.projector.fixture.0") || pages.same_name(name, "hirsel.projector.fixture.1") || pages.same_name(name, "hirsel.projector.oracle.0") || pages.same_name(name, "hirsel.projector.oracle.1")) {
             return Error(MigrationFault)
         }
     }
@@ -560,7 +560,7 @@ fn test_local_projector_pin_ownership(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let Some(image) = row.image else {
         return Error(MigrationFault)
     }
-    let Some(base) = owned_pin(db, ProjectorPin, projector_pin_name(fixture.decl.name, image.slot)) else {
+    let Some(base) = owned_pin(db, ProjectorPin, pages.projector_pin_name(fixture.decl.name, image.slot)) else {
         fail("application unpin removed the projector base")
     }
     if !same_project_snapshot(base, source, image.position) {
@@ -766,7 +766,7 @@ fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     if list.len(shown.generations) != 1 || shown.generations[0].id == original_generation || projected_row(destination, fixture.image_table, shown.generations, 1)? != Some(10u64) {
         return Error(MigrationFault)
     }
-    if list.len(destination.pins) != 0 {
+    if list.len(pages.holder_pins(destination.holders)) != 0 {
         return Error(MigrationFault)
     }
     Ok(())

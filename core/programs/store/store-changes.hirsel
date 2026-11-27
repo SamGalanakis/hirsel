@@ -214,7 +214,7 @@ fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Wa
     // stops here and `tiered_changes` diffs these rows outside it.
     let before = comparison != Greater
     let after = comparison != Less
-    if (before && unwrap_collection_descriptor(std.page_walk.value(left)).residency != ResidentMemory) || (after && unwrap_collection_descriptor(std.page_walk.value(right)).residency != ResidentMemory) {
+    if (before && pages.unwrap_collection_descriptor(std.page_walk.value(left)).residency != ResidentMemory) || (after && pages.unwrap_collection_descriptor(std.page_walk.value(right)).residency != ResidentMemory) {
         out.deferred = Some(TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
         return Ok(false)
     }
@@ -233,7 +233,7 @@ fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Wa
     page_change_rows(mut out, id, mut from, mut until, stop)
 }
 
-fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], after: PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), Error] {
+fn walk_page_changes(mut out: ChangeOutput, before: Option[View[pages.PageTree]], after: pages.PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), Error] {
     let low_id: Option[Bytes] = match low {
         None => None,
         Some(key) => Some(clone(list.slice(key, 0, order.min(4, list.len(key))))),
@@ -250,12 +250,12 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
             } else {
                 std.page_walk.value(right)
             }
-            unwrap_collection_descriptor(descriptor).kind
+            pages.unwrap_collection_descriptor(descriptor).kind
         }
         let more = match kind {
             CellCollection => page_change_cell(mut out, key, left, right, comparison, low)?,
             LogCollection => page_change_log(mut out, key, left, right, comparison, low, high)?,
-            _ => if comparison != Equal || compare_row_versions(left, right) != Equal {
+            _ => if comparison != Equal || pages.compare_row_versions(left, right) != Equal {
                 collection_row_changes(mut out, list.word_be(key, 0), left, right, comparison, diff_bound(low, key), diff_bound(high, key))?
             } else {
                 true
@@ -269,8 +269,8 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
     Ok(())
 }
 
-fn compare_page_collections(before: PageTree, after: PageTree) -> Result[Changes, Error] {
-    if tree_stamp(before) == tree_stamp(after) {
+fn compare_page_collections(before: pages.PageTree, after: pages.PageTree) -> Result[Changes, Error] {
+    if pages.tree_stamp(before) == pages.tree_stamp(after) {
         return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
     }
     let mut out = change_output(None)
@@ -279,7 +279,7 @@ fn compare_page_collections(before: PageTree, after: PageTree) -> Result[Changes
     Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
 }
 
-fn defer_replay_overlays(tree: PageTree, before: PageTree, after: PageTree, skip_ids: List[u32], mut deferred: List[TieredRowDiff]) -> Result[(), Error] {
+fn defer_replay_overlays(tree: pages.PageTree, before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32], mut deferred: List[TieredRowDiff]) -> Result[(), Error] {
     let Some(overlays) = view tree.replay else {
         return Ok(())
     }
@@ -318,7 +318,7 @@ fn defer_replay_overlays(tree: PageTree, before: PageTree, after: PageTree, skip
 // inline, and collects every Tiered collection (including replay-overlaid
 // Tiered collections whose base descriptor did not move) into `deferred`
 // without stopping at the first Tiered collection.
-fn catch_up_compare_collections(before: PageTree, after: PageTree, skip_ids: List[u32]) -> Result[(Changes, List[TieredRowDiff]), Error] {
+fn catch_up_compare_collections(before: pages.PageTree, after: pages.PageTree, skip_ids: List[u32]) -> Result[(Changes, List[TieredRowDiff]), Error] {
     let has_replay = (if let Some(_) = view before.replay {
         true
     } else {
@@ -328,7 +328,7 @@ fn catch_up_compare_collections(before: PageTree, after: PageTree, skip_ids: Lis
     } else {
         false
     })
-    if tree_stamp(before) == tree_stamp(after) && !has_replay {
+    if pages.tree_stamp(before) == pages.tree_stamp(after) && !has_replay {
         return Ok((Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()), list.new()))
     }
     let mut out = change_output(None)
@@ -347,12 +347,12 @@ fn catch_up_compare_collections(before: PageTree, after: PageTree, skip_ids: Lis
             } else {
                 std.page_walk.value(right)
             }
-            unwrap_collection_descriptor(descriptor).kind
+            pages.unwrap_collection_descriptor(descriptor).kind
         }
         let more = match kind {
             CellCollection => page_change_cell(mut out, key, left, right, comparison, None)?,
             LogCollection => page_change_log(mut out, key, left, right, comparison, None, None)?,
-            _ => if comparison != Equal || compare_row_versions(left, right) != Equal {
+            _ => if comparison != Equal || pages.compare_row_versions(left, right) != Equal {
                 collection_row_changes(mut out, id, left, right, comparison, None, None)?
             } else {
                 true

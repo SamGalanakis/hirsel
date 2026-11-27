@@ -193,7 +193,7 @@ fn layout_answers(mut db: Db) -> LayoutAnswers waits {
     let rows = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, sh, Unbounded, Unbounded)))
     let large = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, big, Unbounded, Unbounded)))
     let indexed = collect_layout_rows(result.unwrap(find(result.unwrap(reader(db, 0u64)), at, ix, Included(1), Included(2))))
-    let empty = Snapshot(store: at.store, open: at.open, branch: at.branch, head: 0, roots: empty_roots(), watermark: 1, bases: no_tail_bases())
+    let empty = Snapshot(store: at.store, open: at.open, branch: at.branch, head: 0, roots: pages.empty_roots(), watermark: 1, bases: pages.no_tail_bases())
     let Changes(rows: take delta, ..) = result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, at))
     let account = accounts(db)
     if !account.exact {
@@ -269,7 +269,7 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
 
 // Every page a head reaches is in its canonical image and unmarked (AP3).
 fn heads_canonical(db: Db) -> bool {
-    let roots = view db.heads[0u64].roots
+    let roots = pages.holder_heads(db.holders)[0u64].roots
     result.unwrap(std.page.canonical(roots.collections.root)) && result.unwrap(std.page.canonical(roots.streams.root)) && result.unwrap(std.page.canonical(roots.catalog.root))
 }
 

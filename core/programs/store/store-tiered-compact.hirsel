@@ -23,17 +23,17 @@ type TieredCompaction: send {
     // Remove defers a retired Tiered pack while a share other than this one
     // lists it (§13.5: on log@1 a lease defers Remove). Each cut drops the
     // shares nothing else holds.
-    held: List[Arc[TieredReadInventory]]
+    held: List[Arc[pages.TieredReadInventory]]
 }
 
 fn no_tiered_compaction() -> TieredCompaction {
     TieredCompaction(probes: map.new(), held: list.new())
 }
 
-fn prune_tiered_leases(mut held: List[Arc[TieredReadInventory]]) {
+fn prune_tiered_leases(mut held: List[Arc[pages.TieredReadInventory]]) {
     let mut slot = 0u64
     while slot < list.len(held) {
-        let ended = match arc.with_unique(mut held[slot], fn(mut _inventory: TieredReadInventory) {}) {
+        let ended = match arc.with_unique(mut held[slot], fn(mut _inventory: pages.TieredReadInventory) {}) {
             Some(_) => true,
             None => false
         }
@@ -45,7 +45,7 @@ fn prune_tiered_leases(mut held: List[Arc[TieredReadInventory]]) {
     }
 }
 
-fn tiered_leased(held: List[Arc[TieredReadInventory]], seq: u64) -> bool {
+fn tiered_leased(held: List[Arc[pages.TieredReadInventory]], seq: u64) -> bool {
     for inventory in held {
         if let Some(_) = std.omap.get(inventory.packs, seq) {
             return true
@@ -55,8 +55,8 @@ fn tiered_leased(held: List[Arc[TieredReadInventory]], seq: u64) -> bool {
 }
 
 // The participants' current inventories join the leases, once per generation.
-fn lease_cut_inventories(installed: TieredCompaction, roots: List[Roots]) -> Result[List[Arc[TieredReadInventory]], Error] {
-    let mut held: List[Arc[TieredReadInventory]] = clone(installed.held)
+fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Roots]) -> Result[List[Arc[pages.TieredReadInventory]], Error] {
+    let mut held: List[Arc[pages.TieredReadInventory]] = clone(installed.held)
     for participant in roots {
         if let Some(inventory) = view participant.collections.paging {
             let mut known = false
@@ -88,7 +88,7 @@ type TieredQueueMove: send {
 }
 
 type TieredCompactWork {
-    roots: List[Roots],
+    roots: List[pages.Roots],
     next_stamp: u64,
     // (pack, len) of each Cold ancestor a move re-emitted, once per stamp.
     moved: List[(u64, u64)],
@@ -158,8 +158,8 @@ fn compact_rebuild(page: Arc[std.page.Page], at: u64, child: Option[std.page.Slo
             }
             list.push(mut rows, take row)
         }
-        let ready = page_result(std.page.encode(rows, std.page.level(image), std.page.stamp(image), std.page.key_domain(image)))?
-        Ok(HotPage(page_result(std.page.attach(take ready, take kids, take bodies))?))
+        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, std.page.level(image), std.page.stamp(image), std.page.key_domain(image))))?
+        Ok(HotPage(failure_result_from_rep(pages.page_result(std.page.attach(take ready, take kids, take bodies)))?))
     })
 }
 
@@ -274,7 +274,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
         let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
             let mut candidate = arc.share(work.roots[slot].collections.root)
             let mut draw = work.next_stamp
-            page_result(std.page.install_tiered_root(mut candidate, key, moved_root, mut draw))?
+            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, moved_root, mut draw)))?
             Ok((take candidate, draw))
         })?
         work.roots[slot].collections.root = take mapped
@@ -319,7 +319,7 @@ fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installe
 
 // §13.6 selection: a listed Tiered pack below the ratio starts a probe. A
 // pack keeps at most one probe. Shared by reading and Tiered-idle cuts.
-fn pack_selected_for_compaction(seq: u64, pack: PagePack, running: Map[u64, TieredProbeCursor], permille: u64) -> bool {
+fn pack_selected_for_compaction(seq: u64, pack: pages.PagePack, running: Map[u64, TieredProbeCursor], permille: u64) -> bool {
     if pack.class != 3 && pack.class != 4 {
         return false
     }
@@ -362,8 +362,8 @@ fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCurs
 // Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
 // collection descriptor, the candidate queue (installed and added rows) is
 // empty, and there is no anchor (anchors are empty until archival lands).
-fn cut_tiered_idle(roots: List[Roots], installed_queue: Arc[std.page.Page], queued: List[DeferredFree]) -> bool {
-    !holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
+fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.Page], queued: List[DeferredFree]) -> bool {
+    !pages.holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
 }
 
 // D-TI-1 + v2.162 F2: a Tiered-idle cut reads nothing and needs no pager. It
@@ -402,7 +402,7 @@ fn compact_idle_probes(installed: PageLocations, running: Map[u64, TieredProbeCu
 // progress: the installed cursors stand, nothing retires, and every root
 // is the one the cut staged before the probes ran, and no queue row is
 // rewritten.
-fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], queued: List[DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
+fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
     let installed = disk_state(db).pages
     let running: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
         Ok(clone(installed.compaction.probes))
@@ -443,7 +443,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
         return Error(Io(Closed))
     }
     let checkpointed = db.checkpointed
-    let inventory_read = disk_allocation(scoped fn() -> Result[Arc[TieredReadInventory], Error] {
+    let inventory_read = disk_allocation(scoped fn() -> Result[Arc[pages.TieredReadInventory], Error] {
         recovered_tiered_inventory(installed.locations, None, checkpointed, next_stamp)
     })
     let paging = match take inventory_read {
@@ -454,11 +454,11 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A refusal restores these, so no root keeps a move whose old ancestors
     // were never charged dead.
-    let shared = disk_allocation(scoped fn() -> Result[List[Roots], Error] {
-        let mut shares: List[Roots] = list.new()
+    let shared = disk_allocation(scoped fn() -> Result[List[pages.Roots], Error] {
+        let mut shares: List[pages.Roots] = list.new()
         failure_result_from_rep(types.capacity(list.try_reserve(mut shares, list.len(roots))))?
         for held in roots {
-            list.push(mut shares, PageRoots(collections: share_page_tree(held.collections), streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
+            list.push(mut shares, pages.PageRoots(collections: pages.share_page_tree(held.collections), streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
         }
         Ok(take shares)
     })

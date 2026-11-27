@@ -1,0 +1,141 @@
+fn define_collection(mut tree: pages.PageTree, id: u32, kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
+    failure_result_from_rep(pages.put_collection(mut tree, prefix(id)?, None, kind, private_from, mut ids))
+}
+
+fn remove_store_collection(mut tree: pages.PageTree, id: u32, mut final_item: u64) -> Result[u64, Error] {
+    let key = prefix(id)?
+    let charge = match std.page.lookup(tree.root, key) {
+        Some(descriptor) => {
+            let fields = pages.collection_descriptor(descriptor)
+            if fields.residency == ResidentTiered {
+                126u64
+            } else {
+                int.saturating_add(126, fields.row_bytes)
+            }
+        },
+        None => 0u64,
+    }
+    let first = stamp_after(final_item)?
+    let mut next_stamp = first
+    let _ = drop_collection(mut tree, id, first, mut next_stamp)?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
+    final_item = next_stamp - 1
+    Ok(charge)
+}
+
+fn define_empty_tiered_index(mut tree: pages.PageTree, id: u32, mut final_item: u64) -> Result[(), Error] {
+    let (take record, take root) = {
+        let Some(empty_root) = view tree.empty_collection else {
+            fail("store: missing empty collection page")
+        }
+        (failure_result_from_rep(pages.rooted_collection_record(empty_root, 2, ResidentTiered))?, arc.share(empty_root))
+    }
+    let first = stamp_after(final_item)?
+    let mut draw = first
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, prefix(id)?, record, Some(take root), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
+    final_item = draw - 1
+    Ok(())
+}
+
+fn bulk_collection(mut tree: pages.PageTree, id: u32, kind: u8, rows: List[std.page.Row], private_from: u64, mut ids: u64) -> Result[(), Error] {
+    let bulk = failure_result_from_rep(pages.page_result(std.page.bulk(rows, Collection, tree.inline, mut ids)))?
+    failure_result_from_rep(pages.put_collection(mut tree, prefix(id)?, bulk, kind, private_from, mut ids))
+}
+
+fn count_page_rows(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u64, Error] {
+    let collection_key = prefix(id)?
+    let Some((root, descriptor)) = std.page.collection_entry(tree.root, collection_key) else {
+        return Ok(0u64)
+    }
+    let total: u64 = pages.collection_descriptor(descriptor).rows
+    let from = pages.collection_rank(root, collection_key, low, total)
+    let until = pages.collection_rank(root, collection_key, high, total)
+    Ok(int.saturating_sub(until, from))
+}
+
+fn resident_images(roots: List[pages.PageRoots], lists: Option[View[PagedLists]]) -> u64 {
+    let mut seen: Map[u64, ()] = map.new()
+    let mut total = 0u64
+    for held in roots {
+        total = int.saturating_add(total, pages.page_image_charge(held.collections.root, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(held.streams.root, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(held.catalog.root, mut seen))
+        for tree in held.keyed {
+            total = int.saturating_add(total, pages.page_image_charge(tree.root, mut seen))
+        }
+    }
+    if let Some(published) = lists {
+        total = int.saturating_add(total, pages.page_image_charge(published.packs, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(published.deferred, mut seen))
+        total = int.saturating_add(total, pages.page_image_charge(published.lineage, mut seen))
+    }
+    total
+}
+
+fn drop_collection(mut tree: pages.PageTree, id: u32, private_from: u64, mut ids: u64) -> Result[bool, Error] {
+    failure_result_from_rep(pages.page_result(std.page.remove(mut tree.root, prefix(id)?, private_from, mut ids)))
+}
+
+fn collection_cursor(tree: pages.PageTree, id: u32, low: Bytes, high: Bytes, reverse: bool) -> Result[Option[pages.CollectionCursor], Error] {
+    let leading = prefix(id)?
+    let low_prefix = list.slice(low, 0, order.min(4, list.len(low)))
+    let high_prefix = list.slice(high, 0, order.min(4, list.len(high)))
+    if high <= low || high_prefix < leading || low_prefix > leading {
+        return Ok(None)
+    }
+    let Some(root) = std.page.collection_child(tree.root, leading) else {
+        return Ok(None)
+    }
+    let start = if low_prefix == leading {
+        Some(failure_result_from_rep(types.copied(list.slice(low, 4, list.len(low))))?)
+    } else {
+        None
+    }
+    let stop = if high_prefix == leading {
+        Some(failure_result_from_rep(types.copied(list.slice(high, 4, list.len(high))))?)
+    } else {
+        None
+    }
+    let walk = if reverse {
+        std.page.cursor_open_bounded(root, stop, false, true, take start)
+    } else {
+        std.page.cursor_open_bounded(root, start, true, false, take stop)
+    }
+    Ok(Some(pages.CollectionCursor(walk: take walk, leading: take leading)))
+}
+
+fn next_page_range(mut rows: pages.PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    if !rows.nested {
+        if let Some(take item) = std.page.cursor_next(mut rows.listed) {
+            let std.page.CursorRow(key: take key, value: take value, ..) = take item
+            return Ok(Some((take key, take value)))
+        }
+        return Ok(None)
+    }
+    loop {
+        if list.len(rows.active) != 0 {
+            if let Some(take item) = std.page.cursor_next(mut rows.active[0u64]) {
+                let std.page.CursorRow(key: take key, value: take value, ..) = take item
+                return Ok(Some((logical_key(rows.collection, key)?, take value)))
+            }
+            let _ = list.pop(mut rows.active)
+        }
+        let Some(take found) = std.page.cursor_next(mut rows.listed) else {
+            return Ok(None)
+        }
+        let std.page.CursorRow(key: take key, value: take descriptor, collection: take subtree) = take found
+        let Some(take root) = take subtree else {
+            return Error(failure_from_rep(pages.malformed(0)))
+        }
+        if pages.collection_descriptor(descriptor).kind == CellCollection {
+            if pages.range_has_cell(rows, key) {
+                if let Some(take value) = pages.owned_cell(root, descriptor) {
+                    return Ok(Some((take key, take value)))
+                }
+            }
+        } else {
+            failure_result_from_rep(pages.open_page_collection(mut rows, key, root))?
+        }
+    }
+}

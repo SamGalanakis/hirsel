@@ -4,7 +4,7 @@ type ListKind: key = PackList | DeferredList | LineageList
 
 type ListedPages {
     allow_tiered: bool,
-    packs: Map[u64, PagePack],
+    packs: Map[u64, pages.PagePack],
     deferred: List[DeferredFree],
     lineage: Lineage,
     // The last `lineage` key read, so its rows ascend.

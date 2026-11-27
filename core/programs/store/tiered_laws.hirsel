@@ -122,9 +122,11 @@ fn refusal_attach_descriptors(mut db: Db, memory_id: u32, tiered_id: u32) -> Res
     let mut rows: List[std.page.Row] = list.new()
     list.push(mut rows, std.page.Row(key: prefix(memory_id)?, value: refusal_descriptor(false), charge: 126))
     list.push(mut rows, std.page.Row(key: prefix(tiered_id)?, value: refusal_descriptor(true), charge: 126))
-    let mut stamp = stamp_after(db.next_node)?
-    let root = page_result(std.page.bulk(rows, Unprefixed, 1024, mut stamp))?
-    db.heads[0].roots.collections.root = option.unwrap(take root)
+    let mut stamp = stamp_after(pages.holder_next_node(db.holders))?
+    let root = failure_result_from_rep(pages.page_result(std.page.bulk(rows, Unprefixed, 1024, mut stamp)))?
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections)
+    tree.root = option.unwrap(take root)
+    pages.set_head_collection(mut db.holders, 0, take tree)
     Ok(())
 }
 
@@ -345,7 +347,7 @@ fn l84_page(offset: u64, direction: TieredDirection) -> TieredDemand {
     TieredDemand(target: TieredPage(std.page.PagePtr(pack: 7, offset: offset, len: 72, checksum: 1, stamp: 2)), direction: direction)
 }
 
-fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: HistoryRef, window: TieredRange) -> Result[(), Error] waits {
+fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: pages.HistoryRef, window: TieredRange) -> Result[(), Error] waits {
     let mut source = bucket_law_client_lanes(model, tasks, "s3.test", 9, true, 1)?
     let mut data: Bytes = list.with_capacity(500000)
     list.fill(mut data, 500000, 0u8)
@@ -363,7 +365,7 @@ fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: HistoryRef, window: Ti
 
 @test
 fn test_l84_bucket_window(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    let item = HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
+    let item = pages.HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
     let mut asked: List[TieredDemand] = list.new()
     list.push(mut asked, l84_page(130000, TieredForward))
     list.push(mut asked, l84_page(7290, TieredPoint))
@@ -462,7 +464,7 @@ fn test_l68_replay_overlay_table() -> Result[(), Error] {
     let Some(deleted) = replay_overlay_at(main_overlay, logical) else {
         fail("L68: missing tombstone")
     }
-    let Some(ReplayRow(base: 4, now: ReplayPut(fork_value), ..)) = replay_overlay_at(fork_overlay, logical) else {
+    let Some(pages.ReplayRow(base: 4, now: ReplayPut(fork_value), ..)) = replay_overlay_at(fork_overlay, logical) else {
         fail("L68: changing main changed the fork")
     }
     if deleted.base != 4 || main_overlay.charged != 29 || list.compare_bytes(fork_value, string.as_bytes("stored")) != Equal || replay_overlay_count(main_overlay, logical, larger, 2)? != 1 || replay_overlay_count(fork_overlay, logical, larger, 2)? != 2 {
@@ -554,7 +556,7 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     list.fill(mut pack_bytes, 28, 0u8)
     disk_write_synced(fixtures, path, pack_bytes)?
     let owner = StoreId(hi: 3, lo: 4)
-    let inventory = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
+    let inventory = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let demand = TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
     let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4)?
@@ -566,8 +568,8 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
 
 fn l84_parallel_read(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits {
     let mut source = bucket_law_client_lanes(model, tasks, "s3.test", 9, true, 2)?
-    let item = HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
-    let missing_pack = HistoryRef(seq: 8, epoch: 1, len: 500000, digest: 24)
+    let item = pages.HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
+    let missing_pack = pages.HistoryRef(seq: 8, epoch: 1, len: 500000, digest: 24)
     let mut raw: Bytes = list.with_capacity(500000)
     list.fill(mut raw, 500000, 0u8)
     raw[72u64] = 3
@@ -715,11 +717,11 @@ fn l68_collection_map_wire() -> Bytes {
 @test
 fn test_l68_lazy_collection_root() -> Result[(), Error] {
     let raw = l68_collection_map_wire()
-    let disk_image = page_result(std.page.decode(clone(raw), CollectionMap))?
+    let disk_image = failure_result_from_rep(pages.page_result(std.page.decode(clone(raw), CollectionMap)))?
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let mut slots: List[std.page.Slot] = list.new()
     list.push(mut slots, ColdPage(ptr))
-    let root = page_result(std.page.attach(take disk_image, take slots, list.new()))?
+    let root = failure_result_from_rep(pages.page_result(std.page.attach(take disk_image, take slots, list.new())))?
     let logical = prefix(9)?
     let Some((ColdPage(found), descriptor)) = std.page.collection_slot(root, logical) else {
         fail("L68: lazy attach lost the table root's location")
@@ -752,11 +754,11 @@ fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_byt
 
 fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
     let mut records: List[std.page.Entry] = list.with_capacity(2)
-    let cold = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
-    let warm = PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
+    let cold = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
+    let warm = pages.PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
     list.push(mut records, std.page.Entry(key: types.key_word(8), cell: InlineValue(encode_pack_row(cold))))
     list.push(mut records, std.page.Entry(key: types.key_word(9), cell: InlineValue(encode_pack_row(warm))))
-    let image = page_result(std.page.encode(records, 0, 101, Unprefixed))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(records, 0, 101, Unprefixed)))?
     failure_result_from_rep(types.copied(std.page.payload(image)))
 }
 
@@ -805,15 +807,15 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
     let mut raw = l68_collection_map_wire()
     list.set_word_le(mut raw, 69, 2u64)
     list.set_word_le(mut raw, 77, 172u64)
-    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let image = failure_result_from_rep(pages.page_result(std.page.decode(take raw, CollectionMap)))?
     let mut slots: List[std.page.Slot] = list.new()
     list.push(mut slots, ColdPage(std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)))
-    let mut roots = empty_roots()
-    roots.collections.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    let mut roots = pages.empty_roots()
+    roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take slots, list.new())))?
     let mut manifest = page_manifest_empty(default_limits())
     manifest.account_tiered = 172
     manifest.next_stamp = 101
-    journal_replay_manifest(failure_result_from_rep(types.capacity(main_state(take roots, 0, 0)))?, manifest)
+    journal_replay_manifest(failure_result_from_rep(types.capacity(pages.main_state(take roots, 0, 0)))?, manifest)
 }
 
 fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[format.JournalEvent, Error] {
@@ -822,13 +824,13 @@ fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Resul
     Ok(Commit(format.JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None, payload: 0)))
 }
 
-fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
+fn l68_check_replay_root(tree: pages.PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
     let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(tree.root, prefix(9)?) else {
         fail("L68: replay forced the base page")
     }
     let recorded_rows: u64 = list.word_le(descriptor, 36)
     let recorded_charge: u64 = list.word_le(descriptor, 44)
-    if ptr.stamp != 40 || recorded_rows != rows || recorded_charge != charge || tree_stamp(tree) <= 100 {
+    if ptr.stamp != 40 || recorded_rows != rows || recorded_charge != charge || pages.tree_stamp(tree) <= 100 {
         fail("L68: replay changed the base pointer or produced incorrect descriptor totals")
     }
     let Some(branch_overlay) = view tree.replay else {
@@ -837,7 +839,7 @@ fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value:
     let Some(collection_overlay) = std.omap.get(branch_overlay.collections, 9u32) else {
         fail("L68: the branch's written collection has no replay overlay")
     }
-    let Some(ReplayRow(now: ReplayPut(value), ..)) = replay_overlay_at(collection_overlay, log_key(9, 2)?) else {
+    let Some(pages.ReplayRow(now: ReplayPut(value), ..)) = replay_overlay_at(collection_overlay, log_key(9, 2)?) else {
         fail("L68: replay lost the put")
     }
     if list.compare_bytes(value, string.as_bytes(expected_value)) != Equal || branch_overlay.charged != 42 {
@@ -868,12 +870,12 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
     l68_check_replay_root(q.state.tips[0u64].roots.collections, 3, 258, "stored")?
     let child = view q.state.tips[1u64].roots.collections
     l68_check_replay_root(child, 3, 258, "second")?
-    let layer: Arc[ReplayBranch] = option.unwrap(clone(child.replay))
+    let layer: Arc[pages.ReplayBranch] = option.unwrap(clone(child.replay))
     let Some(forked) = view layer.fork_time else {
         fail("L87(d): replay lost the version of the overlay shared at FORK")
     }
     let inherited = option.unwrap(std.omap.get(forked, 9u32))
-    let Some(ReplayRow(now: ReplayPut(value), ..)) = replay_overlay_at(inherited, log_key(9, 2)?) else {
+    let Some(pages.ReplayRow(now: ReplayPut(value), ..)) = replay_overlay_at(inherited, log_key(9, 2)?) else {
         fail("L87(d): replay lost the fork-time put")
     }
     if list.compare_bytes(value, string.as_bytes("stored")) != Equal {
@@ -891,7 +893,7 @@ fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
         fail("L87(e): replay did not reserve the stamps below the fork watermark")
     }
     journal_apply("j-1", mut replay, l68_replay_put(1, 1, 7, "second")?)?
-    let edited = tree_stamp(replay.state.tips[1u64].roots.collections)
+    let edited = pages.tree_stamp(replay.state.tips[1u64].roots.collections)
     if edited < 500 {
         fail("L87(e): the child drew an inherited stamp after the fork")
     }
@@ -926,7 +928,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     manifest.account_tiered = 78
     manifest.branches[0u64].roots.collections = l68_object_pack(mut source, owner, 9, 100, l68_collection_map_wire())?
     manifest.pack_root = l68_object_pack(mut source, owner, 10, 101, l68_inventory_wire(168)?)?
-    let cold = HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
+    let cold = pages.HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
     // The locator names the Tiered pack, but the test never uploads it.
     map.insert(mut source.locator.rows, 8u64, cold)
     let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(manifest), true, None)?

@@ -5,7 +5,7 @@
 type TieredCutPack: send {
     seq: u64,
     wire: Bytes,
-    pack: PagePack
+    pack: pages.PagePack
 }
 
 type TieredCutStage: send {
@@ -13,7 +13,7 @@ type TieredCutStage: send {
     packs: List[TieredCutPack],
     // The participants' roots in `cut_participants` order, each Tiered
     // `CollectionRoot` sealed to its emitted location.
-    roots: List[Roots],
+    roots: List[pages.Roots],
     next_pack: u64,
     // The first stamp the fold left unissued.
     stamp_end: u64,
@@ -38,10 +38,10 @@ fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
 // A holder whose collection map holds a Tiered collection without a pack
 // inventory (for example an empty table moving Memory -> Tiered, whose
 // stamp-0 root emits no frames) still needs Step 5 to attach one.
-fn tiered_without_paging(roots: List[Roots]) -> bool {
+fn tiered_without_paging(roots: List[pages.Roots]) -> bool {
     for held in roots {
         if let None = view held.collections.paging {
-            if tiered_collections(held.collections.root) {
+            if pages.tiered_collections(held.collections.root) {
                 return true
             }
         }
@@ -87,7 +87,7 @@ fn fold_owners(branches: List[u32], heads: u64, forked: List[LineageFork]) -> Re
     Ok(take owners)
 }
 
-fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], owners: List[bool], promote: Option[u64], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[bool, Error] waits {
+fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[pages.Roots], branches: List[u32], owners: List[bool], promote: Option[u64], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[bool, Error] waits {
     let mut folded = false
     let mut filed: Map[(u32, u64, u64), ()] = map.new()
     for slot in 0u64 .. list.len(roots) {
@@ -151,12 +151,12 @@ fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), (
     let ReplaceMain(replacement, _) = view delta else {
         return Ok(())
     }
-    let head = view db.heads[0]
+    let head = pages.holder_heads(db.holders)[0]
     for id in replacement.superseded {
         let Some((root, desc)) = std.page.collection_slot(head.roots.collections.root, prefix(id)?) else {
             continue
         }
-        if collection_descriptor(desc).residency != ResidentTiered {
+        if pages.collection_descriptor(desc).residency != ResidentTiered {
             continue
         }
         let mut effects: List[TieredFoldEffect] = list.new()
@@ -180,14 +180,14 @@ fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), (
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
-fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
+fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
     let id = db.store
     let first_pack = disk_state(db).pages.next_pack
     let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
         Some(requests) => Some(view requests),
         None => None,
     }
-    let mut next_stamp = stamp_after(db.next_node)?
+    let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
     let mut roots = take participants
     if let ReplaceMain(replacement, _) = delta {
         if let Some(freed) = view replacement.chunk_freed {
@@ -205,7 +205,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
             queue_superseded(db, delta, mut seen, mut queued)?
         }
         if let Some(freed) = view replacement.chunk_freed {
-            queue_index_chunk_frees(freed, db.heads[0].id, mut seen, mut queued, mut replaced)?
+            queue_index_chunk_frees(freed, pages.holder_heads(db.holders)[0].id, mut seen, mut queued, mut replaced)?
         }
     }
     // A Tiered -> Memory change installs its loaded tree like a fold does.
@@ -229,22 +229,22 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     // also moved keeps the one location the roots take.
     let mut pending = tiered_cut_frames_restamped(roots, disk_state(db).restamp, mut next_stamp)?
     tiered_emit_queue(mut pending, moving)?
-    let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = take pending
-    if list.len(pages) == 0 && list.len(blobs) == 0 && !folded {
+    let TieredCutFrames(pages: take staged_page_frames, blobs: take blobs, ..) = take pending
+    if list.len(staged_page_frames) == 0 && list.len(blobs) == 0 && !folded {
         return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction, emitted: map.new()))
     }
     let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
-    let page_run = layout_tiered_packs(take pages, 3, blob_run.next_pack, cap)?
+    let page_run = layout_tiered_packs(take staged_page_frames, 3, blob_run.next_pack, cap)?
     let mut emitted: Map[u64, std.page.PagePtr] = map.new()
     let mut packs: List[TieredCutPack] = list.new()
     encode_tiered_run(id, blob_run, mut emitted, mut packs)?
     encode_tiered_run(id, page_run, mut emitted, mut packs)?
     settle_queue_moves(mut queue, moving, emitted, disk_state(db).pages.lists.deferred_next)?
-    let mut sealed: List[Roots] = list.new()
+    let mut sealed: List[pages.Roots] = list.new()
     failure_result_from_rep(types.capacity(list.try_reserve(mut sealed, list.len(roots))))?
     for held in roots {
         let collections = seal_holder_tiered(held.collections, emitted)?
-        list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
+        list.push(mut sealed, pages.PageRoots(collections: take collections, streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
     }
     Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction, emitted: take emitted))
 }
@@ -341,7 +341,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
             tiered_map_account(option.unwrap(std.page.child(root, slot)), mut seen, mut total)?
             continue
         }
-        let descriptor = unwrap_collection_descriptor(std.page.value_at(root, slot))
+        let descriptor = pages.unwrap_collection_descriptor(std.page.value_at(root, slot))
         if descriptor.residency != ResidentTiered {
             continue
         }
@@ -367,7 +367,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
 
 // Over the roots the cut publishes, so a fold's fresh roots are counted
 // and an overlaid head never hides a pin that shares its Cold root.
-fn cut_tiered_account(published: List[Roots]) -> Result[u64, Error] {
+fn cut_tiered_account(published: List[pages.Roots]) -> Result[u64, Error] {
     let mut seen: Map[u64, ()] = map.new()
     let mut total = 0u64
     for roots in published {
@@ -390,15 +390,15 @@ fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocation
             Some(_) => true,
             None => false,
         }
-        if had_paging || tiered_collections(cut_stage.roots[slot].collections.root) {
+        if had_paging || pages.tiered_collections(cut_stage.roots[slot].collections.root) {
             cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
         }
     }
     Ok(settled)
 }
 
-fn take_sealed(mut sealed: List[Roots], mut at: u64) -> PageTree {
-    let tree = share_page_tree(sealed[at].collections)
+fn take_sealed(mut sealed: List[pages.Roots], mut at: u64) -> pages.PageTree {
+    let tree = pages.share_page_tree(sealed[at].collections)
     at += 1
     take tree
 }
@@ -418,7 +418,8 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
         ReplaceMain(_, slot) => slot,
         _ => None,
     }
-    for slot in 0u64 .. list.len(db.heads) {
+    let head_count = list.len(pages.holder_heads(db.holders))
+    for slot in 0u64 .. head_count {
         if removed == Some(slot) {
             continue
         }
@@ -428,14 +429,15 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
                 continue
             }
         }
-        db.heads[slot].roots.collections = take_sealed(mut sealed_roots, mut at)
+        pages.set_head_collection(mut db.holders, slot, take_sealed(mut sealed_roots, mut at))
     }
     if let AddHead(mut added, _) = delta {
         added.roots.collections = take_sealed(mut sealed_roots, mut at)
     }
     let dropped = removed_pin(delta)
     let mut inserted = false
-    for slot in 0u64 .. list.len(db.pins) {
+    let pin_count = list.len(pages.holder_pins(db.holders))
+    for slot in 0u64 .. pin_count {
         if dropped == Some(slot) {
             continue
         }
@@ -447,13 +449,13 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
         }
         if !inserted {
             if let AddPin(mut added) = delta {
-                if pin_order(added.name, added.owner, db.pins[slot].name, db.pins[slot].owner) == Less {
+                if pin_order(added.name, added.owner, pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].owner) == Less {
                     added.roots.collections = take_sealed(mut sealed_roots, mut at)
                     inserted = true
                 }
             }
         }
-        db.pins[slot].roots.collections = take_sealed(mut sealed_roots, mut at)
+        pages.install_sealed_pin(mut db.holders, slot, take_sealed(mut sealed_roots, mut at))
     }
     if !inserted {
         if let AddPin(mut added) = delta {
@@ -463,7 +465,7 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
     take delta
 }
 
-fn tiered_index_dirty_room(db: Db, roots: List[Roots], freed: TieredFreed) -> Result[(), Error] {
+fn tiered_index_dirty_room(db: Db, roots: List[pages.Roots], freed: TieredFreed) -> Result[(), Error] {
     let frames = tiered_cut_frames(roots)?
     let state = disk_state(db)
     let dirty = view state.tiered_dirty

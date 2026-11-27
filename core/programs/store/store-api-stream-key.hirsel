@@ -39,5 +39,5 @@ pub fn stream_record_matches(raw: Bytes, name: StreamKey) -> bool {
 }
 
 pub fn keyed_time(db: Db) -> u64 {
-    order.max(host.wall_ms(db.clock), db.heads[0].at)
+    order.max(host.wall_ms(db.clock), pages.holder_heads(db.holders)[0].at)
 }

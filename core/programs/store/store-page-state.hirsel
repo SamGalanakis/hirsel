@@ -1,0 +1,208 @@
+pub fn tiered_collections(root: Arc[std.page.Page]) -> bool {
+    let image = std.page.image_of(root)
+    let slots = std.page.count(image)
+    if std.page.level(image) == 0 {
+        for slot in 0u64 .. slots {
+            // AP7 puts residency immediately after the collection kind.
+            if unwrap_collection_descriptor(std.page.value_at(root, slot)).residency == ResidentTiered {
+                return true
+            }
+        }
+    } else {
+        for slot in 0u64 .. slots {
+            if tiered_collections(option.unwrap(std.page.child(root, slot))) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+pub fn holders_tiered(all: List[Roots]) -> bool {
+    for roots in all {
+        if tiered_collections(roots.collections.root) {
+            return true
+        }
+    }
+    false
+}
+
+pub fn materialize_keyed_edits(mut roots: Roots, edits: List[format.KeyedEdit], private_from: u64, mut stamps: u64) -> Result[(), types.Failure] {
+    if list.len(edits) == 0 {
+        return Ok(())
+    }
+    if list.len(roots.keyed) == 0 {
+        roots.keyed = new_keyed_pages(roots.streams.inline)
+    }
+    for edit in edits {
+        let slot: u64 = int.widen(edit.tree)
+        match edit.value {
+            Some(value) => put_page_row(mut roots.keyed[slot], edit.key, value, private_from, mut stamps)?,
+            None => {
+                let _ = remove_page_row(mut roots.keyed[slot], edit.key, private_from, mut stamps)?
+            },
+        }
+    }
+    if std.list.all(roots.keyed, fn(tree: PageTree) -> bool {
+        tree_stamp(tree) == 0
+    }) {
+        roots.keyed = list.new()
+    }
+    Ok(())
+}
+
+pub fn keyed_lookup(trees: List[PageTree], tree: u8, key: Bytes) -> Option[View[Bytes]] in trees {
+    if list.len(trees) == 0 {
+        return None
+    }
+    let slot: u64 = int.widen(tree)
+    get_page_row(trees[slot], key)
+}
+
+pub type Roots = PageRoots
+
+pub fn empty_roots() -> Roots {
+    PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024), keyed: list.new())
+}
+
+pub fn share_roots(r: Roots) -> Roots {
+    PageRoots(collections: share_page_tree(r.collections), streams: share_page_tree(r.streams), catalog: share_page_tree(r.catalog), keyed: share_keyed_pages(r.keyed))
+}
+
+pub type Head {
+    id: u32,
+    name: String,
+    parent: u32,
+    forked_at: u64,
+    roots: Roots,
+    head: u64,
+    at: u64
+}
+
+fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
+    Head(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at)
+}
+
+// A branch record carried by cuts, opens and replay.
+pub type Tip: shareable + send {
+    id: u32,
+    name: String,
+    parent: u32,
+    forked_at: u64,
+    roots: Roots,
+    head: u64,
+    at: u64
+}
+
+// Every branch's head and every pin: what one cut makes durable.
+pub type State: shareable + send {
+    tips: List[Tip],
+    pins: List[Pin],
+    next_branch: u32,
+    next_table: u32
+}
+
+pub fn main_state(take roots: Roots, head: u64, at: u64) -> Result[State, Capacity] {
+    let mut tips: List[Tip] = list.new()
+    list.push(mut tips, Tip(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at))
+    Ok(State(tips: take tips, pins: list.new(), next_branch: 1, next_table: 1))
+}
+
+pub fn tip_of(h: Head) -> Tip {
+    Tip(id: h.id, name: string.from(h.name), parent: h.parent, forked_at: h.forked_at, roots: share_roots(h.roots), head: h.head, at: h.at)
+}
+
+pub fn state_roots(s: State) -> Result[List[Roots], Capacity] {
+    let mut all: List[Roots] = list.with_capacity(list.len(s.tips) + list.len(s.pins))
+    for t in s.tips {
+        list.push(mut all, share_roots(t.roots))
+    }
+    for held in s.pins {
+        list.push(mut all, share_roots(held.roots))
+    }
+    Ok(take all)
+}
+
+pub fn state_account(s: State) -> Result[u64, Capacity] {
+    Ok(page_row_account(state_roots(s)?))
+}
+
+pub fn same_name(a: String, b: String) -> bool {
+    string.as_bytes(a) == string.as_bytes(b)
+}
+
+pub fn encode_fork(context: format.DiskContext, offset: u64, head: Head, watermark: u64) -> Result[Bytes, Capacity] {
+    let size = 26 + string.byte_len(head.name)
+    let mut out: Bytes = list.with_capacity(16 + size + format.BINDING_BYTES)
+    format.le(mut out, 0x0013, 2)?
+    format.le(mut out, 1, 2)?
+    format.le(mut out, size, 4)?
+    format.le(mut out, 0, 8)?
+    format.le(mut out, int.widen(head.id), 4)?
+    format.le(mut out, int.widen(head.parent), 4)?
+    format.le(mut out, head.forked_at, 8)?
+    format.disk_put_name(mut out, head.name)?
+    format.le(mut out, watermark, 8)?
+    format.seal_frame(mut out, context, offset)?
+    Ok(take out)
+}
+
+pub fn branch_record_bytes(name: String) -> u64 {
+    143 + string.byte_len(name)
+}
+
+pub fn pin_record_bytes(name: String) -> u64 {
+    130 + string.byte_len(name)
+}
+
+pub fn malformed(at: u64) -> types.Failure {
+    Corrupt(types.FaultRep(file: "catalog", offset: at, why: Malformed))
+}
+
+pub fn projector_pin_name(name: String, slot: u8) -> String {
+    let mut out = string.from("hirsel.projector.")
+    string.push(mut out, name)
+    string.push(mut out, if slot == 0 {
+        ".0"
+    } else {
+        ".1"
+    })
+    take out
+}
+
+// ImportPin holds a deploy's kept import (§3.5a "The kept import").
+pub type PinOwner: key + shareable + send = ApplicationPin | ProjectorPin | ImportPin
+
+pub type Pin: shareable + send {
+    owner: PinOwner,
+    name: String,
+    branch: u32,
+    version: u64,
+    serial: u64,
+    roots: Roots,
+    watermark: u64
+}
+
+pub fn share_pin(p: Pin) -> Result[Pin, Capacity] {
+    Ok(Pin(owner: p.owner, name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
+}
+
+pub fn inline_cell(descriptor: Bytes) -> Option[View[Bytes]] in descriptor {
+    if list.len(descriptor) > 58 {
+        Some(list.slice(descriptor, 58, list.len(descriptor)))
+    } else {
+        None
+    }
+}
+
+pub fn owned_cell(root: Arc[std.page.Page], descriptor: Bytes) -> Option[Arc[Bytes]] {
+    if let Some(raw) = inline_cell(descriptor) {
+        return Some(arc.new(result.unwrap(types.copied(raw))))
+    }
+    let mut rows = std.page.cursor_open(root, None, true, false)
+    let Some(take item) = std.page.cursor_next(mut rows) else {
+        return None
+    }
+    let std.page.CursorRow(value: take raw, ..) = take item
+    Some(take raw)
+}

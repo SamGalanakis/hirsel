@@ -394,11 +394,11 @@ fn journal_tail_write(take writer: Db, t: Table[u64, u64], out: Stdout) -> Resul
             _ => fail("BL2: a wide commit was refused")
         }
         durable(mut db, commit_ticket)?
-        journal_note(out, db.heads[0].head)
+        journal_note(out, pages.holder_heads(db.holders)[0].head)
         if k == 1 {
             let cut = checkpoint(mut db)?
             durable(mut db, cut)?
-            journal_note(out, db.heads[0].head)
+            journal_note(out, pages.holder_heads(db.holders)[0].head)
         }
     }
     close(take db)
@@ -407,7 +407,7 @@ fn journal_tail_write(take writer: Db, t: Table[u64, u64], out: Stdout) -> Resul
 // The commit law (acked ⊆ recovered ⊆ issued): the head lies in
 // [minimum, TAIL_COMMITS + 1] and holds exactly commits 0 .. head - 2.
 fn journal_tail_read(db: Db, t: Table[u64, u64], minimum: u64) -> Result[bool, Error] waits {
-    let head = db.heads[0].head
+    let head = pages.holder_heads(db.holders)[0].head
     if head < 1 || head > TAIL_COMMITS + 1 || head < minimum {
         return Ok(false)
     }

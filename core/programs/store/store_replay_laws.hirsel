@@ -34,7 +34,7 @@ fn replay_law_same_rows(a: Arc[std.page.Page], b: Arc[std.page.Page], collection
     true
 }
 
-fn replay_law_mismatch(tip: Tip, part: String) -> Never {
+fn replay_law_mismatch(tip: pages.Tip, part: String) -> Never {
     let mut message = string.from("live and replayed branch ")
     string.push_u64(mut message, int.widen(tip.id))
     string.push(mut message, " version ")
@@ -44,7 +44,7 @@ fn replay_law_mismatch(tip: Tip, part: String) -> Never {
     fail(take message)
 }
 
-fn replay_law_compare(primary: Tip, replayed: Tip) {
+fn replay_law_compare(primary: pages.Tip, replayed: pages.Tip) {
     if primary.id != replayed.id || primary.head != replayed.head || primary.at != replayed.at {
         replay_law_mismatch(primary, "commit identity or time")
     }
@@ -84,7 +84,7 @@ fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Resu
     // Compare the exact union of the live roots with the reconstructed one.
     // Exclude cached Accounts.logical and Accounts.exact. L51(d) allows the
     // live retained union to charge 604 conservatively and reopen to charge 518.
-    if failure_result_from_rep(types.capacity(state_account(primary)))? != replayed.resident {
+    if failure_result_from_rep(types.capacity(pages.state_account(primary)))? != replayed.resident {
         replay_law_mismatch(tip, "exact row account")
     }
     Ok(())

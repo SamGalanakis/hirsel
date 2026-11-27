@@ -130,11 +130,11 @@ fn visit_fold_records[K: ordered + shareable + send, V: shareable + send, S](nod
     Ok(())
 }
 
-fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Arc[pages.ReplayOverlay]) -> Result[(), Error] waits {
     let pack_file = paged_pack_path(base.pack)?
     let mut checked = ()
     if let Some(root) = std.omap.root(overlay.trims) {
-        visit_fold_records(root, mut checked, scoped fn(mut state: (), _index: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), _index: u64, evidence: pages.ReplayTrimEvidence) -> Result[(), Error] waits {
             if evidence.lo < evidence.hi {
                 let low = fold_prefix_charge(cut, base, evidence.lo)?
                 let high = fold_prefix_charge(cut, base, evidence.hi)?
@@ -146,7 +146,7 @@ fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Ar
         })?
     }
     if let Some(root) = std.omap.root(overlay.entries) {
-        visit_fold_records(root, mut checked, scoped fn(mut state: (), key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+        visit_fold_records(root, mut checked, scoped fn(mut state: (), key: Bytes, row: pages.ReplayRow) -> Result[(), Error] waits {
             if fold_base_prior(cut, base, key)? != row.base {
                 return Error(failure_from_rep(format.disk_fault(pack_file, base.offset, Malformed)))
             }
@@ -172,7 +172,7 @@ fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(core.Cell[Tie
                 let frame = fold_frame(cut, target)?
                 map.insert(mut pins, tiered_cache_key(frame.identity), take frame)
             },
-            Some(AttemptPinLimit(_)) => return Error(malformed(0)),
+            Some(AttemptPinLimit(_)) => return Error(failure_from_rep(pages.malformed(0))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
             Some(AttemptFold(_)) => fail("store: a cut cannot wait for itself"),
             None => {
@@ -289,7 +289,7 @@ fn append_fold_effects(mut effects: Option[List[TieredFoldEffect]], take added: 
     Ok(())
 }
 
-fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: ReplayRow, inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: pages.ReplayRow, inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
     let record = match effects {
         Some(_) => true,
         None => false,
@@ -338,7 +338,7 @@ type FoldCollection {
     effects: Option[List[TieredFoldEffect]]
 }
 
-fn fold_log_before(cut: TieredPageSource, current: std.page.Slot, overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], floor: u64) -> Result[(LogBounds, u64), Error] waits {
+fn fold_log_before(cut: TieredPageSource, current: std.page.Slot, overlay: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], floor: u64) -> Result[(LogBounds, u64), Error] waits {
     let (_, first_trim) = option.unwrap(std.omap.first(overlay.trims))
     let cold_end = option.unwrap(overlay.cold_next)
     let mut first = first_trim.lo
@@ -371,7 +371,7 @@ fn fold_log_before(cut: TieredPageSource, current: std.page.Slot, overlay: Arc[R
     Ok((LogBounds(first: first, next: end_seq), before))
 }
 
-fn inherited_fold_value(inherited: Option[View[Arc[ReplayOverlay]]], key: Bytes, now: ReplayValue) -> bool {
+fn inherited_fold_value(inherited: Option[View[Arc[pages.ReplayOverlay]]], key: Bytes, now: pages.ReplayValue) -> bool {
     let Some(previous) = inherited else {
         return false
     }
@@ -390,7 +390,7 @@ fn inherited_fold_value(inherited: Option[View[Arc[ReplayOverlay]]], key: Bytes,
     }
 }
 
-fn fold_apply_overlay(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+fn fold_apply_overlay(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
     let previous_floor = match inherited {
         Some(previous) => previous.floor,
         None => None,
@@ -406,7 +406,7 @@ fn fold_apply_overlay(cut: TieredPageSource, base: std.page.Slot, empty_root: Ar
     let log_rows = overlay.cold_next != None
     let mut folded = FoldCollection(current: take current, next_stamp: next_stamp, effects: replace(mut effects, None))
     let materialized = if let Some(rows) = std.omap.root(overlay.entries) {
-        visit_fold_records(rows, mut folded, scoped fn(mut working: FoldCollection, key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+        visit_fold_records(rows, mut folded, scoped fn(mut working: FoldCollection, key: Bytes, row: pages.ReplayRow) -> Result[(), Error] waits {
             if !inherited_fold_value(inherited, key, row.now) {
                 working.current = fold_materialize_row(cut, working.current, empty_root, key, row, inline, log_rows, private_from, mut working.next_stamp, mut working.effects)?
             }
@@ -422,7 +422,7 @@ fn fold_apply_overlay(cut: TieredPageSource, base: std.page.Slot, empty_root: Ar
     Ok(take ready)
 }
 
-fn fold_collection(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
+fn fold_collection(cut: TieredPageSource, base: std.page.Slot, empty_root: Arc[std.page.Page], overlay: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[std.page.Slot, Error] waits {
     let location = match base {
         ColdPage(ptr) => ptr,
         HotPage(_) => std.page.unlocated(0),
@@ -443,8 +443,8 @@ type FoldMap {
     effects: Option[List[TieredFoldEffect]]
 }
 
-fn fold_page_tree(cut: TieredPageSource, mut tree: PageTree, mut next_stamp: u64) -> Result[List[TieredFoldEffect], Error] waits {
-    let replayed: Option[Arc[ReplayBranch]] = clone(tree.replay)
+fn fold_page_tree(cut: TieredPageSource, mut tree: pages.PageTree, mut next_stamp: u64) -> Result[List[TieredFoldEffect], Error] waits {
+    let replayed: Option[Arc[pages.ReplayBranch]] = clone(tree.replay)
     let Some(take overlay) = take replayed else {
         return Ok(list.new())
     }
@@ -454,7 +454,7 @@ fn fold_page_tree(cut: TieredPageSource, mut tree: PageTree, mut next_stamp: u64
     let inline = tree.inline
     let mut folded = FoldMap(root: arc.share(tree.root), next_stamp: next_stamp, effects: Some(list.new()))
     let materialized = if let Some(collections) = std.omap.root(overlay.collections) {
-        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+        visit_fold_records(collections, mut folded, scoped fn(mut working: FoldMap, id: u32, edits: Arc[pages.ReplayOverlay]) -> Result[(), Error] waits {
             let inherited = match overlay.fork_time {
                 Some(forked) => std.omap.get(forked, id),
                 None => None,
@@ -473,7 +473,7 @@ fn fold_page_tree(cut: TieredPageSource, mut tree: PageTree, mut next_stamp: u64
     Ok(option.unwrap(take fold_effects))
 }
 
-fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[ReplayOverlay], inherited: Option[View[Arc[ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[Arc[std.page.Page], Error] waits {
+fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty_root: Arc[std.page.Page], id: u32, edits: Arc[pages.ReplayOverlay], inherited: Option[View[Arc[pages.ReplayOverlay]]], inline: u64, mut next_stamp: u64, mut effects: Option[List[TieredFoldEffect]]) -> Result[Arc[std.page.Page], Error] waits {
     let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         prefix(id)
     })?
@@ -482,7 +482,7 @@ fn fold_collection_in_map(cut: TieredPageSource, root: Arc[std.page.Page], empty
     let (take mapped, following_stamp) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
         let mut candidate = arc.share(root)
         let mut draw = next_stamp
-        page_result(std.page.install_tiered_root(mut candidate, key, folded, mut draw))?
+        failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut candidate, key, folded, mut draw)))?
         Ok((take candidate, draw))
     })?
     next_stamp = following_stamp

@@ -92,27 +92,27 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     if list.len(large_value) <= JOURNAL_CHUNK_BYTES {
         fail("catalog BLOB fixture did not cross a chunk boundary")
     }
-    let payload = page_result(std.page.encode_blob(1, large_value))?
+    let payload = failure_result_from_rep(pages.page_result(std.page.encode_blob(1, large_value)))?
     let mut blob_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(large, 0, 0)))?
     list.append(mut blob_bytes, failure_result_from_rep(types.capacity(format.disk_seal(large, 72, 0x0022, 1, payload)))?)
     disk_write_synced(d, "p-2", blob_bytes)?
     let reference = std.page.BlobRef(stamp: 1, len: list.len(large_value), checksum: std.check.xxh3(large_value, 0, list.len(large_value)), pack: 2, offset: 72, body: 0)
     list.push(mut catalog_rows, std.page.Entry(key: catalog_index_key(1, "large")?, cell: BlobValue(reference)))
-    let leaf = page_result(std.page.encode(catalog_rows, 0, 2, Unprefixed))?
+    let leaf = failure_result_from_rep(pages.page_result(std.page.encode(catalog_rows, 0, 2, Unprefixed)))?
     let mut root = capture_test_page(mut raw, data, leaf)?
     for height in 1u8 .. 65 {
         let mut children: List[std.page.Entry] = list.with_capacity(1)
         list.push(mut children, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: root, rows: 16, charge: 0))))
         let stamp: u64 = int.widen(height)
-        let branch_image = page_result(std.page.encode(children, height, stamp + 2, Unprefixed))?
+        let branch_image = failure_result_from_rep(pages.page_result(std.page.encode(children, height, stamp + 2, Unprefixed)))?
         root = capture_test_page(mut raw, data, branch_image)?
     }
     disk_write_synced(d, "p-1", raw)?
     let mut pack_rows: List[std.page.Entry] = list.with_capacity(2)
     let page_bytes = list.len(raw) - 72 - 16 * 65
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(encode_pack_row(PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(encode_pack_row(PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
-    let listing = page_result(std.page.encode(pack_rows, 0, 67, Unprefixed))?
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(encode_pack_row(pages.PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(encode_pack_row(pages.PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
+    let listing = failure_result_from_rep(pages.page_result(std.page.encode(pack_rows, 0, 67, Unprefixed)))?
     let mut list_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(inventory, 0, 0)))?
     m.pack_root = capture_test_page(mut list_bytes, inventory, listing)?
     disk_write_synced(d, "p-3", list_bytes)?
@@ -120,8 +120,8 @@ fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), 
     m.next_pack = 4
     m.next_table = 17
     m.branches[0].roots.catalog = root
-    let main_roots: LocatedRoots = clone(m.branches[0].roots)
-    let second_roots: LocatedRoots = clone(main_roots)
+    let main_roots: pages.LocatedRoots = clone(m.branches[0].roots)
+    let second_roots: pages.LocatedRoots = clone(main_roots)
     m.next_branch = 2
     list.push(mut m.branches, LocatedBranch(id: 1, name: "child", parent: 0, forked_at: 0, version: 0, at: 0, roots: take second_roots))
     for pin_name in["a", "b", "c"] {
@@ -144,7 +144,7 @@ fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
         }
         let id: u32 = int.truncate(2 + i)
         let zero = std.page.unlocated(0)
-        let roots = LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
+        let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
         list.push(mut m.branches, LocatedBranch(id: id, name: take label, parent: 0, forked_at: 0, version: 0, at: 0, roots: take roots))
         remaining -= 143 + width
     }

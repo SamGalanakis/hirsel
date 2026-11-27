@@ -281,7 +281,7 @@ fn pack_cache_discard(cache: ObjectsCache, path: String) waits {
     }
 }
 
-fn history_read_pack(mut client: std.object.Client, path: String, reference: HistoryRef, cache: ObjectsCache, mut raw: Bytes, deadline: u64) -> Result[(), Error] waits {
+fn history_read_pack(mut client: std.object.Client, path: String, reference: pages.HistoryRef, cache: ObjectsCache, mut raw: Bytes, deadline: u64) -> Result[(), Error] waits {
     if pack_cache_read(cache, path, reference.len, Some(reference.digest), mut raw) {
         return Ok(())
     }

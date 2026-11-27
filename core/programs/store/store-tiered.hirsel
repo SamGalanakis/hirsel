@@ -7,9 +7,9 @@ fn sealed_tiered_root(root: Arc[std.page.Page], locate: scoped[view] fn(u64) -> 
     }
     let size = std.page.sealed_size(image)
     let mut sealed: Bytes = list.with_capacity(size)
-    page_result(std.page.seal_located(mut sealed, root, size, locate))?
-    let ready = page_result(std.page.decode(take sealed, Collection))?
-    page_result(std.page.attach_cold(take ready))
+    failure_result_from_rep(pages.page_result(std.page.seal_located(mut sealed, root, size, locate)))?
+    let ready = failure_result_from_rep(pages.page_result(std.page.decode(take sealed, Collection)))?
+    failure_result_from_rep(pages.page_result(std.page.attach_cold(take ready)))
 }
 
 type ReplacedFrame: key {
@@ -90,24 +90,24 @@ fn admit_tiered_commit(mut dirty: TieredDirty, br: u32, take freed: TieredFreed)
 
 // The deciding and proposed collection maps are Memory. Settling a commit
 // needs only their descriptors and its final staged puts (§13.1, §13.8).
-fn tiered_data_key(tree: PageTree, key: Bytes) -> bool {
+fn tiered_data_key(tree: pages.PageTree, key: Bytes) -> bool {
     let Some(descriptor) = std.page.lookup(tree.root, list.slice(key, 0, 4)) else {
         return false
     }
-    collection_descriptor(descriptor).residency == ResidentTiered
+    pages.collection_descriptor(descriptor).residency == ResidentTiered
 }
 
-fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: PageTree, operations: DataRows) -> Result[u64, Error] {
-    let order = failure_result_from_rep(types.capacity(data_order(operations)))?
+fn settled_tiered_bytes(total: u64, retained: bool, base: pages.PageTree, proposed: pages.PageTree, operations: pages.DataRows) -> Result[u64, Error] {
+    let order = failure_result_from_rep(types.capacity(pages.data_order(operations)))?
     let mut prior_collection: Option[u32] = None
     let mut charged = total
-    for slot in 0u64 .. data_row_count(operations) {
+    for slot in 0u64 .. pages.data_row_count(operations) {
         let op = ordered_row(operations, order, slot)
         let id = list.slice(op.key, 0, 4)
         let Some(before) = std.page.lookup(base.root, id) else {
             continue
         }
-        let fields = collection_descriptor(before)
+        let fields = pages.collection_descriptor(before)
         if fields.residency != ResidentTiered {
             continue
         }
@@ -120,7 +120,7 @@ fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: Pa
             if prior_collection != Some(collection) {
                 prior_collection = Some(collection)
                 let after = option.unwrap(std.page.lookup(proposed.root, id))
-                charged = replay_charge("MANIFEST", charged, fields.row_bytes, collection_descriptor(after).row_bytes)?
+                charged = replay_charge("MANIFEST", charged, fields.row_bytes, pages.collection_descriptor(after).row_bytes)?
             }
         }
     }

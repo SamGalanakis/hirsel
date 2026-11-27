@@ -1,5 +1,5 @@
-fn page_row_count(tree: PageTree) -> u64 {
-    if tree_domain(tree) != CollectionMap {
+fn page_row_count(tree: pages.PageTree) -> u64 {
+    if pages.tree_domain(tree) != CollectionMap {
         let (rows, _) = std.page.totals(tree.root)
         return rows
     }
@@ -15,26 +15,26 @@ fn page_row_count(tree: PageTree) -> u64 {
 @test
 fn test_paged_row_account() -> Result[(), Error] {
     let mut next_stamp = 1u64
-    let mut collections = new_page_tree(CollectionMap, 0)
+    let mut collections = pages.new_page_tree(CollectionMap, 0)
     define_collection(mut collections, 8, 1, 1, mut next_stamp)?
     let key = logical_key(8, types.key_word(1))?
-    put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp)?
-    let mut participants: List[PageRoots] = list.with_capacity(3)
-    list.push(mut participants, PageRoots(collections: share_page_tree(collections), streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
+    failure_result_from_rep(pages.put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp))?
+    let mut participants: List[pages.PageRoots] = list.with_capacity(3)
+    list.push(mut participants, pages.PageRoots(collections: pages.share_page_tree(collections), streams: pages.new_page_tree(Unprefixed, 0), catalog: pages.new_page_tree(Unprefixed, 0), keyed: list.new()))
     // One descriptor at 126, one logical 12-byte key and a one-byte value.
-    if page_row_account(participants) != 212 {
+    if pages.page_row_account(participants) != 212 {
         return Error(Foreign)
     }
     let changed_from = next_stamp
-    put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp)?
+    failure_result_from_rep(pages.put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp))?
     define_collection(mut collections, 9, 2, changed_from, mut next_stamp)?
-    list.push(mut participants, PageRoots(collections: share_page_tree(collections), streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
+    list.push(mut participants, pages.PageRoots(collections: pages.share_page_tree(collections), streams: pages.new_page_tree(Unprefixed, 0), catalog: pages.new_page_tree(Unprefixed, 0), keyed: list.new()))
     // The same value is written under a new blob stamp.
     let rewritten_from = next_stamp
-    put_page_row(mut collections, key, string.as_bytes("B"), rewritten_from, mut next_stamp)?
-    list.push(mut participants, PageRoots(collections: take collections, streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
+    failure_result_from_rep(pages.put_page_row(mut collections, key, string.as_bytes("B"), rewritten_from, mut next_stamp))?
+    list.push(mut participants, pages.PageRoots(collections: take collections, streams: pages.new_page_tree(Unprefixed, 0), catalog: pages.new_page_tree(Unprefixed, 0), keyed: list.new()))
     // Two distinct descriptors and two byte-distinct versions of key 1.
-    if page_row_account(participants) != 424 {
+    if pages.page_row_account(participants) != 424 {
         return Error(Foreign)
     }
     Ok(())
@@ -43,30 +43,30 @@ fn test_paged_row_account() -> Result[(), Error] {
 @test
 fn test_paged_collection_paths() -> Result[(), Error] {
     let mut stamps = 1u64
-    let mut tree = new_page_tree(CollectionMap, 1024)
+    let mut tree = pages.new_page_tree(CollectionMap, 1024)
     define_collection(mut tree, 7, 1, 1, mut stamps)?
     define_collection(mut tree, 9, 2, 1, mut stamps)?
     let mut small: Bytes = list.with_capacity(64)
     list.fill(mut small, 64, 7u8)
     for row in 0u64 .. 160 {
-        put_page_row(mut tree, logical_key(7, types.key_word(row))?, small, 1, mut stamps)?
+        failure_result_from_rep(pages.put_page_row(mut tree, logical_key(7, types.key_word(row))?, small, 1, mut stamps))?
     }
-    let earlier = share_page_tree(tree)
+    let earlier = pages.share_page_tree(tree)
     let floor = stamps
     for row in 0u64 .. 40 {
-        if !remove_page_row(mut tree, logical_key(7, types.key_word(row))?, floor, mut stamps)? {
+        if !failure_result_from_rep(pages.remove_page_row(mut tree, logical_key(7, types.key_word(row))?, floor, mut stamps))? {
             return Error(Missing("present row"))
         }
     }
     let mut large: Bytes = list.with_capacity(1025)
     list.fill(mut large, 1025, 55u8)
     let rewritten = logical_key(7, types.key_word(100))?
-    put_page_row(mut tree, rewritten, large, floor, mut stamps)?
+    failure_result_from_rep(pages.put_page_row(mut tree, rewritten, large, floor, mut stamps))?
     {
-        let Some(current) = get_page_row(tree, rewritten) else {
+        let Some(current) = pages.get_page_row(tree, rewritten) else {
             return Error(Missing("new row"))
         }
-        let Some(old) = get_page_row(earlier, rewritten) else {
+        let Some(old) = pages.get_page_row(earlier, rewritten) else {
             return Error(Missing("old row"))
         }
         if current != large || old != small {
@@ -82,7 +82,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
             return Error(Foreign)
         }
     }
-    let mut forward = open_page_range(tree, None, true, false, None)?
+    let mut forward = failure_result_from_rep(pages.open_page_range(tree, None, true, false, None))?
     for row in 40u64 .. 160 {
         let Some((key, _)) = next_page_range(mut forward)? else {
             return Error(Missing("range row"))
@@ -94,7 +94,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     if let Some(_) = next_page_range(mut forward)? {
         return Error(Foreign)
     }
-    let mut reverse = open_page_range(tree, Some(logical_key(7, types.key_word(111))?), false, true, None)?
+    let mut reverse = failure_result_from_rep(pages.open_page_range(tree, Some(logical_key(7, types.key_word(111))?), false, true, None))?
     let Some((key, _)) = next_page_range(mut reverse)? else {
         return Error(Missing("reverse row"))
     }
@@ -132,7 +132,7 @@ fn test_paged_collection_paths() -> Result[(), Error] {
 }
 
 fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] waits {
-    let tree = db.heads[0u64].roots.collections
+    let tree = pages.holder_heads(db.holders)[0u64].roots.collections
     let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else {
         return Error(Missing("collection"))
     }
@@ -178,7 +178,7 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         return Error(Missing("initial commit"))
     }
     {
-        let Some(root) = std.page.collection_child(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some(root) = std.page.collection_child(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
             return Error(Missing("collection"))
         }
         let image = std.page.image_of(root)

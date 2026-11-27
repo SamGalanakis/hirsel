@@ -172,8 +172,8 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
         }
     }
     history_check_empty(mut client, deadline)?
-    let first = disk_allocation(scoped fn() -> Result[State, Error] {
-        failure_result_from_rep(types.capacity(main_state(empty_roots(), 0, 0)))
+    let first = disk_allocation(scoped fn() -> Result[pages.State, Error] {
+        failure_result_from_rep(types.capacity(pages.main_state(pages.empty_roots(), 0, 0)))
     })?
     let initial = journal_replay(take first, 0, limits_from_rep(types.named_limits(optional_limits_to_rep(options.limits))))?
     over_ceiling(journal_account(initial)?, options.resident_limit)?
@@ -344,7 +344,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
     }
 }
 
-fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, from: HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
+fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, from: pages.HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
     let suffix = history_suffix(mut read_source.client, head, from, read_source.deadline)?
     let mut replay = take initial
     history_apply_suffix(mut read_source.client, head, from.seq, suffix, mut replay, ceiling, read_source.deadline)?

@@ -155,7 +155,7 @@ fn describe_owner(names: List[DescribeName], id: u32) -> Result[String, Error] {
         }
     }
     if lo == list.len(names) || names[lo].id != id {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(string.from(names[lo].name))
 }

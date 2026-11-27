@@ -232,11 +232,11 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
     // The fixture skips only set_residency's public kind check.
     residency_to_tiered(mut db, schema.by_v.id, prefix(schema.by_v.id)?)?
     {
-        let base = view db.heads[0].roots.collections
+        let base = pages.holder_heads(db.holders)[0].roots.collections
         let Some((ColdPage(_), descriptor)) = std.page.collection_slot(base.root, prefix(schema.by_v.id)?) else {
             fail("L68: the checkpoint must store the index in a Cold leaf")
         }
-        if seed != D7Unique && collection_descriptor(descriptor).row_bytes != 86 {
+        if seed != D7Unique && pages.collection_descriptor(descriptor).row_bytes != 86 {
             fail("L68: the initial Many entry has a 20-byte key and an empty payload")
         }
     }
@@ -255,9 +255,9 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
     let mut reopened = open(tasks, d, c, r, l70_open_options(182375272)?)?
     let rebound = index_build_schema_kind(mut reopened, Open, d7_seed_kind(seed))?
     if seed != D7Unique {
-        let tree = view reopened.heads[0].roots.collections
+        let tree = pages.holder_heads(reopened.holders)[0].roots.collections
         let inserted = law_read_key(rebound.by_v.id, 20u64, Some(primary))
-        let Some(ReplayRow(base: 0, now: ReplayPut(raw))) = tiered_replayed_row(tree, inserted) else {
+        let Some(pages.ReplayRow(base: 0, now: ReplayPut(raw))) = tiered_replayed_row(tree, inserted) else {
             fail("L68: the durable insert must replay with prior zero")
         }
         if list.len(raw) != 0 {
@@ -265,7 +265,7 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> R
         }
         let old = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
         if overwrite {
-            let Some(ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(tree, old) else {
+            let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(tree, old) else {
                 fail("L68(f): deleting a present empty payload needs prior one")
             }
         } else if let Some(_) = tiered_replayed_row(tree, old) {
@@ -279,11 +279,11 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
     let Backfilling(None) = lix_state(db, "by_v")? else {
         fail("L68: the schema cut must publish Backfilling(None)")
     }
-    let tree = view db.heads[0].roots.collections
+    let tree = pages.holder_heads(db.holders)[0].roots.collections
     let Some((HotPage(root), fields)) = std.page.collection_slot(tree.root, prefix(schema.by_v.id)?) else {
         fail("L68: the schema cut must publish the empty index root")
     }
-    let descriptor = collection_descriptor(fields)
+    let descriptor = pages.collection_descriptor(fields)
     if descriptor.residency != ResidentTiered || descriptor.rows != 0 || descriptor.row_bytes != 0 || std.page.totals(root) != (0u64, 0u64) {
         fail("L68: superseded entries must not reappear in the rebuilt root")
     }
@@ -291,7 +291,7 @@ fn d7_check_demoted(db: Db, schema: IndexBuildSchema, primary: u64) -> Result[()
         fail("L68: the new root must not retain the old overlay")
     }
     let logical = law_read_key(schema.rows.id, primary, None)
-    let Some(raw) = get_page_row(tree, logical) else {
+    let Some(raw) = pages.get_page_row(tree, logical) else {
         fail("L68: the acknowledged table row must survive demotion")
     }
     if format.read_le(raw, 2, 8) != 20u64 {
@@ -307,8 +307,8 @@ fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] 
         fail("L68(f): the fixture must start with a Public index")
     }
     let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..) = take plan
-    db.next_node = ids
-    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None, step_rows: list.new(), step_drift: false)
+    pages.set_next_node(mut db.holders, ids)
+    let replacement = ProposedMain(roots: take roots, head: pages.holder_heads(db.holders)[0].head + 1, at: pages.holder_heads(db.holders)[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None, step_rows: list.new(), step_drift: false)
     refused_cut_bytes(mut db, ReplaceMain(take replacement, None))
 }
 
@@ -342,7 +342,7 @@ fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, dri
             fail("L68(f): the previous catalog survives a refused schema cut")
         }
         let inserted = law_read_key(rebound.by_v.id, 20u64, Some(1u64))
-        if let None = tiered_replayed_row(recovered.heads[0].roots.collections, inserted) {
+        if let None = tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, inserted) {
             fail("L68(f): the previous overlay survives a refused schema cut")
         }
         let mut evidence: List[(u32, u32)] = list.new()
@@ -448,7 +448,7 @@ fn test_lix_tiered_index_build_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let rebound = index_build_schema(mut recovered, Open)?
     {
         let former = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
-        let Some(ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(recovered.heads[0].roots.collections, former) else {
+        let Some(pages.ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(pages.holder_heads(recovered.holders)[0].roots.collections, former) else {
             fail("L-IX: reopen replays the acknowledged write behind the cursor")
         }
     }

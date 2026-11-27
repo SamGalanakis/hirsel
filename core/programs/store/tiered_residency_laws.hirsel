@@ -55,7 +55,7 @@ fn residency_memory_stamps(page: Arc[std.page.Page], mut stamps: List[u64]) {
 }
 
 fn residency_mode(db: Db, id: u32) -> Result[(std.page_descriptor.CollectionKind, std.page_descriptor.Residency), Error] {
-    let Some(mode) = collection_by_key(db.heads[0u64].roots.collections, prefix(id)?) else {
+    let Some(mode) = pages.collection_by_key(pages.holder_heads(db.holders)[0u64].roots.collections, prefix(id)?) else {
         fail("residency: the table is in main's collection map")
     }
     Ok((mode.kind, mode.residency))
@@ -182,7 +182,7 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     }
     let mut loaded: List[u64] = list.new()
     {
-        let Some((page, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
             fail("residency: main has the table")
         }
         residency_memory_stamps(arc.share(page), mut loaded)
@@ -277,7 +277,7 @@ fn test_set_residency_restamps_hot_pages_back_to_memory(d: Dir, c: Clock, r: Ran
     set_residency(mut db, rows.id, Memory)?
     let mut loaded: List[u64] = list.new()
     {
-        let Some((page, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+        let Some((page, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(rows.id)?) else {
             fail("residency: main has the table")
         }
         residency_memory_stamps(arc.share(page), mut loaded)
@@ -442,7 +442,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
     let _ = seal(mut db, take declaring)?
     log_append_entries(mut db, events, 0, 300)?
     {
-        let Some((root, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+        let Some((root, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(events.binding.id)?) else {
             fail("Tiered Log: main has the Log")
         }
         if std.page.level(std.page.image_of(root)) == 0 {
@@ -454,7 +454,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
         fail("Tiered Log: main's descriptor names the Log Tiered")
     }
     {
-        let Some((ColdPage(_), _)) = std.page.collection_slot(db.heads[0u64].roots.collections.root, prefix(events.binding.id)?) else {
+        let Some((ColdPage(_), _)) = std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(events.binding.id)?) else {
             fail("Tiered Log: the residency cut leaves the Log's root Cold")
         }
     }

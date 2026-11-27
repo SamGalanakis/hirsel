@@ -1,13 +1,6 @@
-type LocatedRoots: shareable + send {
-    collections: std.page.PagePtr,
-    streams: std.page.PagePtr,
-    catalog: std.page.PagePtr,
-    keyed: List[std.page.PagePtr]
-}
-
 // A sparse suffix in holder order. Each record names a branch or pin slot
 // followed by the seven claim tree pointers in journal tag order.
-const KEYED_ROOT_RECORD_BYTES: u64 = 4 + 36 * KEYED_TREE_COUNT
+const KEYED_ROOT_RECORD_BYTES: u64 = 4 + 36 * pages.KEYED_TREE_COUNT
 
 fn keyed_root_record_bytes[T](trees: List[T]) -> u64 {
     if list.len(trees) == 0 {
@@ -24,15 +17,15 @@ type LocatedBranch: shareable + send {
     forked_at: u64,
     version: u64,
     at: u64,
-    roots: LocatedRoots
+    roots: pages.LocatedRoots
 }
 
 type LocatedPin: shareable + send {
-    owner: PinOwner,
+    owner: pages.PinOwner,
     name: String,
     branch: u32,
     version: u64,
-    roots: LocatedRoots,
+    roots: pages.LocatedRoots,
     watermark: u64
 }
 
@@ -70,7 +63,7 @@ type PageManifest: shareable + send {
 
 fn page_manifest_empty(limits: StoreLimits) -> PageManifest {
     let zero = std.page.unlocated(0)
-    let roots = LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
+    let roots = pages.LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
     let mut branches: List[LocatedBranch] = list.with_capacity(1)
     list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
     PageManifest(generation: 1, fence: 0, inline: 1024, limits: limits, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account_memory: 0, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: zero, branches: take branches, pins: list.new())
@@ -79,10 +72,10 @@ fn page_manifest_empty(limits: StoreLimits) -> PageManifest {
 fn page_manifest_size(m: PageManifest) -> u64 {
     let mut size = MANIFEST_FIXED_BYTES
     for item in m.branches {
-        size = int.saturating_add(size, branch_record_bytes(item.name) + keyed_root_record_bytes(item.roots.keyed))
+        size = int.saturating_add(size, pages.branch_record_bytes(item.name) + keyed_root_record_bytes(item.roots.keyed))
     }
     for held in m.pins {
-        size = int.saturating_add(size, pin_record_bytes(held.name) + keyed_root_record_bytes(held.roots.keyed))
+        size = int.saturating_add(size, pages.pin_record_bytes(held.name) + keyed_root_record_bytes(held.roots.keyed))
     }
     size
 }
@@ -103,7 +96,7 @@ fn put_page_ptr(mut out: Bytes, ptr: std.page.PagePtr) {
     list.put_word_le(mut out, ptr.stamp)
 }
 
-fn put_located_roots(mut out: Bytes, roots: LocatedRoots) {
+fn put_located_roots(mut out: Bytes, roots: pages.LocatedRoots) {
     put_page_ptr(mut out, roots.collections)
     put_page_ptr(mut out, roots.streams)
     put_page_ptr(mut out, roots.catalog)
@@ -136,7 +129,7 @@ fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[(), Er
     Ok(())
 }
 
-fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: LocatedRoots) -> Result[(), Error] {
+fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
     failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(id), 4)))?
     failure_result_from_rep(types.capacity(format.disk_put_name(mut raw, name)))?
     failure_result_from_rep(types.capacity(format.le(mut raw, int.widen(parent), 4)))?
@@ -147,7 +140,7 @@ fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u3
     failure_result_from_rep(types.capacity(format.le(mut raw, 0, 1)))
 }
 
-fn append_page_manifest_pin(mut raw: Bytes, owner: PinOwner, name: String, branch_id: u32, held_at: u64, roots: LocatedRoots, watermark: u64) -> Result[(), Error] {
+fn append_page_manifest_pin(mut raw: Bytes, owner: pages.PinOwner, name: String, branch_id: u32, held_at: u64, roots: pages.LocatedRoots, watermark: u64) -> Result[(), Error] {
     failure_result_from_rep(types.capacity(format.le(mut raw, pin_owner_tag(owner), 1)))?
     failure_result_from_rep(types.capacity(format.le(mut raw, string.byte_len(name), 1)))?
     list.append(mut raw, string.as_bytes(name))
@@ -157,7 +150,7 @@ fn append_page_manifest_pin(mut raw: Bytes, owner: PinOwner, name: String, branc
     failure_result_from_rep(types.capacity(format.le(mut raw, watermark, 8)))
 }
 
-fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
+fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: pages.LocatedRoots) -> Result[(), Error] {
     if list.len(roots.keyed) != 0 {
         failure_result_from_rep(types.capacity(format.le(mut raw, holder, 4)))?
         for ptr in roots.keyed {
@@ -195,11 +188,11 @@ fn read_page_ptr(file: String, raw: Bytes, mut at: u64) -> Result[std.page.PageP
     Ok(ptr)
 }
 
-fn read_located_roots(file: String, raw: Bytes, mut at: u64) -> Result[LocatedRoots, Error] {
+fn read_located_roots(file: String, raw: Bytes, mut at: u64) -> Result[pages.LocatedRoots, Error] {
     let collections = read_page_ptr(file, raw, mut at)?
     let streams = read_page_ptr(file, raw, mut at)?
     let catalog = read_page_ptr(file, raw, mut at)?
-    Ok(LocatedRoots(collections: collections, streams: streams, catalog: catalog, keyed: list.new()))
+    Ok(pages.LocatedRoots(collections: collections, streams: streams, catalog: catalog, keyed: list.new()))
 }
 
 fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[LocatedBranch], mut pins: List[LocatedPin]) -> Result[(), Error] {
@@ -212,9 +205,9 @@ fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[Lo
             return Error(failure_from_rep(format.disk_fault(file, at - 4, Order)))
         }
         next_holder = holder + 1
-        let mut keyed: List[std.page.PagePtr] = list.with_capacity(KEYED_TREE_COUNT)
+        let mut keyed: List[std.page.PagePtr] = list.with_capacity(pages.KEYED_TREE_COUNT)
         let mut any = false
-        for _ in 0u64 .. KEYED_TREE_COUNT {
+        for _ in 0u64 .. pages.KEYED_TREE_COUNT {
             let ptr = read_page_ptr(file, raw, mut at)?
             any = any || ptr.stamp != 0
             list.push(mut keyed, ptr)
@@ -302,7 +295,7 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
     let pin_count = failure_result_from_rep(format.disk_count(file, raw, mut at, 130))?
     let mut pins: List[LocatedPin] = list.with_capacity(pin_count)
     for i in 0u64 .. pin_count {
-        let owner = match failure_result_from_rep(format.disk_number(file, raw, mut at, 1))? {
+        let owner: pages.PinOwner = match failure_result_from_rep(format.disk_number(file, raw, mut at, 1))? {
             1 => ApplicationPin,
             2 => ProjectorPin,
             3 => ImportPin,
@@ -350,7 +343,7 @@ fn require_unarchived_manifest(m: PageManifest) -> Result[(), Error] {
 type ArchiveRange {
     start: u64,
     end: u64,
-    segment: HistoryRef
+    segment: pages.HistoryRef
 }
 
 fn encode_archive_range(row: ArchiveRange) -> std.page.Entry {
@@ -375,29 +368,29 @@ fn decode_archive_range(file: String, at: u64, key: Bytes, value: Bytes, previou
     if start < previous_end || start >= end || segment_position != end {
         return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
     }
-    let segment = HistoryRef(seq: segment_position, epoch: list.word_le(value, 16), len: list.word_le(value, 32), digest: list.word_le(value, 24))
+    let segment = pages.HistoryRef(seq: segment_position, epoch: list.word_le(value, 16), len: list.word_le(value, 32), digest: list.word_le(value, 24))
     Ok(ArchiveRange(start: start, end: end, segment: segment))
 }
 
 fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
     let records = match delta {
-        AddHead(head, _) => db.record_bytes + branch_root_bytes(head.name, head.roots),
-        RemoveHead(slot) => db.record_bytes - branch_root_bytes(db.heads[slot].name, db.heads[slot].roots),
+        AddHead(head, _) => pages.holder_record_bytes(db.holders) + branch_root_bytes(head.name, head.roots),
+        RemoveHead(slot) => pages.holder_record_bytes(db.holders) - branch_root_bytes(pages.holder_heads(db.holders)[slot].name, pages.holder_heads(db.holders)[slot].roots),
         ReplaceMain(proposed, gone) => {
             let removed = match gone {
-                Some(slot) => branch_root_bytes(db.heads[slot].name, db.heads[slot].roots),
+                Some(slot) => branch_root_bytes(pages.holder_heads(db.holders)[slot].name, pages.holder_heads(db.holders)[slot].roots),
                 None => 0u64,
             }
             let unpinned = match proposed.drop_pin {
-                Some(pin_slot) => pin_root_bytes(db.pins[pin_slot].name, db.pins[pin_slot].roots),
+                Some(pin_slot) => pin_root_bytes(pages.holder_pins(db.holders)[pin_slot].name, pages.holder_pins(db.holders)[pin_slot].roots),
                 None => 0u64,
             }
-            db.record_bytes - removed - unpinned - keyed_root_record_bytes(db.heads[0u64].roots.keyed) + keyed_root_record_bytes(proposed.roots.keyed)
+            pages.holder_record_bytes(db.holders) - removed - unpinned - keyed_root_record_bytes(pages.holder_heads(db.holders)[0u64].roots.keyed) + keyed_root_record_bytes(proposed.roots.keyed)
         },
-        AddPin(held) => db.record_bytes + pin_root_bytes(held.name, held.roots),
-        RemovePin(slot) => db.record_bytes - pin_root_bytes(db.pins[slot].name, db.pins[slot].roots),
-        ReplacePin(slot, held) => db.record_bytes - pin_root_bytes(db.pins[slot].name, db.pins[slot].roots) + pin_root_bytes(held.name, held.roots),
-        _ => db.record_bytes,
+        AddPin(held) => pages.holder_record_bytes(db.holders) + pin_root_bytes(held.name, held.roots),
+        RemovePin(slot) => pages.holder_record_bytes(db.holders) - pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots),
+        ReplacePin(slot, held) => pages.holder_record_bytes(db.holders) - pin_root_bytes(pages.holder_pins(db.holders)[slot].name, pages.holder_pins(db.holders)[slot].roots) + pin_root_bytes(held.name, held.roots),
+        _ => pages.holder_record_bytes(db.holders),
     }
     page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
 }

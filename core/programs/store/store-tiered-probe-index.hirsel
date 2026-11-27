@@ -1,7 +1,7 @@
 type TieredIndexRequest: send {
     pack: u64,
     offset: u64,
-    listed: TieredPagerPack,
+    listed: pages.TieredPagerPack,
     deadline: u64
 }
 
@@ -69,7 +69,7 @@ fn checked_tiered_index(path: String, owner: StoreId, pack_seq: u64, at: u64, wi
     Ok(end)
 }
 
-fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: TieredPagerPack) -> Result[Arc[Bytes], Error] waits {
+fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages.TieredPagerPack) -> Result[Arc[Bytes], Error] waits {
     let request = TieredIndexRequest(pack: pack, offset: offset, listed: clone(listed), deadline: cut.deadline)
     let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[Arc[Bytes], Error]], Receiver[Result[Arc[Bytes], Error]]), Error] {
         Ok(channel.new(1))
@@ -90,7 +90,7 @@ type TieredProbeCursor: send {
     rows: u64
 }
 
-fn start_tiered_probe(pack: PagePack) -> TieredProbeCursor {
+fn start_tiered_probe(pack: pages.PagePack) -> TieredProbeCursor {
     TieredProbeCursor(index_at: pack.index, previous_index: 0, inside: None, next_data: 72, rows: 0)
 }
 

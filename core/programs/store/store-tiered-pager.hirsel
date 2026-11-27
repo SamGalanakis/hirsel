@@ -5,28 +5,15 @@ type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Client, u64, O
 type TieredPagerTarget: send {
     edge: format.TieredTarget,
     direction: TieredDirection,
-    inventory: PagePack,
-    object: Option[HistoryRef],
+    inventory: pages.PagePack,
+    object: Option[pages.HistoryRef],
     next_stamp: u64,
     deadline: u64
 }
 
-type TieredPagerPack: shareable + send {
-    inventory: PagePack,
-    object: Option[HistoryRef]
-}
-
-type TieredReadInventory: shareable + send {
-    packs: std.omap.OMap[u64, TieredPagerPack],
-    generation: u64,
-    // The generation's MANIFEST `next_stamp`: every frame its packs hold is
-    // below it (M6), including a promoted holder's materialized pages.
-    next_stamp: u64
-}
-
 type TieredPageSource {
     pager: Sender[TieredPagerMessage],
-    packs: std.omap.OMap[u64, TieredPagerPack],
+    packs: std.omap.OMap[u64, pages.TieredPagerPack],
     next_stamp: u64,
     deadline: u64
 }
@@ -43,7 +30,7 @@ type TieredPointDemand: send {
     direction: TieredDirection,
     paths: List[TieredPath],
     siblings: List[format.TieredTarget],
-    packs: std.omap.OMap[u64, TieredPagerPack],
+    packs: std.omap.OMap[u64, pages.TieredPagerPack],
     next_stamp: u64,
     deadline: u64,
     grant: Option[Arc[TieredReaderGrant]]
@@ -547,7 +534,7 @@ fn tiered_pager_demand_target(demand: TieredPointDemand, edge: format.TieredTarg
     tiered_pager_target(demand.packs, demand.next_stamp, demand.deadline, demand.direction, edge)
 }
 
-fn tiered_pager_target(packs: std.omap.OMap[u64, TieredPagerPack], next_stamp: u64, deadline: u64, direction: TieredDirection, edge: format.TieredTarget) -> Result[TieredPagerTarget, Error] {
+fn tiered_pager_target(packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, direction: TieredDirection, edge: format.TieredTarget) -> Result[TieredPagerTarget, Error] {
     let facts = format.tiered_frame_id(edge)
     let Some(pack) = std.omap.get(packs, facts.pack) else {
         return Error(failure_from_rep(format.disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp))))

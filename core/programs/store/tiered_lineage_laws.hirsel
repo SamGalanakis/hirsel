@@ -1,10 +1,10 @@
-fn l69_pack() -> Result[DiskIndex[u64, PagePack], Error] {
-    let mut packs: DiskIndex[u64, PagePack] = disk_index()
-    failure_result_from_rep(types.capacity(disk_index_put(mut packs, 7, PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge)))?
+fn l69_pack() -> Result[DiskIndex[u64, pages.PagePack], Error] {
+    let mut packs: DiskIndex[u64, pages.PagePack] = disk_index()
+    failure_result_from_rep(types.capacity(disk_index_put(mut packs, 7, pages.PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge)))?
     Ok(take packs)
 }
 
-fn l69_live(packs: DiskIndex[u64, PagePack]) -> u64 {
+fn l69_live(packs: DiskIndex[u64, pages.PagePack]) -> u64 {
     let Some(pack) = disk_index_get(packs, 7) else {
         fail("L69: the fixture pack must remain in inventory")
     }
@@ -103,7 +103,7 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
         fail("lineage: the fixture append commits")
     }
     // §13.1: a FORK's watermark is the first stamp not yet issued.
-    let watermark = db.next_node + 1
+    let watermark = pages.holder_next_node(db.holders) + 1
     let main = snapshot(db)
     let (beta, _) = fork(mut db, "beta", main)?
     close(take db)?
@@ -132,7 +132,7 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
 }
 
 fn l69_cold_root(db: Db, collection: u32) -> Result[std.page.PagePtr, Error] {
-    match std.page.collection_slot(db.heads[0u64].roots.collections.root, prefix(collection)?) {
+    match std.page.collection_slot(pages.holder_heads(db.holders)[0u64].roots.collections.root, prefix(collection)?) {
         Some((ColdPage(located), _)) => Ok(located),
         _ => fail("L69: the cut leaves the Tiered table root Cold"),
     }

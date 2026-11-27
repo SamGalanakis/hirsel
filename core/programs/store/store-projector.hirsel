@@ -120,23 +120,12 @@ fn projection_empty() -> Projection {
     Projection(binding: None, image: None, generations: list.new(), pass: None, merge: None, retiring: list.new(), next: 0, again: false)
 }
 
-fn projector_pin_name(name: String, slot: u8) -> String {
-    let mut out = string.from("hirsel.projector.")
-    string.push(mut out, name)
-    string.push(mut out, if slot == 0 {
-        ".0"
-    } else {
-        ".1"
-    })
-    take out
-}
-
 pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error] {
-    let _ = checked_name(projector_pin_name(name, 0))?
+    let _ = checked_name(pages.projector_pin_name(name, 0))?
     let rows_name = "hirsel.projections"
     let dictionary: std.codec.Codec[Projection] = std.codec.of()
     let table_key_bytes = table_key(rows_name)?
-    if let Some(raw) = get_page_row(d.plan.roots.catalog, table_key_bytes) {
+    if let Some(raw) = pages.get_page_row(d.plan.roots.catalog, table_key_bytes) {
         let descriptor = decode_catalog(raw)?
         if option.copied(map.get(d.tables, descriptor.id)) == Some(true) {
             let rows = catalog_handle(d.plan.store, d.plan.roots.catalog, take rows_name, std.codec.key_string(), dictionary)?
@@ -226,7 +215,7 @@ fn step_declared[K, V, E: inert + send](mut held: ProjectorState, mut db: Db, li
 
 fn projector_slot(db: Db, name: String) -> Option[u64] {
     for k in 0u64 .. list.len(db.projectors) {
-        if same_name(db.projectors[k].state.decl.name, name) {
+        if pages.same_name(db.projectors[k].state.decl.name, name) {
             return Some(k)
         }
     }
@@ -235,7 +224,7 @@ fn projector_slot(db: Db, name: String) -> Option[u64] {
 
 /// The current commit version of the main branch.
 pub fn main_commit_version(db: Db) -> u64 {
-    db.heads[0u64].head
+    pages.holder_heads(db.holders)[0u64].head
 }
 
 // The names of the registered projectors, in registration order.
@@ -318,7 +307,7 @@ fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, im
         }
     }
     let selected = match p.from {
-        Local => owned_pin(db, ProjectorPin, projector_pin_name(p.decl.name, image.slot)),
+        Local => owned_pin(db, ProjectorPin, pages.projector_pin_name(p.decl.name, image.slot)),
         Follower(mut remote) => exact_follower_checkpoint(mut remote, image.position)?,
     }
     match take selected {
@@ -359,7 +348,7 @@ fn projection_page[K, V](p: Projector[K, V], base: Option[Snapshot], target: Sna
     }
     let page = changes_page(p.reads, base, target, low, prefix(p.input.id + 1)?, limits)?
     if list.len(page.trimmed) > 0 || list.len(page.bounds) > 0 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(take page)
 }
@@ -368,7 +357,7 @@ fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, 
     let slot = match row.image {
         Some(image) => {
             if image.slot > 1 {
-                return Error(malformed(0))
+                return Error(failure_from_rep(pages.malformed(0)))
             }
             1u8 - image.slot
         },
@@ -376,7 +365,7 @@ fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, 
     }
     match p.from {
         Local => {
-            let name = projector_pin_name(p.decl.name, slot)
+            let name = pages.projector_pin_name(p.decl.name, slot)
             let _ = replace_projector_pin(mut db, name, target)?
             Ok(slot)
         },
@@ -428,7 +417,7 @@ fn publish_merge(mut row: Projection, merge: Merge) -> Result[(), Error] {
     let span = list.len(merge.inputs)
     let total = list.len(row.generations)
     if span < 2 {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let mut start = total
     for k in 0u64 .. total {
@@ -438,12 +427,12 @@ fn publish_merge(mut row: Projection, merge: Merge) -> Result[(), Error] {
         }
     }
     if start == total || span > total - start {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     let mut rows = 0u64
     for j in 0u64 .. span {
         if row.generations[start + j].id != merge.inputs[j] {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         rows = int.saturating_add(rows, row.generations[start + j].rows)
     }
@@ -463,7 +452,7 @@ fn publish_merge(mut row: Projection, merge: Merge) -> Result[(), Error] {
     }
     row.merge = None
     if !generations_contiguous(row) {
-        return Error(malformed(0))
+        return Error(failure_from_rep(pages.malformed(0)))
     }
     Ok(())
 }
@@ -519,7 +508,7 @@ fn write_projection[K, V, E: inert + send, A](mut tx: Tx, work: ProjectionWork[K
         MergePage(limits) => {
             let opened: Option[Merge] = clone(work.replacement.merge)
             let Some(take merge) = take opened else {
-                return Error(ProjectionFailed(Store(malformed(0))))
+                return Error(ProjectionFailed(Store(failure_from_rep(pages.malformed(0)))))
             }
             let resumed = (code.callable(work.fold.merge))(mut tx, work.fold.env, merge, limits) ?=> |problem| ProjectionFailed(Apply(take problem))
             match take resumed {
@@ -641,7 +630,7 @@ fn publish_projection_page[K, V, E: inert + send, A](mut p: Projector[K, V], mut
         ready.pass = None
         if delta {
             let Some(image) = row.image else {
-                return Error(Store(malformed(0)))
+                return Error(Store(failure_from_rep(pages.malformed(0))))
             }
             list.push(mut ready.generations, Generation(id: generation, from: image.position, to: at, rows: rows))
         } else {
@@ -658,7 +647,7 @@ fn publish_projection_page[K, V, E: inert + send, A](mut p: Projector[K, V], mut
         }
         ready.image = Some(Image(position: at, slot: slot))
         if !generations_contiguous(ready) {
-            return Error(Store(malformed(0)))
+            return Error(Store(failure_from_rep(pages.malformed(0))))
         }
         if delta {
             Folded(rows)
@@ -684,7 +673,7 @@ fn continue_projection[K, V, E: inert + send, A](mut p: Projector[K, V], mut db:
     }
     let base: Option[Snapshot] = if pass.delta {
         let Some(image) = row.image else {
-            return Error(Store(malformed(0)))
+            return Error(Store(failure_from_rep(pages.malformed(0))))
         }
         match borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
             Some(take held) => Some(take held),
@@ -718,7 +707,7 @@ fn merge_projection[K, V, E: inert + send, A](mut p: Projector[K, V], mut db: Db
     }
     let into = match ready.merge {
         Some(merge) => merge.into,
-        None => return Error(Store(malformed(0))),
+        None => return Error(Store(failure_from_rep(pages.malformed(0)))),
     }
     if !project_commit(mut p, mut db, row, take ready, MergePage(limits), fold)? {
         return Ok(forget_projector(mut p))
@@ -812,7 +801,7 @@ pub fn rebuild(mut db: Db, name: String) -> Result[Ticket, Error] waits {
     let decl: ProjectionDecl = clone(db.projectors[k].state.decl)
     let row = read_projection(db, decl)?
     if row.again {
-        return Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
+        return Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, pages.holder_heads(db.holders)[0].head)))
     }
     let request_env: (ProjectionDecl, Projection) = (take decl, row)
     // The store's own body: it reads and writes only the projection's row,
@@ -843,24 +832,7 @@ pub fn rebuild(mut db: Db, name: String) -> Result[Ticket, Error] waits {
     }
 }
 
-// ImportPin holds a deploy's kept import (§3.5a "The kept import").
-type PinOwner: key + shareable + send = ApplicationPin | ProjectorPin | ImportPin
-
-type Pin: shareable + send {
-    owner: PinOwner,
-    name: String,
-    branch: u32,
-    version: u64,
-    serial: u64,
-    roots: Roots,
-    watermark: u64
-}
-
-fn share_pin(p: Pin) -> Result[Pin, Capacity] {
-    Ok(Pin(owner: p.owner, name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
-}
-
-fn pin_owner_tag(owner: PinOwner) -> u64 {
+fn pin_owner_tag(owner: pages.PinOwner) -> u64 {
     match owner {
         ApplicationPin => 1,
         ProjectorPin => 2,
@@ -868,7 +840,7 @@ fn pin_owner_tag(owner: PinOwner) -> u64 {
     }
 }
 
-fn pin_order(a: String, a_owner: PinOwner, b: String, b_owner: PinOwner) -> Order {
+fn pin_order(a: String, a_owner: pages.PinOwner, b: String, b_owner: pages.PinOwner) -> Order {
     let names = order.compare(a, b)
     if names == Equal {
         order.compare(pin_owner_tag(a_owner), pin_owner_tag(b_owner))
@@ -877,26 +849,26 @@ fn pin_order(a: String, a_owner: PinOwner, b: String, b_owner: PinOwner) -> Orde
     }
 }
 
-fn pin_index(db: Db, owner: PinOwner, name: String) -> u64 {
-    for k in 0u64 .. list.len(db.pins) {
-        if db.pins[k].owner == owner && same_name(db.pins[k].name, name) {
+fn pin_index(db: Db, owner: pages.PinOwner, name: String) -> u64 {
+    for k in 0u64 .. list.len(pages.holder_pins(db.holders)) {
+        if pages.holder_pins(db.holders)[k].owner == owner && pages.same_name(pages.holder_pins(db.holders)[k].name, name) {
             return k
         }
     }
-    list.len(db.pins)
+    list.len(pages.holder_pins(db.holders))
 }
 
 pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
     owned_pin(db, ApplicationPin, name)
 }
 
-fn owned_pin(db: Db, owner: PinOwner, name: String) -> Option[Snapshot] {
+fn owned_pin(db: Db, owner: pages.PinOwner, name: String) -> Option[Snapshot] {
     let k = pin_index(db, owner, name)
-    if k == list.len(db.pins) {
+    if k == list.len(pages.holder_pins(db.holders)) {
         return None
     }
-    let p = db.pins[k]
-    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), watermark: p.watermark, bases: no_tail_bases()))
+    let p = pages.holder_pins(db.holders)[k]
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: pages.share_roots(p.roots), watermark: p.watermark, bases: pages.no_tail_bases()))
 }
 
 pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
@@ -907,16 +879,16 @@ fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket
     change_pin(mut db, ProjectorPin, name, s)
 }
 
-fn capture_matches_head(from: Snapshot, head: Head) -> bool {
+fn capture_matches_head(from: Snapshot, head: pages.Head) -> bool {
     roots_match_head(from.head, from.roots, head)
 }
 
-fn roots_match_head(at_version: u64, roots: Roots, head: Head) -> bool {
-    if !(head.head == at_version && tree_stamp(head.roots.collections) == tree_stamp(roots.collections) && tree_stamp(head.roots.streams) == tree_stamp(roots.streams) && tree_stamp(head.roots.catalog) == tree_stamp(roots.catalog) && list.len(head.roots.keyed) == list.len(roots.keyed)) {
+fn roots_match_head(at_version: u64, roots: pages.Roots, head: pages.Head) -> bool {
+    if !(head.head == at_version && pages.tree_stamp(head.roots.collections) == pages.tree_stamp(roots.collections) && pages.tree_stamp(head.roots.streams) == pages.tree_stamp(roots.streams) && pages.tree_stamp(head.roots.catalog) == pages.tree_stamp(roots.catalog) && list.len(head.roots.keyed) == list.len(roots.keyed)) {
         return false
     }
     for slot in 0u64 .. list.len(head.roots.keyed) {
-        if tree_stamp(head.roots.keyed[slot]) != tree_stamp(roots.keyed[slot]) {
+        if pages.tree_stamp(head.roots.keyed[slot]) != pages.tree_stamp(roots.keyed[slot]) {
             return false
         }
     }
@@ -925,45 +897,45 @@ fn roots_match_head(at_version: u64, roots: Roots, head: Head) -> bool {
 
 // A pin `change_pin` gave the head's shares needs no promotion (§13.5
 // "Pinning the live head"); any other pin is historical.
-fn pin_shares_head(db: Db, held: Pin) -> bool {
+fn pin_shares_head(db: Db, held: pages.Pin) -> bool {
     match branch_slot(db, held.branch) {
-        Ok(slot) => roots_match_head(held.version, held.roots, db.heads[slot]),
+        Ok(slot) => roots_match_head(held.version, held.roots, pages.holder_heads(db.holders)[slot]),
         Error(_) => false,
     }
 }
 
-fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+fn change_pin(mut db: Db, owner: pages.PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
     let delta = pin_delta(mut db, owner, name, s)?
     cut_install(mut db, take delta)
 }
 
 // The holder change a pin's cut publishes.
-fn pin_delta(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[HolderDelta, Error] {
+fn pin_delta(mut db: Db, owner: pages.PinOwner, name: String, s: Snapshot) -> Result[HolderDelta, Error] {
     journal_poll(mut db)?
     healthy(db)?
     this_open(db, s)?
     let owned = checked_name(name)?
     let slot = pin_index(db, owner, name)
-    let replacing = slot != list.len(db.pins)
+    let replacing = slot != list.len(pages.holder_pins(db.holders))
     if replacing {
         if owner == ApplicationPin {
             return Error(Exists(take owned))
         }
-        check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(db.pins[slot].roots.keyed)))?
+        check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(pages.holder_pins(db.holders)[slot].roots.keyed)))?
     } else {
         check_manifest_addition(db, pin_root_bytes(name, s.roots))?
     }
-    let serial = db.next_pin
+    let serial = pages.holder_next_pin(db.holders)
     let Some(following) = int.checked_add(serial, 1) else {
         return Error(Limit(Ids))
     }
-    db.next_pin = following
+    pages.set_next_pin(mut db.holders, following)
     // Equal stamps identify the logical roots. A cut may have moved their frames.
     let roots = match branch_slot(db, s.branch) {
-        Ok(head_slot) if capture_matches_head(s, db.heads[head_slot]) => share_roots(db.heads[head_slot].roots),
-        _ => share_roots(s.roots),
+        Ok(head_slot) if capture_matches_head(s, pages.holder_heads(db.holders)[head_slot]) => pages.share_roots(pages.holder_heads(db.holders)[head_slot].roots),
+        _ => pages.share_roots(s.roots),
     }
-    let kept = Pin(owner: owner, name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
+    let kept = pages.Pin(owner: owner, name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
     if replacing {
         return Ok(ReplacePin(slot, take kept))
     }
@@ -974,11 +946,11 @@ pub fn unpin(mut db: Db, name: String) -> Result[Ticket, Error] waits {
     remove_pin(mut db, ApplicationPin, name)
 }
 
-fn remove_pin(mut db: Db, owner: PinOwner, name: String) -> Result[Ticket, Error] waits {
+fn remove_pin(mut db: Db, owner: pages.PinOwner, name: String) -> Result[Ticket, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
     let k = pin_index(db, owner, name)
-    if k == list.len(db.pins) {
+    if k == list.len(pages.holder_pins(db.holders)) {
         return Error(Missing(named(name)?))
     }
     cut_install(mut db, RemovePin(k))

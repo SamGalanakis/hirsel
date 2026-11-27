@@ -18,11 +18,11 @@ fn cached_prior_conflict_safety(c: Clock) -> Result[(), Error] waits {
     })? else {
         return Error(Missing("initial row"))
     }
-    let ci = call_info(db.store, 0, db.heads[0].head + 1, 21, db.heads[0].at)
+    let ci = call_info(db.store, 0, pages.holder_heads(db.holders)[0].head + 1, 21, pages.holder_heads(db.holders)[0].at)
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
-    let Prepared(take draft) = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, None, map.new(), fn(mut tx: Tx) -> Result[(), Error] {
+    let Prepared(take draft) = draft_body(db, db.indexes, pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, None, map.new(), fn(mut tx: Tx) -> Result[(), Error] {
         put_bytes(mut tx, 1, types.key_word(7), prior_fixture_value(16))?
         rollback_writes_on_error(mut tx, fn(mut nested: Tx) -> Result[(), Error] {
             put_bytes(mut nested, 1, types.key_word(7), prior_fixture_value(10))
@@ -33,10 +33,10 @@ fn cached_prior_conflict_safety(c: Clock) -> Result[(), Error] waits {
     let _ = log.finish(take reads)
     let _ = cell.into_inner(take issued)
     let mut staged = take draft
-    if data_row_count(staged.ops) != 1 || data_row(staged.ops, 0).prior != Some(35u32) {
+    if pages.data_row_count(staged.ops) != 1 || pages.data_row(staged.ops, 0).prior != Some(35u32) {
         return Error(Missing("cached base width across repeated writes"))
     }
-    let before = failure_result_from_rep(types.capacity(encode_staged(ci, Some(view db.heads[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT)))?
+    let before = failure_result_from_rep(types.capacity(encode_staged(ci, Some(pages.holder_heads(db.holders)[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, pages.NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT)))?
     if !prior_fixture_frame(before, 0, 1, 77, 35) {
         return Error(Missing("frame on the original head"))
     }
@@ -45,7 +45,7 @@ fn cached_prior_conflict_safety(c: Clock) -> Result[(), Error] waits {
     })? else {
         return Error(Missing("moved head"))
     }
-    let after = failure_result_from_rep(types.capacity(encode_staged(ci, Some(view db.heads[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT)))?
+    let after = failure_result_from_rep(types.capacity(encode_staged(ci, Some(pages.holder_heads(db.holders)[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, pages.NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT)))?
     if !prior_fixture_frame(after, 0, 1, 77, 24) {
         return Error(Missing("frame on the moved head"))
     }
@@ -79,7 +79,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     if db.resident != baseline + 118 || db.file_end != start + 101 {
         return Error(Missing("insert charge or length"))
     }
-    let first = share_page_tree(db.heads[0].roots.collections)
+    let first = pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections)
     let Committed(changed) = run(mut db, None, (), fn(mut tx: Tx, unused: ()) -> Result[(), Error] {
         put_bytes(mut tx, 1, types.key_word(7), prior_fixture_value(16))?
         put_bytes(mut tx, 1, types.key_word(7), prior_fixture_value(10))
@@ -110,7 +110,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     list.set_word_le(mut body, 43, 34u32)
     let invalid = journal_decode_commit(path, body)?
     let mut tree = take first
-    let mut ids = db.next_node
+    let mut ids = pages.holder_next_node(db.holders)
     let mut tiered = ReplayTieredAccount(total: 0, exact: true)
     match journal_apply_ops(path, mut ids, mut tree, invalid.data, mut tiered, false) {
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
@@ -129,7 +129,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     close(take db)?
     let reopened = open(tasks, dir, c, r, options)?
-    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 || reopened.heads[0].head != removed_info.id.version {
+    if reopened.resident != baseline || page_row_count(pages.holder_heads(reopened.holders)[0].roots.collections) != 0 || pages.holder_heads(reopened.holders)[0].head != removed_info.id.version {
         return Error(Missing("replayed table account"))
     }
     close(take reopened)
@@ -196,11 +196,13 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     {
         // Seed a valid checkpoint from a writer whose write limit held 12 MiB.
         // The law also runs with the public write limit compiled to 8 MiB.
-        let mut next_stamp = stamp_after(db.next_node)?
+        let mut next_stamp = stamp_after(pages.holder_next_node(db.holders))?
         let first = next_stamp
         let raw = prior_fixture_value(width)
-        put_page_row(mut db.heads[0].roots.collections, logical, raw, first, mut next_stamp)?
-        db.next_node = next_stamp - 1
+        pages.edit_head_collection(mut db.holders, 0, scoped fn(mut tree: pages.PageTree) -> Result[(), Error] {
+            failure_result_from_rep(pages.put_page_row(mut tree, logical, raw, first, mut next_stamp))
+        })?
+        pages.set_next_node(mut db.holders, next_stamp - 1)
         db.resident += 12582990
     }
     let receipt = checkpoint(mut db)?
@@ -210,7 +212,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     if reopened.resident != baseline + 12582990 {
         return Error(Missing("12 MiB prior seed charge"))
     }
-    if let Some(raw) = get_page_row(reopened.heads[0].roots.collections, logical) {
+    if let Some(raw) = pages.get_page_row(pages.holder_heads(reopened.holders)[0].roots.collections, logical) {
         if list.len(raw) != width {
             return Error(Missing("12 MiB seed size"))
         }
@@ -247,13 +249,13 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     }
     close(take reopened)?
     let replayed = open(tasks, directory, c, r, options)?
-    if replayed.resident != baseline || page_row_count(replayed.heads[0].roots.collections) != 0 {
+    if replayed.resident != baseline || page_row_count(pages.holder_heads(replayed.holders)[0].roots.collections) != 0 {
         return Error(Missing("12 MiB delete replay"))
     }
     close(take replayed)
 }
 
-fn install_cold_companion(mut roots: Roots, stamp: u64) -> Result[(), Error] {
+fn install_cold_companion(mut roots: pages.Roots, stamp: u64) -> Result[(), Error] {
     let warm_key = prefix(1)?
     let (take resident_root, take resident_descriptor) = {
         let Some((warm_root, warm_descriptor)) = std.page.collection_entry(roots.collections.root, warm_key) else {
@@ -272,8 +274,8 @@ fn install_cold_companion(mut roots: Roots, stamp: u64) -> Result[(), Error] {
     let mut slots: List[std.page.Slot] = list.new()
     list.push(mut slots, HotPage(take resident_root))
     list.push(mut slots, ColdPage(cold))
-    let image = page_result(std.page.encode(descriptors, 0, stamp, CollectionMap))?
-    roots.collections.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    let image = failure_result_from_rep(pages.page_result(std.page.encode(descriptors, 0, stamp, CollectionMap)))?
+    roots.collections.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take slots, list.new())))?
     Ok(())
 }
 
@@ -324,13 +326,13 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     {
         // Attach an untouched Tiered sibling with no resolvable page at its
         // pointer. Only its 126-byte Memory descriptor belongs to this walk.
-        let mut state = failure_result_from_rep(types.capacity(main_state(share_roots(replayed.heads[0].roots), replayed.heads[0].head, 0)))?
+        let mut state = failure_result_from_rep(types.capacity(pages.main_state(pages.share_roots(pages.holder_heads(replayed.holders)[0].roots), pages.holder_heads(replayed.holders)[0].head, 0)))?
         install_cold_companion(mut state.tips[0].roots, 101)?
         let mut restored = journal_replay(take state, 102, default_limits())?
         if journal_account(restored)? != baseline + 172 + 126 {
             return Error(Missing("single mixed root Memory account"))
         }
-        let mut held = failure_result_from_rep(types.capacity(share_pin(replayed.pins[0])))?
+        let mut held = failure_result_from_rep(types.capacity(pages.share_pin(pages.holder_pins(replayed.holders)[0])))?
         install_cold_companion(mut held.roots, 102)?
         list.push(mut restored.state.pins, take held)
         if journal_account(restored)? != baseline + 172 + 126 {
@@ -351,8 +353,8 @@ fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     prior_ceiling_case(d, c, r, tasks)
 }
 
-fn batch_law_edits(round: u64) -> Result[DataRows, Error] {
-    let mut ops = new_data_rows()
+fn batch_law_edits(round: u64) -> Result[pages.DataRows, Error] {
+    let mut ops = pages.new_data_rows()
     for i in 0u64 .. 3072 {
         let k = 3071 - i
         let id: u32 = int.truncate(1 + k % 2)
@@ -371,9 +373,9 @@ fn batch_law_edits(round: u64) -> Result[DataRows, Error] {
             }
             let mut raw = prior_fixture_value(width)
             list.set_word_le(mut raw, 0, round * 3072 + k)
-            Some(stage_value(take raw, 1024))
+            Some(pages.stage_value(take raw, 1024))
         }
-        push_data_row(mut ops, format.DataOp(key: take key, value: take value, trim: None, prior: None))
+        pages.push_data_row(mut ops, format.DataOp(key: take key, value: take value, trim: None, prior: None))
     }
     Ok(take ops)
 }
@@ -432,7 +434,7 @@ fn batch_law_bounds(root: Arc[std.page.Page], low: Option[View[Bytes]], high: Op
     Ok(())
 }
 
-fn batch_law_compare(candidate: PageTree, oracle: PageTree) -> Result[(), Error] {
+fn batch_law_compare(candidate: pages.PageTree, oracle: pages.PageTree) -> Result[(), Error] {
     for id in 1u32 .. 3 {
         let collection = prefix(id)?
         let want = option.unwrap(std.page.collection_child(oracle.root, collection))
@@ -493,12 +495,12 @@ fn source_layout_equal(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> bool {
 }
 
 fn source_layout_witness(outlined: bool) -> Result[(), Error] {
-    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 1u64
     define_store_collection(mut base, 1, 1, mut ids)?
     let first = ids + 1
     let id_key = prefix(1)?
-    let mut staged = new_data_rows()
+    let mut staged = pages.new_data_rows()
     let mut journal: List[format.JournalOp] = list.new()
     let mut edits: List[std.page.BatchEdit] = list.new()
     for i in 0u64 .. 5 {
@@ -511,36 +513,36 @@ fn source_layout_witness(outlined: bool) -> Result[(), Error] {
         }
         let mut raw = prior_fixture_value(width)
         list.set_word_le(mut raw, 0, i)
-        let value = stage_value(clone(raw), 1024)
+        let value = pages.stage_value(clone(raw), 1024)
         let expected_value: std.page.BatchValue = match value {
             BlobBody(shared) => BatchShared(arc.share(shared)),
             PageValue(inline_value) => BatchBytes(clone(inline_value)),
         }
         list.push(mut edits, std.page.BatchEdit(key: take key, value: Some(take expected_value), prior: None))
-        push_data_row(mut staged, format.DataOp(key: clone(logical), value: Some(take value), trim: None, prior: None))
+        pages.push_data_row(mut staged, format.DataOp(key: clone(logical), value: Some(take value), trim: None, prior: None))
         list.push(mut journal, format.JournalOp(key: take logical, value: Some(take raw), prior: 0, trim: None))
     }
-    let mut expected_tree = share_page_tree(base)
+    let mut expected_tree = pages.share_page_tree(base)
     let mut expected_next = first
-    page_result(std.page.edit_collection(mut expected_tree.root, id_key, first, mut expected_next, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+    failure_result_from_rep(pages.page_result(std.page.edit_collection(mut expected_tree.root, id_key, first, mut expected_next, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
         std.page.apply_sorted_batch(mut root, edits, 1024, mut stamps)
-    }))?
+    })))?
     let expected = option.unwrap(std.page.collection_child(expected_tree.root, id_key))
-    let mut live_tree = share_page_tree(base)
+    let mut live_tree = pages.share_page_tree(base)
     let mut live_next = first
     materialize_ordered_rows(mut live_tree, staged, InOrder, false, first, mut live_next)?
-    canonical_tree(mut live_tree)?
+    failure_result_from_rep(pages.canonical_tree(mut live_tree))?
     let materialized = option.unwrap(std.page.collection_child(live_tree.root, id_key))
-    if live_next != expected_next || !source_layout_equal(expected, materialized) || !page_result(std.page.canonical(materialized))? {
+    if live_next != expected_next || !source_layout_equal(expected, materialized) || !failure_result_from_rep(pages.page_result(std.page.canonical(materialized)))? {
         return Error(Missing("local source layout or stamps"))
     }
     for immutable in[true, false] {
-        let mut replay = share_page_tree(base)
+        let mut replay = pages.share_page_tree(base)
         let mut replay_ids = ids
         let mut account = ReplayTieredAccount(total: 0, exact: true)
         journal_apply_ops("source layout", mut replay_ids, mut replay, journal, mut account, immutable)?
         let actual = option.unwrap(std.page.collection_child(replay.root, id_key))
-        if !page_result(std.page.canonical(actual))? || !source_layout_equal(expected, actual) || replay_ids + 1 != expected_next {
+        if !failure_result_from_rep(pages.page_result(std.page.canonical(actual)))? || !source_layout_equal(expected, actual) || replay_ids + 1 != expected_next {
             return Error(Missing("replay source layout or stamps"))
         }
         if !outlined {
@@ -551,7 +553,7 @@ fn source_layout_witness(outlined: bool) -> Result[(), Error] {
             }
         }
         for op in journal {
-            let Some(stored) = get_page_row(replay, op.key) else {
+            let Some(stored) = pages.get_page_row(replay, op.key) else {
                 return Error(Missing("source layout lost a row"))
             }
             let Some(wanted) = view op.value else {
@@ -577,7 +579,7 @@ fn source_rightmost_witness() -> Result[(), Error] {
         list.push(mut first_edits, std.page.BatchEdit(key: types.key_word(i), value: Some(BatchBytes(prior_fixture_value(width))), prior: None))
     }
     let mut stamps = 1u64
-    page_result(std.page.apply_sorted_batch(mut base, first_edits, 1024, mut stamps))?
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut base, first_edits, 1024, mut stamps)))?
     {
         let Some(tail) = std.page.child(base, 1) else {
             return Error(Missing("rightmost source fixture needs two leaves"))
@@ -597,9 +599,9 @@ fn source_rightmost_witness() -> Result[(), Error] {
         list.push(mut journal, format.JournalOp(key: logical_key(1, key)?, value: Some(clone(raw)), prior: 0, trim: None))
         list.push(mut right_edits, std.page.BatchEdit(key: take key, value: Some(BatchBytes(take raw)), prior: Some(0u32)))
     }
-    page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps))?
-    page_result(std.page.apply_sorted_source(mut actual, journal, visit_journal_edit, 0, 2, 1024, mut stamps))?
-    if reference_stamps != stamps || !source_layout_equal(reference, actual) || !page_result(std.page.canonical(actual))? {
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps)))?
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_source(mut actual, journal, visit_journal_edit, 0, 2, 1024, mut stamps)))?
+    if reference_stamps != stamps || !source_layout_equal(reference, actual) || !failure_result_from_rep(pages.page_result(std.page.canonical(actual)))? {
         return Error(Missing("rightmost source changed layout or stamps"))
     }
     Ok(())
@@ -632,10 +634,10 @@ fn batch_law_same_pages(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> Result[
     Ok(())
 }
 
-fn batch_law_collection_edits(ops: DataRows, order: format.DataOrder, id: u32) -> Result[List[std.page.BatchEdit], Error] {
+fn batch_law_collection_edits(ops: pages.DataRows, order: format.DataOrder, id: u32) -> Result[List[std.page.BatchEdit], Error] {
     let collection = prefix(id)?
     let mut edits: List[std.page.BatchEdit] = list.new()
-    for slot in 0u64 .. data_row_count(ops) {
+    for slot in 0u64 .. pages.data_row_count(ops) {
         let op = ordered_row(ops, order, slot)
         if list.slice(op.key, 0, 4) != collection {
             continue
@@ -674,7 +676,7 @@ fn batch_law_join() -> Result[(), Error] {
         list.push(mut fill, std.page.BatchEdit(key: types.key_word(k), value: Some(BatchBytes(prior_fixture_value(160))), prior: None))
     }
     let mut ids = 1u64
-    page_result(std.page.apply_sorted_batch(mut base, fill, 1024, mut ids))?
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut base, fill, 1024, mut ids)))?
     let leaves = std.page.count(std.page.image_of(base))
     if std.page.level(std.page.image_of(base)) != 1 || leaves < 3 {
         return Error(Missing("join fixture is not one branch of leaves"))
@@ -697,8 +699,8 @@ fn batch_law_join() -> Result[(), Error] {
     let mut rebuilt = arc.share(base)
     let mut edited_ids = ids
     let mut rebuilt_ids = ids
-    page_result(std.page.apply_sorted_batch(mut edited, thinned, 1024, mut edited_ids))?
-    page_result(std.page.rebuild_sorted_batch(mut rebuilt, thinned, 1024, mut rebuilt_ids))?
+    failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut edited, thinned, 1024, mut edited_ids)))?
+    failure_result_from_rep(pages.page_result(std.page.rebuild_sorted_batch(mut rebuilt, thinned, 1024, mut rebuilt_ids)))?
     if edited_ids != rebuilt_ids || std.page.count(std.page.image_of(rebuilt)) != leaves - 1 {
         return Error(Missing("one-row leaf did not join"))
     }
@@ -706,7 +708,7 @@ fn batch_law_join() -> Result[(), Error] {
 }
 
 fn batch_law_3152() -> Result[(), Error] {
-    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
     define_store_collection(mut base, 1, 1, mut ids)?
     let mut account = ReplayTieredAccount(total: 0, exact: true)
@@ -715,7 +717,7 @@ fn batch_law_3152() -> Result[(), Error] {
     list.push(mut both, 2u64)
     journal_apply_ops("batch 3152", mut ids, mut base, batch_law_rows(both, 0)?, mut account, false)?
     for left in 1u64 .. 3 {
-        let mut replay = share_page_tree(base)
+        let mut replay = pages.share_page_tree(base)
         let mut final_item = 18446744073709551615u64 - 1 - left
         let outcome = journal_apply_ops("batch 3152", mut final_item, mut replay, batch_law_rows(both, 9)?, mut account, false)
         match (left, outcome) {
@@ -724,18 +726,18 @@ fn batch_law_3152() -> Result[(), Error] {
             _ => return Error(Missing("two-row replay stamp draws")),
         }
     }
-    let mut inserted = share_page_tree(base)
-    let mut ops = new_data_rows()
+    let mut inserted = pages.share_page_tree(base)
+    let mut ops = pages.new_data_rows()
     for n in 3u64 .. 5 {
         let mut raw = prior_fixture_value(8)
         list.set_word_le(mut raw, 0, n)
-        push_data_row(mut ops, format.DataOp(key: logical_key(1, types.key_word(n))?, value: Some(stage_value(take raw, 1024)), trim: None, prior: None))
+        pages.push_data_row(mut ops, format.DataOp(key: logical_key(1, types.key_word(n))?, value: Some(pages.stage_value(take raw, 1024)), trim: None, prior: None))
     }
-    let order = failure_result_from_rep(types.capacity(data_order(ops)))?
+    let order = failure_result_from_rep(types.capacity(pages.data_order(ops)))?
     let first = ids + 1
     let mut draw = first
     materialize_ordered_rows(mut inserted, ops, order, false, first, mut draw)?
-    canonical_tree(mut inserted)?
+    failure_result_from_rep(pages.canonical_tree(mut inserted))?
     let collection = option.unwrap(std.page.collection_child(inserted.root, prefix(1)?))
     let (_, descriptor) = option.unwrap(std.page.collection_entry(inserted.root, prefix(1)?))
     let leaf = list.capacity(std.page.payload(std.page.image_of(collection)))
@@ -763,12 +765,12 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     if std.page.count(std.page.image_of(empty)) != 0 {
         return Error(Missing("batch prior published a prefix"))
     }
-    let mut oracle = new_page_tree(CollectionMap, 1024)
+    let mut oracle = pages.new_page_tree(CollectionMap, 1024)
     let mut oracle_ids = 0u64
     define_store_collection(mut oracle, 1, 1, mut oracle_ids)?
     define_store_collection(mut oracle, 2, 1, mut oracle_ids)?
-    let mut live_tree = share_page_tree(oracle)
-    let mut replay = share_page_tree(oracle)
+    let mut live_tree = pages.share_page_tree(oracle)
+    let mut replay = pages.share_page_tree(oracle)
     let mut live_ids = oracle_ids + 1
     let mut replay_ids = oracle_ids
     let mut account = ReplayTieredAccount(total: 0, exact: true)
@@ -787,13 +789,13 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     let mut rebuilt_ids = 1u64
     for round in 0u64 .. 200 {
         let mut ops = batch_law_edits(round)?
-        let order = failure_result_from_rep(types.capacity(data_order(ops)))?
+        let order = failure_result_from_rep(types.capacity(pages.data_order(ops)))?
         for c in 0u64 .. 2 {
             let edits = batch_law_collection_edits(ops, order, int.truncate(c + 1))?
             let held = arc.share(edited[c])
             let previous = arc.share(rebuilt[c])
-            page_result(std.page.apply_sorted_batch(mut edited[c], edits, 1024, mut edited_ids))?
-            page_result(std.page.rebuild_sorted_batch(mut rebuilt[c], edits, 1024, mut rebuilt_ids))?
+            failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut edited[c], edits, 1024, mut edited_ids)))?
+            failure_result_from_rep(pages.page_result(std.page.rebuild_sorted_batch(mut rebuilt[c], edits, 1024, mut rebuilt_ids)))?
             if edited_ids != rebuilt_ids {
                 return Error(Missing("in-place batch stamp draws"))
             }
@@ -801,20 +803,20 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
             batch_law_same_pages(held, previous)?
         }
         let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: round + 1), at: round, seed: 0)
-        let wire = failure_result_from_rep(types.capacity(encode_staged(ci, Some(view oracle), None, None, mut ops, order, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT)))?
+        let wire = failure_result_from_rep(types.capacity(encode_staged(ci, Some(view oracle), None, None, mut ops, order, pages.NO_FRAME_TAIL, pages.new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT)))?
         let frame = journal_decode_commit("batch", list.slice(wire, 16, list.len(wire)))?
         for op in frame.data {
             if let Some(value) = op.value {
-                put_page_row(mut oracle, op.key, value, 0, mut oracle_ids)?
+                failure_result_from_rep(pages.put_page_row(mut oracle, op.key, value, 0, mut oracle_ids))?
             } else {
-                let _ = remove_page_row(mut oracle, op.key, 0, mut oracle_ids)?
+                let _ = failure_result_from_rep(pages.remove_page_row(mut oracle, op.key, 0, mut oracle_ids))?
             }
         }
         let first = live_ids
         materialize_ordered_rows(mut live_tree, ops, order, false, first, mut live_ids)?
-        canonical_tree(mut live_tree)?
+        failure_result_from_rep(pages.canonical_tree(mut live_tree))?
         journal_apply_ops("batch", mut replay_ids, mut replay, frame.data, mut account, false)?
-        if !page_result(std.page.canonical(live_tree.root))? || !page_result(std.page.canonical(replay.root))? {
+        if !failure_result_from_rep(pages.page_result(std.page.canonical(live_tree.root)))? || !failure_result_from_rep(pages.page_result(std.page.canonical(replay.root)))? {
             return Error(Missing("batch canonical form"))
         }
         batch_law_compare(live_tree, oracle)?
@@ -852,7 +854,7 @@ fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir
 }
 
 fn replay_prior_grants() -> Result[(), Error] {
-    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut base = pages.new_page_tree(CollectionMap, 1024)
     let mut ids = 0u64
     define_store_collection(mut base, 1, 1, mut ids)?
     let seed = ids
@@ -882,16 +884,16 @@ fn replay_prior_grants() -> Result[(), Error] {
     }
     wrong[1].prior = 0
     for immutable in[true, false] {
-        let mut candidate = share_page_tree(base)
+        let mut candidate = pages.share_page_tree(base)
         let mut candidate_ids = seed
         failure_result_from_rep(types.capacity(bound bytes 98304 {
             journal_apply_ops("valid priors", mut candidate_ids, mut candidate, wrong, mut account, immutable)
         }))??
         {
-            let Some(stored) = get_page_row(candidate, wrong[0].key) else {
+            let Some(stored) = pages.get_page_row(candidate, wrong[0].key) else {
                 return Error(Missing("zero-prior put is absent"))
             }
-            if page_row_count(candidate) != 1 || list.len(stored) != 65536 || get_page_row(candidate, wrong[1].key) != None {
+            if page_row_count(candidate) != 1 || list.len(stored) != 65536 || pages.get_page_row(candidate, wrong[1].key) != None {
                 return Error(Missing("put with an absent zero-prior delete"))
             }
         }
@@ -905,7 +907,7 @@ fn replay_prior_grants() -> Result[(), Error] {
         mismatch[0].key = logical_key(1, types.key_word(1))?
         mismatch[0].prior = 0
         mismatch[1].key = logical_key(1, types.key_word(2))?
-        let mut empty = share_page_tree(base)
+        let mut empty = pages.share_page_tree(base)
         let mut empty_ids = seed
         journal_apply_ops("zero-prior deletes", mut empty_ids, mut empty, mismatch, mut account, immutable)?
         if page_row_count(empty) != 0 {

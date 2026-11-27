@@ -6,19 +6,19 @@ type ObjectExportLease: send {
 type ObjectExportCopy: send {
     journal: Sender[JournalMsg],
     health: Latest[Health],
-    manifest: HistoryRef,
-    packs: List[HistoryRef],
-    entries: List[HistoryRef],
+    manifest: pages.HistoryRef,
+    packs: List[pages.HistoryRef],
+    entries: List[pages.HistoryRef],
 }
 
 type ObjectExportFetch: send {
     key: String,
-    reference: HistoryRef,
+    reference: pages.HistoryRef,
     buffer: Bytes,
     reply: Sender[Result[Bytes, Error]]
 }
 
-fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: HistoryRef, take buffer: Bytes) -> Result[Bytes, Error] waits {
+fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: pages.HistoryRef, take buffer: Bytes) -> Result[Bytes, Error] waits {
     let mut raw = take buffer
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
     match history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due) {
@@ -31,7 +31,7 @@ fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: Hi
     }
 }
 
-fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: HistoryRef) -> Result[Bytes, Error] waits {
+fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: pages.HistoryRef) -> Result[Bytes, Error] waits {
     let (take key, take buffer) = disk_allocation(scoped fn() -> Result[(String, Bytes), Error] {
         Ok((history_key(lead, reference), list.with_capacity(reference.len)))
     })?
@@ -139,10 +139,10 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     deploy_result(object_journal_fresh_probe(mut lane, due))?
     let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
     let suffix = deploy_result(history_suffix(mut lane.client, head, head.checkpoint, due))?
-    let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[HistoryRef], List[HistoryRef], Map[String, ()]), Error] {
+    let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[pages.HistoryRef], List[pages.HistoryRef], Map[String, ()]), Error] {
         let locator = object_state(db).locator
-        let mut packs: List[HistoryRef] = list.with_capacity(map.len(locator.rows))
-        let mut history_entries: List[HistoryRef] = list.with_capacity(list.len(suffix))
+        let mut packs: List[pages.HistoryRef] = list.with_capacity(map.len(locator.rows))
+        let mut history_entries: List[pages.HistoryRef] = list.with_capacity(list.len(suffix))
         let mut names: Map[String, ()] = map.new()
         live_reclaim_name(mut names, "m-", mark.manifest)?
         live_reclaim_name(mut names, "e-", head.checkpoint)?
@@ -177,8 +177,8 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     }
     let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(failure_result_from_rep(types.copied(attempt)))?
-    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
-    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), collections: share_page_tree(db.heads[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: pages.holder_heads(db.holders)[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
+    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), collections: pages.share_page_tree(pages.holder_heads(db.holders)[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
     Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))
 }
@@ -190,7 +190,7 @@ fn export_write(mut file: HostFile, raw: Bytes) -> Result[(), DeployError] waits
     }
 }
 
-fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String, reference: HistoryRef, role: u8, local: String) -> Result[(), DeployError] waits {
+fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String, reference: pages.HistoryRef, role: u8, local: String) -> Result[(), DeployError] waits {
     let mut raw = deploy_result(object_export_fetch(plan, lead, reference))?
     let key = history_key(lead, reference)
     let ctx = deploy_result(history_object_context(key, id, role, reference, raw))?

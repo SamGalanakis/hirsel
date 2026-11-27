@@ -1,0 +1,179 @@
+pub opaque type HolderTable {
+    // Main occupies slot zero. Every other head is ordered by id.
+    heads: List[Head],
+    branch_names: Map[String, u32],
+    pins: List[Pin],
+    record_bytes: u64,
+    next_pin: u64,
+    next_branch: u32,
+    next_node: u64,
+    bases: TailBases
+}
+
+pub fn empty_holders() -> HolderTable {
+    HolderTable(heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, bases: no_tail_bases())
+}
+
+pub fn init_main(mut held: HolderTable) {
+    list.push(mut held.heads, main_head(empty_roots(), 0, 0))
+}
+
+pub fn holder_heads(held: HolderTable) -> View[List[Head]] in held {
+    view held.heads
+}
+
+pub fn holder_pins(held: HolderTable) -> View[List[Pin]] in held {
+    view held.pins
+}
+
+pub fn holder_branch_names(held: HolderTable) -> View[Map[String, u32]] in held {
+    view held.branch_names
+}
+
+pub fn holder_record_bytes(held: HolderTable) -> u64 {
+    held.record_bytes
+}
+
+pub fn holder_next_pin(held: HolderTable) -> u64 {
+    held.next_pin
+}
+
+pub fn set_next_pin(mut held: HolderTable, next: u64) {
+    held.next_pin = next
+}
+
+pub fn holder_next_branch(held: HolderTable) -> u32 {
+    held.next_branch
+}
+
+pub fn advance_branch(mut held: HolderTable) {
+    held.next_branch += 1
+}
+
+pub fn holder_next_node(held: HolderTable) -> u64 {
+    held.next_node
+}
+
+pub fn set_next_node(mut held: HolderTable, next: u64) {
+    held.next_node = next
+}
+
+pub fn edit_next_node[R](mut held: HolderTable, edit: scoped fn(mut u64) -> R) -> R {
+    edit(mut held.next_node)
+}
+
+pub fn holder_bases(held: HolderTable) -> View[TailBases] in held {
+    view held.bases
+}
+
+pub fn reserve_head(mut held: HolderTable) -> Result[(), Capacity] {
+    reserve_branch_name(mut held)?
+    list.try_reserve(mut held.heads, 1)
+}
+
+pub fn reserve_branch_name(mut held: HolderTable) -> Result[(), Capacity] {
+    map.try_reserve(mut held.branch_names, 1)
+}
+
+pub fn reserve_pin(mut held: HolderTable) -> Result[(), Capacity] {
+    list.try_reserve(mut held.pins, 1)
+}
+
+pub fn add_head(mut held: HolderTable, take added: Head, take indexed_name: String, count_bytes: u64) {
+    held.record_bytes += count_bytes
+    map.insert(mut held.branch_names, take indexed_name, added.id)
+    list.push(mut held.heads, take added)
+}
+
+pub fn drop_head(mut held: HolderTable, slot: u64, count_bytes: u64) {
+    let removed = list.remove(mut held.heads, slot)
+    held.record_bytes -= count_bytes
+    let _ = map.remove(mut held.branch_names, removed.name)
+}
+
+pub fn add_pin(mut held: HolderTable, slot: u64, take added: Pin, count_bytes: u64) {
+    held.record_bytes += count_bytes
+    list.insert(mut held.pins, slot, take added)
+    held.bases = tail_bases(held.pins)
+}
+
+pub fn drop_pin(mut held: HolderTable, slot: u64, count_bytes: u64) {
+    let _ = list.remove(mut held.pins, slot)
+    held.record_bytes -= count_bytes
+    held.bases = tail_bases(held.pins)
+}
+
+pub fn drop_import_pin(mut held: HolderTable, slot: u64, count_bytes: u64) {
+    // An import pin never participates in a projector's tail base.
+    let _ = list.remove(mut held.pins, slot)
+    held.record_bytes -= count_bytes
+}
+
+pub fn replace_pin(mut held: HolderTable, slot: u64, take replacement: Pin, old_bytes: u64, count_bytes: u64) {
+    held.record_bytes -= old_bytes
+    held.record_bytes += count_bytes
+    let _ = list.set(mut held.pins, slot, take replacement)
+    held.bases = tail_bases(held.pins)
+}
+
+pub fn replace_head(mut held: HolderTable, slot: u64, take roots: Roots, head: u64, at: u64, old_keyed_bytes: u64, keyed_bytes: u64) {
+    held.record_bytes -= old_keyed_bytes
+    held.record_bytes += keyed_bytes
+    held.heads[slot].roots = take roots
+    held.heads[slot].head = head
+    held.heads[slot].at = at
+}
+
+pub fn commit_roots(mut held: HolderTable, slot: u64, take roots: Roots, old_keyed_bytes: u64, keyed_bytes: u64) {
+    let PageRoots(collections: take collections, streams: take streams, catalog: take catalog, keyed: take keyed) = take roots
+    install_page_tree(mut held.heads[slot].roots.collections, take collections)
+    install_page_tree(mut held.heads[slot].roots.streams, take streams)
+    install_page_tree(mut held.heads[slot].roots.catalog, take catalog)
+    held.record_bytes -= old_keyed_bytes
+    held.record_bytes += keyed_bytes
+    held.heads[slot].roots.keyed = take keyed
+}
+
+pub fn advance_head(mut held: HolderTable, slot: u64, at: u64) {
+    held.heads[slot].head += 1
+    held.heads[slot].at = at
+}
+
+pub fn edit_head_collection[R](mut held: HolderTable, slot: u64, edit: scoped fn(mut PageTree) -> R) -> R {
+    edit(mut held.heads[slot].roots.collections)
+}
+
+pub fn edit_head_collection_with_stamp[R](mut held: HolderTable, slot: u64, edit: scoped fn(mut PageTree, mut u64) -> R) -> R {
+    edit(mut held.heads[slot].roots.collections, mut held.next_node)
+}
+
+pub fn edit_head_streams[R](mut held: HolderTable, slot: u64, edit: scoped fn(mut PageTree) -> R) -> R {
+    edit(mut held.heads[slot].roots.streams)
+}
+
+pub fn set_head_collection(mut held: HolderTable, slot: u64, take tree: PageTree) {
+    held.heads[slot].roots.collections = take tree
+}
+
+pub fn set_head_at(mut held: HolderTable, slot: u64, at: u64) {
+    held.heads[slot].at = at
+}
+
+pub fn install_sealed_pin(mut held: HolderTable, slot: u64, take tree: PageTree) {
+    // Sealing changes the page representation of the same pinned version.
+    held.pins[slot].roots.collections = take tree
+}
+
+pub fn release_heads(mut held: HolderTable) {
+    list.clear(mut held.heads)
+}
+
+pub fn restore_holders(mut held: HolderTable, take heads: List[Head], take names: Map[String, u32], take pins: List[Pin], record_bytes: u64, next_branch: u32) {
+    held.heads = take heads
+    held.branch_names = take names
+    held.record_bytes = record_bytes
+    held.next_pin = list.len(pins)
+    held.pins = take pins
+    held.bases = tail_bases(held.pins)
+    held.next_branch = next_branch
+}

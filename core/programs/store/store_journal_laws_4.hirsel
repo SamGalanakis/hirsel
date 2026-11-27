@@ -62,15 +62,15 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         Error(Full(Journal(problem))) if problem.requested == 16781569 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
-    let id_before = db.next_branch
+    let id_before = pages.holder_next_branch(db.holders)
     let frame_before = db.frame_seq
-    let bytes_before = db.record_bytes
+    let bytes_before = pages.holder_record_bytes(db.holders)
     let from = snapshot(db)
     match fork(mut db, "beta", from) {
         Error(Full(Journal(problem))) if problem.requested == 16781438 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
-    if db.next_branch != id_before || db.frame_seq != frame_before || db.record_bytes != bytes_before {
+    if pages.holder_next_branch(db.holders) != id_before || db.frame_seq != frame_before || pages.holder_record_bytes(db.holders) != bytes_before {
         return Error(Foreign)
     }
     if disk_state(db).uncovered != 16781392 || version(snapshot(db)) != previous_head {
@@ -230,10 +230,10 @@ pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     let sh = view t
     let _ = take db
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.heads[0].head != 1 && reopened.heads[0].head != 2 {
+    if pages.holder_heads(reopened.holders)[0].head != 1 && pages.holder_heads(reopened.holders)[0].head != 2 {
         return false
     }
-    let expected: Option[u64] = if reopened.heads[0].head == 2 {
+    let expected: Option[u64] = if pages.holder_heads(reopened.holders)[0].head == 2 {
         Some(70u64)
     } else {
         None
@@ -313,7 +313,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(law_table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
-    let before = db.heads[0].head
+    let before = pages.holder_heads(db.holders)[0].head
     let live_bytes = db.resident
     let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1u64, 91u64)?
@@ -325,7 +325,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != before || db.resident != live_bytes {
+    if pages.holder_heads(db.holders)[0].head != before || db.resident != live_bytes {
         return false
     }
     let source = snapshot(db)
@@ -355,7 +355,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
     }))
     match take inspected {
         Seen(v) => match v.value {
-            Ok(None) => db.heads[0].head == before,
+            Ok(None) => pages.holder_heads(db.holders)[0].head == before,
             _ => false
         },
         _ => false
@@ -603,8 +603,8 @@ fn window_law_commit(ctx: format.DiskContext, offset: u64, head: u64, width: u64
     let mut value: Bytes = list.with_capacity(width)
     list.fill(mut value, width, 119u8)
     let key = result.unwrap(logical_key(1, types.key_word(head)))
-    let mut data = new_data_rows()
-    push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
+    let mut data = pages.new_data_rows()
+    pages.push_data_row(mut data, format.DataOp(key: take key, value: Some(PageValue(take value)), trim: None, prior: None))
     let ci = CallInfo(id: CallId(store: store_key_from_rep(ctx.store), branch: 0, version: head), at: head + 100, seed: 0)
     result.unwrap(encode_commit(ci, mut data, ctx.seq, offset))
 }
@@ -688,8 +688,8 @@ fn journal_window_prefix(d: Dir, c: Clock) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
-    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node, default_limits()))
+fn journal_main(take roots: pages.Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
+    result.unwrap(journal_replay(result.unwrap(pages.main_state(take roots, head, at)), next_node, default_limits()))
 }
 
 fn disk_window_width(commit_number: u64) -> u64 {
@@ -719,7 +719,7 @@ fn disk_window_work(mut db: Db, t: Table[u64, Bytes], tasks: Tasks, out: Stdout)
             return Error(Missing("window commit size"))
         }
         durable(mut db, done.ticket)?
-        journal_note(out, db.heads[0].head)
+        journal_note(out, pages.holder_heads(db.holders)[0].head)
         // The journal gets its idle turn before the next commit is queued.
         let (wake, signal): (Sender[()], Receiver[()]) = channel.new(1)
         let turn = task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn)

@@ -93,7 +93,7 @@ def crash_inputs(root):
 
 CHECKER_CONTROLS = ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused',
                     'index_rows_write_refused', 'completion_unreachable',
-                    'view_tx_write_refused', 'journal_input_refused')
+                    'view_tx_write_refused', 'journal_input_refused', 'holder_table_refused')
 
 
 def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
@@ -103,7 +103,7 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
         source = dict(
             file=str(root / ('core/programs/store/' + control + '.hirsel')),
             modules=[control], signatures=False)
-        if control == 'journal_input_refused':
+        if control in ('journal_input_refused', 'holder_table_refused'):
             negative['packages'].append({
                 'package': {'name': control, 'version': '1'},
                 'dependencies': [{'name': 'core', 'version': '1'}, {'name': 'store', 'version': '1'}],
@@ -121,6 +121,7 @@ def checker_controls(root, compiler, work, controls=CHECKER_CONTROLS):
         expected = {
             'completion_unreachable': [('PROG-2', '`store@1/store/Completion` is private or opaque')],
             'journal_input_refused': [('PROG-2', '`store@1/format/JournalInput` is private or opaque')],
+            'holder_table_refused': [('PROG-2', '`store@1/pages/HolderTable` is private or opaque')],
             'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
             'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],
             'view_tx_write_refused': [('OWN-10', '`tx` is viewed')],

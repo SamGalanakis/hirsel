@@ -4,13 +4,6 @@ const HISTORY_ENTRY_READ_LIMIT: u64 = 72 + 40 + 4294967296 + 16 + 16777280
 
 const HISTORY_OPEN_LIMIT: u64 = 9223372036854775808
 
-type HistoryRef {
-    seq: u64,
-    epoch: u64,
-    len: u64,
-    digest: u64
-}
-
 type HistoryPair {
     epoch: u64,
     holder: StoreId
@@ -33,8 +26,8 @@ type HistoryHead {
     store: StoreId,
     pair: HistoryPair,
     activation: u64,
-    entry: HistoryRef,
-    checkpoint: HistoryRef,
+    entry: pages.HistoryRef,
+    checkpoint: pages.HistoryRef,
     floor: u64,
     binding: Inline[u8, 32],
     origin: Option[HistoryOrigin]
@@ -50,7 +43,7 @@ type HistoryCapture {
     config: HistoryConfig
 }
 
-fn history_fill_key(mut key: String, lead: String, reference: HistoryRef) {
+fn history_fill_key(mut key: String, lead: String, reference: pages.HistoryRef) {
     string.clear(mut key)
     string.push(mut key, lead)
     format.history_number(mut key, reference.seq)
@@ -60,7 +53,7 @@ fn history_fill_key(mut key: String, lead: String, reference: HistoryRef) {
     std.hex.push_u64(mut key, reference.digest)
 }
 
-fn history_key(lead: String, reference: HistoryRef) -> String {
+fn history_key(lead: String, reference: pages.HistoryRef) -> String {
     let mut key = string.with_capacity(60)
     history_fill_key(mut key, lead, reference)
     take key
@@ -70,11 +63,11 @@ fn history_pair_matches(a: HistoryPair, b: HistoryPair) -> bool {
     a.epoch == b.epoch && types.same(a.holder.hi, a.holder.lo, b.holder.hi, b.holder.lo)
 }
 
-fn history_ref_matches(a: HistoryRef, b: HistoryRef) -> bool {
+fn history_ref_matches(a: pages.HistoryRef, b: pages.HistoryRef) -> bool {
     a.seq == b.seq && a.epoch == b.epoch && a.len == b.len && a.digest == b.digest
 }
 
-fn history_entry_range(item: HistoryRef, epoch: u64) -> bool {
+fn history_entry_range(item: pages.HistoryRef, epoch: u64) -> bool {
     item.epoch != 0 && item.epoch <= epoch && item.len >= 112 && item.len <= HISTORY_ENTRY_READ_LIMIT
 }
 
@@ -307,8 +300,8 @@ fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[form
     let head = list.slice(raw, field.payload, field.end)
     let pair = history_frame_pair(raw, field)
     let epoch = pair.epoch
-    let newest = HistoryRef(seq: format.read_le(head, 32, 8), epoch: format.read_le(head, 40, 8), len: format.read_le(head, 48, 8), digest: format.read_le(head, 56, 8))
-    let base = HistoryRef(seq: format.read_le(head, 64, 8), epoch: format.read_le(head, 72, 8), len: format.read_le(head, 80, 8), digest: format.read_le(head, 88, 8))
+    let newest = pages.HistoryRef(seq: format.read_le(head, 32, 8), epoch: format.read_le(head, 40, 8), len: format.read_le(head, 48, 8), digest: format.read_le(head, 56, 8))
+    let base = pages.HistoryRef(seq: format.read_le(head, 64, 8), epoch: format.read_le(head, 72, 8), len: format.read_le(head, 80, 8), digest: format.read_le(head, 88, 8))
     let floor = format.read_le(head, 96, 8)
     if epoch == 0 || floor == 0 || floor > base.seq || base.seq > newest.seq || context.seq != newest.seq || format.read_le(raw, 48, 8) != epoch {
         return Error(failure_from_rep(format.disk_fault("head", 72, Malformed)))
@@ -370,7 +363,7 @@ fn history_next_id(n: u64) -> Result[u64, Error] {
     Ok(n + 1)
 }
 
-fn history_ref_encode(mut raw_bytes: Bytes, reference: HistoryRef) {
+fn history_ref_encode(mut raw_bytes: Bytes, reference: pages.HistoryRef) {
     list.put_word_le(mut raw_bytes, reference.seq)
     list.put_word_le(mut raw_bytes, reference.epoch)
     list.put_word_le(mut raw_bytes, reference.len)

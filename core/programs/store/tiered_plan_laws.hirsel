@@ -1,13 +1,13 @@
-fn l63_tiered_table_base(ptr: std.page.PagePtr) -> Result[PageTree, Error] {
+fn l63_tiered_table_base(ptr: std.page.PagePtr) -> Result[pages.PageTree, Error] {
     let mut raw = l68_collection_map_wire()
     list.copy_from_slice(mut raw, 33, std.page.encode_ptr(ptr))
     list.set_word_le(mut raw, 69, 2u64)
     list.set_word_le(mut raw, 77, 172u64)
-    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let image = failure_result_from_rep(pages.page_result(std.page.decode(take raw, CollectionMap)))?
     let mut slots: List[std.page.Slot] = list.with_capacity(1)
     list.push(mut slots, ColdPage(ptr))
-    let mut tree = new_page_tree(CollectionMap, 1024)
-    tree.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    let mut tree = pages.new_page_tree(CollectionMap, 1024)
+    tree.root = failure_result_from_rep(pages.page_result(std.page.attach(take image, take slots, list.new())))?
     Ok(take tree)
 }
 
@@ -19,11 +19,11 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     let source = arc.new(format.TieredFrame(identity: format.tiered_frame_id(TieredPage(ptr)), payload: TieredImage(arc.share(leaf))))
     let mut visible: Map[TieredCacheKey, Arc[format.TieredFrame]] = map.new()
     map.insert(mut visible, (8u64, 72u64), take source)
-    let mut operations = new_data_rows()
-    push_data_row(mut operations, format.DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None, prior: None))
-    push_data_row(mut operations, format.DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None, prior: None))
+    let mut operations = pages.new_data_rows()
+    pages.push_data_row(mut operations, format.DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None, prior: None))
+    pages.push_data_row(mut operations, format.DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None, prior: None))
     let missed = tiered_attempt(75, 0)
-    let order = failure_result_from_rep(types.capacity(data_order(operations)))?
+    let order = failure_result_from_rep(types.capacity(pages.data_order(operations)))?
     let Error(Missed) = plan_tiered_edits(base, missed, map.new(), operations, order, 101) else {
         fail("L63: a Cold plan must latch before the encoder runs")
     }
@@ -45,7 +45,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     }
     let owner = StoreId(hi: 3, lo: 4)
     let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
-    let wire = failure_result_from_rep(types.capacity(encode_staged(call, Some(view base), None, Some(view plan.deltas), mut operations, order, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT)))?
+    let wire = failure_result_from_rep(types.capacity(encode_staged(call, Some(view base), None, Some(view plan.deltas), mut operations, order, pages.NO_FRAME_TAIL, pages.new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT)))?
     // The section starts at byte 37 and has a five-byte head. Each put
     // takes 31 bytes, and its prior comes 17 bytes after its tag.
     if list.len(wire) != 104 || format.word_be(wire, 51) != 2 || format.read_le(wire, 59, 4) != 7 || format.word_be(wire, 82) != 3 || format.read_le(wire, 90, 4) != 0 {

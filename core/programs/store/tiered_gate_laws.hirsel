@@ -11,7 +11,7 @@
 // - after the rename, the new generation recovers with the holder.
 // In every generation the walker over every published root finds each stamp
 // at exactly one (pack, offset), in a listed pack on disk (L88).
-fn gate_walk_roots(d: Dir, db: Db, roots: Roots, collection: u32, mut walk: CompactWalk) -> Result[(), Error] waits {
+fn gate_walk_roots(d: Dir, db: Db, roots: pages.Roots, collection: u32, mut walk: CompactWalk) -> Result[(), Error] waits {
     match std.page.collection_slot(roots.collections.root, prefix(collection)?) {
         Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
         _ => fail("L88: a cut leaves every published holder's Tiered root Cold"),
@@ -22,11 +22,11 @@ fn gate_walk_roots(d: Dir, db: Db, roots: Roots, collection: u32, mut walk: Comp
 // (§13.6: queue rows are their own roots).
 fn gate_walk_all(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] waits {
     let mut walk = CompactWalk(live: map.new(), places: map.new())
-    for slot in 0u64 .. list.len(db.heads) {
-        gate_walk_roots(d, db, db.heads[slot].roots, collection, mut walk)?
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
+        gate_walk_roots(d, db, pages.holder_heads(db.holders)[slot].roots, collection, mut walk)?
     }
-    for k in 0u64 .. list.len(db.pins) {
-        gate_walk_roots(d, db, db.pins[k].roots, collection, mut walk)?
+    for k in 0u64 .. list.len(pages.holder_pins(db.holders)) {
+        gate_walk_roots(d, db, pages.holder_pins(db.holders)[k].roots, collection, mut walk)?
     }
     let queued = l87_queue(db)?
     for k in 0u64 .. list.len(queued) {
@@ -45,9 +45,9 @@ fn gate_walk_all(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] 
 }
 
 fn gate_head(db: Db, name: String) -> Option[Branch] {
-    for slot in 0u64 .. list.len(db.heads) {
-        if db.heads[slot].name == name {
-            return Some(Branch(store: db.store, id: db.heads[slot].id))
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
+        if pages.holder_heads(db.holders)[slot].name == name {
+            return Some(Branch(store: db.store, id: pages.holder_heads(db.holders)[slot].id))
         }
     }
     None
@@ -285,7 +285,7 @@ fn test_l87_each_promoted_holder_crash_after_rename(d: Dir, c: Clock, r: Random,
 fn gate_page(d: Dir, db: Db, ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], Error] waits {
     let path = paged_pack_path(ptr.pack)?
     let wire = disk_read_file(d, path, 4194304)?
-    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(pages.holder_next_node(db.holders))?)?
     Ok(arc.share(fold_page(frame)))
 }
 
@@ -434,7 +434,7 @@ fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let left_len: u64 = int.widen(left.at.len)
     let right_len: u64 = int.widen(right.at.len)
     let replaced = top_len + left_len + right_len
-    for slot in 0u64 .. list.len(db.heads) {
+    for slot in 0u64 .. list.len(pages.holder_heads(db.holders)) {
         let walk = compact_walk_from(d, db, compact_branch_root(db, slot, rows.id)?)?
         if map.contains(walk.places, top.stamp) || map.contains(walk.places, left.at.stamp) || map.contains(walk.places, right.at.stamp) {
             fail("L87 (d): every branch's fold merges L and R and replaces T")

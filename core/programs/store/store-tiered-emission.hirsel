@@ -79,12 +79,12 @@ fn tiered_emit_map(mut pending: TieredCutFrames, root: Arc[std.page.Page], resta
     Ok(())
 }
 
-fn tiered_cut_frames(roots: List[Roots]) -> Result[TieredCutFrames, Error] {
+fn tiered_cut_frames(roots: List[pages.Roots]) -> Result[TieredCutFrames, Error] {
     let mut unused = 0u64
     tiered_cut_frames_restamped(roots, None, mut unused)
 }
 
-fn tiered_cut_frames_restamped(roots: List[Roots], restamp: Option[u32], mut next_stamp: u64) -> Result[TieredCutFrames, Error] {
+fn tiered_cut_frames_restamped(roots: List[pages.Roots], restamp: Option[u32], mut next_stamp: u64) -> Result[TieredCutFrames, Error] {
     let mut pending = TieredCutFrames(pages: list.new(), blobs: list.new(), seen: map.new())
     let mut first = true
     for held in roots {
@@ -144,7 +144,7 @@ fn layout_tiered_packs(take frames: List[TieredEmitFrame], class: u8, first_pack
 
 // PACK_INDEX frame boundaries use the worst-case width. The pack-list
 // row records the actual front-coded width and is known before emission.
-fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> PagePack {
+fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> pages.PagePack {
     let total = pack.end - pack.first
     let index_at = 72 + 16 * total + pack.payload_bytes
     let mut room = 0u64
@@ -161,10 +161,10 @@ fn planned_tiered_pack(layout: TieredPackRun, pack: PlannedPack) -> PagePack {
             index_bytes += width - common
         }
     }
-    PagePack(class: layout.class, frames: int.truncate(total), live: pack.payload_bytes, payload_bytes: index_at + index_bytes, index: index_at)
+    pages.PagePack(class: layout.class, frames: int.truncate(total), live: pack.payload_bytes, payload_bytes: index_at + index_bytes, index: index_at)
 }
 
-fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, PagePack), Error] {
+fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, pages.PagePack), Error] {
     let mut draft = begin_tiered_pack(id, pack.seq, layout.class, pack.size)?
     let room = pack.size - list.len(draft.raw)
     failure_result_from_rep(types.capacity(list.try_reserve(mut draft.raw, room)))?
@@ -241,15 +241,15 @@ fn seal_tiered_map(root: Arc[std.page.Page], emitted: Map[u64, std.page.PagePtr]
             list.push(mut kids, take child)
             list.push(mut rows, take row)
         }
-        let ready = page_result(std.page.encode(rows, height, std.page.stamp(image), CollectionMap))?
-        Ok(Some(page_result(std.page.attach(take ready, take kids, list.new()))?))
+        let ready = failure_result_from_rep(pages.page_result(std.page.encode(rows, height, std.page.stamp(image), CollectionMap)))?
+        Ok(Some(failure_result_from_rep(pages.page_result(std.page.attach(take ready, take kids, list.new())))?))
     })
 }
 
 // The Memory map frames were already assigned stamps in the cut plan.
 // Installing Tiered locations changes only the physical references.
-fn seal_holder_tiered(tree: PageTree, emitted: Map[u64, std.page.PagePtr]) -> Result[PageTree, Error] {
-    let mut ready = share_page_tree(tree)
+fn seal_holder_tiered(tree: pages.PageTree, emitted: Map[u64, std.page.PagePtr]) -> Result[pages.PageTree, Error] {
+    let mut ready = pages.share_page_tree(tree)
     if let Some(take sealed) = seal_tiered_map(tree.root, emitted)? {
         ready.root = take sealed
     }

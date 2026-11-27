@@ -1,0 +1,118 @@
+pub fn data_order(ops: DataRows) -> Result[format.DataOrder, Capacity] {
+    let n = data_row_count(ops)
+    if n < 2 {
+        return Ok(InOrder)
+    }
+    if n == 2 {
+        return Ok(if list.compare_bytes(data_row(ops, 0).key, data_row(ops, 1).key) == Greater {
+            ReversePair
+        } else {
+            InOrder
+        })
+    }
+    if rows_ascending(ops) {
+        return Ok(InOrder)
+    }
+    let mut slots: List[u64] = list.new()
+    list.try_reserve(mut slots, n)?
+    for slot_order in 0u64 .. n {
+        list.push(mut slots, slot_order)
+    }
+    list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
+        list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
+    })
+    Ok(SortedSlots(take slots))
+}
+
+pub fn stage_value(take raw: Bytes, inline: u64) -> format.StagedValue {
+    if list.len(raw) <= inline {
+        PageValue(take raw)
+    } else {
+        BlobBody(arc.new(take raw))
+    }
+}
+
+// Small drafts scan. Larger ascending drafts search the rows directly.
+// Larger unordered drafts use the slot map.
+pub type DataOps: shareable + send {
+    rows: DataRows,
+    slots: Map[Bytes, u64],
+    cells: Map[u32, CellEdit],
+    logs: Map[u32, LogState]
+}
+
+pub const SCANNED_OPS: u64 = 8
+
+// A journaled draft starts open. The first inserted typed key supplies its row slot.
+// The two sentinels are outside the range of slots in a bounded COMMIT frame.
+pub const NO_FRAME_TAIL: u64 = 18446744073709551615
+
+pub const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
+
+pub fn empty_ops() -> DataOps {
+    DataOps(rows: new_data_rows(), slots: map.new(), cells: map.new(), logs: map.new())
+}
+
+// What enclosing transactions staged before a callback began, frozen so the
+// callback shares it instead of copying it (MEM-30's copy idiom without the
+// copy). Lookups check a transaction's own ops, then its layers newest first.
+pub type Staged: shareable + send {
+    ops: DataOps,
+    stream_ops: DataOps,
+    call: Option[format.CallSection]
+}
+
+// The frame bytes of the op staged for `key`, in `ops` or the newest layer.
+pub fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
+    if let Some(slot) = op_slot(ops, key) {
+        return format.data_op_size(data_row(ops.rows, slot), streams)
+    }
+    let mut size = 0u64
+    for layer in below {
+        let staged = if streams {
+            view layer.stream_ops
+        } else {
+            view layer.ops
+        }
+        if let Some(slot) = op_slot(staged, key) {
+            size = format.data_op_size(data_row(staged.rows, slot), streams)
+        }
+    }
+    size
+}
+
+pub fn stream_control_slot(ops: DataRows) -> Option[u64] {
+    for slot in 0u64 .. data_row_count(ops) {
+        if list.len(data_row(ops, slot).key) == 0u64 {
+            return Some(slot)
+        }
+    }
+    None
+}
+
+pub fn apply_collection_batch[T](mut tree: PageTree, collection: Bytes, source: T, edit_at: std.page.EditSource[T], start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), std.page.Error] {
+    let inline = tree.inline
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    std.page.edit_collection(mut tree.root, collection, first, mut draw, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.apply_sorted_source(mut root, source, edit_at, start, end, inline, mut stamps)?
+        if std.page.count(std.page.image_of(root)) == 0 {
+            root = arc.share(empty_root)
+        }
+        Ok(())
+    })
+}
+
+pub type CellEdit: shareable + send = CellPut(format.StagedValue) | CellDelete | CellRevert
+
+pub type LogBoundsRep: shareable + send {
+    first: u64,
+    next: u64
+}
+
+pub type LogState: shareable + send {
+    head: LogBoundsRep,
+    limits: LogBoundsRep,
+    height: u64
+}

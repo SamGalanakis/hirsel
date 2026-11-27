@@ -169,14 +169,14 @@ fn collect_base_descriptors(root: Arc[std.page.Page], mut out: Map[u32, (std.pag
         }
         let key = option.unwrap(std.page.key_at(image, slot))
         let id: u32 = list.word_be(key, 0)
-        let desc = unwrap_collection_descriptor(std.page.value_at(root, slot))
+        let desc = pages.unwrap_collection_descriptor(std.page.value_at(root, slot))
         failure_result_from_rep(types.capacity(map.try_reserve(mut out, 1)))?
         map.insert(mut out, id, (desc.kind, desc.residency))
     }
     Ok(())
 }
 
-fn base_descriptors_from_tree(tree: PageTree) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], Error] {
+fn base_descriptors_from_tree(tree: pages.PageTree) -> Result[Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)], Error] {
     let mut out: Map[u32, (std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = map.new()
     collect_base_descriptors(tree.root, mut out)?
     Ok(take out)
@@ -239,7 +239,7 @@ fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, m
     let wire = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
     disk_io(host.close(take file))?
     let (height, take children, take found_descs) = disk_allocation(scoped fn() -> Result[(u8, List[std.page.PagePtr], List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)]), Error] {
-        let image = page_result(std.page.decode(failure_result_from_rep(types.copied(list.slice(wire, 16, 16 + width)))?, CollectionMap))?
+        let image = failure_result_from_rep(pages.page_result(std.page.decode(failure_result_from_rep(types.copied(list.slice(wire, 16, 16 + width)))?, CollectionMap)))?
         let lvl = std.page.level(image)
         let mut kids: List[std.page.PagePtr] = list.new()
         let mut descs: List[(u32, std.page_descriptor.CollectionKind, std.page_descriptor.Residency)] = list.new()
@@ -252,7 +252,7 @@ fn read_collection_map_descriptors(d: Dir, id: StoreId, ptr: std.page.PagePtr, m
                 let row = option.unwrap(std.page.entry(image, slot))
                 if let InlineValue(raw) = row.cell {
                     let cid: u32 = list.word_be(row.key, 0)
-                    let desc = collection_descriptor(raw)
+                    let desc = pages.collection_descriptor(raw)
                     list.push(mut descs, (cid, desc.kind, desc.residency))
                 }
             }
@@ -348,14 +348,14 @@ fn derive_range_residencies(base: Map[u32, (std.page_descriptor.CollectionKind, 
 
 // Installs a collection entry with an explicit residency and rebuilt
 // descriptor into `tree` (supports both HotPage and ColdPage roots).
-fn put_collection_with_residency(mut tree: PageTree, key: Bytes, take slot: Option[std.page.Slot], rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency, private_from: u64, mut ids: u64) -> Result[(), Error] {
+fn put_collection_with_residency(mut tree: pages.PageTree, key: Bytes, take slot: Option[std.page.Slot], rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency, private_from: u64, mut ids: u64) -> Result[(), Error] {
     if residency == ResidentMemory {
         let built: Option[Arc[std.page.Page]] = match take slot {
             Some(HotPage(page)) => Some(take page),
             None => None,
-            Some(ColdPage(_)) => return Error(malformed(0)),
+            Some(ColdPage(_)) => return Error(failure_from_rep(pages.malformed(0))),
         }
-        return put_collection(mut tree, key, take built, kind, private_from, mut ids)
+        return failure_result_from_rep(pages.put_collection(mut tree, key, take built, kind, private_from, mut ids))
     }
     let empty_root = match view tree.empty_collection {
         Some(shared) => arc.share(shared),
@@ -364,31 +364,31 @@ fn put_collection_with_residency(mut tree: PageTree, key: Bytes, take slot: Opti
     match take slot {
         None => {
             let record = match kind {
-                4 => log_record(empty_root, 0, 0, ResidentTiered)?,
-                _ => rooted_collection_record(empty_root, kind, ResidentTiered)?,
+                4 => failure_result_from_rep(pages.log_record(empty_root, 0, 0, ResidentTiered))?,
+                _ => failure_result_from_rep(pages.rooted_collection_record(empty_root, kind, ResidentTiered))?,
             }
-            page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids))
+            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids)))
         },
         Some(HotPage(page)) => {
             let record = match kind {
-                4 => log_record(page, 0, rows, ResidentTiered)?,
-                _ => rooted_collection_record(page, kind, ResidentTiered)?,
+                4 => failure_result_from_rep(pages.log_record(page, 0, rows, ResidentTiered))?,
+                _ => failure_result_from_rep(pages.rooted_collection_record(page, kind, ResidentTiered))?,
             }
-            page_result(std.page.insert(mut tree.root, key, record, Some(take page), tree.inline, private_from, mut ids))
+            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take page), tree.inline, private_from, mut ids)))
         },
         Some(ColdPage(ptr)) => {
-            let record = collection_header(ptr.stamp, rows, charge, kind, ResidentTiered)?
-            page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids))?
-            page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids))
+            let record = failure_result_from_rep(pages.collection_header(ptr.stamp, rows, charge, kind, ResidentTiered))?
+            failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, key, record, Some(take empty_root), tree.inline, private_from, mut ids)))?
+            failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, key, ColdPage(ptr), mut ids)))
         },
     }
 }
 
-fn define_empty_tiered_collection(mut tree: PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
+fn define_empty_tiered_collection(mut tree: pages.PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
     let first = stamp_after(final_item)?
     let mut draw = first
     put_collection_with_residency(mut tree, prefix(id)?, None, 0, 0, kind, ResidentTiered, first, mut draw)?
-    canonical_tree(mut tree)?
+    failure_result_from_rep(pages.canonical_tree(mut tree))?
     final_item = draw - 1
     Ok(())
 }
@@ -481,9 +481,9 @@ fn stream_encode_leaf(take leaf_rows: List[std.page.Row], inline: u64, mut curso
         }
     }
     let id = stream_draw_stamp(mut cursor, high)?
-    let image = deploy_result(page_result(std.page.encode(page_entries, 0u8, id, Collection)))?
+    let image = deploy_result(failure_result_from_rep(pages.page_result(std.page.encode(page_entries, 0u8, id, Collection))))?
     hot = int.saturating_add(hot, std.page.sealed_size(image))
-    let page = deploy_result(page_result(std.page.attach(take image, list.new(), take blobs)))?
+    let page = deploy_result(failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), take blobs))))?
     Ok((StreamNode(slot: HotPage(take page), stamp: id, level: 0u8, first: take first, last: take last_key, rows: rows, charge: charge), hot))
 }
 
@@ -501,7 +501,7 @@ fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u
         let sep: Bytes = if i == lo {
             list.new()
         } else {
-            deploy_result(page_result(std.page.separator(nodes[i - 1u64].last, node.first)))?
+            deploy_result(failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, node.first))))?
         }
         let ptr = match node.slot {
             ColdPage(place) => place,
@@ -511,9 +511,9 @@ fn stream_encode_branch(nodes: List[StreamNode], lo: u64, hi: u64, mut cursor: u
         list.push(mut kids, clone(node.slot))
     }
     let id = stream_draw_stamp(mut cursor, high)?
-    let image = deploy_result(page_result(std.page.encode(page_entries, lvl, id, Collection)))?
+    let image = deploy_result(failure_result_from_rep(pages.page_result(std.page.encode(page_entries, lvl, id, Collection))))?
     let hot = std.page.sealed_size(image)
-    let page = deploy_result(page_result(std.page.attach(take image, take kids, list.new())))?
+    let page = deploy_result(failure_result_from_rep(pages.page_result(std.page.attach(take image, take kids, list.new()))))?
     let first = deploy_result(failure_result_from_rep(types.copied(nodes[lo].first)))?
     let last_key = deploy_result(failure_result_from_rep(types.copied(nodes[hi - 1u64].last)))?
     Ok((StreamNode(slot: HotPage(take page), stamp: id, level: lvl, first: take first, last: take last_key, rows: rows, charge: charge), hot))
@@ -527,7 +527,7 @@ fn stream_branch_fits(nodes: List[StreamNode], lo: u64, hi: u64) -> Result[bool,
     let mut first_sep: Bytes = list.new()
     let mut common = 0u64
     for i in lo + 1u64 .. hi {
-        let sep = deploy_result(page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first)))?
+        let sep = deploy_result(failure_result_from_rep(pages.page_result(std.page.separator(nodes[i - 1u64].last, nodes[i].first))))?
         sum += 4 + 52 + list.len(sep)
         if i == lo + 1u64 {
             common = list.len(sep)
@@ -633,8 +633,8 @@ fn stream_wrap_level(nodes: List[StreamNode], mut cursor: u64, high: u64) -> Res
 
 // Flushes every HotPage currently in `builder.levels` into class-3/4 packs via
 // one `hold_import_emitted` cut, replacing each HotPage with its ColdPage(ptr).
-fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: PageTree) -> Result[(), DeployError] waits {
-    let mut temp_stamp = deploy_result(stamp_after(db.next_node))?
+fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree) -> Result[(), DeployError] waits {
+    let mut temp_stamp = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
     let Some(take root_node) = stream_temporary_root_multi(builder.levels, mut temp_stamp)? else {
         return Ok(())
     }
@@ -642,9 +642,9 @@ fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: P
     let key = deploy_result(prefix(builder.id))?
     let private_from = temp_stamp
     deploy_result(put_collection_with_residency(mut collections, key, Some(take root_slot), root_rows, root_charge, builder.kind, ResidentTiered, private_from, mut temp_stamp))?
-    deploy_result(canonical_tree(mut collections))?
-    db.next_node = temp_stamp - 1
-    let (take packed, emitted) = hold_import_emitted(mut db, share_page_tree(collections))?
+    deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
+    pages.set_next_node(mut db.holders, temp_stamp - 1)
+    let (take packed, emitted) = hold_import_emitted(mut db, pages.share_page_tree(collections))?
     collections = take packed
     for l in 0u64 .. list.len(builder.levels) {
         for j in 0u64 .. list.len(builder.levels[l]) {
@@ -665,7 +665,7 @@ fn stream_flush_chunk(mut db: Db, mut builder: StreamBuilder, mut collections: P
     Ok(())
 }
 
-fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: PageTree, take row: std.page.Row) -> Result[(), DeployError] waits {
+fn stream_push_row(mut db: Db, mut builder: StreamBuilder, mut collections: pages.PageTree, take row: std.page.Row) -> Result[(), DeployError] waits {
     let key_len = list.len(row.key)
     let val_len = list.len(row.value)
     let width = stream_leaf_row_width(key_len, val_len, builder.inline)
@@ -742,7 +742,7 @@ fn stream_finish_range(mut builder: StreamBuilder) -> Result[Option[StreamNode],
 // streaming each range bottom-up into `collections` and flushing via
 // `hold_import` cuts at `dirty_bytes`. Re-derives each range's digest; a
 // mismatch forgets the import and returns `ImportMalformed`.
-fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mut collections: PageTree, low: u64, high: u64, inline: u64) -> Result[(), DeployError] waits {
+fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mut collections: pages.PageTree, low: u64, high: u64, inline: u64) -> Result[(), DeployError] waits {
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
     let header = scratch_result(prepared_read(mut file, 72u64))?
     let head = deploy_result(disk_read_header("PREPARED", header, 6, None, None))?
@@ -801,7 +801,7 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
         let finished = stream_finish_range(mut builder)?
         stamp_cursor = builder.next_stamp
         let key = deploy_result(prefix(target.id))?
-        let private_from = deploy_result(stamp_after(db.next_node))?
+        let private_from = deploy_result(stamp_after(pages.holder_next_node(db.holders)))?
         let mut map_stamp = private_from
         match take finished {
             Some(take node) => {
@@ -812,10 +812,10 @@ fn build_tiered_import_pass2(mut db: Db, d: Dir, ranges: List[ImportedRange], mu
                 deploy_result(put_collection_with_residency(mut collections, key, None, 0, 0, target.kind, ResidentTiered, private_from, mut map_stamp))?
             },
         }
-        deploy_result(canonical_tree(mut collections))?
-        db.next_node = map_stamp - 1
+        deploy_result(failure_result_from_rep(pages.canonical_tree(mut collections)))?
+        pages.set_next_node(mut db.holders, map_stamp - 1)
         if builder.hot_bytes >= dirty_bytes {
-            let (take packed, _) = hold_import_emitted(mut db, share_page_tree(collections))?
+            let (take packed, _) = hold_import_emitted(mut db, pages.share_page_tree(collections))?
             collections = take packed
         }
     }

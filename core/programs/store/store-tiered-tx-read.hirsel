@@ -27,12 +27,12 @@ fn tx_tiered_descriptor(tx: Tx, collection: u32) -> Result[bool, Error] {
     let Some(descriptor) = std.page.lookup(tx.roots.collections.root, prefix(collection)?) else {
         return Ok(false)
     }
-    Ok(collection_descriptor(descriptor).residency == ResidentTiered)
+    Ok(pages.collection_descriptor(descriptor).residency == ResidentTiered)
 }
 
 // The rows the Tx stages for Tiered table collections, the newest op for a
 // key winning. With `only`, the rows of that collection.
-fn tx_tiered_staged(tree: PageTree, below: List[Arc[Staged]], ops: DataOps, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Option[Arc[Bytes]]], Error] {
+fn tx_tiered_staged(tree: pages.PageTree, below: List[Arc[pages.Staged]], ops: pages.DataOps, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Option[Arc[Bytes]]], Error] {
     let mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]] = std.omap.new()
     let mut ids = 0u64
     for layer in below {
@@ -42,9 +42,9 @@ fn tx_tiered_staged(tree: PageTree, below: List[Arc[Staged]], ops: DataOps, only
     Ok(take staged)
 }
 
-fn tx_tiered_stage_rows(tree: PageTree, rows: DataRows, only: Option[u32], mut ids: u64, mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]) -> Result[(), Error] {
-    for slot in 0u64 .. data_row_count(rows) {
-        let op = data_row(rows, slot)
+fn tx_tiered_stage_rows(tree: pages.PageTree, rows: pages.DataRows, only: Option[u32], mut ids: u64, mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]) -> Result[(), Error] {
+    for slot in 0u64 .. pages.data_row_count(rows) {
+        let op = pages.data_row(rows, slot)
         if let Some(_) = op.trim {
             continue
         }
@@ -58,7 +58,7 @@ fn tx_tiered_stage_rows(tree: PageTree, rows: DataRows, only: Option[u32], mut i
         let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
             continue
         }
-        let fields = collection_descriptor(descriptor)
+        let fields = pages.collection_descriptor(descriptor)
         if fields.residency != ResidentTiered || fields.kind == CellCollection || fields.kind == LogCollection {
             continue
         }
@@ -101,7 +101,7 @@ fn tx_tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> Result[(), Error] {
 }
 
 // The next row of a Tiered Tx cursor, or None once [from, to) is spent.
-fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_tiered_in(tree: pages.PageTree, attempt_record: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], collection: u32, staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], mut from: Bytes, mut to: Bytes, reverse: bool) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, prefix(collection)?) else {
         return Error(Stale(collection))
     }
@@ -186,7 +186,7 @@ fn next_tiered_in(tree: PageTree, attempt_record: Option[core.Cell[TieredTouchSe
     Ok(None)
 }
 
-fn next_tiered_index_row(tree: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn next_tiered_index_row(tree: pages.PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[format.TieredFrame]], staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     let mut start = failure_result_from_rep(types.copied(low))?
     let mut stop = failure_result_from_rep(types.copied(high))?
     next_tiered_in(tree, attempt, pins, id, staged, mut start, mut stop, false)
@@ -225,9 +225,9 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
     }
     let committed = if list.slice(high, 0, 4) != id {
         let omitted = tiered_count_overlay(overlay, id, low, before)?
-        let rows: u64 = collection_descriptor(descriptor).rows
+        let rows: u64 = pages.collection_descriptor(descriptor).rows
         let Some(total) = int.checked_sub(rows, omitted) else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         total
     } else {
@@ -235,7 +235,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
         let through = tiered_page_rank(attempt, tx.pins, edge, None, end)?
         tiered_seek(attempt, SeekOperation)
         let Some(base_count) = int.checked_sub(through, before) else {
-            return Error(malformed(0))
+            return Error(failure_from_rep(pages.malformed(0)))
         }
         tiered_count_overlay(overlay, low, high, base_count)?
     }
@@ -262,7 +262,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
 
 // An index row's primary when its table is Tiered: the staged op, else the
 // replay overlay, else the Cold row through the attempt.
-fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: PageTree, row_key: Bytes, raw: Bytes, seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: pages.PageTree, row_key: Bytes, raw: Bytes, seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
     let (take k, take owner) = decode_row_key(r, row_key, raw)?
     let Some(primary) = view owner else {
         return finish_row(r, take k, row_key, raw, None, seen)
@@ -270,8 +270,8 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: P
     let Some((edge, descriptor)) = std.page.collection_slot(data.root, list.slice(primary, 0, 4)) else {
         return Error(Stale(r.table))
     }
-    if collection_descriptor(descriptor).residency == ResidentMemory {
-        let Some(value) = get_page_row(data, primary) else {
+    if pages.collection_descriptor(descriptor).residency == ResidentMemory {
+        let Some(value) = pages.get_page_row(data, primary) else {
             return Error(Stale(r.table))
         }
         return finish_row(r, take k, primary, value, None, seen)

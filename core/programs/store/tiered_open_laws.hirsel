@@ -132,7 +132,7 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     let id = prefix(rows.id)?
     let memory_leaf = {
-        let Some((here, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, id) else {
+        let Some((here, _)) = std.page.collection_entry(pages.holder_heads(db.holders)[0u64].roots.collections.root, id) else {
             fail("L68: the fixture has no collection")
         }
         arc.share(here)
@@ -161,13 +161,13 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
         fail("L68: the fixture value 30 must be one byte")
     }
     let mut hot = arc.share(memory_leaf)
-    let mut draw = stamp_after(db.next_node)?
+    let mut draw = stamp_after(pages.holder_next_node(db.holders))?
     let first = draw
-    page_result(std.page.insert(mut hot, row_key, take written, None, 1024, first, mut draw))?
-    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
-    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(arc.share(hot)), mut draw))?
-    db.heads[0u64].roots.collections = take tree
-    db.next_node = draw - 1
+    failure_result_from_rep(pages.page_result(std.page.insert(mut hot, row_key, take written, None, 1024, first, mut draw)))?
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(arc.share(hot)), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
     let _ = checkpoint(mut db)?
     close(take db)?
     let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?

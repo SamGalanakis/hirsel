@@ -392,7 +392,7 @@ fn l63_directory_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(D
     let mut db = open(tasks, directory, c, r, options)?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let marks = table(mut db, "marks", std.codec.key_u64(), std.codec.of_u32())?
-    match std.page.collection_slot(db.heads[0].roots.collections.root, prefix(rows.id)?) {
+    match std.page.collection_slot(pages.holder_heads(db.holders)[0].roots.collections.root, prefix(rows.id)?) {
         Some((ColdPage(_), _)) => (),
         _ => fail("L63: the reopened Tiered root is Cold"),
     }

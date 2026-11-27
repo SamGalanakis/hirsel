@@ -330,12 +330,12 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
 
 type WitnessCut {
     head: HistoryHead,
-    manifest: HistoryRef,
+    manifest: pages.HistoryRef,
     manifest_bytes: Bytes,
     entry_bytes: Bytes
 }
 
-fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
+fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: pages.HistoryRef, generation: u64, rows_version: u64) -> Result[WitnessCut, Error] {
     let mut manifest = page_manifest_empty(default_limits())
     manifest.generation = generation
     manifest.first_live = pos
@@ -437,7 +437,7 @@ fn witness_ceiling_check(report: std.sim.s3.Report, removed: String, next_cut: u
 fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool) -> Result[(), Error] waits {
     let id = StoreId(hi: 9, lo: 10)
     let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12))
-    let previous = HistoryRef(seq: 19, epoch: 1, len: 112, digest: 0)
+    let previous = pages.HistoryRef(seq: 19, epoch: 1, len: 112, digest: 0)
     let first = witness_cut(id, pair, 20, previous, 1, 0)?
     let manifest_key = history_key("m-", first.manifest)
     let mut group: Bytes = list.with_capacity(1024)
@@ -496,7 +496,7 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
             fail("L52-W: the successor's head writes were missing")
         }
         let body = view report.head_writes[3].data
-        let reference = HistoryRef(seq: format.read_le(body, 120, 8), epoch: format.read_le(body, 128, 8), len: format.read_le(body, 136, 8), digest: format.read_le(body, 144, 8))
+        let reference = pages.HistoryRef(seq: format.read_le(body, 120, 8), epoch: format.read_le(body, 128, 8), len: format.read_le(body, 136, 8), digest: format.read_le(body, 144, 8))
         let claimed_entry = history_key("e-", reference)
         witness_ceiling_check(report, manifest_key, 22, claimed_entry)?
     }

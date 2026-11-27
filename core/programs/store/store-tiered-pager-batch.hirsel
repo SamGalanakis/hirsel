@@ -2,7 +2,7 @@ const TIERED_GET_STREAMS: u64 = 8
 
 type TieredBucketTarget {
     slot: u64,
-    pack: HistoryRef,
+    pack: pages.HistoryRef,
     edge: format.TieredTarget,
     direction: TieredDirection,
 }

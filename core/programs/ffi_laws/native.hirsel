@@ -1,15 +1,29 @@
 pub fn make(f: Foreign[laws.Laws]) -> Option[foreign.Ptr[laws.Obj]]
+
 pub fn make_w(f: Foreign[laws.Laws]) -> Option[foreign.Ptr[laws.Obj]] waits
+
 pub fn free(f: Foreign[laws.Laws], take p: foreign.Ptr[laws.Obj]) -> i32 waits
+
 pub fn freed(f: Foreign[laws.Laws]) -> u64
+
 pub fn made(f: Foreign[laws.Laws]) -> u64
+
 pub fn same(f: Foreign[laws.Laws], p: foreign.Ptr[laws.Obj]) -> Option[foreign.Ptr[laws.Obj]] waits
+
 pub fn mark(f: Foreign[laws.Laws], mut b: Bytes) -> u64
+
 pub fn mark_w(f: Foreign[laws.Laws], mut b: Bytes) -> u64 waits
+
 pub fn loan_length(f: Foreign[laws.Laws], b: Bytes) -> u64
+
 pub fn loan_sum(f: Foreign[laws.Laws], b: Bytes) -> u64
+
 pub fn gate(f: Foreign[laws.Laws], on: u32) -> i32
+
 pub fn touch(f: Foreign[laws.Laws]) -> i32
+
 pub fn hold(f: Foreign[laws.Laws]) -> i32 waits
+
 pub fn held(f: Foreign[laws.Laws]) -> u64
+
 pub fn open(f: Foreign[laws.Laws], n: u32) -> i32

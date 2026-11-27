@@ -25,7 +25,7 @@ fn on_empty(i: u64) -> u64 {
 }
 
 fn on_inline(i: u64) -> u64 {
-    let a: Inline[u16, 3] = [1, 2, 3]
+    let a: Inline[u16, 3] =[1, 2, 3]
     inline.prefetch(a, i)
     int.widen(a[0] + a[1] + a[2])
 }

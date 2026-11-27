@@ -1,7 +1,6 @@
 // Runs each prepared case through transcode.run into a simulated S3
 // bucket, then writes every stored object (key with '/' as "__") and the
 // run summary to the fixture directory for validate.py.
-
 fn name(prefix: String, index: u64, suffix: String) -> String {
     let mut s: String = string.with_capacity(32)
     string.push(mut s, prefix)
@@ -45,12 +44,11 @@ fn bucket(tasks: Tasks, real: Clock) -> Bucket {
     list.push(mut peers, address.ip)
     std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
     // Public AWS SigV4 documentation example.
-    let sample: Inline[u8, 32] = [219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let sample: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
     let mut signing_bytes: Bytes = list.with_capacity(32)
     let _ = bytebuf.append_inline(mut signing_bytes, sample, 0, 32)
     let signing_key = result.unwrap(secret.seal(take signing_bytes, "verify"))
-    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take signing_key,
-        faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 1048576, max_body: 268435456)
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take signing_key, faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 1048576, max_body: 268435456)
     let (take world, time) = std.sim.world.new(1123, 0, 1369353600000)
     let (stopping, stop_from): (Sender[()], Receiver[()]) = channel.new(1)
     let clock_task = task.spawn(tasks, bytes 65536, BucketClock(world: take world, stop_from: take stop_from, real), bucket_clock)

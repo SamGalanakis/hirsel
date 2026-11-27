@@ -1,13 +1,13 @@
 hirsel.laws 1
-hirsel.ai/ffi_laws@1/tests/fl16_cancelled_release src=f94b27247c90a503 sig=ebbd67222af10291 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl16_failed_finalizer src=a8fadb41e04777e4 sig=166f783af4923a97 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl17_address_reuse src=b0c4974602b6873b sig=f52dbd2f9869b762 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl18_full_helper_pool src=b8d2fdc42e590caa sig=c6a6957ef0c52bab run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl3_double_release src=a24c5eace42fdbdb sig=af45137407e8cc32 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl4_racing_release src=6ce4e55ac8311946 sig=af45137407e8cc32 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl5_immutable_slice src=4b3158ac21c665a0 sig=29eca1cf28e19dc3 run=973a9d3850e7ba1c bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl5_mutable_loan src=14c255eda1669a94 sig=af05687e688d44a2 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl5_stack_loan src=46da54682ef0645b sig=0260c71171b55996 run=973a9d3850e7ba1c bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl16_cancelled_release src=d1ab7705e57ed63a sig=ebbd67222af10291 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl16_failed_finalizer src=15a6e5f7e49c8f90 sig=166f783af4923a97 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl17_address_reuse src=31fc8c909620b551 sig=f52dbd2f9869b762 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl18_full_helper_pool src=5dc3d046f45bfa5d sig=c6a6957ef0c52bab run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl3_double_release src=bab45478dfec279b sig=af45137407e8cc32 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl4_racing_release src=118be3cb85808e95 sig=af45137407e8cc32 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl5_immutable_slice src=dd808797379e2c1b sig=29eca1cf28e19dc3 run=973a9d3850e7ba1c bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl5_mutable_loan src=1457942eff8b40b7 sig=af05687e688d44a2 run=8d9c58cf76260b95 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl5_stack_loan src=480fe14f130e12e3 sig=0260c71171b55996 run=973a9d3850e7ba1c bug=- oracle=- rows=pending
 hirsel.ai/ffi_laws@1/tests/fl6_parameterless_control src=d4a24b438a6e488b sig=66312a9512151900 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl6_reaches_in_finalizer src=930f954602d46091 sig=9bddab227fa31296 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-hirsel.ai/ffi_laws@1/tests/fl6_reaches_without_calling src=60fc782bea012a09 sig=9bddab227fa31296 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl6_reaches_in_finalizer src=b01327c79972b93b sig=9bddab227fa31296 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+hirsel.ai/ffi_laws@1/tests/fl6_reaches_without_calling src=4fdabd97f4f6ab0d sig=9bddab227fa31296 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

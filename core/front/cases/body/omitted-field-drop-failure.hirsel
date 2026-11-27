@@ -52,6 +52,7 @@ type Inner {
     keep: Bad,
     bad: Bad
 }
+
 type Outer = Pack(Inner, u64) | Empty
 
 fn nested(d: u64) -> u64 {

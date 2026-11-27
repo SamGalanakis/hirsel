@@ -186,7 +186,7 @@ fn check_encode(e_grant: Foreign[av1.EncoderCodec], d_grant: Foreign[av1.Decoder
 // An OBU_SEQUENCE_HEADER (AV1 §5.5) with a reduced still-picture header,
 // 16-bit frame size fields and max_frame_width/height of 65536.
 fn huge_sequence_header() -> Bytes {
-    let header: Inline[u8, 11] = [10, 9, 31, 255, 255, 255, 255, 255, 192, 0, 128]
+    let header: Inline[u8, 11] =[10, 9, 31, 255, 255, 255, 255, 255, 192, 0, 128]
     let mut b: Bytes = list.with_capacity(11)
     for i in 0u64 .. 11 {
         list.push(mut b, header[i])

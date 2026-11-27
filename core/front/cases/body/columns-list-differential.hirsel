@@ -73,8 +73,12 @@ fn list_digest(seed: u64, steps: u64) -> (u64, u64) {
                 }
             } else if op == 4u64 {
                 match list.pop(mut xs) {
-                    Some(x) => { h = mix(h, key(x)) },
-                    None => { h = mix(h, 7u64) }
+                    Some(x) => {
+                        h = mix(h, key(x))
+                    },
+                    None => {
+                        h = mix(h, 7u64)
+                    }
                 }
             } else if op == 5u64 && len > 0u64 {
                 let old = list.set(mut xs, v % len, row(v + 1u64))
@@ -146,8 +150,12 @@ fn columns_step(mut xs: Columns[Row], s: u64, mut h: u64, mut refused: u64) {
         }
     } else if op == 4u64 {
         match columns.pop(mut xs) {
-            Some(x) => { h = mix(h, key(x)) },
-            None => { h = mix(h, 7u64) }
+            Some(x) => {
+                h = mix(h, key(x))
+            },
+            None => {
+                h = mix(h, 7u64)
+            }
         }
     } else if op == 5u64 && len > 0u64 {
         let old = columns.set(mut xs, v % len, row(v + 1u64))

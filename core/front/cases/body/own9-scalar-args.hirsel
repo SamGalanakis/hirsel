@@ -33,6 +33,5 @@ pub fn widened_read_first() -> u64 {
     let now: u64 = int.widen(t.root)
     old * 10u64 + now
 }
-
 // expect: run scalar_read_first() = 49
 // expect: run widened_read_first() = 49

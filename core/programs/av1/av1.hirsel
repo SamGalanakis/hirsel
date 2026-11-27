@@ -54,10 +54,10 @@ pub opaque resource type Encoder: send {
 
 fn error(code: i64) -> Av1Error {
     match code {
-        -1 => Invalid,
-        -2 => Limit,
-        -3 => Buffer,
-        -4 => Drain,
+        - 1 => Invalid,
+        - 2 => Limit,
+        - 3 => Buffer,
+        - 4 => Drain,
         _ => Native,
     }
 }

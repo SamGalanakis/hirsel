@@ -1,5 +1,4 @@
 // AWS-style credentials from a Cred grant or a static Secret grant (TLS-7).
-
 pub type Credentials: send {
     access_key_id: String,
     secret: Secret,

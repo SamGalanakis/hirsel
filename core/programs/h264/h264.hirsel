@@ -15,14 +15,15 @@ pub type Frame {
 }
 
 const MAX_DIMENSION: u32 = 4096
+
 const MAX_PIXELS: u64 = 9437184
+
 const MAX_NAL: u64 = 16777216
 
 // Every native call runs on a helper (FFI-7 `waits`): no coded size keeps one under the 50 us
 // host-stack budget. Measured directly against OpenH264 on one Zen 3 core, a 16x16 CABAC
 // stream peaks at 148 us per decode call, decoder creation takes 160 us and encoder
 // teardown at 1280x720 takes 534 us.
-
 // MEM-27 holds this reservation for as long as the native session is live.
 resource type CodecHeap: send grant bytes 268435456 {}
 
@@ -51,8 +52,7 @@ fn pixels(width: u32, height: u32) -> u64 {
 }
 
 fn valid_size(width: u32, height: u32) -> bool {
-    width >= 16 && height >= 16 && width <= MAX_DIMENSION && height <= MAX_DIMENSION &&
-        width % 2 == 0 && height % 2 == 0 && pixels(width, height) <= MAX_PIXELS
+    width >= 16 && height >= 16 && width <= MAX_DIMENSION && height <= MAX_DIMENSION && width % 2 == 0 && height % 2 == 0 && pixels(width, height) <= MAX_PIXELS
 }
 
 /// Opens a decoder for progressive 8-bit 4:2:0 AVC streams. The limits apply to
@@ -61,8 +61,12 @@ pub fn decoder(f: Foreign[H264], max_width: u32, max_height: u32) -> Result[Deco
     if !valid_size(max_width, max_height) {
         return Error(InvalidConfig)
     }
-    let Ok(take heap) = CodecHeap() else { return Error(Capacity) }
-    let Some(p) = native.decoder_create(f) else { return Error(Capacity) }
+    let Ok(take heap) = CodecHeap() else {
+        return Error(Capacity)
+    }
+    let Some(p) = native.decoder_create(f) else {
+        return Error(Capacity)
+    }
     match Decoder(f: f, p: p, max_width: max_width, max_height: max_height, heap: take heap) {
         Ok(take d) => Ok(take d),
         Error((_, (grant, handle, _, _, _))) => {
@@ -100,7 +104,6 @@ fn check_nal(nal: Bytes, max_width: u32, max_height: u32) -> Result[(), Error] {
     if kind != 1 && kind != 5 && (kind < 6 || kind > 12) {
         return Error(InvalidNal)
     }
-
     // A view must contain one NAL. Otherwise a second SPS could bypass the
     // validation below and go straight to the decoder.
     let mut at = start + 1
@@ -115,7 +118,9 @@ fn check_nal(nal: Bytes, max_width: u32, max_height: u32) -> Result[(), Error] {
         while last > start + 1 && nal[last - 1] == 0 {
             last -= 1
         }
-        let Ok(sps) = media_bits.h264.parse_sps(list.slice(nal, start, last)) else { return Error(InvalidNal) }
+        let Ok(sps) = media_bits.h264.parse_sps(list.slice(nal, start, last)) else {
+            return Error(InvalidNal)
+        }
         let (width, height, progressive_420) = media_bits.h264.coded_format(sps)
         if !progressive_420 {
             return Error(InvalidNal)
@@ -129,10 +134,10 @@ fn check_nal(nal: Bytes, max_width: u32, max_height: u32) -> Result[(), Error] {
 
 fn codec_error(code: i32) -> Error {
     match code {
-        -1 => InvalidConfig,
-        -2 => ShortBuffer,
-        -3 => Capacity,
-        -4 => Finished,
+        - 1 => InvalidConfig,
+        - 2 => ShortBuffer,
+        - 3 => Capacity,
+        - 4 => Finished,
         _ => CodecError(-code - 16),
     }
 }
@@ -176,7 +181,9 @@ pub fn encoder(f: Foreign[H264], width: u32, height: u32, fps: u32, bitrate: u32
     if !valid_size(width, height) || fps == 0 || fps > 60 || bitrate == 0 || bitrate > 100000000 {
         return Error(InvalidConfig)
     }
-    let Ok(take heap) = CodecHeap() else { return Error(Capacity) }
+    let Ok(take heap) = CodecHeap() else {
+        return Error(Capacity)
+    }
     let mode = match profile {
         Baseline => 0u8,
         Main => 1u8,

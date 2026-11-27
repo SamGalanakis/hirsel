@@ -2,7 +2,6 @@
 // Unicode-3.0 (https://www.unicode.org/license.txt).
 // WordBreakProperty.txt SHA-256 8dbfa17063e11084201f33c3e76d485d3b9166930c71db8e39ed1c9234171aec
 // CaseFolding.txt SHA-256 a004797658a457bec4dc11683e39f69249ea3b595b752dbea6721c4c9f587b0d
-
 const WORD_RANGES_COUNT: u64 = 1102
 
 const WORD_RANGES: Inline[(u32, u32, u8), 1102] =[

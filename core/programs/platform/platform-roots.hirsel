@@ -64,5 +64,4 @@ fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] waits {
     }
     Ok(take roots)
 }
-
 // A describe, preview or prepare child of a deploy: no store, listener or endpoint.

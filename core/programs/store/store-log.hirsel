@@ -592,11 +592,16 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     let overlap_next = order.min(old.next, new.next)
     window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
     window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
+    // Across branches the overlap is read by §1.5's two-sided resolver, each
+    // side by its own descriptor, so a differing Cold root is paged (§14.9).
     if a.branch != b.branch && overlap_first < overlap_next && !shared_cold_window(mut out, a.roots.collections, b.roots.collections, id, overlap_first, overlap_next)? {
-        let key = failure_result_from_rep(catalog.prefix(id))?
-        let mut previous = read.start_diff(std.page.collection_child(a.roots.collections.root, key), Some(types.key_word(overlap_first)))
-        let mut current = read.start_diff(std.page.collection_child(b.roots.collections.root, key), Some(types.key_word(overlap_first)))
-        let _ = page_change_rows(mut out, id, mut previous, mut current, Some(types.key_word(overlap_next)))?
+        let lo = failure_result_from_rep(pager.log_key(id, overlap_first))?
+        let hi = failure_result_from_rep(pager.log_key(id, overlap_next))?
+        let read.ChangeOutput(rows: take rows, ..) = tiered_changes(r, a, b, Some(take lo), Some(take hi), None)?
+        failure_result_from_rep(types.capacity(list.try_reserve(mut out.rows, list.len(rows))))?
+        for take row in take rows {
+            list.push(mut out.rows, take row)
+        }
     }
     window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
     window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?

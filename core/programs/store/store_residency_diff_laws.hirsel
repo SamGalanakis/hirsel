@@ -1,0 +1,186 @@
+// L109 (§13.12): differences between a Tiered side and a Memory side, each
+// read by its own descriptor (§1.5, §13.10a "Finishes the Tiered diff",
+// §14.9 "Across branches"). Every expected row is a literal map difference.
+type ResidencyDiffFixture {
+    rows: Table[u64, u32],
+    events: Log[u32]
+}
+
+fn residency_diff_schema(mut db: Db, mode: Mode) -> Result[ResidencyDiffFixture, Error] waits {
+    let mut d = declare(db, mode)?
+    let rows_decl = declare_table(mut d, "residency_rows", std.codec.key_u64(), std.codec.of_u32())?
+    let rows = finish(mut d, take rows_decl)?
+    let events = declare_log(mut d, "residency_events", std.codec.of_u32(), Forever)?
+    let _ = seal(mut db, take d)?
+    Ok(ResidencyDiffFixture(rows: take rows, events: take events))
+}
+
+// Rows {1: 10, 2: 20, 3: 30} and events [10, 11, 12], both made Tiered, and
+// the store reopened so both are Cold.
+fn residency_diff_open(directory: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Db, ResidencyDiffFixture), Error] waits {
+    let options = l70_open_options(300000000)?
+    let mut db = open(tasks, directory, c, r, options)?
+    let fixture = residency_diff_schema(mut db, Migrate)?
+    let Committed(_) = run(mut db, Some(1048576u64), copy_env(fixture), fn(mut tx: Tx, f: ResidencyDiffFixture) -> Result[(), Error] {
+        for k in 1u64 .. 4u64 {
+            put(mut tx, f.rows, k, int.narrow(k * 10u64))?
+        }
+        for value in 10u32 .. 13u32 {
+            let _ = append(mut tx, f.events, value)?
+        }
+        Ok(())
+    })? else {
+        fail("L109: the fixture rows commit")
+    }
+    set_residency(mut db, fixture.rows.id, Tiered)?
+    set_residency(mut db, fixture.events.binding.id, Tiered)?
+    close(take db)?
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let rebound = residency_diff_schema(mut reopened, Open)?
+    Ok((take reopened, take rebound))
+}
+
+fn residency_key(t: Table[u64, u32], k: u64) -> Result[Bytes, Error] {
+    failure_result_from_rep(pager.log_key(t.id, k))
+}
+
+// `seen` must be exactly `expected`, in key order; None is a deletion.
+// Rows of other collections (the Log's append) are skipped.
+fn residency_rows_are(all: List[Change], t: Table[u64, u32], expected: List[(u64, Option[u32])], why: String) -> Result[(), Error] {
+    let prefix = failure_result_from_rep(catalog.prefix(t.id))?
+    let mut seen: List[Change] = list.new()
+    for change in all {
+        if list.len(change.tree_key) >= 4 && list.slice(change.tree_key, 0, 4) == prefix {
+            list.push(mut seen, clone(change))
+        }
+    }
+    if list.len(seen) != list.len(expected) {
+        fail(clone(why))
+    }
+    for i in 0u64 .. list.len(seen) {
+        if seen[i].tree_key != residency_key(t, expected[i].0)? {
+            fail(clone(why))
+        }
+        match (view seen[i].value, expected[i].1) {
+            (None, None) => (),
+            (Some(raw), Some(v)) => if row_value(t.readers, t.id, raw)? != v {
+                fail(clone(why))
+            },
+            _ => fail(clone(why)),
+        }
+    }
+    Ok(())
+}
+
+// The table's changes from `a` to `b` in pages under `limits`, each resumed
+// where the last one stopped.
+fn residency_pages(r: Reader, a: Snapshot, b: Snapshot, t: Table[u64, u32], limits: Limits) -> Result[List[Change], Error] waits {
+    let mut low = failure_result_from_rep(catalog.prefix(t.id))?
+    let hi = failure_result_from_rep(catalog.prefix(t.id + 1u32))?
+    let mut all: List[Change] = list.new()
+    loop {
+        let ChangePage(changes: take rows, next: take resume, ..) = changes_page(r, Some(clone(a)), b, low, hi, limits)?
+        for take change in take rows {
+            list.push(mut all, take change)
+        }
+        let Some(take next_low) = take resume else {
+            return Ok(take all)
+        }
+        low = take next_low
+    }
+}
+
+// A retained Tiered Snapshot `a` ({1: 10, 2: 20, 3: 30}) against a Memory one
+// `b` ({1: 10, 2: 21}), both orders, whole and in one-row pages.
+fn residency_snapshot_diffs(r: Reader, a: Snapshot, b: Snapshot, t: Table[u64, u32]) -> Result[(), Error] waits {
+    let mut forward: List[(u64, Option[u32])] = list.new()
+    list.push(mut forward, (2u64, Some(21u32)))
+    list.push(mut forward, (3u64, None))
+    let mut backward: List[(u64, Option[u32])] = list.new()
+    list.push(mut backward, (2u64, Some(20u32)))
+    list.push(mut backward, (3u64, Some(30u32)))
+    let Changes(rows: take ab, ..) = changes(r, a, b)?
+    residency_rows_are(ab, t, forward, "L109: changes from a Tiered Snapshot to a Memory one")?
+    let Changes(rows: take ba, ..) = changes(r, b, a)?
+    residency_rows_are(ba, t, backward, "L109: changes from a Memory Snapshot to a Tiered one")?
+    let single = Limits(rows: 1, byte_limit: VALUE_LIMIT + 1048576)
+    residency_rows_are(residency_pages(r, a, b, t, single)?, t, forward, "L109: changes_page pages from a Tiered Snapshot to a Memory one")?
+    residency_rows_are(residency_pages(r, b, a, t, single)?, t, backward, "L109: changes_page pages from a Memory Snapshot to a Tiered one")
+}
+
+// The child's deferred-diff entry, with a present Memory side that has no
+// inventory before a present Tiered side that has one.
+fn residency_catch_up(db: Db, directory: Dir, demoted: Snapshot, tiered: Snapshot, t: Table[u64, u32]) -> Result[(), Error] waits {
+    // A Memory side needs no inventory (§13.10a), so the child's view of it
+    // carries none.
+    let mut bare = Snapshot(store: demoted.store, open: demoted.open, branch: demoted.branch, head: demoted.head, roots: pages.share_roots(demoted.roots), watermark: demoted.watermark, bases: pages.no_tail_bases())
+    bare.roots.collections.paging = None
+    if !snapshot_paged(tiered) {
+        fail("L109: the Tiered side has an inventory")
+    }
+    let mut deferred: List[pager.TieredRowDiff] = list.new()
+    list.push(mut deferred, pager.TieredRowDiff(id: t.id, start: None, stop: None, before: true, after: true))
+    let finished = catch_up_tiered_diffs(directory, db.store, pager.pin_partition(db.pager), bare, tiered, deferred)
+    let Ok(take found) = take finished else {
+        fail("L109: a present Memory side finishes the deferred diff without Drift")
+    }
+    if list.len(found) != 2 || found[0u64].tree_key != residency_key(t, 2)? || found[1u64].tree_key != residency_key(t, 3)? || found[1u64].before != None {
+        fail("L109: the deferred diff is the literal difference")
+    }
+    let (Some(before_two), Some(after_two), Some(after_three)) = (view found[0u64].before, view found[0u64].after, view found[1u64].after) else {
+        fail("L109: the deferred diff is the literal difference")
+    }
+    if row_value(t.readers, t.id, before_two)? != 21u32 || row_value(t.readers, t.id, after_two)? != 20u32 || row_value(t.readers, t.id, after_three)? != 30u32 {
+        fail("L109: the deferred diff is the literal difference")
+    }
+    Ok(())
+}
+
+fn residency_event(change: Change, events: Log[u32], seq: u64, value: u32) -> Result[bool, Error] {
+    let mut expected: Bytes = list.new()
+    list.put_word_le(mut expected, value)
+    Ok(change.tree_key == failure_result_from_rep(pager.log_key(events.binding.id, seq))? && published_log(events, change)? == Some(take expected))
+}
+
+/// bug: the child guard returns Drift for a present Memory side, a differing Cold Log root is descended by collection_child and fails in hot_child, an inventory read from the wrong side, or lost supersede semantics.
+/// oracle: the literal map differences {1: 10, 2: 20, 3: 30} against {1: 10, 2: 21} in both orders, and the Log windows [2, 4) holding 12 then 13 on main and 12 then 99 on the branch.
+@test
+fn test_l109_differences_across_residency(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let (opened, fixture) = residency_diff_open(directory, c, r, tasks)?
+    let mut db = take opened
+    let tiered = snapshot(db)
+    // A branch forked from the Cold head keeps the Log Tiered.
+    let (side, _) = fork(mut db, "side", tiered)?
+    set_residency(mut db, fixture.rows.id, Memory)?
+    set_residency(mut db, fixture.events.binding.id, Memory)?
+    let Committed(_) = run(mut db, Some(1048576u64), copy_env(fixture), fn(mut tx: Tx, f: ResidencyDiffFixture) -> Result[(), Error] {
+        put(mut tx, f.rows, 2u64, 21u32)?
+        let _ = delete(mut tx, f.rows, 3u64)?
+        let _ = append(mut tx, f.events, 13u32)?
+        Ok(())
+    })? else {
+        fail("L109: main's writes commit")
+    }
+    let Committed(_) = run_on(mut db, side, Some(1048576u64), copy_env(fixture), fn(mut tx: Tx, f: ResidencyDiffFixture) -> Result[(), Error] {
+        let _ = append(mut tx, f.events, 99u32)?
+        Ok(())
+    })? else {
+        fail("L109: the branch's append commits")
+    }
+    // The cut seals the branch's Log, so its root is Cold.
+    let _ = checkpoint(mut db)?
+    let demoted = snapshot(db)
+    let forked = snapshot_of(db, side)?
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    residency_snapshot_diffs(read_handle, tiered, demoted, fixture.rows)?
+    residency_catch_up(db, directory, demoted, tiered, fixture.rows)?
+    // Both windows are [2, 4): seq 2 is 12 on both, seq 3 is 13 on main and
+    // 99 on the branch, whose Log root is Tiered.
+    let to_branch = window_changes(read_handle, demoted, forked, fixture.events, 2)?
+    let to_main = window_changes(read_handle, forked, demoted, fixture.events, 2)?
+    if list.len(to_branch) != 1 || !residency_event(to_branch[0u64], fixture.events, 3, 99u32)? || list.len(to_main) != 1 || !residency_event(to_main[0u64], fixture.events, 3, 13u32)? {
+        fail("L109: a cross-branch window over a Cold Log root is the literal difference")
+    }
+    close(take db)
+}

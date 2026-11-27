@@ -99,12 +99,14 @@ fn write_tiered_prepared_rows_direct(mut file: FrameFile, d: Dir, id: StoreId, w
 }
 
 // Finishes every deferred Tiered range diff at the two captured roots
-// (`before` and `after`) through PagerDirect on `d`. Any deferred range that
-// cannot be finished (e.g. missing paging inventory) returns `Drift`.
+// (`before` and `after`) through PagerDirect on `d`. Each present side is
+// read by its own descriptor (§13.10a "Finishes the Tiered diff"): a Memory
+// side needs no inventory, and a Tiered side without one cannot be finished,
+// which is `Drift`.
 fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Snapshot, after: Snapshot, deferred: List[pager.TieredRowDiff]) -> Result[List[CatchUpChange], DeployError] waits {
     let mut out: List[CatchUpChange] = list.new()
     for diff in deferred {
-        if (diff.before && !snapshot_paged(before)) || (diff.after && !snapshot_paged(after)) {
+        if (diff.before && deploy_result(catch_up_side_unread(before, diff.id))?) || (diff.after && deploy_result(catch_up_side_unread(after, diff.id))?) {
             return Error(Drift)
         }
         let low = match diff.start {
@@ -180,6 +182,16 @@ fn catch_up_tiered_diffs(d: Dir, id: StoreId, writer_pin_bytes: u64, before: Sna
         }
     }
     Ok(take out)
+}
+
+// A present side the child cannot read: a Tiered collection with no
+// inventory to resolve its Cold slots.
+fn catch_up_side_unread(snap: Snapshot, collection_id: u32) -> Result[bool, Error] {
+    let key = failure_result_from_rep(catalog.prefix(collection_id))?
+    let Some((_, desc)) = std.page.collection_slot(snap.roots.collections.root, key) else {
+        return Ok(false)
+    }
+    Ok(pages.collection_descriptor(desc).residency != ResidentMemory && !snapshot_paged(snap))
 }
 
 fn catch_up_next_row(d: Dir, id: StoreId, writer_pin_bytes: u64, snap: Snapshot, collection_id: u32, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {

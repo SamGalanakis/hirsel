@@ -8,7 +8,7 @@
 #                                         lock record
 #
 # The archive is the prefix a Mac-hosted compiler reads as LLVM_SYS_231_PREFIX:
-# bin/ld.lld, bin/llvm-config, bin/llvm-ar and bin/llvm-objdump (the bridge build
+# bin/ld.lld, bin/llvm-config, bin/llvm-ar, bin/llvm-objcopy and bin/llvm-objdump (the bridge build
 # scripts archive with one and read the dylib's LC_UUID with the other),
 # lib/libLLVM.23.1.dylib and its libLLVM-23.dylib alias
 # (the name `llvm-config --link-shared --libs` links by), include/llvm and
@@ -49,7 +49,7 @@ read -r triple floor <<< "$apple"
 library_path="$(python3 "$here/../toolchain-dist/product.py" llvm-path "$triple")"
 library="${library_path##*/}"
 build="$dir/build"
-tools="llvm-config llvm-ar llvm-objdump"
+tools="llvm-config llvm-ar llvm-objcopy llvm-objdump"
 stage="$dir/stage"
 
 if (( $# == 1 )); then
@@ -122,7 +122,7 @@ done
 [[ "$("$stage/bin/ld.lld" --version)" == *" $version "* ]] || fail "ld.lld does not report $version"
 [[ "$("$stage/bin/ld.lld" -flavor darwin --version)" == *" $version"* ]] || fail "ld.lld has no Mach-O port"
 [[ "$("$stage/bin/llvm-config" --version)" == "$version" ]] || fail "llvm-config does not report $version"
-for tool in llvm-ar llvm-objdump; do
+for tool in llvm-ar llvm-objcopy llvm-objdump; do
   [[ "$("$stage/bin/$tool" --version)" == *"LLVM version $version"* ]] || fail "$tool does not report $version"
 done
 

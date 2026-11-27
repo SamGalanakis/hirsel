@@ -3,7 +3,6 @@ use crate::Backend;
 use crate::cli::CompilerOption as Opt;
 use crate::installation::Flavour;
 use hirsel_core_ids::{ContentHash, DefPath};
-use hirsel_core_layout::Target;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,6 +82,7 @@ impl CompilerFlags {
         };
         for option in options {
             match option {
+                Opt::Emit(_) => unreachable!("request validates and removes --emit"),
                 Opt::Json => flags.json = true,
                 Opt::Recipe(value) => {
                     flags.recipe_root = Some(crate::native::recipe_build::parse_root(&value)?)
@@ -97,6 +97,11 @@ impl CompilerFlags {
                     }
                 }
                 Opt::Recording => flags.recording_build = true,
+                Opt::EmbedRuntime(value) => {
+                    flags
+                        .additional_runtimes
+                        .insert(Flavour::EMBEDDED, PathBuf::from(value));
+                }
                 Opt::RecordingRuntime(value) => {
                     flags
                         .additional_runtimes
@@ -281,16 +286,6 @@ impl CompilerFlags {
                 }
             }
         }
-        flags.target = admit_target(flags.target)?;
         Ok(flags)
     }
-}
-
-pub(super) fn admit_target(target: String) -> Result<String, String> {
-    if let Some(build_target) = Target::from_triple(&target) {
-        build_target
-            .admitted()
-            .map_err(|reason| format!("{target}: {reason}"))?;
-    }
-    Ok(target)
 }

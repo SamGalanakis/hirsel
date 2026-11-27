@@ -493,7 +493,8 @@ impl LaunchedPlace {
     /// spawn place worker, and wait up to `start_timeout_ms` for Ready + Dialer.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
-        program: &'static EmbedProgram,
+        program: &EmbedProgram,
+        parameter_names: &[&str],
         digest: Option<[u8; 32]>,
         n_place: u64,
         start_timeout_ms: u32,
@@ -511,8 +512,11 @@ impl LaunchedPlace {
             dir_bases,
             grants,
             program.parameters,
-            program.parameter_names,
+            parameter_names,
         )?;
+        if !resolved.exec_grants.is_empty() {
+            return Err("embedded Exec provider not built".into());
+        }
 
         // 3. Arm embedded fault handler (EMB-3: verifies no replacement).
         crate::fiber::arm_embedded().map_err(|e| match e {

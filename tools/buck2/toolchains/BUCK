@@ -73,6 +73,12 @@ rust_toolchain(
     visibility = ["PUBLIC"],
 )
 
+llvm_tree(
+    name = "test-rustc",
+    srcs = RUST_FILES,
+    visibility = ["PUBLIC"],
+)
+
 # Compiler and device std for the native toolchain proof's verifier object.
 llvm_tree(
     name = "ios-rustc",

@@ -182,6 +182,58 @@ pub unsafe extern "C" fn hirsel_embed_v1_start(
     config: *const HirselEmbedConfig,
     out: *mut HirselRuntime,
 ) -> HirselStatus {
+    // SAFETY: forwards the C ABI's caller requirements.
+    unsafe { start(config, out, current_program(), None) }
+}
+
+/// # Safety
+/// `config` and `out` follow the C ABI. The remaining arguments refer to
+/// immutable tables and code emitted together in one native Hirsel archive.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_embed_archive_start(
+    config: *const HirselEmbedConfig,
+    out: *mut HirselRuntime,
+    manifest: *const u8,
+    manifest_len: usize,
+    target: *const u8,
+    target_len: usize,
+    root_limit: u64,
+    parameters: *const crate::entry::Requirement,
+    parameters_len: usize,
+    names: *const crate::process::View,
+    revision: *const [u8; 32],
+    place: u64,
+    foreign_waits: u64,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+) -> HirselStatus {
+    // SAFETY: the emitter supplies these immutable static tables.
+    unsafe {
+        let program = super::EmbedProgram {
+            manifest: std::slice::from_raw_parts(manifest, manifest_len),
+            target: std::str::from_utf8_unchecked(std::slice::from_raw_parts(target, target_len)),
+            root_limit,
+            parameters: std::slice::from_raw_parts(parameters, parameters_len),
+            parameter_names: &[],
+            revision: Some(*revision),
+            place: place != 0,
+            foreign_waits: foreign_waits != 0,
+            sources,
+            entry,
+            probe_dir: None,
+        };
+        let names = std::slice::from_raw_parts(names, parameters_len);
+        start(config, out, Some(&program), Some(names))
+    }
+}
+
+unsafe fn start(
+    config: *const HirselEmbedConfig,
+    out: *mut HirselRuntime,
+    program: Option<&super::EmbedProgram>,
+    names: Option<&[crate::process::View]>,
+) -> HirselStatus {
     // Phase 1: Output pointer check and immediate zeroing.
     if out.is_null() {
         return HIRSEL_ABI_MISMATCH;
@@ -192,7 +244,7 @@ pub unsafe extern "C" fn hirsel_embed_v1_start(
     }
 
     // Phase 2: ABI v1 validation BEFORE touching the registry.
-    let Some(program) = current_program() else {
+    let Some(program) = program else {
         return HIRSEL_ABI_MISMATCH;
     };
     let parsed_manifest = match parse_manifest(program.manifest) {
@@ -253,6 +305,24 @@ pub unsafe extern "C" fn hirsel_embed_v1_start(
         Err(_) => return HIRSEL_HOST_MEMORY,
     };
 
+    let mut linked_names = Vec::new();
+    let parameter_names = match names {
+        Some(names) => {
+            if linked_names.try_reserve_exact(names.len()).is_err() {
+                return HIRSEL_HOST_MEMORY;
+            }
+            for name in names {
+                // SAFETY: the linked table holds immutable UTF-8 views.
+                let text = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(name.data, name.len))
+                };
+                linked_names.push(text);
+            }
+            &linked_names
+        }
+        None => program.parameter_names,
+    };
+
     // Phase 3: Singleton reservation (`Stopped -> Starting`, monotonic generation).
     let Some(gen_id) = registry().reserve_start() else {
         return HIRSEL_ALREADY_RUNNING;
@@ -268,6 +338,7 @@ pub unsafe extern "C" fn hirsel_embed_v1_start(
         let account = Arc::new(ClientAccount::new(cfg.client_bytes)?);
         let (place, dialer) = LaunchedPlace::start(
             program,
+            parameter_names,
             digest,
             cfg.n_place,
             cfg.start_timeout_ms,

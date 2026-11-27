@@ -8,6 +8,7 @@
 //! ROOT/hirsel                       the compiler, RPATH $ORIGIN/lib
 //! ROOT/lib/libLLVM.so.23.1 ...      the LLVM engine and the libraries it loads
 //! ROOT/bin/ld.lld                   the link editor
+//! ROOT/bin/llvm-ar, llvm-objcopy    the archive tools
 //! ROOT/link/<target>.json           the bundle-relative link recipe
 //! ROOT/link/kit/                   the startup objects and link-only libraries
 //! ROOT/runtime/<target>/<hash>/     runtime archives
@@ -721,7 +722,11 @@ pub fn publish(
                 io::Error::new(error.kind(), format!("{}: {error}", linker.display()))
             })?;
             install_libraries(library, &root.join("lib"))?;
-            let recipe = crate::tool_inputs::install_recipe(kit, &linker_bytes, target, &root)?;
+            let archive_bin = linker
+                .parent()
+                .ok_or_else(|| io::Error::other("linker has no bin directory"))?;
+            let recipe =
+                crate::tool_inputs::install_recipe(kit, &linker_bytes, archive_bin, target, &root)?;
             meter.finish("install/native toolchain");
             Some((target, recipe))
         }

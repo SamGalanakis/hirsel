@@ -31,14 +31,65 @@ fn stderr(output: &Output) -> String {
 fn hirsel_build_refuses_ios_before_reading_source() {
     let dir = tempfile::tempdir().unwrap();
     for target in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
-        let output = run_in(dir.path(), &["build", "--target", target]);
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(
-            stderr(&output),
-            format!(
-                "hirsel: {target}: iOS targets build only --emit staticlib, which is not built yet (docs/spec/embed.md)\n"
-            )
-        );
+        for (kind, reason) in [
+            ("exe", "iOS executables require an Xcode-signed app bundle"),
+            ("staticlib", "iOS static libraries land with slice 6"),
+        ] {
+            let output = run_in(dir.path(), &["build", "--target", target, "--emit", kind]);
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(
+                stderr(&output),
+                format!("hirsel: {target}: {reason} (docs/spec/embed.md)\n")
+            );
+        }
+    }
+}
+
+#[test]
+fn output_kind_is_refused_before_installation_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let compiler = dir.path().join("hirsel");
+    std::fs::copy(hirsel_bin(), &compiler).unwrap();
+    std::fs::write(
+        dir.path().join("hirsel-core-toolchain.json"),
+        "bad installation",
+    )
+    .unwrap();
+    for (args, diagnostic) in [
+        (
+            &[
+                "run",
+                "--emit",
+                "staticlib",
+                "--target",
+                "aarch64-apple-darwin",
+            ][..],
+            "run: --emit staticlib is only supported by build",
+        ),
+        (
+            &["sdk", "swift", "--emit", "exe"],
+            "sdk swift refuses --emit",
+        ),
+        (
+            &["sdk", "json", "--emit", "staticlib"],
+            "sdk json: --emit staticlib is only supported by build",
+        ),
+        (
+            &["sdk", "ts", "--emit", "staticlib"],
+            "sdk ts: --emit staticlib is only supported by build",
+        ),
+        (
+            &["test", "--emit", "staticlib"],
+            "test: --emit staticlib is only supported by build",
+        ),
+    ] {
+        let out = Command::new(&compiler)
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(stderr(&out), format!("hirsel: {diagnostic}\n"));
     }
 }
 

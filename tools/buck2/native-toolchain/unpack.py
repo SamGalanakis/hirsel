@@ -86,7 +86,8 @@ def unpack(kind, output, archives, linker=None):
         normalize_links(tree)
         if kind == "qemu":
             output.mkdir()
-            shutil.copy2(tree / "usr/bin/qemu-aarch64", output / "qemu-aarch64")
+            for name in ("qemu-aarch64", "qemu-x86_64"):
+                shutil.copy2(tree / "usr/bin" / name, output / name)
         elif kind == "valgrind":
             copy_tree(tree / "usr", output)
             place_runtime_debug(output)

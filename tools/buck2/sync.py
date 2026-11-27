@@ -428,7 +428,7 @@ def first_party(meta: dict) -> str:
     unguarded = []
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle", "hirsel_dev_fixture_cache")\n',
+        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_driver_archive_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle", "hirsel_dev_fixture_cache")\n',
     ]
 
     out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
@@ -572,6 +572,10 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                           **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
     core_gates(out, call, Raw, [d for d in declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages) if "libc" in d])
+    out.append("\n" + call("hirsel_driver_archive_test", name="core-driver-archive-laws",
+        selection=["--include-ignored", "--exact", "test_run::link_only::archive_laws::embedded_archive_laws",
+                   "native::archive::tests::audit_only_exempts_optional_imports_from_the_runtime"],
+        data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/**", "core/programs/runner/**", "crates/hirsel-core-rt/testdata/embed_place/**"]) + ["crates/hirsel-core-driver/Cargo.toml"]')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["core/programs/ffi_laws/**", "core/programs/sqlite/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**", "core/front/fixtures/recording/**", "core/programs/m1/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-sites", case_filter="native::tests::failure_sites_",
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**"])')))

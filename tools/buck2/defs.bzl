@@ -1033,6 +1033,30 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", 
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-shard-1"] + host_targets)
 
+def hirsel_driver_archive_test(name, data, selection):
+    _rust_test(
+        name = name,
+        harness = "//:hirsel-core-driver-unittest-harness",
+        args = selection,
+        data = data,
+        cwd = "crates/hirsel-core-driver",
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        files_env = {
+            "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+            "HIRSEL_DEV_TEST_DRIVER": "//:hirsel-core-driver-bin-hirsel",
+            "HIRSEL_ARCHIVE_RUST": "toolchains//:test-rustc",
+            "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
+            "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu",
+        },
+        labels = ["local-execution", "requires-openat2"],
+        exec_compatible_with = [budget_constraint("host")],
+        pool = False,
+        test_binary = name,
+        request = _request("hirsel-core-driver-unittest"),
+        visibility = ["PUBLIC"],
+    )
+
 def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic", binary = "hirsel-llvm-unittest", cwd = "crates/hirsel-llvm", extra_env = {}):
     """CoreIR executable agreement uses the core runtime, with no old std products."""
     _rust_test(

@@ -1,6 +1,6 @@
 #[test]
 fn bare_net_grant_is_refused_before_discovery_with_the_rule_syntax() {
-    let result = super::run(
+    let result = super::dispatch::run(
         ["run", "unused", "--grant", "Net"]
             .map(str::to_owned)
             .to_vec(),

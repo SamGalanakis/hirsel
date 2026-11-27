@@ -536,6 +536,7 @@ fn a_relocated_installation_keys_the_same_toolchain() {
             schema: INSTALLED_RECIPE_SCHEMA,
             target: target.into(),
             args: vec![crt.into(), INPUT_MARKER.into()],
+            archive_tools: Default::default(),
         };
         std::fs::write(&recipe, serde_json::to_vec(&installed).unwrap()).unwrap();
         let (toolchain, recipe) = installed_toolchain(&recipe, target, &runtime).unwrap();

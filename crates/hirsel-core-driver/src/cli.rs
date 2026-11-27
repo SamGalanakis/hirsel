@@ -103,12 +103,12 @@ commands! {
         Add(AddOption), One: AddRoot, AddUpdate, AddWorkspace, AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Output;
-    "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
+    "build", "build [package-dir | --recipe HASH] [options]", "Build a native executable or static library from a release recipe.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Recipe, CodeStore, ReleaseManifest, PlaceTimeout, NPlace,
             Recording, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Limit, Output, Entry, Libraries,
-            Store, Inputs, Metrics, ProfileFront, Image;
+            Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, CodeStore, NPlace, HELP, SourceCore, SourceStd, Dir, Grant,
@@ -160,7 +160,7 @@ commands! {
         Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct,
             Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator,
-            Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, ProfileFront, Image;
+            Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "serve", "serve [--max-memory BYTES] [--stop]", "Serve this toolchain's build, run and test requests from every directory.";
         Serve(ServeOption), One: HELP, MaxMemory, Stop;
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
@@ -170,12 +170,12 @@ commands! {
             PackageStore, Locked, Frozen, Record, HELP, Resident, ProfTasks, ProfMem, ProfOut, ProfFrequency,
             ProfPmu, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Entry,
-            Libraries, Store, Inputs, Metrics, ProfileFront, Image;
+            Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Tape, ReplayUnit, HELP, ProfTasks, ProfMem, ProfOut, SourceCore,
             SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
-            Cc, Target, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image;
+            Cc, Target, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
         Attach(AttachOption), One: HELP, ProfOut, ProfFrequency, ProfPmu, ProfDuration, ProfDebug, REFUSE_MEM;
     "prof tail", "prof tail <FILE.hprof> [--limit 20] [--json]", "Report completed and censored task latencies and the observed causal edges.";
@@ -210,7 +210,7 @@ commands! {
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HostState, Tape, ReplayUnit, ReplayOutputs, Diagnose, HELP, Json, SourceCore,
             SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
-            Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image;
+            Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
     "tape", "tape show TAPE --include-credentials [--json]", "Export the header and frames stored in a credential-bearing tape.";
         Tape(TapeOption), One: IncludeCredentials, Json, HELP;
     "tapes", "tapes <check>", "Check recorded calls in an offline Place store.";
@@ -224,7 +224,7 @@ commands! {
             LinkOnly, TestTimeout, Rerun, TestCache, PropertyCorpus, Sim, SimSeeds, SimSeed, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Output,
             Libraries, Store, Inputs, Metrics, Image, Coverage, CoverageOut, CoverageBase, CoverageTargets,
-            CoverageRuns, SeedBase;
+            CoverageRuns, SeedBase, Emit;
     "inspect", "inspect [package-dir | ARCHIVE.hpkg | DEPENDENCY | --core | --std] [--interface [--module MODULE] [--filter TEXT] [--json] | --foreign-header MODULE | --foreign-abi MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library]]", "Inspect a package's declarations and dependencies. The default is --interface.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Interface, InspectModule, InspectFilter, ForeignHeader, ForeignAbi,
@@ -234,11 +234,11 @@ commands! {
         Compiler(CompilerOption), One: HELP, Json, Libraries, Store, Inputs, Metrics;
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
         Compiler(CompilerOption), None:
-            RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
+            EmbedRuntime, RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
             Install, LinkKit, HELP, Json, Name, Runtime, Target, Store, Metrics, Image;
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
         Compiler(CompilerOption), None:
-            RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
+            EmbedRuntime, RecordingRuntime, ProfRuntime, ProfRecordingRuntime, ObservedRuntime, ObservedRecordingRuntime,
             Install, LinkKit, HELP, Json, Name, Runtime, Target, Store, Metrics, Image;
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
         New(NewOption), One: HELP, Lib;
@@ -250,17 +250,19 @@ commands! {
         Explain(ExplainOption), One: ListRules, HELP, Json;
     "primer", "primer", "Print the Hirsel primer: the language in one page.";
         Simple(NoOption), One: HELP;
-    "sdk", "sdk <ts|json>", "Export bindings or the schema for a place.";
+    "sdk", "sdk <ts|json|swift>", "Export bindings or the schema for a place.";
         Simple(NoOption), One: HELP;
     "sdk ts", "sdk ts <program> -o DIR [options]", "Generate TypeScript bindings and manifest.json.";
         Sdk(SdkOption), One:
             PackageStore, Locked, Frozen, PlaceTimeout, NPlace, HELP, SourceCore, SourceStd, CoreProduct,
             Release, DebugLines, Backend, Runtime, Cc, Target, Limit, Output, Entry, Libraries, Store,
-            Inputs;
+            Inputs, Emit;
     "sdk json", "sdk json <program> [options]", "Write the SDK schema manifest to stdout.";
         Sdk(SdkOption), One:
             PackageStore, Locked, Frozen, PlaceTimeout, NPlace, HELP, SourceCore, SourceStd, CoreProduct,
-            Release, DebugLines, Backend, Runtime, Cc, Target, Limit, Entry, Libraries, Store, Inputs;
+            Release, DebugLines, Backend, Runtime, Cc, Target, Limit, Entry, Libraries, Store, Inputs, Emit;
+    "sdk swift", "sdk swift <program> -o DIR [options]", "Generate Swift bindings (planned).";
+        Sdk(SdkOption), One: HELP, Emit;
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
         Call(CallOption), Tail: PlaceTimeout, NPlace, Url, CallTimeout, CallStream, HELP;
 }

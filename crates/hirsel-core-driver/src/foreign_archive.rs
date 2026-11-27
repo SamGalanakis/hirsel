@@ -172,6 +172,19 @@ impl LinkArchives {
         )
     }
 
+    pub(crate) fn read_archives(&self) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+        use std::os::unix::fs::FileExt;
+        self.0
+            .values()
+            .map(|row| {
+                let file = row.archive.file.file();
+                let mut bytes = vec![0; file.metadata()?.len() as usize];
+                file.read_exact_at(&mut bytes, 0)?;
+                Ok((archive_name(row.object, row.path.as_deref()), bytes))
+            })
+            .collect()
+    }
+
     /// Check the actual generated inputs, the files `inputs` and the object
     /// bytes `members` the link bundles, then give LLD only the sealed
     /// descriptors. The owner lives across LLD's invocation.

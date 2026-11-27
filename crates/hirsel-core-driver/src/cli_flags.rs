@@ -34,6 +34,7 @@ flags! {
     CallTimeout ["--timeout"] "SECONDS" => "Connection and call deadline; default 10 seconds.";
     CallStream ["--stream"] "32-HEX" => "Send once at position zero on this saved stream ID.";
     Recording ["--recording"] => "Include recording support. Set HIRSEL_RECORD when running the executable to record.";
+    EmbedRuntime ["--embed-runtime"] "ARCHIVE" => "Install the embedded runtime slot alongside --runtime.";
     RecordingRuntime ["--recording-runtime"] "ARCHIVE" => "Install this recording runtime archive alongside --runtime.";
     ProfRuntime ["--prof-runtime"] "ARCHIVE" => "Install the profiling runtime archive alongside --runtime.";
     ProfRecordingRuntime ["--prof-recording-runtime"] "ARCHIVE" => "Install the combined profiling and recording runtime archive.";
@@ -111,6 +112,7 @@ flags! {
     Runtime ["--runtime"] "ARCHIVE" => "Select the core runtime archive for the requested recording mode.";
     LogicalChargeReport ["--logical-charge-report"] "FILE" => "Instrument root logical reservation; unsuitable for timings.";
     Cc ["--cc"] "PROGRAM" => "Select the C linker driver for this request.";
+    Emit ["--emit"] "exe|staticlib" => "Select the native output kind (default exe).";
     Target ["--target"] "TRIPLE" => "Select the full native target triple.";
     CoreIr ["--coreir"] => "Export linked checked CoreIR, layouts and source annexes as JSON.";
     Emulator ["--emulator"] "FILE" => "Run through this explicit QEMU user executable.";

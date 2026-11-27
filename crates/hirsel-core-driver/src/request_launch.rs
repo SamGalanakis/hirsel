@@ -234,7 +234,7 @@ pub(super) fn finish(
 /// Serve one request in a resident compiler: [`super::main`]'s request, with its
 /// error answered as main reports it.
 pub(crate) fn serve(args: Vec<String>) -> Outcome {
-    match super::run(args) {
+    match super::dispatch::run(args) {
         Ok(outcome) => outcome,
         Err(e) => {
             crate::store::remote::finish(); // No session outlives its request.

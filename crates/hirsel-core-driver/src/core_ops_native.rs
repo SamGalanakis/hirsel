@@ -1,6 +1,21 @@
 // Source-level regressions for the missing core-operation bodies. Each source
 // must traverse checking, instance collection, native emission, linking and the
 // actual process runtime. Result values are hand-derived in the source tests.
+fn core_ops_options(backend: Backend, root: &Path, dir: &Path) -> NativeOptions {
+    let runtime =
+        root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
+    let link = Link::Driver(
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+    );
+    NativeOptions {
+        backend,
+        cas: dir.join("cas"),
+        root_limit: 1_048_576,
+        instance_limit: 64,
+        ..NativeOptions::development(TARGET.into(), runtime, link, dir.join("program"))
+    }
+}
+
 fn core_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cases = [
@@ -77,7 +92,11 @@ fn core_operations(backend: Backend) {
     // returns. An Arc share folds it, so both later room reads agree (0);
     // without the share the first refused admission folds it (64).
     for (name, share, expected) in [
-        ("Arc share folds a pending refund", "let other = arc.share(a); ", 0),
+        (
+            "Arc share folds a pending refund",
+            "let other = arc.share(a); ",
+            0,
+        ),
         ("refund pending until the next owner event", "", 64),
     ] {
         let polls = "task.check_cancel(); ".repeat(64);
@@ -100,34 +119,9 @@ fn core_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            recording: false,
-            coverage: None,
-            replay: None,
-            backend,
-            optimize: false,
-            debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: crate::native::Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
-            cas: dir.path().join("cas"),
-            output: dir.path().join("program"),
             root_limit: limit,
-            instance_limit: 64,
-            directories: vec![],
             grant_mask,
-            logical_charge_report: None,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: Default::default(),
-            exec_grants: vec![],
-            env_patterns: None,
-            observed: None,
-            store_teardown: false,
+            ..core_ops_options(backend, &root, dir.path())
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -170,12 +164,44 @@ fn counted_operations(backend: Backend) {
     // Capacity case's room is the refused admission's available bytes plus 32.
     const SEEN: &str = "fn seen(take attempt: Result[Result[u64, Causes], Capacity]) -> u64 { let Ok(Error(take causes)) = take attempt else { return 0u64 }; for c in causes { return match c.kind { Capacity(k) => k.requested*10000u64+k.available*100u64, _ => 1u64 } }; 2u64 }\n";
     let mut vectors = vec![
-        ("fn run() -> u64 { box.unbox(box.new(7u64)) }".to_owned(), 8, 7),
-        ("fn run() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(), 0, 7),
-        (format!("{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ box.unbox(box.new(7u64)) }})) }}"), 7 + 32, 80700),
-        (format!("{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ match (bound bytes 0 {{ box.unbox(box.new(7u64)) }}) {{ Ok(v) => v, Error(_) => 3u64 }} }})) }}"), 1000, 80000),
-        (format!("resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let (tx,rx): (Sender[R], Receiver[R]) = channel.new(1); let _ = take tx; let _ = take rx; 0u64 }})) }}"), 71 + 32, 727100),
-        (format!("resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let r = result.unwrap(R(a:7u64,b:11u64)); let b = box.new(take r); let R(a:x,b:y) = box.unbox(take b); x+y }})) }}"), 55 + 32, 80700),
+        (
+            "fn run() -> u64 { box.unbox(box.new(7u64)) }".to_owned(),
+            8,
+            7,
+        ),
+        (
+            "fn run() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(),
+            0,
+            7,
+        ),
+        (
+            format!(
+                "{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ box.unbox(box.new(7u64)) }})) }}"
+            ),
+            7 + 32,
+            80700,
+        ),
+        (
+            format!(
+                "{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ match (bound bytes 0 {{ box.unbox(box.new(7u64)) }}) {{ Ok(v) => v, Error(_) => 3u64 }} }})) }}"
+            ),
+            1000,
+            80000,
+        ),
+        (
+            format!(
+                "resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let (tx,rx): (Sender[R], Receiver[R]) = channel.new(1); let _ = take tx; let _ = take rx; 0u64 }})) }}"
+            ),
+            71 + 32,
+            727100,
+        ),
+        (
+            format!(
+                "resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let r = result.unwrap(R(a:7u64,b:11u64)); let b = box.new(take r); let R(a:x,b:y) = box.unbox(take b); x+y }})) }}"
+            ),
+            55 + 32,
+            80700,
+        ),
     ];
     for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
         vectors.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn run() -> u64 {{ let h = {module}.new(7u64); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,7));
@@ -196,34 +222,8 @@ fn counted_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            recording: false,
-            coverage: None,
-            replay: None,
-            backend,
-            optimize: false,
-            debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: crate::native::Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
-            cas: dir.path().join("cas"),
-            output: dir.path().join("program"),
             root_limit: 288 + room,
-            instance_limit: 64,
-            directories: vec![],
-            grant_mask: 0,
-            logical_charge_report: None,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: Default::default(),
-            exec_grants: vec![],
-            env_patterns: None,
-            observed: None,
-            store_teardown: false,
+            ..core_ops_options(backend, &root, dir.path())
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -276,36 +276,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             .check(request, &mut Meter::new(false))
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let options = NativeOptions {
-            recording: false,
-            coverage: None,
-            replay: None,
-            backend,
-            optimize: false,
-            debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: crate::native::Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
-            cas: dir.path().join("cas"),
-            output: dir.path().join("program"),
-            root_limit: 1_048_576,
-            instance_limit: 64,
-            directories: vec![],
-            grant_mask: 0,
-            logical_charge_report: None,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: Default::default(),
-            exec_grants: vec![],
-            env_patterns: None,
-            observed: None,
-            store_teardown: false,
-        };
+        let options = core_ops_options(backend, &root, dir.path());
         let built = product.build(&entry, &options).unwrap();
         let result = Command::new(built.executable).args(argv).output().unwrap();
         assert_eq!(
@@ -348,7 +319,14 @@ fn stream_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (name, argv, stdout, stderr, closed, mask) in [
         ("streams", vec![], "out", "err", 0, (1 << 4) | (1 << 5)),
-        ("args-print", vec!["alpha", "beta", ""], "alphabeta", "", 0, 1 << 4),
+        (
+            "args-print",
+            vec!["alpha", "beta", ""],
+            "alphabeta",
+            "",
+            0,
+            1 << 4,
+        ),
         ("stdout-closed", vec![], "", "", 1, 1 << 4),
         ("stderr-closed", vec![], "", "", 2, 1 << 5),
         ("stdout-cancel", vec![], "", "", 0, (1 << 4) | (1 << 9)),
@@ -366,34 +344,8 @@ fn stream_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            recording: false,
-            coverage: None,
-            replay: None,
-            backend,
-            optimize: false,
-            debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: crate::native::Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
-            cas: dir.path().join("cas"),
-            output: dir.path().join("program"),
-            root_limit: 1_048_576,
-            instance_limit: 64,
-            directories: vec![],
             grant_mask: mask,
-            logical_charge_report: None,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: Default::default(),
-            exec_grants: vec![],
-            env_patterns: None,
-            observed: None,
-            store_teardown: false,
+            ..core_ops_options(backend, &root, dir.path())
         };
         let built = product.build(&entry, &options).unwrap();
         let mut command = Command::new(built.executable);
@@ -446,38 +398,13 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
-        recording: false,
-        coverage: None,
-        replay: None,
-        backend,
         optimize,
-        debug_lines: false,
-        target: TARGET.into(),
-        runtime: root
-            .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-        link: crate::native::Link::Driver(
-            PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-        ),
-        cas: dir.path().join("cas"),
-        output: dir.path().join("program"),
-        root_limit: 1_048_576,
-        instance_limit: 64,
-        directories: vec![],
         grant_mask: ["Clock", "Stdout", "Tasks"]
             .into_iter()
             .fold(0, |mask, kind| {
                 mask | 1 << crate::native::grant_kind(kind).unwrap()
             }),
-        logical_charge_report: None,
-        net_rules: vec![],
-            unix_roots: Default::default(),
-        secret_grants: vec![],
-            cred_grants: vec![],
-        foreign_grants: Default::default(),
-        exec_grants: vec![],
-        env_patterns: None,
-        observed: None,
-        store_teardown: false,
+        ..core_ops_options(backend, &root, dir.path())
     };
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(built.executable).output().unwrap();
@@ -548,34 +475,9 @@ fn host_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            recording: false,
-            coverage: None,
-            replay: None,
-            backend,
-            optimize: false,
-            debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: crate::native::Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
-            cas: dir.path().join("cas"),
-            output: dir.path().join("program"),
-            root_limit: 1_048_576,
-            instance_limit: 64,
             directories: vec![grant.to_str().unwrap().into()],
             grant_mask: (1 << 2) | (1 << 4) | (1 << 9),
-            logical_charge_report: None,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: Default::default(),
-            exec_grants: vec![],
-            env_patterns: None,
-            observed: None,
-            store_teardown: false,
+            ..core_ops_options(backend, &root, dir.path())
         };
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(built.executable).output().unwrap();
@@ -773,8 +675,8 @@ fn bodied_core_operations(backend: Backend) {
     request.inputs.packages[1]
         .sources
         .push(hirsel_core_resolve::ModuleSource {
-                    foreign: None,
-                    captured: None,
+            foreign: None,
+            captured: None,
             file,
             modules: vec!["args".into()],
             signatures: true,
@@ -1058,9 +960,7 @@ fn generic_counted_operations(backend: Backend) {
             7,
         ),
         (
-            format!(
-                "{boxing}\nfn run()->u64 {{let s=unboxed(boxed(\"abc\"));string.byte_len(s)}}"
-            ),
+            format!("{boxing}\nfn run()->u64 {{let s=unboxed(boxed(\"abc\"));string.byte_len(s)}}"),
             24,
             3,
         ),
@@ -1174,7 +1074,10 @@ fn returned_argument_views_llvm() {
 
 fn string_growth_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, room) in [("string-growth", 16 + 32 + 8), ("string-growth-refusal", 32)] {
+    for (name, room) in [
+        ("string-growth", 16 + 32 + 8),
+        ("string-growth-refusal", 32),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let source =
             std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel")))

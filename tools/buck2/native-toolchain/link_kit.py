@@ -368,7 +368,9 @@ def main():
         debs[key] = Path(path)
     output = args.output
     output.mkdir(parents=True)
-    shutil.copy2(lld, output / "ld.lld")
+    archive_tools = {name: llvm / "bin" / name for name in ("llvm-ar", "llvm-objcopy")}
+    for name, tool in {"ld.lld": lld, **archive_tools}.items():
+        shutil.copy2(tool, output / name)
     pins = json.loads(args.pins.read_text())
     manifest = {
         "schema": 1,
@@ -378,6 +380,7 @@ def main():
             "ld.lld": subprocess.check_output([str(lld), "--version"], text=True).strip(),
             # The linker every kit line runs: its executable and the LLVM library it loads.
             "ld.lld.sha256": sha256(lld),
+            **{f"{name}.sha256": sha256(path) for name, path in archive_tools.items()},
             "libLLVM.sha256": sha256(next(llvm.glob("lib/libLLVM.so.*"))),
         },
         "sources": pins,

@@ -161,3 +161,58 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
         coverage: None,
     }
 }
+
+impl Publication {
+    /// The options the recipe's launch fixes over `options`, and its entry's
+    /// declaration.
+    pub(super) fn launch(
+        &self,
+        options: &NativeOptions,
+    ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
+        let annex = &self.units[&self.recipe.entry].annex;
+        let parameters = annex
+            .1
+            .as_deref()
+            .ok_or_else(|| NativeStop::Entry("recipe entry has no startup parameters".into()))?;
+        let error = annex
+            .2
+            .as_deref()
+            .map(crate::entry_show::ErrorShown::decode)
+            .transpose()
+            .map_err(|e| NativeStop::Entry(e.into()))?;
+        launch_options(&self.recipe, parameters, error, options)
+    }
+
+    pub(super) fn describe(&self) -> Result<Vec<u8>, NativeStop> {
+        let mut units = self
+            .units
+            .iter()
+            .map(|(identity, unit)| {
+                let module = match &unit.module {
+                    UnitModule::Decoded(module) => Cow::Borrowed(module.as_ref()),
+                    UnitModule::Encoded(_, _) => {
+                        Cow::Owned(unit.module.clone().into_bound(&unit.annex, identity))
+                    }
+                };
+                Ok((identity, module, FuncId(0)))
+            })
+            .collect::<Result<Vec<_>, NativeStop>>()?;
+        if let Some(index) = &self.index {
+            for (identity, (_, memo)) in &self.memos {
+                units.push((
+                    identity,
+                    Cow::Owned(index.module(identity, memo)?),
+                    FuncId(0),
+                ));
+            }
+        }
+        archive::describe(
+            units,
+            &self.recipe.entry,
+            &self.recipe.launch,
+            self.addresses.iter().map(|(identity, &address)| {
+                (identity.digest(), hirsel_core_ir::code_revision(address))
+            }),
+        )
+    }
+}

@@ -185,6 +185,8 @@ def ignored_buck_runners(root, rules):
             runners['hirsel-core-driver-unittest'].append(args)
         if rule == 'hirsel_core_llvm_native_test':
             runners[literal(attrs, 'binary', 'hirsel-llvm-unittest')].append(literal(attrs, 'selection') or [])
+        if rule == 'hirsel_driver_archive_test':
+            runners['hirsel-core-driver-unittest'].append(literal(attrs, 'selection'))
     return runners
 
 

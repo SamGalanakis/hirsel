@@ -144,3 +144,7 @@ fn link(staged: Staged) -> Result<(), NativeStop> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "link_only/archive_laws.rs"]
+mod archive_laws;

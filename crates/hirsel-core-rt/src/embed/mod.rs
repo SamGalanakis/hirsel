@@ -28,9 +28,8 @@ use std::sync::RwLock;
 
 /// Descriptor of the compiled Hirsel program linked into this embedded library.
 ///
-/// Slice 3's embed archive export member registers this descriptor via a link-time
-/// registration hook or `register_program`; Slice 2's test harnesses register their
-/// compiled fixture program directly.
+/// The archive entry supplies this descriptor from its link tables. ABI
+/// fixture hosts can register a descriptor directly.
 pub struct EmbedProgram {
     pub manifest: &'static [u8],
     pub target: &'static str,

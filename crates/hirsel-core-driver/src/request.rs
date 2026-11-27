@@ -10,11 +10,16 @@ use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions, operator_cli,
 };
+use hirsel_core_layout::OutputKind;
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+mod dispatch;
 mod flags;
+pub use dispatch::main;
 mod lean;
+mod output;
+use output::{admit_target, output_kind};
 mod release;
 use flags::CompilerFlags;
 pub(crate) use release::local_admission_limits;
@@ -42,123 +47,16 @@ struct ReachableOutput<'a> {
     first_stops: &'a [crate::GapStop],
 }
 
-fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let invocation = match crate::cli::parse(args.into_iter())? {
-        crate::cli::Action::Help(help) => {
-            print!("{help}");
-            return conclude(Outcome::Exit(0));
-        }
-        crate::cli::Action::Version => {
-            crate::installation::print_version()?;
-            return conclude(Outcome::Exit(0));
-        }
-        crate::cli::Action::Invoke(invocation) => invocation,
-    };
-    match invocation {
-        Invocation::Attach(request) => {
-            conclude(crate::prof_command::attach(request).map(|()| Outcome::Exit(0))?)
-        }
-        Invocation::ProfileExport(request) => {
-            conclude(crate::prof_command::export(request).map(|()| Outcome::Exit(0))?)
-        }
-        Invocation::ProfileQuery(request) => {
-            conclude(crate::prof_command::query(request).map(|()| Outcome::Exit(0))?)
-        }
-        Invocation::Coverage(request) => conclude(crate::coverage::cli::run(request)?),
-        Invocation::Lean(request) => conclude(lean::run(request).map(|()| Outcome::Exit(0))?),
-        Invocation::Add(request) => conclude(Outcome::Exit(crate::package_add::run(request)?)),
-        Invocation::Launcher(request) => match crate::launcher::run(request)? {},
-        Invocation::Serve(request) => {
-            if crate::resident::serving() {
-                return Err("a resident compiler serves build and run requests only".into());
-            }
-            let serve = crate::resident::Serve::read(request)?;
-            conclude(Outcome::Exit(crate::resident::run(serve)?))
-        }
-        Invocation::Host(request) => match operator_cli::host(request)? {},
-        Invocation::Register(request) => conclude(Outcome::Exit(operator_cli::register(request)?)),
-        Invocation::Deploy(request) => conclude(Outcome::Exit(operator_cli::deploy(request)?)),
-        Invocation::Decide(request) => conclude(Outcome::Exit(operator_cli::decide(request)?)),
-        Invocation::Call(request) => conclude(Outcome::Exit(crate::call::run(
-            crate::call::Options::read(request)?,
-        )?)),
-        Invocation::Dev(request) => conclude(Outcome::Exit(launch::dev::run(request)?)),
-        Invocation::Store(request) => launch::store_tool(request),
-        Invocation::Sdk(request) => {
-            crate::sdk_command::run(crate::sdk_command::Options::read(request)?)?;
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::Tape(request) => {
-            crate::tape_cli::show(request)?;
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::Simple(request) if request.command.name == "manifest" => {
-            crate::release_manifest::show(Path::new(
-                request
-                    .positional
-                    .as_deref()
-                    .ok_or("manifest show requires a path")?,
-            ))?;
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::Simple(request) => {
-            crate::store::remote::begin()?;
-            if request.positional.is_some() {
-                return Err("primer takes no arguments".into());
-            }
-            print!("{}", crate::cli_tools::PRIMER);
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::New(request) => {
-            crate::store::remote::begin()?;
-            let directory = request
-                .positional
-                .as_deref()
-                .ok_or("new requires a package directory")?;
-            let library = request.options.contains(&NewOption::Lib);
-            crate::cli::scaffold(Path::new(directory), library)?;
-            crate::fs::atomic_write(
-                &Path::new(directory).join("hirsel.lock"),
-                crate::package_lock::scaffold().as_bytes(),
-            )?;
-            crate::cli_tools::print_scaffold_summary(directory, library);
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::Fmt(request) => {
-            use hirsel_core_syntax::{FormatAction, ParseMode};
-            crate::store::remote::begin()?;
-            let action = if request.options.contains(&FmtOption::FmtCheck) {
-                FormatAction::Check
-            } else {
-                FormatAction::Write
-            };
-            let mode = if request.options.contains(&FmtOption::Signatures) {
-                ParseMode::Signatures
-            } else {
-                ParseMode::Source
-            };
-            let stdin = request.options.contains(&FmtOption::FmtStdin);
-            let status = match (stdin, request.positional.as_deref()) {
-                (true, None) => crate::cli_tools::format_stdin(action, mode)?,
-                (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
-                _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
-            };
-            conclude(Outcome::Exit(status))
-        }
-        Invocation::Explain(request) => {
-            crate::store::remote::begin()?;
-            crate::cli_tools::explain(
-                request.positional.as_deref(),
-                request.options.contains(&ExplainOption::ListRules),
-                request.options.contains(&ExplainOption::Json),
-            )?;
-            conclude(Outcome::Exit(0))
-        }
-        Invocation::Compiler(request) => run_compiler(request),
-    }
-}
-
 fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let emit = invocation
+        .options
+        .extract_if(.., |option| matches!(option, Opt::Emit(_)))
+        .filter_map(|option| match option {
+            Opt::Emit(value) => Some(value),
+            _ => None,
+        })
+        .last();
+    let output_kind = output_kind(invocation.command.name, emit.as_deref())?;
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
@@ -309,6 +207,14 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         inspect_library.is_some(),
         crate::TestCache::default_root(),
     )?;
+    admit_target(&target, output_kind)?;
+    if output_kind == OutputKind::StaticLibrary {
+        output::validate_archive_flags(
+            recording_build,
+            release_manifest.is_some(),
+            logical_charge_report.is_some(),
+        )?;
+    }
     use crate::installation::{Flavour, Observation};
     let law_baseline = law_baseline
         .as_deref()
@@ -498,7 +404,8 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             .ok_or("--recipe requires --code-store DIR")?;
         let publication =
             Publication::open(&CodeStore::new(path), root, &local_admission_limits())?;
-        target = flags::admit_target(publication.recipe().launch.target.clone())?;
+        target = publication.recipe().launch.target.clone();
+        admit_target(&target, output_kind)?;
         Some(publication)
     } else {
         None
@@ -530,7 +437,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             Observation::None
         },
         record: needs_recording,
-        embedded: false,
+        embedded: output_kind == OutputKind::StaticLibrary,
     };
     let env_recording_runtime = installed
         .as_ref()
@@ -636,6 +543,8 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 format!("no profiling runtime archive for {target}; pass --runtime with a profiling archive")
             } else if needs_recording {
                 format!("no recording runtime archive for {target}; pass --runtime with a recording archive")
+            } else if output_kind == OutputKind::StaticLibrary {
+                "build --emit staticlib requires an embed runtime slot or --runtime <embed runtime archive>".into()
             } else {
                 "build/run/test requires --runtime <core runtime archive>".into()
             }
@@ -675,8 +584,9 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             target.clone(),
             select_runtime()?,
             select_link(cc)?,
-            output_path.unwrap_or_else(|| PathBuf::from("program")),
+            output_path.unwrap_or_else(|| output::default_path(output_kind)),
         );
+        options.output_kind = output_kind;
         options.backend = match recipe.launch.backend {
             RecipeBackend::Cranelift => Backend::Cranelift,
             RecipeBackend::Llvm => Backend::Llvm,
@@ -952,7 +862,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 return Err(crate::code_admission::AdmissionError::MissingRootLimit.into());
             }
             let default_output = temporary_output.as_ref().map_or_else(
-                || PathBuf::from("program"),
+                || output::default_path(output_kind),
                 |scratch| scratch.path().join("program"),
             );
             let publishing = command == "publish";
@@ -972,6 +882,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 link,
                 output_path.unwrap_or(default_output),
             );
+            options.output_kind = output_kind;
             if release {
                 options.backend = Backend::Llvm;
                 options.optimize = true;
@@ -1251,7 +1162,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
                 n_place.unwrap_or(hirsel_core_ids::launch::DEFAULT_N_PLACE),
             ) {
                 Ok(publication) => {
-                    if command == "build" {
+                    if command == "build" && output_kind == OutputKind::Executable {
                         crate::native::recipe_grants::warn_ungranted(&publication.ungranted);
                     }
                     let root = publication.root;
@@ -1527,24 +1438,6 @@ mod launch;
 pub use launch::Launch;
 use launch::{conclude, finish};
 pub(crate) use launch::{report_request_error, serve};
-
-/// Run the request `args` names (the arguments after the program name) and
-/// exit with its status, through a resident compiler when one serves the
-/// request's store (`crate::resident`). Process setup (allocator guard,
-/// signal dispositions, inherited descriptors) is the caller's.
-pub fn main(args: Vec<String>) -> ! {
-    if let Some(code) = crate::resident::submit(&args) {
-        std::process::exit(code);
-    }
-    let error = match run(args) {
-        Ok(outcome) => match conclude(outcome) {
-            Ok(_) => unreachable!("a one-shot request exits in conclude"),
-            Err(e) => e,
-        },
-        Err(e) => e,
-    };
-    std::process::exit(report_request_error(error.as_ref()))
-}
 
 #[cfg(test)]
 mod net_grant_tests;

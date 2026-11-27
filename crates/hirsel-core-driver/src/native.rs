@@ -3,13 +3,15 @@ use super::*;
 use crate::store::Bare;
 use hirsel_core_ir::Identity;
 use hirsel_core_ir::normal::EntryParameter;
-use hirsel_core_layout::{Layout, Recipe};
+use hirsel_core_layout::{Layout, OutputKind, Recipe};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 #[cfg(test)]
 use std::process::Command;
 
+#[path = "native_archive.rs"]
+mod archive;
 #[path = "entry_cleanup.rs"]
 mod cleanup;
 #[path = "native_link.rs"]
@@ -32,6 +34,8 @@ use cleanup::result_cleanup;
 pub(crate) use link::command;
 pub(crate) use link::direct_link;
 pub use object_product::ObjectProduct;
+mod options;
+pub use options::BuildProduct;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 
@@ -109,6 +113,7 @@ pub struct NativeOptions {
     pub link: Link,
     pub cas: PathBuf,
     pub output: PathBuf,
+    pub output_kind: OutputKind,
     pub root_limit: u64,
     pub instance_limit: usize,
     pub directories: Vec<String>,
@@ -136,49 +141,6 @@ pub struct NativeOptions {
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
 pub(crate) const DEFAULT_ROOT_LIMIT: u64 = 64 * 1024 * 1024;
 
-impl NativeOptions {
-    pub(crate) fn llvm_release(&self) -> bool {
-        matches!(self.backend, Backend::Llvm) && self.optimize
-    }
-
-    pub(crate) fn bind_exec(&mut self) -> Result<(), NativeStop> {
-        self.exec_grants
-            .iter_mut()
-            .try_for_each(crate::exec_launch::Binding::seal_policy)
-    }
-
-    /// Development defaults use Cranelift without optimizations, line tables,
-    /// or a charge report. An installation prebuilds with these options.
-    pub fn development(target: String, runtime: PathBuf, link: Link, output: PathBuf) -> Self {
-        Self {
-            backend: Backend::Cranelift,
-            optimize: false,
-            debug_lines: false,
-            target,
-            runtime,
-            link,
-            cas: crate::store::collect::user(),
-            output,
-            root_limit: DEFAULT_ROOT_LIMIT,
-            instance_limit: DEFAULT_INSTANCE_LIMIT,
-            recording: false,
-            store_teardown: false,
-            coverage: None,
-            replay: None,
-            directories: vec![],
-            grant_mask: 0,
-            net_rules: vec![],
-            unix_roots: Default::default(),
-            secret_grants: vec![],
-            cred_grants: vec![],
-            foreign_grants: BTreeSet::new(),
-            exec_grants: vec![],
-            env_patterns: None,
-            logical_charge_report: None,
-            observed: None,
-        }
-    }
-}
 #[derive(Debug)]
 pub enum NativeStop {
     Check(String),
@@ -233,34 +195,6 @@ impl From<crate::code_admission::AdmissionError> for NativeStop {
     fn from(error: crate::code_admission::AdmissionError) -> Self {
         Self::Archive(error)
     }
-}
-#[derive(Debug, Serialize)]
-pub struct BuildProduct {
-    /// Native implementation copies, never semantic type instances.
-    pub private_variants: usize,
-    pub executable: PathBuf,
-    /// The executable's key: its objects' identities, the entry plan, the
-    /// sources digest and the link inputs. Its record is stored under it.
-    pub identity: ContentHash,
-    /// The entry's PROG-10 code address.
-    pub address: ContentHash,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recipe: Option<ContentHash>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assembly: Option<recipe_build::AssemblyRecord>,
-    /// The entry's PROG-9 revision.
-    pub revision: ContentHash,
-    pub compiled: usize,
-    pub linked: bool,
-    /// True means diagnostic instrumentation; timings are not performance samples.
-    pub observation_mode: bool,
-    pub debug_lines: bool,
-    /// The walk's and the link's work counters.
-    pub reach: crate::reach::ReachCounters,
-    /// A coverage build's site map: the fragments of its linked objects,
-    /// one record per id (`docs/coverage.md`, "The site map").
-    #[serde(skip)]
-    pub(crate) coverage: Option<Arc<hirsel_core_ir::coverage::Fragment>>,
 }
 /// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
 /// none for Cranelift, which is part of the compiler executable.
@@ -811,7 +745,7 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        if options.llvm_release() {
+        if options.llvm_release() || options.output_kind == OutputKind::StaticLibrary {
             let reached = self.reachable_recipe(entry, options)?;
             let options = options.with_bound_exec()?;
             let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
@@ -1493,10 +1427,31 @@ fn link_objects(
         link_mode,
     )?;
     let link_key = crate::store::remote::bind(match assembly {
-        Some(assembly) => key("hirsel.recipe-final-link.v4", &assembly)?,
-        None => key("hirsel.core-executable.v10", &(build, entry_plan))?,
+        Some(assembly) => key(
+            "hirsel.recipe-final-link.v5",
+            &(assembly, options.output_kind),
+        )?,
+        None => key("hirsel.core-executable.v11", &(build, entry_plan))?,
     });
     let store = Store::cas(&options.cas)?;
+    if options.output_kind == OutputKind::StaticLibrary {
+        return archive::pack(
+            entry_plan,
+            objects,
+            link_archives,
+            options,
+            sources_digest,
+            sources,
+            build,
+            link_key,
+            &store,
+            &recipe,
+            counters,
+            address,
+            revisions,
+            assembly,
+        );
+    }
     let coverage = options
         .coverage
         .is_some()
@@ -1705,7 +1660,7 @@ fn link_objects(
                                 }))
                                 .collect();
                         key(
-                            "hirsel.incremental-link-frame.v2",
+                            "hirsel.incremental-link-frame.v3",
                             &(
                                 &recipe.identity,
                                 &recipe.linker,
@@ -1713,6 +1668,7 @@ fn link_objects(
                                 &archive_pins,
                                 &options.runtime,
                                 &options.target,
+                                options.output_kind,
                             ),
                         )
                         .map(|frame| (frame, objects))
@@ -2018,6 +1974,7 @@ pub(crate) mod tests {
             runtime,
             cas: dir.join("cas"),
             output: dir.join("program"),
+            output_kind: OutputKind::Executable,
             root_limit: 1_048_576,
             // Glue operations are instances of their own: a program's walk counts each.
             instance_limit: 256,

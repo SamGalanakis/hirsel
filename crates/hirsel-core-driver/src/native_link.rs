@@ -35,7 +35,7 @@ pub(super) fn build_key(
     link_mode: &str,
 ) -> std::io::Result<ContentHash> {
     key(
-        "hirsel.core-build.v1",
+        "hirsel.core-build.v2",
         &(
             crate::compiler_identity(),
             toolchain,
@@ -48,6 +48,7 @@ pub(super) fn build_key(
             options.optimize,
             options.debug_lines,
             link_mode,
+            options.output_kind,
         ),
     )
 }

@@ -110,6 +110,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
         link: _,
         // The output is rendered per request.
         output: _,
+        output_kind,
         // An object is a function of its key alone, so where the content
         // store is does not change the executable; the store holds the record.
         cas: _,
@@ -136,7 +137,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
         backend,
         optimize,
         debug_lines,
-        target,
+        (target, output_kind),
         root_limit,
         instance_limit,
         directories,

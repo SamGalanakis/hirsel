@@ -103,8 +103,11 @@ archiver changes the toolchain identity, and with it every key below.
 target's link kit does not export would only fail later, in the host's link. The driver
 fails it first. Every symbol left undefined across the archive's members, after the
 renaming, must be exported by one of the target's link-kit stubs (EMB-6). A name that no
-stub exports refuses the build with `UnlistedImport(name, member)`. This is the list an
-executable's link enforces, applied without a link.
+stub exports refuses the build with `UnlistedImport(name, member)`. A weak undefined
+symbol whose only referrers are members of the toolchain's own runtime archive may
+remain undefined. If no library defines it at link time, ELF and Mach-O resolve it to
+null. Rust std's optional probes check for null before they call. A reference from
+any program or foreign member must resolve even if that reference is weak.
 
 **Cache keys.** The output kind is a field of every key that names a native product, so an
 archive and an executable of the same program never answer for each other:

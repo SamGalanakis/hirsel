@@ -18,6 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 mod adapter;
 mod code;
 mod data;
+mod embed;
 mod foreign;
 pub(crate) mod launch_config;
 mod report;
@@ -63,6 +64,8 @@ pub(crate) fn reaches_place<'d>(
 pub(crate) struct Plan<'a> {
     symbol: String,
     identity: String,
+    #[serde(skip)]
+    manifest: Option<Vec<u8>>,
     layout: &'a Fixed,
     exit_offset: Option<u64>,
     /// PROG-3: the encoded text program of a non-`Exit` error.
@@ -259,6 +262,7 @@ impl<'a> Plan<'a> {
             })
             .collect::<std::result::Result<_, NativeStop>>()?;
         Ok(Self {
+            manifest: None,
             symbol,
             identity,
             layout,
@@ -342,6 +346,11 @@ impl<'a> Plan<'a> {
         self
     }
 
+    pub(crate) fn with_manifest(mut self, manifest: Option<Vec<u8>>) -> Self {
+        self.manifest = manifest;
+        self
+    }
+
     /// The entry object of the executable. It also defines
     /// `hirsel_code_revision`, the entry's code revision, which a Run tape's
     /// header carries (REPLAY-SPEC v2.3 R10): a rebuild or another engine keeps
@@ -375,7 +384,7 @@ impl<'a> Plan<'a> {
             &self.contained,
         )?;
         let data = data::write(&mut object, format, self, sources, live_sites)?;
-        data::bytes(
+        let revision_data = data::bytes(
             &mut object,
             Some("hirsel_code_revision"),
             revision.to_vec(),
@@ -405,20 +414,34 @@ impl<'a> Plan<'a> {
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
         adapter::emit(&mut object, &mut unwind, self, entry, signature)?;
-        let launch = launch_config::emit(&mut object, format, self.place_backend, revision)?;
-        start::emit(
-            &mut object,
-            &mut unwind,
-            target,
-            self,
-            &data,
-            entry,
-            waits,
-            spawns_units,
-            build,
-            descriptors,
-            launch,
-        )?;
+        if let Some(manifest) = &self.manifest {
+            embed::emit(
+                &mut object,
+                &mut unwind,
+                target,
+                self,
+                &data,
+                entry,
+                revision_data,
+                manifest,
+                waits,
+            )?;
+        } else {
+            let launch = launch_config::emit(&mut object, format, self.place_backend, revision)?;
+            start::emit(
+                &mut object,
+                &mut unwind,
+                target,
+                self,
+                &data,
+                entry,
+                waits,
+                spawns_units,
+                build,
+                descriptors,
+                launch,
+            )?;
+        }
         let mut product = object.finish();
         unwind.write(&mut product, format).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);

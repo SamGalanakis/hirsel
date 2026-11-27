@@ -1364,23 +1364,6 @@ impl Publication {
         std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
     }
 
-    /// The options the recipe's launch fixes over `options`, and its entry's
-    /// declaration.
-    fn launch(&self, options: &NativeOptions) -> Result<(NativeOptions, EntryDecl), NativeStop> {
-        let annex = &self.units[&self.recipe.entry].annex;
-        let parameters = annex
-            .1
-            .as_deref()
-            .ok_or_else(|| NativeStop::Entry("recipe entry has no startup parameters".into()))?;
-        let error = annex
-            .2
-            .as_deref()
-            .map(crate::entry_show::ErrorShown::decode)
-            .transpose()
-            .map_err(|e| NativeStop::Entry(e.into()))?;
-        launch_options(&self.recipe, parameters, error, options)
-    }
-
     /// Assemble the program; an optimised LLVM build over `std`, the
     /// separately lowered release std ([`Self::std_side`]), which every such
     /// build takes and no other does: the program holds none of its exports'
@@ -1396,6 +1379,9 @@ impl Publication {
         let _phase = crate::meter::trace::span("native assembly");
         let mut counters = counters;
         counters.std_lowered = std.as_ref().map_or(0, |std| std.lowered);
+        let manifest = (options.output_kind == OutputKind::StaticLibrary)
+            .then(|| self.describe())
+            .transpose()?;
         let entry_identity = self.recipe.entry.clone();
         let (options, decl) = self.launch(options)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
@@ -1445,6 +1431,7 @@ impl Publication {
         // Native bodies and lent std code can operate on the same live Map.
         let emitter = emitter(&options, tools.runtime, &target)?;
         use std::os::unix::ffi::OsStrExt;
+        let image = archive::toolchain_image(&options, tools.image)?;
         let fingerprint = key(
             "hirsel.assembly-environment.v2",
             &(
@@ -1452,7 +1439,7 @@ impl Publication {
                 // The bodies the program imports shape its code.
                 std.as_ref().and_then(|std| std.lent.key()),
                 emitter,
-                tools.image,
+                image,
                 tools.runtime,
                 tools.environment,
                 link.identity,
@@ -1479,7 +1466,8 @@ impl Publication {
                 &options,
                 tools.runtime,
                 &store,
-                link.uses_hirsel_launcher(&options.link),
+                options.output_kind == OutputKind::Executable
+                    && link.uses_hirsel_launcher(&options.link),
             )?;
             release_sites = emitted.release_sites;
             release_debug_sites = emitted.release_debug_sites;
@@ -1610,7 +1598,8 @@ impl Publication {
         ))
         .with_store_teardown(options.store_teardown, self.addresses.keys())
         .with_release_sites(&release_sites, &release_debug_sites, &remarks)
-        .with_foreign(&self.recipe.foreign_modules, Some(&self.link_archives));
+        .with_foreign(&self.recipe.foreign_modules, Some(&self.link_archives))
+        .with_manifest(manifest);
         let result = link_objects(
             &plan,
             &objects,
@@ -1619,7 +1608,7 @@ impl Publication {
             &options,
             sources_digest,
             || Ok((sources, sources_key)),
-            tools.image,
+            image,
             link,
             closed_image,
             counters,

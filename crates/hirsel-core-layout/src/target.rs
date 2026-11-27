@@ -34,6 +34,26 @@ impl AppleRecord {
     }
 }
 
+/// The native product a build emits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize)]
+pub enum OutputKind {
+    #[default]
+    Executable,
+    StaticLibrary,
+}
+
+impl std::str::FromStr for OutputKind {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "exe" => Ok(Self::Executable),
+            "staticlib" => Ok(Self::StaticLibrary),
+            _ => Err("--emit expects exe or staticlib"),
+        }
+    }
+}
+
 /// The named targets. They share FORM's little-endian, 64-bit layout
 /// recipes; calling conventions, object format and OS facts derive from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -88,13 +108,19 @@ impl Target {
             .find(|target| target.triple() == triple)
     }
 
-    /// Whether a compiler request can build for this target.
-    pub fn admitted(self) -> Result<(), &'static str> {
-        match self {
-            Self::X86_64Linux | Self::Aarch64Linux | Self::Aarch64Darwin => Ok(()),
-            Self::Aarch64Ios | Self::Aarch64IosSim => Err(
-                "iOS targets build only --emit staticlib, which is not built yet (docs/spec/embed.md)",
-            ),
+    /// Whether this target builds the requested native product.
+    pub fn admits(self, output: OutputKind) -> Result<(), &'static str> {
+        match (self, output) {
+            (
+                Self::X86_64Linux | Self::Aarch64Linux | Self::Aarch64Darwin,
+                OutputKind::Executable | OutputKind::StaticLibrary,
+            ) => Ok(()),
+            (Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::Executable) => {
+                Err("iOS executables require an Xcode-signed app bundle (docs/spec/embed.md)")
+            }
+            (Self::Aarch64Ios | Self::Aarch64IosSim, OutputKind::StaticLibrary) => {
+                Err("iOS static libraries land with slice 6 (docs/spec/embed.md)")
+            }
         }
     }
 

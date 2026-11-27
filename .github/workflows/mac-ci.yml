@@ -16,7 +16,7 @@ on:
         options: [none, linux-platform, unexplained-skip]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event.schedule }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}-${{ github.event.schedule }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

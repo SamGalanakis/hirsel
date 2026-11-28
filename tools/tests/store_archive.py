@@ -160,7 +160,7 @@ def drill(hirsel, server, work, release):
 if __name__ == "__main__":
     compiler = (Path(sys.argv[1]) if len(sys.argv) > 1 else
                 Path(os.environ["HIRSEL_TOOLCHAIN_BUNDLE"]) / "hirsel").resolve()
-    with tempfile.TemporaryDirectory(prefix="archive-drill-") as temp:
+    with tempfile.TemporaryDirectory(prefix="archive-drill-", dir=os.environ.get("HIRSEL_OPERATOR_TEST_ROOT")) as temp:
         root = Path(temp)
         if len(sys.argv) == 4:
             release, indexed = [Path(p).resolve() for p in sys.argv[2:]]

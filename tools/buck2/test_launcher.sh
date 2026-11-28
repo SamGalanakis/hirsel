@@ -29,6 +29,8 @@ case "${HIRSEL_TEST_DEDICATED_CASE:-}|${1:-}" in
   operator_cli::laws::slice1_resolve_identify_read\|* | \
   native::tests::foreign_deploy_and_recording_registration_refuse_before_payloads\|* | \
   native::tests::exec_test_and_deploy_require_the_exact_profile_approval\|* | \
+  *\|*/store_archive.py | *\|store_archive.py | \
+  *\|*/store_host_recovery.py | *\|store_host_recovery.py | \
   *\|*/core_store_no_sync.py | *\|core_store_no_sync.py | \
   *\|*/runner_tests.py | *\|runner_tests.py)
     if [ -z "${HIRSEL_OPERATOR_TEST_ROOT:-}" ]; then

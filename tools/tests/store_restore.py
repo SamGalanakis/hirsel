@@ -35,7 +35,9 @@ def drill(hirsel, work):
     source = work / "source"
     export = work / "backup"
     dest = work / "child"
-    shutil.copytree(CORPUS, source)
+    # The executor mounts corpus inputs read-only. Faults belong to this private copy.
+    shutil.copytree(CORPUS, source, copy_function=shutil.copyfile)
+    source.chmod(0o700)
     (source / "LOCK").touch()
     original = contents(source)
     # The frozen writer acknowledged main version 4. Its j-5 END covers bytes

@@ -25,8 +25,7 @@ def address():
 def launcher(hirsel, state, env):
     host = subprocess.Popen([hirsel, "launcher", "--control", state / "launcher.sock", "--state", state,
                              "--lifecycle", "leader", "--operator-listen", state / "operator.sock",
-                             "--admission", "tools/tests/fixtures/host-admission.hcfg", "--max-places", "4",
-                             "--platform-host", hirsel.parent / "libexec/hirsel/platform_main"], env=env)
+                             "--admission", "tools/tests/fixtures/host-admission.hcfg", "--max-places", "4"], env=env)
     try:
         start = time.monotonic()
         while not listening(state / "operator.sock"):
@@ -173,7 +172,7 @@ def drill(hirsel, work, recipe, code):
 
 if __name__ == "__main__":
     hirsel = (Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.environ["HIRSEL_TOOLCHAIN_BUNDLE"]) / "hirsel").resolve()
-    with tempfile.TemporaryDirectory(prefix="host-recovery-") as temp:
+    with tempfile.TemporaryDirectory(prefix="host-recovery-", dir=os.environ.get("HIRSEL_OPERATOR_TEST_ROOT")) as temp:
         work = Path(temp)
         if len(sys.argv) == 4:
             recipe, code = sys.argv[2], Path(sys.argv[3])

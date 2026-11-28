@@ -70,15 +70,16 @@ def distribution_gates(out, call, Raw, reads, slots):
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.hcfg", "core/programs/store-archive-tool/hirsel.hcfg"]'),
                             visibility=["PUBLIC"]))
-    out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py",
+    # The installed Store helpers open Directory grants with openat2.
+    out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py", host=True,
                             data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
-    out.append("\n" + call("hirsel_script_test", name="store-archive-recovery", script="tools/tests/store_archive.py",
+    out.append("\n" + call("hirsel_script_test", name="store-archive-recovery", script="tools/tests/store_archive.py", host=True,
                             data=["tools/tests/store_archive_server.py", "tools/tests/store_gap_recovery.py", "tools/tests/fixtures/store-archive-gap-format14.json", "tools/tests/store_index_recovery.py", "tools/tests/fixtures/store-index-damage-format14.json", "tools/tests/fixtures/store-archive-format14.json",
                                   "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                   "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
-    out.append("\n" + call("hirsel_script_test", name="store-host-recovery", script="tools/tests/store_host_recovery.py",
+    out.append("\n" + call("hirsel_script_test", name="store-host-recovery", script="tools/tests/store_host_recovery.py", host=True,
                             data=["core/tools/operator_fixture.py", "tools/tests/fixtures/host-admission.hcfg",
                                   "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                   "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],

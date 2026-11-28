@@ -27,9 +27,33 @@ impl Emitter {
         };
         let spelling = crate::identity::closed_type_text(&p.decls, t, callable)?;
         let mut parts = Vec::with_capacity(parameters.len() + 2);
-        let mut params = Vec::new();
-        for (mode, ty) in parameters {
+        for &(_, ty) in &parameters {
             parts.push(self.held_type_hash(p, t, ty)?);
+        }
+        parts.push(self.held_type_hash(p, t, result)?);
+        let adapter = self.pack_call_signature(p, t, &parameters, result)?;
+        parts.push(hirsel_core_ir::normal::abi_signature(
+            &self.module,
+            &adapter,
+        ));
+        let digest = ContentHash::of_parts(
+            "hirsel.pack-export.v1",
+            std::iter::once(spelling.as_bytes()).chain(parts.iter().map(|h| h.0.as_slice())),
+        );
+        Some((adapter, digest, waits))
+    }
+
+    /// A typed handle already carries the admission proof. A call needs the
+    /// native argument and result convention, including rows of a rigid body.
+    pub(super) fn pack_call_signature(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        parameters: &[(Mode, TyId)],
+        result: TyId,
+    ) -> Option<Signature> {
+        let mut params = Vec::new();
+        for &(mode, ty) in parameters {
             let rep = self.rep(p, t, ty).ok()?;
             match (mode, rep) {
                 (Mode::Mut, Rep::Place(row)) => params.push(Param::Address {
@@ -52,7 +76,6 @@ impl Emitter {
                 },
             }
         }
-        parts.push(self.held_type_hash(p, t, result)?);
         let dest = if self.rep(p, t, result).ok()? == Rep::None {
             None
         } else {
@@ -60,15 +83,7 @@ impl Emitter {
         };
         let mut adapter = Signature::new(params, vec![], dest);
         adapter.never = result == NEVER;
-        parts.push(hirsel_core_ir::normal::abi_signature(
-            &self.module,
-            &adapter,
-        ));
-        let digest = ContentHash::of_parts(
-            "hirsel.pack-export.v1",
-            std::iter::once(spelling.as_bytes()).chain(parts.iter().map(|h| h.0.as_slice())),
-        );
-        Some((adapter, digest, waits))
+        Some(adapter)
     }
 
     /// Emit a PACK-15 adapter function and PROG-9 descriptor for closed top-level

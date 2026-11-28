@@ -88,9 +88,19 @@ pub fn probe_overlap(c: Code[fn(Big, Big) -> Big]) -> Big {
     c(b, b)
 }
 
+fn invoke[A, R](c: Code[fn(take A) -> R], take arg: A) -> R {
+    c(take arg)
+}
+
+fn word(take n: u64) -> u64 { n + 1u64 }
+fn empty(take _unit: ()) -> u64 { 22u64 }
+fn keep(take value: Big) -> Big { take value }
+
 pub fn call_via_bind() -> Big {
     let c = code.bind(overlap_sum)
-    let b = arc.new(Big(a: 11, b: 22, c: 33, d: 44))
+    let a = invoke(code.bind(word), 10u64)
+    let b_word = invoke(code.bind(empty), ())
+    let b = arc.new(invoke(code.bind(keep), Big(a: a, b: b_word, c: 33, d: 44)))
     c(b, b)
 }
 "#;

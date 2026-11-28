@@ -408,15 +408,14 @@ impl Cx<'_, '_, '_> {
         } else {
             result
         };
-        let Some((adapter_sig, _hash, _waits)) =
-            self.e.pack_export_signature(self.p, &mut self.t, entry)
+        let TyKind::Fn(parameters, _, _, Callable::Plain) = self.t.kind(entry).clone() else {
+            return self.gap_ty(n, "a packed call requires a plain callable signature");
+        };
+        let Some(adapter_sig) =
+            self.e
+                .pack_call_signature(self.p, &mut self.t, &parameters, result)
         else {
-            self.refuse(
-                "PACK-14",
-                n,
-                "the operation requires a closed type with a compiled witness",
-            );
-            return (out_ty, None);
+            return self.gap_ty(n, "packed callable has no native calling convention");
         };
         if !self.live() {
             if out_ty == NEVER {
@@ -427,7 +426,25 @@ impl Cx<'_, '_, '_> {
         let Some(callee_val) = callee_val else {
             return (out_ty, None);
         };
-        let sig_id = self.e.sig(adapter_sig.clone());
+        // A rigid argument can become a scalar or disappear when the template is
+        // instantiated. The PACK-15 result always uses the caller's result place.
+        let abi = scalar_abi::SignatureAbi {
+            params: adapter_sig
+                .params
+                .iter()
+                .map(|param| {
+                    matches!(
+                        param,
+                        Param::Address {
+                            loan: Loan::Take | Loan::View,
+                            ..
+                        }
+                    )
+                })
+                .collect(),
+            result: false,
+        };
+        let sig_id = self.e.sig_abi(adapter_sig.clone(), abi);
         let ret_rep = match self.rep(result) {
             Ok(rep) => rep,
             Err(what) => {

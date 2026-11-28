@@ -171,7 +171,7 @@ pub use roles::Role;
 use roles::nominal_bounds;
 pub(crate) use type_queries::LayoutKinds;
 use type_queries::kind_row;
-pub use type_queries::{collect_roots, kind};
+pub use type_queries::{collect_roots, copyable, kind};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generic {
@@ -2685,38 +2685,6 @@ pub(crate) fn vector_shape(
     let count = count.ok_or("a vector lane count must be an integer literal")?;
     hirsel_core_layout::Vector::new(lane, count)
         .ok_or("a vector must have integer lanes and occupy 16 or 32 bytes")
-}
-
-/// Whether `let` copies a value of this type (OWN-3).
-pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
-    let row = t.kind(ty);
-    match kind_row(decls, t, row, params) {
-        Kind::Plain | Kind::Region => true,
-        Kind::Scoped => match row {
-            TyKind::Anchored(x, _) => copyable(decls, t, *x, params),
-            TyKind::View(_) => true,
-            TyKind::Tuple(xs) => xs.iter().all(|&x| copyable(decls, t, x, params)),
-            TyKind::Adt(d, args) => {
-                let decl = &decls[d.index()];
-                if decl.role.is_some() {
-                    return decl.role == Some(Role::Region) || decl.role == Some(Role::View);
-                }
-                if decl.structural {
-                    return args.iter().all(|&x| copyable(decls, t, x, params));
-                }
-                // A scoped declaration copies when every field does; its fields were
-                // lowered against its own parameters.
-                decl.all_fields().all(|f| {
-                    !matches!(
-                        kind(decls, t, f.ty, &[]),
-                        Kind::Own | Kind::Resource | Kind::Counted | Kind::Generic
-                    )
-                })
-            }
-            _ => false,
-        },
-        _ => false,
-    }
 }
 
 /// The nominal declarations that prevent this field type from satisfying `codec`.

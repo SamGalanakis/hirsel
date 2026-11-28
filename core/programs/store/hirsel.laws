@@ -614,5 +614,5 @@ store@1/store/tiered_l70_refusals src=dee7baa8c4eb5074 sig=5a6eb37bb1dd542f run=
 store@1/store/trim_and_table_frame src=71c235a3e77136f3 sig=b1c77c893097ac57 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/tx_pop_and_range_oracle src=25f78287225be270 sig=fada44c7622ede0d run=e0b7a0a702e2cf42 bug=- oracle=- rows=pending
 store@1/store/tx_pop_linear_steps src=f8b39cc172c04d27 sig=4e00b1f4270bc07c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/witness_replays_resident_call_from_its_pages src=111f6b3347396bb5 sig=9c42162ec86e7286 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/witness_replays_tiered_call_from_its_frames src=43526b51218ca6b9 sig=d7cffbc321afc397 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/witness_replays_resident_call_from_its_pages src=3249ced2d1f41298 sig=9c42162ec86e7286 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/witness_replays_tiered_call_from_its_frames src=ba30f0db67c627b5 sig=d7cffbc321afc397 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending

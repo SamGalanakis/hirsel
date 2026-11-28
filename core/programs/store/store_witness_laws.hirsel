@@ -50,13 +50,15 @@ fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Re
         fail("witness law: row 900")
     }
     list.push(mut reply, wide[4999u64])
-    let mut rows = result.unwrap(range(tx, t, Included(2000u64), Excluded(2004u64)))
-    while let Some((_, v)) = result.unwrap(next_in(tx, mut rows)) {
-        list.push(mut reply, v[0u64])
-    }
-    if let Some(k) = extra {
-        if let Some(other) = result.unwrap(fetch(tx, t, k)) {
-            list.push(mut reply, other[0u64])
+    {
+        let mut rows = result.unwrap(range(tx, t, Included(2000u64), Excluded(2004u64)))
+        while let Some((_, v)) = result.unwrap(next_in(tx, mut rows)) {
+            list.push(mut reply, v[0u64])
+        }
+        if let Some(k) = extra {
+            if let Some(other) = result.unwrap(fetch(tx, t, k)) {
+                list.push(mut reply, other[0u64])
+            }
         }
     }
     result.unwrap(put(mut tx, t, 5000u64, take small))

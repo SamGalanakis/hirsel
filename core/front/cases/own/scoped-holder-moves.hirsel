@@ -1,0 +1,65 @@
+// OWN-3, OWN-15: a scoped type copies only when every component does, a scoped field
+// included. `Held` holds `Inner`, which owns a String, so `Held` moves: `let` takes it,
+// and a `match` or `let ... else` on a view of it binds views and owns nothing. So
+// `let b = a` moves the view parameter `a`, which is refused.
+// Each call reads "abc" (3 bytes) through the same holder three times: 3 * 3 = 9.
+// expect: run matched() = 9
+// expect: run let_else() = 9
+// expect: refuse OWN-7 at 51:13
+// expect: cause OWN-7 at 51:13 from 50:9
+// expect: compared OWN-7 at 51:13 | view | take
+scoped type Inner {
+    label: View[String],
+    text: String
+}
+
+scoped type Held {
+    inner: Inner
+}
+
+scoped type Lens {
+    text: View[String]
+}
+
+fn lens(inner: Inner) -> Lens in inner {
+    Lens(text: view inner.text)
+}
+
+fn matched_len(held: Option[Held]) -> u64 {
+    let found = match held {
+        Some(h) => Some(lens(h.inner)),
+        None => None,
+    }
+    match found {
+        Some(l) => string.byte_len(l.text),
+        None => 0,
+    }
+}
+
+fn let_else_len(held: Option[Held]) -> u64 {
+    let Some(h) = view held else {
+        return 0
+    }
+    string.byte_len(h.inner.text)
+}
+
+fn made(label: String) -> Option[Held] in label {
+    Some(Held(inner: Inner(label: view label, text: string.from("abc"))))
+}
+
+fn kept(a: Held) -> u64 {
+    let b = a
+    string.byte_len(b.inner.text)
+}
+
+fn matched() -> u64 {
+    let label = string.from("l")
+    let held = made(label)
+    matched_len(held) + matched_len(held) + matched_len(held)
+}
+
+fn let_else() -> u64 {
+    let label = string.from("l")
+    let held = made(label)
+    let_else_len(held) + let_else_len(held) + let_else_len(held)
+}

@@ -76,6 +76,53 @@ fn kind_row_with(
     }
 }
 
+/// Whether `let` copies a value of this type (OWN-3).
+pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
+    copyable_in(decls, t, ty, params, &mut Vec::new())
+}
+
+/// `seen` holds the scoped declarations being expanded: one that reaches itself
+/// through its fields has no finite copy, so it moves.
+fn copyable_in(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+    seen: &mut Vec<DeclId>,
+) -> bool {
+    let row = t.kind(ty);
+    match kind_row(decls, t, row, params) {
+        Kind::Plain | Kind::Region => true,
+        Kind::Scoped => match row {
+            TyKind::Anchored(x, _) => copyable_in(decls, t, *x, params, seen),
+            TyKind::View(_) => true,
+            TyKind::Tuple(xs) => xs.iter().all(|&x| copyable_in(decls, t, x, params, seen)),
+            TyKind::Adt(d, args) => {
+                let decl = &decls[d.index()];
+                if decl.role.is_some() {
+                    return decl.role == Some(Role::Region) || decl.role == Some(Role::View);
+                }
+                if decl.structural {
+                    return args.iter().all(|&x| copyable_in(decls, t, x, params, seen));
+                }
+                if seen.contains(d) {
+                    return false;
+                }
+                // A scoped declaration copies when every field does, a scoped field
+                // included (OWN-3); its fields were lowered against its own parameters.
+                seen.push(*d);
+                let copies = decl
+                    .all_fields()
+                    .all(|f| copyable_in(decls, t, f.ty, &[], seen));
+                seen.pop();
+                copies
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Kind queries over one arena and declaration table, with no enclosing bounds.
 #[derive(Default)]
 pub(crate) struct LayoutKinds(rustc_hash::FxHashMap<TyId, Kind>);

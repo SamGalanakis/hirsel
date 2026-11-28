@@ -229,13 +229,42 @@ impl Want<'_> {
     }
 }
 
-/// One published entry of an installed image.
-pub(crate) struct ImageEntry {
-    pub(crate) identity: ContentHash,
-    pub(crate) signature: ContentHash,
-    pub(crate) waits: bool,
-    pub(crate) entry: usize,
-    pub(crate) descriptor: usize,
+/// Native rows keep their PACK-2 offsets and validated identity order. Prelinked
+/// addresses already belong to the host image and use its static directory.
+enum ImageEntries {
+    Native(Box<[hirsel_mod::Entry]>),
+    Prelinked(&'static [(ContentHash, ContentHash, usize)]),
+}
+
+impl Image {
+    fn entry_index(&self, want: &Want<'_>) -> Option<usize> {
+        match &self.entries {
+            ImageEntries::Native(entries) => {
+                let index = entries
+                    .binary_search_by_key(want.identity, |row| row.identity)
+                    .ok()?;
+                want.names(&entries[index]).then_some(index)
+            }
+            ImageEntries::Prelinked(entries) => entries.iter().position(|(id, sig, _)| {
+                !want.waits && id == want.identity && sig == want.signature
+            }),
+        }
+    }
+
+    fn addresses(&self, index: usize) -> (usize, usize) {
+        match &self.entries {
+            ImageEntries::Native(entries) => {
+                let row = &entries[index];
+                let descriptor = if row.descriptor == hirsel_mod::NO_DESCRIPTOR {
+                    0
+                } else {
+                    self.data + row.descriptor as usize
+                };
+                (self.text + row.text as usize, descriptor)
+            }
+            ImageEntries::Prelinked(entries) => (entries[index].2, 0),
+        }
+    }
 }
 
 /// One installed module.
@@ -248,8 +277,7 @@ struct Image {
     data: usize,
     bytes: u64,
     cause_data: Option<CauseDataHandle>,
-    /// Each entry's identity, signature, waits flag, address, and optional descriptor.
-    entries: Vec<ImageEntry>,
+    entries: ImageEntries,
     /// How many slots name this image, and whether none does after one did. Both
     /// change only under the retired lock.
     slots: AtomicU32,
@@ -572,7 +600,11 @@ impl Loader {
         if slab.quarantined.contains(&digest) {
             return Err(Refusal::Quarantined);
         }
-        let has = |want: &Want<'_>| module.entries().any(|entry| want.names(&entry));
+        let has = |want: &Want<'_>| {
+            module
+                .entry(want.identity)
+                .is_some_and(|entry| want.names(&entry))
+        };
         if want.is_some_and(|want| !has(want)) {
             return Err(Refusal::NoEntry);
         }
@@ -628,17 +660,7 @@ impl Loader {
             data: 0,
             bytes: 0,
             cause_data: None,
-            entries: held
-                .entries
-                .iter()
-                .map(|&(identity, signature, entry)| ImageEntry {
-                    identity,
-                    signature,
-                    waits: false,
-                    entry,
-                    descriptor: 0,
-                })
-                .collect(),
+            entries: ImageEntries::Prelinked(held.entries),
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
             retire: Some(Box::new(Retire {
@@ -681,20 +703,50 @@ impl Installed {
         self.0.digest
     }
 
-    /// The `Code` of the entry `identity`, when its signature and `waits` flag match `F`.
-    pub fn code<F: Signature>(&self, identity: &ContentHash) -> Result<Code<F>, Refusal> {
-        const { assert!(size_of::<F>() == size_of::<usize>()) };
-        let found = self.0.entries.iter().find(|entry| {
-            entry.identity == *identity && entry.signature == F::DIGEST && entry.waits == F::WAITS
-        });
-        let found = found.ok_or(Refusal::NoEntry)?;
-        Ok(Code {
-            image: self.0.clone(),
-            entry: found.entry,
-            descriptor: found.descriptor,
+    /// Resolve a typed candidate once for selection under a worker's generation pin.
+    pub fn resolve<F: Signature>(&self, identity: &ContentHash) -> Result<EntryIndex<F>, Refusal> {
+        let index = self
+            .0
+            .entry_index(&Want {
+                identity,
+                signature: &F::DIGEST,
+                waits: F::WAITS,
+            })
+            .ok_or(Refusal::NoEntry)?;
+        Ok(EntryIndex {
+            image: Arc::downgrade(&self.0),
+            index,
             callable: PhantomData,
         })
     }
+
+    /// The `Code` of the entry `identity`, when its signature and `waits` flag match `F`.
+    pub fn code<F: Signature>(&self, identity: &ContentHash) -> Result<Code<F>, Refusal> {
+        const { assert!(size_of::<F>() == size_of::<usize>()) };
+        let index = self
+            .0
+            .entry_index(&Want {
+                identity,
+                signature: &F::DIGEST,
+                waits: F::WAITS,
+            })
+            .ok_or(Refusal::NoEntry)?;
+        let (entry, descriptor) = self.0.addresses(index);
+        Ok(Code {
+            image: self.0.clone(),
+            entry,
+            descriptor,
+            callable: PhantomData,
+        })
+    }
+}
+
+/// A typed ordinal in one installation. It can reside in the installation's
+/// registration table without keeping that installation's executable pages alive.
+pub struct EntryIndex<F> {
+    image: Weak<Image>,
+    index: usize,
+    callable: PhantomData<fn() -> F>,
 }
 
 /// A counted handle to one entry of one image (PACK-6).

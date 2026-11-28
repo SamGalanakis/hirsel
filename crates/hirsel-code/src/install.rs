@@ -3,7 +3,7 @@
 use super::retire::Retire;
 use super::table::{DataRow, Owner};
 use super::{
-    Cohort, ContentHash, Image, ImageEntry, Loader, Refusal, Shared, Slab, State, TARGET, WINDOW,
+    Cohort, ContentHash, Image, ImageEntries, Loader, Refusal, Shared, Slab, State, TARGET, WINDOW,
     Window, fixup, host,
 };
 use hirsel_mod::{Import, Module};
@@ -239,20 +239,7 @@ impl Loader {
             data: d,
             bytes,
             cause_data,
-            entries: module
-                .entries()
-                .map(|entry| ImageEntry {
-                    identity: entry.identity,
-                    signature: entry.signature,
-                    waits: entry.waits,
-                    entry: t + entry.text as usize,
-                    descriptor: if entry.descriptor == hirsel_mod::NO_DESCRIPTOR {
-                        0
-                    } else {
-                        d + entry.descriptor as usize
-                    },
-                })
-                .collect(),
+            entries: ImageEntries::Native(module.entries().collect()),
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
             retire: Some(Box::new(Retire {

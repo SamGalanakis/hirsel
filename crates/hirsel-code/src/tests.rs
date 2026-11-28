@@ -546,6 +546,52 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
 
 mod g11;
 
+#[test]
+fn resolved_entry_stays_with_its_installation_through_replacement() {
+    if !host::slab() {
+        return;
+    }
+    let loader = Loader::new(config()).unwrap();
+    let slot = loader.slot::<Leaf>();
+    let mut worker = loader.worker();
+    let install = |k| {
+        let bytes = image(k).encode();
+        loader.admit_module(&bytes).unwrap();
+        loader.image(&bytes, true).unwrap()
+    };
+    let a = install(10);
+    let old = a.resolve::<Leaf>(&IDENTITY).unwrap();
+    assert!(matches!(
+        a.resolve::<Other>(&IDENTITY),
+        Err(Refusal::NoEntry)
+    ));
+    slot.activate(0, a.code::<Leaf>(&IDENTITY).unwrap())
+        .unwrap();
+    drop(a);
+    let b = install(20);
+    let new = b.resolve::<Leaf>(&IDENTITY).unwrap();
+    let got = worker.dispatch_entry(&slot, &old, |entry| {
+        slot.activate(1, b.code::<Leaf>(&IDENTITY).unwrap())
+            .unwrap();
+        // SAFETY: the callback owns a borrow of the old leaf through the call.
+        unsafe { entry(1) }
+    });
+    assert_eq!(got, Ok(Some(12)));
+    assert_eq!(
+        worker.dispatch_entry(&slot, &old, |_| ()),
+        Err(Refusal::NoEntry)
+    );
+    // SAFETY: the selected leaf belongs to the second image.
+    assert_eq!(
+        worker.dispatch_entry(&slot, &new, |f| unsafe { f(1) }),
+        Ok(Some(22))
+    );
+    drop(b);
+    drop(slot);
+    worker.park();
+    assert_eq!((loader.installed(), loader.retired()), (0, 0));
+}
+
 /// `activate` is a compare-and-swap on the version, the retired budget refuses without
 /// changing anything, and a worker keeps old code alive only while its row holds it
 /// (PACK-6 steps 3 to 5).

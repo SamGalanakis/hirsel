@@ -1,4 +1,4 @@
-use super::{Code, Image, Shared, Signature, Stop};
+use super::{Code, EntryIndex, Image, Refusal, Shared, Signature, Stop};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -367,7 +367,47 @@ impl Worker {
         slot: &Slot<F>,
         with: impl FnOnce(F) -> R,
     ) -> Option<R> {
-        let (entry, token) = self.begin_cell(&slot.lease.0)?;
+        self.with_borrow(&slot.lease.0, |entry, _, _| {
+            // SAFETY: the slot admits only F and the worker pins its generation through with.
+            with(unsafe { std::mem::transmute_copy(&entry) })
+        })
+    }
+
+    /// Call a registration selected from the slot's installation. A replacement
+    /// cannot pair an ordinal resolved in the old directory with text in the new one.
+    pub fn dispatch_entry<F: Signature, Root: Signature, R>(
+        &mut self,
+        slot: &Slot<Root>,
+        selection: &EntryIndex<F>,
+        with: impl FnOnce(F) -> R,
+    ) -> Result<Option<R>, Refusal> {
+        const { assert!(size_of::<F>() == size_of::<usize>()) };
+        self.with_borrow(&slot.lease.0, |_, worker, token| {
+            let image = match token {
+                BorrowToken::Row(at) => worker.rows[*at]
+                    .as_ref()
+                    .and_then(|row| row.code.0.as_deref()),
+                BorrowToken::Owned(image) => image.as_deref(),
+                BorrowToken::Promoted => None,
+            }
+            .ok_or(Refusal::NoEntry)?;
+            if !std::ptr::eq(image, selection.image.as_ptr()) {
+                return Err(Refusal::NoEntry);
+            }
+            let (entry, _) = image.addresses(selection.index);
+            // SAFETY: resolve checked F on this exact installation and the worker
+            // owns the generation until the callback returns or unwinds.
+            Ok(with(unsafe { std::mem::transmute_copy(&entry) }))
+        })
+        .transpose()
+    }
+
+    fn with_borrow<R>(
+        &mut self,
+        cell: &Arc<Cell>,
+        with: impl FnOnce(usize, &Self, &BorrowToken) -> R,
+    ) -> Option<R> {
+        let (entry, token) = self.begin_cell(cell)?;
         struct Guard<'a> {
             worker: &'a mut Worker,
             token: Option<BorrowToken>,
@@ -379,13 +419,11 @@ impl Worker {
                 }
             }
         }
-        let _guard = Guard {
+        let guard = Guard {
             worker: self,
             token: Some(token),
         };
-        // SAFETY: as `Code::entry`; this worker's row is pinned with `borrows > 0`
-        // while `with` runs (and released on return or unwind by `_guard`).
-        Some(with(unsafe { std::mem::transmute_copy(&entry) }))
+        Some(with(entry, guard.worker, guard.token.as_ref().unwrap()))
     }
 
     /// Drop every unborrowed row whose slot has moved on. A worker calls this

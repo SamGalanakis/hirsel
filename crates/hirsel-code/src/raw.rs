@@ -57,14 +57,8 @@ impl RawCode {
 impl Want<'_> {
     /// The handle to the entry this names in `image`.
     fn code(&self, image: Arc<Image>) -> Result<RawCode, Refusal> {
-        let named = |entry: &&super::ImageEntry| {
-            (&entry.identity, &entry.signature, entry.waits)
-                == (self.identity, self.signature, self.waits)
-        };
-        let (entry, descriptor) = {
-            let found = image.entries.iter().find(named).ok_or(Refusal::NoEntry)?;
-            (found.entry, found.descriptor)
-        };
+        let index = image.entry_index(self).ok_or(Refusal::NoEntry)?;
+        let (entry, descriptor) = image.addresses(index);
         Ok(RawCode {
             image: Some(image),
             entry,

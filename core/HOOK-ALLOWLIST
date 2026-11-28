@@ -182,7 +182,6 @@ core@1/deque/pop_front
 core@1/deque/prepare_push
 core@1/deque/push_back
 core@1/deque/push_front
-core@1/deque/reverse
 core@1/deque/slots_empty
 core@1/deque/slots_forget_ring
 core@1/deque/slots_free

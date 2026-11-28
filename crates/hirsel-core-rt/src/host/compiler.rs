@@ -17,6 +17,7 @@ const QUEUE: usize = 64;
 #[derive(Default)]
 pub(crate) struct Call {
     pub(crate) reply: Vec<u8>,
+    pub(crate) source: Option<(crate::process::View, u64)>,
     pending: Option<Arc<Completion>>,
 }
 
@@ -28,6 +29,7 @@ struct Completion {
 struct Job {
     token: u64,
     input: Vec<u8>,
+    source: Option<(Vec<u8>, u64)>,
     completion: Arc<Completion>,
 }
 
@@ -63,7 +65,13 @@ impl Binding {
 }
 
 impl Lane {
-    fn submit(self: &Arc<Self>, token: u64, input: &[u8], call: &mut Call) -> Result<(), Answer> {
+    fn submit(
+        self: &Arc<Self>,
+        token: u64,
+        input: &[u8],
+        source: Option<(&[u8], u64)>,
+        call: &mut Call,
+    ) -> Result<(), Answer> {
         {
             let mut q = self.queue.lock().unwrap();
             if q.admitted == WORKERS + QUEUE {
@@ -72,6 +80,7 @@ impl Lane {
             q.admitted += 1;
         }
         let input = input.to_vec();
+        let source = source.map(|(path, limit)| (path.to_vec(), limit));
         let mut q = self.queue.lock().unwrap();
         if q.helpers < WORKERS {
             let lane = self.clone();
@@ -91,6 +100,7 @@ impl Lane {
         q.jobs.push_back(Job {
             token,
             input,
+            source,
             completion: completion.clone(),
         });
         call.pending = Some(completion);
@@ -108,11 +118,22 @@ impl Lane {
                 job
             };
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let answer = self
-                .service
-                .check_cancellable(&job.input, &job.completion.cancelled);
+            let answer = match job.source {
+                Some((path, limit)) => self.service.read_source_cancellable(
+                    &job.input,
+                    &path,
+                    limit,
+                    &job.completion.cancelled,
+                ),
+                None => self
+                    .service
+                    .check_cancellable(&job.input, &job.completion.cancelled),
+            };
             #[cfg(target_os = "ios")]
-            let answer = (9, b"compiler workers are unavailable on iOS".to_vec());
+            let answer = {
+                drop((job.input, job.source));
+                (9, b"compiler workers are unavailable on iOS".to_vec())
+            };
             self.queue.lock().unwrap().admitted -= 1;
             let mut state = job.completion.state.lock().unwrap();
             if let Some(waiter) = state.0.take() {
@@ -134,7 +155,16 @@ pub(crate) unsafe fn step(row: &mut Request, token: u64, first: bool) -> Step {
             } else {
                 unsafe { std::slice::from_raw_parts(row.buffer.data, row.buffer.len) }
             };
-            binding.0.submit(token, input, call).err()
+            let source = call.source.map(|(path, limit)| {
+                let bytes = if path.len == 0 {
+                    &[]
+                } else {
+                    // The borrowed path stays live until the provider delivers or aborts.
+                    unsafe { std::slice::from_raw_parts(path.data, path.len) }
+                };
+                (bytes, limit)
+            });
+            binding.0.submit(token, input, source, call).err()
         } else {
             call.pending
                 .as_ref()

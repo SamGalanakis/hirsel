@@ -6,6 +6,38 @@ fn fixture() -> compiler.CheckLibrary {
     compiler.CheckLibrary(root: "1deb571bbd582801213907f7455641123c0d84ee447d76c51f48ce8f20028abc", content: b"\x03\x1agithub.com/example/checked\x01\x00\x00\x00\x09charge-v1\x01\x03dep\x17github.com/example/leaf\x01\x01v\xae$\xceM\x9aq!\x05t\xfc\xf5y\x05M\xa2\x06\xf4\xf2\xd7\x0b\x10\x9a\xa4\x90\x823\xa7\xe4\xbb1&\x01\x0echecked.hirsel\x01\x07checkedc/// Carries both designations.\x0apub fn inspect(c: Compiler, f: fn(u64) -> u64) -> u64 { dep.one() }\x0a\x00", closure: take deps, history: list.new())
 }
 
+// expect: run source_member(compiler) = true
+fn source_member(c: Compiler) -> bool waits {
+    let archive = b"\x03\x17github.com/example/leaf\x01\x00\x00\x00\x09charge-v1\x00\x02\x10src/empty.hirsel\x01\x05empty\x00\x0esrc/one.hirsel\x01\x04leaf\x0d// \xe7\x8c\xab\x0a// \xce\xb1\x0a\x00"
+    let Ok(text) = compiler.read_source(c, archive, "src/one.hirsel", 13) else {
+        fail("canonical source refused")
+    }
+    if text != "// 猫\n// α\n" {
+        fail("source bytes changed")
+    }
+    let Ok(empty) = compiler.read_source(c, archive, "src/empty.hirsel", 0) else {
+        fail("empty source refused")
+    }
+    if empty != "" {
+        fail("empty source changed")
+    }
+    let Error(InvalidPath) = compiler.read_source(c, archive, "../src/one.hirsel", 13) else {
+        fail("traversal path accepted")
+    }
+    let Error(MissingPath) = compiler.read_source(c, archive, "src/two.hirsel", 13) else {
+        fail("missing path was not reported")
+    }
+    let mut trailing: Bytes = clone(archive)
+    list.push(mut trailing, 0u8)
+    let Error(MalformedArchive) = compiler.read_source(c, trailing, "src/one.hirsel", 13) else {
+        fail("archive with trailing data accepted")
+    }
+    let Error(Limit(Output)) = compiler.read_source(c, archive, "src/one.hirsel", 12) else {
+        fail("source over the output limit accepted")
+    }
+    true
+}
+
 // expect: run admission(compiler) = true
 fn admission(c: Compiler) -> bool waits {
     let request = fixture()

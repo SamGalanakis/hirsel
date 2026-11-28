@@ -19,18 +19,17 @@ impl Cx<'_, '_, '_> {
         Some(output)
     }
 
-    pub(super) fn runtime_check_library(
+    pub(super) fn runtime_compiler(
         &mut self,
+        op: HostOp,
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        let args = [
-            Arg::Value(vals[0]?),
-            Arg::Value(vals[1]?),
-            Arg::Value(vals[2]?),
-        ];
-        let [value, error, _, available] =
-            self.runtime_row(RtOp::Host(HostOp::CheckLibrary), &args, n)?;
+        let args: Vec<_> = vals
+            .iter()
+            .map(|value| value.map(Arg::Value))
+            .collect::<Option<_>>()?;
+        let [value, error, _, available] = self.runtime_row(RtOp::Host(op), &args, n)?;
         let fits = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
         self.raise_unless(fits, value, available, n);
         Some(value)

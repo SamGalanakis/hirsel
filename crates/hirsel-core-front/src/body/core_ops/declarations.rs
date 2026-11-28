@@ -17,7 +17,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                         entry.name,
                         "of_bytes" | "to_bytes" | "view_string" | "shorten"
                     )
-                    || entry.module == "compiler" && entry.name == "check"
+                    || entry.module == "compiler" && matches!(entry.name, "check" | "read_member")
                     || entry.module == "map"
                     || entry.module == "list" && entry.name.starts_with("slots_")
                     || matches!(entry.module, "deque" | "heap")
@@ -47,7 +47,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
 pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
     fn ambient(k: Kernel) -> bool {
         match k {
-            Kernel::CheckLibrary
+            Kernel::Compiler(_)
             | Kernel::Stream(_)
             | Kernel::StreamTerminal(_)
             | Kernel::StreamSize(_)

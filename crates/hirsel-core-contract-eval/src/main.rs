@@ -115,7 +115,16 @@ fn run(
     };
     let compiler = setting.compiler_worker.map(|worker| {
         let service = hirsel_compiler::grant::Designation::new(worker);
-        std::sync::Arc::new(move |bytes: &[u8]| service.check(bytes)) as eval::CompilerGrant
+        std::sync::Arc::new(move |op, bytes: &[u8], path: &[u8], limit| match op {
+            hirsel_core_ir::HostOp::CheckLibrary => service.check(bytes),
+            hirsel_core_ir::HostOp::CompilerReadSource => service.read_source_cancellable(
+                bytes,
+                path,
+                limit,
+                &std::sync::atomic::AtomicBool::new(false),
+            ),
+            _ => unreachable!(),
+        }) as eval::CompilerGrant
     });
     let (report, checked) = eval::run_entry_with_grants(
         module,
@@ -272,7 +281,12 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
 }
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.as_slice() == [hirsel_compiler::check_library::WORKER_ARG] {
+    if let [arg] = args.as_slice()
+        && matches!(
+            arg.as_str(),
+            hirsel_compiler::check_library::WORKER_ARG | hirsel_compiler::read_source::WORKER_ARG
+        )
+    {
         hirsel_core_driver::request::main(args);
     }
     std::panic::set_hook(Box::new(|_| {}));

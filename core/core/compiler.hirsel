@@ -91,6 +91,54 @@ pub type Refusal = Rejected(String) | Unsupported(String) | Limit(ResourceLimit)
 // complete reply to the empty owned carrier before returning its refusal tag.
 fn check(c: Compiler, request: Bytes, mut reply: Bytes) -> u64 waits
 
+pub type SourceReadError = InvalidPath | MissingPath | MalformedArchive | Limit(ResourceLimit) | Busy | Unavailable(String)
+
+fn read_member(c: Compiler, content: Bytes, path: Bytes, limit: u64, mut reply: Bytes) -> u64 waits
+
+/// Read one UTF-8 member by its canonical relative path in a library's C v3 bytes.
+/// The caller verifies the release root before reading. The limit is in bytes.
+pub fn read_source(c: Compiler, content: Bytes, path: String, limit: u64) -> Result[String, SourceReadError] waits {
+    if string.byte_len(path) > 1024 {
+        return Error(InvalidPath)
+    }
+    if list.len(content) > 67108864 {
+        return Error(Limit(Input))
+    }
+    let mut reply: Bytes = list.new()
+    let tag = read_member(c, content, string.as_bytes(path), limit, mut reply)
+    if tag == 0 {
+        return Ok(result.unwrap(string.from_utf8(take reply)))
+    }
+    if tag == 1 {
+        return Error(InvalidPath)
+    }
+    if tag == 2 {
+        return Error(MissingPath)
+    }
+    if tag == 3 {
+        return Error(Limit(Input))
+    }
+    if tag == 4 {
+        return Error(Limit(Cpu))
+    }
+    if tag == 5 {
+        return Error(Limit(Wall))
+    }
+    if tag == 6 {
+        return Error(Limit(Memory))
+    }
+    if tag == 7 {
+        return Error(Limit(Output))
+    }
+    if tag == 8 {
+        return Error(Busy)
+    }
+    if tag == 10 {
+        return Error(MalformedArchive)
+    }
+    Error(Unavailable(result.unwrap(string.from_utf8(take reply))))
+}
+
 fn put_bytes(mut out: Bytes, b: Bytes) {
     list.put_word_le(mut out, list.len(b))
     list.append(mut out, b)

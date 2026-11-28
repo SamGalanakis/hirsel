@@ -422,10 +422,59 @@ pub unsafe extern "C" fn hirsel_core_check_library(
     site: u64,
 ) -> Outcome {
     unsafe {
-        let buffer = *input;
-        let mut call = crate::host::compiler::Call::default();
-        let mut row = request(
+        compiler_call(
+            context,
+            compiler,
             CHECK_LIBRARY,
+            *input,
+            output,
+            site,
+            crate::host::compiler::Call::default(),
+        )
+    }
+}
+
+/// Read an archive member through the Compiler provider.
+/// # Safety
+/// The checked caller borrows the archive and path and lends an empty output
+/// carrier until delivery or cancellation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_compiler_read_source(
+    context: *mut Context,
+    compiler: u64,
+    content: *const crate::process::View,
+    path: *const crate::process::View,
+    limit: u64,
+    output: *mut Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let mut call = crate::host::compiler::Call::default();
+        call.source = Some((*path, limit));
+        compiler_call(
+            context,
+            compiler,
+            COMPILER_READ_SOURCE,
+            *content,
+            output,
+            site,
+            call,
+        )
+    }
+}
+
+unsafe fn compiler_call(
+    context: *mut Context,
+    compiler: u64,
+    operation: u8,
+    buffer: crate::process::View,
+    output: *mut Buffer,
+    site: u64,
+    mut call: crate::host::compiler::Call,
+) -> Outcome {
+    unsafe {
+        let mut row = request(
+            operation,
             0,
             site,
             Buffer {
@@ -442,7 +491,9 @@ pub unsafe extern "C" fn hirsel_core_check_library(
             return outcome;
         }
         let reply = call.reply;
-        if outcome.error != IoError::OK || (outcome.value == 0 && reply.is_empty()) {
+        if outcome.error != IoError::OK
+            || (operation == CHECK_LIBRARY && outcome.value == 0 && reply.is_empty())
+        {
             return Outcome {
                 value: 9,
                 ..Default::default()

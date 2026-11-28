@@ -282,6 +282,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::NetNarrowUnix
                     | HostOp::Resolve
                     | HostOp::CheckLibrary
+                    | HostOp::CompilerReadSource
                     | HostOp::CredFetch
                     | HostOp::TlsConnect
                     | HostOp::TlsHello

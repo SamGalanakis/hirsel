@@ -90,7 +90,7 @@ impl HostOp {
             | Self::TlsHello
             | Self::TlsServerName
             | Self::ScramFinalLen => &[GrantKind::Net],
-            Self::CheckLibrary => &[GrantKind::Compiler],
+            Self::CheckLibrary | Self::CompilerReadSource => &[GrantKind::Compiler],
             Self::CredFetch => &[GrantKind::Cred],
             Self::Stopped | Self::ProvideProcess | Self::ProcessTrigger => &[GrantKind::Process],
             Self::EnvGet | Self::EnvLen | Self::EnvName | Self::EnvNarrow => &[GrantKind::Env],

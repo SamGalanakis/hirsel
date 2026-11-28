@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 pub mod check_library;
 pub mod grant;
 mod host;
+pub mod read_source;
+mod worker;
 
 pub use check_library::{
     AuthorityCard, AuthorityVerdict, CarriedAuthority, CheckLibraryCaps, CheckLibraryRequest,

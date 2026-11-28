@@ -628,7 +628,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     // SAFETY: these operations pin the Exec call and its callback table.
     unsafe {
         match ((*request).operation, (*request).mode) {
-            (CHECK_LIBRARY, _) => {
+            (CHECK_LIBRARY | COMPILER_READ_SOURCE, _) => {
                 return crate::tasks::on_host_stack(
                     false,
                     #[cfg(feature = "prof")]
@@ -729,7 +729,7 @@ unsafe fn unix_operations(request: *const Request) -> &'static crate::os_unix::O
 unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == CHECK_LIBRARY {
+        if matches!((*request).operation, CHECK_LIBRARY | COMPILER_READ_SOURCE) {
             crate::host::compiler::step(&mut *request, token, false)
         } else if (*request).operation == EXEC_WAIT {
             (crate::exec_runtime::operations(request).process)(&mut *request, token)
@@ -754,7 +754,7 @@ unsafe extern "C" fn abort(
 ) -> Outcome {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == CHECK_LIBRARY {
+        if matches!((*request).operation, CHECK_LIBRARY | COMPILER_READ_SOURCE) {
             crate::host::compiler::abort(&mut *request)
         } else if (*request).operation == EXEC_WAIT {
             (crate::exec_runtime::operations(request).abort)(&mut *request, reason)

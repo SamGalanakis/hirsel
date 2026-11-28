@@ -1,4 +1,4 @@
-pub type SourceExtractor = fn(Bytes, String, u64) -> Result[String, String] waits
+pub type SourceExtractor = scoped fn(Bytes, String, u64) -> Result[String, String] waits
 
 pub const MAX_SOURCE: u64 = 1048576
 

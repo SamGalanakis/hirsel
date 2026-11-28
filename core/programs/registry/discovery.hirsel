@@ -102,8 +102,17 @@ pub fn refresh(mut db: store.Db, tables: directory.Tables, mut history: director
     }
 }
 
-pub fn compiler_source(_content: Bytes, _path: String, _limit: u64) -> Result[String, String] {
-    Error("this compiler has no archive member extraction operation")
+pub fn compiler_source(c: Compiler, content: Bytes, path: String, limit: u64) -> Result[String, String] waits {
+    match compiler.read_source(c, content, path, limit) {
+        Ok(text) => Ok(take text),
+        Error(InvalidPath) => Error("invalid source path"),
+        Error(MissingPath) => Error("source path not found"),
+        Error(MalformedArchive) => Error("invalid package archive"),
+        Error(Limit(Output)) => Error("source file exceeds the byte limit"),
+        Error(Limit(_)) => Error("compiler source read exceeded its resource limit"),
+        Error(Busy) => Error("compiler busy"),
+        Error(Unavailable(_)) => Error("compiler source read unavailable"),
+    }
 }
 
 type ListenerJob: send {
@@ -125,7 +134,7 @@ fn serve_json(take job: ListenerJob) -> Result[(), std.http.ServeError] waits {
     directory_http.serve(take site, ctx.requests, clock, tasks, None)
 }
 
-pub fn main(n: Net, clock: Clock, tasks: Tasks, random: Random, config: Dir, projection: Dir, err: Stderr) -> Result[(), Exit] waits {
+pub fn main(c: Compiler, n: Net, clock: Clock, tasks: Tasks, random: Random, config: Dir, projection: Dir, err: Stderr) -> Result[(), Exit] waits {
     let down = Exit(status: 1)
     let invalid = Exit(status: 2)
     let Ok(raw) = std.file.read_string_bounded(config, "discovery.json", 65536) else {
@@ -187,7 +196,9 @@ pub fn main(n: Net, clock: Clock, tasks: Tasks, random: Random, config: Dir, pro
                 let value = if ready {
                     mcp_hub.answer(reader, store.snapshot(db), tables, msg.name, msg.arguments, scoped fn(root: String) -> Result[Bytes, String] waits {
                         frame(std.http_client.handle(pool), cfg.origin, root, clock)
-                    }, compiler_source)
+                    }, scoped fn(content: Bytes, path: String, limit: u64) -> Result[String, String] waits {
+                        compiler_source(c, content, path, limit)
+                    })
                 } else {
                     Error(string.from("directory replay unavailable"))
                 }

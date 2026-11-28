@@ -1,6 +1,6 @@
 // discovery_cli/main --json TOOL ARGUMENTS. The Directory is opened read-only.
 // Only source needs to fetch a public object.
-pub fn query(name: String, arguments: String, projection: Dir, config: Dir, n: Net, clock: Clock, tasks: Tasks) -> Result[String, String] waits {
+pub fn query(name: String, arguments: String, projection: Dir, config: Dir, c: Compiler, n: Net, clock: Clock, tasks: Tasks) -> Result[String, String] waits {
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let Ok(captured) = store.open_read_only(projection, clock, options) else {
         return Error("cannot open discovery Directory")
@@ -23,17 +23,19 @@ pub fn query(name: String, arguments: String, projection: Dir, config: Dir, n: N
             return Error("source fetch unavailable")
         }
         discovery.frame(std.http_client.handle(pool), discovery.public_origin(config)?, root, clock)
-    }, discovery.compiler_source)
+    }, scoped fn(content: Bytes, path: String, limit: u64) -> Result[String, String] waits {
+        discovery.compiler_source(c, content, path, limit)
+    })
 }
 
-pub fn main(argv: Args, projection: Dir, config: Dir, n: Net, clock: Clock, tasks: Tasks, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+pub fn main(argv: Args, projection: Dir, config: Dir, c: Compiler, n: Net, clock: Clock, tasks: Tasks, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
     if args.len(argv) != 3 || args.get(argv, 0) != Some("--json") {
         let _ = stderr.write(err, "usage: --json TOOL ARGUMENTS\n")
         return Error(Exit(status: 2))
     }
     let name = option.unwrap(args.get(argv, 1))
     let arguments = option.unwrap(args.get(argv, 2))
-    match query(name, arguments, projection, config, n, clock, tasks) {
+    match query(name, arguments, projection, config, c, n, clock, tasks) {
         Ok(text) => {
             let mut line = take text
             string.push(mut line, "\n")

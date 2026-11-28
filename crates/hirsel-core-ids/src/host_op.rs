@@ -181,6 +181,7 @@ host_ops! {
     /// Advance a virtual clock's monotonic and suspend-inclusive readings together.
     CLOCK_ADVANCE_BOOT = 185,
     CHECK_LIBRARY = 186,
+    COMPILER_READ_SOURCE = 187,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

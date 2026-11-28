@@ -6,6 +6,7 @@ impl HostOp {
             Self::Connect => "hirsel_core_host_connect",
             Self::Resolve => "hirsel_core_host_resolve",
             Self::CheckLibrary => "hirsel_core_check_library",
+            Self::CompilerReadSource => "hirsel_core_compiler_read_source",
             Self::CredFetch => "hirsel_core_cred_fetch",
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",

@@ -154,6 +154,17 @@ Every supported host must enforce equivalent denial and aggregate resource caps 
 `Unavailable` before spawning. An empty environment or a CLI offline flag alone is
 insufficient. A cap or isolation failure yields a typed refusal and no registry writes.
 
+The same grant offers `compiler.read_source(c, content, path, limit) -> Result[String,
+SourceReadError] waits`. It decodes one expanded C v3 archive with the same decoder,
+validates a canonical relative `.hirsel` path, and returns the member's UTF-8 text.
+`InvalidPath` covers paths outside the canonical syntax, `MissingPath` covers absent
+members, and `MalformedArchive` covers undecodable archives and non-UTF-8 members.
+`Limit(Output)` refuses a member larger than the requested byte limit before returning
+any text. The worker and queue use the same confinement and resource refusals as
+admission. The Registry verifies the release status and the bounded Zstd frame against
+its signed release root before requesting the source. The MCP, HTTP and CLI discovery
+entries require a `Compiler` grant and cap a source reply at 1 MiB.
+
 ## 3. The two logs
 
 The release and status prefixes are `/log` and `/status`, respectively. Their distinct

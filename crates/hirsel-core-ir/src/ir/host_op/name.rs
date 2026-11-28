@@ -39,6 +39,7 @@ impl HostOp {
             HostOp::Connect => "host_connect",
             HostOp::Resolve => "host_resolve",
             HostOp::CheckLibrary => "check_library",
+            HostOp::CompilerReadSource => "compiler_read_source",
             HostOp::CredFetch => "cred_fetch",
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",

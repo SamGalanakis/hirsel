@@ -233,14 +233,19 @@ impl Machine<'_> {
             | HostOp::StdinSecret => {
                 unreachable!()
             }
-            HostOp::CheckLibrary => {
+            HostOp::CheckLibrary | HostOp::CompilerReadSource => {
+                let (path, limit, output) = if op == HostOp::CompilerReadSource {
+                    (self.carrier_bytes(a[2]), a[3], a[4])
+                } else {
+                    (&[][..], 0, a[2])
+                };
                 let reply = self
                     .host
                     .world
                     .compiler
                     .as_ref()
                     .filter(|_| a[0] == 0)
-                    .map(|check| check(self.carrier_bytes(a[1])));
+                    .map(|call| call(op, self.carrier_bytes(a[1]), path, limit));
                 let (tag, bytes) =
                     reply.unwrap_or_else(|| (9, b"compiler service is unavailable".to_vec()));
                 let size = bytes.len() as u64;
@@ -252,9 +257,9 @@ impl Machine<'_> {
                     }
                     let ptr = self.block(size, Some(limit), charge, None);
                     self.put(ptr, &bytes);
-                    self.store(a[2], 8, ptr);
-                    self.store(a[2] + 8, 8, size);
-                    self.store(a[2] + 16, 8, size);
+                    self.store(output, 8, ptr);
+                    self.store(output + 8, 8, size);
+                    self.store(output + 16, 8, size);
                 }
                 vec![tag, 0, 0, 0]
             }

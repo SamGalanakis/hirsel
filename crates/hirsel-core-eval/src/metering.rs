@@ -25,8 +25,9 @@ pub fn run_injected(
     .0
 }
 /// A host's explicit registry compiler designation in the evaluator. Its
-/// callback accepts and returns the private core.compiler row's value bytes.
-pub type CompilerGrant = std::sync::Arc<dyn Fn(&[u8]) -> (u64, Vec<u8>) + Send + Sync>;
+/// callback accepts the operation's borrowed inputs and returns its reply.
+pub type CompilerGrant =
+    std::sync::Arc<dyn Fn(HostOp, &[u8], &[u8], u64) -> (u64, Vec<u8>) + Send + Sync>;
 
 /// Run an entry with the root task's startup charge and teardown, as the native
 /// process entry does. The limit must cover startup. May record CONC-10 events.

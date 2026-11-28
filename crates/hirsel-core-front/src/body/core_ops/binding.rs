@@ -504,7 +504,8 @@ operations! {
     ("schedule", "dtls12", Lane::Runtime(Kernel::Media(HostOp::ScheduleDtls12)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "import_srtp", Lane::Runtime(Kernel::Media(HostOp::ScheduleImportSrtp)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "srtp", Lane::Runtime(Kernel::Media(HostOp::ScheduleSrtp)), "A", "media-w0-crypto-build-2282", false),
-    ("compiler", "check", Lane::Runtime(Kernel::CheckLibrary), "B", "registry-2", true),
+    ("compiler", "check", Lane::Runtime(Kernel::Compiler(HostOp::CheckLibrary)), "B", "registry-2", true),
+    ("compiler", "read_member", Lane::Runtime(Kernel::Compiler(HostOp::CompilerReadSource)), "B", "registry-2", true),
 }
 
 /// The core operation `f` binds; `toolchain` is whether the installed toolchain

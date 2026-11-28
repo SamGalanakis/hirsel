@@ -42,6 +42,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::UdpLocalAddr => &["u64"],
         HostOp::NetNarrowUnix => &["u64", "u8", "ptr", "ptr"],
         HostOp::CheckLibrary => &["u64", "ptr", "ptr"],
+        HostOp::CompilerReadSource => &["u64", "ptr", "ptr", "u64", "ptr"],
         HostOp::Resolve | HostOp::CredFetch => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
         HostOp::SendSecret => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
         HostOp::ScramSha256 => &["u64", "u64", "ptr", "ptr", "ptr", "ptr", "u8", "u64", "u64"],

@@ -613,6 +613,7 @@ tags!(HostOp {
     191 => StderrTerminal,
     192 => StderrSize,
     193 => CheckLibrary,
+    194 => CompilerReadSource,
 });
 
 tags!(RaiseCause {

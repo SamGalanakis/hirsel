@@ -2,10 +2,21 @@ use super::*;
 
 #[path = "../check_library.rs"]
 mod check_library;
+#[path = "../read_source.rs"]
+mod read_source;
+
+fn compiler_worker(args: &[String]) -> Option<fn() -> i32> {
+    let [arg] = args else { return None };
+    match arg.as_str() {
+        check_library::WORKER_ARG => Some(check_library::run_worker),
+        hirsel_compiler::read_source::WORKER_ARG => Some(read_source::run_worker),
+        _ => None,
+    }
+}
 
 pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if args.len() == 1 && args[0] == check_library::WORKER_ARG {
-        return conclude(Outcome::Exit(check_library::run_worker()));
+    if let Some(worker) = compiler_worker(&args) {
+        return conclude(Outcome::Exit(worker()));
     }
     if let [worker, directory] = args.as_slice()
         && worker == "--stage-toolchain-package"
@@ -253,8 +264,8 @@ pub fn main(mut args: Vec<String>) -> ! {
         println!("{}", serde_json::to_string(&reply).unwrap());
         std::process::exit(report_request_error(error.as_ref()));
     }
-    if args.len() == 1 && args[0] == check_library::WORKER_ARG {
-        std::process::exit(check_library::run_worker());
+    if let Some(worker) = compiler_worker(&args) {
+        std::process::exit(worker());
     }
     let structured = structured_execution(&args);
     if structured.is_none()

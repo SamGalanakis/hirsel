@@ -16,6 +16,7 @@ fn serve_discovery(take job: DiscoveryListener) -> Result[(), std.http.ServeErro
 
 type DiscoveryReader: send {
     calls: Receiver[mcp_hub.Call],
+    compiler: Compiler,
     reader: store.Reader,
     snapshot: store.Snapshot,
     tables: directory.Tables,
@@ -29,7 +30,9 @@ fn read_calls(take job: DiscoveryReader) waits {
                 return Error("wrong frame key")
             }
             Ok(clone(job.frame))
-        }, fixture_extract)
+        }, scoped fn(content: Bytes, path: String, limit: u64) -> Result[String, String] waits {
+            discovery.compiler_source(job.compiler, content, path, limit)
+        })
         let _ = channel.try_send(call.reply, take value)
     }
 }
@@ -143,10 +146,10 @@ fn check_json_queries(n: Net, clock: Clock, tasks: Tasks, address: Addr, roots: 
     Ok(())
 }
 
-fn dispatch_law(n: Net, c: Clock, random: Random, tasks: Tasks, db: store.Db, tables: directory.Tables, roots: SampleRoots, frame: Bytes, out: Stdout) -> Result[(), String] waits {
+fn dispatch_law(compiler: Compiler, n: Net, c: Clock, random: Random, tasks: Tasks, db: store.Db, tables: directory.Tables, roots: SampleRoots, frame: Bytes, out: Stdout) -> Result[(), String] waits {
     let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let (to, from): (Sender[mcp_hub.Call], Receiver[mcp_hub.Call]) = channel.new(8)
-    let worker = task.spawn(tasks, bytes 67108864, DiscoveryReader(calls: take from, reader: result.unwrap(store.reader(db, 0)), snapshot: store.snapshot(db), tables: store.copy_env(tables), frame: clone(frame)), read_calls)
+    let worker = task.spawn(tasks, bytes 67108864, DiscoveryReader(calls: take from, compiler, reader: result.unwrap(store.reader(db, 0)), snapshot: store.snapshot(db), tables: store.copy_env(tables), frame: clone(frame)), read_calls)
     let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1)
     let (json_listener, json_address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let (end_json, stopping_json): (Sender[u64], Receiver[u64]) = channel.new(1)

@@ -44,7 +44,7 @@ fn long_export_round_trip() -> Result[(), String] {
 }
 
 @test
-fn directory_bucket_rebuild(parent: Dir, clock: Clock, tasks: Tasks, random: Random, n: Net, out: Stdout) -> Result[(), String] waits {
+fn directory_bucket_rebuild(source_compiler: Compiler, parent: Dir, clock: Clock, tasks: Tasks, random: Random, n: Net, out: Stdout) -> Result[(), String] waits {
     let bucket = start_bucket(tasks, 3396, list.new())
     let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 3397)
     let mut witnesses = new_witness_pair(1730000000)
@@ -102,7 +102,7 @@ fn directory_bucket_rebuild(parent: Dir, clock: Clock, tasks: Tasks, random: Ran
     let _ = finish_bucket(take bucket)
     let queries = sample_queries(roots)
     for i in 0u64 .. list.len(queries) {
-        let value = discovery_cli.query(queries[i].0, queries[i].1, cold, parent, n, clock, tasks)?
+        let value = discovery_cli.query(queries[i].0, queries[i].1, cold, parent, source_compiler, n, clock, tasks)?
         require(value == before[i], "local --json twin disagrees with live snapshot")?
     }
     let gone = cat3("{\"path\":\"leaf.hirsel\",\"root\":", pending.quoted(roots.reader), "}")
@@ -110,7 +110,7 @@ fn directory_bucket_rebuild(parent: Dir, clock: Clock, tasks: Tasks, random: Ran
         Error(msg) if msg == "release taken down" => {},
         _ => return Error("source must refuse takedown before reading the frame"),
     }
-    let dispatch_result = dispatch_law(n, clock, random, tasks, rebuilt, rebound, roots, frame, out)
+    let dispatch_result = dispatch_law(source_compiler, n, clock, random, tasks, rebuilt, rebound, roots, frame, out)
     result.unwrap(store.close(take rebuilt))
     result.unwrap(std.dir.remove_all(parent, cold_name))
     take dispatch_result

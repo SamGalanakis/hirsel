@@ -2,7 +2,7 @@
 //! wrapper owns the request bytes and constructs the public typed result.
 use crate::{
     AuthorityVerdict, CheckLibraryCaps, CheckLibraryRequest, CheckedBinding, CheckedLibrary,
-    HistoryRow, LibraryEntry, Limit, Refusal, Service, parse_digest,
+    HistoryRow, LibraryEntry, Limit, Refusal, Service, parse_digest, read_source,
 };
 use hirsel_core_ids::ContentHash;
 
@@ -70,6 +70,28 @@ impl Designation {
             Ok(bound) => check(&bound.service, input, cancelled),
             Err(error) => (9, error.to_string().into_bytes()),
         }
+    }
+
+    /// Read one source member through the same confined worker service.
+    pub fn read_source_cancellable(
+        &self,
+        content: &[u8],
+        path: &[u8],
+        limit: u64,
+        cancelled: &AtomicBool,
+    ) -> (u64, Vec<u8>) {
+        if path.len() > read_source::MAX_PATH {
+            return (1, Vec::new());
+        }
+        if content.len() as u64 > read_source::MAX_CONTENT {
+            return refusal(Refusal::Limit(Limit::Input));
+        }
+        let answer = self
+            .service()
+            .map_err(crate::unavailable)
+            .and_then(|bound| read_source::run(&bound.service, content, path, limit, cancelled))
+            .and_then(read_source::answer);
+        answer.unwrap_or_else(refusal)
     }
 }
 
@@ -161,9 +183,15 @@ fn check(service: &Service, input: &[u8], cancelled: &AtomicBool) -> (u64, Vec<u
                 Err(message) => (9, message.as_bytes().to_vec()),
             }
         }
-        Err(Refusal::Rejected(s)) => (1, s.into_bytes()),
-        Err(Refusal::Unsupported(s)) => (2, s.into_bytes()),
-        Err(Refusal::Limit(kind)) => (
+        Err(error) => refusal(error),
+    }
+}
+
+fn refusal(error: Refusal) -> (u64, Vec<u8>) {
+    match error {
+        Refusal::Rejected(s) => (1, s.into_bytes()),
+        Refusal::Unsupported(s) => (2, s.into_bytes()),
+        Refusal::Limit(kind) => (
             match kind {
                 Limit::Input => 3,
                 Limit::Cpu => 4,
@@ -173,8 +201,8 @@ fn check(service: &Service, input: &[u8], cancelled: &AtomicBool) -> (u64, Vec<u
             },
             vec![],
         ),
-        Err(Refusal::Busy) => (8, vec![]),
-        Err(Refusal::ToolRefusal(s) | Refusal::Unavailable(s)) => (9, s.into_bytes()),
+        Refusal::Busy => (8, vec![]),
+        Refusal::ToolRefusal(s) | Refusal::Unavailable(s) => (9, s.into_bytes()),
     }
 }
 

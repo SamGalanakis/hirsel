@@ -142,7 +142,7 @@ fn rooted(service: Loopback, req: sim.s3_wire.WireRequest, raw_target: String, b
         return None
     }
     let day = string.slice(date, 0, 8)
-    let Ok(take key) = sigv4.scope_signing_key(service.root, string.from(day), clone(service.aws_region), "s3") else {
+    let Ok(take key) = sigv4.scope_signing_key(service.root, day, service.aws_region, "s3") else {
         return None
     }
     let mut scope = string.from(service.access_key)

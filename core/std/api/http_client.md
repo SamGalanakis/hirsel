@@ -62,8 +62,9 @@ Pass a buffer with spare capacity on the call that checks for EOF.
 bodies. The connection copies payload already buffered during the head read
 once. It receives subsequent payload directly into the caller's buffer,
 limited by the current payload span and spare capacity. Body reads allocate
-no storage. The reader has `http1.HEAD_MAX` (32768) bytes of wire storage and as
-much head storage, with up to 64 fields in one head. It consumes chunk extensions and
+no storage. A connection starts with 8192 bytes of wire storage and grows it
+on demand while reading a head, up to `http1.HEAD_MAX` (32768). Its final-head
+storage holds up to that same limit, with up to 64 fields. It consumes chunk extensions and
 trailers without returning them as body data. Read to EOF before starting
 another request. The client keeps bytes read ahead for the next exchange and
 reports whether `reusable(connection)` permits it. Close-delimited bodies

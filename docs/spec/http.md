@@ -591,13 +591,14 @@ The connection copies any payload that arrived during its head read once.
 After that it receives payload directly into the caller's allocation. Each
 receive is bounded by the available capacity and the current Content-Length
 or chunk remainder. Close-delimited bodies use the remaining decoded-body
-limit and require transport EOF. Chunk framing uses the fixed wire buffer
+limit and require transport EOF. Chunk framing uses the connection's wire buffer
 and never enters the caller's payload. Any bytes buffered beyond the body
 stay available for the next response.
 
 The caller's storage retains its existing payer and charge (MEM-19 and
 MEM-20). Body reads require no new admission or growth. The connection
-keeps its fixed `http1.HEAD_MAX` wire buffer and `http1.HEAD_MAX` final-head storage.
+starts with an 8192-byte wire buffer and may grow it while reading a head,
+up to `http1.HEAD_MAX`. It reserves `http1.HEAD_MAX` for final-head storage.
 
 ### HTTP-17: Client request bodies
 

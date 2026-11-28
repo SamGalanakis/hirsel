@@ -320,9 +320,11 @@ fn http_object_partial(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 fn http_object_conditions(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let h = harness(n, c, tasks)
     let auth = "Authorization: Bearer reader\r\n"
-    let whole = get(n, c, h, "/blob/blob", auth)
-    let tags = field_values(whole.wire, whole.head, b"ETag")
-    if list.len(tags) != 1 {
+    let mut probe = string.from(auth)
+    string.push(mut probe, "Range: bytes=0-0\r\n")
+    let tagged = get(n, c, h, "/blob/blob", probe)
+    let tags = field_values(tagged.wire, tagged.head, b"ETag")
+    if tagged.status != 206 || !tagged.whole || tagged.body != slice_of(0, 1) || list.len(tags) != 1 {
         finish(take h)
         return false
     }

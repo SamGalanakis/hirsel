@@ -158,9 +158,13 @@ pub type BodyRead: key = NeedInput | Data(u64) | End
 
 /// Allocates the bounded wire buffer and final-head storage.
 pub fn reader() -> Result[Reader, Error] {
-    let input: Bytes = list.with_capacity(http1.HEAD_MAX)
+    Ok(reader_with_input(http1.HEAD_MAX))
+}
+
+fn reader_with_input(input_bytes: u64) -> Reader {
+    let input: Bytes = list.with_capacity(input_bytes)
     let raw: Bytes = list.with_capacity(http1.HEAD_MAX)
-    Ok(Reader(input: take input, at: 0, eof: false, head: ResponseHead(raw: take raw, parsed: http1.head(), persistent: false), pending: http1.head(), cursor: http1.response_cursor(), body: None))
+    Reader(input: take input, at: 0, eof: false, head: ResponseHead(raw: take raw, parsed: http1.head(), persistent: false), pending: http1.head(), cursor: http1.response_cursor(), body: None)
 }
 
 fn compact(mut r: Reader) {
@@ -470,7 +474,7 @@ fn idle_connection(take input: ReadHalf, take output: WriteHalf, authority: Stri
         return Error(TooLarge)
     }
     let stored = string.from(authority)
-    let wire = reader()?
+    let wire = reader_with_input(8192)
     let encoding: Bytes = list.with_capacity(8192)
     Ok(Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock, deadline: deadline_ns, phase: Idle, head_committed: false, response_committed: false, response_fresh: false, upload: Remaining(0), head_request: false, close_after: false))
 }
@@ -618,7 +622,12 @@ fn receive_into(mut input: ReadHalf, mut into: Bytes, max: u64, clock: Clock, de
 fn receive_staged(mut c: Connection, allowance: u64) -> Result[(), Error] waits {
     check_deadline(mut c)?
     compact(mut c.wire)
-    let max = order.min(allowance, http1.HEAD_MAX - list.len(c.wire.input))
+    let buffered = list.len(c.wire.input)
+    let room = order.min(allowance, http1.HEAD_MAX - buffered)
+    if room != 0 && buffered == list.capacity(c.wire.input) {
+        list.reserve(mut c.wire.input, 1)
+    }
+    let max = order.min(room, list.capacity(c.wire.input) - buffered)
     if receive_into(mut c.input, mut c.wire.input, max, c.clock, c.deadline)? == 0 {
         end_input(mut c.wire)
     } else {

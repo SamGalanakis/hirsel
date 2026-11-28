@@ -19,7 +19,7 @@ impl<'s, 'b> Layouts<'s, 'b> {
 
     /// The logical (MEM-24) size the frontend charges per element of `t`;
     /// none for a compact layout, which no fixed charge covers.
-    fn logical(&mut self, m: &Module, t: TypeId) -> Result<Option<u64>, Error> {
+    pub(super) fn logical(&mut self, m: &Module, t: TypeId) -> Result<Option<u64>, Error> {
         let rows = match &mut self.rows {
             Some(rows) => rows,
             None => self

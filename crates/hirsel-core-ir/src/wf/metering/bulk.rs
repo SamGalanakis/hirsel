@@ -117,6 +117,10 @@ impl<'a> Facts<'a> {
         })
     }
 
+    pub(super) fn predecessor(&self, block: usize) -> Option<usize> {
+        self.incoming[block].predecessor
+    }
+
     pub(super) fn incoming(&self, block: usize) -> usize {
         self.incoming[block].count
     }

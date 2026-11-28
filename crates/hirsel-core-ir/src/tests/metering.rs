@@ -398,3 +398,184 @@ b0(v0: ptr, v1: ptr):
         );
     }
 }
+
+#[test]
+fn slot_cursor_needs_a_paid_bound_and_positive_nonwrapping_progress() {
+    let source = r#"core v1
+sig g0 = (u64) -> ()
+sig g1 = (u64, u64, u64) -> ()
+inst n0 = sample@1/count/cursor [] []
+fn f0 = n0 g0 {
+  slot s0 = u64
+  addr a0 = s0 : u64
+b0(v0: u64):
+  live s0
+  address a0
+  v1: u64 = const 0
+  v2: u64 = const 6
+  v3: u64 = const 1
+  store a0, v1
+  call rt.work_steps g1 (v0, v2, v1)
+  jump b1
+b1:
+  v4: u64 = read a0
+  v5: bool = lt v4, v0
+  branch v5, b2, b3
+b2:
+  v6: u64 = wrapping_add v4, v3
+  store a0, v6
+  jump b1
+b3:
+  return
+}
+"#;
+    let verify = |s: &str| {
+        let m = load("slot cursor", s);
+        wf::specialized_module(&m).unwrap();
+        wf::metering_strict_with_budget(&m, &decode::Debit::unlimited())
+    };
+    verify(source).unwrap();
+    verify(
+        &source
+            .replace("const 1\n", "const 3\n")
+            .replace("wrapping_add", "add"),
+    )
+    .unwrap();
+    let offset = source
+        .replace(
+            "store a0, v1",
+            "store a0, v2\n  v7: u64 = wrapping_add v2, v0",
+        )
+        .replace("lt v4, v0", "lt v4, v7");
+    verify(&offset).unwrap();
+    let product = source.replace(
+        "  call rt.work_steps g1 (v0,",
+        "  v7: u64 = saturating_mul v0, v2\n  call rt.work_steps g1 (v7,",
+    );
+    verify(&product).unwrap();
+    let split = source
+        .replace(
+            "b2:\n  v6",
+            "b2:\n  v7: bool = eq v4, v2\n  branch v7, b4, b5\nb3:\n  return\nb4:\n  v6",
+        )
+        .replace(
+            "store a0, v6\n  jump b1\nb3:\n  return",
+            "store a0, v6\n  jump b1\nb5:\n  v8: u64 = add v4, v2\n  store a0, v8\n  jump b1",
+        );
+    verify(&split).unwrap();
+    for bad in [
+        offset.replace("store a0, v2", "store a0, v1"),
+        product.replace("saturating_mul", "wrapping_mul"),
+        split.replace("add v4, v2", "add v4, v1"),
+        source
+            .replace("  jump b1\nb1:", "  call f1 g2 ()\n  jump b1\nb1:")
+            .replace("inst n0", "sig g2 = () -> ()\ninst n0")
+            .replace("fn f0", "inst n1 = sample@1/count/other [] []\nfn f0")
+            + "fn f1 = n1 g2 extern\n",
+        source.replace(
+            "  v6: u64 = wrapping_add v4, v3",
+            "  store a0, v1\n  v7: u64 = read a0\n  v6: u64 = wrapping_add v7, v3",
+        ),
+        source.replace("  call rt.work_steps g1 (v0, v2, v1)\n", ""),
+        source.replace("const 1\n", "const 0\n"),
+        source.replace("wrapping_add", "wrapping_sub"),
+        source.replace("wrapping_add v4, v3", "wrapping_add v4, v0"),
+        source.replace("const 1\n", "const 2\n"),
+        source.replace("lt v4, v0", "lt v4, v2"),
+        source.replace("  store a0, v6", "  store a0, v6\n  store a0, v1"),
+        source
+            .replace("b0(v0:", "  addr a1 = s0 : u64\nb0(v0:")
+            .replace(
+                "  store a0, v6",
+                "  store a0, v6\n  address a1\n  store a1, v1",
+            ),
+    ] {
+        assert!(
+            matches!(verify(&bad), Err(wf::Error::Invalid(ref e)) if e.contains("cycle")),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn failure_drain_uses_the_initialized_allocation_and_its_paid_count() {
+    let source = r#"core v1
+type t0 = own "sample@1/count/Element" { x: u64 }
+sig g0 = (u64, ptr) -> ()
+sig g1 = (u64, u64, u64) -> ()
+inst n0 = sample@1/count/drain [] []
+fn f0 = n0 g0 {
+  slot s0 = u64
+  addr a0 = s0 : u64
+  addr a1 = v7 : t0
+  addr a2 = v1 : t0
+  addr a3 = v7 index v10 : t0
+b0(v0: u64, v1: ptr):
+  live s0
+  address a0
+  v2: u64 = const 0
+  store a0, v2
+  v3: u64 = const 12
+  v4: ptr = const 0x0
+  v5: u64 = held_size t0
+  v6: u64 = mul v0, v5
+  call rt.work_steps g1 (v6, v3, v2)
+  v7: ptr, v8: u64 = alloc for seq t0 v6 align 8 charge v6
+  v9: bool = ne v7, v4
+  branch v9, b1, b7
+b1:
+  address a1
+  address a2
+  call rt.work_steps g1 (v6, v3, v2) fail b6
+  move a1, a2, v6
+  raise bounds cleanup b2
+b2:
+  jump b3
+b3:
+  v10: u64 = read a0
+  v11: bool = lt v10, v0
+  branch v11, b4, b5
+b4:
+  address a3
+  v12: u64 = const 1
+  v13: u64 = wrapping_add v10, v12
+  store a0, v13
+  drop a3 t0
+  jump b3
+b5:
+  free v7 charge v6
+  propagate
+b6:
+  free v7 charge v6
+  propagate
+b7:
+  return
+}
+"#;
+    let verify = |s: &str| {
+        let m = load("allocation-paid drain", s);
+        wf::specialized_module(&m).unwrap();
+        wf::metering::metering_checks_with_budget(
+            &m,
+            &decode::Debit::unlimited(),
+            wf::metering::Checks {
+                cycles: wf::metering::Cycles::Local,
+                ..wf::metering::Checks::NONE
+            },
+        )
+    };
+    verify(source).unwrap();
+    for refused in [
+        source.replacen("  call rt.work_steps g1 (v6, v3, v2)\n", "", 1),
+        source.replace("lt v10, v0", "lt v10, v6"),
+        source.replace("addr a3 = v7 index", "addr a3 = v1 index"),
+        source.replace(" = mul v0, v5", " = wrapping_mul v0, v5"),
+        source.replace("move a1, a2, v6", "move a1, a2, v2"),
+        source.replace("branch v9, b1, b7", "branch v9, b7, b1"),
+    ] {
+        assert!(
+            matches!(verify(&refused), Err(wf::Error::Invalid(ref e)) if e.contains("cycle")),
+            "{refused}"
+        );
+    }
+}

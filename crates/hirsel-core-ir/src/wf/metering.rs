@@ -3,6 +3,7 @@
 use super::*;
 
 mod bulk;
+mod cursor;
 mod repeat;
 mod scopes;
 
@@ -150,11 +151,14 @@ fn check(module: &Module, budget: &Debit<'_>, checks: Checks) -> Result<(), Erro
             scopes::check(body, &local)?;
         }
         let facts = bulk::Facts::new(body, &local)?;
-        let paid =
+        let mut paid =
             repeat::paid_repeats(module, body, &facts, &mut layouts, checks.repeats, &local)?;
         facts.check_operations(body, checks, &paid, &local)?;
         if checks.cycles == Cycles::Off {
             continue;
+        }
+        if checks.cycles >= Cycles::Local {
+            cursor::paid_latches(module, &mut layouts, body, &facts, &mut paid, &local)?;
         }
         let entry = entries[fi];
         connect(external, entry)?;

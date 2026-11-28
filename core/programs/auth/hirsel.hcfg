@@ -1,0 +1,18 @@
+pkg_v1.Package(
+    name: "auth",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("auth.hirsel", "auth"), ("browser.hirsel", "auth"), ("token.hirsel", "auth"), ("ceremony.hirsel", "auth"), ("oidc.hirsel", "auth"), ("exchange.hirsel", "auth"), ("attestation.hirsel", "auth"), ("passkey.hirsel", "auth"), ("monitor.hirsel", "auth")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("effect", Path(package: "effect", major: 1, path: "../effect", authority: [Dir, Net, Clock, Secret])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+    ],
+    tests: Some(Tests(sources: [("laws.hirsel", "laws"), ("browser-law.hirsel", "auth"), ("oidc-law.hirsel", "laws"), ("passkey-law.hirsel", "laws"), ("stream-law.hirsel", "laws"), ("transact-law.hirsel", "laws"), ("invalidation-law.hirsel", "laws")], limit: 134217728, grants: [Clock, Random, Tasks, Dir("."), Net(Listen(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)), Net(Connect(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535))], runs: [])),
+)

@@ -120,11 +120,23 @@ function readQuery(binding, envelope) {
 }
 
 function readResult(binding, reply) {
+  const error = () => {
+    let detail;
+    try { detail = JSON.parse(reply.body); } catch {}
+    if (typeof detail?.fault === 'string') return {tag: 'Fault', code: detail.fault};
+    if (typeof detail?.refused === 'string') return {tag: 'Refused', code: detail.refused};
+    if (reply.status === 401) return {tag: 'Rejected'};
+    if (reply.status === 503) return {tag: 'Unavailable'};
+    return {tag: 'HttpStatus'};
+  };
+  if ((binding.mode === 'stream' && !reply.committed) ||
+      (reply.status !== binding.okStatus && !(reply.committed && reply.status === binding.errorStatus))) {
+    return {...reply, error: error()};
+  }
   if (reply.body.length === 0) return reply;
   const [root, definitions] = binding.result;
   const value = JSON.parse(reply.body);
   if (binding.mode === 'stream') {
-    if (!reply.committed) return reply;
     const result = root[0] === 19 ? definitions[root[1]].body : root;
     if (reply.status === binding.okStatus) {
       return {...reply, value: {tag: 'Ok', value: convert(result[1], definitions, value, false)}};
@@ -159,7 +171,7 @@ export function makeHttpBinding(binding) {
       const headers = new Headers();
       if (options.credential !== undefined) headers.set('Authorization', options.credential);
       if (request.body !== undefined) headers.set('Content-Type', 'application/json');
-        const fetcher = options.fetch ?? globalThis.fetch;
+      const fetcher = options.fetch ?? globalThis.fetch;
       const response = await fetcher(new URL(request.path, options.url), {
         method: binding.method, headers, body: request.body, redirect: 'error',
       });

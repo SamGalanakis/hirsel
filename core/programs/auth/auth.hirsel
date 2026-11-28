@@ -1,0 +1,199 @@
+pub type Error: codec + send = Rejected | Unavailable
+
+pub opaque type Registration: codec + send {
+    id: String,
+    digest: Bytes
+}
+
+type Row: codec + send {
+    origin: store.StoreId,
+    digest: Bytes,
+    subject: Bytes,
+    expires_at_ms: u64
+}
+
+pub opaque type Tables: shareable + send {
+    sessions: store.Table[String, Row],
+    ceremonies: store.Table[String, Ceremony],
+    providers: store.Table[String, ProviderKeys],
+    credentials: store.Table[String, Credential],
+    generations: store.Table[String, u64],
+    invalidations: store.Table[String, bool]
+}
+
+pub type Session: codec + send {
+    origin: store.StoreId,
+    id: String,
+    subject: Bytes,
+    expires_at_ms: u64
+}
+
+pub fn declare(mut d: store.Declare) -> Result[Tables, store.Error] {
+    Ok(Tables(sessions: table(mut d, "auth.sessions")?, ceremonies: table(mut d, "auth.ceremony")?, providers: table(mut d, "auth.jwks")?, credentials: table(mut d, "auth.credentials")?, generations: table(mut d, "auth.credential-generations")?, invalidations: table(mut d, "auth.invalidations")?))
+}
+
+fn table[V: codec](mut d: store.Declare, name: String) -> Result[store.Table[String, V], store.Error] {
+    let value: std.codec.Codec[V] = std.codec.of()
+    let def = store.declare_table(mut d, name, std.codec.key_string(), value)?
+    store.finish(mut d, take def)
+}
+
+fn digest_of(value: String) -> Bytes {
+    let digest = std.sha256.hash(string.as_bytes(value))
+    let mut raw: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut raw, digest[i])
+    }
+    take raw
+}
+
+fn random_text(r: Random, count: u64) -> String {
+    let mut raw: Bytes = list.with_capacity(count)
+    host.random(r, mut raw)
+    std.base64.encode_url(raw, false)
+}
+
+/// Keep the cookie outside the recorded transaction. Only the registration
+/// belongs in the successful credential ceremony's write.
+pub fn fresh(r: Random) -> (String, Registration) {
+    let id = random_text(r, 16)
+    let secret_part = random_text(r, 32)
+    let mut raw = string.from(id)
+    string.push(mut raw, ".")
+    string.push(mut raw, secret_part)
+    (take raw, Registration(id: take id, digest: digest_of(secret_part)))
+}
+
+pub fn create(mut tx: store.Tx, t: Tables, registration: Registration, principal: Bytes, ttl_ms: u64) -> Result[(), Error] {
+    let info = store.info(mut tx)
+    let Some(end) = int.checked_add(info.at, ttl_ms) else {
+        return Error(Rejected)
+    }
+    if string.byte_len(registration.id) != 22 || list.len(registration.digest) != 32 || ttl_ms == 0 || list.len(principal) == 0 || list.len(principal) > runner.SUBJECT_MAX {
+        return Error(Rejected)
+    }
+    if let Some(_) = store.fetch(tx, t.sessions, registration.id) ?=> |_| Unavailable {
+        return Error(Rejected)
+    }
+    let row = Row(origin: info.id.store, digest: clone(registration.digest), subject: clone(principal), expires_at_ms: end)
+    store.put(mut tx, t.sessions, registration.id, row) ?=> |_| Unavailable
+    Ok(())
+}
+
+fn parts(cookie: String) -> Result[(String, Bytes), Error] {
+    if string.byte_len(cookie) != 66 {
+        return Error(Rejected)
+    }
+    let Some((id, text)) = std.string.split_once(cookie, ".") else {
+        return Error(Rejected)
+    }
+    if string.byte_len(id) != 22 || string.byte_len(text) != 43 {
+        return Error(Rejected)
+    }
+    Ok((clone(id), digest_of(text)))
+}
+
+fn live(id: String, row: Option[Row], origin: store.StoreId, now_ms: u64) -> Result[Session, Error] {
+    let Some(value) = view row else {
+        return Error(Rejected)
+    }
+    if value.origin != origin || now_ms >= value.expires_at_ms {
+        return Error(Rejected)
+    }
+    Ok(Session(origin: origin, id: clone(id), subject: clone(value.subject), expires_at_ms: value.expires_at_ms))
+}
+
+fn checked(id: String, digest: Bytes, row: Option[Row], origin: store.StoreId, now_ms: u64) -> Result[Session, Error] {
+    let Some(value) = view row else {
+        return Error(Rejected)
+    }
+    if !std.hmac.equal(value.digest, digest) {
+        return Error(Rejected)
+    }
+    live(id, row, origin, now_ms)
+}
+
+pub fn verify(mut tx: store.Tx, t: Tables, cookie: String) -> Result[Session, Error] {
+    let (id, digest) = parts(cookie)?
+    let info = store.info(mut tx)
+    let row = store.fetch(tx, t.sessions, id) ?=> |_| Unavailable
+    checked(id, digest, row, info.id.store, info.at)
+}
+
+/// For a Runner bind mint. The recorded caller carries the public lookup id.
+/// The adapter reads the session again under the writer lock.
+pub fn bind_session(reader: store.Reader, snap: store.Snapshot, t: Tables, cookie: String, issuer: u8, clock: Clock, service: Sender[std.stream_watch.Probe]) -> Result[runner.LiveBinding, runner.BindRefusal] waits {
+    if issuer < 2 {
+        return Error(Rejected)
+    }
+    let (id, digest) = parts(cookie) ?=> |_| Rejected
+    let row = store.get(reader, snap, t.sessions, id) ?=> |_| Unavailable
+    let (origin, _) = store.table_identity(t.sessions)
+    let session = checked(id, digest, row, origin, host.wall_ms(clock)) ?=> |_| Rejected
+    let caller = runner.BoundCaller(caller: store.Caller(issuer: issuer, subject: clone(string.as_bytes(id))), expires_at_ms: Some(session.expires_at_ms))
+    watched(service, Local(Invalidation(origin, id: take id)), take caller, clock)
+}
+
+pub fn revoke(mut tx: store.Tx, t: Tables, id: String) -> Result[(), Error] {
+    let found = store.fetch(tx, t.sessions, id) ?=> |_| Unavailable
+    if let Some(take row) = take found {
+        let mut revoked = take row
+        revoked.expires_at_ms = 0
+        store.put(mut tx, t.sessions, id, revoked) ?=> |_| Unavailable
+    }
+    Ok(())
+}
+
+pub opaque scoped type Proof {
+    session: View[Session]
+}
+
+pub fn subject(proof: Proof) -> View[Bytes] in proof {
+    proof.session.subject
+}
+
+pub fn session_id(proof: Proof) -> View[String] in proof {
+    view proof.session.id
+}
+
+pub fn expires_at_ms(proof: Proof) -> u64 {
+    proof.session.expires_at_ms
+}
+
+type Env[H, A, R, E]: send {
+    issuer: u8,
+    tables: StaticFn[fn(H) -> Tables],
+    authorize: StaticFn[fn(store.Tx, H, Session, A) -> Result[(), E]],
+    refuse: StaticFn[fn(Error) -> E],
+    handler: StaticFn[fn(mut store.Tx, H, Proof, take A) -> Result[R, E]]
+}
+
+fn current(mut tx: store.Tx, t: Tables, issuer: u8, caller: runner.Caller) -> Result[Session, Error] {
+    if issuer < 2 || caller.issuer != issuer || list.len(caller.subject) != 22 {
+        return Error(Rejected)
+    }
+    let id = string.from_utf8(clone(caller.subject)) ?=> |_| Rejected
+    let info = store.info(mut tx)
+    let row = store.fetch(tx, t.sessions, id) ?=> |_| Unavailable
+    live(id, row, info.id.store, info.at)
+}
+
+fn adapt[H, A, R, E](mut tx: store.Tx, h: H, caller: runner.Caller, take input: A, env: Env[H, A, R, E]) -> Result[R, E] {
+    let session = current(mut tx, (code.callable(env.tables))(h), env.issuer, caller) ?=> |why| (code.callable(env.refuse))(why)
+    (code.callable(env.authorize))(tx, h, session, input)?
+    (code.callable(env.handler))(mut tx, h, Proof(session: view session), take input)
+}
+
+pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: codec](mut reg: runner.Registry[G, H], issuer: u8, tables: StaticFn[fn(H) -> Tables], authorize: StaticFn[fn(store.Tx, H, Session, A) -> Result[(), E]], refuse: StaticFn[fn(Error) -> E], handler: StaticFn[fn(mut store.Tx, H, Proof, take A) -> Result[R, E]], bytes_max: u64, steps_max: u64) -> Result[(), runner.RegisterError] {
+    if issuer < 2 {
+        return Error(Bounds)
+    }
+    runner.transact_via(mut reg, handler, Env(issuer, tables, authorize, refuse, handler), adapt, bytes_max, steps_max)
+}
+
+/// Authorize a locally dispatched write with a cookie before calling the handler.
+/// Runner wire handlers use transact so their recorded inputs omit the cookie.
+pub fn with_session[R](mut tx: store.Tx, t: Tables, cookie: String, handler: scoped fn(mut store.Tx, Proof) -> Result[R, Error]) -> Result[R, Error] {
+    let session = verify(mut tx, t, cookie)?
+    handler(mut tx, Proof(session: view session))
+}

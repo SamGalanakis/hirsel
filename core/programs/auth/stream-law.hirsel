@@ -1,0 +1,88 @@
+type StreamServer: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    identity: runner.LiveBinding,
+    stop: Receiver[u64]
+}
+
+fn output_item(mut state: (bool, Clock)) -> Result[Option[Bytes], ()] waits {
+    if state.0 {
+        host.sleep_until(state.1, std.clock.deadline_after_ms(host.mono_ns(state.1), 60000))
+    }
+    state.0 = true
+    Ok(Some(b"private"))
+}
+
+fn body_source(take seed: std.stream.Seed, c: Clock) waits {
+    std.stream.produce_owned(take seed, (false, c), output_item)
+}
+
+fn private_route(req: std.http.Request, _scratch: Region, mut _body: std.http.Responder, who: runner.LiveBinding) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let bounds = std.stream.Bounds(event_max: 128, producer_bytes: 16384, producer_steps: 16384)
+    let spec = runner.http_bound_stream(req, 200, bounds, who, body_source)?
+    Ok(Stream(take spec))
+}
+
+fn serve_stream(take job: StreamServer) waits {
+    let StreamServer(listener: take listener, clock, tasks, identity: take identity, stop: take stop) = take job
+    let mut routes: std.router.Builder[runner.LiveBinding] = std.router.builder()
+    result.unwrap(std.router.add(mut routes, "GET", "/data", std.router.Route(handler: private_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(131072), steps: None)))
+    let mut sockets: List[Listener] = list.new()
+    list.push(mut sockets, take listener)
+    let mut cfg = std.http.defaults()
+    cfg.streams_max = 1
+    cfg.heartbeat_ms = 1000
+    cfg.state_max = 256
+    cfg.lease_ms = 60000
+    let make: scoped[view] fn() -> runner.LiveBinding = fn() -> runner.LiveBinding {
+        runner.LiveBinding(binding: runner.BoundCaller(caller: clone(identity.binding.caller), expires_at_ms: identity.binding.expires_at_ms), guard: std.stream_watch.copy_guard(identity.guard))
+    }
+    result.unwrap(std.http.serve_with_factory(take sockets, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 4096, make, Some(take stop)))
+}
+
+@test
+fn revoke_open_response(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), store.Error] waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let t = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take cookie, take registration) = auth.fresh(r)
+    let args: (auth.Tables, auth.Registration) = (clone(t), take registration)
+    let saved = store.run(mut db, None, args, fn(mut tx, env) -> Result[(), auth.Error] {
+        auth.create(mut tx, env.0, env.1, b"user", 60000)
+    })?
+    let Committed(_) = saved else {
+        fail("create session")
+    }
+    let branch = store.main_branch(db)
+    let head = store.follow(mut db, branch)?
+    let (service, take worker) = result.unwrap(auth.monitor(tasks, c, store.reader(db, store.READER_PIN_MIN)?, head, t, 8, 1048576))
+    let identity = result.unwrap(auth.bind_session(store.reader(db, store.READER_PIN_MIN)?, store.snapshot(db), t, cookie, 7, c, service))
+    let id = result.unwrap(string.from_utf8(clone(identity.binding.caller.subject)))
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0), 8))
+    let (stop, ending): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let server = task.spawn(tasks, bytes 33554432, StreamServer(listener: take listener, clock: c, tasks, identity: take identity, stop: take ending), serve_stream)
+    let req = std.http_client.Request(method: "GET", target: "/data", headers: list.new(), body: Fixed(0))
+    let until = std.clock.deadline_after_ms(host.mono_ns(c), 4000)
+    let mut client = result.unwrap(std.http_client.dial(n, addr, "a", c, req, until))
+    result.unwrap(std.http_client.finish_request(mut client, 4096))
+    let mut body: Bytes = list.with_capacity(64)
+    if std.http_client.status(std.http_client.head(client)) != 200 || result.unwrap(std.http_client.read(mut client, mut body)) != 7 || body != b"private" {
+        fail("authenticated stream did not open")
+    }
+    let revocation: (auth.Tables, String) = (take t, take id)
+    let changed = store.run(mut db, None, revocation, fn(mut tx, env) -> Result[(), auth.Error] {
+        auth.revoke(mut tx, env.0, env.1)
+    })?
+    let Committed(_) = changed else {
+        fail("commit revoke")
+    }
+    list.clear(mut body)
+    if let Ok(0) = std.http_client.read(mut client, mut body) {} else {
+        fail("open stream did not end after revoke")
+    }
+    std.http_client.close(take client)
+    result.unwrap(channel.send(stop, until))
+    result.unwrap(task.join(take server))
+    let _ = std.task.cancel_join(take worker)
+    Ok(())
+}

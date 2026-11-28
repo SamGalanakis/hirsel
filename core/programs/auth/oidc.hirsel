@@ -1,0 +1,116 @@
+pub type Provider: codec + send {
+    issuer: String,
+    client_id: String,
+    token_endpoint: String,
+    redirect_uri: String
+}
+
+type ProviderKeys: codec {
+    config: Provider,
+    jwks: String,
+    good_until_ms: u64
+}
+
+pub type OidcRequest: codec + send {
+    challenge: Challenge,
+    code_challenge: String
+}
+
+pub type Identity: codec + send {
+    issuer: String,
+    subject: String
+}
+
+fn https(value: String) -> bool {
+    let Ok(uri) = std.uri.parse(value) else {
+        return false
+    }
+    std.string.starts_with(value, "https://") && uri.host != None && uri.userinfo == None && uri.fragment == None
+}
+
+/// Install only from a trusted issuer configuration and its granted JWKS refresh.
+pub fn cache_provider(mut tx: store.Tx, t: Tables, p: Provider, jwks: String, good_until_ms: u64) -> Result[(), Error] {
+    let now = store.info(mut tx).at
+    if !https(p.issuer) || !https(p.token_endpoint) || !https(p.redirect_uri) || p.client_id == "" || good_until_ms <= now || good_until_ms - now > 86400000 {
+        return Error(Rejected)
+    }
+    let keys = std.jwt.jwks_public(jwks) ?=> |_| Rejected
+    if std.jwt.public_len(keys) == 0 {
+        return Error(Rejected)
+    }
+    let row = ProviderKeys(config: clone(p), jwks: clone(jwks), good_until_ms: good_until_ms)
+    store.put(mut tx, t.providers, p.issuer, row) ?=> |_| Unavailable
+    Ok(())
+}
+
+pub fn begin_oidc(mut tx: store.Tx, t: Tables, issuer: String, seed: ChallengeSeed, ttl_ms: u64) -> Result[OidcRequest, Error] {
+    let found = store.fetch(tx, t.providers, issuer) ?=> |_| Unavailable
+    let Some(p) = view found else {
+        return Error(Rejected)
+    }
+    if p.good_until_ms <= store.info(mut tx).at {
+        return Error(Unavailable)
+    }
+    let prompt = open_challenge(mut tx, t, seed, Oidc(clone(issuer), clone(p.config.client_id)), ttl_ms)?
+    Ok(OidcRequest(challenge: take prompt, code_challenge: std.base64.encode_url(seed.browser_digest, false)))
+}
+
+type Extra {
+    nonce: Option[String],
+    azp: Option[String]
+}
+
+fn extras(s: String, mut c: std.json.Cursor) -> Result[Extra, std.json.Error] {
+    std.json.record_of(s, mut c, Extra(nonce: None, azp: None), fn(k: String, text: String, mut v: std.json.Cursor, mut out: Extra) -> Result[(), std.json.Error] {
+        if k == "nonce" {
+            out.nonce = Some(std.json.read_string(text, mut v)?)
+        } else if k == "azp" {
+            out.azp = Some(std.json.read_string(text, mut v)?)
+        } else {
+            std.json.skip_value(text, mut v)?
+        }
+        Ok(())
+    })
+}
+
+fn verify_id(p: Provider, jwks: String, nonce: String, id_token: String, now_ms: u64) -> Result[Identity, Error] {
+    let keys = std.jwt.jwks_public(jwks) ?=> |_| Unavailable
+    let mut other: List[std.jwt.Alg] = list.new()
+    list.push(mut other, Es256)
+    list.push(mut other, EdDsa)
+    let rules = std.jwt.Rules(allow: std.jwt.Allow(first: Rs256, rest: take other), now_secs: now_ms / 1000, leeway_secs: 0, iss: Some(clone(p.issuer)), aud: Some(clone(p.client_id)), require_exp: true)
+    let jwt = std.jwt.verify_jwt_public(id_token, rules, keys) ?=> |_| Rejected
+    let Some(sub) = view jwt.claims.sub else {
+        return Error(Rejected)
+    }
+    if sub == "" || string.byte_len(sub) > 255 || jwt.claims.iat == None {
+        return Error(Rejected)
+    }
+    let extra = std.json.decode(jwt.claims.json, extras) ?=> |_| Rejected
+    if extra.nonce != Some(clone(nonce)) || (list.len(jwt.claims.aud) > 1 || extra.azp != None) && extra.azp != Some(clone(p.client_id)) {
+        return Error(Rejected)
+    }
+    Ok(Identity(issuer: clone(p.issuer), subject: clone(sub)))
+}
+
+pub fn finish_oidc_via(mut tx: store.Tx, t: Tables, state: String, browser: String, id_token: String, verify_token: fn(Provider, String, String, String, u64) -> Result[Identity, Error]) -> Result[Identity, Error] {
+    let row = pending(mut tx, t, state, browser)?
+    let Oidc(issuer, client_id) = view row.purpose else {
+        return Error(Rejected)
+    }
+    let found = store.fetch(tx, t.providers, issuer) ?=> |_| Unavailable
+    let Some(p) = view found else {
+        return Error(Rejected)
+    }
+    let now = store.info(mut tx).at
+    if p.good_until_ms <= now || p.config.client_id != client_id {
+        return Error(Unavailable)
+    }
+    let identity = verify_token(p.config, p.jwks, row.nonce, id_token, now)?
+    consume(mut tx, t, state)?
+    Ok(take identity)
+}
+
+pub fn finish_oidc(mut tx: store.Tx, t: Tables, state: String, browser: String, id_token: String) -> Result[Identity, Error] {
+    finish_oidc_via(mut tx, t, state, browser, id_token, verify_id)
+}

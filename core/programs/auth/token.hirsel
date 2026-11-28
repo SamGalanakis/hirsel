@@ -1,0 +1,85 @@
+pub type Scope: codec + key + send {
+    issuer: String,
+    audience: String,
+    action: String
+}
+
+type Grant: codec {
+    scope: Scope,
+    issued_at_ms: u64,
+    session: Session
+}
+
+fn scope_valid(s: Scope) -> bool {
+    s.issuer != "" && s.audience != "" && s.action != ""
+}
+
+fn permitted_lifetime(issued: u64, end: u64) -> bool {
+    end > issued && end - issued <= 300000
+}
+
+pub fn mint_scoped(signer: std.jwt.Signer, alg: std.jwt.Alg, scope: Scope, session: Session, now_ms: u64, ttl_ms: u64) -> Result[String, Error] {
+    let Some(end) = int.checked_add(now_ms, ttl_ms) else {
+        return Error(Rejected)
+    }
+    if !permitted_lifetime(now_ms, end) || session.expires_at_ms < end || !scope_valid(scope) || session.id == "" || list.len(session.subject) == 0 {
+        return Error(Rejected)
+    }
+    let mut issued: Session = clone(session)
+    issued.expires_at_ms = end
+    let grant = Grant(scope: clone(scope), issued_at_ms: now_ms, session: take issued)
+    let codec: std.codec.Codec[Grant] = std.codec.of()
+    let mut payload: Bytes = list.new()
+    std.codec.encode(codec, grant, mut payload) ?=> |_| Rejected
+    let mut header = string.from("{\"typ\":\"hirsel-scope-v1\",\"alg\":\"")
+    string.push(mut header, std.jwt.alg_name(alg))
+    string.push(mut header, "\"}")
+    Ok(std.jwt.sign_jws(signer, header, payload) ?=> |_| Rejected)
+}
+
+pub opaque type Scoped: send {
+    scope: Scope,
+    session: Session
+}
+
+pub fn scoped_subject(access: Scoped) -> View[Bytes] in access {
+    view access.session.subject
+}
+
+pub fn scoped_expiry(access: Scoped) -> u64 {
+    access.session.expires_at_ms
+}
+
+pub fn verify_scoped(token: String, key: std.jwt.Key, alg: std.jwt.Alg, scope: Scope, now_ms: u64) -> Result[Scoped, Error] {
+    let verified = std.jwt.verify_jws(token, std.jwt.allow(alg), key) ?=> |_| Rejected
+    if verified.header.typ != Some("hirsel-scope-v1") || !scope_valid(scope) {
+        return Error(Rejected)
+    }
+    let codec: std.codec.Codec[Grant] = std.codec.of()
+    let grant = std.codec.decode(codec, verified.payload) ?=> |_| Rejected
+    let end = grant.session.expires_at_ms
+    if grant.scope != scope || !permitted_lifetime(grant.issued_at_ms, end) || now_ms < grant.issued_at_ms || now_ms >= end || grant.session.id == "" || list.len(grant.session.subject) == 0 {
+        return Error(Rejected)
+    }
+    let Grant(scope: _, issued_at_ms: _, session: take active) = take grant
+    Ok(Scoped(scope: clone(scope), session: take active))
+}
+
+/// Caller identity includes the scope and source Store. Its 32-byte digest
+/// cannot fit the full-session adapter's 22-byte lookup key.
+pub fn bind_scoped(access: Scoped, issuer: u8, service: Sender[std.stream_watch.Probe], clock: Clock) -> Result[runner.LiveBinding, runner.BindRefusal] waits {
+    if issuer < 2 || host.wall_ms(clock) >= access.session.expires_at_ms {
+        return Error(Rejected)
+    }
+    let notice = Invalidation(origin: access.session.origin, id: clone(access.session.id))
+    let codec: std.codec.Codec[(Scope, Invalidation)] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    std.codec.encode(codec, (clone(access.scope), clone(notice)), mut raw) ?=> |_| Unavailable
+    let digest = std.sha256.hash(raw)
+    let mut identity: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut identity, digest[i])
+    }
+    let caller = runner.BoundCaller(caller: store.Caller(issuer, subject: take identity), expires_at_ms: Some(access.session.expires_at_ms))
+    watched(service, ScopedAccess(take notice), take caller, clock)
+}

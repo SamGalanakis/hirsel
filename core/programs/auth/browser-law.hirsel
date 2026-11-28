@@ -1,0 +1,16 @@
+@test
+fn cookie_origin_policy() -> Result[(), ()] {
+    if let Ok(_) = request_policy(b"GET", true, true, false, false) {
+        fail("cookie upgrade requires matching origin")
+    }
+    if let Ok(_) = request_policy(b"POST", true, false, false, true) {
+        fail("missing or mismatched origin")
+    }
+    if let Ok(_) = request_policy(b"POST", true, false, true, false) {
+        fail("missing or mismatched fetch site")
+    }
+    let _ = result.unwrap(request_policy(b"GET", true, false, false, false))
+    let _ = result.unwrap(request_policy(b"POST", true, false, true, true))
+    let _ = result.unwrap(request_policy(b"GET", true, true, true, true))
+    Ok(())
+}

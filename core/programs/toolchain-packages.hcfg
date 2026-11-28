@@ -5,6 +5,7 @@ toolchain_v1.Packages(
         "runner",
         "effect",
         "inbox",
+        "auth",
         "media_bits",
         "sframe",
         "media_container",

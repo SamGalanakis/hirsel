@@ -100,7 +100,7 @@ fn wire_event(take e: WireInput) -> WireEvent {
     WireEvent(e: take e)
 }
 
-type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Result[BoundCaller, BindRefusal], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Result[LiveBinding, BindRefusal], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 
@@ -271,6 +271,8 @@ type WireWrite: send {
     config: std.wsock.Config,
     end: u64,
     can_close: bool,
+    guard: Option[std.stream_watch.Guard],
+    auth_end: Option[u64],
     close: bool,
     report: Option[Sender[u64]]
 }
@@ -400,7 +402,7 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
                         return
                     }
                     probing = true
-                    break Control(9u8, box.new(std.websocket.Control(data:[0u8; 125], len: 0u64)))
+                    break Control(9u8, box.new(std.websocket.Control(data: [0u8; 125], len: 0u64)))
                 },
                 _ => {
                     wire_return_reader(to, wire_close_control(1001u16), take r);
@@ -417,8 +419,12 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
 // Writes x's staged frame; without `wait`, Ok(false) is a send that would block (v2.44).
 fn wire_push_frame(mut x: WireWrite, wait: bool) -> Result[bool, u16] waits {
     loop {
+        if std.stream_watch.revoked(x.guard, x.clock) || std.stream.auth_lapsed(x.clock, x.auth_end) {
+            return Error(4401u16)
+        }
+        let stop = std.stream.release_deadline(x.clock, x.auth_end, x.end)
         let until = if wait {
-            x.end
+            std.stream_watch.probe_deadline(x.guard, x.clock, stop)
         } else {
             0u64
         }
@@ -433,6 +439,12 @@ fn wire_push_frame(mut x: WireWrite, wait: bool) -> Result[bool, u16] waits {
             Error(Network(TimedOut)) => {
                 if !wait {
                     return Ok(false)
+                }
+                if until < stop {
+                    continue
+                }
+                if std.stream.auth_lapsed(x.clock, x.auth_end) {
+                    return Error(4401u16)
                 }
                 if !x.can_close {
                     return Error(1001u16)

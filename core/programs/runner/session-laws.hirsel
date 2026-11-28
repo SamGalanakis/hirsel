@@ -469,7 +469,7 @@ fn write_stage(mut w: Box[std.wsock.Writer], config: std.wsock.Config, size: u64
 
 fn write_staged(tasks: Tasks, take w: Box[std.wsock.Writer], to: Sender[WireEvent], clock: Clock, config: std.wsock.Config) -> Result[Task[()], WireInput] waits {
     let out = result.unwrap(std.wsock.outbound(Server, config, None))
-    wire_start(tasks, WireWrite(live: None, cursor: 0u64, writer: take w, to: channel.sender(to), out: out, clock: clock, config: config, end: int.saturating_add(host.mono_ns(clock), std.wsock.MESSAGE_NS), can_close: true, close: false, report: None))
+    wire_start(tasks, WireWrite(live: None, cursor: 0u64, writer: take w, to: channel.sender(to), out: out, clock: clock, config: config, end: int.saturating_add(host.mono_ns(clock), std.wsock.MESSAGE_NS), can_close: true, guard: None, auth_end: None, close: false, report: None))
 }
 
 // Bug caught: a writer that blocks the owner, or a spawned writer that never hands the Writer

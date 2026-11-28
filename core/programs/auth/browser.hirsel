@@ -1,0 +1,39 @@
+/// The configured serialized HTTPS origin comes from trusted deployment data.
+pub opaque type BrowserOrigin: shareable + send {
+    text: String
+}
+
+pub fn browser_origin(value: String) -> Result[BrowserOrigin, Error] {
+    let uri = std.uri.parse(value) ?=> |_| Rejected
+    if !std.string.starts_with(value, "https://") || uri.host == None || uri.path.start != uri.path.end || uri.userinfo != None || uri.query != None || uri.fragment != None {
+        return Error(Rejected)
+    }
+    Ok(BrowserOrigin(text: clone(value)))
+}
+
+fn one_field(req: std.http.Request, name: Bytes, expected: Bytes) -> bool {
+    if let Some(value) = std.http.field(req, name) {
+        return value == expected && std.http.field_at(req, name, 1) == None
+    }
+    false
+}
+
+/// Check ambient credentials before dispatch. A long-lived GET uses check_stream.
+pub fn check_request(req: std.http.Request, origin: BrowserOrigin) -> Result[(), Error] {
+    request_policy(std.http.method(req), std.http.field(req, b"cookie") != None, std.http.field(req, b"upgrade") != None, one_field(req, b"origin", string.as_bytes(origin.text)), one_field(req, b"sec-fetch-site", b"same-origin"))
+}
+
+fn request_policy(method: Bytes, cookie: bool, upgrade: bool, origin_matches: bool, same_site: bool) -> Result[(), Error] {
+    if !cookie || (!upgrade && (method == b"GET" || method == b"HEAD" || method == b"OPTIONS")) {
+        return Ok(())
+    }
+    if !origin_matches || !same_site {
+        return Error(Rejected)
+    }
+    Ok(())
+}
+
+/// A cookie that opens a long-lived response requires same-origin evidence.
+pub fn check_stream(req: std.http.Request, origin: BrowserOrigin) -> Result[(), Error] {
+    request_policy(std.http.method(req), std.http.field(req, b"cookie") != None, true, one_field(req, b"origin", string.as_bytes(origin.text)), one_field(req, b"sec-fetch-site", b"same-origin"))
+}

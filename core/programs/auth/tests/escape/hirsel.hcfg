@@ -1,0 +1,7 @@
+pkg_v1.Package(
+    name: "local/escape",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [("auth", Toolchain(package: "auth", major: 1, authority: []))],
+)

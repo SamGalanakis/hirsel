@@ -1,0 +1,105 @@
+@test
+fn session_lifecycle(c: Clock, r: Random) -> Result[(), store.Error] waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let tables = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take cookie, take registration) = auth.fresh(r)
+    let issuance: (auth.Tables, auth.Registration) = (clone(tables), take registration)
+    let saved = store.run(mut db, None, issuance, fn(mut tx, input) -> Result[(), auth.Error] {
+        auth.create(mut tx, input.0, input.1, b"actor", 60000)
+    })?
+    let Committed(_) = saved else {
+        fail("session creation")
+    }
+    let proof = store.run(mut db, None, (tables, cookie), fn(mut tx, input) -> Result[(), auth.Error] {
+        let active = auth.verify(mut tx, input.0, input.1)?
+        if active.subject != b"actor" || active.expires_at_ms <= store.info(mut tx).at {
+            fail("identity or expiry")
+        }
+        auth.revoke(mut tx, input.0, active.id)?
+        if let Ok(_) = auth.verify(mut tx, input.0, input.1) {
+            fail("revoked session")
+        }
+        Ok(())
+    })?
+    let Committed(_) = proof else {
+        fail("session verification")
+    }
+    Ok(())
+}
+
+fn scratch(d: Dir) -> Dir waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "session-")
+    result.unwrap(host.mkdtemp(d, mut name))
+}
+
+@test
+fn restored_cookie(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let parent = scratch(d)
+    let backup = scratch(d)
+    let child = scratch(d)
+    let options = result.unwrap(store.sized(Directory, 268435456))
+    let mut db = store.open(tasks, parent, c, r, options)?
+    let t = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take cookie, take reg) = auth.fresh(r)
+    let issuance: (auth.Tables, auth.Registration) = (clone(t), take reg)
+    let write = store.run(mut db, None, issuance, fn(mut tx, env) -> Result[(), auth.Error] {
+        auth.create(mut tx, env.0, env.1, b"actor", 60000)
+    })?
+    let Committed(done) = write else {
+        fail("create")
+    }
+    store.durable(mut db, done.ticket)?
+    let old_reader = store.reader(db, store.READER_PIN_MIN)?
+    let branch = store.main_branch(db)
+    let head = store.follow(mut db, branch)?
+    let (to, take worker) = result.unwrap(auth.monitor(tasks, c, store.reader(db, store.READER_PIN_MIN)?, head, t, 8, 1048576))
+    let before = auth.bind_session(old_reader, store.snapshot(db), t, cookie, 2, c, to)
+    if let Error(_) = before {
+        fail("parent cookie")
+    }
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 7u8)
+    let backup_job = result.unwrap(store.begin_backup(mut db, backup, clone(attempt)))
+    let _ = result.unwrap(store.export_copy(take backup_job))
+    store.release_export(mut db, attempt)
+    let _ = std.task.cancel_join(take worker)
+    store.close(take db)?
+    let _ = result.unwrap(store.restore(tasks, backup, child, c, r, options, Latest, store.restore_attempt(r)))
+    let mut restored = store.open(tasks, child, c, r, options)?
+    let new_tables = store.bind_declaration(mut restored, Open, auth.declare)?
+    let child_branch = store.main_branch(restored)
+    let child_head = store.follow(mut restored, child_branch)?
+    let (child_to, take child_worker) = result.unwrap(auth.monitor(tasks, c, store.reader(restored, store.READER_PIN_MIN)?, child_head, new_tables, 8, 1048576))
+    let reader = store.reader(restored, store.READER_PIN_MIN)?
+    if let Error(Rejected) = auth.bind_session(reader, store.snapshot(restored), new_tables, cookie, 2, c, child_to) {} else {
+        fail("child accepted parent cookie")
+    }
+    let _ = std.task.cancel_join(take child_worker)
+    store.close(take restored)
+}
+
+@test
+fn scoped_token_limits(r: Random) -> Result[(), ()] {
+    let key = b"0123456789abcdef0123456789abcdef"
+    let signing = std.jwt.signer(Hs256, r, result.unwrap(secret.seal(clone(key), "mac")))
+    let checking = std.jwt.hmac_key(result.unwrap(secret.seal(clone(key), "verify")))
+    let principal = auth.Session(origin: store.StoreId(hi: 11, lo: 22), id: "session", subject: b"actor", expires_at_ms: 999999)
+    let scope = auth.Scope(issuer: "issuer", audience: "recipient", action: "read")
+    if let Ok(_) = auth.mint_scoped(signing, Hs256, scope, principal, 1000, 300001) {
+        fail("mint exceeded 300 seconds")
+    }
+    let token = result.unwrap(auth.mint_scoped(signing, Hs256, scope, principal, 1000, 300000))
+    let active = result.unwrap(auth.verify_scoped(token, checking, Hs256, scope, 300999))
+    if auth.scoped_subject(active) != b"actor" || auth.scoped_expiry(active) != 301000 {
+        fail("scoped identity")
+    }
+    if let Ok(_) = auth.verify_scoped(token, checking, Hs256, scope, 301000) {
+        fail("expiry inclusive")
+    }
+    let wrong = auth.Scope(issuer: "issuer", audience: "elsewhere", action: "read")
+    if let Ok(_) = auth.verify_scoped(token, checking, Hs256, wrong, 1000) {
+        fail("wrong audience")
+    }
+    Ok(())
+}

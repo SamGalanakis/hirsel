@@ -1,0 +1,148 @@
+const ISS: String = "https://issuer.test"
+
+const JWKS: String = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}]}"
+
+type ExchangePeer: send {
+    net: Served[NetOp],
+    reply: String
+}
+
+fn token_peer(take peer: ExchangePeer) -> bool waits {
+    let ExchangePeer(net: take port, reply: take response) = take peer
+    let mut service = take port
+    let mut slots: u64 = 0
+    let mut headers: Bytes = list.with_capacity(4096)
+    while let Some(take call) = provide.next(mut service) {
+        let mut c = take call
+        let reply: NetReply = match provide.net_op(c) {
+            Resolve(..) => {
+                let mut name: Bytes = list.with_capacity(128)
+                provide.payload(c, 0, mut name)
+                if name != b"issuer.test" {
+                    fail("unexpected issuer")
+                }
+                let mut ip: Bytes = list.with_capacity(17)
+                list.fill(mut ip, 13, 0u8)
+                list.put_word_be(mut ip, 0x7f000001u32)
+                let _ = provide.fill(mut service, mut c, ip)
+                Count(1)
+            },
+            Connect(addr, ..) => {
+                if addr.port != 443 {
+                    fail("issuer port")
+                }
+                Socket(8, addr)
+            },
+            Handshake(..) => {
+                let mut name: Bytes = list.with_capacity(128)
+                provide.payload(c, 1, mut name)
+                if name != b"issuer.test" {
+                    fail("issuer TLS name")
+                }
+                Secured(Handshake(protocol: Some(0), peer: (0, 0, 0, 0)))
+            },
+            SendSecret(secrets: n, ..) => {
+                slots += n
+                provide.payload(c, 1, mut headers)
+                for i in 0u64 .. n {
+                    if let Ok(_) = secret.narrow(provide.secret(c, i), "tls_send(other.test)") {
+                        fail("issuer secret escaped TLS origin")
+                    }
+                }
+                Done
+            },
+            Send(prefix, tail, ..) => {
+                provide.payload(c, 1, mut headers)
+                provide.payload(c, 2, mut headers)
+                Count(prefix + tail)
+            },
+            Recv(..) => {
+                let n = provide.fill(mut service, mut c, string.as_bytes(response))
+                result.unwrap(provide.reply(mut service, take c, provide.net_reply(Count(n))))
+                let txt = result.unwrap(string.from_utf8(take headers))
+                return slots == 2 && string.find(txt, 0, "POST /token HTTP/1.1") != None && string.find(txt, 0, "&code_verifier=") != None
+            },
+            Released(..) => Done,
+            _ => fail("unexpected issuer operation"),
+        }
+        result.unwrap(provide.reply(mut service, take c, provide.net_reply(reply)))
+    }
+    false
+}
+
+fn signed_id(r: Random, nonce: String) -> String {
+    let key = option.unwrap(std.hex.decode(b"302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+    let signer = std.jwt.signer(EdDsa, r, result.unwrap(secret.seal(take key, "sign(ed25519)")))
+    let mut claims = string.from("{\"iss\":\"https://issuer.test\",\"sub\":\"42\",\"aud\":\"client\",\"iat\":900,\"exp\":1100,\"nonce\":")
+    std.json.push_quoted(mut claims, nonce)
+    string.push(mut claims, "}")
+    result.unwrap(std.jwt.sign_jwt(signer, claims))
+}
+
+@test
+fn oidc_exchange_and_consume(r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let (c, take hand) = provide.clock(0, 1000000)
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let t = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take browser, take seed) = auth.fresh_challenge(r)
+    let start: (auth.Tables, auth.ChallengeSeed) = (clone(t), take seed)
+    let issued = store.run(mut db, None, start, fn(mut tx, env) -> Result[auth.OidcRequest, auth.Error] {
+        let p = auth.Provider(issuer: ISS, client_id: "client", token_endpoint: "https://issuer.test/token", redirect_uri: "https://client.test/cb")
+        auth.cache_provider(mut tx, env.0, p, JWKS, 1100000)?
+        auth.begin_oidc(mut tx, env.0, ISS, env.1, 60000)
+    })?
+    let Committed(take create) = take issued else {
+        fail("OIDC begin")
+    }
+    let prompt: auth.OidcRequest = clone(create.value)
+    let digest = std.sha256.hash(string.as_bytes(browser))
+    let mut raw: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut raw, digest[i])
+    }
+    if prompt.code_challenge != std.base64.encode_url(raw, false) {
+        fail("S256")
+    }
+    let fixture = signed_id(r, prompt.challenge.challenge)
+    let mut json = string.from("{\"id_token\":")
+    std.json.push_quoted(mut json, fixture)
+    string.push(mut json, "}")
+    let mut reply = string.from("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: ")
+    std.string.push_uint(mut reply, string.byte_len(json), 10, 0, '0')
+    string.push(mut reply, "\r\n\r\n")
+    string.push(mut reply, json)
+    let (n, port) = provide.net(bytes 65536)
+    let remote = task.spawn(tasks, bytes 1048576, ExchangePeer(net: take port, reply: take reply), token_peer)
+    let token = result.unwrap(auth.exchange_oidc(store.reader(db, store.READER_PIN_MIN)?, store.snapshot(db), t, prompt.challenge.state, browser, "code", n, tasks, c, System, 1000000000))
+    if token != fixture || !result.unwrap(task.join(take remote)) {
+        fail("OIDC exchange")
+    }
+    let wrong = signed_id(r, "other")
+    let verification: (auth.Tables, String, String, String, String) = (take t, clone(prompt.challenge.state), take browser, take token, take wrong)
+    let verified = store.run(mut db, None, verification, fn(mut tx, env) -> Result[(), auth.Error] {
+        if let Ok(_) = auth.finish_oidc(mut tx, env.0, env.1, env.2, env.4) {
+            fail("accepted wrong nonce")
+        }
+        if let Ok(_) = auth.finish_oidc(mut tx, env.0, env.1, "foreign-browser", env.3) {
+            fail("accepted wrong browser")
+        }
+        let mut damaged = string.from(env.3)
+        string.push(mut damaged, "A")
+        if let Ok(_) = auth.finish_oidc(mut tx, env.0, env.1, env.2, damaged) {
+            fail("accepted damaged token")
+        }
+        let identity = auth.finish_oidc(mut tx, env.0, env.1, env.2, env.3)?
+        if identity.issuer != ISS || identity.subject != "42" {
+            fail("wrong principal")
+        }
+        if let Ok(_) = auth.finish_oidc(mut tx, env.0, env.1, env.2, env.3) {
+            fail("replayed token")
+        }
+        Ok(())
+    })?
+    let Committed(_) = verified else {
+        fail("OIDC verification")
+    }
+    let _ = take hand
+    Ok(())
+}

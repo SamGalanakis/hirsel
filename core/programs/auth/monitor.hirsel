@@ -1,0 +1,97 @@
+pub type Invalidation: codec + send {
+    origin: store.StoreId,
+    id: String
+}
+
+type Access: codec = Local(Invalidation) | ScopedAccess(Invalidation)
+
+type Monitor: send {
+    reader: store.Reader,
+    head: Latest[store.Snapshot],
+    tables: Tables,
+    clock: Clock,
+    requests: Receiver[std.stream_watch.Probe]
+}
+
+fn invalidation_key(value: Invalidation) -> String {
+    let mut raw: Bytes = list.with_capacity(64)
+    std.codec.put_u64(value.origin.hi, mut raw)
+    std.codec.put_u64(value.origin.lo, mut raw)
+    list.append(mut raw, string.as_bytes(value.id))
+    std.base64.encode_url(raw, false)
+}
+
+/// The caller authenticates the sending Place and pins its StoreId in its inbox.
+pub fn invalidate(mut tx: store.Tx, t: Tables, expected: store.StoreId, notice: Invalidation) -> Result[(), Error] {
+    if notice.origin != expected || string.byte_len(notice.id) != 22 {
+        return Error(Rejected)
+    }
+    store.put(mut tx, t.invalidations, invalidation_key(notice), true) ?=> |_| Unavailable
+    Ok(())
+}
+
+pub fn revoke_and_notify(mut tx: store.Tx, t: Tables, id: String, steps: runner.steps.Tables, entries: runner.triggers.Entries, push: effect.Op[Invalidation]) -> Result[runner.triggers.Id, Error] {
+    if string.byte_len(id) != 22 {
+        return Error(Rejected)
+    }
+    revoke(mut tx, t, id)?
+    let notice = Invalidation(origin: store.info(mut tx).id.store, id: clone(id))
+    Ok(effect.emit(mut tx, steps, entries, push, notice) ?=> |_| Unavailable)
+}
+
+fn permitted(m: Monitor, raw: Bytes) -> Result[bool, Error] waits {
+    let codec: std.codec.Codec[Access] = std.codec.of()
+    let access = std.codec.decode(codec, raw) ?=> |_| Rejected
+    let snap = latest.read(m.head)
+    match access {
+        Local(key) => {
+            if store.snapshot_identity(snap) != key.origin {
+                return Ok(false)
+            }
+            let row = store.get(m.reader, snap, m.tables.sessions, key.id) ?=> |_| Unavailable
+            if let Ok(_) = live(key.id, row, key.origin, host.wall_ms(m.clock)) {
+                return Ok(true)
+            }
+            Ok(false)
+        },
+        ScopedAccess(key) => {
+            if store.snapshot_identity(snap) == key.origin {
+                let row = store.get(m.reader, snap, m.tables.sessions, key.id) ?=> |_| Unavailable
+                if let Error(_) = live(key.id, row, key.origin, host.wall_ms(m.clock)) {
+                    return Ok(false)
+                }
+            }
+            let denied = store.get(m.reader, snap, m.tables.invalidations, invalidation_key(key)) ?=> |_| Unavailable
+            Ok(denied == None)
+        },
+    }
+}
+
+fn serve_monitor(take m: Monitor) waits {
+    while let Ok(take probe) = channel.receive(m.requests) {
+        let allowed = match permitted(m, probe.key) {
+            Ok(value) => value,
+            Error(_) => false,
+        }
+        let _ = channel.try_send(probe.reply, allowed)
+    }
+}
+
+/// Keep the task alive while serving. Use store.follow on the serving branch.
+pub fn monitor(tasks: Tasks, clock: Clock, take reader: store.Reader, head: Latest[store.Snapshot], t: Tables, queue: u64, bytes_max: u64) -> Result[(Sender[std.stream_watch.Probe], Task[()]), Error] {
+    let (to, from): (Sender[std.stream_watch.Probe], Receiver[std.stream_watch.Probe]) = channel.new(queue)
+    let job = Monitor(reader: take reader, head: latest.handle(head), tables: clone(t), clock, requests: take from)
+    let worker = task.try_spawn(tasks, bytes bytes_max, take job, serve_monitor) ?=> |_| Unavailable
+    Ok((take to, take worker))
+}
+
+fn watched(service: Sender[std.stream_watch.Probe], access: Access, take caller: runner.BoundCaller, clock: Clock) -> Result[runner.LiveBinding, runner.BindRefusal] waits {
+    let mut raw: Bytes = list.new()
+    let codec: std.codec.Codec[Access] = std.codec.of()
+    std.codec.encode(codec, access, mut raw) ?=> |_| Unavailable
+    let guard = Some(std.stream_watch.release_guard(service, take raw))
+    if std.stream_watch.revoked(guard, clock) {
+        return Error(Rejected)
+    }
+    Ok(runner.LiveBinding(binding: take caller, guard: take guard))
+}

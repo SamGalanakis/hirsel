@@ -64,3 +64,107 @@ pub fn spawn_alarm[E: send](tasks: Tasks, c: Clock, start: u64, period: u64, pre
     let run: fn(take Alarm[E]) waits = alarm
     task.spawn(tasks, bytes 4096u64, Alarm(clock: c, from: start, interval: period, pre_head, inbox: take inbox, notify), run)
 }
+
+/// A Place-owned authority reader answers against its latest committed state.
+pub type Probe: send {
+    key: Arc[Bytes],
+    reply: Sender[bool]
+}
+
+pub opaque type Guard: send {
+    service: Sender[Probe],
+    key: Arc[Bytes]
+}
+
+pub fn release_guard(service: Sender[Probe], take key: Bytes) -> Guard {
+    Guard(service: channel.sender(service), key: arc.new(take key))
+}
+
+pub fn guarded(check: Option[Guard]) -> bool {
+    if let Some(_) = view check {
+        return true
+    }
+    false
+}
+
+// A release probe owns one one-place reply channel while it waits.
+pub fn probe_bytes(check: Option[Guard]) -> u64 {
+    if guarded(check) {
+        4096
+    } else {
+        0
+    }
+}
+
+/// Bound a blocked write so revocation can be observed before its next attempt.
+pub fn probe_deadline(check: Option[Guard], c: Clock, end: u64) -> u64 {
+    if guarded(check) {
+        return order.min(end, clock.deadline_after_ms(host.mono_ns(c), 100u64))
+    }
+    end
+}
+
+pub fn copy_guard(check: Option[Guard]) -> Option[Guard] {
+    if let Some(g) = view check {
+        return Some(Guard(service: channel.sender(g.service), key: arc.share(g.key)))
+    }
+    None
+}
+
+fn probe_denied(check: Guard, c: Clock) -> bool waits {
+    let (reply, answer): (Sender[bool], Receiver[bool]) = channel.new(1u64)
+    if let Error(_) = channel.try_send(check.service, Probe(key: arc.share(check.key), reply: take reply)) {
+        return true
+    }
+    match channel.receive_until(answer, At(c, clock.deadline_after_ms(host.mono_ns(c), 100u64))) {
+        Ok(true) => false,
+        _ => true,
+    }
+}
+
+pub fn revoked(check: Option[Guard], c: Clock) -> bool waits {
+    if let Some(g) = view check {
+        return probe_denied(g, c)
+    }
+    false
+}
+
+type GuardAlarm[E: send]: send {
+    clock: Clock,
+    expires: Option[u64],
+    guard: Guard,
+    to: Sender[E],
+    event: E
+}
+
+fn await_guard[E: send](take job: GuardAlarm[E]) waits {
+    let GuardAlarm(clock: c, expires, guard: take check, to: take to, event: take event) = take job
+    loop {
+        let now = host.wall_ms(c)
+        let next = int.saturating_add(now, 100u64)
+        if probe_denied(check, c) {
+            break
+        }
+        if let Some(end) = expires {
+            if now >= end {
+                break
+            }
+            host.sleep_until_wall(c, order.min(next, end))
+        } else {
+            host.sleep_until_wall(c, next)
+        }
+    }
+    let _ = channel.send(to, take event)
+}
+
+/// Idle guarded transports recheck at most 100 ms apart. Active transports
+/// also check at release. Deadline-only transports keep their one-shot alarm.
+pub fn guard_alarm[E: send](tasks: Tasks, c: Clock, expires: Option[u64], check: Option[Guard], to: Sender[E], take event: E) -> Option[Task[()]] {
+    if let Some(take watch) = copy_guard(check) {
+        return Some(task.spawn(tasks, bytes 4096, GuardAlarm(clock: c, expires, guard: take watch, to: channel.sender(to), event: take event), await_guard))
+    }
+    match expires {
+        Some(end) => Some(clock.wall_alarm(tasks, c, end, to, take event)),
+        None => None,
+    }
+}

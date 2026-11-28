@@ -624,6 +624,13 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         ),
     ]);
     http::generate(describe, &mut files)?;
+    let http_import = if describe.bindings.is_empty() {
+        "const bindHttp = (_client: Client, _options: {url: string; fetch: typeof fetch}) => ({});"
+    } else {
+        "import {bindHttp} from './http.js';"
+    };
+    let place = format!("{http_import}\n{}", include_str!("sdk_place.ts"));
+    files.insert("place.ts".into(), place);
     files.insert("manifest.json".into(), manifest::render(describe, &paths)?);
     Ok(files)
 }
@@ -851,6 +858,9 @@ mod tests {
             bindings: vec![],
         };
         let files = generate(&d).unwrap();
+        assert_eq!(files, generate(&d).unwrap());
+        assert!(files["place.ts"].contains("export async function openPlace("));
+        assert!(!files["place.ts"].contains("from './http.js'"));
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
         assert!(files["entries.js"].contains("args_fp:18446744073709551615n"));
         assert!(files["entries.js"].contains("ns(call,[\"m\"])[\"toggle\"]"));

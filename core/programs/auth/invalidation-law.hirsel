@@ -1,0 +1,78 @@
+type IssuerTables: shareable + send {
+    authn: auth.Tables,
+    steps: runner.steps.Tables,
+    triggers: runner.triggers.Tables
+}
+
+fn issuer_schema(mut d: store.Declare) -> Result[IssuerTables, store.Error] {
+    let authn = auth.declare(mut d)?
+    let triggers = runner.triggers.declare_tables(mut d)?
+    let steps = runner.steps.declare_tables(mut d, clone(triggers))?
+    Ok(IssuerTables(authn: take authn, steps: take steps, triggers: take triggers))
+}
+
+fn notify_peer(_grant: (), _caller: runner.Caller, take _notice: auth.Invalidation) -> Result[(), Capacity] {
+    Ok(())
+}
+
+@test
+fn scoped_invalidation(c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut source = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let h = store.bind_declaration(mut source, Migrate, issuer_schema)?
+    let (take cookie, take registration) = auth.fresh(r)
+    let args: (auth.Tables, auth.Registration, String) = (clone(h.authn), take registration, take cookie)
+    let created = store.run(mut source, None, args, fn(mut tx, env) -> Result[auth.Session, auth.Error] {
+        auth.create(mut tx, env.0, env.1, b"actor", 60000)?
+        auth.verify(mut tx, env.0, env.2)
+    })?
+    let Committed(take result_row) = take created else {
+        fail("source session")
+    }
+    let notice = auth.Invalidation(origin: store.identity(source), id: clone(result_row.value.id))
+    let key = b"0123456789abcdef0123456789abcdef"
+    let signer = std.jwt.signer(Hs256, r, result.unwrap(secret.seal(clone(key), "mac")))
+    let verifier = std.jwt.hmac_key(result.unwrap(secret.seal(clone(key), "verify")))
+    let scope = auth.Scope(issuer: "source", audience: "target", action: "read")
+    let token = result.unwrap(auth.mint_scoped(signer, Hs256, scope, result_row.value, host.wall_ms(c), 30000))
+    let scoped_access = result.unwrap(auth.verify_scoped(token, verifier, Hs256, scope, host.wall_ms(c)))
+    let mut target = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let dest = store.bind_declaration(mut target, Migrate, auth.declare)?
+    let branch = store.main_branch(target)
+    let head = store.follow(mut target, branch)?
+    let (service, take worker) = result.unwrap(auth.monitor(tasks, c, store.reader(target, store.READER_PIN_MIN)?, head, dest, 8, 1048576))
+    let admitted = result.unwrap(auth.bind_scoped(scoped_access, 7, service, c))
+    if list.len(admitted.binding.caller.subject) == 22 {
+        fail("scoped token yielded a full session id")
+    }
+    let src: (IssuerTables, auth.Invalidation) = (clone(h), clone(notice))
+    let emitted = store.run(mut source, None, src, fn(mut tx, env) -> Result[runner.triggers.Id, auth.Error] {
+        let op = result.unwrap(effect.operation(code.describe(notify_peer)))
+        let mut allowed = runner.triggers.empty_entries()
+        result.unwrap(effect.allow(mut allowed, op))
+        auth.revoke_and_notify(mut tx, env.0 .authn, env.1 .id, env.0 .steps, allowed, op)
+    })?
+    let Committed(take sent) = take emitted else {
+        fail("atomic revoke and effect")
+    }
+    if let Pending = effect.status(store.reader(source, store.READER_PIN_MIN)?, store.snapshot(source), h.triggers, sent.value)? {} else {
+        fail("push absent after commit")
+    }
+    let applied: (auth.Tables, auth.Invalidation, store.StoreId) = (take dest, clone(notice), store.identity(target))
+    let received = store.run(mut target, None, applied, fn(mut tx, env) -> Result[(), auth.Error] {
+        if let Ok(_) = auth.invalidate(mut tx, env.0, env.2, env.1) {
+            fail("wrong source")
+        }
+        auth.invalidate(mut tx, env.0, env.1 .origin, env.1)
+    })?
+    let Committed(_) = received else {
+        fail("invalidation commit")
+    }
+    if !std.stream_watch.revoked(admitted.guard, c) {
+        fail("old scoped binding still live")
+    }
+    if let Ok(_) = auth.bind_scoped(scoped_access, 7, service, c) {
+        fail("invalidated token rebound")
+    }
+    let _ = std.task.cancel_join(take worker)
+    Ok(())
+}

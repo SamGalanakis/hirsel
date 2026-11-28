@@ -1,0 +1,82 @@
+pub opaque type ChallengeSeed: codec + send {
+    state: String,
+    browser_digest: Bytes,
+    nonce: String
+}
+
+pub type Challenge: codec + send {
+    state: String,
+    challenge: String
+}
+
+type Purpose: codec = Oidc(String, String) | Enroll(String, String, Bytes, u64) | Assert(String, String)
+
+type Ceremony: codec {
+    origin: store.StoreId,
+    expires_at_ms: u64,
+    nonce: String,
+    browser_digest: Bytes,
+    purpose: Purpose
+}
+
+/// Keep the first value in the initiating browser's HttpOnly pre-auth cookie.
+/// Only the digest travels in the registration. For OIDC it is also PKCE S256.
+pub fn fresh_challenge(r: Random) -> (String, ChallengeSeed) {
+    let browser = random_text(r, 32)
+    let seed = ChallengeSeed(state: random_text(r, 32), browser_digest: digest_of(browser), nonce: random_text(r, 32))
+    (take browser, take seed)
+}
+
+fn open_challenge(mut tx: store.Tx, t: Tables, seed: ChallengeSeed, take purpose: Purpose, ttl_ms: u64) -> Result[Challenge, Error] {
+    let ctx = store.info(mut tx)
+    let Some(end) = int.checked_add(ctx.at, ttl_ms) else {
+        return Error(Rejected)
+    }
+    if ttl_ms == 0 || ttl_ms > 600000 || string.byte_len(seed.state) != 43 || string.byte_len(seed.nonce) != 43 || list.len(seed.browser_digest) != 32 {
+        return Error(Rejected)
+    }
+    if let Some(_) = store.fetch(tx, t.ceremonies, seed.state) ?=> |_| Unavailable {
+        return Error(Rejected)
+    }
+    // A new transaction cannot recreate a consumed challenge, even if a
+    // recorded seed is submitted again after deletion.
+    let mut context: Bytes = clone(string.as_bytes(seed.nonce))
+    list.append(mut context, string.as_bytes(seed.state))
+    std.codec.put_u64(ctx.id.store.hi, mut context)
+    std.codec.put_u64(ctx.id.store.lo, mut context)
+    std.codec.put_u32(ctx.id.branch, mut context)
+    std.codec.put_u64(ctx.id.version, mut context)
+    let digest = std.sha256.hash(context)
+    let mut raw: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32u64 {
+        list.push(mut raw, digest[i])
+    }
+    let nonce = std.base64.encode_url(raw, false)
+    let record = Ceremony(origin: ctx.id.store, expires_at_ms: end, nonce: clone(nonce), browser_digest: clone(seed.browser_digest), purpose: take purpose)
+    store.put(mut tx, t.ceremonies, seed.state, record) ?=> |_| Unavailable
+    Ok(Challenge(state: clone(seed.state), challenge: take nonce))
+}
+
+fn bound_ceremony(found: Option[Ceremony], origin: store.StoreId, now_ms: u64, browser: String) -> Result[Ceremony, Error] {
+    let Some(row) = view found else {
+        return Error(Rejected)
+    }
+    if row.origin != origin || now_ms >= row.expires_at_ms || string.byte_len(browser) != 43 || !std.hmac.equal(row.browser_digest, digest_of(browser)) {
+        return Error(Rejected)
+    }
+    Ok(clone(row))
+}
+
+fn pending(mut tx: store.Tx, t: Tables, state: String, browser: String) -> Result[Ceremony, Error] {
+    let info = store.info(mut tx)
+    let found = store.fetch(tx, t.ceremonies, state) ?=> |_| Unavailable
+    bound_ceremony(found, info.id.store, info.at, browser)
+}
+
+fn consume(mut tx: store.Tx, t: Tables, state: String) -> Result[(), Error] {
+    let removed = store.delete(mut tx, t.ceremonies, state) ?=> |_| Unavailable
+    if !removed {
+        return Error(Rejected)
+    }
+    Ok(())
+}

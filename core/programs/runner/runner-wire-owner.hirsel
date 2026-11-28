@@ -73,6 +73,7 @@ type WireLoop[C: send] {
     hello_alarm: Option[Task[()]],
     // The binding's session expiry (exclusive, Unix ms) and its idle alarm; transport only (CHANGES-v2.57).
     auth_end: Option[u64],
+    auth_guard: Option[std.stream_watch.Guard],
     auth_alarm: Option[Task[()]],
     run: u64,
     held: Option[WireEvent],
@@ -159,7 +160,7 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
         let h = std.clock.alarm(tasks, clock, at, to, wire_event(HelloExpired))
         hello_alarm = Some(take h)
     }
-    let st = WireLoop(apply_input: apply_input, work: take work, c: c, clock: clock, tasks: tasks, managed: take managed, pub_to: take pub_to, to: take to, inbox: take inbox, credit: take credit, out: out, first_write: take first_write, done: None, encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from, encoder: encoder, rh: take rh, wh: None, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm, auth_end: None, auth_alarm: None, run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None, room_pass: None, read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
+    let st = WireLoop(apply_input: apply_input, work: take work, c: c, clock: clock, tasks: tasks, managed: take managed, pub_to: take pub_to, to: take to, inbox: take inbox, credit: take credit, out: out, first_write: take first_write, done: None, encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from, encoder: encoder, rh: take rh, wh: None, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm, auth_end: None, auth_guard: None, auth_alarm: None, run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None, room_pass: None, read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
     Ok((take st, take service))
 }
 
@@ -232,19 +233,17 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
             HelloBound(take given, sample) => {
                 st.work.stream_time = sample
                 let _ = replace(mut st.work.asking, None)
-                let (take identity_result, auth_end): (Result[Caller, BindRefusal], Option[u64]) = match unexpired(st.clock, take given) {
-                    Ok(BoundCaller(caller: take caller, expires_at_ms: end)) => (Ok(take caller), end),
-                    Error(why) => (Error(why), None),
+                let (take identity_result, auth_end, take guard): (Result[Caller, BindRefusal], Option[u64], Option[std.stream_watch.Guard]) = match unexpired(st.clock, take given) {
+                    Ok(LiveBinding(binding: BoundCaller(caller: take caller, expires_at_ms: end), guard: take guard)) => (Ok(take caller), end, take guard),
+                    Error(why) => (Error(why), None, None),
                 }
                 match wire_owner_hello(mut st, take service, pool, take identity_result) {
                     Some(take kept) => {
                         service = take kept
-                        if let Some(end) = auth_end {
-                            if !st.closing {
-                                st.auth_end = Some(end)
-                                let h = std.clock.wall_alarm(st.tasks, st.clock, end, st.to, wire_event(AuthExpired))
-                                st.auth_alarm = Some(take h)
-                            }
+                        if !st.closing {
+                            st.auth_end = auth_end
+                            st.auth_guard = take guard
+                            st.auth_alarm = std.stream_watch.guard_alarm(st.tasks, st.clock, auth_end, st.auth_guard, st.to, wire_event(AuthExpired))
                         }
                         None
                     },
@@ -281,8 +280,8 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
             DrainWake => None,
             HttpStream(_) => None,
             AuthExpired => {
-                if st.closing || !wire_auth_lapsed(mut st) {
-                    continue
+                if !st.closing {
+                    wire_owner_refuse(mut st, 4401u16)
                 }
                 None
             },
@@ -884,7 +883,17 @@ fn wire_owner_write[C: send](mut st: WireLoop[C], take u: WireUnit) waits {
     } else {
         None
     }
-    let x = WireWrite(live: None, cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end: end, can_close: !close, close: close, report: take report)
+    let release_guard: Option[std.stream_watch.Guard] = if close {
+        None
+    } else {
+        std.stream_watch.copy_guard(st.auth_guard)
+    }
+    let auth_end: Option[u64] = if close {
+        None
+    } else {
+        st.auth_end
+    }
+    let x = WireWrite(live: None, cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end: end, can_close: !close, guard: take release_guard, auth_end, close: close, report: take report)
     match wire_start(st.tasks, take x) {
         Ok(take h) => {
             st.wh = Some(take h)

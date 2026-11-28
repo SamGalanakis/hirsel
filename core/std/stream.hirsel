@@ -12,6 +12,7 @@ pub opaque type Spec: send {
     room: Bounds,
     source: Source,
     expires_at_ms: Option[u64],
+    guard: Option[stream_watch.Guard],
 }
 
 type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Managed | Contextual
@@ -52,7 +53,7 @@ fn encode_spec[P: codec + send](spec_status: u16, room: Bounds, state: P, out_ca
         }
     }
     match take made {
-        Ok(Ok(take block)) => Ok(Spec(status: spec_status, fields: list.new(), block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None)),
+        Ok(Ok(take block)) => Ok(Spec(status: spec_status, fields: list.new(), block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
         Ok(Error(_)) => Error(InvalidStream),
         Error(e) => Error(Allocation(e)),
     }
@@ -115,7 +116,7 @@ fn held_spec(req: http.Request, response_status: u16, room: Bounds, take head_fi
         take block
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: take head_fields, block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None)),
+        Ok(take block) => Ok(Spec(status: response_status, fields: take head_fields, block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -123,6 +124,16 @@ fn held_spec(req: http.Request, response_status: u16, room: Bounds, take head_fi
 /// Gives a private stream its binding's exclusive wall-clock deadline.
 pub fn expire_at(mut offer: Spec, expires_at_ms: Option[u64]) {
     offer.expires_at_ms = expires_at_ms
+}
+
+/// Bound an in-flight write by the time remaining on the binding.
+pub fn release_deadline(c: Clock, expires: Option[u64], deadline: u64) -> u64 {
+    if let Some(end) = expires {
+        let now = host.mono_ns(c)
+        let remaining = int.saturating_sub(end, host.wall_ms(c))
+        return order.min(deadline, clock.deadline_after_ms(now, remaining))
+    }
+    deadline
 }
 
 pub fn pre_head_refusal(s: Spec, c: Clock, now: u64, deadline: u64) -> Option[u16] {
@@ -168,16 +179,17 @@ pub type Offer: send {
     at: u64,
     pre_head: u64,
     expires_at_ms: Option[u64],
+    guard: Option[stream_watch.Guard],
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source, expires_at_ms) = take s
+    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source, expires_at_ms, guard: take guard) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
     let beat = heartbeat && !relayed(source)
-    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat: beat, suppress, at, pre_head, expires_at_ms)
+    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat: beat, suppress, at, pre_head, expires_at_ms, guard: take guard)
 }
 
 pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | Expiry | UnitExpired | ReadEnd | Tick | SourceEnded | SourceFailed | Stop
@@ -317,6 +329,7 @@ type Writer[E: send]: send {
     pre_head: u64,
     write_ms: u64,
     expires_at_ms: Option[u64],
+    guard: Option[stream_watch.Guard],
     stop: Option[http.DrainSignal],
     inbox: Sender[E],
     units: Receiver[Unit],
@@ -333,17 +346,17 @@ fn chunk_prefix(mut out: Bytes, length: u64) {
     let _ = list.append(mut out, string.as_bytes("\r\n"))
 }
 
-fn send_data(mut socket: WriteHalf, mut scratch: Bytes, data: Bytes, chunked: bool, clock: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[(), NetError] waits {
+fn send_data(mut socket: WriteHalf, mut scratch: Bytes, data: Bytes, chunked: bool, clock: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> Result[(), NetError] waits {
     if chunked {
         chunk_prefix(mut scratch, list.len(data))
-        http.write_wire_until(mut socket, scratch, data, clock, deadline, signal)?
-        http.write_wire_until(mut socket, string.as_bytes("\r\n"), string.as_bytes(""), clock, deadline, signal)
+        http_writer.write_guarded(mut socket, scratch, data, clock, deadline, signal, check)?
+        http_writer.write_guarded(mut socket, string.as_bytes("\r\n"), string.as_bytes(""), clock, deadline, signal, check)
     } else {
-        http.write_wire_until(mut socket, data, string.as_bytes(""), clock, deadline, signal)
+        http_writer.write_guarded(mut socket, data, string.as_bytes(""), clock, deadline, signal, check)
     }
 }
 
-fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u64, inbox: Sender[E], notify: fn(take Delivery) -> E, signal: Option[http.DrainSignal]) -> Result[SentUnit, NetError] waits {
+fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u64, inbox: Sender[E], notify: fn(take Delivery) -> E, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard], expires: Option[u64]) -> Result[SentUnit, NetError] waits {
     if http.stop_deadline(signal) != None {
         return Ok(EndSent)
     }
@@ -352,7 +365,7 @@ fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u
         http.write_promotion_refusal(mut socket, c, at, ms, signal)?
         return Ok(EndSent)
     }
-    let stop = clock.deadline_after_ms(at, ms)
+    let stop = release_deadline(c, expires, clock.deadline_after_ms(at, ms))
     let sent = match host.send_pair(mut socket, head, string.as_bytes(""), At(c, http.clamp_deadline(signal, order.min(stop, deadline)))) {
         Ok(0) => return Error(Reset),
         Ok(n) => n,
@@ -368,12 +381,12 @@ fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u
     if let Error(_) = channel.send(inbox, notify(Committed(host.mono_ns(c)))) {
         return Error(Aborted)
     }
-    http.write_wire_until(mut socket, list.slice(head, sent, list.len(head)), string.as_bytes(""), c, stop, signal)?
+    http_writer.write_guarded(mut socket, list.slice(head, sent, list.len(head)), string.as_bytes(""), c, stop, signal, check)?
     Ok(HeadSent)
 }
 
 fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
-    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: take signal, inbox: take inbox, units: take units, notify) = take job
+    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: take guard, stop: take signal, inbox: take inbox, units: take units, notify) = take job
     let mut socket = take half
     let mut scratch: Bytes = list.with_capacity(capacity)
     let _ = list.append(mut scratch, list.slice(block, 0, size))
@@ -383,7 +396,7 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
     let mut committed = false
     let mut expired = false
     while let Ok(take unit) = channel.receive(units) {
-        expired = expired || auth_lapsed(c, expires_at_ms)
+        expired = expired || stream_watch.revoked(guard, c) || auth_lapsed(c, expires_at_ms)
         if expired && !after_expiry(unit) {
             if committed {
                 let _ = channel.send(inbox, notify(UnitExpired))
@@ -419,17 +432,17 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
             break
         }
         let wrote: Result[SentUnit, NetError] = match take unit {
-            Head => write_head(mut socket, scratch, c, pre_head, ms, inbox, notify, signal),
+            Head => write_head(mut socket, scratch, c, pre_head, ms, inbox, notify, signal, guard, expires_at_ms),
             Data(take data, cap) => {
-                let deadline = order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms))
-                match send_data(mut socket, mut scratch, data, chunked, c, deadline, signal) {
+                let deadline = release_deadline(c, expires_at_ms, order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms)))
+                match send_data(mut socket, mut scratch, data, chunked, c, deadline, signal, guard) {
                     Ok(()) => Ok(ItemSent),
                     Error(e) => Error(e),
                 }
             },
             Heartbeat => {
-                let deadline = clock.deadline_after_ms(host.mono_ns(c), ms)
-                match send_data(mut socket, mut scratch, string.as_bytes(":\n\n"), chunked, c, deadline, signal) {
+                let deadline = release_deadline(c, expires_at_ms, clock.deadline_after_ms(host.mono_ns(c), ms))
+                match send_data(mut socket, mut scratch, string.as_bytes(":\n\n"), chunked, c, deadline, signal, guard) {
                     Ok(()) => Ok(ControlSent),
                     Error(e) => Error(e),
                 }
@@ -446,7 +459,7 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
             },
             Measured(take event, cap, initial) => {
                 let ready = if initial {
-                    write_head(mut socket, scratch, c, pre_head, ms, inbox, notify, signal)
+                    write_head(mut socket, scratch, c, pre_head, ms, inbox, notify, signal, guard, expires_at_ms)
                 } else {
                     Ok(HeadSent)
                 }
@@ -456,19 +469,19 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
                     Ok(_) => {
                         if initial {
                             committed = true
-                            if auth_lapsed(c, expires_at_ms) {
+                            if stream_watch.revoked(guard, c) || auth_lapsed(c, expires_at_ms) {
                                 expired = true
                                 let _ = channel.send(inbox, notify(UnitExpired))
                                 continue
                             }
                         }
-                        let deadline = order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms))
-                        send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal)
+                        let deadline = release_deadline(c, expires_at_ms, order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms)))
+                        send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal, guard, expires_at_ms)
                     },
                     Error(e) => Error(e),
                 }
             },
-            AuthTerminal(take event, deadline) => send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal),
+            AuthTerminal(take event, deadline) => send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal, None, None),
             AuthRefusal => if write_auth_refusal(mut socket, c, ms, signal) {
                 Ok(EndSent)
             } else {
@@ -572,7 +585,7 @@ fn write_reset_refusal(mut socket: WriteHalf, suppressed: bool, c: Clock, ms: u6
     }
 }
 
-fn send_measured(mut socket: WriteHalf, mut scratch: Bytes, event: MeasuredEvent, chunked: bool, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[SentUnit, NetError] waits {
+fn send_measured(mut socket: WriteHalf, mut scratch: Bytes, event: MeasuredEvent, chunked: bool, c: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard], expires: Option[u64]) -> Result[SentUnit, NetError] waits {
     if chunked {
         chunk_prefix(mut scratch, event.length)
         http.write_wire_until(mut socket, scratch, b"", c, deadline, signal)?
@@ -581,8 +594,11 @@ fn send_measured(mut socket: WriteHalf, mut scratch: Bytes, event: MeasuredEvent
     let flush = scoped fn(block: Bytes) -> bool waits {
         let mut offset = 0u64
         while offset < list.len(block) {
+            if auth_lapsed(c, expires) {
+                return false
+            }
             let next = offset + order.min(capacity, list.len(block) - offset)
-            if let Error(_) = http.write_wire_until(mut socket, list.slice(block, offset, next), b"", c, deadline, signal) {
+            if let Error(_) = http_writer.write_guarded(mut socket, list.slice(block, offset, next), b"", c, deadline, signal, check) {
                 return false
             }
             offset = next
@@ -627,13 +643,14 @@ pub fn start_managed[E: send](take work: Work, to: Sender[E], notify: fn(take De
     if buffered > allowance {
         return None
     }
-    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, heartbeat: _, suppress, at, pre_head, expires_at_ms) = take offer
+    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, heartbeat: _, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
     let signal = http.stream_signal(control)
     let (units, writes): (Sender[Unit], Receiver[Unit]) = channel.new(1u64)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
+    let check_bytes = stream_watch.probe_bytes(guard)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
     let write: fn(take Writer[E]) -> WriteHalf waits = writer
-    let expiry = stream_expiry(tasks, c, expires_at_ms, to, notify)
-    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64), take writing, write), reader: stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(to), notify), timer: stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(to), notify), expiry: take expiry, signal: take signal, clock: c, linger: linger))
+    let expiry = stream_watch.guard_alarm(tasks, c, expires_at_ms, guard, to, notify(Expiry))
+    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64 + check_bytes), take writing, write), reader: stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(to), notify), timer: stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(to), notify), expiry: take expiry, signal: take signal, clock: c, linger: linger))
 }
 
 pub fn managed_offer(active: ManagedWriter, take event: MeasuredEvent, until: u64, initial: bool) -> bool {
@@ -701,8 +718,8 @@ pub fn reservation(offer: Offer, out_cap: u64) -> u64 {
     // HTTP-15 rows 10–13b. The spawner pays the group's own task record.
     let owner: u64 = 256 + 104 + 64 + 96 + 8192
     let children: u64 = 296 + (296 + 64) + (288 + 4096) + 288
-    let output = (int.saturating_add(out_cap, 7) / 8) * 8
-    let expiry = if offer.expires_at_ms != None {
+    let output = (int.saturating_add(out_cap, 7) / 8) * 8 + stream_watch.probe_bytes(offer.guard)
+    let expiry = if stream_watch.guarded(offer.guard) || offer.expires_at_ms != None {
         288u64 + 4096u64
     } else {
         0u64
@@ -710,7 +727,7 @@ pub fn reservation(offer: Offer, out_cap: u64) -> u64 {
     if managed(offer) {
         // The subscription has a depth stack and an owner inbox. It has no
         // producer task, its credits or a retained producer-owned event.
-        return int.saturating_add(managed_reservation(out_cap), expiry + (int.saturating_add(list.len(offer.block) - offer.state_at, 7u64) / 8u64) * 8u64)
+        return int.saturating_add(managed_reservation(out_cap), stream_watch.probe_bytes(offer.guard) + expiry + (int.saturating_add(list.len(offer.block) - offer.state_at, 7u64) / 8u64) * 8u64)
     }
     int.saturating_add(owner + children + expiry, int.saturating_add(output, offer.room.producer_bytes))
 }
@@ -721,11 +738,8 @@ fn stop_producer(mut running: Option[Task[()]]) {
     }
 }
 
-fn stream_expiry[E: send](tasks: Tasks, c: Clock, expires_at_ms: Option[u64], to: Sender[E], notify: fn(take Delivery) -> E) -> Option[Task[()]] {
-    match expires_at_ms {
-        Some(at_ms) => Some(clock.wall_alarm(tasks, c, at_ms, to, notify(Expiry))),
-        None => None,
-    }
+pub fn guard_release(mut offer: Spec, take check: stream_watch.Guard) {
+    offer.guard = Some(take check)
 }
 
 pub fn expiry_wake(message: Delivery) -> bool {
@@ -757,7 +771,7 @@ fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take S
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms) = take offer
+    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
     // A relayed body is whole only when upstream ends it (§2 Ending).
     let relay = relayed(offered_source)
     let mut source = Some(take offered_source)
@@ -774,11 +788,12 @@ fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take S
     let _ = channel.try_send(give, ())
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = list.with_capacity(2)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
-    let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer)
+    let check_bytes = stream_watch.probe_bytes(guard)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
+    let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8 + check_bytes), take writing, writer)
     let mut read_task = stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(tx), same_delivery)
     let mut alarm_task = stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(tx), same_delivery)
-    let mut expiry = stream_expiry(tasks, c, expires_at_ms, tx, same_delivery)
+    let mut expiry = stream_watch.guard_alarm(tasks, c, expires_at_ms, guard, tx, Expiry)
     let mut producer: Option[Task[()]] = None
     let mut credit: Option[Receiver[()]] = Some(take take_credit)
     let mut head_started = false

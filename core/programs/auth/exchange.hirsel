@@ -1,0 +1,83 @@
+fn token_response(s: String, mut cursor: std.json.Cursor) -> Result[Option[String], std.json.Error] {
+    let seed: Option[String] = None
+    std.json.record_of(s, mut cursor, take seed, fn(k: String, text: String, mut v: std.json.Cursor, mut token: Option[String]) -> Result[(), std.json.Error] {
+        if k == "id_token" {
+            if token != None {
+                return Error(Syntax(0))
+            }
+            token = Some(std.json.read_string(text, mut v)?)
+        } else {
+            std.json.skip_value(text, mut v)?
+        }
+        Ok(())
+    })
+}
+
+fn tls_send_use(url: String) -> Result[String, Error] {
+    let uri = std.uri.parse(url) ?=> |_| Rejected
+    let Some(Name(span)) = uri.host else {
+        return Error(Rejected)
+    }
+    let name = string.slice(url, span.start, span.end)
+    if name == "" {
+        return Error(Rejected)
+    }
+    for b in string.as_bytes(name) {
+        if !(int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'-' || b == b'.') {
+            return Error(Rejected)
+        }
+    }
+    let mut uses = string.from("tls_send(")
+    string.push(mut uses, name)
+    string.push(mut uses, ")")
+    Ok(take uses)
+}
+
+/// Reads the issuing Store before disclosing the code. The pool never follows
+/// redirects and sends the code and PKCE verifier only as protected TLS segments.
+pub fn exchange_oidc(reader: store.Reader, snap: store.Snapshot, t: Tables, state: String, browser: String, code_text: String, n: Net, tasks: Tasks, clock: Clock, take trust: Trust, deadline_ns: u64) -> Result[String, Error] waits {
+    let now = host.wall_ms(clock)
+    let found = store.get(reader, snap, t.ceremonies, state) ?=> |_| Unavailable
+    let row = bound_ceremony(found, store.snapshot_identity(snap), now, browser)?
+    let Oidc(issuer, client) = view row.purpose else {
+        return Error(Rejected)
+    }
+    let entry = store.get(reader, snap, t.providers, issuer) ?=> |_| Unavailable
+    let Some(p) = view entry else {
+        return Error(Rejected)
+    }
+    if now >= p.good_until_ms || client != p.config.client_id || code_text == "" {
+        return Error(Rejected)
+    }
+    let uses = tls_send_use(p.config.token_endpoint)?
+    let code_key = secret.seal(clone(string.as_bytes(code_text)), uses) ?=> |_| Rejected
+    let verifier = secret.seal(clone(string.as_bytes(browser)), uses) ?=> |_| Rejected
+    let mut form = string.from("grant_type=authorization_code&client_id=")
+    std.uri.encode(mut form, string.as_bytes(client), QueryPart)
+    string.push(mut form, "&redirect_uri=")
+    std.uri.encode(mut form, string.as_bytes(p.config.redirect_uri), QueryPart)
+    string.push(mut form, "&code=")
+    let mut segments: List[std.http_client.Segment] = list.new()
+    list.push(mut segments, Plain(string.into_bytes(take form)))
+    list.push(mut segments, Sealed(take code_key, Form))
+    list.push(mut segments, Plain(b"&code_verifier="))
+    list.push(mut segments, Sealed(take verifier, Form))
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "Content-Type", value: Public(b"application/x-www-form-urlencoded")))
+    let request = std.http_client.Fetch(method: "POST", url: clone(p.config.token_endpoint), headers: take headers, body: take segments)
+    let mut limits = std.http_client.limits(std.jwt.MAX_TOKEN * 2)
+    limits.redirects = Return
+    limits.conns_max = 1
+    limits.waiters_max = 1
+    let pool = std.http_client.pool(n, clock, tasks, take trust, limits) ?=> |_| Unavailable
+    let mut body: Bytes = list.new()
+    let head = std.http_client.fetch_all(std.http_client.handle(pool), request, mut body, deadline_ns) ?=> |_| Unavailable
+    if std.http_client.status(head) != 200 {
+        return Error(Rejected)
+    }
+    let text = string.from_utf8(take body) ?=> |_| Rejected
+    let Some(take token) = std.json.decode(text, token_response) ?=> |_| Rejected else {
+        return Error(Rejected)
+    }
+    Ok(take token)
+}

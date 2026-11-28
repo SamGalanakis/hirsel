@@ -1,6 +1,7 @@
 pkg_v1.Workspace(
     members: [
         "archive",
+        "auth",
         "av1",
         "checkbox",
         "cli",

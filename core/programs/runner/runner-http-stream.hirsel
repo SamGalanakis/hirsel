@@ -34,3 +34,13 @@ pub fn http_stream_response(req: std.http.Request, status: u16, bounds: std.stre
     std.stream.expire_at(mut spec, expires_at_ms)
     Ok(take spec)
 }
+
+/// Use the complete binding on an authenticated raw route so the writer sees
+/// both the exclusive deadline and revocation while the response is open.
+pub fn http_bound_stream(req: std.http.Request, status: u16, bounds: std.stream.Bounds, identity: LiveBinding, take producer: own[send] fn(take std.stream.Seed, Clock) waits) -> Result[std.stream.Spec, std.http.HandlerError] {
+    let mut stream_spec = http_stream_response(req, status, bounds, identity.binding.expires_at_ms, take producer)?
+    if let Some(take check) = std.stream_watch.copy_guard(identity.guard) {
+        std.stream.guard_release(mut stream_spec, take check)
+    }
+    Ok(take stream_spec)
+}

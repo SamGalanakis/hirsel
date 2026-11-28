@@ -1,0 +1,11 @@
+hirsel.laws 1
+auth@1/auth/cookie_origin_policy src=2e876c7bbcd96cf5 sig=64478513b639bd7b run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
+auth@1/laws/oidc_exchange_and_consume src=ce6e8f5c1f68dcae sig=49ecb88fefe93b70 run=db4e4334fc7b99e2 bug=- oracle=- rows=pending
+auth@1/laws/passkey_ed25519 src=c4ed4f3820245b13 sig=368b5c13faa3ca31 run=7338608ae6c89dee bug=- oracle=- rows=pending
+auth@1/laws/passkey_es256 src=ac658a499f0e4f8f sig=368b5c13faa3ca31 run=7338608ae6c89dee bug=- oracle=- rows=pending
+auth@1/laws/restored_cookie src=9632538991545a0f sig=6a7aadaae316747f run=ba799caff9b50348 bug=- oracle=- rows=pending
+auth@1/laws/revoke_open_response src=b1d56e72c0881727 sig=221ebd7d5fe06619 run=e13a00cc3f8c84c9 bug=- oracle=- rows=pending
+auth@1/laws/scoped_invalidation src=7bf687f87d9b3857 sig=bfeaffe07122b064 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
+auth@1/laws/scoped_token_limits src=71519c7170dd5df9 sig=b7c2757c9dea3ffd run=2c429cb51b7fff22 bug=- oracle=- rows=pending
+auth@1/laws/session_lifecycle src=2938ed37808d3969 sig=37100fba590f182f run=7338608ae6c89dee bug=- oracle=- rows=pending
+auth@1/laws/transact_authority src=af8fbc6386111e35 sig=fa3a692869e918a4 run=2f2681ca48ebe043 bug=- oracle=- rows=pending

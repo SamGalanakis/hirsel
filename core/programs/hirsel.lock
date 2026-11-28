@@ -2,6 +2,12 @@
 version = 2
 
 [[package]]
+id = "auth@1"
+version = "1.0.0"
+source = "member:auth"
+edges = ["effect@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "cli@1"
 version = "1.0.0"
 source = "member:cli"

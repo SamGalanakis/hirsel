@@ -634,7 +634,7 @@ fn wire_room_offer[C: send](mut st: WireLoop[C]) -> bool waits {
     let writer = option.unwrap(replace(mut st.writer, None))
     st.busy = true
     let end = int.saturating_add(host.mono_ns(st.clock), std.wsock.MESSAGE_NS)
-    let job = WireWrite(live: Some(take framed), cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end, can_close: true, close: false, report: None)
+    let job = WireWrite(live: Some(take framed), cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end, can_close: true, guard: std.stream_watch.copy_guard(st.auth_guard), auth_end: st.auth_end, close: false, report: None)
     match wire_start(st.tasks, take job) {
         Ok(take child) => {
             st.wh = Some(take child);

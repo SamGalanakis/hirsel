@@ -411,9 +411,16 @@ fn http_generated_handler[G: send, H: shareable + inert + send](req: std.http.Re
                 return Ok(Reply(http_refusal(Overloaded)?))
             }
             if binding.mode == Read {
-                Ok(Reply(http_one_shot(req, resp, reads, operation, take sent, state.budget, state.clock, state.tasks)?))
+                let mut response = http_one_shot(req, resp, reads, operation, take sent, state.budget, state.clock, state.tasks)?
+                std.http.guard_read(mut response, std.stream_watch.copy_guard(context.guard), context.expires_at_ms)
+                Ok(Reply(take response))
             } else {
-                Ok(Stream(http_stream_offer(req, take sent, state.budget)?))
+                let mut stream = http_stream_offer(req, take sent, state.budget)?
+                let Admitted(guard: take guard, ..) = take context
+                if let Some(take check) = take guard {
+                    std.stream.guard_release(mut stream, take check)
+                }
+                Ok(Stream(take stream))
             }
         },
         Granted => Ok(Reply(http_refusal(NoEntry)?)),

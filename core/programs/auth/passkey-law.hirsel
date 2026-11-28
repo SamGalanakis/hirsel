@@ -1,0 +1,192 @@
+// Fixed none-attestation CBOR with COSE EC2/P-256 and OKP/Ed25519 keys.
+const P_ATTESTATION: String = "a363666d74646e6f6e656761747453746d74a068617574684461746158904b44c0f58579a3a8da8e78db6a053a6e22cc0ed832530ca834a91a30a991ea15450000000000000000000000000000000000000000000c63726564656e7469616c2d50a5010203262001215820fb50388f29498d0a93ad25ec4c34037b9d3cc3cca4787eb6fedabe2b3003eac82258209f7765ca9d6288e6ff734f5cd08f3a5921cf54b21bb398b50ac0d2577fa07472"
+
+const P_PRIVATE: String = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b020101042000000000000000000000000000000000000000000000000000000000075bcd15a14403420004fb50388f29498d0a93ad25ec4c34037b9d3cc3cca4787eb6fedabe2b3003eac89f7765ca9d6288e6ff734f5cd08f3a5921cf54b21bb398b50ac0d2577fa07472"
+
+const ED_ATTESTATION: String = "a363666d74646e6f6e656761747453746d74a0686175746844617461586e4b44c0f58579a3a8da8e78db6a053a6e22cc0ed832530ca834a91a30a991ea15450000000000000000000000000000000000000000000d63726564656e7469616c2d4544a401010327200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+
+const ED_PRIVATE: String = "302e020100300506032b657004220420000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+fn unhex(s: String) -> Bytes {
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
+}
+
+fn client_bytes(kind: String, challenge: String, origin: String) -> Bytes {
+    let mut txt = string.from("{\"type\":")
+    std.json.push_quoted(mut txt, kind)
+    string.push(mut txt, ",\"challenge\":")
+    std.json.push_quoted(mut txt, challenge)
+    string.push(mut txt, ",\"origin\":")
+    std.json.push_quoted(mut txt, origin)
+    string.push(mut txt, ",\"crossOrigin\":false}")
+    string.into_bytes(take txt)
+}
+
+fn site() -> auth.RelyingParty {
+    result.unwrap(auth.relying_party("client.test", result.unwrap(auth.browser_origin("https://client.test"))))
+}
+
+type RegisterInput {
+    t: auth.Tables,
+    cookie: String,
+    browser: String,
+    prompt: auth.Challenge,
+    raw_id: Bytes,
+    data: Bytes
+}
+
+fn record_key(mut tx: store.Tx, env: RegisterInput) -> Result[(), auth.Error] {
+    auth.with_session(mut tx, env.t, env.cookie, scoped fn(mut inner: store.Tx, proof: auth.Proof) -> Result[(), auth.Error] {
+        let client = client_bytes("webauthn.create", env.prompt.challenge, "https://client.test")
+        auth.finish_registration(mut inner, env.t, env.prompt.state, env.browser, proof, env.raw_id, client, env.data)
+    })
+}
+
+type Assertion: codec {
+    client: Bytes,
+    data: Bytes,
+    signature: Bytes
+}
+
+fn assertion(r: Random, ed: bool, challenge: String, origin: String, rp_id: String, f: u8, count: u32) -> Assertion {
+    let client = client_bytes("webauthn.get", challenge, origin)
+    let hash = std.sha256.hash(string.as_bytes(rp_id))
+    let mut raw: Bytes = list.with_capacity(37)
+    for i in 0u64 .. 32u64 {
+        list.push(mut raw, hash[i])
+    }
+    list.push(mut raw, f)
+    list.put_word_be(mut raw, count)
+    let mut signed: Bytes = clone(raw)
+    let client_hash = std.sha256.hash(client)
+    for i in 0u64 .. 32u64 {
+        list.push(mut signed, client_hash[i])
+    }
+    let mut sig: Bytes = list.with_capacity(64)
+    if ed {
+        let key = result.unwrap(secret.seal(unhex(ED_PRIVATE), "sign(ed25519)"))
+        let _ = result.unwrap(secret.sign(key, Ed25519, r, signed, mut sig))
+    } else {
+        let key = result.unwrap(secret.seal(unhex(P_PRIVATE), "sign(p256)"))
+        let _ = result.unwrap(secret.sign(key, P256, r, signed, mut sig))
+        sig = option.unwrap(std.x509_build.p256_signature_der(sig))
+    }
+    Assertion(client: take client, data: take raw, signature: take sig)
+}
+
+type AssertionInput {
+    t: auth.Tables,
+    browser: String,
+    state: String,
+    id: Bytes,
+    invalid: List[Assertion],
+    valid: Assertion
+}
+
+fn check_vectors(mut tx: store.Tx, env: AssertionInput) -> Result[(), auth.Error] {
+    for bad in env.invalid {
+        if let Ok(_) = auth.finish_assertion(mut tx, env.t, env.state, env.browser, env.id, b"user", bad.client, bad.data, bad.signature) {
+            fail("accepted invalid signed assertion")
+        }
+    }
+    let v = view env.valid
+    let handle = auth.finish_assertion(mut tx, env.t, env.state, env.browser, env.id, b"user", v.client, v.data, v.signature)?
+    if handle != b"user" {
+        fail("incorrect user handle")
+    }
+    if let Ok(_) = auth.finish_assertion(mut tx, env.t, env.state, env.browser, env.id, b"user", v.client, v.data, v.signature) {
+        fail("replayed assertion")
+    }
+    Ok(())
+}
+
+fn passkey(c: Clock, r: Random, ed: bool) -> Result[(), store.Error] waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let t = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take cookie, take registration) = auth.fresh(r)
+    let (take browser, take first) = auth.fresh_challenge(r)
+    let initial: (auth.Tables, auth.Registration, String, auth.ChallengeSeed) = (clone(t), take registration, clone(cookie), take first)
+    let issued = store.run(mut db, None, initial, fn(mut tx, env) -> Result[auth.Challenge, auth.Error] {
+        auth.create(mut tx, env.0, env.1, b"user", 60000)?
+        auth.with_session(mut tx, env.0, env.2, scoped fn(mut inner: store.Tx, proof: auth.Proof) -> Result[auth.Challenge, auth.Error] {
+            auth.begin_registration(mut inner, env.0, site(), proof, env.3, 60000)
+        })
+    })?
+    let Committed(take opened) = take issued else {
+        fail("begin registration")
+    }
+    let id: Bytes = if ed {
+        b"credential-ED"
+    } else {
+        b"credential-P"
+    }
+    let attestation = unhex(if ed {
+        ED_ATTESTATION
+    } else {
+        P_ATTESTATION
+    })
+    let input = RegisterInput(t: clone(t), cookie: clone(cookie), browser: take browser, prompt: clone(opened.value), raw_id: clone(id), data: take attestation)
+    let registration_outcome = store.run(mut db, None, input, record_key)?
+    let Committed(_) = registration_outcome else {
+        fail("finish registration")
+    }
+    let (take second_browser, take second) = auth.fresh_challenge(r)
+    let start: (auth.Tables, auth.ChallengeSeed) = (clone(t), take second)
+    let authn = store.run(mut db, None, start, fn(mut tx, env) -> Result[auth.Challenge, auth.Error] {
+        auth.begin_assertion(mut tx, env.0, site(), env.1, 60000)
+    })?
+    let Committed(take request) = take authn else {
+        fail("begin assertion")
+    }
+    let nonce = view request.value.challenge
+    let mut invalid: List[Assertion] = list.new()
+    list.push(mut invalid, assertion(r, ed, nonce, "https://other.test", "client.test", 5, 1))
+    list.push(mut invalid, assertion(r, ed, nonce, "https://client.test", "other.test", 5, 1))
+    list.push(mut invalid, assertion(r, ed, nonce, "https://client.test", "client.test", 1, 1))
+    list.push(mut invalid, assertion(r, ed, nonce, "https://client.test", "client.test", 4, 1))
+    let valid = assertion(r, ed, nonce, "https://client.test", "client.test", 5, 1)
+    let vectors = AssertionInput(t: clone(t), browser: take second_browser, state: clone(request.value.state), id: clone(id), invalid: take invalid, valid: take valid)
+    let verified = store.run(mut db, None, vectors, check_vectors)?
+    let Committed(_) = verified else {
+        fail("valid UV assertion")
+    }
+    let (take last_browser, take last_seed) = auth.fresh_challenge(r)
+    let removal: (auth.Tables, String, Bytes, auth.ChallengeSeed, bool) = (clone(t), take cookie, clone(id), take last_seed, ed)
+    let removed = store.run(mut db, None, removal, fn(mut tx, env) -> Result[auth.Challenge, auth.Error] {
+        let challenge = auth.begin_assertion(mut tx, env.0, site(), env.3, 60000)?
+        if env.4 {
+            auth.recover_credentials(mut tx, env.0, site(), b"user")?
+        } else {
+            auth.with_session(mut tx, env.0, env.1, scoped fn(mut inner: store.Tx, proof: auth.Proof) -> Result[(), auth.Error] {
+                auth.remove_credential(mut inner, env.0, site(), proof, env.2)
+            })?
+        }
+        Ok(take challenge)
+    })?
+    let Committed(take last) = take removed else {
+        fail("remove enrolled credential")
+    }
+    let signed = assertion(r, ed, last.value.challenge, "https://client.test", "client.test", 5, 2)
+    let final_input: (auth.Tables, String, String, Bytes, Assertion) = (take t, take last_browser, clone(last.value.state), take id, take signed)
+    let denied = store.run(mut db, None, final_input, fn(mut tx, env) -> Result[(), auth.Error] {
+        let v = view env.4
+        if let Error(Rejected) = auth.finish_assertion(mut tx, env.0, env.2, env.1, env.3, b"user", v.client, v.data, v.signature) {
+            return Ok(())
+        }
+        fail("removed credential verified")
+    })?
+    let Committed(_) = denied else {
+        fail("revocation check")
+    }
+    Ok(())
+}
+
+@test
+fn passkey_es256(c: Clock, r: Random) -> Result[(), store.Error] waits {
+    passkey(c, r, false)
+}
+
+@test
+fn passkey_ed25519(c: Clock, r: Random) -> Result[(), store.Error] waits {
+    passkey(c, r, true)
+}

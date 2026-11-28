@@ -131,7 +131,7 @@ pub(super) fn generate(
     }
     js.push_str("import {want} from './entries.js';\nconst bindings = {\n");
     let mut types = String::from(
-        "import type * as codec from './codec.js';\n         import type {DecodedRow} from './entries.js';\n         import type {Change, Client, Clock, HttpReply, HttpRequest, Outcome, Subscription, SubscriptionEnd} from './client.js';\n         export interface HttpOptions {url: string; fetch?: typeof fetch; credential?: string; clock?: Clock}\n         export type HttpSubscriptionEnd = {tag: 'Ended'; reason: SubscriptionEnd} | {tag: 'Refused'; status: number; body: string} | {tag: 'Aborted'};\n         export interface HttpSubscription<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> extends Subscription<V, Slots, Keys> {readonly done: Promise<HttpSubscriptionEnd>}\n         export interface HttpSubscribeOptions<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> {\n           signal?: AbortSignal;\n           onChange?: (sub: HttpSubscription<V, Slots, Keys>, change: Change<V, Slots>) => void;\n           onEnd?: (reason: SubscriptionEnd) => void;\n         }\n         export const httpBindings: {\n",
+        "import type * as codec from './codec.js';\n         import type {DecodedRow} from './entries.js';\n         import type {Change, Client, Clock, HttpReply, HttpRequest, Outcome, Subscription, SubscriptionEnd} from './client.js';\n         export type HttpFailure = {tag: 'Rejected' | 'Unavailable' | 'HttpStatus'} | {tag: 'Refused' | 'Fault'; code: string};\n         export type HttpResult<T> = HttpReply & {value?: T; error?: HttpFailure};\n         export type HttpRow<S, K, V> = {slot: S; table: string; key: K} & ({present: true; value: V} | {present: false});\n         export interface HttpBatch<V, R> {version: bigint; complete: number[]; groups: Array<{sub: number; value?: V; rows: R[]}>; outcomes: unknown[]}\n         export interface HttpOptions {url: string; fetch?: typeof fetch; credential?: string; clock?: Clock}\n         export type HttpSubscriptionEnd = {tag: 'Ended'; reason: SubscriptionEnd} | {tag: 'Refused'; status: number; body: string} | {tag: 'Aborted'};\n         export interface HttpSubscription<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> extends Subscription<V, Slots, Keys> {readonly done: Promise<HttpSubscriptionEnd>}\n         export interface HttpSubscribeOptions<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> {\n           signal?: AbortSignal;\n           onChange?: (sub: HttpSubscription<V, Slots, Keys>, change: Change<V, Slots>) => void;\n           onEnd?: (reason: SubscriptionEnd) => void;\n         }\n         export const httpBindings: {\n",
     );
     let mut calls = Vec::new();
     for binding in &description.bindings {
@@ -220,10 +220,20 @@ pub(super) fn generate(
         )?;
         let output = match binding.mode {
             "stream" => format!(
-                "(HttpReply & {{value?: codec.Result{index}}}) | Exclude<Outcome<never>, {{tag: 'Returned'}}>"
+                "HttpResult<codec.Result{index}> | Exclude<Outcome<never>, {{tag: 'Returned'}}>"
             ),
-            _ if entry.kind == 2 => "HttpReply & {value?: unknown}".to_owned(),
-            _ => format!("HttpReply & {{value?: codec.Result{index}}}"),
+            _ if entry.kind == 2 => {
+                let rows = entry.slots.iter().enumerate().map(|(slot_index, slot)| {
+                    format!("HttpRow<{}, codec.Key{index}_{slot_index}, codec.RowValue{index}_{slot_index}>", json!(slot.name))
+                }).collect::<Vec<_>>();
+                let row = if rows.is_empty() {
+                    "never".to_owned()
+                } else {
+                    rows.join(" | ")
+                };
+                format!("HttpResult<HttpBatch<codec.Value{index}, {row}>>")
+            }
+            _ => format!("HttpResult<codec.Result{index}>"),
         };
         calls.push(format!(
             "  {name}: (args: codec.Args{index}) => Promise<{output}>;\n"

@@ -2,7 +2,7 @@
 // credential. The G is dropped when the binding's task ends (RUNNER-SPEC v2.70 F4).
 type BindingJob[G: send]: send {
     grant: G,
-    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+    bind: Binder[G],
     credential: Bytes,
     steps: u64
 }
@@ -10,7 +10,7 @@ type BindingJob[G: send]: send {
 // A bind before its mint: the bind mint's inbox and the rest of the job.
 type BindAsk[G: send]: send {
     to: Sender[MintRequest[(), G]],
-    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+    bind: Binder[G],
     credential: Bytes,
     steps: u64,
     allowance: u64
@@ -43,9 +43,12 @@ fn anonymous_caller(random: Random) -> Option[Caller] {
 
 // §3 "Binding": a binding whose exclusive expiry the wall clock has reached is refused like
 // any other, so a credential already expired at bind never yields a session.
-fn unexpired(clock: Clock, take given: Result[BoundCaller, BindRefusal]) -> Result[BoundCaller, BindRefusal] {
+fn unexpired(clock: Clock, take given: Result[LiveBinding, BindRefusal]) -> Result[LiveBinding, BindRefusal] waits {
     let b = (take given)?
-    if let Some(end) = b.expires_at_ms {
+    if std.stream_watch.revoked(b.guard, clock) {
+        return Error(Rejected)
+    }
+    if let Some(end) = b.binding.expires_at_ms {
         if host.wall_ms(clock) >= end {
             return Error(Rejected)
         }
@@ -53,18 +56,23 @@ fn unexpired(clock: Clock, take given: Result[BoundCaller, BindRefusal]) -> Resu
     Ok(take b)
 }
 
-fn run_binding[G: send](take job: BindingJob[G]) -> Result[BoundCaller, BindRefusal] waits {
+fn run_binding[G: send](take job: BindingJob[G]) -> Result[LiveBinding, BindRefusal] waits {
     let BindingJob(grant: take made, bind: bind_app, credential: take credential, steps: steps) = take job
     invoke_binding(bind_app, made, credential, steps)
 }
 
-fn invoke_binding[B](bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], seed: B, credential: Bytes, steps: u64) -> Result[BoundCaller, BindRefusal] waits {
-    let invoke = code.callable(bind_app)
+fn invoke_binding[B](bind_app: Binder[B], seed: B, credential: Bytes, steps: u64) -> Result[LiveBinding, BindRefusal] waits {
     let result = bound steps steps {
-        invoke(seed, credential)
+        match bind_app {
+            DeadlineOnly(f) => match (code.callable(f))(seed, credential) {
+                Ok(take identity) => (Ok(LiveBinding(binding: take identity, guard: None)) : Result[LiveBinding, BindRefusal]),
+                Error(why) => Error(why),
+            },
+            Watched(f) => (code.callable(f))(seed, credential),
+        }
     }
     match take result {
-        Ok(Ok(take given)) if given.caller.issuer != 1u8 => Ok(take given),
+        Ok(Ok(take given)) if given.binding.caller.issuer != 1u8 => Ok(take given),
         Ok(Error(why)) => Error(why),
         _ => Error(Rejected),
     }
@@ -74,11 +82,12 @@ fn invoke_binding[B](bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, Bind
 // bound and expiry rules before it opens a private session. The G is dropped
 // when the bind ends.
 pub fn bind_credential[G: send](tasks: Tasks, clock: Clock, take grant: G, bind_app: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Result[BoundCaller, BindRefusal] waits {
-    unexpired(clock, bound_caller(tasks, BindingJob(grant: take grant, bind: bind_app, credential: take credential, steps: steps), bytes_budget))
+    let LiveBinding(binding: take identity, ..) = unexpired(clock, bound_caller(tasks, BindingJob(grant: take grant, bind: DeadlineOnly(bind_app), credential: take credential, steps: steps), bytes_budget))?
+    Ok(take identity)
 }
 
-fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Result[BoundCaller, BindRefusal] waits {
-    let run: fn(take BindingJob[G]) -> Result[BoundCaller, BindRefusal] waits = run_binding
+fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Result[LiveBinding, BindRefusal] waits {
+    let run: fn(take BindingJob[G]) -> Result[LiveBinding, BindRefusal] waits = run_binding
     let handle = match task.try_spawn(tasks, bytes allowance, take job, run) {
         Ok(take child) => take child,
         Error(_) => return Error(Rejected),
@@ -403,7 +412,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
 
 pub type HttpBindError: send = RejectedCredential | BindingUnavailable | BindingDeadline | BindingCapacity | BindMintFailed(Fault)
 
-type HttpBindingResult: send = Bound(Result[BoundCaller, BindRefusal]) | BindingExpired
+type HttpBindingResult: send = Bound(Result[LiveBinding, BindRefusal]) | BindingExpired
 
 resource type BindingCompletion: send {
     to: Sender[HttpBindingResult],
@@ -455,7 +464,11 @@ pub fn bind_http[G: send](supplied: Option[BindGrant[G]], take credential: Optio
     }
     match take answer {
         Ok(Bound(take given)) => match unexpired(clock, take given) {
-            Ok(BoundCaller(caller: take caller, expires_at_ms: expiry)) => Ok(admitted(take caller, expiry, take entries, arrived, now, budget, arg_max)),
+            Ok(LiveBinding(binding: BoundCaller(caller: take caller, expires_at_ms: expiry), guard: take guard)) => {
+                let mut context = admitted(take caller, expiry, take entries, arrived, now, budget, arg_max)
+                context.guard = take guard
+                Ok(take context)
+            },
             Error(Rejected) => Error(RejectedCredential),
             Error(Unavailable) => Error(BindingUnavailable),
         },
@@ -521,6 +534,7 @@ pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], 
 // `expires_at_ms` is the binding's exclusive wall-clock expiry (§3 "Binding"). It stays in
 // the transport: no store key, transaction or CallInfo carries it.
 pub opaque type Admitted: send {
+    guard: Option[std.stream_watch.Guard],
     caller: Caller,
     expires_at_ms: Option[u64],
     entries: List[Bytes],
@@ -531,7 +545,7 @@ pub opaque type Admitted: send {
 }
 
 fn admitted(take caller: Caller, expires_at_ms: Option[u64], take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
-    Admitted(caller: take caller, expires_at_ms: expires_at_ms, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
+    Admitted(guard: None, caller: take caller, expires_at_ms: expires_at_ms, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
 }
 
 pub type CallWant: send {
@@ -631,7 +645,7 @@ fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
             Ok((take bind_job, allowance)) => bound_caller(tasks, take bind_job, allowance),
             Error(_) => Error(Unavailable),
         },
-        None => Ok(BoundCaller(caller: take anonymous, expires_at_ms: None)),
+        None => Ok(LiveBinding(binding: BoundCaller(caller: take anonymous, expires_at_ms: None), guard: None)),
     }
     let sample = match identity {
         Ok(_) => match head {
@@ -649,18 +663,30 @@ pub type BoundCaller: send {
     expires_at_ms: Option[u64]
 }
 
+pub type LiveBinding: send {
+    binding: BoundCaller,
+    guard: Option[std.stream_watch.Guard]
+}
+
+type Binder[G]: send = DeadlineOnly(StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits]) | Watched(StaticFn[fn(G, Bytes) -> Result[LiveBinding, BindRefusal] waits])
+
 pub type BindRefusal: codec + send = Rejected | Unavailable
 
 // A wire only binds. Its binding takes a view of a G that the place's bind
 // mint makes for each bind (RUNNER-SPEC v2.70 F4).
 pub opaque type Wire[G: send]: send {
-    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+    bind: Binder[G],
     bind_bytes: u64,
     bind_steps: u64,
 }
 
 pub fn wire[G: send](bind_app: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G] {
-    Wire(bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
+    Wire(bind: DeadlineOnly(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
+}
+
+/// Carries a live revocation check from the bind mint to the transport.
+pub fn watched_wire[G: send](bind_app: StaticFn[fn(G, Bytes) -> Result[LiveBinding, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G] {
+    Wire(bind: Watched(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
 // A session owner's room for its hello's bind child: the child's 4096 plus the
@@ -702,9 +728,13 @@ fn copy_bind_grant[G: send](supplied: Option[BindGrant[G]]) -> Option[BindGrant[
 
 // Latches the binding's expiry: at or past it the session closes with 4401
 // AuthExpired and no further data frame is admitted or written.
-fn wire_auth_lapsed[C: send](mut st: WireLoop[C]) -> bool {
+fn wire_auth_lapsed[C: send](mut st: WireLoop[C]) -> bool waits {
     if st.closing {
         return false
+    }
+    if std.stream_watch.revoked(st.auth_guard, st.clock) {
+        wire_owner_refuse(mut st, 4401u16)
+        return true
     }
     match st.auth_end {
         Some(end) if host.wall_ms(st.clock) >= end => {

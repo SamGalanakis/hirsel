@@ -29,6 +29,8 @@ pub opaque type Response: send {
     invalid: bool
     committed: bool,
     release: Option[ReleaseGate],
+    auth_guard: Option[stream_watch.Guard],
+    auth_end: Option[u64],
     read_permit: Option[ReadPermit]
 }
 
@@ -111,11 +113,16 @@ pub fn guard_response(mut reply: Response, round: Latest[ReleaseRound], fence: L
     reply.release = Some(ReleaseGate(fence: latest.handle(fence), round: latest.handle(round), version: version))
 }
 
+pub fn guard_read(mut reply: Response, take check: Option[stream_watch.Guard], end: Option[u64]) {
+    reply.auth_guard = take check
+    reply.auth_end = end
+}
+
 fn response_with(status: u16, take body: ResponseBody, close: bool) -> Result[Response, ResponseError] {
     if status < 200 || status > 599 {
         return Error(StatusInvalid)
     }
-    Ok(Response(status, fields: list.new(), body: take body, close, invalid: false, committed: false, release: None, read_permit: None))
+    Ok(Response(status, fields: list.new(), body: take body, close, invalid: false, committed: false, release: None, auth_guard: None, auth_end: None, read_permit: None))
 }
 
 fn response_length(r: Response) -> u64 {
@@ -914,26 +921,8 @@ pub fn write_wire_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, 
     http_writer.write_until(mut w, prefix, body, c, deadline, signal)
 }
 
-fn refusal_head(status: u16) -> String {
-    match status {
-        400 => "HTTP/1.1 400 Bad Request\r\n",
-        408 => "HTTP/1.1 408 Request Timeout\r\n",
-        413 => "HTTP/1.1 413 Content Too Large\r\n",
-        414 => "HTTP/1.1 414 URI Too Long\r\n",
-        417 => "HTTP/1.1 417 Expectation Failed\r\n",
-        431 => "HTTP/1.1 431 Request Header Fields Too Large\r\n",
-        501 => "HTTP/1.1 501 Not Implemented\r\n",
-        503 => "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n",
-        _ => "HTTP/1.1 500 Internal Server Error\r\n",
-    }
-}
-
 fn reply_error(mut w: WriteHalf, status: u16, c: Clock, deadline: u64) -> Result[(), NetError] waits {
-    reply_error_until(mut w, status, c, deadline, None)
-}
-
-fn reply_error_until(mut w: WriteHalf, status: u16, c: Clock, deadline: u64, signal: Option[DrainSignal]) -> Result[(), NetError] waits {
-    write_wire_until(mut w, string.as_bytes(refusal_head(status)), string.as_bytes("Connection: close\r\nContent-Length: 0\r\n\r\n"), c, deadline, signal)
+    http_writer.reply_error_until(mut w, status, c, deadline, None)
 }
 
 pub fn write_promotion_unit(mut w: WriteHalf, head: Bytes, c: Clock, at: u64, ms: u64, signal: Option[DrainSignal]) -> Result[(), NetError] waits {
@@ -941,7 +930,7 @@ pub fn write_promotion_unit(mut w: WriteHalf, head: Bytes, c: Clock, at: u64, ms
 }
 
 pub fn write_promotion_refusal(mut w: WriteHalf, c: Clock, at: u64, ms: u64, signal: Option[DrainSignal]) -> Result[(), NetError] waits {
-    reply_error_until(mut w, 503, c, clock.deadline_after_ms(at, ms), signal)
+    http_writer.reply_error_until(mut w, 503, c, clock.deadline_after_ms(at, ms), signal)
 }
 
 pub opaque scoped type Body {
@@ -1214,7 +1203,7 @@ fn write_succeeded(r: Result[(), NetError]) -> bool {
 type OutputResult = FinalReply(bool) | ClosingReply(bool)
 
 fn error_step(mut w: WriteHalf, status: u16, clock: Clock, end: u64, signal: Option[DrainSignal]) -> Step waits {
-    if write_succeeded(reply_error_until(mut w, status, clock, end, signal)) {
+    if write_succeeded(http_writer.reply_error_until(mut w, status, clock, end, signal)) {
         RepliedAndClose
     } else {
         CloseConnection
@@ -1223,9 +1212,13 @@ fn error_step(mut w: WriteHalf, status: u16, clock: Clock, end: u64, signal: Opt
 
 fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress: bool, close: bool, cfg: Config, mut cache: DateCache) -> OutputResult waits {
     if let Error(_) = response_head(mut out, r, version, close, host.wall_ms(b.clock), mut cache) {
-        return ClosingReply(write_succeeded(reply_error_until(mut b.writer, 500, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)))
+        return ClosingReply(write_succeeded(http_writer.reply_error_until(mut b.writer, 500, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)))
     }
-    let write_end = clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms)
+    let until = clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms)
+    if stream_watch.revoked(r.auth_guard, b.clock) || stream.auth_lapsed(b.clock, r.auth_end) {
+        return ClosingReply(write_succeeded(http_writer.reply_error_until(mut b.writer, 401, b.clock, until, b.stop)))
+    }
+    let write_end = stream.release_deadline(b.clock, r.auth_end, until)
     if let Some(release) = r.release {
         if !read_fence(release.round, release.fence, release.version) {
             let end = clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms)
@@ -1239,13 +1232,13 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
         }
     }
     if suppress || !has_body(r.status) {
-        return FinalReply(write_succeeded(write_wire_until(mut b.writer, out, string.as_bytes(""), b.clock, write_end, b.stop)))
+        return FinalReply(write_succeeded(http_writer.write_guarded(mut b.writer, out, string.as_bytes(""), b.clock, write_end, b.stop, r.auth_guard)))
     }
     let sent = match r.body {
-        OwnedBody(data) => write_succeeded(write_wire_until(mut b.writer, out, bytebuf.as_bytes(data), b.clock, write_end, b.stop)),
-        SharedBody(data) => write_succeeded(write_wire_until(mut b.writer, out, data, b.clock, write_end, b.stop)),
-        JsonBody(binary, plan, root, offset, _) => http_writer.write_json(mut b.writer, mut out, plan, root, list.slice(binary, offset, list.len(binary)), b.clock, write_end, b.stop),
-        MeasuredBody(_, write) => http_writer.write_measured(mut b.writer, mut out, write, b.clock, write_end, b.stop),
+        OwnedBody(data) => write_succeeded(http_writer.write_guarded(mut b.writer, out, bytebuf.as_bytes(data), b.clock, write_end, b.stop, r.auth_guard)),
+        SharedBody(data) => write_succeeded(http_writer.write_guarded(mut b.writer, out, data, b.clock, write_end, b.stop, r.auth_guard)),
+        JsonBody(binary, plan, root, offset, _) => http_writer.guarded_json(mut b.writer, mut out, plan, root, list.slice(binary, offset, list.len(binary)), b.clock, write_end, b.stop, r.auth_guard),
+        MeasuredBody(_, write) => http_writer.guarded_measured(mut b.writer, mut out, write, b.clock, write_end, b.stop, r.auth_guard),
     }
     FinalReply(sent)
 }
@@ -1791,7 +1784,7 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
         match read_head(mut reader, mut input, mut head, c, first, start, cfg, inbox, slot, signal) {
             PeerClosed => break,
             Rejected(status) => {
-                if write_succeeded(reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
+                if write_succeeded(http_writer.reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
                     let _ = channel.send(inbox, FirstResponse(slot))
                 }
                 break
@@ -1803,14 +1796,14 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
             let source = match ingress_policy.source_for_head(input, head, peer, cfg.ingress) {
                 Ok(ip) => ip,
                 Error(status) => {
-                    if write_succeeded(reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
+                    if write_succeeded(http_writer.reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
                         let _ = channel.send(inbox, FirstResponse(slot))
                     }
                     break
                 },
             }
             if source_key(source) != source_key(peer) && !change_source(inbox, slot, source) {
-                if write_succeeded(reply_error_until(mut writer, 503, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
+                if write_succeeded(http_writer.reply_error_until(mut writer, 503, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
                     let _ = channel.send(inbox, FirstResponse(slot))
                 }
                 break
@@ -1820,7 +1813,7 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
         let (policy, fields) = match request_policy(input, parsed) {
             Ok(p) => p,
             Error(status) => {
-                if write_succeeded(reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
+                if write_succeeded(http_writer.reply_error_until(mut writer, status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
                     let _ = channel.send(inbox, FirstResponse(slot))
                 }
                 break
@@ -1841,7 +1834,7 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
         let frame = match wire {
             Ok(f) => f,
             Error(e) => {
-                if write_succeeded(reply_error_until(mut writer, e.status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
+                if write_succeeded(http_writer.reply_error_until(mut writer, e.status, c, clock.deadline_after_ms(host.mono_ns(c), cfg.write_ms), signal)) && first {
                     let _ = channel.send(inbox, FirstResponse(slot))
                 }
                 break

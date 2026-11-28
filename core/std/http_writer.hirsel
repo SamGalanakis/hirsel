@@ -1,10 +1,18 @@
 // Writes fixed HTTP bodies with one deadline and a committed-prefix cursor.
 pub fn write_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[(), NetError] waits {
+    write_guarded(mut w, prefix, body, c, deadline, signal, None)
+}
+
+pub fn write_guarded(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> Result[(), NetError] waits {
     let boundary = list.len(prefix)
     let end = boundary + list.len(body)
     let mut committed: u64 = 0
     while committed < end {
-        let until = http.clamp_deadline(signal, deadline)
+        if stream_watch.revoked(check, c) {
+            return Error(Aborted)
+        }
+        let end_at = http.clamp_deadline(signal, deadline)
+        let until = stream_watch.probe_deadline(check, c, end_at)
         if host.mono_ns(c) >= until {
             return Error(TimedOut)
         }
@@ -18,6 +26,7 @@ pub fn write_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadl
             Ok(n) => {
                 committed += n
             },
+            Error(TimedOut) if until < end_at => (),
             Error(e) => return Error(e),
         }
     }
@@ -25,11 +34,15 @@ pub fn write_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadl
 }
 
 pub fn write_json(mut writer: WriteHalf, mut out: Bytes, plan: json.JsonPlan, root: u64, binary: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> bool waits {
-    if let Error(_) = write_until(mut writer, out, b"", c, deadline, signal) {
+    guarded_json(mut writer, mut out, plan, root, binary, c, deadline, signal, None)
+}
+
+pub fn guarded_json(mut writer: WriteHalf, mut out: Bytes, plan: json.JsonPlan, root: u64, binary: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> bool waits {
+    if let Error(_) = write_guarded(mut writer, out, b"", c, deadline, signal, check) {
         return false
     }
     let flush = scoped fn(chunk: Bytes) -> bool waits {
-        match write_until(mut writer, b"", chunk, c, deadline, signal) {
+        match write_guarded(mut writer, b"", chunk, c, deadline, signal, check) {
             Ok(()) => true,
             Error(_) => false,
         }
@@ -41,15 +54,38 @@ pub fn write_json(mut writer: WriteHalf, mut out: Bytes, plan: json.JsonPlan, ro
 }
 
 pub fn write_measured(mut writer: WriteHalf, mut out: Bytes, write: http.BodyWriter, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> bool waits {
-    if let Error(_) = write_until(mut writer, out, b"", c, deadline, signal) {
+    guarded_measured(mut writer, mut out, write, c, deadline, signal, None)
+}
+
+pub fn guarded_measured(mut writer: WriteHalf, mut out: Bytes, write: http.BodyWriter, c: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> bool waits {
+    if let Error(_) = write_guarded(mut writer, out, b"", c, deadline, signal, check) {
         return false
     }
     list.clear(mut out)
     let flush = scoped fn(chunk: Bytes) -> bool waits {
-        match write_until(mut writer, b"", chunk, c, deadline, signal) {
+        match write_guarded(mut writer, b"", chunk, c, deadline, signal, check) {
             Ok(()) => true,
             Error(_) => false,
         }
     }
     write(mut out, flush)
+}
+
+fn refusal_head(status: u16) -> String {
+    match status {
+        401 => "HTTP/1.1 401 Unauthorized\r\n",
+        400 => "HTTP/1.1 400 Bad Request\r\n",
+        408 => "HTTP/1.1 408 Request Timeout\r\n",
+        413 => "HTTP/1.1 413 Content Too Large\r\n",
+        414 => "HTTP/1.1 414 URI Too Long\r\n",
+        417 => "HTTP/1.1 417 Expectation Failed\r\n",
+        431 => "HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        501 => "HTTP/1.1 501 Not Implemented\r\n",
+        503 => "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n",
+        _ => "HTTP/1.1 500 Internal Server Error\r\n",
+    }
+}
+
+pub fn reply_error_until(mut w: WriteHalf, status: u16, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[(), NetError] waits {
+    write_until(mut w, string.as_bytes(refusal_head(status)), string.as_bytes("Connection: close\r\nContent-Length: 0\r\n\r\n"), c, deadline, signal)
 }

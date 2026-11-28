@@ -1,0 +1,208 @@
+pub opaque type RelyingParty: shareable + send {
+    rp_id: String,
+    origin: BrowserOrigin
+}
+
+/// This profile requires a top-level HTTPS origin on the RP ID's exact host.
+pub fn relying_party(rp_id: String, origin: BrowserOrigin) -> Result[RelyingParty, Error] {
+    let parsed = std.uri.parse(origin.text) ?=> |_| Rejected
+    let Some(Name(host)) = parsed.host else {
+        return Error(Rejected)
+    }
+    if rp_id == "" || string.slice(origin.text, host.start, host.end) != rp_id {
+        return Error(Rejected)
+    }
+    Ok(RelyingParty(rp_id: clone(rp_id), origin: clone(origin)))
+}
+
+type Credential: codec {
+    handle: Bytes,
+    generation: u64,
+    key: PublicKey,
+    count: u32,
+    eligible: bool,
+    backed_up: bool
+}
+
+pub fn begin_registration(mut tx: store.Tx, t: Tables, rp: RelyingParty, proof: Proof, seed: ChallengeSeed, ttl_ms: u64) -> Result[Challenge, Error] {
+    let handle = subject(proof)
+    if list.len(handle) > 64 {
+        return Error(Rejected)
+    }
+    let generation = credential_generation(tx, t, rp.rp_id, handle)?
+    open_challenge(mut tx, t, seed, Enroll(clone(rp.rp_id), clone(rp.origin.text), clone(handle), generation), ttl_ms)
+}
+
+pub fn begin_assertion(mut tx: store.Tx, t: Tables, rp: RelyingParty, seed: ChallengeSeed, ttl_ms: u64) -> Result[Challenge, Error] {
+    open_challenge(mut tx, t, seed, Assert(clone(rp.rp_id), clone(rp.origin.text)), ttl_ms)
+}
+
+type ClientData {
+    kind: String,
+    challenge: String,
+    origin: String,
+    cross: bool,
+    names: std.set.Set[String]
+}
+
+fn client_fields(s: String, mut cursor: std.json.Cursor) -> Result[ClientData, std.json.Error] {
+    let seed = ClientData(kind: "", challenge: "", origin: "", cross: false, names: std.set.new())
+    std.json.record_of(s, mut cursor, take seed, fn(k: String, txt: String, mut v: std.json.Cursor, mut data: ClientData) -> Result[(), std.json.Error] {
+        if !std.set.insert(mut data.names, clone(k)) || k == "topOrigin" {
+            return Error(Syntax(0))
+        }
+        if k == "type" {
+            data.kind = std.json.read_string(txt, mut v)?
+        } else if k == "challenge" {
+            data.challenge = std.json.read_string(txt, mut v)?
+        } else if k == "origin" {
+            data.origin = std.json.read_string(txt, mut v)?
+        } else if k == "crossOrigin" {
+            data.cross = std.json.read_bool(txt, mut v)?
+        } else {
+            std.json.skip_value(txt, mut v)?
+        }
+        Ok(())
+    })
+}
+
+fn client_matches(raw: Bytes, kind: String, origin: String, nonce: String) -> Result[(), Error] {
+    if list.len(raw) > 65535 {
+        return Error(Rejected)
+    }
+    let start: u64 = if list.len(raw) >= 3 && list.slice(raw, 0, 3) == b"\xef\xbb\xbf" {
+        3
+    } else {
+        0
+    }
+    let text = string.from_utf8(clone(list.slice(raw, start, list.len(raw)))) ?=> |_| Rejected
+    let data = std.json.decode(text, client_fields) ?=> |_| Rejected
+    if data.kind != kind || data.origin != origin || data.challenge != nonce || data.cross {
+        return Error(Rejected)
+    }
+    Ok(())
+}
+
+fn flags(raw: Bytes, rp_id: String, enrolling: bool) -> Result[u8, Error] {
+    if list.len(raw) < 37 || list.slice(raw, 0, 32) != digest_of(rp_id) {
+        return Error(Rejected)
+    }
+    let f = raw[32u64]
+    if (f & 5) != 5 || (f & 0x40 != 0) != enrolling || f & 0x80 != 0 || f & 0x18 == 0x10 {
+        return Error(Rejected)
+    }
+    Ok(f)
+}
+
+fn credential_id(rp_id: String, raw: Bytes) -> Result[String, Error] {
+    if list.len(raw) == 0 || list.len(raw) > 1023 {
+        return Error(Rejected)
+    }
+    let mut text = string.from(rp_id)
+    string.push(mut text, ":")
+    string.push(mut text, std.base64.encode_url(raw, false))
+    Ok(take text)
+}
+
+pub fn finish_registration(mut tx: store.Tx, t: Tables, state: String, browser: String, proof: Proof, raw_id: Bytes, client_data: Bytes, attestation: Bytes) -> Result[(), Error] {
+    let row = pending(mut tx, t, state, browser)?
+    let Enroll(rp_id, origin, handle, generation) = view row.purpose else {
+        return Error(Rejected)
+    }
+    if handle != subject(proof) {
+        return Error(Rejected)
+    }
+    client_matches(client_data, "webauthn.create", origin, row.nonce)?
+    let data = attested_data(attestation)?
+    let f = flags(data, rp_id, true)?
+    if list.len(data) < 55 {
+        return Error(Rejected)
+    }
+    let n: u16 = list.word_be(data, 53)
+    let mut at: u64 = 55u64 + int.widen(n)
+    if at > list.len(data) || list.slice(data, 55, at) != raw_id {
+        return Error(Rejected)
+    }
+    let id = credential_id(rp_id, raw_id)?
+    if let Some(_) = store.fetch(tx, t.credentials, id) ?=> |_| Unavailable {
+        return Error(Rejected)
+    }
+    if generation != credential_generation(tx, t, rp_id, handle)? {
+        return Error(Rejected)
+    }
+    let record = Credential(handle: clone(handle), generation: generation, key: cose(data, mut at)?, count: list.word_be(data, 33), eligible: f & 8 != 0, backed_up: f & 16 != 0)
+    store.put(mut tx, t.credentials, id, record) ?=> |_| Unavailable
+    consume(mut tx, t, state)
+}
+
+pub fn finish_assertion(mut tx: store.Tx, t: Tables, state: String, browser: String, raw_id: Bytes, user_handle: Bytes, client_data: Bytes, authenticator_data: Bytes, signature: Bytes) -> Result[Bytes, Error] {
+    let row = pending(mut tx, t, state, browser)?
+    let Assert(rp_id, origin) = view row.purpose else {
+        return Error(Rejected)
+    }
+    client_matches(client_data, "webauthn.get", origin, row.nonce)?
+    let f = flags(authenticator_data, rp_id, false)?
+    if list.len(authenticator_data) != 37 {
+        return Error(Rejected)
+    }
+    let id = credential_id(rp_id, raw_id)?
+    let found = store.fetch(tx, t.credentials, id) ?=> |_| Unavailable
+    let Some(take saved) = take found else {
+        return Error(Rejected)
+    }
+    if user_handle != saved.handle || saved.generation != credential_generation(tx, t, rp_id, saved.handle)? || (f & 8 != 0) != saved.eligible {
+        return Error(Rejected)
+    }
+    let hash = std.sha256.hash(client_data)
+    let mut signed: Bytes = clone(authenticator_data)
+    for i in 0u64 .. 32u64 {
+        list.push(mut signed, hash[i])
+    }
+    let valid = match view saved.key {
+        EdKey(k) => ed25519.verify(k, signed, signature),
+        P256Key(k) => p256.verify_der(k, signed, signature),
+    }
+    let count: u32 = list.word_be(authenticator_data, 33)
+    if !valid || !saved.eligible && (saved.count != 0 || count != 0) && count <= saved.count {
+        return Error(Rejected)
+    }
+    let mut record = take saved
+    record.count = order.max(record.count, count)
+    record.backed_up = f & 16 != 0
+    store.put(mut tx, t.credentials, id, record) ?=> |_| Unavailable
+    consume(mut tx, t, state)?
+    Ok(clone(record.handle))
+}
+
+fn credential_generation(tx: store.Tx, t: Tables, rp_id: String, handle: Bytes) -> Result[u64, Error] {
+    let name = credential_id(rp_id, handle)?
+    match store.fetch(tx, t.generations, name) ?=> |_| Unavailable {
+        Some(value) => Ok(value),
+        None => Ok(0),
+    }
+}
+
+/// Call only after independent recovery authorization. Invalidates all of the
+/// handle's keys and any outstanding enrollment for this relying party.
+pub fn recover_credentials(mut tx: store.Tx, t: Tables, rp: RelyingParty, handle: Bytes) -> Result[(), Error] {
+    let name = credential_id(rp.rp_id, handle)?
+    let generation = credential_generation(tx, t, rp.rp_id, handle)?
+    let Some(next) = int.checked_add(generation, 1u64) else {
+        return Error(Unavailable)
+    }
+    store.put(mut tx, t.generations, name, next) ?=> |_| Unavailable
+    Ok(())
+}
+
+pub fn remove_credential(mut tx: store.Tx, t: Tables, rp: RelyingParty, proof: Proof, raw_id: Bytes) -> Result[(), Error] {
+    let id = credential_id(rp.rp_id, raw_id)?
+    let found = store.fetch(tx, t.credentials, id) ?=> |_| Unavailable
+    let Some(saved) = view found else {
+        return Error(Rejected)
+    }
+    if saved.handle != subject(proof) {
+        return Error(Rejected)
+    }
+    let _ = store.delete(mut tx, t.credentials, id) ?=> |_| Unavailable
+    Ok(())
+}

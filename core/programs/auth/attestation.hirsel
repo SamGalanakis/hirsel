@@ -1,0 +1,130 @@
+// Definite-length CBOR for the "none" attestation profile and its COSE keys.
+fn byte_at(raw: Bytes, mut at: u64) -> Result[u8, Error] {
+    if at >= list.len(raw) {
+        return Error(Rejected)
+    }
+    let b = raw[at]
+    at += 1
+    Ok(b)
+}
+
+fn length(raw: Bytes, mut at: u64, major: u8) -> Result[u64, Error] {
+    let first = byte_at(raw, mut at)?
+    if first >> 5 != major {
+        return Error(Rejected)
+    }
+    let n = first & 31
+    if n < 24 {
+        return Ok(int.widen(n))
+    }
+    if n == 24 {
+        return Ok(int.widen(byte_at(raw, mut at)?))
+    }
+    if n == 25 {
+        let hi: u64 = int.widen(byte_at(raw, mut at)?)
+        let lo: u64 = int.widen(byte_at(raw, mut at)?)
+        return Ok((hi << 8) | lo)
+    }
+    Error(Rejected)
+}
+
+fn field_bytes(raw: Bytes, mut at: u64, major: u8) -> Result[Bytes, Error] {
+    let n = length(raw, mut at, major)?
+    if n > list.len(raw) - at {
+        return Error(Rejected)
+    }
+    let start = at
+    at += n
+    Ok(clone(list.slice(raw, start, at)))
+}
+
+fn attested_data(raw: Bytes) -> Result[Bytes, Error] {
+    let mut at: u64 = 0
+    if list.len(raw) > 65535 || length(raw, mut at, 5)? != 3 {
+        return Error(Rejected)
+    }
+    let mut stmt = false
+    let mut fmt = false
+    let mut data: Option[Bytes] = None
+    for _ in 0u64 .. 3u64 {
+        let key = field_bytes(raw, mut at, 3)?
+        if key == b"fmt" && !fmt {
+            if field_bytes(raw, mut at, 3)? != b"none" {
+                return Error(Rejected)
+            }
+            fmt = true
+        } else if key == b"attStmt" && !stmt {
+            if length(raw, mut at, 5)? != 0 {
+                return Error(Rejected)
+            }
+            stmt = true
+        } else if key == b"authData" && data == None {
+            data = Some(field_bytes(raw, mut at, 2)?)
+        } else {
+            return Error(Rejected)
+        }
+    }
+    if at != list.len(raw) {
+        return Error(Rejected)
+    }
+    let Some(take bytes_out) = take data else {
+        return Error(Rejected)
+    }
+    Ok(take bytes_out)
+}
+
+type PublicKey: codec = P256Key(Bytes) | EdKey(Bytes)
+
+fn cose(raw: Bytes, mut at: u64) -> Result[PublicKey, Error] {
+    let n = length(raw, mut at, 5)?
+    if n != 4 && n != 5 {
+        return Error(Rejected)
+    }
+    let mut kty: Option[u8] = None
+    let mut alg: Option[u8] = None
+    let mut crv: Option[u8] = None
+    let mut x: Option[Bytes] = None
+    let mut y: Option[Bytes] = None
+    for _ in 0u64 .. n {
+        match byte_at(raw, mut at)? {
+            1 if kty == None => {
+                kty = Some(byte_at(raw, mut at)?)
+            },
+            3 if alg == None => {
+                alg = Some(byte_at(raw, mut at)?)
+            },
+            0x20 if crv == None => {
+                crv = Some(byte_at(raw, mut at)?)
+            },
+            0x21 if x == None => {
+                x = Some(field_bytes(raw, mut at, 2)?)
+            },
+            0x22 if y == None => {
+                y = Some(field_bytes(raw, mut at, 2)?)
+            },
+            _ => return Error(Rejected),
+        }
+    }
+    let Some(take xb) = take x else {
+        return Error(Rejected)
+    }
+    if at != list.len(raw) {
+        return Error(Rejected)
+    }
+    if kty == Some(1u8) && alg == Some(0x27u8) && crv == Some(6u8) && y == None {
+        let _ = std.jwt.ed25519_key(clone(xb)) ?=> |_| Rejected
+        return Ok(EdKey(take xb))
+    }
+    if kty == Some(2u8) && alg == Some(0x26u8) && crv == Some(1u8) {
+        let Some(take yb) = take y else {
+            return Error(Rejected)
+        }
+        let _ = std.jwt.p256_key(xb, yb) ?=> |_| Rejected
+        let mut point: Bytes = list.with_capacity(65)
+        list.push(mut point, 4)
+        list.append(mut point, xb)
+        list.append(mut point, yb)
+        return Ok(P256Key(take point))
+    }
+    Error(Rejected)
+}

@@ -1,0 +1,83 @@
+fn select_auth(t: auth.Tables) -> auth.Tables {
+    clone(t)
+}
+
+fn authorize(_tx: store.Tx, _t: auth.Tables, s: auth.Session, _arg: bool) -> Result[(), auth.Error] {
+    if s.subject == b"actor" {
+        Ok(())
+    } else {
+        Error(Rejected)
+    }
+}
+
+fn same_error(why: auth.Error) -> auth.Error {
+    why
+}
+
+fn use_session(mut tx: store.Tx, t: auth.Tables, proof: auth.Proof, take remove: bool) -> Result[Bytes, auth.Error] {
+    if remove {
+        auth.revoke(mut tx, t, auth.session_id(proof))?
+    }
+    Ok(clone(auth.subject(proof)))
+}
+
+fn auth_place(mut r: runner.Registry[(), auth.Tables]) -> Result[(), runner.RegisterError] {
+    auth.transact(mut r, 7, code.describe(select_auth), code.describe(authorize), code.describe(same_error), code.describe(use_session), 131072, runner.DEFAULT_STEPS)
+}
+
+type Drive: send {
+    head: Sender[runner.HeadInput],
+    birth: u64,
+    id: Bytes
+}
+
+fn call_protected(d: Drive, issuer: u8, subject: Bytes, n: u64, remove: bool) -> Result[Bytes, auth.Error] waits {
+    let reply_codec: std.codec.Codec[Result[Bytes, auth.Error]] = std.codec.of()
+    let key = result.unwrap(runner.attempt_key(code.describe(use_session), std.codec.of_bool(), reply_codec))
+    let mut arg: Bytes = list.new()
+    result.unwrap(std.codec.encode(std.codec.of_bool(), remove, mut arg))
+    let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1)
+    let req = runner.head_request(store.Caller(issuer, subject: clone(subject)), store.StreamId(t: d.birth, n), 0, take key, take arg, take to)
+    result.unwrap(channel.send(d.head, RunRequest(take req)))
+    let item = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
+    let Returned(raw) = view item.outcome else {
+        fail("expected typed reply")
+    }
+    result.unwrap(std.codec.decode(reply_codec, raw))
+}
+
+fn drive_proof(take d: Drive) waits {
+    if let Error(Rejected) = call_protected(d, 8, d.id, 1, false) {} else {
+        fail("wrong issuer")
+    }
+    if let Error(Rejected) = call_protected(d, 7, b"short", 2, false) {} else {
+        fail("wrong session id")
+    }
+    if result.unwrap(call_protected(d, 7, d.id, 3, true)) != b"actor" {
+        fail("incorrect proof subject")
+    }
+    if let Error(Rejected) = call_protected(d, 7, d.id, 4, false) {} else {
+        fail("revoked writer")
+    }
+}
+
+@test
+fn transact_authority(c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 268435456)))
+    let t = store.bind_declaration(mut db, Migrate, auth.declare)?
+    let (take cookie, take registration) = auth.fresh(r)
+    let inputs: (auth.Tables, auth.Registration) = (take t, take registration)
+    let write = store.run(mut db, None, inputs, fn(mut tx, env) -> Result[(), auth.Error] {
+        auth.create(mut tx, env.0, env.1, b"actor", 60000)
+    })?
+    let Committed(_) = write else {
+        fail("create")
+    }
+    let (id, _) = option.unwrap(std.string.split_once(cookie, "."))
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8)
+    let mail = result.unwrap(runner.mailbox(8))
+    let job = task.spawn(tasks, bytes 4194304, Drive(head: take head, birth: store.keyed_time(db), id: clone(string.as_bytes(id))), drive_proof)
+    result.unwrap(runner.place_head(take db, code.describe(auth_place), 1048576, None, code.describe(auth.declare), take inbox, take mail, tasks, 4194304))
+    result.unwrap(task.join(take job))
+    Ok(())
+}

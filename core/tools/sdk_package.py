@@ -6,8 +6,6 @@ import shutil
 import subprocess
 import tempfile
 
-from std_native import source_manifest
-
 
 SELECTOR = 'sdk.client:packed_consumer'
 
@@ -53,11 +51,29 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
             if not declaration.startswith('./') or not (installed / declaration).is_file():
                 raise ValueError(f'@hirsel/client export {subpath!r} has a missing types target: {declaration}')
 
-        inputs = work / 'inputs.json'
-        inputs.write_text(json.dumps(source_manifest(root, 'runner', ['packed_consumer'], fixture)))
+        # A source package under this library root has the same launch metadata
+        # access as the installed runner when the CLI asks the Place to describe itself.
+        libraries = work / 'lib'
+        programs = libraries / 'programs'
+        app = programs / 'client'
+        app.mkdir(parents=True)
+        for name in ('core', 'std'):
+            (libraries / name).symlink_to(root / 'core' / name, target_is_directory=True)
+        for name in ('store', 'runner'):
+            source = root / 'core/programs' / name
+            for directory, subdirs, files in os.walk(source):
+                subdirs[:] = [d for d in subdirs if not d.startswith('.')]
+                for filename in files:
+                    if filename.endswith(('.hirsel', '.hcfg')):
+                        dest = programs / name / Path(directory).relative_to(source) / filename
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(Path(directory) / filename, dest)
+        (programs / 'hirsel.hcfg').write_text('pkg_v1.Workspace(members: ["store", "runner", "client"])\n')
+        shutil.copyfile(fixture, app / 'main.hirsel')
+        shutil.copyfile(fixture.with_suffix('.hcfg'), app / 'hirsel.hcfg')
         executable = work / 'fixture'
-        subprocess.run([compiler, 'build', '--source-core', '--source-std', '--inputs', inputs, '--runtime', runtime,
-                        '--entry', 'runner@1/packed_consumer/main', '--grant', 'Stdout',
+        subprocess.run([compiler, 'build', app, '--libraries', libraries, '--source-std', '--runtime', runtime,
+                        '--entry', 'local/sdk_test@1/packed_consumer/main', '--grant', 'Stdout',
                         '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
         subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated'],
@@ -79,7 +95,12 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         standalone.mkdir()
         shutil.copyfile(consumer / 'package.json', standalone / 'package.json')
         shutil.copyfile(consumer / example, standalone / example)
-        shutil.copytree(consumer / 'generated', standalone / 'generated')
+        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', standalone / 'generated'],
+                       cwd=work, check=True)
+        def contents(directory):
+            return {p.name: p.read_bytes() for p in directory.iterdir()}
+        if contents(consumer / 'generated') != contents(standalone / 'generated'):
+            raise ValueError('generated SDK differs between consumers')
         subprocess.run([*install, *tool_tarballs], cwd=standalone, env=npm_env, check=True)
         standalone_source = (consumer / 'consumer.ts').read_text()
         standalone_source = standalone_source.replace("'@hirsel/client'", "'./generated/client.js'")
@@ -92,10 +113,12 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         subprocess.run([*standalone_node, standalone / 'node_modules/typescript/bin/tsc',
                         '--strict', '--module', 'NodeNext', '--target', 'ES2022',
                         '--rewriteRelativeImportExtensions', '--outDir', compiled,
-                        'consumer.ts', 'generated/browser.ts'],
+                        'consumer.ts', 'generated/place.ts'],
                        cwd=standalone, env=env, check=True)
         for module in (standalone / 'generated').glob('*.js'):
             shutil.copyfile(module, compiled / 'generated' / module.name)
+        shutil.copyfile(fixture.with_name('open-place.js'), compiled / 'open-place.js')
+        subprocess.run([*standalone_node, 'open-place.js'], cwd=compiled, env=env, check=True)
         shutil.copyfile(consumer / 'payload.bin', compiled / 'payload.bin')
         subprocess.run([*standalone_node, 'consumer.js'],
                        cwd=compiled, env=env, check=True)

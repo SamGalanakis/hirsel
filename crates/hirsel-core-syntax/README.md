@@ -32,6 +32,9 @@ PRIOR-ART.md records choices and tradeoffs. There are no old semantic dependenci
 comment and semicolon. Blocks, fields, match arms and statements use four-space structural
 layout; declarations have one blank line between them. Parenthesized and bracketed
 lists with a trailing comma put one entry on each line.
+Other lines wrap at a target width of 100 columns, using syntax boundaries
+such as list entries and operands. Continuation lines add one indentation
+level. Long literals, identifiers and comments can exceed the target.
 `format_verified` checks changed output by reparsing in the original mode and
 comparing the normalized AST, token spellings and comment ownership. Tests also
 check item-relative anchors, recovery and idempotence.

@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn formatter_wraps_at_syntax_boundaries() {
+    let first = "a".repeat(42);
+    let fits = "b".repeat(46);
+    let over = "b".repeat(47);
+    for (second, call) in [
+        (&fits, format!("    call({first}, {fits})")),
+        (&over, format!("    call({first},\n        {over})")),
+    ] {
+        let input = format!("fn f(){{call({first},{second})}}");
+        assert_eq!(
+            formatted(&input, ParseMode::Source),
+            format!("fn f() {{\n{call}\n}}\n")
+        );
+    }
+
+    let input = format!("fn f(){{return {first} - {over} // difference\n}}");
+    assert_eq!(
+        formatted(&input, ParseMode::Source),
+        format!("fn f() {{\n    return {first} -\n        {over} // difference\n}}\n")
+    );
+
+    let literal = format!("r#\"{}\"#", "a b ".repeat(30));
+    let input = format!("fn f(){{record({literal},2)}}");
+    assert_eq!(
+        formatted(&input, ParseMode::Source),
+        format!("fn f() {{\n    record(\n        {literal},\n        2)\n}}\n")
+    );
+
+    let input = format!("pub fn f({first}: u64, {over}: u64) -> u64");
+    assert_eq!(
+        formatted(&input, ParseMode::Foreign),
+        format!("pub fn f({first}: u64,\n    {over}: u64) -> u64\n")
+    );
+}
+
+#[test]
 fn formatter_trailing_commas_break_lists() {
     for (input, expected, mode) in [
         (

@@ -147,8 +147,9 @@ def check_transition(root, before, after, paths, moved=None):
         limit = min(old_cap, new_cap, max(baseline, prior))
         explicit_raise = (new_cap > old_cap
                           or new_entry.get('raise_revision', 0) > old_entry.get('raise_revision', 0))
+        # Existing Hirsel entries may predate the higher default.
         raised = (after is not None and path in old and path in changed and explicit_raise
-                  and baseline < prior < new_cap == lines and 'reason' in new_entry)
+                  and LIMIT < prior < new_cap == lines and new_cap > baseline and 'reason' in new_entry)
         if raised:
             limit = new_cap
         elif new_cap > old_cap:
@@ -228,11 +229,11 @@ def main(root):
         except ValueError:
             parser.error('LINES must be an integer')
         prior = line_count(snapshot(root, 'HEAD', {path}).get(path, b''))
-        baseline = default_limit(path)
-        if prior <= baseline:
-            parser.error(f'{path} must exceed {baseline:,} lines in HEAD to raise its limit')
-        if lines <= prior:
-            parser.error(f'LINES must exceed the current length of {prior}')
+        if prior <= LIMIT:
+            parser.error(f'{path} must exceed {LIMIT:,} lines in HEAD to raise its limit')
+        threshold = max(prior, default_limit(path))
+        if lines <= threshold:
+            parser.error(f'LINES must exceed {threshold:,}')
         # A raise can set a stale cap to the same or a lower number. Record a
         # fresh revision so an ordinary cap update cannot authorize growth.
         entries[path] = {'lines': lines, 'reason': args.reason.strip(),

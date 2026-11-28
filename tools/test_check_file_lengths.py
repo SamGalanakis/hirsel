@@ -30,11 +30,14 @@ class FileLengthRatchet(unittest.TestCase):
                 shutil.copy2(ROOT / path, root / path)
             (root / 'tools/check_boundaries.py').write_text('# No Hirsel packages in this fixture.\n')
 
-            targets = {'below.py': 1150, 'equal.py': 1200}
-            entries = {path: {'lines': 1200, 'reason': 'fixture-lane'} for path in targets}
+            targets = {'below.py': 1150, 'equal.py': 1200, 'legacy.hirsel': 2077}
+            entries = {
+                path: {'lines': 1880 if path == 'legacy.hirsel' else 1200, 'reason': 'fixture-lane'}
+                for path in targets
+            }
             (root / RATCHET).write_text(json.dumps(entries))
             for path in targets:
-                (root / path).write_text('# line\n' * 1100)
+                (root / path).write_text('# line\n' * (1880 if path == 'legacy.hirsel' else 1100))
             run('git', 'add', '.')
             run('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fixture with stale caps')
             run('git', 'config', 'core.hooksPath', '.githooks')

@@ -3,10 +3,14 @@
 use crate::*;
 use std::io;
 
+const LINE_WIDTH: usize = 100;
+const INDENT: &str = "    ";
+
 /// Canonical layout of a complete parse. Invalid source has no formatted result.
 /// Prints every non-whitespace token verbatim, including comments and semicolons.
 /// Four-space blocks and statement/field/arm lines are structural. A trailing
 /// comma gives parenthesized and bracketed lists one entry per line.
+/// Other lines wrap at syntax boundaries with a target of 100 columns.
 /// No resolution, second parse or validation of our output is run.
 pub fn format(parsed: &ParseOutput) -> Option<String> {
     if !parsed.diagnostics.is_empty() || parsed.resource_refusal.is_some() {
@@ -123,6 +127,7 @@ pub(crate) fn same_ast(before: &SyntaxFile, after: &SyntaxFile) -> bool {
 struct Role {
     line_before: bool,
     line_after: bool,
+    wrap_before: bool,
     open: bool,
     close: bool,
     unary: bool,
@@ -197,6 +202,32 @@ fn item_text(item: &Item, roles: &mut [Role]) -> String {
                     roles[token.0 as usize].unary = true;
                 }
             }
+            NodeKind::Assign | NodeKind::Binary => {
+                roles[tree.node(children[1]).origin.tokens.start as usize].wrap_before = true;
+            }
+            NodeKind::Constant | NodeKind::Let | NodeKind::LetMut | NodeKind::Arm => {
+                for &child in children {
+                    let start = tree.node(child).origin.tokens.start as usize;
+                    let previous = tree.tokens[range.start..start]
+                        .iter()
+                        .rfind(|token| !token.kind.is_trivia());
+                    if previous.is_some_and(|token| matches!(token.symbol, sym::EQ | sym::FATARROW))
+                    {
+                        roles[start].wrap_before = true;
+                    }
+                }
+            }
+            NodeKind::ResultType | NodeKind::Outlives => roles[range.start].wrap_before = true,
+            NodeKind::Variants => {
+                for pair in children.windows(2) {
+                    let start = tree.node(pair[0]).origin.tokens.end as usize;
+                    let end = tree.node(pair[1]).origin.tokens.start as usize;
+                    let pipe = (start..end)
+                        .find(|&i| tree.tokens[i].symbol == sym::PIPE)
+                        .unwrap();
+                    roles[pipe].wrap_before = true;
+                }
+            }
             // `e ?=> |p| v`: the arm's pipes hug its pattern.
             NodeKind::Try
                 if children.len() == 2 && tree.node(children[1]).kind == NodeKind::Arm =>
@@ -231,7 +262,7 @@ fn item_text(item: &Item, roles: &mut [Role]) -> String {
             }
             _ => continue,
         };
-        trailing_comma_list(tree, roles, range.start, range.end - 1, entries);
+        layout_list(tree, roles, range.start, range.end - 1, entries);
     }
     print(
         item.text,
@@ -240,13 +271,7 @@ fn item_text(item: &Item, roles: &mut [Role]) -> String {
     )
 }
 
-fn trailing_comma_list(
-    tree: &Tree,
-    roles: &mut [Role],
-    start: usize,
-    close: usize,
-    entries: &[NodeId],
-) {
+fn layout_list(tree: &Tree, roles: &mut [Role], start: usize, close: usize, entries: &[NodeId]) {
     let (Some(&first), Some(&last)) = (entries.first(), entries.last()) else {
         return;
     };
@@ -255,6 +280,9 @@ fn trailing_comma_list(
         .iter()
         .find(|token| !token.kind.is_trivia());
     if !trailing.is_some_and(|token| token.kind == TokenKind::Comma) {
+        for &entry in entries {
+            roles[tree.node(entry).origin.tokens.start as usize].wrap_before = true;
+        }
         return;
     }
     let first_start = tree.node(first).origin.tokens.start as usize;
@@ -279,6 +307,8 @@ fn indent_between(roles: &mut [Role], open: usize, close: usize) {
 fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
     let mut out = String::new();
     let mut indent = 0;
+    let mut column = 0;
+    let mut wrap = None;
     let mut line = false;
     let mut previous: Option<(TokenKind, Role)> = None;
     for (token, &role) in tokens.iter().zip(roles) {
@@ -305,13 +335,33 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
             let continued = !role.line_before
                 && (grammar::line_continuation(token.symbol)
                     || grammar::ASSIGN.contains(&token.symbol));
-            out.push_str(&"    ".repeat(indent + usize::from(continued)));
-        } else if previous.is_some_and(|(kind, before)| {
-            comment || kind.is_trivia() || space(kind, before, token.kind, role)
-        }) {
-            out.push(' ');
+            let depth = indent + usize::from(continued);
+            out.push_str(&INDENT.repeat(depth));
+            column = INDENT.len() * depth;
+            wrap = None;
+        } else {
+            let spaced = previous.is_some_and(|(kind, before)| {
+                comment || kind.is_trivia() || space(kind, before, token.kind, role)
+            });
+            let prefix = column + usize::from(spaced);
+            if role.wrap_before && prefix > INDENT.len() * (indent + 1) {
+                wrap = Some((out.len()..out.len() + usize::from(spaced), prefix));
+            }
+            if spaced {
+                out.push(' ');
+            }
+            column = prefix;
         }
         out.push_str(raw);
+        column += raw.chars().count();
+        if column > LINE_WIDTH
+            && !comment
+            && let Some((separator, prefix)) = wrap.take()
+        {
+            let padding = INDENT.repeat(indent + 1);
+            column = padding.len() + column - prefix;
+            out.replace_range(separator, &format!("\n{padding}"));
+        }
         if role.open {
             indent += 1;
         }

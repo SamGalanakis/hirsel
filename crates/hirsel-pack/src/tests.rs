@@ -821,11 +821,18 @@ fn l2_cause_surviving_reuse_churn_100k() {
     let mut rss_after_warmup = 0u64;
     let read_rss_kib = hirsel_core_rt::host::resident_kib;
 
+    let mut worker = loader.worker();
+    let mut first_cause = None;
     let mut first_text = 0usize;
     let mut reused_count = 0usize;
-    for round in 0..ROUNDS {
+    for round in 0..=ROUNDS {
         let (bytes, expected) = &templates[round % templates.len()];
-        let code = loader.load::<RaiseEntry>(bytes, &IDENTITY, true).unwrap();
+        let image = loader.image(bytes, true).unwrap();
+        let code = image.code::<RaiseEntry>(&IDENTITY).unwrap();
+        let entry = image.resolve::<RaiseEntry>(&IDENTITY).unwrap();
+        let registered = code.register([entry.candidate()]).unwrap();
+        let slot = PlaceSlot::new(loader).unwrap();
+        let place = slot.activate(0, |_| Ok::<_, ()>((registered, ()))).unwrap();
         if round == 0 {
             first_text = code.text();
         } else if code.text() == first_text {
@@ -834,12 +841,18 @@ fn l2_cause_surviving_reuse_churn_100k() {
         // Record a cause using `isolate` so the task keeps its primary cell across all 10^5 rounds.
         let entered = unsafe { hirsel_core_rt::isolate::hirsel_core_isolate_enter(&mut ctx) };
         assert!(entered.entered);
-        code.with_entry(|f| unsafe { (f.0)(&mut ctx, 10, std::ptr::null(), 0) });
+        place
+            .dispatch(&mut worker, 0, |f: RaiseEntry, _, _| {
+                // SAFETY: the checkout pins the test module's cause entry for this call.
+                unsafe { (f.0)(&mut ctx, 10, std::ptr::null(), 0) };
+            })
+            .unwrap()
+            .unwrap();
         let caught = unsafe { hirsel_core_rt::isolate::hirsel_core_isolate_catch(&mut ctx) };
         assert_eq!(caught.status, 0);
 
-        // Unload & reclaim 100% of RX while the caught cause survives!
-        drop(code);
+        drop((place, slot, code, image));
+        worker.park();
         loader.reclaim().unwrap();
         assert_eq!(loader.installed(), 0);
 
@@ -852,12 +865,22 @@ fn l2_cause_surviving_reuse_churn_100k() {
             unsafe { abi_sites::format_cell(cell, std::ptr::null()) },
             *expected
         );
-        drop(chain);
+        if round == 0 {
+            first_cause = Some(chain);
+        }
 
         if round == 500 {
             rss_after_warmup = read_rss_kib();
         }
     }
+    let first = first_cause.unwrap();
+    let cell = first.iter_cells().next().unwrap();
+    // SAFETY: this retained chain owns the original literal and site table.
+    assert_eq!(
+        unsafe { abi_sites::format_cell(cell, std::ptr::null()) },
+        templates[0].1
+    );
+    drop(first);
     let rss_end = read_rss_kib();
     let raw_left = unsafe { hirsel_core_causes_take(&mut ctx) };
     assert!(raw_left.is_null());

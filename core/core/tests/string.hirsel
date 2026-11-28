@@ -1,6 +1,19 @@
-// Laws of core.string's case changes (core/core/string.hirsel), each result derived by hand.
+// Laws of core.string (core/core/string.hirsel), each result derived by hand.
 fn same(a: String, b: String) -> bool {
     a == b
+}
+
+// Each clone of "apple" needs eight bytes. The first call must release its
+// temporary before the next statement can clone the same string.
+// expect: run borrowed_clone_refunds() = true
+fn borrowed_clone_refunds() -> bool {
+    let text = string.from("apple")
+    let trial = bound bytes 8 {
+        let first = same(clone(text), "apple")
+        let second = same(clone(text), "apple")
+        first && second
+    }
+    result.unwrap(trial)
 }
 
 // Only a-z change; É (two bytes) and '-' are kept.

@@ -878,7 +878,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        Some(self.pointer(to, n))
+        let value = Some(self.pointer(to, n));
+        self.temp(result, value);
+        value
     }
 }
 

@@ -960,8 +960,13 @@ fn assemble<'a>(
     );
     native.optimize = launch.backend == hirsel_core_ir::release_recipe::Backend::Llvm;
     native.recording = recording;
+    let library = if native.optimize {
+        installed.product("std")?.map(|image| image.store_root())
+    } else {
+        None
+    };
     let product = publication
-        .assemble(&native, Default::default())
+        .assemble_with(&native, Default::default(), library.as_deref())
         .map_err(|e| e.to_string())?;
     let record = product.assembly.ok_or("assembly returned no record")?;
     let image = fs::read(product.executable)?;

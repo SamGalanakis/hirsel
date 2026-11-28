@@ -278,6 +278,8 @@ def notes_rows(board, out, env, toolchain):
 
 def churn_row(board, out, env, toolchain):
     result = out.with_suffix(".json")
+    # Genesis assembles the place inside this same 2 GiB scope.
+    env = env | LOW_MEMORY_ALLOCATOR
     with out.with_suffix(".log").open("w") as log:
         subprocess.run([CAP, sys.executable, ROOT / "bench/place-density/run.py",
                         "--hirsel", toolchain / "hirsel", "--churn", result], cwd=ROOT,

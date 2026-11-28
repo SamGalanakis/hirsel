@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from decimal import Decimal
 import http.client
+from itertools import chain
 import json
 import math
 import os
@@ -221,12 +222,14 @@ def register_places(compiler, scratch, state, recipe, launcher, places=PLACES):
             raise RuntimeError(f"{work.name} registration failed: {answer}")
         return ready(addresses[work])[2]
 
-    # The launcher links in its own process. Keep two concurrent links within
-    # the compiler's existing memory limit.
+    # Admit the cold recipe once before concurrent registrations. Otherwise
+    # two admissions reserve the same missing objects against the staging cap.
+    remaining = iter(addresses)
+    first = register(next(remaining))
     with ThreadPoolExecutor(max_workers=2) as registrations:
         try:
             digests = set()
-            for number, digest in enumerate(registrations.map(register, addresses), 1):
+            for number, digest in enumerate(chain((first,), registrations.map(register, remaining)), 1):
                 digests.add(digest)
                 if number % 16 == 0 or number == places:
                     print(f"Ready after genesis: {number}/{places}", flush=True)
@@ -474,7 +477,9 @@ def main():
     args = parser.parse_args()
     compiler = args.hirsel.resolve()
     if args.churn:
-        with tempfile.TemporaryDirectory(prefix="hirsel-churn-", dir="/dev/shm") as directory:
+        # Genesis writes the compiler's objects and native image under this
+        # root. Disk-backed pages can be reclaimed within the board's cap.
+        with tempfile.TemporaryDirectory(prefix="hirsel-churn-", dir="/tmp") as directory:
             result = churn(compiler, Path(directory))
         args.output.write_text(json.dumps(result, indent=2) + "\n")
         return 0

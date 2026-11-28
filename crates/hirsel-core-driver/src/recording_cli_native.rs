@@ -302,3 +302,41 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
     );
     assert_eq!(std::fs::read(tape).unwrap(), tape_bytes);
 }
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn run_tape_replays_fifo_after_eventless_receive() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/fixtures/recording/fifo-receive.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let tape = dir.path().join("fifo.tape");
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.grant_mask = (1 << grant_kind("Clock").unwrap()) | (1 << grant_kind("Tasks").unwrap());
+    let recording = product.build(&entry, &options).unwrap();
+    let (code, _, err) = tape_run(&recording.executable, &[], Some(&tape));
+    assert_eq!(code, Some(0), "record: {err}");
+
+    options.grant_mask = 0;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let (code, _, err) = tape_run(&replay.executable, &[], None);
+    assert_eq!(code, Some(0), "FIFO replay: {err}");
+}

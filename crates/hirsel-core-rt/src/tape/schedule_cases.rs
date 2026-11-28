@@ -943,11 +943,11 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
             }
             Scenario::Wait { between } => {
                 hirsel_core_check_cancel(context, 1);
-                if record && between {
+                if between && (record || (*timeline).chooser == format::CHOOSER_FIFO) {
                     checkpoint();
                 }
                 hirsel_core_check_cancel(context, 2);
-                if record && !between {
+                if !between && (record || (*timeline).chooser == format::CHOOSER_FIFO) {
                     checkpoint();
                 }
                 hirsel_core_check_cancel(context, 3);
@@ -956,7 +956,7 @@ unsafe extern "C" fn timeline_root(context: *mut Context, _: *mut u8, input: *mu
                 }
             }
             Scenario::Latest => {
-                if record {
+                if record || (*timeline).chooser == format::CHOOSER_FIFO {
                     checkpoint();
                 }
                 held = crate::latest::hirsel_core_latest_read(latest);

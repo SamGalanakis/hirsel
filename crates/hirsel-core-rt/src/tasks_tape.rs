@@ -94,6 +94,7 @@ pub(super) fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
                 // that parks with no event of its own reaches it at its park,
                 // after this entry, so it never pauses the running task.
                 Turn::Wake(_)
+                | Turn::Wait(_)
                 | Turn::Cancel(_)
                 | Turn::Done(_)
                 | Turn::Retired(_)

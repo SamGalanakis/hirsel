@@ -1,0 +1,34 @@
+type ReceiverJob: send {
+    clock: Clock,
+    signal: Sender[u64],
+    input: Receiver[u64],
+}
+
+fn receiver(take job: ReceiverJob) -> u64 waits {
+    result.unwrap(channel.send(job.signal, 1u64))
+    let item = result.unwrap(channel.receive(job.input))
+    host.mono_ns(job.clock) + item
+}
+
+fn sleep(take clock: Clock) waits {
+    host.sleep_until(clock, 18446744073709551615u64)
+}
+
+fn clock_read(take clock: Clock) -> u64 {
+    host.mono_ns(clock)
+}
+
+pub fn main(clock: Clock, tasks: Tasks) -> Result[(), Exit] waits {
+    let (send, receive): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let (signal, started): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let reader = task.spawn(tasks, bytes 65536, ReceiverJob(clock: clock, signal: take signal,
+        input: take receive), receiver)
+    let sleeper = task.spawn(tasks, bytes 65536, clock, sleep)
+    let _ = result.unwrap(channel.receive(started))
+    let writer = task.spawn(tasks, bytes 65536, clock, clock_read)
+    result.unwrap(channel.send(send, 2u64))
+    let _ = result.unwrap(task.join(take writer))
+    let _ = result.unwrap(task.join(take reader))
+    let _ = take sleeper
+    Ok(())
+}

@@ -136,6 +136,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::prog3_prog6_llvm_source_entries_link_run_and_reuse",
         "native::tests::tape_run_replays_cranelift",
         "native::tests::tape_run_replays_llvm",
+        "native::tests::run_tape_replays_fifo_after_eventless_receive",
         "native::tests::run_tape_replays_stdin_and_env_without_host_sources",
         "native::tests::run_tape_replays_granted_terminal_bits",
         "native::tests::run_tape_records_scram_outcome_without_key_material",

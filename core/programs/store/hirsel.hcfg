@@ -439,6 +439,7 @@ pkg_v1.Package(
             ("tiered_plan_laws.hirsel", "store"),
             ("tiered_snapshot_laws.hirsel", "store"),
             ("tiered_pager_batch_laws.hirsel", "store"),
+            ("tiered_local_batch_laws.hirsel", "store"),
             ("tiered_attempt_laws.hirsel", "store"),
             ("tiered_call_laws.hirsel", "store"),
             ("tiered_open_laws.hirsel", "store"),
@@ -748,6 +749,7 @@ pkg_v1.Package(
             ("store@1/store/test_la3_typed_gap_mandatory_and_attention", TestRun(limit: Some(536870912))),
             ("store@1/store/test_la6_stale_archiver_fenced", TestRun(limit: Some(536870912))),
             ("store@1/store/test_la8_attached_place_settle_then_archive", TestRun(limit: Some(536870912))),
+            ("store@1/store/test_local_tiered_pager_batch_opens", TestRun(grant_change: Some(ReplaceNonDir([Tasks, Stdout])))),
             ("store@1/store/test_la14_foreign_pack_mount", TestRun(
                 limit: Some(536870912),
                 grant_change: Some(ReplaceNonDir([Clock, Random, Tasks, Stdout])),

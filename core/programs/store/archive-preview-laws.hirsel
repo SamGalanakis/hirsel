@@ -297,6 +297,7 @@ fn la14_directory(d: Dir, c: Clock, sim: BucketSim, r: Random, tasks: Tasks, out
     let ref = deploy_result(failure_result_from_rep(pager.preview_pack_ref(read_source, seq)))?
     let path = deploy_result(failure_result_from_rep(pager.preview_pack_key(read_source, seq, ref)))?
     let (_, take original) = deploy_result(restore_range_read(opener, path, 0, ref.len, due))?
+    deploy_result(la14_mixed_pager_batch(disk_test_directory(d), store_key_to_rep(id), read_source, seq, listed, original))?
     let mut valid_alternative: Bytes = clone(original)
     valid_alternative[96u64] ^= 1u8
     let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 3, seq)

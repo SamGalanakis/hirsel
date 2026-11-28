@@ -121,11 +121,11 @@ pub fn tiered_pager_point(mut input: pager.TieredPagerInput, mut private_cache: 
     while list.len(walking) != 0 {
         // This round's distinct edges, then the siblings queued for it.
         let mut edges: List[format.TieredTarget] = list.new()
-        let mut slot_of: Map[pager.TieredCacheKey, u64] = map.new()
+        let mut slot_of: Map[format.TieredFrameId, u64] = map.new()
         let mut slots: List[u64] = list.new()
         types.capacity(list.try_reserve(mut slots, list.len(walking)))?
         for descent in walking {
-            let id = pager.tiered_cache_key(format.tiered_frame_id(descent.edge))
+            let id = format.tiered_frame_id(descent.edge)
             let known: Option[u64] = match map.get(slot_of, id) {
                 Some(slot) => Some(slot),
                 None => None,
@@ -349,6 +349,11 @@ fn tiered_pager_point_frame(mut input: pager.TieredPagerInput, mut private_cache
 }
 
 fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPagerTarget) -> Result[Arc[format.TieredFrame], types.Failure] waits {
+    let mut opened: Option[Result[HostFile, IoError]] = None
+    tiered_pager_frame_with_pack(mut input, mut private_cache, owner, demand, mut opened, true)
+}
+
+fn tiered_pager_frame_with_pack(mut input: pager.TieredPagerInput, mut private_cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPagerTarget, mut opened: Option[Result[HostFile, IoError]], last: bool) -> Result[Arc[format.TieredFrame], types.Failure] waits {
     let (take path, expected) = history.checked_tiered_pager_target(input, demand)?
     if let Some(take found) = pager.tiered_cache_lookup(mut private_cache, path, demand.edge)? {
         return Ok(take found)
@@ -368,14 +373,7 @@ fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: page
     }
     let page = match input {
         PagerLocal(d, _) => {
-            let mut opened = match host.open(d, path, Read) {
-                Ok(take fd) => take fd,
-                Error(NotFound) => return Error(format.disk_fault(path, expected.offset, Dangling(expected.stamp))),
-                Error(problem) => return Error(Io(problem)),
-            }
-            let obtained = manifest.read_disk_bytes(mut opened, path, expected.offset, width)
-            manifest.disk_io(host.close(take opened))?
-            let raw = obtained?
+            let raw = tiered_pager_local_bytes(mut opened, d, path, expected, last)?
             manifest.disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], types.Failure] {
                 manifest.read_tiered_frame(path, owner, demand.edge, raw, expected.offset, demand.next_stamp)
             })?
@@ -399,4 +397,27 @@ fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: page
     }
     pager.tiered_cache_admit(mut private_cache, page)
     Ok(take page)
+}
+
+fn tiered_pager_local_bytes(mut opened: Option[Result[HostFile, IoError]], dir: Dir, path: String, expected: format.TieredFrameId, last: bool) -> Result[Bytes, types.Failure] waits {
+    if let None = opened {
+        opened = Some(host.open(dir, path, Read))
+    }
+    let obtained = match opened {
+        Some(Ok(mut file)) => manifest.read_disk_bytes(mut file, path, expected.offset, 16 + expected.len),
+        Some(Error(NotFound)) => Error(format.disk_fault(path, expected.offset, Dangling(expected.stamp))),
+        Some(Error(problem)) => Error(Io(problem)),
+        None => fail("store: no outcome for a local pack open"),
+    }
+    if last {
+        tiered_pager_close_local_pack(mut opened)?
+    }
+    obtained
+}
+
+fn tiered_pager_close_local_pack(mut opened: Option[Result[HostFile, IoError]]) -> Result[(), types.Failure] waits {
+    if let Some(Ok(take file)) = replace(mut opened, None) {
+        return manifest.disk_io(host.close(take file))
+    }
+    Ok(())
 }

@@ -1,0 +1,314 @@
+type LocalBatchFixture: send {
+    port: core.Served[DirOp],
+    first: Bytes,
+    second: Option[Bytes]
+}
+
+type LocalBatchCounts: send {
+    opens: u64,
+    closes: u64,
+    peak: u64
+}
+
+fn local_batch_serve(take fixture: LocalBatchFixture) -> LocalBatchCounts waits {
+    let LocalBatchFixture(port: take port, first: take first, second: take second) = take fixture
+    let mut server = take port
+    let mut counts = LocalBatchCounts(opens: 0, closes: 0, peak: 0)
+    let missing_second = match second {
+        None => true,
+        Some(_) => false
+    }
+    let mut file_serial = 0u64
+    let mut open_files: Map[u64, bool] = map.new()
+    while let Some(take submitted) = provide.next(mut server) {
+        let mut call = take submitted
+        let reply: DirReply = match provide.dir_op(call) {
+            Open(path: width, mode: Read, ..) => {
+                let mut name: Bytes = list.with_capacity(width)
+                provide.payload(call, 1, mut name)
+                counts.opens += 1
+                let other = if name == string.as_bytes("p-8") {
+                    false
+                } else if name == string.as_bytes("p-9") {
+                    true
+                } else {
+                    fail("local batch: wrong pack path")
+                }
+                if other && missing_second {
+                    Failed(NotFound)
+                } else {
+                    file_serial += 1
+                    map.insert(mut open_files, file_serial, other)
+                    counts.peak = order.max(counts.peak, map.len(open_files))
+                    File(file_serial)
+                }
+            },
+            ReadAt(file: id, at: at, room: room) => {
+                let other = option.unwrap(map.get(open_files, id))
+                let raw = if other {
+                    match view second {
+                        Some(data) => data,
+                        None => fail("local batch: reading a missing pack"),
+                    }
+                } else {
+                    view first
+                }
+                let start = order.min(at, list.len(raw))
+                let end = start + order.min(room, list.len(raw) - start)
+                Count(provide.fill(mut server, mut call, list.slice(raw, start, end)))
+            },
+            Close(file: id) => {
+                let _ = option.unwrap(map.remove(mut open_files, id))
+                counts.closes += 1
+                Done
+            },
+            Released(..) => continue,
+            _ => fail("local batch: unexpected Directory operation"),
+        }
+        result.unwrap(provide.reply(mut server, take call, provide.dir_reply(reply)))
+    }
+    if map.len(open_files) != 0 {
+        fail("local batch: every opened file must be closed explicitly")
+    }
+    counts
+}
+
+fn local_batch_pack(owner: types.StoreKey, seq: u64, first: u64) -> Result[(Bytes, pages.PagePack, List[format.TieredTarget]), Error] {
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(owner, seq, 4, 8192))?
+    let mut refs: List[format.TieredTarget] = list.with_capacity(8)
+    for row in 0u64 .. 8 {
+        let stamp = first + row * 2
+        let mut payload: Bytes = list.with_capacity(33)
+        list.fill(mut payload, 33, int.truncate(stamp))
+        let frame = manifest.PackFrame(stamp, size: 41, body: BlobBody(arc.new(take payload)))
+        let Some(ptr) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 9, failure_result_from_rep(pager.log_key(9, stamp))?, fn(expected: u64) -> std.page.PagePtr {
+            fail("local batch: a BLOB has no child page")
+        }))? else {
+            fail("local batch: fixture frame fits")
+        }
+        list.push(mut refs, TieredBlob(std.page.BlobRef(stamp, len: 33, checksum: ptr.checksum, pack: seq, offset: ptr.offset, body: 0)))
+    }
+    let (take raw, inventory) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
+    Ok((take raw, inventory, take refs))
+}
+
+fn local_batch_demand(first_pack: pages.PagePack, second_pack: pages.PagePack, first: List[format.TieredTarget], second: List[format.TieredTarget]) -> pager.TieredPointDemand {
+    let mut ids = 0u64
+    let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let (take one, _) = std.omap.insert(mut ids, blank, 8u64, pages.TieredPagerPack(inventory: first_pack, object: None))
+    let (take packs, _) = std.omap.insert(mut ids, one, 9u64, pages.TieredPagerPack(inventory: second_pack, object: None))
+    let mut siblings: List[format.TieredTarget] = list.with_capacity(15)
+    list.push(mut siblings, clone(second[0u64]))
+    for row in 1u64 .. 8 {
+        list.push(mut siblings, clone(first[row]))
+        list.push(mut siblings, clone(second[row]))
+    }
+    pager.TieredPointDemand(target: clone(first[0u64]), key: list.new(), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: take siblings, ahead: NoAhead, packs: take packs, next_stamp: 56, deadline: 0, grant: None)
+}
+
+fn local_batch_deliver(dir: Dir, mut cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPointDemand) -> Result[pager.TieredPointDelivery, Error] waits {
+    let mut input: pager.TieredPagerInput = PagerLocal(dir, None)
+    failure_result_from_rep(object_writer.tiered_pager_point(mut input, mut cache, owner, demand))
+}
+
+fn local_batch_check_frames(delivery: pager.TieredPointDelivery, width: u64) {
+    if list.len(delivery.frames) != width {
+        fail("local batch: wrong delivered frame count")
+    }
+    for at in 0u64 .. width {
+        let frame = view delivery.frames[at]
+        let TieredValue(payload) = view frame.payload else {
+            fail("local batch: expected a BLOB")
+        }
+        let stamp = 40 + at
+        if frame.identity.stamp != stamp || list.len(payload) != 33 {
+            fail("local batch: wrong stamp or length in request order")
+        }
+        let byte: u8 = int.truncate(stamp)
+        let mut expected: Bytes = list.with_capacity(33)
+        list.fill(mut expected, 33, byte)
+        if list.compare_bytes(payload, expected) != Equal {
+            fail("local batch: wrong BLOB payload")
+        }
+    }
+}
+
+@test
+fn test_local_tiered_pager_batch_opens(tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    let owner = store_key_to_rep(StoreId(hi: 1, lo: 2))
+    let (take left, first_pack, take first) = local_batch_pack(owner, 8, 40)?
+    let (take right, second_pack, take second) = local_batch_pack(owner, 9, 41)?
+    let mut demand = local_batch_demand(first_pack, second_pack, first, second)
+    let (dir, take port) = provide.dir(bytes 65536)
+    let observer = task.spawn(tasks, bytes 1048576, LocalBatchFixture(port: take port, first: take left, second: Some(take right)), local_batch_serve)
+    let mut cache = pager.new_tiered_cache(1048576)
+    let cold = local_batch_deliver(dir, mut cache, owner, demand)?
+    local_batch_check_frames(cold, 16)
+    if let Some(_) = cold.failure {
+        fail("local batch: all cold frames exist")
+    }
+    list.push(mut demand.siblings, clone(first[0u64]))
+    let warm = local_batch_deliver(dir, mut cache, owner, demand)?
+    if list.len(warm.frames) != 17 || warm.frames[16u64].identity != warm.frames[0u64].identity {
+        fail("local batch: a duplicate keeps its request position")
+    }
+    let TieredBlob(reference) = view first[0u64] else {
+        fail("local batch: the first frame is a BLOB")
+    }
+    let bad = std.page.BlobRef(stamp: 55, len: reference.len, checksum: reference.checksum, pack: reference.pack, offset: reference.offset, body: 0)
+    list.push(mut demand.siblings, TieredBlob(bad))
+    let invalid = local_batch_deliver(dir, mut cache, owner, demand)?
+    if let Some((edge, Corrupt(problem))) = invalid.failure {
+        let Checksum = problem.why else {
+            fail("local batch: expected a checksum failure for the conflicting duplicate")
+        }
+        if format.tiered_frame_id(edge).stamp != 55 {
+            fail("local batch: the conflicting duplicate must fail its own edge check")
+        }
+    } else {
+        fail("local batch: the conflicting duplicate was accepted")
+    }
+    list.truncate(mut demand.siblings, 0)
+    list.push(mut demand.paths, pager.TieredPath(target: TieredBlob(bad), key: list.new(), values: ValuesNone))
+    let distinct = local_batch_deliver(dir, mut cache, owner, demand)?
+    if let None = distinct.failure {
+        fail("local batch: distinct paths sharing an offset must check both edges")
+    }
+    drop(take dir)
+    let counts = result.unwrap(task.join(take observer))
+    let mut message = string.from("local pack opens=")
+    string.push_u64(mut message, counts.opens)
+    string.push(mut message, " closes=")
+    string.push_u64(mut message, counts.closes)
+    string.push(mut message, " peak=")
+    string.push_u64(mut message, counts.peak)
+    string.push(mut message, "\n")
+    let _ = stdout.write(out, message)
+    if counts.opens != 2 || counts.closes != 2 || counts.peak > 2 {
+        fail("local batch: sixteen cold misses must open two packs once each")
+    }
+    Ok(())
+}
+
+@test
+fn test_local_tiered_pager_batch_failures(tasks: Tasks) -> Result[(), Error] waits {
+    let owner = store_key_to_rep(StoreId(hi: 1, lo: 2))
+    let (take left, first_pack, take first) = local_batch_pack(owner, 8, 40)?
+    let (take right, second_pack, take second) = local_batch_pack(owner, 9, 41)?
+    let broken = format.tiered_frame_id(second[0u64])
+    let mut damaged = take right
+    damaged[broken.offset + 24] ^= 1u8
+    for mode in 0u64 .. 2 {
+        let missing = mode == 0
+        let raw: Option[Bytes] = if missing {
+            None
+        } else {
+            Some(clone(damaged))
+        }
+        let (dir, take port) = provide.dir(bytes 65536)
+        let observer = task.spawn(tasks, bytes 1048576, LocalBatchFixture(port: take port, first: clone(left), second: take raw), local_batch_serve)
+        let mut cache = pager.new_tiered_cache(1048576)
+        let mut demand = local_batch_demand(first_pack, second_pack, first, second)
+        let failed = local_batch_deliver(dir, mut cache, owner, demand)?
+        local_batch_check_frames(failed, 1)
+        let Some((edge, Corrupt(problem))) = view failed.failure else {
+            fail("local batch: expected a corrupt or missing pack")
+        }
+        if format.tiered_frame_id(edge) != broken || problem.file != "p-9" || problem.offset != broken.offset {
+            fail("local batch: the first error must name the second request")
+        }
+        match problem.why {
+            Dangling(stamp) if missing && stamp == 41 => (),
+            Checksum if !missing => (),
+            _ => fail("local batch: wrong missing or corrupt pack verdict"),
+        }
+        // Later requests in the batch still finish. Probe a later frame
+        // without its siblings to see that the batch admitted it.
+        demand.target = if missing {
+            clone(first[7u64])
+        } else {
+            clone(second[7u64])
+        }
+        demand.siblings = list.new()
+        let found = local_batch_deliver(dir, mut cache, owner, demand)?
+        if list.len(found.frames) != 1 || found.frames[0u64].identity != format.tiered_frame_id(demand.target) {
+            fail("local batch: a later valid read was lost")
+        }
+        drop(take dir)
+        let counts = result.unwrap(task.join(take observer))
+        let expected = if missing {
+            1u64
+        } else {
+            2u64
+        }
+        if counts.opens != 2 || counts.closes != expected || counts.peak > expected {
+            fail("local batch: each pack is tried once and every opened handle closes")
+        }
+    }
+    Ok(())
+}
+
+fn la14_mixed_pager_batch(dir: Dir, owner: types.StoreKey, preview: pager.PreviewRead, seq: u64, listed: pages.PagePack, raw: Bytes) -> Result[(), Error] waits {
+    let width = format.read_le(raw, 76, 4)
+    if format.read_le(raw, 72, 2) != 0x0022 || width < 8 || 88 + width > listed.index {
+        fail("Preview pager: the archived pack must start with a BLOB")
+    }
+    let stamp = format.read_le(raw, 88, 8)
+    let parent_payload = list.slice(raw, 96, 88 + width)
+    let foreign: format.TieredTarget = TieredBlob(std.page.BlobRef(stamp: stamp, len: list.len(parent_payload), checksum: std.check.xxh3(parent_payload, 0, list.len(parent_payload)), pack: seq, offset: 72, body: 0))
+    let (take left, first_pack, take first) = local_batch_pack(owner, seq + 1, stamp + 1)?
+    let (take right, second_pack, take second) = local_batch_pack(owner, seq + 2, stamp + 2)?
+    let first_path = failure_result_from_rep(manifest.paged_pack_path(seq + 1))?
+    let second_path = failure_result_from_rep(manifest.paged_pack_path(seq + 2))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, first_path, left))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, second_path, right))?
+    // The foreign file is absent in this directory. It must use Preview's
+    // exact held reference even when it appears between local reads.
+    let mut ids = 0u64
+    let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let (take foreign_only, _) = std.omap.insert(mut ids, blank, seq, pages.TieredPagerPack(inventory: listed, object: None))
+    let (take one, _) = std.omap.insert(mut ids, foreign_only, seq + 1, pages.TieredPagerPack(inventory: first_pack, object: None))
+    let (take packs, _) = std.omap.insert(mut ids, one, seq + 2, pages.TieredPagerPack(inventory: second_pack, object: None))
+    let mut siblings: List[format.TieredTarget] = list.with_capacity(5)
+    list.push(mut siblings, clone(foreign))
+    list.push(mut siblings, clone(second[0u64]))
+    list.push(mut siblings, clone(first[1u64]))
+    list.push(mut siblings, take foreign)
+    list.push(mut siblings, clone(second[1u64]))
+    let demand = pager.TieredPointDemand(target: clone(first[0u64]), key: list.new(), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: take siblings, ahead: NoAhead, packs: take packs, next_stamp: stamp + 17, deadline: 0, grant: None)
+    let mut input: pager.TieredPagerInput = PagerLocal(dir, Some(pager.share_preview(preview)))
+    let mut cache = pager.new_tiered_cache(1048576)
+    let delivered = failure_result_from_rep(object_writer.tiered_pager_point(mut input, mut cache, owner, demand))?
+    if let Some(problem) = delivered.failure {
+        return Error(failure_from_rep(clone(problem.1)))
+    }
+    if list.len(delivered.frames) != 6 {
+        fail("Preview pager: all local and foreign frames must be delivered")
+    }
+    for at in 0u64 .. 6 {
+        let wanted = if at == 0 {
+            view demand.target
+        } else {
+            view demand.siblings[at - 1]
+        }
+        let expected_id = format.tiered_frame_id(wanted)
+        let frame = view delivered.frames[at]
+        if frame.identity != expected_id {
+            fail("Preview pager: mixed packs changed request order")
+        }
+        let TieredValue(payload) = view frame.payload else {
+            fail("Preview pager: expected a BLOB")
+        }
+        let mut local: Bytes = list.with_capacity(33)
+        list.fill(mut local, 33, int.truncate(expected_id.stamp))
+        let same = if expected_id.pack == seq {
+            list.compare_bytes(payload, parent_payload) == Equal
+        } else {
+            list.compare_bytes(payload, local) == Equal
+        }
+        if !same {
+            fail("Preview pager: mixed packs changed a payload")
+        }
+    }
+    Ok(())
+}

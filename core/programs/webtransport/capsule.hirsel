@@ -123,7 +123,7 @@ fn capsules(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List
             remote_close(mut w, mut e, i, k, code, take reason, mut out)
             return Done
         }
-        if kind == h3_wire.CAPSULE_WT_MAX_STREAM_DATA || kind == h3_wire.CAPSULE_WT_STREAM_DATA_BLOCKED {
+        if w.conns[i].sessions[k].draft == Draft17 && (kind == h3_wire.CAPSULE_WT_MAX_STREAM_DATA || kind == h3_wire.CAPSULE_WT_STREAM_DATA_BLOCKED) {
             flow_error(mut w, mut e, i, k, mut out)
             return Done
         }

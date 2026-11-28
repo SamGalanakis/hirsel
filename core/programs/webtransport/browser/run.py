@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 CORE = HERE.parents[2]
 DISPATCH = Path("/workspace/code/hirsel-briefs/tools/boat-dispatch")
 T10 = "webtransport@1/laws/certificate_rotation_accepts_either"
-ENTRY = "webtransport_browser_echo@1/main/main"
+ENTRY = "hirsel.ai/webtransport_browser_echo@1/main/main"
 PLAYWRIGHT = "1.63.0"
 
 
@@ -38,7 +38,7 @@ def stage(work, compiler, runtime, linker):
                                                     "browser/*.hirsel", "browser/hirsel.hcfg", "browser/*.mjs"])]:
         copy_sources(CORE / name, bundle / "core" / name, globs)
     (bundle / "core/programs/hirsel.hcfg").write_text(
-        '[workspace]\nmembers = ["quic", "webtransport", "webtransport/browser"]\n'
+        'pkg_v1.Workspace(members: ["quic", "webtransport", "webtransport/browser"])\n'
     )
     return bundle
 

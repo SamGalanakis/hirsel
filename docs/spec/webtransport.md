@@ -28,13 +28,13 @@ with no body, so `std.http` stays the one HTTP server and no second request rout
 | --- | --- | --- |
 | HTTP/3 | control streams, SETTINGS, GOAWAY, HEADERS, DATA, the frame and stream-type registries, unknown-type skipping (RFC 9114 §9) | server push, PRIORITY_UPDATE: no consumer uses them; a received PUSH_PROMISE is `H3_FRAME_UNEXPECTED` (a server never receives one; a client never enables push) |
 | QPACK | static table, literal fields, Huffman decode and encode; `SETTINGS_QPACK_MAX_TABLE_CAPACITY` 0 | dynamic table: a WebTransport session has one CONNECT, so a dynamic table saves nothing (Design review, O3) |
-| CONNECT | extended CONNECT with `:protocol` `webtransport-h3` (draft-17 §3.2) | other `:protocol` values (`connect-udp`, `websocket`) answer `501` |
+| CONNECT | extended CONNECT with `:protocol` `webtransport-h3` for draft 17 and `webtransport` for the two browser profiles in WT-1 | other `:protocol` values (`connect-udp`, `websocket`) answer `501` |
 | Sessions | several per connection when both sides give flow-control limits (draft-17 §5); one otherwise | — |
 | Streams | unidirectional (type `0x54`) and bidirectional (signal `0x41`), each tagged with its session id | — |
 | Datagrams | HTTP Datagrams on the session's quarter stream id (RFC 9297 §2.1) over QUIC DATAGRAM | — |
 | Capsules | WT_CLOSE_SESSION, WT_DRAIN_SESSION, WT_MAX_DATA, WT_MAX_STREAMS, WT_DATA_BLOCKED, WT_STREAMS_BLOCKED | DATAGRAM capsules: QUIC DATAGRAM is mandatory here |
 | Browsers | Chromium and Firefox `new WebTransport(url, {serverCertificateHashes})` | Web PKI server certificates: ruled out for Wave 2 ([quic](quic.md) Design review, O4) |
-| Versions | draft-17 codepoints only | earlier drafts' `SETTINGS_ENABLE_WEBTRANSPORT` (`0x2b603742`) and pre-17 `SETTINGS_WT_ENABLED` values: a second draft is a compatibility path (Design review, O1) |
+| Versions | draft 17 and the two server-side browser profiles in WT-1 | other draft codepoints |
 
 ## WT-1: Codepoints
 
@@ -43,6 +43,8 @@ From draft-17 §9 and the RFCs above. These are the only values the package writ
 | Name | Value | Where |
 | --- | --- | --- |
 | `SETTINGS_WT_ENABLED` | `0x20b8933b` (draft-17 codepoint) | SETTINGS, both sides |
+| `SETTINGS_ENABLE_WEBTRANSPORT` | `0x2b603742` = 1 | SETTINGS, server support for Firefox 155 and Chrome 153's default |
+| `SETTINGS_WEBTRANSPORT_MAX_SESSIONS` | `0xc671706a` = 1 | SETTINGS, server support for Chrome 153 with draft 07 enabled |
 | `SETTINGS_WT_INITIAL_MAX_STREAMS_UNI` | `0x2b64` | SETTINGS |
 | `SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI` | `0x2b65` | SETTINGS |
 | `SETTINGS_WT_INITIAL_MAX_DATA` | `0x2b61` | SETTINGS |
@@ -63,11 +65,19 @@ From draft-17 §9 and the RFCs above. These are the only values the package writ
 | `WT_REQUIREMENTS_NOT_MET` | `0x212c0d48` | connection error |
 | application errors | `0x52e4a40fa8db` to `0x52e5ac983162`, a 32-bit code `n` maps to `0x52e4a40fa8db + n + n / 0x1e` (draft-17 §4.4), which skips the reserved values `0x1f·N + 0x21` | RESET_STREAM, STOP_SENDING |
 
-The QUIC connection must have agreed `max_datagram_frame_size` > 0 and `reset_stream_at`
-(draft-17 §3.1), which the package reads from `quic.peer_params`. A client closes a server
+All sessions require `SETTINGS_H3_DATAGRAM` = 1 and QUIC `max_datagram_frame_size` > 0.
+Draft 17 also requires `reset_stream_at` (draft-17 §3.1). The package reads both transport
+parameters from `quic.peer_params`. A client closes a server
 whose SETTINGS or transport parameters lack any requirement with `WT_REQUIREMENTS_NOT_MET`
 before any session opens; a server resets each CONNECT of such a client with
 `H3_MESSAGE_ERROR` (WT-3 step 7, law T8). The ALPN is `h3`.
+
+Hirsel clients use draft 17. Servers offer the two browser SETTINGS while their limits
+permit a session. From the client's SETTINGS the server selects draft 17 first, then draft
+07 on a positive `0xc671706a`, then `0x2b603742` when its value is 1. Each CONNECT must use
+the selected draft's token. The browser profiles share WT-4 framing and the close and
+drain capsules. Remove both legacy settings and their CONNECT handling when Firefox and
+Chrome stable ship draft 17.
 
 The HTTP/3 and QPACK codes the package uses are RFC 9114 §8.1's and RFC 9204 §6's:
 `H3_REQUEST_REJECTED` (`0x010b`), `H3_CLOSED_CRITICAL_STREAM` (`0x0104`),
@@ -170,7 +180,8 @@ stream of another session, even one on the same connection, is `State`, and noth
 changes. `reset_at(…, code, reliable)` resets with `RESET_STREAM_AT` at the stream header's
 length plus the first `reliable` bytes the application wrote, so the header and that prefix
 always arrive (draft-17 §4.4); `reset` is `reset_at` with `reliable` 0. `reliable` past what
-was written is `Quic(StreamState)`, and a peer without `reset_stream_at` makes it
+was written is `Quic(StreamState)`. For a legacy session without `reset_stream_at`, a reset
+with `reliable` 0 uses ordinary `RESET_STREAM` and a positive `reliable` returns
 `Quic(Unsupported)`. `priority` sets the stream's `quic.Priority` (QUIC-1). Stream data is
 never copied through this layer: the wrappers pass the caller's buffers and
 `quic.PayloadSlice` straight to `quic`. `Acked(s, stream)` reports `quic`'s acknowledgement
@@ -215,9 +226,9 @@ deadline, which the caller folds into the `quic` driver's wait.
    SETTINGS or for `answer`, and one past that is reset with `H3_REQUEST_REJECTED`
    (draft-17 §5.2). Closing the control stream or either QPACK stream is
    `H3_CLOSED_CRITICAL_STREAM` (RFC 9114 §6.2.1, RFC 9204 §4.2).
-2. The client sends HEADERS with `:method CONNECT`, `:protocol webtransport-h3`, `:scheme
-   https`, `:authority`, `:path`, and `Origin` from a browser. The CONNECT stream's id is the
-   session's `id`.
+2. The client sends HEADERS with `:method CONNECT`, the `:protocol` for its draft (WT-1),
+   `:scheme https`, `:authority`, `:path`, and `Origin` from a browser. The CONNECT stream's
+   id is the session's `id`.
 3. The server checks that each pseudo-header is present once (RFC 9114 §4.3.1) and that
    `:authority` is one of `Limits.authorities`, answering `404` otherwise. When the request
    carries `Origin`, the package checks it against `Limits.origins` and answers `403` on a
@@ -226,7 +237,8 @@ deadline, which the caller folds into the `quic` driver's wait.
    browsers, and a server that serves only browsers can demand it. The application never
    sees a refused request; one that passes is emitted as `Requested`.
 4. On `Accept`, the server sends `200` and the session is live; the CONNECT stream then
-   carries only capsules (RFC 9297 §3) in both directions.
+   carries only capsules (RFC 9297 §3) in both directions. For `0x2b603742` the response
+   includes `sec-webtransport-http3-draft: draft02`, as Chromium's draft-02 path does.
 5. A session ends with a WT_CLOSE_SESSION capsule (a 32-bit code and a reason of at most
    1,024 bytes) followed by FIN, or by the CONNECT stream's reset. Either way all its streams
    are reset with `WT_SESSION_GONE` and its datagrams are dropped (draft-17 §6). The capsules
@@ -287,7 +299,10 @@ deadline, which the caller folds into the `quic` driver's wait.
 
 ## WT-5: Flow control and session limits
 
-draft-17 §5's session-level limits are enforced at both ends: `data` bounds the bytes of all a
+Legacy sessions use QUIC credit and ignore the draft-17 credit capsules. The server
+allows one legacy session per connection, within `sessions_per_connection` and `sessions`.
+
+Draft-17 §5's session-level limits are enforced at both ends: `data` bounds the bytes of all a
 session's streams together, excluding stream headers (§5.4), and `streams_bidi` and
 `streams_uni` bound the streams the peer may open in it (§5.3). They are sent as SETTINGS
 initial values and raised with WT_MAX_DATA and WT_MAX_STREAMS capsules as the application
@@ -389,8 +404,8 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
   reason `"bye"`, which the server reports as `Closed(_, 7, "bye")`. Nightly on Boat.
   *Oracle:* the browser's `WebTransportCloseInfo` and the hashes. Run T5 and T10 with
   `python3 core/programs/webtransport/browser/run.py --compiler HIRSEL --runtime PIC_ARCHIVE --linker LD_LLD --work DIR`.
-  Boat mints the echo identities in the VM. Chromium 153 and Firefox 155
-  require older WebTransport SETTINGS and leave T5 red until they support draft-17.
+  Boat mints the echo identities in the VM. Chromium 153 and Firefox 155 use the WT-1
+  browser profiles for T5.
 - **T6 `buffered_streams_bounded`.** Under `sim.udp`, a client whose CONNECT is delayed
   opens `buffered` + 5 streams: the first `buffered` are delivered once the session is
   accepted, the rest are reset with `WT_BUFFERED_STREAM_REJECTED`, and a refused session's
@@ -398,7 +413,8 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
 - **T7 `session_close_resets_its_streams_only`.** Two sessions on one connection; closing one
   resets each of its streams with `WT_SESSION_GONE` and drops its datagrams while the
   other's streams complete. *Oracle:* draft-17 §6.
-- **T8 `refusals`.** A CONNECT with `:protocol` other than `webtransport-h3` (`501`), a
+- **T8 `refusals`.** A CONNECT with a mismatched `:protocol` (`501`), a client offering
+  only an unsupported WebTransport codepoint (`H3_MESSAGE_ERROR` on its draft-17 CONNECT), a
   missing `:authority` (stream error `H3_MESSAGE_ERROR`), an `:authority` outside
   `authorities` (`404`), an Origin outside `origins` (`403`, and no session), no Origin with
   `require_origin` (`403`), a second session without flow-control SETTINGS (CONNECT stream
@@ -453,8 +469,8 @@ rs/moq-relay and rs/moq-tokio), quinn (/tmp/ref-quinn at `75d08d9`, no HTTP/3 of
 
 Rulings of the media Wave 2 design review (VERDICT-MEDIA-W2, 2026-11-26), applied above:
 
-- **O1 (draft-17 only).** Draft-17 codepoints only; no earlier draft's settings. Law T4 targets
-  a draft-17 peer instead of quiche's h3, which has no WebTransport.
+- **O1 (draft 17 and browser profiles, amended 2026-11-28).** The server accepts the two
+  legacy SETTINGS listed in WT-1. Law T4 targets a draft-17 peer.
 
 Not ruled by the review; the standing choice is kept as written:
 

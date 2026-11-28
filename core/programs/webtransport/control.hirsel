@@ -209,25 +209,41 @@ fn peer_settings(mut w: Endpoint, mut e: quic.Endpoint, i: u64, s: h3_wire.Setti
     let datagram = setting_or_zero(s, h3_wire.SETTINGS_H3_DATAGRAM)
     let connect_protocol = setting_or_zero(s, h3_wire.SETTINGS_ENABLE_CONNECT_PROTOCOL)
     let enabled = setting_or_zero(s, h3_wire.SETTINGS_WT_ENABLED)
-    if datagram > 1 || connect_protocol > 1 || (w.conns[i].client && enabled > 1) {
+    let client = w.conns[i].client
+    let legacy = setting_or_zero(s, h3_wire.SETTINGS_WT_LEGACY_ENABLE)
+    let legacy07 = setting_or_zero(s, h3_wire.SETTINGS_WT_LEGACY07_MAX_SESSIONS)
+    if datagram > 1 || connect_protocol > 1 || (client && enabled > 1) || (!client && legacy > 1) {
         return h3_wire.H3_SETTINGS_ERROR
     }
-    let bidi = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI)
-    let uni = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI)
-    let data = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_DATA)
-    if bidi > MAX_STREAMS || uni > MAX_STREAMS {
-        return h3_wire.H3_SETTINGS_ERROR
+    let draft = if enabled == 1 {
+        Some(Draft17)
+    } else if !client && legacy07 > 0 {
+        Some(Legacy07c671706a)
+    } else if !client && legacy == 1 {
+        Some(Legacy2b603742)
+    } else {
+        None
+    }
+    if draft == Some(Draft17) {
+        let bidi = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI)
+        let uni = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI)
+        let data = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_DATA)
+        if bidi > MAX_STREAMS || uni > MAX_STREAMS {
+            return h3_wire.H3_SETTINGS_ERROR
+        }
+        w.conns[i].peer_credit = credit(data, bidi, uni)
     }
     let transport_ok = match quic.peer_params(e, w.conns[i].handle) {
-        Some(p) => p.max_datagram_frame > 0 && p.reset_stream_at,
+        Some(p) => p.max_datagram_frame > 0 && (draft != Some(Draft17) || p.reset_stream_at),
         None => false,
     }
-    let ok = transport_ok && datagram == 1 && enabled == 1 && (!w.conns[i].client || connect_protocol == 1)
+    let ok = transport_ok && datagram == 1 && (!client || connect_protocol == 1)
     w.conns[i].settings = true
-    w.conns[i].peer_ok = ok
-    w.conns[i].peer_credit = credit(data, bidi, uni)
-    if w.conns[i].client {
-        if !ok {
+    if ok {
+        w.conns[i].draft = draft
+    }
+    if client {
+        if w.conns[i].draft == None {
             // draft-17 §3.1: no session on a server that lacks a requirement; this connection
             // exists only for WebTransport, so it closes.
             return h3_wire.WT_REQUIREMENTS_NOT_MET

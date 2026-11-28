@@ -42,6 +42,8 @@ pub type WtError = UnknownSession | State | Url | Blocked | Quic(quic.QuicError)
 /// until the server's SETTINGS allow a CONNECT, Awaiting its response, then Live.
 type Phase = Reading | Held(List[qpack.Field]) | Asked | Live | Unsent(authority: String, path: String, protocols: List[String]) | Awaiting
 
+type Draft: key = Draft17 | Legacy2b603742 | Legacy07c671706a
+
 /// A WebTransport stream of a session (WT-4). header is the length of the header we wrote
 /// on a stream we opened, which RESET_STREAM_AT keeps (draft-17 §4.4); recv and send say
 /// which halves are still open.
@@ -65,6 +67,7 @@ type Owned {
 /// (RFC 9297 §3) gathered in caps; cap_skip is the rest of a capsule being skipped.
 type Session {
     id: quic.StreamId,
+    draft: Draft,
     phase: Phase,
     buf: Bytes,
     skip: u64,
@@ -121,7 +124,7 @@ type Conn {
     client: bool,
     up: bool,
     settings: bool,
-    peer_ok: bool,
+    draft: Option[Draft],
     peer_credit: Credit,
     destination: Option[Destination],
     goaway: Option[u64],
@@ -191,7 +194,7 @@ fn session_index(conn: Conn, id: quic.StreamId) -> Option[u64] {
 }
 
 fn new_conn(handle: quic.ConnectionHandle, client: bool) -> Conn {
-    Conn(handle: handle, client: client, up: false, settings: false, peer_ok: false, peer_credit: credit(0, 0, 0), destination: None, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), heads: list.new(), parked: list.new(), parked_datagrams: list.new(), peer_bidi_next: 0, sessions: list.new(), out: list.new())
+    Conn(handle: handle, client: client, up: false, settings: false, draft: None, peer_credit: credit(0, 0, 0), destination: None, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), heads: list.new(), parked: list.new(), parked_datagrams: list.new(), peer_bidi_next: 0, sessions: list.new(), out: list.new())
 }
 
 /// The largest capsule read whole: WT_CLOSE_SESSION's code and 1,024-byte reason (draft-17
@@ -199,7 +202,7 @@ fn new_conn(handle: quic.ConnectionHandle, client: bool) -> Conn {
 const CAPSULE_MAX: u64 = 1048
 
 fn new_session(id: quic.StreamId, take phase: Phase, cap: u64) -> Session {
-    Session(id: id, phase: take phase, buf: list.with_capacity(cap), skip: 0, data_left: 0, caps: list.with_capacity(CAPSULE_MAX), cap_skip: 0, drained: false, streams: list.new(), rx: credit(0, 0, 0), tx: credit(0, 0, 0))
+    Session(id: id, draft: Draft17, phase: take phase, buf: list.with_capacity(cap), skip: 0, data_left: 0, caps: list.with_capacity(CAPSULE_MAX), cap_skip: 0, drained: false, streams: list.new(), rx: credit(0, 0, 0), tx: credit(0, 0, 0))
 }
 
 /// Whether the application holds this session: it was emitted as Requested (server) or
@@ -340,6 +343,10 @@ fn start(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) {
     list.push(mut pairs, (h3_wire.SETTINGS_MAX_FIELD_SECTION_SIZE, header))
     if !w.conns[i].client {
         list.push(mut pairs, (h3_wire.SETTINGS_ENABLE_CONNECT_PROTOCOL, 1))
+        if w.limits.sessions_per_connection > 0 && w.limits.sessions > 0 {
+            list.push(mut pairs, (h3_wire.SETTINGS_WT_LEGACY_ENABLE, 1))
+            list.push(mut pairs, (h3_wire.SETTINGS_WT_LEGACY07_MAX_SESSIONS, 1))
+        }
     }
     list.push(mut pairs, (h3_wire.SETTINGS_H3_DATAGRAM, 1))
     list.push(mut pairs, (h3_wire.SETTINGS_WT_ENABLED, 1))

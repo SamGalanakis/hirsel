@@ -323,6 +323,14 @@ fn refusals() -> Result[(), ()] {
     }
     // RFC 9220 §3 and WT-3: another :protocol is 501.
     refused_row(limits(1024, 4, false), control, connect_fields(b"websocket", Some(b"server"), None), 501, 0, "another :protocol")
+    // The 4-byte legacy setting and the 8-byte draft-07 setting are the only older offers.
+    for legacy_control in["00 04 07 33 01 ab603742 01", "00 04 0b 33 01 c0000000c671706a 10"] {
+        let (status, rest) = raw_row(limits(1024, 4, true), hex_text(legacy_control), connect_fields(b"webtransport", Some(b"server"), good))
+        expect(status, 0, "the legacy CONNECT awaits an application verdict")
+        expect(rest, 0x100000000, "the legacy CONNECT is Requested")
+    }
+    refused_row(limits(1024, 4, false), control, connect_fields(b"webtransport", Some(b"server"), good), 501, 0, "the legacy token with draft-17 SETTINGS")
+    refused_row(limits(1024, 4, false), hex_text("00 04 07 33 01 ac7cf000 01"), connect_fields(b"webtransport-h3", Some(b"server"), good), 0, 0x10e, "an unsupported WebTransport codepoint")
     // RFC 9114 §4.3.1: no :authority is malformed, H3_MESSAGE_ERROR.
     refused_row(limits(1024, 4, false), control, connect_fields(b"webtransport-h3", None, None), 0, 0x10e, "no :authority")
     // WT-3 step 3: an :authority outside Limits.authorities is 404.

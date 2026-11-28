@@ -154,7 +154,7 @@ pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, str
     Ok(taken)
 }
 
-/// Reset a WT stream with RESET_STREAM_AT at its header's length (draft-17 §4.4).
+/// Reset a WT stream, retaining its header when the peer negotiated RESET_STREAM_AT.
 pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError] {
     reset_at(mut w, mut e, s, stream, code, 0)
 }
@@ -176,7 +176,15 @@ pub fn reset_at(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream:
     if reliable > h3_wire.MAX_VARINT - header {
         return Error(Quic(StreamState))
     }
-    match quic.reset(mut e, c, stream, h3_wire.application_code(code), header + reliable) {
+    let mut prefix = header + reliable
+    if reliable == 0 && w.conns[i].sessions[k].draft != Draft17 {
+        if let Some(p) = quic.peer_params(e, c) {
+            if !p.reset_stream_at {
+                prefix = 0
+            }
+        }
+    }
+    match quic.reset(mut e, c, stream, h3_wire.application_code(code), prefix) {
         Ok(()) => {
             let mut later = replace(mut w.backlog, list.new())
             refund_reset(mut w, e, i, k, stream, mut later)

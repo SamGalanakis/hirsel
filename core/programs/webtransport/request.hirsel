@@ -6,7 +6,7 @@
 /// connection error closes the connection (RFC 9114 §8).
 type Fault = StreamFault(u64) | ConnectionFault(u64)
 
-/// The checked request: an extended CONNECT for webtransport-h3, or the status to answer.
+/// The checked request: a WebTransport extended CONNECT, or the status to answer.
 type Parsed = Connect(Request) | Answer(u16)
 
 fn handle_of(w: Endpoint, i: u64, k: u64) -> SessionHandle {
@@ -179,7 +179,8 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
         w.conns[i].sessions[k].phase = Held(take fields)
         return
     }
-    let parsed = match parse_request(fields, w.limits) {
+    let draft = w.conns[i].draft
+    let parsed = match parse_request(fields, w.limits, draft) {
         Ok(take p) => take p,
         Error(()) => {
             refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
@@ -196,8 +197,8 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
     }
     let per: u64 = int.widen(w.limits.sessions_per_connection)
     let all: u64 = int.widen(w.limits.sessions)
-    let code = if !w.conns[i].peer_ok {
-        // draft-17 §3.1: a client that lacks a requirement sends only malformed sessions.
+    let code = if draft == None {
+        // A client that lacks a requirement sends only malformed sessions (draft-17 §3.1).
         h3_wire.H3_MESSAGE_ERROR
     } else if !flow(w, i) && live_here(w.conns[i]) > 0 {
         // draft-17 §5.1: without flow control a connection holds one session.
@@ -212,11 +213,12 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
         end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
         return
     }
-    if flow(w, i) && (live_here(w.conns[i]) >= per || w.live >= all) {
-        // WT-5: past either session bound with flow control is 429.
+    let selected = option.unwrap(draft)
+    if (flow(w, i) || selected != Draft17) && (live_here(w.conns[i]) >= per || w.live >= all) {
         refuse_with(mut w, mut e, i, k, 429, mut out)
         return
     }
+    w.conns[i].sessions[k].draft = selected
     w.conns[i].sessions[k].phase = Asked
     w.live += 1
     list.push(mut out, Requested(SessionHandle(conn: c, id: id), take req))
@@ -349,7 +351,7 @@ fn present(x: Option[Bytes]) -> bool {
 }
 
 /// Check a request's fields; Error(()) is malformed (H3_MESSAGE_ERROR, RFC 9114 §4.1.2).
-fn parse_request(fields: List[qpack.Field], limits: Limits) -> Result[Parsed, ()] {
+fn parse_request(fields: List[qpack.Field], limits: Limits, draft: Option[Draft]) -> Result[Parsed, ()] {
     let mut method: Option[Bytes] = None
     let mut scheme: Option[Bytes] = None
     let mut authority: Option[Bytes] = None
@@ -425,7 +427,12 @@ fn parse_request(fields: List[qpack.Field], limits: Limits) -> Result[Parsed, ()
     if !present(scheme) {
         return Error(())
     }
-    if p != b"webtransport-h3" {
+    let required = match draft {
+        Some(Legacy2b603742) => b"webtransport",
+        Some(Legacy07c671706a) => b"webtransport",
+        _ => b"webtransport-h3",
+    }
+    if p != required {
         return Ok(Answer(501))
     }
     let authority_text = text(a)?
@@ -478,6 +485,10 @@ pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: V
         Accept(protocol: protocol, headers: headers) => {
             let mut fields: List[qpack.Field] = list.new()
             push_status(200, mut fields)
+            let legacy02 = w.conns[i].sessions[k].draft == Legacy2b603742
+            if legacy02 {
+                list.push(mut fields, qpack.Field(name: b"sec-webtransport-http3-draft", value: b"draft02"))
+            }
             if let Some(p) = protocol {
                 let mut value: Bytes = list.with_capacity(string.byte_len(p) + 2)
                 list.push(mut value, 0x22)
@@ -486,7 +497,9 @@ pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: V
                 list.push(mut fields, qpack.Field(name: b"wt-protocol", value: take value))
             }
             for (name, value) in headers {
-                list.push(mut fields, qpack.Field(name: clone(string.as_bytes(name)), value: clone(string.as_bytes(value))))
+                if !legacy02 || name != "sec-webtransport-http3-draft" {
+                    list.push(mut fields, qpack.Field(name: clone(string.as_bytes(name)), value: clone(string.as_bytes(value))))
+                }
             }
             let frame = headers_frame(fields)
             send(mut w, mut e, i, id, take frame, false)
@@ -566,7 +579,7 @@ pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: S
     }
     let per: u64 = int.widen(w.limits.sessions_per_connection)
     for i in 0u64 .. list.len(w.conns) {
-        if !w.conns[i].peer_ok || w.conns[i].goaway != None {
+        if w.conns[i].draft != Some(Draft17) || w.conns[i].goaway != None {
             continue
         }
         let cap = if flow(w, i) {

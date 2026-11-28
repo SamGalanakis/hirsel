@@ -1,5 +1,5 @@
 //! Blocking calls leave their unit on a Reply while the call runs on a host thread.
-use super::{POOL, Pool, Reply, in_unit, pool, pool_hooks, untied, wake_slot};
+use super::{POOL, Pool, Reply, in_unit, pool, pool_hooks, untied, wake_slot, xstats_enabled};
 use std::{
     collections::VecDeque,
     io,
@@ -66,8 +66,10 @@ impl State {
     }
 
     fn update_peaks(&mut self) {
-        self.peak_live = self.peak_live.max(self.live());
-        self.peak_queued = self.peak_queued.max(self.queued());
+        if xstats_enabled() {
+            self.peak_live = self.peak_live.max(self.live());
+            self.peak_queued = self.peak_queued.max(self.queued());
+        }
     }
 }
 
@@ -140,7 +142,11 @@ impl Helpers {
                     lane.live += 1;
                     s.update_peaks();
                 }
-                Err(error) if lane.live > 0 && transient(&error) => s.spawn_deferred += 1,
+                Err(error) if lane.live > 0 && transient(&error) => {
+                    if xstats_enabled() {
+                        s.spawn_deferred += 1;
+                    }
+                }
                 Err(_) => {
                     lane.jobs.pop_back();
                     return Err(crate::run_stop::Stop::from_static(b"HostThreads"));

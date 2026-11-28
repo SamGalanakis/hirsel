@@ -150,7 +150,9 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), SpawnErr> {
             u.after.set(After::Run);
             u.status.store(0, Ordering::Relaxed);
             u.stop_fd.set(2);
-            u.first_park.set(false);
+            if xstats_enabled() {
+                u.first_park.set(false);
+            }
             u.timer_at.store(u64::MAX, Ordering::Relaxed);
             u.alone_depth.set(0);
             u.job.set(Some(job));
@@ -221,15 +223,17 @@ pub(super) fn create_initial_unit(id: u32, execution: &crate::run_stop::Executio
     // SAFETY: `unit` has not been published yet; nobody else holds it.
     unsafe { p.memory.admit_pair_to_unit(unit, pair, true) };
     p.units.install(unit);
-    bump(S_CREATED);
-    add_stat(S_CREATE_NS, now() - unit.created_ns);
+    if xstats_enabled() {
+        add_stat(S_CREATED, 1);
+        add_stat(S_CREATE_NS, now() - unit.created_ns);
+    }
     enqueue(p, unit);
 }
 
 // A helper's job is set by its spawner before publication. Keeping the job
 // out of the shared constructor also keeps its vtable out of the root path.
 fn new_unit(id: u32, execution: &crate::run_stop::Execution) -> Box<Unit> {
-    let t0 = now();
+    let t0 = if xstats_enabled() { now() } else { 0 };
     let config = execution.launch.as_ref().unwrap().base;
     // SAFETY: the launch joins every worker, and so drops every unit's last
     // use, before its execution record goes out of scope.
@@ -270,8 +274,10 @@ fn new_unit(id: u32, execution: &crate::run_stop::Execution) -> Box<Unit> {
 fn publish_unit(unit: Box<Unit>) {
     let unit: &'static Unit = Box::leak(unit);
     pool().units.install(unit);
-    bump(S_CREATED);
-    add_stat(S_CREATE_NS, now() - unit.created_ns);
+    if xstats_enabled() {
+        add_stat(S_CREATED, 1);
+        add_stat(S_CREATE_NS, now() - unit.created_ns);
+    }
     enqueue(pool(), unit);
 }
 

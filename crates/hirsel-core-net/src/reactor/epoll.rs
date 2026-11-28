@@ -219,7 +219,7 @@ impl Poller {
             unreachable!()
         };
         events.clear();
-        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::note_poll_wait();
         // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare
         // slots; Event is a transparent epoll_event.
         let count = unsafe {

@@ -29,6 +29,7 @@ fn host_pool_bounded_and_system_lane_progress() {
                 "--nocapture",
             ])
             .env(CHILD, case)
+            .env("HIRSEL_XSTATS", "1")
             .output()
             .unwrap()
     };

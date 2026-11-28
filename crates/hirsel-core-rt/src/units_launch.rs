@@ -106,7 +106,7 @@ pub(super) fn launch_planned(
     // Every recording block is in its file before the run reports.
     #[cfg(feature = "record")]
     crate::tape::writer::flush();
-    if std::env::var_os("HIRSEL_XSTATS").is_some() {
+    if xstats_enabled() {
         report::print(p);
     }
     Ok(generation.worst.load(Ordering::Relaxed))

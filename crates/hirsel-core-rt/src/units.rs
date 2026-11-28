@@ -55,12 +55,19 @@ pub(crate) use reply::file_poller;
 pub(crate) use reply::{Reply, file_request, uses_file_ring};
 #[path = "units_report.rs"]
 mod report;
+#[cfg(test)]
+use report::USTATS;
+use report::{
+    S_CREATE_NS, S_CREATED, S_GPOLL_BLOCKS, S_GPOLL_EVENTS, S_GPOLLS, S_LIFO, S_NOTIFIED_REQUEUE,
+    S_OS_WAKES, S_PARKS, S_READY_TO_PARK_NS, S_RESUMES, S_STEALS, S_TIMER_FIRES, S_YIELDS,
+    add_stat, bump, bump_host,
+};
 #[path = "units_timers.rs"]
 mod timers;
 use timers::{add_timer, clear_timer, fire_timers};
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
-use hirsel_core_net::ready::Ready;
+use hirsel_core_net::{ready::Ready, xstats_enabled};
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -201,47 +208,6 @@ const WAKE_TAG: u64 = u64::MAX;
 const CONNECTION_SPINS: u64 = 16;
 const SLICE_NS: u64 = 500_000;
 const POLL_EVERY_NS: u64 = 100_000;
-
-/// Counts from outside the worker pool and from workers that have exited.
-pub(crate) static USTATS: [AtomicU64; STATS] = [const { AtomicU64::new(0) }; STATS];
-thread_local! {
-    static WORKER_STATS: [Cell<u64>; STATS] = [const { Cell::new(0) }; STATS];
-}
-const S_RESUMES: usize = 0;
-const S_PARKS: usize = 1;
-const S_YIELDS: usize = 2;
-const S_STEALS: usize = 3;
-const S_OS_WAKES: usize = 4;
-const S_GPOLLS: usize = 5;
-const S_GPOLL_BLOCKS: usize = 6;
-const S_TIMER_FIRES: usize = 7;
-const S_CREATED: usize = 8;
-const S_CREATE_NS: usize = 9;
-const S_READY_TO_PARK_NS: usize = 10;
-const S_GPOLL_EVENTS: usize = 11;
-const S_NOTIFIED_REQUEUE: usize = 12;
-const S_LIFO: usize = 13;
-const STATS: usize = 14;
-fn bump(i: usize) {
-    add_stat(i, 1);
-}
-/// `bump` on a worker's own host stack (`find`, `run_unit`). That stack
-/// always resumes on its own thread, so the counter is read in place.
-#[inline(always)]
-fn bump_host(i: usize) {
-    WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(1)));
-}
-
-// A unit may resume on another worker. Resolve this worker's TLS in the
-// callee so the caller cannot cache its address across a stack switch.
-#[inline(never)]
-fn add_stat(i: usize, n: u64) {
-    if worker_ix() == usize::MAX {
-        USTATS[i].fetch_add(n, Ordering::Relaxed);
-    } else {
-        WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(n)));
-    }
-}
 
 const PARKED: u8 = 0;
 const QUEUED: u8 = 1;
@@ -501,11 +467,13 @@ pub(crate) fn park(deadline: Option<u64>) {
 }
 
 fn park_unit(deadline: Option<u64>) {
-    bump(S_PARKS);
     // SAFETY: called on the unit's own stack while it runs.
     let u = unsafe { &*cur() };
-    if !u.first_park.replace(true) {
-        add_stat(S_READY_TO_PARK_NS, now() - u.created_ns);
+    if xstats_enabled() {
+        add_stat(S_PARKS, 1);
+        if !u.first_park.replace(true) {
+            add_stat(S_READY_TO_PARK_NS, now() - u.created_ns);
+        }
     }
     leave(u, After::Wait(deadline));
 }
@@ -990,11 +958,7 @@ fn worker_main(p: &'static Pool, ix: usize) {
     if p.slots[ix].poller.drain_files().is_err() {
         std::process::abort();
     }
-    WORKER_STATS.with(|stats| {
-        for (total, local) in USTATS.iter().zip(stats) {
-            total.fetch_add(local.get(), Ordering::Relaxed);
-        }
-    });
+    report::flush_worker();
     #[cfg(feature = "testing")]
     observe::flush();
 }

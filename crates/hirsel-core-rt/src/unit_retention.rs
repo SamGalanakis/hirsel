@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 pub(super) struct Stock<T> {
     idle: VecDeque<(T, usize, u64)>,
+    stats: bool,
     bytes: usize,
     peak: usize,
     hits: usize,
@@ -11,9 +12,10 @@ pub(super) struct Stock<T> {
 }
 
 impl<T> Stock<T> {
-    fn new() -> Self {
+    fn new(stats: bool) -> Self {
         Self {
             idle: VecDeque::new(),
+            stats,
             bytes: 0,
             peak: 0,
             hits: 0,
@@ -27,19 +29,25 @@ impl<T> Stock<T> {
 
     fn take(&mut self, mut fits: impl FnMut(&T) -> bool) -> Option<(T, usize)> {
         let Some(index) = self.idle.iter().rposition(|(item, _, _)| fits(item)) else {
-            self.misses += 1;
+            if self.stats {
+                self.misses += 1;
+            }
             return None;
         };
         let (item, bytes, _) = self.idle.remove(index).unwrap();
-        self.bytes -= bytes;
-        self.hits += 1;
+        if self.stats {
+            self.bytes -= bytes;
+            self.hits += 1;
+        }
         Some((item, bytes))
     }
 
     fn push(&mut self, item: T, bytes: usize, seq: u64) {
         self.idle.push_back((item, bytes, seq));
-        self.bytes += bytes;
-        self.peak = self.peak.max(self.bytes);
+        if self.stats {
+            self.bytes += bytes;
+            self.peak = self.peak.max(self.bytes);
+        }
     }
 
     fn first(&self) -> Option<u64> {
@@ -48,7 +56,9 @@ impl<T> Stock<T> {
 
     fn pop(&mut self) -> Option<(T, usize)> {
         let (item, bytes, _) = self.idle.pop_front()?;
-        self.bytes -= bytes;
+        if self.stats {
+            self.bytes -= bytes;
+        }
         Some((item, bytes))
     }
 
@@ -68,20 +78,22 @@ pub(super) struct Retention {
     #[cfg(feature = "record")]
     pub(super) tapes: Stock<Vec<u8>>,
     pub(super) used: usize,
+    #[cfg(test)]
     pub(super) peak: usize,
     next: u64,
 }
 
 impl Retention {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(stats: bool) -> Self {
         Self {
-            unit_stacks: Stock::new(),
-            task_stacks: Stock::new(),
-            slabs: Stock::new(),
-            pages: Stock::new(),
+            unit_stacks: Stock::new(stats),
+            task_stacks: Stock::new(stats),
+            slabs: Stock::new(stats),
+            pages: Stock::new(stats),
             #[cfg(feature = "record")]
-            tapes: Stock::new(),
+            tapes: Stock::new(stats),
             used: 0,
+            #[cfg(test)]
             peak: 0,
             next: 0,
         }
@@ -107,7 +119,10 @@ impl Retention {
         self.next += 1;
         select(self).push(item, bytes, seq);
         self.used += bytes;
-        self.peak = self.peak.max(self.used);
+        #[cfg(test)]
+        {
+            self.peak = self.peak.max(self.used);
+        }
     }
 
     pub(super) fn cutoff(&self) -> u64 {

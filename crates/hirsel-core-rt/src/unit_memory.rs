@@ -92,6 +92,7 @@ struct Work {
 
 pub(crate) struct Memory {
     plan: super::UntiedPlan,
+    stats: bool,
     launch: OnceLock<hirsel_core_ids::launch::Metadata>,
     retention: Mutex<Retention>,
     workers: Vec<Mutex<WorkerStock>>,
@@ -122,10 +123,12 @@ pub(crate) trait SharedMemory: Sync {
 
 impl Memory {
     pub(super) fn new(plan: super::UntiedPlan) -> Self {
+        let stats = super::xstats_enabled();
         Self {
             plan,
+            stats,
             launch: OnceLock::new(),
-            retention: Mutex::new(Retention::new()),
+            retention: Mutex::new(Retention::new(stats)),
             workers: (0..plan.workers)
                 .map(|_| Mutex::new(WorkerStock::default()))
                 .collect(),
@@ -171,8 +174,10 @@ impl Memory {
         else {
             return false;
         };
-        self.retained_peak
-            .fetch_max(prev + bytes, Ordering::Relaxed);
+        if self.stats {
+            self.retained_peak
+                .fetch_max(prev + bytes, Ordering::Relaxed);
+        }
         true
     }
 
@@ -368,7 +373,9 @@ impl Memory {
             if let Some(pair) = stock.pairs.pop_back() {
                 let bytes = pair.bytes();
                 stock.bytes -= bytes;
-                stock.hits += 1;
+                if self.stats || cfg!(test) {
+                    stock.hits += 1;
+                }
                 self.release_retained(bytes);
                 let low = self
                     .plan
@@ -412,7 +419,9 @@ impl Memory {
         let pair = stock.pairs.pop_back()?;
         let bytes = pair.bytes();
         stock.bytes -= bytes;
-        stock.hits += 1;
+        if self.stats || cfg!(test) {
+            stock.hits += 1;
+        }
         self.release_retained(bytes);
         let low = self
             .plan
@@ -480,7 +489,9 @@ impl Memory {
         let mut overflow = Vec::new();
         let (more_waiters, post_bg) = {
             let mut stock = self.workers[ix].lock().unwrap();
-            stock.refills += 1;
+            if self.stats {
+                stock.refills += 1;
+            }
             while let Some(up) = stock.waiters.pop_front() {
                 if let Some(pair) = fresh.pop() {
                     ready.push((up, pair));
@@ -634,8 +645,10 @@ impl Memory {
         if bytes > self.plan.reclaim_bytes - work.pending_bytes
             || work.pending_slots == self.plan.reclaim_slots
         {
-            work.sync_dispose_count += 1;
-            work.sync_dispose_bytes += bytes;
+            if self.stats || cfg!(test) {
+                work.sync_dispose_count += 1;
+                work.sync_dispose_bytes += bytes;
+            }
             drop(work);
             release.dispose();
             return;
@@ -643,7 +656,9 @@ impl Memory {
         work.releases.push_back((bytes, release));
         work.pending_slots += 1;
         work.pending_bytes += bytes;
-        work.peak_pending_bytes = work.peak_pending_bytes.max(work.pending_bytes);
+        if self.stats {
+            work.peak_pending_bytes = work.peak_pending_bytes.max(work.pending_bytes);
+        }
         self.ready.notify_one();
     }
 

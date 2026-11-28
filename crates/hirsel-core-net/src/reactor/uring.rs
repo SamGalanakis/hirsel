@@ -404,7 +404,7 @@ impl Poller {
         let Backend::Uring(ring) = &self.backend else {
             unreachable!()
         };
-        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::note_poll_wait();
         // Filled once: a turn reports the prefix it wrote, so the buffer
         // keeps its length rather than being refilled every turn.
         events.resize(2 * ring.plan.poll_batch as usize, Event::EMPTY);

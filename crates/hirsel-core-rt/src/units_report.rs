@@ -1,8 +1,61 @@
-use super::{
-    Ordering, Pool, S_CREATE_NS, S_CREATED, S_GPOLL_BLOCKS, S_GPOLL_EVENTS, S_GPOLLS, S_LIFO,
-    S_NOTIFIED_REQUEUE, S_OS_WAKES, S_PARKS, S_READY_TO_PARK_NS, S_RESUMES, S_STEALS,
-    S_TIMER_FIRES, S_YIELDS, USTATS,
-};
+use super::{Ordering, Pool, sync::AtomicU64, worker_ix, xstats_enabled};
+use std::cell::Cell;
+
+/// Counts from outside the worker pool and from workers that have exited.
+pub(crate) static USTATS: [AtomicU64; STATS] = [const { AtomicU64::new(0) }; STATS];
+thread_local! {
+    static WORKER_STATS: [Cell<u64>; STATS] = [const { Cell::new(0) }; STATS];
+}
+pub(super) const S_RESUMES: usize = 0;
+pub(super) const S_PARKS: usize = 1;
+pub(super) const S_YIELDS: usize = 2;
+pub(super) const S_STEALS: usize = 3;
+pub(super) const S_OS_WAKES: usize = 4;
+pub(super) const S_GPOLLS: usize = 5;
+pub(super) const S_GPOLL_BLOCKS: usize = 6;
+pub(super) const S_TIMER_FIRES: usize = 7;
+pub(super) const S_CREATED: usize = 8;
+pub(super) const S_CREATE_NS: usize = 9;
+pub(super) const S_READY_TO_PARK_NS: usize = 10;
+pub(super) const S_GPOLL_EVENTS: usize = 11;
+pub(super) const S_NOTIFIED_REQUEUE: usize = 12;
+pub(super) const S_LIFO: usize = 13;
+const STATS: usize = 14;
+#[inline]
+pub(super) fn bump(i: usize) {
+    if xstats_enabled() {
+        add_stat(i, 1);
+    }
+}
+/// `bump` on a worker's own host stack (`find`, `run_unit`). That stack
+/// always resumes on its own thread, so the counter is read in place.
+#[inline(always)]
+pub(super) fn bump_host(i: usize) {
+    if xstats_enabled() {
+        WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(1)));
+    }
+}
+
+// A unit may resume on another worker. Resolve this worker's TLS in the
+// callee so the caller cannot cache its address across a stack switch.
+#[inline(never)]
+pub(super) fn add_stat(i: usize, n: u64) {
+    if worker_ix() == usize::MAX {
+        USTATS[i].fetch_add(n, Ordering::Relaxed);
+    } else {
+        WORKER_STATS.with(|stats| stats[i].set(stats[i].get().wrapping_add(n)));
+    }
+}
+
+pub(super) fn flush_worker() {
+    if xstats_enabled() {
+        WORKER_STATS.with(|stats| {
+            for (total, local) in USTATS.iter().zip(stats) {
+                total.fetch_add(local.get(), Ordering::Relaxed);
+            }
+        });
+    }
+}
 
 pub(super) fn print(p: &Pool) {
     p.memory.report();

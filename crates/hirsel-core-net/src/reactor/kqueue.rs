@@ -310,7 +310,7 @@ impl Poller {
         timeout_ns: Option<u64>,
     ) -> io::Result<Option<PollEvents<'a>>> {
         events.clear();
-        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::note_poll_wait();
         let count = wait_raw(
             self.kq(),
             events.as_mut_ptr().cast(),

@@ -402,8 +402,23 @@ pub use reactor::{
     SEND_ZC_ENV, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, TxSlot, TxState, UdpMember, file_ring,
     reactor, slot_pollers, slot_readiness_pollers,
 };
-/// mc-units-untied: kernel waits (epoll_wait or io_uring_enter) made by run reactors.
+/// Whether the process opted into collecting reactor and scheduler diagnostics.
+#[inline]
+pub fn xstats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("HIRSEL_XSTATS").is_some())
+}
+
+/// Kernel waits made by run reactors with `HIRSEL_XSTATS` set.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn note_poll_wait() {
+    if xstats_enabled() {
+        EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 mod signature;
 pub use signature::{
     SignatureAlgorithm, verify_ed25519, verify_p256_asn1, verify_p256_fixed, verify_p384_asn1,

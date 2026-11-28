@@ -1,0 +1,79 @@
+// Heartbeats and suspicions are volatile controller observations (FLT-3/4).
+// They never grant membership, change a lease or commit a store transaction.
+pub type Health: codec + key + send = UnknownHealth | Healthy | Suspect
+
+type Observation: codec + send {
+    controller_incarnation: u64,
+    stamp: u64,
+    state: Health
+}
+
+fn peer_fresh(h: HostLinks, node: u64) -> bool {
+    if h.local == h.controller || node == h.controller {
+        return true
+    }
+    let now = std.clock.boot_ns(h.clock)
+    now < h.fresh_until[advisory.roster_slot(node)] && now < h.fresh_until[advisory.roster_slot(h.local)]
+}
+
+fn may_rpc(h: HostLinks, node: u64) -> bool {
+    if h.local == h.controller {
+        return true
+    }
+    let Some(me) = member(h, h.local) else {
+        return false
+    }
+    if me.incarnation != h.incarnation || me.status == Revoked || me.status == Invited {
+        return false
+    }
+    std.clock.boot_ns(h.clock) < h.fresh_until[advisory.roster_slot(h.local)] && peer_fresh(h, node)
+}
+
+pub fn health(h: HostLinks, node: u64) -> Health {
+    let Some(m) = member(h, node) else {
+        return UnknownHealth
+    }
+    if m.status == Invited || m.status == Revoked {
+        return UnknownHealth
+    }
+    let slot = advisory.roster_slot(node)
+    let now = std.clock.boot_ns(h.clock)
+    if h.local == h.controller {
+        if node == h.local {
+            return Healthy
+        }
+        let seen = h.last_heard[slot]
+        if seen == 0 {
+            return UnknownHealth
+        }
+        if now >= int.saturating_add(seen, 6000000000) {
+            return Suspect
+        }
+        return Healthy
+    }
+    if now < h.fresh_until[slot] {
+        if let Some(sample) = h.observations[slot] {
+            return sample.state
+        }
+    }
+    UnknownHealth
+}
+
+fn observe(mut h: HostLinks, m: Member, sample: Observation, authority: u64) {
+    if sample.controller_incarnation != authority {
+        return
+    }
+    let slot = advisory.roster_slot(m.node)
+    if let Some(old) = h.observations[slot] {
+        if old.controller_incarnation > authority || (old.controller_incarnation == authority && old.stamp >= sample.stamp) {
+            return
+        }
+    }
+    h.observations[slot] = Some(sample)
+    h.fresh_until[slot] = int.saturating_add(std.clock.boot_ns(h.clock), SESSION_NS)
+}
+
+fn send_row(mut h: HostLinks, dst: u64, m: Member) {
+    let sample = Observation(controller_incarnation: h.incarnation, stamp: std.clock.boot_ns(h.clock), state: health(h, m.node))
+    let _ = transmit(mut h, dst, Row(m, sample))
+}

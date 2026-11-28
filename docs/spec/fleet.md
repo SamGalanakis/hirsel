@@ -398,6 +398,33 @@ stall detection.
   per-host revocable STS/IAM principals and per-security-domain streams when mutually
   distrustful tenants share a bucket.
 
+### Phase 3b membership and peer links
+
+The `fleet@1/roster` library stores operator invitations, joins, drain intent and revocations
+in the control Place's `fleet.roster` cell. An invitation assigns a NodeId, an IPv4 or IPv6
+listen address and a SHA-256 SPKI pin. The joining host starts with the controller's enrolled
+row and its own private key. It dials the controller and presents its catalog incarnation
+over mutually pinned QUIC with ALPN `hirsel-fleet-1`. The controller compares the NodeId
+in the request with the enrollment for the authenticated connection pin. It acknowledges
+the join after the Store durability barrier. Retrying the same incarnation returns the same
+row. A lower incarnation is stale and a revocation is terminal.
+
+The first profile has 64 fixed slots. An occupied slot or a previously assigned pin refuses a
+new enrollment. Tombstones retain their slots. Only the controller publishes rows. In each
+slot the highest committed revision wins, including when a tombstone arrives first. Peers
+poll individual slots, so recovery from a lost update uses bounded requests. Volatile health
+observations carry the controller incarnation and observation time. A delayed observation
+cannot replace a newer one. Health has no role in placement authority or directory leases.
+
+Each host uses one UDP socket. Workers dial the controller and the lower-numbered worker
+in each worker pair. Withdrawing a row closes its live handle and removes its pin from
+incoming handshakes. Live handles expire after 30 seconds of suspend-inclusive time.
+Worker-to-worker RPC admission also requires current controller observations for both
+members, which expire after 30 seconds. Each failed dial waits at least 250 milliseconds
+before retry. Application RPCs carry a caller nonce and up to 1,024 bytes on a QUIC
+datagram. Delivery can be lost or reordered. Callers own reply correlation and any retry
+appropriate to the operation.
+
 ## FLT-7: Proof-Ready Protocol Kernel contract (`K1`–`K13`)
 
 Every Fleet, Store and Cluster protocol core follows one deterministic kernel shape so that

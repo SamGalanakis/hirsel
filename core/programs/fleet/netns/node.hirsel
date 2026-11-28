@@ -1,0 +1,178 @@
+// Qualification entry for one OS process per Fleet host. The only shared inputs
+// are public enrollment data. Each process opens its own socket and private key.
+const BASE: u32 = 0x0a4d0001
+
+const PORT: u16 = 7339
+
+fn address(node: u64) -> Addr {
+    Addr(ip: V4(BASE + int.narrow(node)), port: PORT)
+}
+
+fn read_pin(dir: Dir, n: u64) -> roster.Pin waits {
+    let mut name = string.from("pin")
+    string.push_u64(mut name, n)
+    let raw = result.unwrap(std.file.read(dir, name))
+    if list.len(raw) != 32 {
+        fail("wrong SPKI digest length")
+    }
+    let mut key: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        key[i] = raw[i]
+    }
+    roster.spki(key)
+}
+
+fn run_controller(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Roster], dir_db: DirectoryFixture, clock: Clock, out: Stdout) waits {
+    let own = result.unwrap(roster.bootstrap(root.hub))
+    let seed = result.unwrap(roster.admit(mut root.hub, mut db, cell, own))
+    let co: std.codec.Codec[roster.Member] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, seed, mut raw))
+    let mut line = std.hex.encode(raw)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+    let mut finished: Inline[bool, 3] =[false; 3]
+    let mut revoked = false
+    while true {
+        result.unwrap(roster.drive(mut root.hub, mut root.socket, clock, host.mono_ns(clock) + 1000000, mut root.incoming))
+        for e in root.incoming {
+            match e {
+                Admission(req) => {
+                    let _ = result.unwrap(roster.admit(mut root.hub, mut db, cell, req))
+                },
+                Message(node: node, incarnation: inc, nonce: nonce, data: data) => {
+                    if (node != 1 && node != 2) || inc != 5 + node {
+                        fail("unexpected admitted client")
+                    }
+                    if list.compare_bytes(data, b"lookup:42") == Equal {
+                        let row = lease(dir_db)
+                        let wire: std.codec.Codec[directory.LeaseRow] = std.codec.of()
+                        let mut response: Bytes = list.new()
+                        result.unwrap(std.codec.encode(wire, row, mut response))
+                        result.unwrap(roster.rpc(mut root.hub, node, nonce, take response))
+                    } else if list.compare_bytes(data, b"done") == Equal {
+                        finished[node] = true
+                    } else if node == 2 && revoked && list.compare_bytes(data, b"revoked") == Equal {
+                        if roster.connected(root.hub, 1) {
+                            fail("revoked worker still connected")
+                        }
+                        return
+                    } else {
+                        fail("unknown RPC")
+                    }
+                },
+                Refused(_) => (),
+            }
+        }
+        if finished[1] && finished[2] && !revoked {
+            let _ = result.unwrap(roster.configure(mut root.hub, mut db, cell, Revoke(1)))
+            revoked = true
+        }
+    }
+}
+
+fn run_worker(mut h: TestHost, node: u64, clock: Clock, out: Stdout) waits {
+    let start = host.mono_ns(clock)
+    let mut sent: u64 = 0
+    let mut nonce: u64 = 0
+    let mut ready = false
+    while true {
+        result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + 100000, mut h.incoming))
+        if !ready {
+            let mut all = true
+            for n in 0u64 .. 3 {
+                if let Some(m) = roster.member(h.hub, n) {
+                    if m.status != Serving || m.incarnation != 5 + n || m.listen != roster.listen_addr(address(n)) {
+                        all = false
+                    }
+                } else {
+                    all = false
+                }
+                if n != node && !roster.connected(h.hub, n) {
+                    all = false
+                }
+            }
+            if !all {
+                continue
+            }
+            ready = true
+            timed_value(out, "join_roster_ns", host.mono_ns(clock) - start)
+        }
+        if nonce == 50 {
+            if node == 1 && !roster.connected(h.hub, 0) {
+                return
+            }
+            if node == 2 {
+                if let Some(row) = roster.member(h.hub, 1) {
+                    if row.status == Revoked {
+                        if roster.connected(h.hub, 1) {
+                            fail("revoked worker session remained")
+                        }
+                        result.unwrap(roster.rpc(mut h.hub, 0, nonce, b"revoked"))
+                        tick(mut h, clock)
+                        return
+                    }
+                }
+            }
+            if sent == 0 || host.mono_ns(clock) - sent > 10000000 {
+                result.unwrap(roster.rpc(mut h.hub, 0, nonce, b"done"))
+                sent = host.mono_ns(clock)
+            }
+            continue
+        }
+        for e in h.incoming {
+            if let Message(node: from, incarnation: inc, nonce: id, data: data) = e {
+                if from != 0 || inc != 5 || id != nonce || sent == 0 {
+                    fail("lookup reply identity")
+                }
+                let wire: std.codec.Codec[directory.LeaseRow] = std.codec.of()
+                let row = result.unwrap(std.codec.decode(wire, data))
+                if row.term != 1 || row.holder_node != 2 || row.holder_incarnation != 7 || list.compare_bytes(row.payload, b"room-42") != Equal {
+                    fail("directory view")
+                }
+                timed_value(out, "rpc_ns", host.mono_ns(clock) - sent)
+                nonce += 1
+                sent = 0
+            }
+        }
+        if sent == 0 && nonce < 50 {
+            sent = host.mono_ns(clock)
+            result.unwrap(roster.rpc(mut h.hub, 0, nonce, b"lookup:42"))
+        }
+    }
+}
+
+pub fn isolated_node(a: Args, dir: Dir, net: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), Exit] waits {
+    let Some(arg) = args.get(a, 0) else {
+        fail("expected node number")
+    }
+    let node: u64 = result.unwrap(int.parse(string.from(arg)))
+    if node > 2 {
+        fail("invalid node")
+    }
+    let key = result.unwrap(secret.seal(result.unwrap(std.file.read(dir, "key.der")), "sign(p256)"))
+    let mut chain: List[Bytes] = list.new()
+    list.push(mut chain, result.unwrap(std.file.read(dir, "cert.der")))
+    let identity: quic.handshake.Identity = Identity(chain: take chain, key: take key, alg: P256)
+    let (take sock, _) = result.unwrap(host.udp_bind(net, address(node), UdpOptions(slots: 64, slot_bytes: 1536)))
+    if node == 0 {
+        let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+        let mut decl = result.unwrap(store.declare(db, Migrate))
+        let cell = result.unwrap(roster.declare(mut decl))
+        let _ = result.unwrap(store.seal(mut db, take decl))
+        for n in 0u64 .. 3 {
+            let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: n, pin: read_pin(dir, n), listen: roster.listen_addr(address(n)))))
+        }
+        let mut root = test_host(clock, random, node, 5, take identity, take sock, result.unwrap(roster.load(db, cell)))
+        let dir_db = cluster_directory(clock, random)
+        run_controller(mut root, mut db, cell, dir_db, clock, out)
+    } else {
+        let co: std.codec.Codec[roster.Member] = std.codec.of()
+        let seed = result.unwrap(std.codec.decode(co, result.unwrap(std.file.read(dir, "seed"))))
+        let mut initial = roster.empty()
+        result.unwrap(roster.apply(mut initial, seed))
+        let mut h = test_host(clock, random, node, 5 + node, take identity, take sock, take initial)
+        run_worker(mut h, node, clock, out)
+    }
+    Ok(())
+}

@@ -47,7 +47,7 @@ edges = []
 id = "hirsel.ai/fleet@1"
 version = "1.0.0"
 source = "member:fleet"
-edges = ["hirsel.ai/compute@1", "runner@1", "std@1", "store@1"]
+edges = ["hirsel.ai/compute@1", "quic@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "hirsel.ai/h264@1"

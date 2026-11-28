@@ -1,0 +1,194 @@
+// Each datagram is independently authenticated, bounded and idempotently pollable.
+// Only the pinned controller can supply roster rows. Application RPCs retain the
+// authenticated sender and its enrolled incarnation for response correlation.
+type Body: codec + send = Join | Fetch(u64) | Row(Member, Observation) | Rpc(nonce: u64, data: Bytes)
+
+type Envelope: codec + send {
+    node: u64,
+    incarnation: u64,
+    body: Body
+}
+
+pub type Incoming = Admission(JoinRequest) | Refused(RosterError) | Message(node: u64, incarnation: u64, nonce: u64, data: Bytes)
+
+pub fn bootstrap(h: HostLinks) -> Result[JoinRequest, RosterError] {
+    if h.local != h.controller {
+        return Error(NotPinned)
+    }
+    Ok(JoinRequest(node: h.local, incarnation: h.incarnation, pin: identity_pin(h.identity)?))
+}
+
+fn transmit(mut h: HostLinks, dst: u64, take body: Body) -> Result[(), LinkError] {
+    if !self_allowed(h) || !connected(h, dst) {
+        return Error(NotConnected)
+    }
+    let Some(link) = h.links[advisory.roster_slot(dst)] else {
+        return Error(NotConnected)
+    }
+    let co: std.codec.Codec[Envelope] = std.codec.of()
+    let msg = Envelope(node: h.local, incarnation: h.incarnation, body: take body)
+    let mut raw: Bytes = list.new()
+    std.codec.encode(co, msg, mut raw) ?=> |_| BadFrame
+    let framed = quic.framed_from(quic.payload_whole(shared.new(take raw)))
+    quic.send_datagram(mut h.ep, link.handle, take framed, quic.Priority(urgency: 0, order: 0, then: 0), quic.DatagramTag(owner: dst, tag: 0)) ?=> |e| Transport(e)
+    Ok(())
+}
+
+pub fn rpc(mut h: HostLinks, dst: u64, nonce: u64, take data: Bytes) -> Result[(), LinkError] {
+    let Some(m) = member(h, dst) else {
+        return Error(NotConnected)
+    }
+    if !may_rpc(h, dst) || m.status == Invited || list.len(data) > 1024 {
+        return Error(BadFrame)
+    }
+    transmit(mut h, dst, Rpc(nonce, data: take data))
+}
+
+fn receive_frame(mut h: HostLinks, handle: quic.ConnectionHandle, packet: quic.PayloadSlice, mut out: List[Incoming]) {
+    let Some(m) = authenticated_peer(h, handle) else {
+        return
+    }
+    let Some(link) = h.links[advisory.roster_slot(m.node)] else {
+        return
+    }
+    if std.clock.boot_ns(h.clock) >= link.expires || !link.ready || link.handle != handle || !self_allowed(h) {
+        return
+    }
+    let co: std.codec.Codec[Envelope] = std.codec.of()
+    let Ok(take msg) = std.codec.decode(co, quic.payload_bytes(packet)) else {
+        return
+    }
+    if msg.node != m.node || msg.incarnation == 0 {
+        list.push(mut out, Refused(WrongIdentity))
+        forget(mut h, advisory.roster_slot(m.node))
+        return
+    }
+    if let Join = msg.body {
+        if h.local == h.controller {
+            if msg.incarnation < m.incarnation {
+                list.push(mut out, Refused(Stale))
+                quic.close(mut h.ep, handle, 3, b"stale incarnation")
+                h.links[advisory.roster_slot(m.node)] = None
+            } else {
+                list.push(mut out, Admission(JoinRequest(node: m.node, incarnation: msg.incarnation, pin: m.pin)))
+            }
+        }
+        return
+    }
+    if let Row(row, sample) = msg.body {
+        if m.node == h.controller && (msg.incarnation == m.incarnation || (row.node == m.node && row.pin == m.pin && row.incarnation == msg.incarnation && msg.incarnation > m.incarnation)) {
+            if let Ok(()) = install(mut h, row) {
+                if member(h, row.node) == Some(row) {
+                    observe(mut h, row, sample, msg.incarnation)
+                }
+            }
+        }
+        return
+    }
+    if msg.incarnation != m.incarnation || m.status == Invited {
+        return
+    }
+    h.last_heard[advisory.roster_slot(m.node)] = std.clock.boot_ns(h.clock)
+    let Envelope(body: take body, ..) = take msg
+    match take body {
+        Row(_, _) => (),
+        Fetch(slot) => {
+            if h.local == h.controller && slot < list.len(h.members.slots) {
+                if let Some(row) = h.members.slots[slot] {
+                    send_row(mut h, m.node, row)
+                }
+            }
+        },
+        Rpc(nonce: nonce, data: take data) => {
+            if may_rpc(h, m.node) && list.len(data) <= 1024 {
+                list.push(mut out, Message(node: m.node, incarnation: m.incarnation, nonce, data: take data))
+            }
+        },
+        Join => (),
+    }
+}
+
+/// Commit and install the authenticated join before acknowledging it on the link.
+/// A retry after a lost reply recovers the same row.
+pub fn admit(mut h: HostLinks, mut db: store.Db, cell: store.Cell[Roster], req: JoinRequest) -> Result[Member, RosterError] waits {
+    let row = configure(mut h, mut db, cell, Admit(req))?
+    h.last_heard[advisory.roster_slot(row.node)] = std.clock.boot_ns(h.clock)
+    if row.node != h.local {
+        send_row(mut h, row.node, row)
+    }
+    Ok(row)
+}
+
+fn sync_rows(mut h: HostLinks, now: u64) {
+    if h.local == h.controller || now < h.sync_after || !connected(h, h.controller) {
+        return
+    }
+    h.sync_after = int.saturating_add(now, 10000000)
+    if let Some(m) = member(h, h.local) {
+        if m.incarnation == h.incarnation && (m.status == Serving || m.status == Draining) {
+            let cursor = h.cursor
+            let controller = h.controller
+            if let Ok(()) = transmit(mut h, controller, Fetch(cursor)) {
+                h.cursor = (h.cursor + 1) % advisory.MAX_ADVISORY_ENTRIES
+            }
+            return
+        }
+    }
+    let controller = h.controller
+    let _ = transmit(mut h, controller, Join)
+}
+
+/// Run a bounded IO round. The caller consumes one round of messages at a time.
+/// The timer also wakes idle sockets for reconnect, membership polling and expiry.
+pub fn drive(mut h: HostLinks, mut socket: UdpSocket, clock: Clock, until: u64, mut out: List[Incoming]) -> Result[(), LinkError] waits {
+    list.clear(mut out)
+    let now = host.mono_ns(clock)
+    maintain(mut h, now)
+    sync_rows(mut h, now)
+    let mut events: List[quic.Event] = list.new()
+    let wake = order.min(until, int.saturating_add(now, 10000000))
+    quic.drive(mut h.ep, clock, mut socket, wake, mut events) ?=> |e| Network(e)
+    let at = host.mono_ns(clock)
+    for event in events {
+        match event {
+            Connected(c: c, alpn: protocol) => {
+                if protocol != ALPN || !self_allowed(h) || !accept_link(mut h, c) {
+                    quic.close(mut h.ep, c, 2, b"unrecognized fleet peer")
+                } else if h.local == h.controller {
+                    if let Some(m) = authenticated_peer(h, c) {
+                        if let Some(me) = member(h, h.local) {
+                            send_row(mut h, m.node, me)
+                        }
+                    }
+                }
+            },
+            Closed(c, why) => {
+                if let Refused(Pin) = why {
+                    list.push(mut out, Refused(NotPinned))
+                }
+                for i in 0u64 .. list.len(h.links) {
+                    if let Some(link) = h.links[i] {
+                        if link.handle == c {
+                            h.links[i] = None
+                            h.retry[i] = int.saturating_add(at, RETRY_NS)
+                            break
+                        }
+                    }
+                }
+            },
+            Datagram(c, packet) => receive_frame(mut h, c, packet, mut out),
+            _ => (),
+        }
+    }
+    Ok(())
+}
+
+/// Apply a control Place edit and update the serving endpoint before returning.
+pub fn configure(mut h: HostLinks, mut db: store.Db, cell: store.Cell[Roster], change: Change) -> Result[Member, RosterError] waits {
+    if h.local != h.controller {
+        return Error(NotPinned)
+    }
+    let row = commit(mut db, cell, change)?
+    install(mut h, row)?
+    Ok(row)
+}

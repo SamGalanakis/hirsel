@@ -1,0 +1,183 @@
+// One durable Fleet controller serializes edits. A row revision orders committed
+// updates for its slot, including the terminal revocation. Pins and IDs are never reused.
+pub type Status: codec + key + send = Invited | Serving | Draining | Revoked
+
+pub type Pin: codec + key + send {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64
+}
+
+pub fn spki(digest: Inline[u8, 32]) -> Pin {
+    let mut words: Inline[u64, 4] =[0; 4]
+    for i in 0u64 .. 32 {
+        words[i / 8] = (words[i / 8] << 8) | int.widen(digest[i])
+    }
+    Pin(a: words[0], b: words[1], c: words[2], d: words[3])
+}
+
+fn pin_digest(pin: Pin) -> Inline[u8, 32] {
+    let words: Inline[u64, 4] =[pin.a, pin.b, pin.c, pin.d]
+    let mut out: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        out[i] = int.truncate(words[i / 8] >> (8 * (7 - i % 8)))
+    }
+    out
+}
+
+pub type ListenIp: codec + key + send = Ip4(u32) | Ip6(u64, u64)
+
+pub type Listen: codec + key + send {
+    ip: ListenIp,
+    port: u16
+}
+
+pub fn listen_addr(a: Addr) -> Listen {
+    Listen(ip: match a.ip {
+        V4(v) => Ip4(v),
+        V6(h, l) => Ip6(h, l)
+    }, port: a.port)
+}
+
+fn socket_addr(a: Listen) -> Addr {
+    Addr(ip: match a.ip {
+        Ip4(v) => V4(v),
+        Ip6(h, l) => V6(h, l)
+    }, port: a.port)
+}
+
+pub type Member: codec + key + send {
+    node: u64,
+    incarnation: u64,
+    pin: Pin,
+    listen: Listen,
+    revision: u64,
+    status: Status
+}
+
+pub type Roster: codec + send {
+    slots: List[Option[Member]]
+}
+
+pub type RosterError: codec + send = Full | Conflict | Unknown | Removed | Stale | NotPinned | WrongIdentity | Storage
+
+pub fn empty() -> Roster {
+    let mut slots: List[Option[Member]] = list.with_capacity(advisory.MAX_ADVISORY_ENTRIES)
+    list.fill(mut slots, advisory.MAX_ADVISORY_ENTRIES, None)
+    Roster(slots: take slots)
+}
+
+pub fn lookup(r: Roster, node: u64) -> Option[Member] {
+    if let Some(m) = r.slots[advisory.roster_slot(node)] {
+        if m.node == node {
+            return Some(m)
+        }
+    }
+    None
+}
+
+// Called with controller-authenticated rows only. Equal revisions must name the
+// same commit. A conflicting enrollment cannot evict a live row or a tombstone.
+pub fn apply(mut r: Roster, m: Member) -> Result[(), RosterError] {
+    let slot = advisory.roster_slot(m.node)
+    if m.revision == 0 || m.listen.port == 0 {
+        return Error(Conflict)
+    }
+    if let Some(old) = r.slots[slot] {
+        if old.node != m.node || old.pin != m.pin {
+            return Error(Conflict)
+        }
+        if old.revision > m.revision || old == m {
+            return Ok(())
+        }
+        if old.revision == m.revision || old.status == Revoked || m.incarnation < old.incarnation {
+            return Error(Conflict)
+        }
+    } else {
+        for row in r.slots {
+            if let Some(other) = row {
+                if other.pin == m.pin {
+                    return Error(Conflict)
+                }
+            }
+        }
+    }
+    r.slots[slot] = Some(m)
+    Ok(())
+}
+
+/// Operator enrollment binds the pinned key to its node before any network join.
+pub fn enroll(mut r: Roster, node: u64, pin: Pin, listen: Listen) -> Result[Member, RosterError] {
+    if let Some(_) = r.slots[advisory.roster_slot(node)] {
+        return Error(Full)
+    }
+    let m = Member(node, incarnation: 0, pin, listen, revision: 1, status: Invited)
+    apply(mut r, m)?
+    Ok(m)
+}
+
+fn write_row(mut r: Roster, mut m: Member) -> Result[Member, RosterError] {
+    if m.revision == 0xffffffffffffffff {
+        return Error(Full)
+    }
+    m.revision += 1
+    apply(mut r, m)?
+    Ok(m)
+}
+
+pub fn revoke(mut r: Roster, node: u64) -> Result[Member, RosterError] {
+    let Some(original) = lookup(r, node) else {
+        return Error(Unknown)
+    }
+    let mut m = original
+    if m.status == Revoked {
+        return Ok(m)
+    }
+    m.status = Revoked
+    write_row(mut r, mut m)
+}
+
+fn join(mut r: Roster, node: u64, incarnation: u64, pin: Pin) -> Result[Member, RosterError] {
+    let Some(original) = lookup(r, node) else {
+        return Error(Unknown)
+    }
+    let mut m = original
+    if m.status == Revoked {
+        return Error(Removed)
+    }
+    if m.pin != pin {
+        return Error(NotPinned)
+    }
+    if incarnation == 0 || incarnation < m.incarnation {
+        return Error(Stale)
+    }
+    if incarnation == m.incarnation {
+        return Ok(m)
+    }
+    m.incarnation = incarnation
+    if m.status == Invited {
+        m.status = Serving
+    }
+    write_row(mut r, mut m)
+}
+
+fn drain(mut r: Roster, node: u64, draining: bool) -> Result[Member, RosterError] {
+    let Some(original) = lookup(r, node) else {
+        return Error(Unknown)
+    }
+    let mut m = original
+    if m.status != Serving && m.status != Draining {
+        return Error(Conflict)
+    }
+    let status: Status = if draining {
+        Draining
+    } else {
+        Serving
+    }
+    if m.status == status {
+        return Ok(m)
+    }
+    m.status = status
+    write_row(mut r, mut m)
+}

@@ -1,0 +1,234 @@
+const ALPN: String = "hirsel-fleet-1"
+
+const RETRY_NS: u64 = 250000000
+
+const SESSION_NS: u64 = 30000000000
+
+type Link {
+    handle: quic.ConnectionHandle,
+    ready: bool,
+    expires: u64
+}
+
+pub opaque type HostLinks {
+    ep: quic.Endpoint,
+    clock: Clock,
+    fresh_until: List[u64],
+    last_heard: List[u64],
+    observations: List[Option[Observation]],
+    identity: quic.handshake.Identity,
+    local: u64,
+    incarnation: u64,
+    controller: u64,
+    members: Roster,
+    links: List[Option[Link]],
+    retry: List[u64],
+    cursor: u64,
+    sync_after: u64
+}
+
+pub type LinkError = Transport(quic.QuicError) | Network(NetError) | Membership(RosterError) | NotConnected | BadFrame
+
+fn identity_copy(id: quic.handshake.Identity) -> quic.handshake.Identity {
+    match id {
+        Identity(chain: chain, key: key, alg: alg) => Identity(chain: clone(chain), key: secret.share(key), alg: alg),
+    }
+}
+
+pub fn identity_pin(id: quic.handshake.Identity) -> Result[Pin, RosterError] {
+    match id {
+        Identity(chain: chain, ..) => chain_pin(chain)
+    }
+}
+
+fn chain_pin(chain: List[Bytes]) -> Result[Pin, RosterError] {
+    if list.len(chain) == 0 {
+        return Error(NotPinned)
+    }
+    let Some(range) = std.x509_key.spki_range(chain[0]) else {
+        return Error(NotPinned)
+    }
+    let mut hash = std.sha256.start()
+    std.sha256.add(mut hash, chain[0], range.start, range.end)
+    Ok(spki(std.sha256.finish(hash)))
+}
+
+fn pins(r: Roster, self_id: u64) -> List[quic.handshake.Pin] {
+    let mut accepted: List[quic.handshake.Pin] = list.new()
+    for row in r.slots {
+        if let Some(m) = row {
+            if m.status != Revoked && m.node != self_id {
+                list.push(mut accepted, Spki(pin_digest(m.pin)))
+            }
+        }
+    }
+    take accepted
+}
+
+fn transport(take accepted: Option[List[quic.handshake.Pin]]) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.new()
+    list.push(mut alpn, ALPN)
+    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 1152, send_bytes: 16384, max_gaps: 8, cc: Cubic, alpn: take alpn, client_pins: take accepted)
+}
+
+pub fn open_links(clock: Clock, random: Random, local: u64, incarnation: u64, controller: u64, take id: quic.handshake.Identity, take members: Roster) -> Result[HostLinks, LinkError] {
+    let Some(seed) = lookup(members, controller) else {
+        return Error(Membership(Unknown))
+    }
+    if incarnation == 0 || seed.status == Revoked {
+        return Error(Membership(Conflict))
+    }
+    let mut reset: Bytes = list.with_capacity(32)
+    host.random(random, mut reset)
+    let mut token: Bytes = list.with_capacity(32)
+    host.random(random, mut token)
+    let config = quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1280, retry: Above(8), reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 128, unvalidated: 16, datagram_bytes: 65536))
+    let ep = quic.endpoint(random, take config, Some((identity_copy(id), transport(Some(pins(members, local)))))) ?=> |e| Transport(e)
+    let mut links: List[Option[Link]] = list.with_capacity(advisory.MAX_ADVISORY_ENTRIES)
+    let mut retry: List[u64] = list.with_capacity(advisory.MAX_ADVISORY_ENTRIES)
+    list.fill(mut links, advisory.MAX_ADVISORY_ENTRIES, None)
+    list.fill(mut retry, advisory.MAX_ADVISORY_ENTRIES, 0u64)
+    let fresh_until: List[u64] = clone(retry)
+    let last_heard: List[u64] = clone(retry)
+    let mut observations: List[Option[Observation]] = list.with_capacity(advisory.MAX_ADVISORY_ENTRIES)
+    list.fill(mut observations, advisory.MAX_ADVISORY_ENTRIES, None)
+    Ok(HostLinks(ep: take ep, clock, fresh_until: take fresh_until, last_heard: take last_heard, observations: take observations, identity: take id, local, incarnation, controller, members: take members, links: take links, retry: take retry, cursor: 0, sync_after: 0))
+}
+
+pub fn member(h: HostLinks, node: u64) -> Option[Member] {
+    lookup(h.members, node)
+}
+
+pub fn connected(h: HostLinks, node: u64) -> bool {
+    if let Some(m) = member(h, node) {
+        if let Some(link) = h.links[advisory.roster_slot(node)] {
+            return link.ready && std.clock.boot_ns(h.clock) < link.expires && m.status != Revoked
+        }
+    }
+    false
+}
+
+fn forget(mut h: HostLinks, slot: u64) {
+    if let Some(link) = h.links[slot] {
+        quic.close(mut h.ep, link.handle, 1, b"fleet membership changed")
+        h.links[slot] = None
+    }
+}
+
+/// Install the controller's committed row and invalidate any previous session
+/// before the next application request can observe the changed membership.
+pub fn install(mut h: HostLinks, m: Member) -> Result[(), RosterError] {
+    let before = member(h, m.node)
+    apply(mut h.members, m)?
+    let after = member(h, m.node)
+    if before == after {
+        return Ok(())
+    }
+    let slot = advisory.roster_slot(m.node)
+    if let Some(old) = before {
+        if old.incarnation != m.incarnation {
+            h.last_heard[slot] = 0
+            h.observations[slot] = None
+        }
+    }
+    if m.status == Revoked || (m.node == h.local && m.incarnation > h.incarnation) {
+        if m.node == h.local {
+            for i in 0u64 .. list.len(h.links) {
+                forget(mut h, i)
+            }
+        } else {
+            forget(mut h, slot)
+        }
+    } else if let Some(old) = before {
+        if old.incarnation > 0 && old.incarnation != m.incarnation {
+            forget(mut h, slot)
+        }
+    }
+    quic.set_client_pins(mut h.ep, Some(pins(h.members, h.local)))
+    Ok(())
+}
+
+fn self_allowed(h: HostLinks) -> bool {
+    if let Some(m) = member(h, h.local) {
+        return m.status != Revoked && m.incarnation <= h.incarnation
+    }
+    true
+}
+
+fn dialer(h: HostLinks, peer: u64) -> bool {
+    if peer == h.controller {
+        return true
+    }
+    h.local != h.controller && h.local > peer
+}
+
+fn maintain(mut h: HostLinks, now: u64) {
+    if !self_allowed(h) {
+        return
+    }
+    for i in 0u64 .. list.len(h.links) {
+        let Some(m) = h.members.slots[i] else {
+            continue
+        }
+        let allowed = peer_fresh(h, m.node)
+        if let Some(link) = h.links[i] {
+            if allowed && std.clock.boot_ns(h.clock) < link.expires {
+                continue
+            }
+            forget(mut h, i)
+        }
+        if !allowed || m.node == h.local || m.status == Revoked || m.status == Invited || !dialer(h, m.node) || now < h.retry[i] {
+            continue
+        }
+        h.retry[i] = int.saturating_add(now, RETRY_NS)
+        let mut expected: List[quic.handshake.Pin] = list.new()
+        list.push(mut expected, Spki(pin_digest(m.pin)))
+        if let Ok(handle) = quic.connect(mut h.ep, now, socket_addr(m.listen), "fleet", take expected, Some(identity_copy(h.identity)), transport(None)) {
+            h.links[i] = Some(Link(handle, ready: false, expires: int.saturating_add(std.clock.boot_ns(h.clock), SESSION_NS)))
+        }
+    }
+}
+
+fn authenticated_peer(h: HostLinks, handle: quic.ConnectionHandle) -> Option[Member] {
+    let Some(Spki(bytes32)) = quic.peer_pin(h.ep, handle) else {
+        return None
+    }
+    let matched = spki(bytes32)
+    for row in h.members.slots {
+        if let Some(m) = row {
+            if m.pin == matched && m.node != h.local && m.status != Revoked {
+                return Some(m)
+            }
+        }
+    }
+    None
+}
+
+fn accept_link(mut h: HostLinks, handle: quic.ConnectionHandle) -> bool {
+    let Some(m) = authenticated_peer(h, handle) else {
+        return false
+    }
+    if !peer_fresh(h, m.node) {
+        return false
+    }
+    let slot = advisory.roster_slot(m.node)
+    if let Some(link) = h.links[slot] {
+        if link.handle != handle {
+            return false
+        }
+    } else if dialer(h, m.node) {
+        return false
+    }
+    h.links[slot] = Some(Link(handle, ready: true, expires: int.saturating_add(std.clock.boot_ns(h.clock), SESSION_NS)))
+    true
+}
+
+/// Send CONNECTION_CLOSE and release Fleet's handles before the socket is dropped.
+pub fn shutdown(mut h: HostLinks, mut socket: UdpSocket, clock: Clock) -> Result[(), LinkError] waits {
+    for i in 0u64 .. list.len(h.links) {
+        forget(mut h, i)
+    }
+    let mut events: List[quic.Event] = list.new()
+    quic.drive(mut h.ep, clock, mut socket, host.mono_ns(clock), mut events) ?=> |e| Network(e)
+    Ok(())
+}

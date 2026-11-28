@@ -1,0 +1,63 @@
+pub type Change: send = Invite(node: u64, pin: Pin, listen: Listen) | Admit(JoinRequest) | SetDrain(u64, bool) | Revoke(u64)
+
+/// The peer pin in this request comes from QUIC CertificateVerify. Its constructor
+/// is private so a decoded application frame cannot supply the pin to Admit.
+pub opaque type JoinRequest: send {
+    node: u64,
+    incarnation: u64,
+    pin: Pin
+}
+
+pub fn declare(mut d: store.Declare) -> Result[store.Cell[Roster], store.Error] {
+    let codec: std.codec.Codec[Roster] = std.codec.of()
+    store.declare_cell(mut d, "fleet.roster", codec)
+}
+
+pub fn load(db: store.Db, cell: store.Cell[Roster]) -> Result[Roster, store.Error] waits {
+    let reader = store.reader(db, 1048576)?
+    match store.cell_get(reader, store.snapshot(db), cell)? {
+        Some(take r) => Ok(take r),
+        None => Ok(empty()),
+    }
+}
+
+fn edit(mut r: Roster, change: Change) -> Result[Member, RosterError] {
+    match change {
+        Invite(node: node, pin: pin, listen: at) => enroll(mut r, node, pin, at),
+        Admit(req) => join(mut r, req.node, req.incarnation, req.pin),
+        SetDrain(node, value) => drain(mut r, node, value),
+        Revoke(node) => revoke(mut r, node),
+    }
+}
+
+/// Publish the row only after Store has committed the admission or operator change.
+pub fn commit(mut db: store.Db, cell: store.Cell[Roster], change: Change) -> Result[Member, RosterError] waits {
+    let ran = store.run(mut db, None, (store.copy_env(cell), store.copy_env(change)), fn(mut tx, input) -> Result[Result[Member, RosterError], store.Error] {
+        let old = store.cell_fetch(tx, input.0)?
+        let mut r = match take old {
+            Some(take present) => take present,
+            None => empty(),
+        }
+        let node = match input.1 {
+            Invite(node: n, ..) => n,
+            Admit(req) => req.node,
+            SetDrain(n, _) => n,
+            Revoke(n) => n,
+        }
+        let before = lookup(r, node)
+        let result = edit(mut r, input.1)
+        if let Ok(m) = result {
+            if before != Some(m) {
+                store.cell_set(mut tx, input.0, r)?
+            }
+        }
+        Ok(result)
+    }) ?=> |_| Storage
+    match take ran {
+        Committed(take done) => {
+            let _ = store.durable(mut db, done.ticket) ?=> |_| Storage
+            clone(done.value)
+        },
+        _ => Error(Storage),
+    }
+}

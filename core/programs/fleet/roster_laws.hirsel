@@ -1,0 +1,20 @@
+/// bug: An older controller row can resurrect a revoked peer or displace a different enrollment.
+/// oracle: FLT-3 and FLT-6 require unique enrolled identities and persistent revocation across delayed delivery.
+@test
+fn roster_reordered_revocation() -> Result[(), ()] {
+    let mut r = roster.empty()
+    let a = roster.listen_addr(Addr(ip: V4(0x7f000001), port: 9101))
+    let pin = roster.spki([1u8; 32])
+    let permitted = result.unwrap(roster.enroll(mut r, 1, pin, a))
+    if let Ok(_) = roster.enroll(mut r, 2, pin, a) {
+        fail("one pin enrolled under two node identities")
+    }
+    let revoked = result.unwrap(roster.revoke(mut r, 1))
+    let mut replay = roster.empty()
+    result.unwrap(roster.apply(mut replay, revoked))
+    result.unwrap(roster.apply(mut replay, permitted))
+    if roster.lookup(replay, 1) != Some(revoked) {
+        fail("delayed permit resurrected a revoked node")
+    }
+    Ok(())
+}

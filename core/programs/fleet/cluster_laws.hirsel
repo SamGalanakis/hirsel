@@ -1,0 +1,301 @@
+// Three independent Fleet hosts. Each owns its endpoint, key, roster and socket.
+// Each socket's network grant permits binds only on that node's loopback address.
+type TestHost {
+    hub: roster.HostLinks,
+    socket: UdpSocket,
+    incoming: List[roster.Incoming]
+}
+
+fn cluster_key(random: Random) -> quic.handshake.Identity {
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(random, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let cert = result.unwrap(std.x509_build.self_signed_p256(key, random, point, 1, "fleet", start, end))
+    let mut chain: List[Bytes] = list.new()
+    list.push(mut chain, take cert)
+    Identity(chain: take chain, key: take key, alg: P256)
+}
+
+fn copy_key(id: quic.handshake.Identity) -> quic.handshake.Identity {
+    match id {
+        Identity(chain: chain, key: key, alg: alg) => Identity(chain: clone(chain), key: secret.share(key), alg: alg),
+    }
+}
+
+fn bind_host(network: Net, ip: u32) -> (UdpSocket, Addr) waits {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, Rule(dir: UdpBind, prefix: V4(ip), bits: 32, ports: (0, 65535), reach: Any))
+    list.push(mut rules, Rule(dir: UdpSend, prefix: V4(0x7f000000), bits: 8, ports: (0, 65535), reach: Any))
+    let local_net = result.unwrap(net.narrow(network, rules))
+    result.unwrap(host.udp_bind(local_net, Addr(ip: V4(ip), port: 0), UdpOptions(slots: 64, slot_bytes: 1536)))
+}
+
+fn test_host(clock: Clock, random: Random, node: u64, incarnation: u64, take key: quic.handshake.Identity, take sock: UdpSocket, take initial: roster.Roster) -> TestHost {
+    let hub = result.unwrap(roster.open_links(clock, random, node, incarnation, 0, take key, take initial))
+    TestHost(hub: take hub, socket: take sock, incoming: list.new())
+}
+
+fn tick(mut h: TestHost, clock: Clock) waits {
+    result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock), mut h.incoming))
+}
+
+type DirectoryFixture {
+    db: store.Db,
+    handles: directory.DirectoryHandles[u64]
+}
+
+fn cluster_directory(clock: Clock, random: Random) -> DirectoryFixture waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut decl = result.unwrap(store.declare(db, Migrate))
+    let handles = result.unwrap(directory.directory_u64_schema(mut decl))
+    let _ = result.unwrap(store.seal(mut db, take decl))
+    let cfg = directory.DirectoryConfig(partition_id: 1, drift_ppm: 200, default_lease_ns: 24000000000, max_lease_cap_ns: 60000000000)
+    let init = result.unwrap(store.run(mut db, None, (store.copy_env(handles), cfg), fn(mut tx, input) -> Result[Result[directory.PartitionMeta, directory.DirError], store.Error] {
+        Ok(directory.init_partition_tx(mut tx, input.0, input.1, 0u64, 999u64))
+    }))
+    let Committed(take done) = take init else {
+        fail("directory init")
+    }
+    let _ = result.unwrap(store.durable(mut db, done.ticket))
+    let init_result: Result[directory.PartitionMeta, directory.DirError] = clone(done.value)
+    let _ = result.unwrap(take init_result)
+    let now = std.clock.boot_ns(clock)
+    let req = directory.ClaimReq(key: 42u64, holder_node: 2, holder_incarnation: 7, expect_term: 0, lease_ns: 24000000000, holder_boot_ns: now, reported_drift_ppm: 200, payload: b"room-42")
+    let _ = result.unwrap(directory.durable_claim(mut db, handles, directory.DirSession(dir_epoch: 1, takeover_boot_ns: now, quarantine_until_boot_ns: now), clock, req))
+    DirectoryFixture(db: take db, handles: take handles)
+}
+
+fn lease(d: DirectoryFixture) -> directory.LeaseRow waits {
+    let reader = result.unwrap(store.reader(d.db, 1048576))
+    option.unwrap(result.unwrap(store.get(reader, store.snapshot(d.db), d.handles.leases, 42u64)))
+}
+
+fn admit_round(mut root: TestHost, clock: Clock, mut db: store.Db, cell: store.Cell[roster.Roster]) waits {
+    tick(mut root, clock)
+    for event in root.incoming {
+        if let Admission(req) = event {
+            let _ = result.unwrap(roster.admit(mut root.hub, mut db, cell, req))
+        }
+    }
+}
+
+fn converged(h: TestHost, root: TestHost) -> bool {
+    for n in 0u64 .. 3 {
+        let Some(m) = roster.member(h.hub, n) else {
+            return false
+        }
+        if m.status != Serving || m.incarnation != 5 + n || Some(m) != roster.member(root.hub, n) {
+            return false
+        }
+    }
+    true
+}
+
+fn check_time(clock: Clock, start: u64, why: String) {
+    if host.mono_ns(clock) - start > 10000000000 {
+        fail(clone(why))
+    }
+}
+
+// A lookup is one authenticated request and one reply containing the actual
+// durable Directory row. Measure through application receipt and decoding.
+fn lookup_rpc(mut caller: TestHost, node: u64, mut root: TestHost, clock: Clock, d: DirectoryFixture, nonce: u64) -> (directory.LeaseRow, u64) waits {
+    let start = host.mono_ns(clock)
+    result.unwrap(roster.rpc(mut caller.hub, 0, nonce, b"lookup:42"))
+    while true {
+        tick(mut caller, clock)
+        for event in caller.incoming {
+            if let Message(node: origin, incarnation: inc, nonce: id, data: data) = event {
+                if origin != 0 || inc != 5 || id != nonce {
+                    fail("directory reply identity or nonce")
+                }
+                let co: std.codec.Codec[directory.LeaseRow] = std.codec.of()
+                let row = result.unwrap(std.codec.decode(co, data))
+                return (take row, host.mono_ns(clock) - start)
+            }
+        }
+        tick(mut root, clock)
+        for event in root.incoming {
+            if let Message(node: from, incarnation: inc, nonce: id, data: data) = event {
+                if from != node || inc != 5 + node || id != nonce || list.compare_bytes(data, b"lookup:42") != Equal {
+                    fail("directory lookup identity or nonce")
+                }
+                let row = lease(d)
+                let co: std.codec.Codec[directory.LeaseRow] = std.codec.of()
+                let mut bytes_out: Bytes = list.new()
+                result.unwrap(std.codec.encode(co, row, mut bytes_out))
+                result.unwrap(roster.rpc(mut root.hub, from, id, take bytes_out))
+            }
+        }
+        check_time(clock, start, "no directory reply")
+    }
+    fail("unreachable")
+}
+
+fn timed_value(out: Stdout, key: String, ns: u64) waits {
+    let mut s = string.from(key)
+    string.push(mut s, " ")
+    string.push_u64(mut s, ns)
+    string.push(mut s, "\n")
+    result.unwrap(stdout.write(out, s))
+}
+
+/// bug: Accept peer-declared node identity, stale incarnation or a revoked QUIC handle, or distribute different membership and directory views across live nodes.
+/// oracle: FLT-3 and FLT-6. Three distinct kernel loopback sockets see the controller's committed roster and room 42 term 1, an unpinned key and stale restart change no row, and both survivors drop the revoked peer.
+@test
+fn fleet_three_host_quic(network: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), ()] waits {
+    let (take s0, a0) = bind_host(network, 0x7f000001)
+    let (take s1, a1) = bind_host(network, 0x7f000002)
+    let (take s2, a2) = bind_host(network, 0x7f000003)
+    let k0 = cluster_key(random)
+    let k1 = cluster_key(random)
+    let k2 = cluster_key(random)
+    let old_key = copy_key(k2)
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut decl = result.unwrap(store.declare(db, Migrate))
+    let cell = result.unwrap(roster.declare(mut decl))
+    let _ = result.unwrap(store.seal(mut db, take decl))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 0, pin: result.unwrap(roster.identity_pin(k0)), listen: roster.listen_addr(a0))))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 1, pin: result.unwrap(roster.identity_pin(k1)), listen: roster.listen_addr(a1))))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 2, pin: result.unwrap(roster.identity_pin(k2)), listen: roster.listen_addr(a2))))
+    let mut root = test_host(clock, random, 0, 5, take k0, take s0, result.unwrap(roster.load(db, cell)))
+    let own = result.unwrap(roster.bootstrap(root.hub))
+    let seed = result.unwrap(roster.admit(mut root.hub, mut db, cell, own))
+    let mut initial = roster.empty()
+    result.unwrap(roster.apply(mut initial, seed))
+    let before = result.unwrap(roster.load(db, cell))
+    let co: std.codec.Codec[roster.Roster] = std.codec.of()
+    let mut original: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, before, mut original))
+    let (take wrong_socket, _) = bind_host(network, 0x7f000004)
+    let mut wrong = test_host(clock, random, 2, 7, cluster_key(random), take wrong_socket, clone(initial))
+    let began = host.mono_ns(clock)
+    let mut refused = false
+    while !refused {
+        tick(mut wrong, clock)
+        tick(mut root, clock)
+        for e in root.incoming {
+            if let Refused(NotPinned) = e {
+                refused = true
+            } else {
+                fail("unpinned client reached membership admission")
+            }
+        }
+        check_time(clock, began, "missing server-side TLS pin refusal")
+    }
+    let mut after: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, result.unwrap(roster.load(db, cell)), mut after))
+    if list.compare_bytes(original, after) != Equal {
+        fail("unpinned join changed durable state")
+    }
+    let (take mislabeled_socket, _) = bind_host(network, 0x7f000004)
+    let mut mislabeled = test_host(clock, random, 2, 7, copy_key(k1), take mislabeled_socket, clone(initial))
+    refused = false
+    let labeling = host.mono_ns(clock)
+    while !refused {
+        tick(mut mislabeled, clock)
+        tick(mut root, clock)
+        for e in root.incoming {
+            if let Refused(WrongIdentity) = e {
+                refused = true
+            } else {
+                fail("another node's pin admitted")
+            }
+        }
+        check_time(clock, labeling, "authenticated mismatched NodeId reached the controller")
+    }
+    list.clear(mut after)
+    result.unwrap(std.codec.encode(co, result.unwrap(roster.load(db, cell)), mut after))
+    if list.compare_bytes(original, after) != Equal {
+        fail("mismatched identity must fail after TLS with zero roster mutation")
+    }
+    let d = cluster_directory(clock, random)
+    let mut b = test_host(clock, random, 1, 6, take k1, take s1, clone(initial))
+    let mut c = test_host(clock, random, 2, 7, take k2, take s2, clone(initial))
+    let start = host.mono_ns(clock)
+    while !converged(b, root) || !converged(c, root) || !roster.connected(b.hub, 2) || !roster.connected(c.hub, 1) {
+        admit_round(mut root, clock, mut db, cell)
+        tick(mut b, clock)
+        tick(mut c, clock)
+        check_time(clock, start, "three pinned nodes did not converge")
+    }
+    timed_value(out, "join_roster_ns", host.mono_ns(clock) - start)
+    let expected = lease(d)
+    if expected.holder_node != 2 || expected.holder_incarnation != 7 || expected.term != 1 || list.compare_bytes(expected.payload, b"room-42") != Equal {
+        fail("room 42 initial durable view")
+    }
+    let mut times: List[u64] = list.new()
+    for id in 0u64 .. 100 {
+        let (row, elapsed) = if id % 2 == 0 {
+            lookup_rpc(mut b, 1, mut root, clock, d, id)
+        } else {
+            lookup_rpc(mut c, 2, mut root, clock, d, id)
+        }
+        if row != expected {
+            fail("Directory view differs from the durable lease")
+        }
+        list.push(mut times, elapsed)
+    }
+    std.list.sort(mut times, fn(left, right) -> Order {
+        order.compare(left, right)
+    })
+    timed_value(out, "rpc_p50_ns", times[49])
+    timed_value(out, "rpc_p99_ns", times[98])
+    let draining = result.unwrap(roster.configure(mut root.hub, mut db, cell, SetDrain(1, true)))
+    let changing = host.mono_ns(clock)
+    while roster.member(c.hub, 1) != Some(draining) || roster.health(c.hub, 1) != Healthy {
+        tick(mut root, clock)
+        tick(mut b, clock)
+        tick(mut c, clock)
+        check_time(clock, changing, "survivor did not see healthy draining worker")
+    }
+    if draining.status != Draining || !roster.connected(c.hub, 1) {
+        fail("drain disconnected a serving peer")
+    }
+    let removed = result.unwrap(roster.configure(mut root.hub, mut db, cell, Revoke(1)))
+    let revoking = host.mono_ns(clock)
+    while roster.member(c.hub, 1) != Some(removed) {
+        tick(mut root, clock)
+        tick(mut b, clock)
+        tick(mut c, clock)
+        check_time(clock, revoking, "survivor did not learn revocation")
+    }
+    if roster.connected(root.hub, 1) || roster.connected(c.hub, 1) || !roster.connected(root.hub, 2) {
+        fail("revocation did not isolate exactly the removed node")
+    }
+    if let Ok(()) = roster.rpc(mut c.hub, 1, 101, b"x") {
+        fail("revoked link accepted a send")
+    }
+    let durable = result.unwrap(roster.load(db, cell))
+    list.clear(mut original)
+    result.unwrap(std.codec.encode(co, durable, mut original))
+    result.unwrap(roster.shutdown(mut c.hub, mut c.socket, clock))
+    let stopping = host.mono_ns(clock)
+    while roster.connected(root.hub, 2) {
+        tick(mut root, clock)
+        check_time(clock, stopping, "old session stayed connected")
+    }
+    let (take old_socket, _) = bind_host(network, 0x7f000003)
+    let mut old = test_host(clock, random, 2, 6, take old_key, take old_socket, take initial)
+    refused = false
+    let retry_start = host.mono_ns(clock)
+    while !refused {
+        tick(mut old, clock)
+        tick(mut root, clock)
+        for e in root.incoming {
+            if let Refused(Stale) = e {
+                refused = true
+            } else {
+                fail("old incarnation admitted")
+            }
+        }
+        check_time(clock, retry_start, "missing stale admission refusal")
+    }
+    list.clear(mut after)
+    result.unwrap(std.codec.encode(co, result.unwrap(roster.load(db, cell)), mut after))
+    if list.compare_bytes(original, after) != Equal {
+        fail("stale restart mutated durable state")
+    }
+    Ok(())
+}

@@ -170,11 +170,47 @@ fn disk_bench_burst_commit(mut db: Db, t: Table[u64, DiskAccount], n: u64, width
     done.ticket
 }
 
-fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, width: u64, burst: u64, gate_name: String) -> Result[(), Exit] waits {
+// The control writes one different owner byte at key 0 before timing. The
+// normal workload overwrites it, so reopening alone cannot detect it.
+fn disk_bench_burst_substitution(mut db: Db, t: Table[u64, DiskAccount]) waits {
+    let outcome = result.unwrap(run(mut db, None, copy_env(t), fn(mut tx, bench_table) -> Result[(), Error] {
+        let mut raw: Bytes = list.with_capacity(4007)
+        list.fill(mut raw, 4007, 120u8)
+        raw[0] = 121u8
+        let account = DiskAccount(id: 0, balance: 0, owner: result.unwrap(string.from_utf8(take raw)))
+        put(mut tx, bench_table, 0u64, account)
+    }))
+    let Committed(take done) = take outcome else {
+        fail("disk bench burst substitution commit")
+    }
+    result.unwrap(durable(mut db, done.ticket))
+}
+
+fn disk_bench_burst_rows(reopened: ReadOnly, t: Table[u64, DiskAccount], out: Stdout) waits {
+    let read = result.unwrap(read_only_reader(reopened, 0u64))
+    let low = result.unwrap(failure_result_from_rep(catalog.prefix(t.id)))
+    let high = result.unwrap(failure_result_from_rep(catalog.prefix(t.id + 1)))
+    let mut rows = result.unwrap(open_span_changes(read, read_only_snapshot(reopened), low, high))
+    while let Some(take row) = result.unwrap(next_span_change(read, mut rows)) {
+        let Change(tree_key: take tree_key, value: take stored) = take row
+        let value = option.unwrap(take stored)
+        let mut line = string.new()
+        string.push(mut line, "ROW ")
+        string.push(mut line, std.hex.encode(tree_key))
+        string.push(mut line, " ")
+        string.push(mut line, std.hex.encode(value))
+        string.push(mut line, "\n")
+        result.unwrap(stdout.write(out, line))
+    }
+}
+
+fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, width: u64, burst: u64, gate_name: String, substitution: bool) -> Result[(), Exit] waits {
     if (width != 97 && width != 4096) || (burst != 1 && burst != 8 && burst != 64) {
         return Error(Exit(status: 7))
     }
-    let child = disk_test_directory(d)
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "store-law-")
+    let child = result.unwrap(host.mkdtemp(d, mut name))
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     // Keep the measured log in one segment for every row, including 64 × 4096.
     options.checkpoint_bytes = 1073741824
@@ -184,22 +220,31 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
     result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let mut n = 0u64
+    if substitution {
+        disk_bench_burst_substitution(mut db, t)
+        n = 1
+    }
     while file_end(db) - 72 < 8388608 {
         let committed = disk_bench_burst_commit(mut db, t, n, 4096)
         result.unwrap(durable(mut db, committed))
         n += 1
     }
-    let mut file = result.unwrap(host.open(child, result.unwrap(journal_path(file_seq(db), "")), Read))
+    let journal_name = result.unwrap(manifest.journal_path(file_seq(db), ""))
+    let mut file = result.unwrap(host.open(child, journal_name, Read))
     let mut gate = result.unwrap(host.open(d, gate_name, Read))
     let mut byte: Bytes = list.with_capacity(1)
     let trials = 2000u64
     let mut latencies: List[u64] = list.with_capacity(trials * burst)
     let mut tickets: List[Ticket] = list.with_capacity(burst)
     let mut engaged = 0u64
-    result.unwrap(stdout.write(out, "READY\n"))
-    if result.unwrap(host.read(mut gate, mut byte)) != 1 {
-        return Error(Exit(status: 7))
-    }
+    let mut ready = string.new()
+    string.push(mut ready, "READY ")
+    string.push(mut ready, name)
+    string.push(mut ready, " ")
+    string.push(mut ready, journal_name)
+    string.push(mut ready, "\n")
+    result.unwrap(stdout.write(out, ready))
+    disk_bench_wait(mut gate, mut byte)?
     let mut last_ack = host.mono_ns(c)
     for trial in 0u64 .. trials {
         let scheduled = last_ack + splitmix64(trial + 2177) % 2000001
@@ -235,8 +280,14 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
     }
     string.push(mut report, "\n")
     result.unwrap(stdout.write(out, report))
+    // All writers must finish timing before any starts replaying.
+    disk_bench_wait(mut gate, mut byte)?
     result.unwrap(host.close(take file))
     result.unwrap(close(take db))
+    // Replay from disk without starting a new journal segment.
+    let reopened = result.unwrap(open_read_only(child, c, options))
+    let reopened_table = result.unwrap(read_only_table(reopened, "accounts", std.codec.key_u64(), dictionary))
+    disk_bench_burst_rows(reopened, reopened_table, out)
     Ok(())
 }
 
@@ -394,13 +445,13 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
 
 fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
-    if mode == "RB" {
+    if mode == "RB" || mode == "RB-SUBSTITUTION" {
         let width_arg = option.unwrap(args.get(argv, 1))
         let burst_arg = option.unwrap(args.get(argv, 2))
         let gate_name = option.unwrap(args.get(argv, 3))
         let width: u64 = result.unwrap(int.parse(width_arg))
         let burst: u64 = result.unwrap(int.parse(burst_arg))
-        return disk_bench_burst(d, c, r, tasks, out, width, burst, gate_name)
+        return disk_bench_burst(d, c, r, tasks, out, width, burst, gate_name, mode == "RB-SUBSTITUTION")
     }
     if mode == "BL15" {
         let count_arg = option.unwrap(args.get(argv, 1))
@@ -567,17 +618,17 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
     if let Some(_) = result.unwrap(next(read, mut rows)) {
         fail("disk bench extra row")
     }
-    let (id, manifest) = result.unwrap(read_page_manifest_file(child))
+    let (id, page_manifest) = result.unwrap(read_page_manifest_file(child))
     let mut written: u64 = 0
     let mut pages: u64 = 0
-    for seq in first_pack .. manifest.next_pack {
-        let path = result.unwrap(paged_pack_path(seq))
-        let raw = result.unwrap(disk_read_file(child, path, options.pack_bytes + 72))
+    for seq in first_pack .. page_manifest.next_pack {
+        let path = result.unwrap(manifest.paged_pack_path(seq))
+        let raw = result.unwrap(manifest.disk_read_file(child, path, options.pack_bytes + 72))
         written += list.len(raw)
-        let ctx = result.unwrap(disk_read_header(path, raw, 3, Some(seq), Some(id))).context
+        let ctx = result.unwrap(manifest.disk_read_header(path, raw, 3, Some(seq), Some(store_key_to_rep(id)))).context
         let mut offset = 72u64
         while offset < list.len(raw) {
-            let frame = result.unwrap(disk_read_frame(path, ctx, raw, offset))
+            let frame = result.unwrap(manifest.disk_read_frame(path, ctx, raw, offset))
             if frame.kind == 0x0021 {
                 pages += 1
             }
@@ -590,7 +641,7 @@ fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv:
     string.push(mut extra, " NEW_PAGES ")
     string.push_u64(mut extra, pages)
     string.push(mut extra, " ACCOUNT ")
-    string.push_u64(mut extra, holder[0].resident)
+    string.push_u64(mut extra, holder[0].accounting.resident)
     string.push(mut extra, "\n")
     result.unwrap(stdout.write(out, extra))
     let mut finished = take holder

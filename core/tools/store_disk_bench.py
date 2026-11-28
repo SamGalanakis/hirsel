@@ -9,8 +9,9 @@ import os
 from pathlib import Path
 import re
 import shutil
-from struct import error as StructError
+from struct import Struct, error as StructError
 import subprocess
+import sys
 import time
 
 from measurement_artifacts import allocation_linker, check, phase_allocations
@@ -44,59 +45,164 @@ def r6_result(row, output, before):
         raise ValueError(', '.join(row['r6_violations']))
 
 
-def burst_sample(binary, host, out, env, width, burst, stores):
-    before = set(host.glob('store-law-*'))
-    tag = f'{binary.name}-RB-{width}-b{burst}-s{stores}'
+BURST_TRIALS = 2000
+BURST_KEYS = 16
+BURST_WARMUP = (8 * 1024 * 1024) // 4096
+JOURNAL_HEADER_BYTES = 72
+FRAME = Struct('<HHI8x')
+# STORE-SPEC §2.4, a single data-section put with a recorded prior value width.
+PUT = Struct('<IQQBBIBI')
+ACCOUNT_KEY = Struct('>IQ')
+ACCOUNT_VALUE = Struct('<HQqI')
+
+
+def check_burst_row(key_bytes, value, update, width, where):
+    key = update % BURST_KEYS
+    expected_key = ACCOUNT_KEY.pack(1, key)
+    if key_bytes != expected_key:
+        raise ValueError(f'{where} key {key} expected {expected_key.hex()}, actual {key_bytes.hex()}')
+    owner_size = width - 89
+    expected_fields = (0, key, update, owner_size)
+    if len(value) < ACCOUNT_VALUE.size:
+        raise ValueError(f'{where} key {key} expected {ACCOUNT_VALUE.size + owner_size} value bytes, '
+                         f'actual {len(value)}')
+    actual_fields = ACCOUNT_VALUE.unpack_from(value)
+    if actual_fields != expected_fields:
+        raise ValueError(f'{where} key {key} (schema, id, balance, owner length) '
+                         f'expected {expected_fields}, actual {actual_fields}')
+    expected_owner = b'x' * owner_size
+    owner = value[ACCOUNT_VALUE.size:]
+    if owner != expected_owner:
+        offset = next((i for i, (expected, actual) in enumerate(zip(expected_owner, owner))
+                       if expected != actual), min(len(expected_owner), len(owner)))
+        raise ValueError(f'{where} key {key} owner byte {offset} '
+                         f'expected {expected_owner[offset:offset + 1]!r} ({owner_size} bytes), '
+                         f'actual {owner[offset:offset + 1]!r} ({len(owner)} bytes)')
+
+
+def check_burst_journal(segment, terminal_end, width, commits):
+    with segment.open('rb') as journal:
+        header = journal.read(JOURNAL_HEADER_BYTES)
+        if (len(header) != JOURNAL_HEADER_BYTES or FRAME.unpack_from(header) != (1, 1, 56)
+                or header[16:24] != b'HIRSTORE'):
+            raise ValueError(f'{segment.name} has an invalid journal header')
+        for update in range(commits):
+            where = f'journal update {update} at {segment.name}:{journal.tell()}'
+            frame_width = 4096 if update < BURST_WARMUP else width
+            frame = journal.read(frame_width)
+            if len(frame) != frame_width or FRAME.unpack_from(frame) != (0x0011, 1, frame_width - FRAME.size):
+                raise ValueError(f'{where} expected a {frame_width}-byte COMMIT frame')
+            branch, version, _, sections, section, count, op, key_size = PUT.unpack_from(frame, FRAME.size)
+            if (branch, version, sections, section, count, op, key_size) != (0, update + 2, 1, 0, 1, 1, ACCOUNT_KEY.size):
+                raise ValueError(f'{where} expected one main-branch put at version {update + 2}')
+            key_at = FRAME.size + PUT.size
+            value_at = key_at + key_size + 8  # prior width and value length, both u32 LE
+            if int.from_bytes(frame[value_at - 4:value_at], 'little') != len(frame) - value_at:
+                raise ValueError(f'{where} has an invalid value length')
+            check_burst_row(frame[key_at:key_at + key_size], frame[value_at:], update, frame_width, where)
+        if journal.tell() != terminal_end:
+            raise ValueError(f'{segment.name} expected final frame end {journal.tell()}, actual {terminal_end}')
+
+
+def check_burst_reopen(directory, lines, width, commits):
+    for key, line in enumerate(lines):
+        label, raw_key, raw_value = line.split()
+        if label != 'ROW':
+            raise ValueError(f'{directory}: expected reopened key {key}, got {label}')
+        if key >= BURST_KEYS:
+            raise ValueError(f'{directory}: expected end of reopened table, actual extra key {raw_key}')
+        update = commits - 1 - (commits - 1 - key) % BURST_KEYS
+        check_burst_row(bytes.fromhex(raw_key), bytes.fromhex(raw_value), update, width, f'{directory}: reopened row')
+    if len(lines) != BURST_KEYS:
+        raise ValueError(f'{directory}: expected reopened key {len(lines)}, actual end of table')
+
+
+def run_burst(binary, host, out, env, width, burst, stores, tag, check):
     with ExitStack() as stack:
         jobs = []
         gates = []
-        for slot in range(stores):
-            gate_path = host / f'gate-RB-{slot}'
-            gate_path.unlink(missing_ok=True)
-            os.mkfifo(gate_path)
-            stack.callback(gate_path.unlink)
-            gate = os.open(gate_path, os.O_RDWR)
-            stack.callback(os.close, gate)
-            gates.append(gate)
-            stderr = stack.enter_context((out / f'{tag}-{slot}.stderr').open('w'))
-            argv = [ROOT / 'tools/capped', 'taskset', '-c', '16', binary, 'RB',
-                    str(width), str(burst), gate_path.name]
-            jobs.append(subprocess.Popen(list(map(str, argv)), env=env | {'HIRSEL_JOBS': '1'},
-                                         stdout=subprocess.PIPE, stderr=stderr, text=True))
-        ready = [job.stdout.readline() == 'READY\n' for job in jobs]
-        for gate, waiting in zip(gates, ready):
-            if waiting:
+        with hold(REGIMES, BOARD) if check is None else nullcontext():
+            for slot in range(stores):
+                gate_path = host / f'gate-RB-{slot}'
+                gate_path.unlink(missing_ok=True)
+                os.mkfifo(gate_path)
+                stack.callback(gate_path.unlink)
+                gate = os.open(gate_path, os.O_RDWR)
+                stack.callback(os.close, gate)
+                gates.append(gate)
+                stderr = stack.enter_context((out / f'{tag}-{slot}.stderr').open('w'))
+                affinity = ['taskset', '-c', '16'] if check is None else []
+                mode = 'RB-SUBSTITUTION' if check == 'substitution' else 'RB'
+                argv = [ROOT / 'tools/capped', *affinity, binary, mode, width, burst, gate_path.name]
+                jobs.append(subprocess.Popen(list(map(str, argv)), env=env | {'HIRSEL_JOBS': '1'},
+                                             stdout=subprocess.PIPE, stderr=stderr, text=True))
+            ready = [job.stdout.readline().split() for job in jobs]
+            for gate in gates:
                 os.write(gate, b's')
-        output = [job.communicate()[0].split() for job in jobs]
-    if not all(ready) or any(job.returncode for job in jobs):
-        raise ValueError(f'{tag} did not finish; see stderr logs')
-    if any(len(tokens) != 3 + 2000 * burst or tokens[0] != 'BURST' for tokens in output):
-        raise ValueError(f'{tag} sample is incomplete')
-    latencies = sorted(int(value) for tokens in output for value in tokens[3:])
-    engagement = [int(tokens[1]) / 2000 for tokens in output]
-    terminal_ends = {int(tokens[2]) for tokens in output}
-    directories = set(host.glob('store-law-*')) - before
-    if len(directories) != stores or len(terminal_ends) != 1:
-        raise ValueError(f'{tag} stores did not finish at the same frame end')
-    terminal_end, = terminal_ends
+            output = [job.stdout.readline().split() for job in jobs]
+        for gate in gates:
+            os.write(gate, b'v')
+        reopened = [job.communicate()[0].splitlines() for job in jobs]
+    if any(job.returncode for job in jobs):
+        raise ValueError(f'benchmark or reopen failed; see {out / tag}-*.stderr')
+    return ready, output, reopened
+
+
+def burst_sample(binary, host, out, env, width, burst, stores, *, check=None):
+    before = set(host.glob('store-law-*'))
+    tag = f'{binary.name}-RB-{width}-b{burst}-s{stores}' + (f'-{check}' if check else '')
+    samples = BURST_TRIALS * burst
+    commits = BURST_WARMUP + samples
+    try:
+        ready, output, reopened = run_burst(binary, host, out, env, width, burst, stores, tag, check)
+        directories = set(host.glob('store-law-*')) - before
+        if (len(directories) != stores or any(len(tokens) != 3 or tokens[0] != 'READY' for tokens in ready)
+                or {host / tokens[1] for tokens in ready} != directories):
+            raise ValueError('incomplete READY records or unexpected Store directories')
+        if any(len(tokens) != 3 + samples or tokens[0] != 'BURST' for tokens in output):
+            raise ValueError('incomplete BURST sample')
+        verify_burst_stores(host, ready, output, reopened, width, commits)
+        latencies = sorted(int(value) for tokens in output for value in tokens[3:])
+        engagement = [int(tokens[1]) / BURST_TRIALS for tokens in output]
+    except (OSError, ValueError, StructError) as error:
+        retained = sorted(set(host.glob('store-law-*')) - before)
+        paths = ', '.join(map(str, retained)) or '(none created)'
+        raise ValueError(f'{tag}: {error}; Store directories retained: {paths}') from error
     for directory in directories:
+        shutil.rmtree(directory)
+    return dict(tag=tag, complete=True, workload='RB', width=width, burst=burst, stores=stores,
+                samples=len(latencies), engagement=engagement,
+                verified_updates=commits * stores, verified_reopened_rows=BURST_KEYS * stores,
+                p50_ns=latencies[ceil(0.50 * len(latencies)) - 1],
+                p99_ns=latencies[ceil(0.99 * len(latencies)) - 1],
+                p999_ns=latencies[ceil(0.999 * len(latencies)) - 1], max_ns=latencies[-1])
+
+
+def verify_burst_stores(host, ready, output, reopened, width, commits):
+    terminal_ends = {int(tokens[2]) for tokens in output}
+    if len(terminal_ends) != 1:
+        raise ValueError('stores did not finish at the same frame end')
+    terminal_end, = terminal_ends
+    for (_, name, journal), lines in zip(ready, reopened):
+        directory = host / name
+        check_burst_reopen(directory, lines, width, commits)
         segments = sorted((p for p in directory.glob('j-*') if p.name[2:].isdecimal()),
                           key=lambda p: int(p.name[2:]))
+        if not segments or segments[-1].name != journal:
+            raise ValueError(f'{directory}: expected active journal {journal}')
         ends = []
         for successor in segments[1:]:
             with successor.open('rb') as file:
                 file.seek(64)
                 ends.append(int.from_bytes(file.read(8), 'little'))
         ends.append(terminal_end)
-        if not segments or any(not 0 <= segment.stat().st_size - end <= min(4194304, (end - 72) // 4096 * 4096)
-                               for segment, end in zip(segments, ends)):
-            raise ValueError(f'{tag} segment exceeds the window bound: {directory}')
-        shutil.rmtree(directory)
-    return dict(tag=tag, complete=True, workload='RB', width=width, burst=burst, stores=stores,
-                samples=len(latencies), engagement=engagement,
-                p50_ns=latencies[ceil(0.50 * len(latencies)) - 1],
-                p99_ns=latencies[ceil(0.99 * len(latencies)) - 1],
-                p999_ns=latencies[ceil(0.999 * len(latencies)) - 1], max_ns=latencies[-1])
+        if any(not 0 <= segment.stat().st_size - end <= min(4194304, (end - 72) // 4096 * 4096)
+               for segment, end in zip(segments, ends)):
+            raise ValueError(f'{directory}: segment exceeds the window bound')
+        try:
+            check_burst_journal(segments[-1], terminal_end, width, commits)
+        except ValueError as error:
+            raise ValueError(f'{directory}: {error} after verifying {BURST_KEYS} reopened rows') from error
 
 
 BL15_COMMITS = 20000
@@ -200,6 +306,8 @@ def main():
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--prepare', action='store_true')
     p.add_argument('--measure', action='store_true')
+    p.add_argument('--check-burst', choices=['normal', 'substitution'],
+                   help='run one RB configuration without CPU shielding to check durable contents')
     p.add_argument('--allocations', action='store_true',
                    help='prepare or sample the allocation-counting binary instead of the shipping binary')
     p.add_argument('--profile', action='append', choices=['dev', 'release'])
@@ -210,6 +318,8 @@ def main():
     args = p.parse_args()
     if args.unshielded and (args.timing_hold or set(args.workload or ()) & {'BL15', 'RB'}):
         p.error('--unshielded is for phase counters')
+    if args.check_burst and args.measure:
+        p.error('--check-burst and --measure are separate runs')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = out / 'host'
@@ -233,12 +343,14 @@ def main():
         build_env = env | {'HIRSEL_MEMORY_LIMIT': os.environ.get('HIRSEL_MEMORY_LIMIT', '2G')}
         if args.allocations:
             cc = allocation_linker(cc, out)
-        source = ((ROOT / 'core/programs/store/store.hirsel').read_text() + '\n'
-                  + (ROOT / 'core/programs/store/disk_bench.hirsel').read_text())
+        store = ROOT / 'core/programs/store/store.hirsel'
+        source = (store.read_text() + '\n'
+                  + (store.parent / 'disk_bench.hirsel').read_text())
         frozen = out / 'store.hirsel'
         frozen.write_text(source)
         corpus = inputs(ROOT, tests=True)
-        corpus['packages'][-1]['sources'][0]['file'] = str(frozen)
+        store_input, = (item for item in corpus['packages'][-1]['sources'] if item['file'] == str(store))
+        store_input['file'] = str(frozen)
         manifest = out / 'inputs.json'
         manifest.write_text(json.dumps(corpus))
         for profile in profiles:
@@ -260,6 +372,19 @@ def main():
             population='R4/R5 16 keys after 64 durable commits, 100k R6/R7/migrate, 1M R8; Account codec30 with schema2, tree key12',
             indexes='none or one J=id%4', sample='one per configuration',
             cpu=None if args.unshielded else 16, protocol='READY/DONE; R8-load counts creation, population and the first checkpoint; other modes exclude population; validation and final drops excluded'), indent=2) + '\n')
+    if args.check_burst:
+        for profile in profiles:
+            try:
+                row = burst_sample(out / (profile + suffix), host, out, env | {'HIRSEL_UNTIED': '1'},
+                                   97, 1, 1, check=args.check_burst)
+            except ValueError as error:
+                print(error, file=sys.stderr)
+                return 1
+            if args.check_burst == 'substitution':
+                print('RB negative control unexpectedly passed', file=sys.stderr)
+                return 2
+            print(f'{row["tag"]}: verified {row["verified_updates"]} acknowledged updates '
+                  f'and {row["verified_reopened_rows"]} reopened rows', flush=True)
     if args.measure:
         # One pool worker: the bench body's spawned unit runs on the pool, so its file ops take the
         # slot ring (STORE-SPEC §3.3b) instead of running inline on a tied thread.
@@ -285,8 +410,7 @@ def main():
                         for width in (97, 4096):
                             for burst in (1, 8, 64):
                                 for stores in (1, 4):
-                                    with hold(REGIMES, BOARD):
-                                        row = burst_sample(out / (profile + suffix), host, out, env, width, burst, stores)
+                                    row = burst_sample(out / (profile + suffix), host, out, env, width, burst, stores)
                                     rows.append(row)
                                     (out / (row['tag'] + '-sample.json')).write_text(json.dumps(row, indent=2) + '\n')
                                     print(row['tag'], json.dumps(row), flush=True)

@@ -7,7 +7,7 @@
 //! and admitted runtime rows. Native FFI, exec and launch belong in other processes.
 
 use hirsel_core_ids::ContentHash;
-use hirsel_mod::{Import, Malformed, Mask, Module};
+use hirsel_mod::{Malformed, Mask, Module};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::ptr::null_mut;
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 mod fixup;
 mod host;
+mod install;
 mod raw;
 mod retire;
 mod runs;
@@ -29,7 +30,7 @@ use retire::Retire;
 use runs::Runs;
 pub use slot::{BorrowToken, CodePin, RawSlot, Slot, Worker};
 pub use table::Hit;
-use table::{DataRow, DataTable, Owner, Table};
+use table::{DataRow, Owner, Table};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -56,6 +57,9 @@ pub enum Refusal {
     Quarantined,
     NotPrelinked,
     Unsupported,
+    /// The host refused to synchronize its cores with new or dead code. The code
+    /// stays out of use and the loader tries again at its next reclaim.
+    Unsynchronized,
 }
 
 /// Why an `activate` changed nothing (PACK-6, PACK-14).
@@ -163,8 +167,9 @@ struct Cohort {
     images: Vec<(Owner, ContentHash)>,
     /// Every live image's literal-range row in the data band (PACK-9.7).
     data_owners: Vec<DataRow>,
-    /// A failed retirement permanently withholds both runs.
-    withheld: bool,
+    /// Dead text `(offset, length)` that holds traps the host has not synchronized
+    /// its cores with. While there is any, the cohort is neither published nor recycled.
+    unsynchronized: Vec<(usize, usize)>,
 }
 
 /// The writable pages ahead of the open cohort: `(next free offset, end)` per band.
@@ -202,13 +207,27 @@ struct Shared {
     /// The pool's retired bytes. Lock order: a slot, then the slab, then this.
     retired: Mutex<u64>,
     updates: AtomicU64,
-    table: Table,
+    table: Table<Owner>,
     /// Lock-free lookup from data-band literal addresses to independent `CauseData` owners.
-    data_table: DataTable,
+    data_table: Table<DataRow>,
     /// The dead images whose retirement the loader has not done yet.
     pending: AtomicPtr<Retire>,
-    /// Retired instruction bytes whose post-write synchronization failed.
+    /// Bytes of dead text in the cohorts' `unsynchronized` lists.
     unrevoked: AtomicU64,
+}
+
+/// The entry a load asks for: its identity, its signature and whether it waits.
+pub(crate) struct Want<'a> {
+    pub(crate) identity: &'a ContentHash,
+    pub(crate) signature: &'a ContentHash,
+    pub(crate) waits: bool,
+}
+
+impl Want<'_> {
+    fn names(&self, entry: &hirsel_mod::Entry) -> bool {
+        (&entry.identity, &entry.signature, entry.waits)
+            == (self.identity, self.signature, self.waits)
+    }
 }
 
 /// One published entry of an installed image.
@@ -255,17 +274,15 @@ impl Shared {
     /// Close the open cohort and publish it (PACK-4 step 4).
     fn publish(&self, slab: &mut Slab) {
         let Some(id) = slab.open.take() else { return };
-        let window = slab.window.as_mut().unwrap();
+        let (Some(window), Some(cohort)) = (slab.window.as_mut(), slab.cohorts.get_mut(&id)) else {
+            return;
+        };
         let ends = (self.pages(window.text.0), self.pages(window.data.0));
         self.trap(window.text.0, ends.0);
         (window.text.0, window.data.0) = ends;
-        let cohort = slab.cohorts.get_mut(&id).unwrap();
         (cohort.text.1, cohort.data.1) = ends;
         let (text, data) = (cohort.text, cohort.data);
         let publish = || -> std::io::Result<()> {
-            if cohort.withheld {
-                return Err(std::io::ErrorKind::Unsupported.into());
-            }
             if data.1 > data.0 {
                 host::protect(self.data(data.0), data.1 - data.0, Access::Read)?;
             }
@@ -273,7 +290,11 @@ impl Shared {
         };
         cohort.state = match publish() {
             Ok(()) => {
-                let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| *row).collect();
+                // The whole run was synchronized, the dead text in it included.
+                let dead = cohort.unsynchronized.drain(..);
+                let dead = dead.map(|(_, length)| length as u64).sum();
+                self.unrevoked.fetch_sub(dead, Ordering::Relaxed);
+                let rows: Vec<Owner> = cohort.images.iter().map(|(row, _)| row.clone()).collect();
                 self.table.change(text, &rows);
                 if !cohort.data_owners.is_empty() {
                     self.data_table.change(data, &cohort.data_owners);
@@ -282,8 +303,7 @@ impl Shared {
             }
             Err(_) => State::Failed,
         };
-        let dead = cohort.live == 0 && !cohort.withheld;
-        if dead {
+        if cohort.live == 0 && cohort.unsynchronized.is_empty() {
             self.recycle(slab, id);
         }
         self.published.notify_all();
@@ -303,86 +323,20 @@ impl Shared {
         }
     }
 
-    /// Room for an image in the open cohort, opening a window or a cohort as needed:
-    /// its text and data offsets and its cohort.
-    fn place(
-        &self,
-        slab: &mut Slab,
-        text: (usize, usize),
-        data: (usize, usize),
-    ) -> Option<(usize, usize, u64)> {
-        for _ in 0..2 {
-            if let Some((free, ends)) = slab
-                .window
-                .as_ref()
-                .map(|w| ((w.text.0, w.data.0), (w.text.1, w.data.1)))
-            {
-                let at = (
-                    free.0.next_multiple_of(text.1),
-                    free.1.next_multiple_of(data.1),
-                );
-                if at.0 + text.0 <= ends.0 && at.1 + data.0 <= ends.1 {
-                    let id = match slab.open {
-                        Some(id) => id,
-                        None => {
-                            let id = slab.next;
-                            slab.next += 1;
-                            slab.open = Some(id);
-                            slab.cohorts.insert(
-                                id,
-                                Cohort {
-                                    text: (free.0, free.0),
-                                    data: (free.1, free.1),
-                                    state: State::Open,
-                                    first: Instant::now(),
-                                    live: 0,
-                                    bytes: 0,
-                                    retired: 0,
-                                    images: Vec::new(),
-                                    data_owners: Vec::new(),
-                                    withheld: false,
-                                },
-                            );
-                            id
-                        }
-                    };
-                    self.trap(free.0, at.0);
-                    let window = slab.window.as_mut().unwrap();
-                    (window.text.0, window.data.0) = (at.0 + text.0, at.1 + data.0);
-                    return Some((at.0, at.1, id));
-                }
-                self.close(slab);
-            }
-            let (code, words) = (self.pages(text.0), self.pages(data.0));
-            let code = slab.text.take(code, code.max(WINDOW))?;
-            let Some(words) = slab.data.take(words, words.max(WINDOW)) else {
-                slab.text.give(code.0, code.1);
-                return None;
-            };
-            if host::protect(self.data(words.0), words.1, Access::Write).is_err() {
-                slab.text.give(code.0, code.1);
-                return None;
-            }
-            slab.window = Some(Window {
-                text: (code.0, code.0 + code.1),
-                data: (words.0, words.0 + words.1),
-            });
-        }
-        None
-    }
-
-    /// Wait until `image`'s cohort is published, publishing it when this caller is the
-    /// one whose install opened it or asks for an immediate flush.
+    /// Wait until `image`'s cohort is published: whether it was. The cohort is
+    /// published by whoever asks for an immediate flush or first finds its batch over.
     fn settle<'a>(
         &'a self,
         mut slab: MutexGuard<'a, Slab>,
         image: &Image,
-        leads: bool,
         flush: bool,
     ) -> (MutexGuard<'a, Slab>, bool) {
         loop {
-            let Some(cohort) = image.cohort.map(|id| &slab.cohorts[&id]) else {
+            let Some(id) = image.cohort else {
                 return (slab, true);
+            };
+            let Some(cohort) = slab.cohorts.get(&id) else {
+                return (slab, false);
             };
             match cohort.state {
                 State::Published => return (slab, true),
@@ -390,13 +344,27 @@ impl Shared {
                 State::Open => {}
             }
             let wait = (cohort.first + self.config.batch).saturating_duration_since(Instant::now());
-            if flush || (leads && wait.is_zero()) {
+            if flush || wait.is_zero() {
                 self.publish(&mut slab);
-            } else if leads {
-                slab = self.published.wait_timeout(slab, wait).unwrap().0;
             } else {
-                slab = self.published.wait(slab).unwrap();
+                slab = self.published.wait_timeout(slab, wait).unwrap().0;
             }
+        }
+    }
+
+    /// `image` once its cohort is published, or `Unsynchronized` when the host
+    /// refused to publish it.
+    fn settled(
+        &self,
+        slab: MutexGuard<'_, Slab>,
+        image: Arc<Image>,
+        flush: bool,
+    ) -> Result<Arc<Image>, Refusal> {
+        let (slab, published) = self.settle(slab, &image, flush);
+        drop(slab);
+        match published {
+            true => Ok(image),
+            false => Err(Refusal::Unsynchronized),
         }
     }
 }
@@ -440,7 +408,7 @@ impl Loader {
             (base, writer) = host::reserve(config.band_bytes).map_err(|_| Refusal::Unsupported)?;
         }
         let table = Table::new(base, config.band_bytes);
-        let data_table = DataTable::new(base + config.band_bytes, config.band_bytes);
+        let data_table = Table::new(base + config.band_bytes, config.band_bytes);
         let slab = Slab {
             text: Runs::new(config.band_bytes),
             data: Runs::new(config.band_bytes),
@@ -486,6 +454,11 @@ impl Loader {
         (self.0.base, self.0.base + self.0.config.band_bytes)
     }
 
+    /// Whether `other` is a handle on this loader's pool.
+    pub fn same_pool(&self, other: &Loader) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// The data band `[low, high)`: every loaded module's data slice is in it.
     pub fn data_band(&self) -> (usize, usize) {
         let low = self.0.base + self.0.config.band_bytes;
@@ -495,7 +468,10 @@ impl Loader {
     /// The image whose text holds the code address `pc` and the address's offset in
     /// that text (PACK-9). Async-signal-safe: a fault or a sampling handler calls it.
     pub fn resolve(&self, pc: usize) -> Option<Hit> {
-        self.0.table.resolve(pc)
+        self.0.table.find(pc, 1, |row, offset| Hit {
+            digest: row.digest,
+            offset: offset as u32,
+        })
     }
 
     /// Resolve a static literal range `[ptr, ptr + len)` inside the data band to its
@@ -503,7 +479,12 @@ impl Loader {
     /// corresponding byte address inside that owner's R/NX mapping (PACK-9.7).
     pub fn resolve_literal(&self, ptr: usize, len: usize) -> Option<(usize, usize)> {
         let ops = self.0.config.cause_data?;
-        self.0.data_table.resolve_with(ptr, len, ops.retain)
+        self.0.data_table.find(ptr, len, |row, offset| {
+            // SAFETY: the row's image holds a count on its owner until the row is out
+            // of the table and of every hazard slot.
+            unsafe { (ops.retain)(row.owner) };
+            (row.owner, row.ro_base + offset)
+        })
     }
 
     /// Record a hardware fault in the image `hit` names, as the fault handler resolved
@@ -538,6 +519,8 @@ impl Loader {
     /// Retire every image whose last handle was dropped (PACK-4 step 5). A load does
     /// this too; a pack host also calls it from a thread that dispatches nothing, so
     /// dead code stops being reachable without waiting for the next load.
+    /// `Unsynchronized` says that some dead text is still withheld ([`Self::unrevoked`]);
+    /// every other run of the pool stays in use, and the next reclaim tries again.
     pub fn reclaim(&self) -> Result<(), Refusal> {
         self.0.reclaim(&mut self.0.slab.lock().unwrap())
     }
@@ -549,7 +532,8 @@ impl Loader {
         host::mappings(text, self.0.writer, self.0.config.band_bytes)
     }
 
-    /// Bytes of dead text the host refused to close or fill. They stay out of use.
+    /// Bytes of dead text the host has not synchronized its cores with. Their cohorts
+    /// stay out of use until it does.
     pub fn unrevoked(&self) -> u64 {
         self.0.unrevoked.load(Ordering::Relaxed)
     }
@@ -575,6 +559,20 @@ impl Loader {
 
     /// The image of the module `bytes`, installed and published.
     pub fn image(&self, bytes: &[u8], flush: bool) -> Result<Installed, Refusal> {
+        let digest = hirsel_mod::digest(bytes);
+        self.load_image(bytes, digest, None, flush).map(Installed)
+    }
+
+    /// The image of the module `bytes`, whose digest is `digest`, installed and
+    /// published. Every load takes this path. The module must have the entry `want`
+    /// names, and every refusal comes before anything is installed (PACK-14).
+    fn load_image(
+        &self,
+        bytes: &[u8],
+        digest: ContentHash,
+        want: Option<&Want<'_>>,
+        flush: bool,
+    ) -> Result<Arc<Image>, Refusal> {
         let shared = &*self.0;
         let config = &shared.config;
         let module = Module::parse(bytes).map_err(Refusal::Malformed)?;
@@ -589,43 +587,53 @@ impl Loader {
             return Err(Refusal::Mismatch("policy"));
         }
         if config.band_bytes == 0 {
-            return self.prelinked(&header.key());
+            return self.prelinked_image(&header.key(), want);
         }
-        let digest = hirsel_mod::digest(bytes);
-        let image;
-        let published;
-        {
-            let mut slab = shared.slab.lock().unwrap();
-            shared.reclaim(&mut slab)?;
-            if slab.admitted.get(&header.key()) != Some(&digest) {
-                return Err(Refusal::NotAdmitted);
-            }
-            if slab.quarantined.contains(&digest) {
-                return Err(Refusal::Quarantined);
-            }
-            let held = slab.images.get(&digest).and_then(|held| held.1.upgrade());
-            let (leads, held) = match held {
-                Some(held) => (false, held),
-                None => self.install(&mut slab, &module, digest)?,
-            };
-            image = held;
-            (slab, published) = shared.settle(slab, &image, leads, flush);
-            drop(slab);
+        let mut slab = shared.slab.lock().unwrap();
+        let _ = shared.reclaim(&mut slab);
+        if slab.admitted.get(&header.key()) != Some(&digest) {
+            return Err(Refusal::NotAdmitted);
         }
-        if !published {
-            return Err(Refusal::Unsupported);
+        if slab.quarantined.contains(&digest) {
+            return Err(Refusal::Quarantined);
         }
-        Ok(Installed(image))
+        let has = |want: &Want<'_>| module.entries().any(|entry| want.names(&entry));
+        if want.is_some_and(|want| !has(want)) {
+            return Err(Refusal::NoEntry);
+        }
+        let held = slab.images.get(&digest).and_then(|held| held.1.upgrade());
+        let image = match held {
+            Some(held) => held,
+            None => self.install(&mut slab, &module, digest)?,
+        };
+        shared.settled(slab, image, flush)
     }
 
     /// The image the host image holds for the module key `key`, or `NotPrelinked`
     /// (PACK-5). It is counted and interned like an installed image and uses no budget.
     pub fn prelinked(&self, key: &ContentHash) -> Result<Installed, Refusal> {
+        self.prelinked_image(key, None).map(Installed)
+    }
+
+    fn prelinked_image(
+        &self,
+        key: &ContentHash,
+        want: Option<&Want<'_>>,
+    ) -> Result<Arc<Image>, Refusal> {
         let config = &self.0.config;
         let held = config.prelinked.iter().find(|held| held.key == *key);
         let held = held.ok_or(Refusal::NotPrelinked)?;
+        let has = |want: &Want<'_>| {
+            let named = |(identity, signature, _): &(ContentHash, ContentHash, usize)| {
+                (identity, signature) == (want.identity, want.signature)
+            };
+            !want.waits && held.entries.iter().any(named)
+        };
+        if want.is_some_and(|want| !has(want)) {
+            return Err(Refusal::NoEntry);
+        }
         let mut slab = self.0.slab.lock().unwrap();
-        self.0.reclaim(&mut slab)?;
+        let _ = self.0.reclaim(&mut slab);
         if slab.quarantined.contains(&held.digest) {
             return Err(Refusal::Quarantined);
         }
@@ -633,242 +641,48 @@ impl Loader {
             .images
             .get(&held.digest)
             .and_then(|held| held.1.upgrade());
-        let image = match live {
-            Some(image) => image,
-            None => {
-                let image = Arc::new(Image {
-                    shared: self.0.clone(),
-                    digest: held.digest,
-                    cohort: None,
-                    text: held.text,
-                    data: 0,
-                    bytes: 0,
-                    cause_data: None,
-                    entries: held
-                        .entries
-                        .iter()
-                        .map(|&(identity, signature, entry)| ImageEntry {
-                            identity,
-                            signature,
-                            waits: false,
-                            entry,
-                            descriptor: 0,
-                        })
-                        .collect(),
-                    slots: AtomicU32::new(0),
-                    retired: AtomicBool::new(false),
-                    retire: Some(Box::new(Retire {
-                        next: null_mut(),
-                        serial: slab.installs,
-                        digest: held.digest,
-                        cohort: None,
-                        text: (0, 0),
-                        owned: 0,
-                        data: (0, 0),
-                        bytes: 0,
-                        retired: false,
-                        cause_data: None,
-                    })),
-                });
-                let serial = slab.installs;
-                slab.images
-                    .insert(held.digest, (serial, Arc::downgrade(&image)));
-                slab.installs += 1;
-                image
-            }
-        };
-        drop(slab);
-        Ok(Installed(image))
-    }
-
-    /// Copy a module into the open cohort. Nothing of it is reachable until its cohort
-    /// is published.
-    fn install(
-        &self,
-        slab: &mut Slab,
-        module: &Module<'_>,
-        digest: ContentHash,
-    ) -> Result<(bool, Arc<Image>), Refusal> {
-        let shared = &*self.0;
-        let config = &shared.config;
-        let cause_owner_row = hirsel_mod::row("hirsel_core_cause_owner");
-        let mut cause_owner_slots = Vec::new();
-        let mut slots = Vec::with_capacity(module.imports().len());
-        for (slot_index, import) in module.imports().enumerate() {
-            slots.push(match import {
-                Import::Row(row) => {
-                    if cause_owner_row == Some(row) {
-                        cause_owner_slots.push(slot_index);
-                    }
-                    hirsel_mod::ROWS
-                        .get(row as usize)
-                        .filter(|(_, class)| config.mask.admits(*class))
-                        .and_then(|_| (config.row)(row))
-                        .ok_or(Refusal::Import(row))?
-                }
-                Import::Instance(instance) => {
-                    (config.instance)(&instance).ok_or(Refusal::Unbound(instance))?
-                }
-            });
+        if let Some(image) = live {
+            return Ok(image);
         }
-        let aligns = (
-            module.header.text_align as usize,
-            module.header.data_align as usize,
-        );
-        if !aligns.0.is_power_of_two()
-            || !aligns.1.is_power_of_two()
-            || aligns.0.max(aligns.1) > shared.page
-        {
-            return Err(Refusal::Unsupported);
-        }
-        let (mut text, mut data) = (module.text().to_vec(), module.data().to_vec());
-        let bytes = (text.len() + data.len()) as u64;
-        if slab.installed + bytes > config.installed_bytes {
-            return Err(Refusal::Capacity);
-        }
-        let logical = text.len();
-        #[cfg(target_arch = "aarch64")]
-        let owned = logical.next_multiple_of(4);
-        #[cfg(target_arch = "x86_64")]
-        let owned = logical;
-        let before = slab
-            .window
-            .as_ref()
-            .map(|window| (window.text.0, window.data.0));
-        let opened = slab.open;
-        let (at, words, cohort) = shared
-            .place(slab, (owned, aligns.0), (data.len(), aligns.1))
-            .ok_or(Refusal::Capacity)?;
-        let leads = slab.open != opened;
-        let (t, d) = (shared.text(at), shared.data(words));
-        for (slot, address) in data.chunks_exact_mut(8).zip(&slots) {
-            slot.copy_from_slice(&(*address as u64).to_le_bytes());
-        }
-        let fixed = fixup::apply(
-            TARGET.arch(),
-            (&mut text, t as u64),
-            (&mut data, d as u64),
-            module.text_fixups(),
-            module.data_fixups(),
-        );
-        if let Err(index) = fixed {
-            // Take the room back; a cohort this install opened never existed.
-            let start = if leads {
-                slab.open = None;
-                slab.cohorts
-                    .remove(&cohort)
-                    .map(|mine| (mine.text.0, mine.data.0))
-            } else {
-                before
-            };
-            if let (Some(window), Some(start)) = (&mut slab.window, start) {
-                (window.text.0, window.data.0) = start;
-            }
-            return Err(Refusal::Fixup(index));
-        }
-        // Establish independent R/NX cause data ownership before publishing any
-        // entry (PACK-9.7). Skip allocation for synthetic fixup-only modules
-        // with no sites and no literal bytes.
-        let imports_bytes = 8 * slots.len();
-        let literals = &data[imports_bytes..];
-        let fixup_bytes = module.data_fixups().len() * 8;
-        let needs_cause_data = !module.sites().is_empty() || literals.len() > fixup_bytes;
-        let cause_data = if needs_cause_data {
-            config
-                .cause_data
-                .and_then(|ops| (ops.create)(literals, module.sites()))
-        } else {
-            None
-        };
-        if let Some(handle) = cause_data {
-            for slot_index in cause_owner_slots {
-                let at = 8 * slot_index;
-                data[at..at + 8].copy_from_slice(&(handle.slot_addr as u64).to_le_bytes());
-            }
-        }
-        text.resize(owned, 0);
-        // SAFETY: `place` gave this image these writable ranges and nothing else holds them.
-        host::write(&mut || unsafe {
-            std::ptr::copy_nonoverlapping(
-                text.as_ptr(),
-                (shared.writer + at) as *mut u8,
-                text.len(),
-            );
-            std::ptr::copy_nonoverlapping(data.as_ptr(), d as *mut u8, data.len());
-        });
-        let row = Owner {
-            start: at as u32,
-            length: logical as u32,
-            digest: digest.0[..16].try_into().unwrap(),
-        };
-        let data_range = if let Some(handle) = cause_data
-            && handle.ro_literals_len != 0
-        {
-            let range = (words + imports_bytes, handle.ro_literals_len);
-            slab.cohorts
-                .get_mut(&cohort)
-                .unwrap()
-                .data_owners
-                .push(DataRow {
-                    start: range.0 as u32,
-                    length: range.1 as u32,
-                    owner: handle.owner,
-                    ro_base: handle.ro_literals_base,
-                });
-            range
-        } else {
-            (0, 0)
-        };
-        slab.cohorts
-            .get_mut(&cohort)
-            .unwrap()
-            .images
-            .push((row, digest));
+        let serial = slab.installs;
         let image = Arc::new(Image {
             shared: self.0.clone(),
-            digest,
-            cohort: Some(cohort),
-            text: t,
-            data: d,
-            bytes,
-            cause_data,
-            entries: module
-                .entries()
-                .map(|entry| ImageEntry {
-                    identity: entry.identity,
-                    signature: entry.signature,
-                    waits: entry.waits,
-                    entry: t + entry.text as usize,
-                    descriptor: if entry.descriptor == hirsel_mod::NO_DESCRIPTOR {
-                        0
-                    } else {
-                        d + entry.descriptor as usize
-                    },
+            digest: held.digest,
+            cohort: None,
+            text: held.text,
+            data: 0,
+            bytes: 0,
+            cause_data: None,
+            entries: held
+                .entries
+                .iter()
+                .map(|&(identity, signature, entry)| ImageEntry {
+                    identity,
+                    signature,
+                    waits: false,
+                    entry,
+                    descriptor: 0,
                 })
                 .collect(),
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
             retire: Some(Box::new(Retire {
                 next: null_mut(),
-                serial: slab.installs,
-                digest,
-                cohort: Some(cohort),
-                text: (at, logical),
-                owned: text.len(),
-                data: data_range,
-                bytes,
+                serial,
+                digest: held.digest,
+                cohort: None,
+                text: (0, 0),
+                owned: 0,
+                data: (0, 0),
+                bytes: 0,
                 retired: false,
-                cause_data,
+                cause_data: None,
             })),
         });
-        let serial = slab.installs;
-        slab.images.insert(digest, (serial, Arc::downgrade(&image)));
+        slab.images
+            .insert(held.digest, (serial, Arc::downgrade(&image)));
         slab.installs += 1;
-        slab.installed += bytes;
-        let record = slab.cohorts.get_mut(&cohort).unwrap();
-        record.live += 1;
-        record.bytes += bytes;
-        Ok((leads, image))
+        Ok(image)
     }
 
     /// An empty slot at version 0.

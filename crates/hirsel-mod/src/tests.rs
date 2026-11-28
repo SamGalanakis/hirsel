@@ -122,6 +122,24 @@ fn the_writer_and_reader_agree_with_the_specified_layout() {
 }
 
 #[test]
+fn an_entry_descriptor_is_three_whole_words_of_data_past_the_import_slots() {
+    // One import slot and 40 more bytes: the data is 48 bytes, so a descriptor's three
+    // words fit at 8, 16 and 24 and nowhere else.
+    let described = |descriptor| {
+        let mut image = image();
+        image.data = vec![0; 40];
+        image.entries[0].descriptor = descriptor;
+        Module::parse(&image.encode()).map(|_| ())
+    };
+    for fits in [8, 16, 24] {
+        assert_eq!(described(fits), Ok(()), "{fits}");
+    }
+    for refused in [12, 20, 32, 40, 48] {
+        assert_eq!(described(refused), Err(Malformed::Entries), "{refused}");
+    }
+}
+
+#[test]
 fn a_module_that_breaks_one_rule_is_refused() {
     use Malformed::*;
     let rows = ROWS.len() as u32;

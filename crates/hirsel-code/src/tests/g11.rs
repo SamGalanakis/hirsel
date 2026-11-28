@@ -95,14 +95,9 @@ fn retired_text_traps_while_its_shared_page_neighbor_runs() {
     let worker = std::thread::spawn(move || {
         let check = || {
             assert_eq!(call(&neighbor, 1), 4);
+            let table = &neighbor.image.shared.table;
             assert_eq!(
-                neighbor
-                    .image
-                    .shared
-                    .table
-                    .resolve(neighbor.text())
-                    .unwrap()
-                    .digest,
+                table.find(neighbor.text(), 1, |row, _| row.digest).unwrap(),
                 neighbor.digest().0[..16]
             );
         };
@@ -165,6 +160,18 @@ fn retired_text_traps_while_its_shared_page_neighbor_runs() {
     released
         .recv_timeout(Duration::from_secs(10))
         .expect("last drop waited for the slab");
+    // Pinning the image of a code address does not wait for the slab either, and the
+    // dead image, whose row the loader has not removed yet, pins nothing.
+    let (pinned, pin) = std::sync::mpsc::channel();
+    let (pool, live, dead) = (loader.clone(), small.text(), text + SHARED_ENTRY);
+    std::thread::spawn(move || {
+        pinned.send((pool.pin_pc(live).is_some(), pool.pin_pc(dead).is_some()))
+    });
+    assert_eq!(
+        pin.recv_timeout(Duration::from_secs(10)),
+        Ok((true, false)),
+        "a pin waited for the slab"
+    );
     drop(held);
     loader.reclaim().unwrap();
     // SAFETY: only this test loads or retires images in this slab; the RX view stays mapped.

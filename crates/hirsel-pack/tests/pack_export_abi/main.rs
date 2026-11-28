@@ -23,11 +23,9 @@ hirsel_guard::install!();
 fn secondary_loader() -> (&'static Loader, u64) {
     static SECONDARY: OnceLock<(&'static Loader, u64)> = OnceLock::new();
     *SECONDARY.get_or_init(|| {
-        let loader: &'static Loader = Box::leak(Box::new(
-            Loader::new(hirsel_pack::config(0, Mask::PURE, 16 << 20, 8 << 20))
-                .expect("start secondary pack loader"),
-        ));
-        let handle = hirsel_pack::loader_handle(loader);
+        let loader = hirsel_pack::start(hirsel_pack::config(0, Mask::PURE, 16 << 20, 8 << 20))
+            .expect("start secondary pack loader");
+        let handle = hirsel_pack::loader_handle(loader).expect("the secondary pool's handle");
         (loader, handle)
     })
 }

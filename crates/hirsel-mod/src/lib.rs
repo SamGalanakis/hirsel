@@ -25,6 +25,9 @@ pub const SECTIONS: usize = 13;
 /// Policy bits version 1 defines: tape recording, speculative index masking.
 pub const POLICY: u64 = 0b11;
 pub const NO_DESCRIPTOR: u32 = u32::MAX;
+/// The fixed words of a PROG-9 descriptor in a module's data: its code address, the
+/// length of its identity bytes and its revision. The identity bytes follow them.
+pub const DESCRIPTOR: usize = 24;
 
 pub(crate) const IMPORT: usize = 40;
 pub(crate) const FIXUP: usize = 16;
@@ -84,7 +87,9 @@ pub fn rows_digest() -> ContentHash {
 
 /// The runtime ABI revision: the layouts and calling rules loaded code shares with the
 /// runtime. A change to either adds one.
-/// Revision 4 introduces PACK-14/15 typed export adapters (distinct from program-root ABI).
+/// Revision 4 introduced PACK-14/15 typed export adapters (distinct from the
+/// program-root ABI). Revision 5 introduced PACK-16 `Held` lowering, literal ownership
+/// by an image's `CauseData` and stop custody.
 pub const ABI: u32 = 5;
 
 /// The runtime ABI digest of this build: [`ABI`] and the row table.

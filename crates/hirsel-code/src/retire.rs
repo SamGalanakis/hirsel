@@ -105,69 +105,102 @@ impl Shared {
     }
 
     /// Retire every image that died since the last call (PACK-4 step 5): its interning
-    /// entry and PC table row go before its instructions are overwritten.
+    /// entry and PC table row go before its instructions are overwritten. Dead text the
+    /// host would not synchronize keeps its cohort out of use and is tried again first;
+    /// `Unsynchronized` says some is left.
     pub(super) fn reclaim(&self, slab: &mut Slab) -> Result<(), Refusal> {
+        if self.unrevoked.load(Ordering::Relaxed) != 0 {
+            self.resynchronize(slab);
+        }
         let mut next = self.pending.swap(null_mut(), Ordering::Acquire);
         while !next.is_null() {
             // SAFETY: the list owns each record on it, and the swap took the whole list.
             let record = unsafe { Box::from_raw(next) };
             next = record.next;
-            let mine = |held: &(u64, Weak<Image>)| held.0 == record.serial;
-            if slab.images.get(&record.digest).is_some_and(mine) {
-                slab.images.remove(&record.digest);
+            self.retire(slab, &record);
+        }
+        match self.unrevoked.load(Ordering::Relaxed) {
+            0 => Ok(()),
+            _ => Err(Refusal::Unsynchronized),
+        }
+    }
+
+    fn retire(&self, slab: &mut Slab, record: &Retire) {
+        let mine = |held: &(u64, Weak<Image>)| held.0 == record.serial;
+        if slab.images.get(&record.digest).is_some_and(mine) {
+            slab.images.remove(&record.digest);
+        }
+        let (at, length) = record.text;
+        let (from, bytes) = record.data;
+        let cohort = record
+            .cohort
+            .and_then(|id| Some((id, slab.cohorts.get_mut(&id)?)));
+        let published = cohort.as_ref().map(|(_, cohort)| cohort.state);
+        if published == Some(State::Published) {
+            self.table.change((at, at + length), &[]);
+            // Returns when no reader holds the row, so the owner can go below.
+            self.data_table.change((from, from + bytes), &[]);
+        }
+        if let (Some(handle), Some(ops)) = (record.cause_data, &self.config.cause_data) {
+            // SAFETY: the image's data-table row is gone and no hazard reader holds it;
+            // this is the image's one count (surviving causes hold their own).
+            unsafe { (ops.release)(handle.owner) };
+        }
+        let Some((id, cohort)) = cohort else { return };
+        cohort.live -= 1;
+        if record.retired {
+            cohort.retired += record.bytes;
+        }
+        let is = |start: u32, length: u32, range: (usize, usize)| {
+            (start as usize, length as usize) == range
+        };
+        cohort.images.retain(|(row, digest)| {
+            !(is(row.start, row.length, record.text) && *digest == record.digest)
+        });
+        cohort
+            .data_owners
+            .retain(|row| bytes == 0 || !is(row.start, row.length, record.data));
+        if record.owned != 0 {
+            self.trap(at, at + record.owned);
+            if self.synchronize(at, at + record.owned).is_err() {
+                cohort.unsynchronized.push((at, record.owned));
+                self.unrevoked
+                    .fetch_add(record.owned as u64, Ordering::Relaxed);
             }
-            let Some(id) = record.cohort else { continue };
-            let cohort = slab.cohorts.get_mut(&id).unwrap();
-            cohort.live -= 1;
-            if record.retired {
-                cohort.retired += record.bytes;
-            }
-            let (at, length) = record.text;
-            let row = cohort.images.iter().position(|(row, digest)| {
-                (row.start as usize, row.length as usize, *digest) == (at, length, record.digest)
-            });
-            cohort.images.swap_remove(row.unwrap());
-            if cohort.state == State::Published {
-                self.table.change((at, at + length), &[]);
-            }
-            if record.data.1 != 0 {
-                if let Some(pos) = cohort.data_owners.iter().position(|r| {
-                    r.start as usize == record.data.0 && r.length as usize == record.data.1
-                }) {
-                    cohort.data_owners.swap_remove(pos);
+        }
+        if cohort.live == 0 && cohort.state != State::Open && cohort.unsynchronized.is_empty() {
+            self.recycle(slab, id);
+        }
+    }
+
+    /// Ask the host again to synchronize the dead text it refused, stopping at the
+    /// first refusal. A cohort with none left and nothing live is recycled.
+    fn resynchronize(&self, slab: &mut Slab) {
+        let waiting = slab.cohorts.iter();
+        let waiting = waiting.filter(|(_, cohort)| !cohort.unsynchronized.is_empty());
+        let waiting: Vec<u64> = waiting.map(|(id, _)| *id).collect();
+        for id in waiting {
+            let Some(cohort) = slab.cohorts.get_mut(&id) else {
+                continue;
+            };
+            while let Some(&(at, length)) = cohort.unsynchronized.last() {
+                if self.synchronize(at, at + length).is_err() {
+                    return;
                 }
-                if cohort.state == State::Published {
-                    // Removes the row and waits for all hazard slots before releasing `cause_data`.
-                    self.data_table
-                        .change((record.data.0, record.data.0 + record.data.1), &[]);
-                }
+                cohort.unsynchronized.pop();
+                self.unrevoked.fetch_sub(length as u64, Ordering::Relaxed);
             }
-            if let (Some(handle), Some(ops)) = (record.cause_data, &self.config.cause_data) {
-                // SAFETY: image's data-table row is gone and no hazard reader holds it;
-                // release the image's one count (surviving causes retain their own).
-                unsafe { (ops.release)(handle.owner) };
-            }
-            if record.owned != 0 {
-                self.trap(at, at + record.owned);
-                if self.synchronize(at, at + record.owned).is_err() {
-                    cohort.withheld = true;
-                    self.unrevoked
-                        .fetch_add(record.owned as u64, Ordering::Relaxed);
-                }
-            }
-            if cohort.live == 0 && cohort.state != State::Open && !cohort.withheld {
+            if cohort.live == 0 && cohort.state != State::Open {
                 self.recycle(slab, id);
             }
         }
-        if self.unrevoked.load(Ordering::Relaxed) != 0 {
-            return Err(Refusal::Unsupported);
-        }
-        Ok(())
     }
 
     /// Return a dead cohort’s runs after the last successful trap fill (PACK-4 step 5).
     pub(super) fn recycle(&self, slab: &mut Slab, id: u64) {
-        let cohort = slab.cohorts.remove(&id).unwrap();
+        let Some(cohort) = slab.cohorts.remove(&id) else {
+            return;
+        };
         // No reader of the PC table or data table names the cohort once this returns.
         self.table.change(cohort.text, &[]);
         self.data_table.change(cohort.data, &[]);

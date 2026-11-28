@@ -3,7 +3,7 @@
 
 use super::*;
 use hirsel_core_layout::{Arch, Target};
-use hirsel_mod::{Backend, Class, Entry, Fixup, Header, Kind, NO_DESCRIPTOR, Span};
+use hirsel_mod::{Backend, Class, Entry, Fixup, Header, Import, Kind, NO_DESCRIPTOR, Span};
 
 type Leaf = unsafe extern "C" fn(u64) -> u64;
 // SAFETY: the law modules' one entry takes and returns a word.
@@ -128,6 +128,30 @@ fn config() -> Config {
         cause_data: None,
     }
 }
+
+/// Whether the law owner refuses the next image.
+static REFUSES_OWNER: AtomicBool = AtomicBool::new(false);
+
+/// A cause data owner for a law: a copy of the literals that lives as long as the process.
+fn owner(literals: &[u8], _: &[u8]) -> Option<CauseDataHandle> {
+    if REFUSES_OWNER.load(Ordering::Relaxed) {
+        return None;
+    }
+    let copy: &'static [u8] = Box::leak(literals.into());
+    let word: &'static usize = Box::leak(Box::new(copy.as_ptr() as usize));
+    Some(CauseDataHandle {
+        owner: std::ptr::from_ref(word) as usize,
+        slot_addr: std::ptr::from_ref(word) as usize,
+        ro_literals_base: copy.as_ptr() as usize,
+        ro_literals_len: copy.len(),
+    })
+}
+
+const OWNERS: CauseDataOps = CauseDataOps {
+    create: owner,
+    retain: |_| {},
+    release: |_| {},
+};
 
 fn loader_for_law(config: Config) -> Result<Loader, Refusal> {
     // SAFETY: slab calls in these laws run on the invoking thread inside the executor gate.
@@ -298,13 +322,13 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     assert_eq!(loader.installed(), size());
     assert_eq!(host::protection(code.text()), host::LIVE);
     assert_eq!(host::protection(loader.0.data(0)), "r--p");
-    // The text run's bytes outside the image are the trap pattern.
+    // Every byte of the cohort's window outside the image is the trap pattern.
     let page = loader.0.page;
     let pattern: [u8; 4] = match TARGET.arch() {
         Arch::X86_64 => [0xcc; 4],
         Arch::Aarch64 => [0; 4],
     };
-    for offset in leaf().0.len()..page {
+    for offset in leaf().0.len()..WINDOW {
         // SAFETY: the page is mapped readable.
         let byte = unsafe { *((code.text() + offset) as *const u8) };
         assert_eq!(byte, pattern[offset % 4], "{offset}");
@@ -385,6 +409,25 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     .unwrap();
     let _held = load(&full, &bytes).unwrap();
     assert_eq!(refused(&|_| {}, &full), Some(Refusal::Capacity));
+
+    // An image whose data a cause can outlive installs with its owner or not at all
+    // (PACK-9.7), and the refused install gives its room back: the next starts the band.
+    let owned = loader_for_law(Config {
+        cause_data: Some(OWNERS),
+        ..config()
+    })
+    .unwrap();
+    REFUSES_OWNER.store(true, Ordering::Relaxed);
+    assert_eq!(refused(&|_| {}, &owned), Some(Refusal::Capacity));
+    REFUSES_OWNER.store(false, Ordering::Relaxed);
+    let kept = load(&owned, &image(2000).encode()).unwrap();
+    assert_eq!(
+        (kept.text(), owned.installed(), kept.cause_owner().is_some()),
+        (owned.text_band().0, size(), true)
+    );
+    let literal = owned.resolve_literal(kept.data() + 8, 8).unwrap();
+    // SAFETY: the law owner's copy of the literal word lives as long as the process.
+    assert_eq!(unsafe { *(literal.1 as *const u64) }, 2000);
 
     // After the refusals the next module still gets a cohort of its own and runs.
     let next = load(&loader, &image(3000).encode()).unwrap();
@@ -561,7 +604,14 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     assert_eq!(loader.retired(), size());
     assert_eq!(slot.activate(4, kept), Ok(5));
     assert_eq!((loader.retired(), loader.installed()), (0, size()));
+
+    // When a slot's last handle goes, a worker's row is all that holds its code, and
+    // only until that worker parks.
+    // SAFETY: the law module's entry is `leaf`.
+    assert_eq!(worker.dispatch(&slot, |leaf| unsafe { leaf(1) }), Some(32));
     drop(slot);
+    assert_eq!((loader.retired(), loader.installed()), (size(), size()));
+    worker.park();
     assert_eq!((loader.retired(), loader.installed()), (0, 0));
 }
 
@@ -785,6 +835,23 @@ fn validate_before_publication_refuses_without_changing_installed_bytes_or_image
         .load_by_key(&sync_key, &IDENTITY, &Leaf::DIGEST, false, true)
         .unwrap();
     assert_eq!((loader.installed(), loader.live_images()), (size(), 1));
+
+    // The live image answers a later load by key: the same entry and no second image,
+    // and the same refusal for an entry it lacks.
+    let again = loader
+        .load_by_key(&sync_key, &IDENTITY, &Leaf::DIGEST, false, true)
+        .unwrap();
+    assert_eq!(
+        (again.entry(), loader.installed(), loader.live_images()),
+        (loaded_sync.entry(), size(), 1)
+    );
+    drop(again);
+    assert_eq!(
+        loader
+            .load_by_key(&sync_key, &IDENTITY, &Other::DIGEST, false, true)
+            .err(),
+        Some(Refusal::NoEntry)
+    );
 
     // A second module whose entry has `waits = true` is refused for `waits = false`
     // without publishing a second image.

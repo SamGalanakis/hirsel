@@ -5,19 +5,49 @@ use std::sync::{Arc, Mutex};
 
 /// Entry target stored in a slot or worker row: optional slab image pin (`None`
 /// for process-lifetime statically linked entries) + entry code address.
-pub(super) type Raw = (Option<Arc<Image>>, usize);
+type Raw = (Option<Arc<Image>>, usize);
 
-pub(super) struct Cell {
-    pub(super) shared: Arc<Shared>,
-    pub(super) version: AtomicU64,
-    pub(super) current: Mutex<Option<Raw>>,
+struct Cell {
+    shared: Arc<Shared>,
+    version: AtomicU64,
+    current: Mutex<Option<Raw>>,
 }
 
-impl Drop for Cell {
+/// The version of a slot whose last handle is gone. No activation reaches it.
+const CLOSED: u64 = u64::MAX;
+
+/// What the handles of one slot share. Workers hold the cell and not this, so the
+/// last handle to go closes the cell while their rows still name it.
+struct Lease(Arc<Cell>);
+
+impl Drop for Lease {
     fn drop(&mut self) {
-        let Some((Some(image), _)) = self.current.get_mut().unwrap().take() else {
-            return;
+        self.0.close();
+    }
+}
+
+impl Lease {
+    /// An empty version-0 slot of `shared`'s pool.
+    fn new(shared: Arc<Shared>) -> Arc<Self> {
+        Arc::new(Self(Arc::new(Cell {
+            shared,
+            version: AtomicU64::new(0),
+            current: Mutex::new(None),
+        })))
+    }
+}
+
+impl Cell {
+    /// Give up the slot's code and move its version to `CLOSED`, so every worker row
+    /// for it is stale and goes at that worker's next park (PACK-6).
+    fn close(&self) {
+        let old = {
+            let mut current = self.current.lock().unwrap();
+            self.version.store(CLOSED, Ordering::Release);
+            self.shared.updates.fetch_add(1, Ordering::Release);
+            current.take()
         };
+        let Some((Some(image), _)) = old else { return };
         {
             let mut retired = self.shared.retired.lock().unwrap();
             if image.slots.fetch_sub(1, Ordering::Relaxed) == 1 {
@@ -27,24 +57,14 @@ impl Drop for Cell {
         }
         drop(image);
     }
-}
 
-impl Cell {
-    pub(super) fn new(shared: Arc<Shared>) -> Arc<Self> {
-        Arc::new(Self {
-            shared,
-            version: AtomicU64::new(0),
-            current: Mutex::new(None),
-        })
-    }
-
-    pub(super) fn version(&self) -> u64 {
+    fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }
 
     /// Install `(image, entry)` at `expected` version. Checks pool identity
     /// before taking the slot lock or mutating state (PACK-14).
-    pub(super) fn activate(
+    fn activate(
         &self,
         expected: u64,
         image: Option<Arc<Image>>,
@@ -63,7 +83,7 @@ impl Cell {
             if version != expected {
                 return Err(Stop::Stale(version));
             }
-            let Some(next) = version.checked_add(1) else {
+            let Some(next) = version.checked_add(1).filter(|next| *next != CLOSED) else {
                 return Err(Stop::Capacity);
             };
             next_version = next;
@@ -114,14 +134,14 @@ impl Cell {
 
 /// A shared `(version, Code)` that workers dispatch through (PACK-6).
 pub struct Slot<F> {
-    pub(super) cell: Arc<Cell>,
+    lease: Arc<Lease>,
     callable: PhantomData<fn() -> F>,
 }
 
 impl<F> Clone for Slot<F> {
     fn clone(&self) -> Self {
         Self {
-            cell: self.cell.clone(),
+            lease: self.lease.clone(),
             callable: PhantomData,
         }
     }
@@ -130,46 +150,50 @@ impl<F> Clone for Slot<F> {
 impl<F: Signature> Slot<F> {
     pub(super) fn new(shared: Arc<Shared>) -> Self {
         Self {
-            cell: Cell::new(shared),
+            lease: Lease::new(shared),
             callable: PhantomData,
         }
     }
 
     pub fn version(&self) -> u64 {
-        self.cell.version()
+        self.lease.0.version()
     }
 
     /// Store `code` when the slot is at version `expected`, and return the new version.
     /// It waits for no call, worker or unit that still uses the old code.
     pub fn activate(&self, expected: u64, code: Code<F>) -> Result<u64, Stop> {
-        self.cell.activate(expected, Some(code.image), code.entry)
+        self.lease
+            .0
+            .activate(expected, Some(code.image), code.entry)
     }
 }
 
 /// Untyped slot handle for the runtime bridge (`CodeSlot[F]`, PACK-14).
 #[derive(Clone)]
 pub struct RawSlot {
-    pub(super) cell: Arc<Cell>,
+    lease: Arc<Lease>,
 }
 
 impl RawSlot {
     pub(super) fn new(shared: Arc<Shared>) -> Self {
         Self {
-            cell: Cell::new(shared),
+            lease: Lease::new(shared),
         }
     }
 
     pub fn version(&self) -> u64 {
-        self.cell.version()
+        self.lease.0.version()
     }
 
     pub fn activate(&self, expected: u64, code: &super::RawCode) -> Result<u64, Stop> {
-        self.cell.activate(expected, code.image.clone(), code.entry)
+        self.lease
+            .0
+            .activate(expected, code.image.clone(), code.entry)
     }
 
     /// Check whether this slot belongs to `loader`'s pool.
     pub fn same_pool(&self, loader: &super::Loader) -> bool {
-        Arc::ptr_eq(&self.cell.shared, &loader.0)
+        Arc::ptr_eq(&self.lease.0.shared, &loader.0)
     }
 }
 
@@ -227,7 +251,7 @@ impl Worker {
     /// Begin a dispatch through `cell`, borrowing a worker-owned generation on hit
     /// with a single version load and zero shared-line writes or refcount increments.
     /// Returns `None` if the slot is empty.
-    pub(super) fn begin_cell(&mut self, cell: &Arc<Cell>) -> Option<(usize, BorrowToken)> {
+    fn begin_cell(&mut self, cell: &Arc<Cell>) -> Option<(usize, BorrowToken)> {
         let updates = self.shared.updates.load(Ordering::Relaxed);
         if updates != self.seen {
             self.seen = updates;
@@ -296,7 +320,7 @@ impl Worker {
 
     /// Begin a dispatch through an untyped `RawSlot`.
     pub fn begin_dispatch(&mut self, slot: &RawSlot) -> Option<(usize, BorrowToken)> {
-        self.begin_cell(&slot.cell)
+        self.begin_cell(&slot.lease.0)
     }
 
     /// Release one dispatch borrow on return or unwind.
@@ -343,7 +367,7 @@ impl Worker {
         slot: &Slot<F>,
         with: impl FnOnce(F) -> R,
     ) -> Option<R> {
-        let (entry, token) = self.begin_cell(&slot.cell)?;
+        let (entry, token) = self.begin_cell(&slot.lease.0)?;
         struct Guard<'a> {
             worker: &'a mut Worker,
             token: Option<BorrowToken>,

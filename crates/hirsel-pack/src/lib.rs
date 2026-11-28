@@ -1,17 +1,16 @@
 //! The pack host's join of the runtime and the loader (PACK-9).
 //!
 //! The runtime does not link the loader and the loader does not link the runtime. A
-//! pack host links both through this crate: it makes the process's one loader with the
-//! runtime's real row addresses, gives the runtime the loader's text band and PC
-//! lookup, and reports a fault in loaded code after the pool has stopped.
-
-use std::sync::Mutex;
+//! pack host links both through this crate: it makes each pool's loader with the
+//! runtime's real row addresses, gives the runtime the loader's bands and lookups, and
+//! reports a fault in loaded code after the pool has stopped.
 
 use hirsel_code::{CauseDataHandle, CauseDataOps, Config, Loader, Refusal};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_rt::{
     causes::{CauseData, CauseDataRef},
     code,
+    fiber::ArmError,
     run_stop::Execution,
 };
 use hirsel_mod::Mask;
@@ -74,33 +73,49 @@ pub fn config(policy: u64, mask: Mask, band_bytes: usize, installed_bytes: u64) 
 /// Why [`start`] gave no loader.
 #[derive(Debug)]
 pub enum Refused {
-    /// This process already has its loader.
-    Started,
     Loader(Refusal),
-    Runtime(code::Refused),
+    /// The fault handler could not be installed for the signals a trap in loaded code
+    /// raises.
+    Signals(ArmError),
 }
 
-static LOADER: Mutex<Option<&'static Loader>> = Mutex::new(None);
-
-/// Register `loader` with the PACK-14 runtime pool table (if not already registered)
-/// and return its host-issued `Loader` capability handle for Hirsel code.
-pub fn loader_handle(loader: &'static Loader) -> u64 {
-    runtime::install_ops();
-    runtime::register_pool(loader)
+/// The loader a band was registered with.
+///
+/// # Safety
+/// `band` is one [`start`] registered. The runtime has no others: this crate is the
+/// join, and a host that links it registers bands through `start` alone.
+unsafe fn loader_of(band: &code::Band) -> &'static Loader {
+    // SAFETY: `start` leaked the loader it registered.
+    unsafe { &*band.loader.cast::<Loader>() }
 }
 
-/// Make this process's loader and register its text and data bands with the runtime,
-/// so that the fault handler, profile sampler, and cause recorder resolve addresses
-/// through it. The loader lives as long as the process.
+/// The pool a `Loader` capability handle names.
+fn pool(handle: u64) -> Option<&'static Loader> {
+    code::pools()
+        .find(|(issued, _)| *issued == handle)
+        // SAFETY: a registered band is one of `start`'s.
+        .map(|(_, band)| unsafe { loader_of(band) })
+}
+
+/// The host-issued `Loader` capability handle of `loader`'s pool for Hirsel code: the
+/// same handle however often it is asked, and `None` for a loader [`start`] did not
+/// make.
+pub fn loader_handle(loader: &Loader) -> Option<u64> {
+    code::pools()
+        // SAFETY: a registered band is one of `start`'s.
+        .find(|(_, band)| unsafe { loader_of(band) }.same_pool(loader))
+        .map(|(handle, _)| handle)
+}
+
+/// Make a pool's loader and register its text and data bands with the runtime, so that
+/// the fault handler, profile sampler, cause recorder and handle rows resolve
+/// addresses through it. The loader lives as long as the process.
 pub fn start(config: Config) -> Result<&'static Loader, Refused> {
-    let mut slot = LOADER.lock().unwrap();
-    if slot.is_some() {
-        return Err(Refused::Started);
-    }
     let loader: &'static Loader =
         Box::leak(Box::new(Loader::new(config).map_err(Refused::Loader)?));
     let (low, high) = loader.text_band();
     let (data_low, data_high) = loader.data_band();
+    runtime::install_ops();
     code::register(Box::leak(Box::new(code::Band {
         low,
         high,
@@ -109,18 +124,17 @@ pub fn start(config: Config) -> Result<&'static Loader, Refused> {
         loader: std::ptr::from_ref(loader).cast(),
         resolve,
         resolve_literal,
+        pin: runtime::pin,
+        bind: runtime::bind,
     })))
-    .map_err(Refused::Runtime)?;
-    runtime::install_ops();
-    let _ = runtime::register_pool(loader);
-    *slot = Some(loader);
+    .map_err(Refused::Signals)?;
     Ok(loader)
 }
 
 /// The loader's PC lookup in the shape the runtime calls.
 ///
 /// # Safety
-/// `loader` is the process's loader.
+/// `loader` is the loader of the band this was registered with.
 unsafe fn resolve(loader: *const (), pc: usize) -> Option<code::Hit> {
     // SAFETY: the caller passes the loader `start` registered, which is never dropped.
     let hit = unsafe { &*loader.cast::<Loader>() }.resolve(pc)?;
@@ -133,7 +147,7 @@ unsafe fn resolve(loader: *const (), pc: usize) -> Option<code::Hit> {
 /// The loader's lock-free data-band literal lookup in the shape the runtime calls.
 ///
 /// # Safety
-/// `loader` is the process's loader.
+/// `loader` is the loader of the band this was registered with.
 unsafe fn resolve_literal(loader: *const (), ptr: usize, len: usize) -> Option<code::LiteralOwner> {
     // SAFETY: the caller passes the loader `start` registered, which is never dropped.
     let (owner, relocated) = unsafe { &*loader.cast::<Loader>() }.resolve_literal(ptr, len)?;
@@ -170,10 +184,12 @@ impl Report {
 /// that faulted is quarantined. Call it after the execution's pool has stopped.
 pub fn report(execution: &Execution) -> Option<Report> {
     let fault = execution.code_fault()?;
-    let loader = *LOADER.lock().unwrap();
     // By the image the handler recorded: the address may be another image's by now.
-    let quarantined = loader.zip(fault.hit).and_then(|(loader, hit)| {
-        loader.fault(hirsel_code::Hit {
+    let quarantined = fault.hit.and_then(|hit| {
+        let (_, band) =
+            code::pools().find(|(_, band)| (band.low..band.high).contains(&fault.pc))?;
+        // SAFETY: a registered band is one of `start`'s.
+        unsafe { loader_of(band) }.fault(hirsel_code::Hit {
             digest: hit.digest,
             offset: hit.offset,
         })

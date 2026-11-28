@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
 
 use hirsel_code::{
     BorrowToken, CodePin as LoaderPin, Loader, RawCode, RawSlot, Refusal, Stop, Worker,
@@ -33,36 +33,7 @@ struct DynamicSlot {
     slot: RawSlot,
 }
 
-static POOLS: Mutex<Option<Vec<(u64, Loader)>>> = Mutex::new(None);
-static NEXT_POOL_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_THREAD_ID: AtomicU32 = AtomicU32::new(1);
-
-/// Register a [`Loader`] pool as a host-issued `Loader` capability handle (`u64`).
-pub fn register_pool(loader: &Loader) -> u64 {
-    let id = u64::from(NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed));
-    let mut pools = POOLS.lock().unwrap();
-    pools
-        .get_or_insert_with(Vec::new)
-        .push((id, loader.clone()));
-    id
-}
-
-fn lookup_pool(id: u64) -> Option<Loader> {
-    let pools = POOLS.lock().unwrap();
-    pools
-        .as_ref()?
-        .iter()
-        .find(|(k, _)| *k == id)
-        .map(|(_, l)| l.clone())
-}
-
-fn all_pools() -> Vec<Loader> {
-    let pools = POOLS.lock().unwrap();
-    pools
-        .as_ref()
-        .map(|v| v.iter().map(|(_, l)| l.clone()).collect())
-        .unwrap_or_default()
-}
 
 struct ActiveBorrow {
     id: u64,
@@ -97,7 +68,7 @@ impl ThreadDispatch {
 
     fn worker_mut(&mut self, pool_id: u64) -> Option<&mut Worker> {
         if !self.workers.contains_key(&pool_id) {
-            let loader = lookup_pool(pool_id)?;
+            let loader = crate::pool(pool_id)?;
             self.workers.insert(pool_id, loader.worker());
         }
         self.workers.get_mut(&pool_id)
@@ -167,7 +138,7 @@ unsafe fn load_by_key(
     out_word: *mut u64,
     out_bytes: *mut u8,
 ) -> u8 {
-    let Some(loader) = lookup_pool(loader_id) else {
+    let Some(loader) = crate::pool(loader_id) else {
         return 1; // NotAdmitted
     };
     // SAFETY: caller passes valid 32-byte digest pointers.
@@ -209,39 +180,31 @@ unsafe fn load_by_key(
         Err(Refusal::Capacity) => 8,
         Err(Refusal::Quarantined) => 9,
         Err(Refusal::NotPrelinked) => 10,
-        Err(Refusal::Unsupported) => 11,
+        // The host withheld publication; `code.hirsel` has no closer answer than this.
+        Err(Refusal::Unsupported | Refusal::Unsynchronized) => 11,
     }
 }
 
-unsafe fn bind_loaded(entry: usize, descriptor: usize) -> *mut u8 {
-    for loader in all_pools() {
-        if let Some(raw) = loader.bind_loaded(entry, descriptor) {
-            return alloc_dynamic_code(raw);
-        }
-    }
-    ptr::null_mut()
+/// A band's `bind`: a counted handle for an entry of a live image of `loader`'s pool.
+///
+/// # Safety
+/// `loader` is the loader `start` registered the band with.
+pub(crate) unsafe fn bind(loader: *const (), entry: usize, descriptor: usize) -> *mut u8 {
+    // SAFETY: `start` leaked that loader.
+    let loader = unsafe { &*loader.cast::<Loader>() };
+    loader
+        .bind_loaded(entry, descriptor)
+        .map_or(ptr::null_mut(), alloc_dynamic_code)
 }
 
-fn witness_pool(address: usize) -> u64 {
-    let pools = POOLS.lock().unwrap();
-    pools
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .find_map(|(id, loader)| {
-            let (lo, hi) = loader.data_band();
-            (lo..hi).contains(&address).then_some(*id)
-        })
-        .unwrap_or(0)
-}
-
-unsafe fn pin_pc(pc: usize) -> Option<RtPin> {
-    for loader in all_pools() {
-        if let Some(pin) = loader.pin_pc(pc) {
-            return Some(wrap_pin(pin));
-        }
-    }
-    None
+/// A band's `pin`: an owning pin on the live image of `loader`'s pool that holds `pc`.
+///
+/// # Safety
+/// `loader` is the loader `start` registered the band with.
+pub(crate) unsafe fn pin(loader: *const (), pc: usize) -> Option<RtPin> {
+    // SAFETY: `start` leaked that loader.
+    let loader = unsafe { &*loader.cast::<Loader>() };
+    loader.pin_pc(pc).map(wrap_pin)
 }
 
 unsafe fn code_share(code: *mut u8) -> *mut u8 {
@@ -258,7 +221,7 @@ unsafe fn code_drop(code: *mut u8) {
 }
 
 unsafe fn slot_new(loader_id: u64) -> *mut u8 {
-    let Some(loader) = lookup_pool(loader_id) else {
+    let Some(loader) = crate::pool(loader_id) else {
         return ptr::null_mut();
     };
     let slot = Box::new(DynamicSlot {
@@ -387,9 +350,6 @@ pub fn current_thread_active_borrows() -> u32 {
 
 static OPS: CodeOps = CodeOps {
     load_by_key,
-    bind_loaded,
-    witness_pool,
-    pin_pc,
     code_share,
     code_drop,
     slot_new,

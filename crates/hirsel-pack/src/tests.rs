@@ -34,7 +34,7 @@ unsafe impl Signature for Fill {
 
 const IDENTITY: ContentHash = ContentHash([0xaa; 32]);
 
-/// The laws share the process's one loader, and one of them calls a recycled address,
+/// The laws share one loader, and one of them calls a recycled address,
 /// so they run one at a time.
 fn alone() -> std::sync::MutexGuard<'static, ()> {
     static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -303,6 +303,22 @@ fn a_sampled_stack_resolves_its_loaded_code_frames() {
     let low = u64::from_le_bytes(digest[..8].try_into().unwrap());
     let high = u64::from_le_bytes(digest[8..16].try_into().unwrap());
     assert_eq!(out, [1, 2, low, high, 3, 0, low, high]);
+    // A second pool is a pool like the first: the runtime resolves its frames too,
+    // and each pool has one handle however often and through whichever clone of its
+    // loader it is asked.
+    let other = start(config(0, Mask::PURE, 16 << 20, 1 << 20)).unwrap();
+    let module = hirsel_mod::Module::parse(&bytes).unwrap();
+    other.admit(module.header.key(), hirsel_mod::digest(&bytes));
+    let twin: Code<Root> = other.load(&bytes, &IDENTITY, true).unwrap();
+    let mut out = Vec::new();
+    assert_eq!(code::frames(&[twin.text() as u64 + 2], &mut out), 1);
+    assert_eq!(out, [0, 2, low, high]);
+    let handles = (loader_handle(loader()), loader_handle(other));
+    assert_eq!(
+        handles,
+        (loader_handle(&loader().clone()), loader_handle(other))
+    );
+    assert!(handles.0.is_some() && handles.1.is_some() && handles.0 != handles.1);
 }
 
 /// Entry that records a cause using its own `hirsel_core_cause_owner` import slot

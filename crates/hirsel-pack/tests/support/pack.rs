@@ -30,7 +30,7 @@ fn primary_loader() -> (&'static Loader, u64) {
     *PRIMARY.get_or_init(|| {
         let loader = hirsel_pack::start(hirsel_pack::config(0, Mask::PURE, 64 << 20, 32 << 20))
             .expect("start primary pack loader");
-        let handle = hirsel_pack::loader_handle(loader);
+        let handle = hirsel_pack::loader_handle(loader).expect("the primary pool's handle");
         (loader, handle)
     })
 }

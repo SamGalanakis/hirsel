@@ -1,7 +1,7 @@
 //! The reader: [`Module::parse`] and the checked views it gives a loader.
 
 use crate::{
-    Backend, ENTRY, Entry, FIXUP, Fixup, HEADER, Header, IMPORT, Import, Kind, MAGIC,
+    Backend, DESCRIPTOR, ENTRY, Entry, FIXUP, Fixup, HEADER, Header, IMPORT, Import, Kind, MAGIC,
     NO_DESCRIPTOR, POLICY, ROWS, SECTIONS, SPAN, Span,
 };
 use hirsel_core_ids::ContentHash;
@@ -180,8 +180,12 @@ impl<'a> Module<'a> {
         for record in entries.chunks_exact(ENTRY) {
             let entry = entry(record);
             let starts = starts.binary_search(&entry.text).is_ok();
+            // A descriptor is whole words of the data past the import slots.
+            let descriptor = u64::from(entry.descriptor);
             let described = entry.descriptor == NO_DESCRIPTOR
-                || (8 * count as u64..data).contains(&u64::from(entry.descriptor));
+                || (descriptor.is_multiple_of(8)
+                    && descriptor >= 8 * count as u64
+                    && descriptor + DESCRIPTOR as u64 <= data);
             if last >= Some(entry.identity)
                 || !starts
                 || !described
@@ -223,6 +227,11 @@ impl<'a> Module<'a> {
     /// The data image, import slots first.
     pub fn data(&self) -> &'a [u8] {
         self.sections[1]
+    }
+    /// The range of the data image past its import slots: the literals, descriptors
+    /// and pointer words a loaded value may point into.
+    pub fn literals(&self) -> std::ops::Range<usize> {
+        self.sections[2].len() / IMPORT * 8..self.sections[1].len()
     }
     pub fn imports(&self) -> impl ExactSizeIterator<Item = Import> + 'a {
         self.sections[2].chunks_exact(IMPORT).map(|record| {

@@ -1,8 +1,8 @@
 //! Loaded code as the runtime sees it (PACK-9).
 //!
-//! The runtime does not link the loader. A pack host registers its loader's text band
-//! and the loader's PC lookup here, once per process. The fault handler and the profile
-//! sampler ask this module which image owns a code address.
+//! The runtime does not link the loader. A pack host registers each pool's bands and
+//! its loader's lookups here. The fault handler, the profile sampler and the handle
+//! rows ask this module which pool and which image own an address.
 
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -37,7 +37,7 @@ pub struct LiteralOwner {
     pub relocated: *const u8,
 }
 
-/// A pack host's text and data bands and its lock-free lookups.
+/// One pool's text and data bands and its loader's lock-free lookups.
 pub struct Band {
     /// The text band is `[low, high)`.
     pub low: usize,
@@ -45,7 +45,7 @@ pub struct Band {
     /// The data band is `[data_low, data_high)`.
     pub data_low: usize,
     pub data_high: usize,
-    /// The loader `resolve` and `resolve_literal` are called with.
+    /// The loader every lookup below is called with.
     pub loader: *const (),
     /// The image whose text holds a code address. It must be async-signal-safe: the
     /// fault handler calls it.
@@ -54,67 +54,96 @@ pub struct Band {
     /// `[data_low, data_high)`, retaining one count while pinned. Allocates and
     /// admits nothing.
     pub resolve_literal: unsafe fn(*const (), usize, usize) -> Option<LiteralOwner>,
+    /// An owning pin on the live image whose text holds a code address. It takes no
+    /// lock.
+    pub pin: unsafe fn(*const (), usize) -> Option<CodePin>,
+    /// A counted `Code[F]` handle for the entry address and PROG-9 descriptor of a
+    /// live image, or null when no live image holds the entry.
+    pub bind: unsafe fn(*const (), usize, usize) -> *mut u8,
 }
 
 // SAFETY: a registered band is never changed, and `resolve` is async-signal-safe, so it
 // is also safe to call from any thread.
 unsafe impl Sync for Band {}
 
-static BAND: AtomicPtr<Band> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Why [`register`] refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Refused {
-    /// This process already has a band.
-    Registered,
-    /// The fault handler could not be installed for the signals a trap in loaded code
-    /// raises.
-    Signals(crate::fiber::ArmError),
+/// A registered pool. Nothing changes or frees one once the list names it, so a signal
+/// handler may walk the list.
+struct Pool {
+    handle: u64,
+    band: &'static Band,
+    next: *const Pool,
 }
 
-/// Make `band` this process's loaded-code band and take the signals a fault or a trap
-/// in loaded code raises (PACK-9).
-pub fn register(band: &'static Band) -> Result<(), Refused> {
-    crate::fiber::arm_code().map_err(Refused::Signals)?;
-    BAND.compare_exchange(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(band).cast_mut(),
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    )
-    .map(drop)
-    .map_err(|_| Refused::Registered)
+/// The newest registered pool.
+static POOLS: AtomicPtr<Pool> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Make `band` one of this process's pools and take the signals a fault or a trap in
+/// loaded code raises (PACK-9). Gives the pool's `Loader` capability handle, which is
+/// never zero.
+pub fn register(band: &'static Band) -> Result<u64, crate::fiber::ArmError> {
+    crate::fiber::arm_code()?;
+    let pool = Box::into_raw(Box::new(Pool {
+        handle: 0,
+        band,
+        next: std::ptr::null(),
+    }));
+    let mut newest = POOLS.load(Ordering::Acquire);
+    loop {
+        // SAFETY: nothing else reaches `pool` until the exchange below names it, and a
+        // registered pool is never freed.
+        unsafe {
+            (*pool).next = newest;
+            (*pool).handle = newest.as_ref().map_or(1, |newest| newest.handle + 1);
+        }
+        match POOLS.compare_exchange_weak(newest, pool, Ordering::AcqRel, Ordering::Acquire) {
+            // SAFETY: as above.
+            Ok(_) => return Ok(unsafe { (*pool).handle }),
+            Err(now) => newest = now,
+        }
+    }
 }
 
-/// `None` when `pc` is outside the band. Inside it, the image that owns `pc`, or `None`
-/// when no live image does (the text of a dead image). Async-signal-safe.
+/// Every registered pool's handle and band, newest first. Async-signal-safe.
+pub fn pools() -> impl Iterator<Item = (u64, &'static Band)> {
+    let mut at = POOLS.load(Ordering::Acquire).cast_const();
+    std::iter::from_fn(move || {
+        // SAFETY: a registered pool is never changed or freed.
+        let pool = unsafe { at.as_ref() }?;
+        at = pool.next;
+        Some((pool.handle, pool.band))
+    })
+}
+
+/// The pool whose text band holds `pc`. Async-signal-safe.
+pub(crate) fn text(pc: usize) -> Option<&'static Band> {
+    pools()
+        .map(|(_, band)| band)
+        .find(|band| (band.low..band.high).contains(&pc))
+}
+
+/// The handle of the pool whose data band holds `address`, or zero when none does.
+pub(crate) fn data(address: usize) -> u64 {
+    pools()
+        .find(|(_, band)| (band.data_low..band.data_high).contains(&address))
+        .map_or(0, |(handle, _)| handle)
+}
+
+/// `None` when `pc` is outside every pool's text band. Inside one, the image that owns
+/// `pc`, or `None` when no live image does (the text of a dead image).
+/// Async-signal-safe.
 pub(crate) fn locate(pc: usize) -> Option<Option<Hit>> {
-    let band = BAND.load(Ordering::Acquire);
-    if band.is_null() {
-        return None;
-    }
-    // SAFETY: a registered band is `'static`.
-    let band = unsafe { &*band };
-    if pc < band.low || pc >= band.high {
-        return None;
-    }
+    let band = text(pc)?;
     // SAFETY: `resolve` takes the loader it was registered with.
     Some(unsafe { (band.resolve)(band.loader, pc) })
 }
 
-/// Resolve a non-empty static literal `[ptr, ptr + len)` against the registered
-/// loader's data band (PACK-9.7). Returns `None` for host/immortal literals or
-/// when no loader is registered. Allocates and admits nothing.
+/// Resolve a non-empty static literal `[ptr, ptr + len)` against the data band of the
+/// pool that holds it (PACK-9.7). Returns `None` for host/immortal literals. Allocates
+/// and admits nothing.
 pub(crate) fn locate_literal(ptr: usize, len: usize) -> Option<LiteralOwner> {
-    let band = BAND.load(Ordering::Acquire);
-    if band.is_null() {
-        return None;
-    }
-    // SAFETY: a registered band is `'static`.
-    let band = unsafe { &*band };
-    if ptr < band.data_low || ptr >= band.data_high {
-        return None;
-    }
+    let band = pools()
+        .map(|(_, band)| band)
+        .find(|band| (band.data_low..band.data_high).contains(&ptr))?;
     // SAFETY: `resolve_literal` takes the loader it was registered with.
     unsafe { (band.resolve_literal)(band.loader, ptr, len) }
 }

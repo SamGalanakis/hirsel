@@ -1,9 +1,9 @@
 //! PACK-14 runtime handle, slot, worker-borrow, and continuation/Unit pin hooks.
 //!
 //! `hirsel-core-rt` does not link `hirsel-code`; a pack host (`hirsel-pack`)
-//! registers its [`CodeOps`] implementation here. Statically bound `code.bind(f)`
-//! handles use bit-0 tagged descriptor pointers (`ptr | 1`) with process-lifetime
-//! backing so they work even in standalone binaries without a pack host.
+//! registers its [`CodeOps`] implementation here. `code.bind(f)` of an entry outside
+//! every pool's text band gives a bit-0 tagged descriptor pointer (`ptr | 1`) with
+//! process-lifetime backing, so it works in standalone binaries without a pack host.
 
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -62,9 +62,6 @@ pub struct CodeOps {
         out_word: *mut u64,
         out_bytes: *mut u8,
     ) -> u8,
-    pub bind_loaded: unsafe fn(entry: usize, descriptor: usize) -> *mut u8,
-    pub witness_pool: fn(usize) -> u64,
-    pub pin_pc: unsafe fn(pc: usize) -> Option<CodePin>,
     pub code_share: unsafe fn(code: *mut u8) -> *mut u8,
     pub code_drop: unsafe fn(code: *mut u8),
     pub slot_new: unsafe fn(loader: u64) -> *mut u8,
@@ -103,15 +100,17 @@ fn ops() -> Option<&'static CodeOps> {
     }
 }
 
+/// The handle of the pool whose data band holds a witness, or zero for a host one.
 pub(super) fn witness_pool(address: usize) -> u64 {
-    ops().map_or(0, |ops| (ops.witness_pool)(address))
+    super::data(address)
 }
 
-/// Pin the loaded image owning `pc`, if `pc` lies in the loaded text band.
+/// Pin the live image owning `pc`. A `pc` outside every pool's text band costs the
+/// band comparisons alone, and one inside a band takes no lock.
 pub(crate) fn pin_pc(pc: usize) -> Option<CodePin> {
-    let ops = ops()?;
-    // SAFETY: registered pack host callback.
-    unsafe { (ops.pin_pc)(pc) }
+    let band = super::text(pc)?;
+    // SAFETY: `pin` takes the loader it was registered with.
+    unsafe { (band.pin)(band.loader, pc) }
 }
 
 /// Execution-scoped custody handle for a [`CodePin`] (PACK-16 / FAIL-15).
@@ -199,8 +198,11 @@ const LOAD_UNSUPPORTED: u8 = 11;
 const ACTIVATE_CAPACITY: u8 = 3;
 
 /// `code.bind(f)`: produce a `Code[F]` handle for the PROG-9 descriptor `descriptor`.
-/// Statically linked entries get process-lifetime backing (`descriptor | 1`); entries
-/// inside a loaded slab image retain an owning image pin.
+/// An entry outside every pool's text band is statically linked and gets
+/// process-lifetime backing (`descriptor | 1`). An entry inside one gets a handle that
+/// owns a pin on its image. An entry inside a band that no live image holds is the
+/// text of an unloaded image, which only code that outlived its image can name: it
+/// gets no handle, and the process stops.
 ///
 /// # Safety
 /// `descriptor` points to a valid PROG-9 descriptor `{code, length, revision, id...}`.
@@ -211,17 +213,16 @@ pub unsafe extern "C" fn hirsel_core_code_bind(descriptor: *const u8) -> *mut u8
     }
     // SAFETY: descriptor word 0 is the PACK-15 adapter entry address.
     let entry = unsafe { descriptor.cast::<usize>().read() };
-    if super::locate(entry).is_some()
-        && let Some(ops) = ops()
-    {
-        // SAFETY: registered pack host binds live loaded image owning `entry`.
-        let handle = unsafe { (ops.bind_loaded)(entry, descriptor.addr()) };
-        if !handle.is_null() {
-            return handle;
-        }
+    let Some(band) = super::text(entry) else {
+        return (descriptor.addr() | 1) as *mut u8;
+    };
+    // SAFETY: `bind` takes the loader it was registered with.
+    let handle = unsafe { (band.bind)(band.loader, entry, descriptor.addr()) };
+    if handle.is_null() {
+        eprintln!("hirsel: code.bind named the entry {entry:#x} of an unloaded image");
+        std::process::abort();
     }
-    // Statically linked host entry: process-lifetime backing, bit 0 tagged.
-    (descriptor.addr() | 1) as *mut u8
+    handle
 }
 
 /// `code.load[F](loader, key, entry_id)`: validate and load a typed entry.

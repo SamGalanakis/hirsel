@@ -418,11 +418,8 @@ fn literal_llvm() {
 fn stop(backend: Backend) {
     let _alone = alone();
     // A separate pool makes the balance independent of any other stopped test.
-    let loader = Box::leak(Box::new(
-        Loader::new(hirsel_pack::config(0, Mask::PURE, 16 << 20, 8 << 20)).unwrap(),
-    ));
+    let loader = hirsel_pack::start(hirsel_pack::config(0, Mask::PURE, 16 << 20, 8 << 20)).unwrap();
     let _ = primary_loader();
-    hirsel_pack::loader_handle(loader);
     let a = compile_pack_module(
         &(resources("stopped", "u64")
             + r#"

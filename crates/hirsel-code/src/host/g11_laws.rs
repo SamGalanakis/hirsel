@@ -43,18 +43,24 @@ pub(super) fn check(loader: &Loader, replacement: Code<Leaf>) {
                     );
                 }
                 // The live replacement still runs but a fresh publication fails.
-                assert_eq!(load(loader, &bytes).err(), Some(Refusal::Unsupported));
+                assert_eq!(load(loader, &bytes).err(), Some(Refusal::Unsynchronized));
                 assert_eq!(call(&replacement, 1), 9);
                 drop(replacement);
-                assert_eq!(loader.reclaim(), Err(Refusal::Unsupported));
+                assert_eq!(loader.reclaim(), Err(Refusal::Unsynchronized));
+                // The dead text resolves to nothing, and while this thread's host
+                // refuses to synchronize it, its cohort keeps its run and its bytes.
+                assert_eq!(loader.resolve(at), None);
+                assert!(loader.installed() >= expected);
+                assert!(loader.unrevoked() >= expected - 24);
             })
             .join()
             .unwrap();
     });
-    assert_eq!(loader.resolve(at), None);
-    assert!(loader.installed() >= expected);
-    assert!(loader.unrevoked() >= expected - 24);
-    assert_eq!(load(loader, &bytes).err(), Some(Refusal::Unsupported));
+    // The refusal was that thread's. This one's reclaim synchronizes the withheld
+    // text, its cohorts are recycled, and the pool loads again.
+    assert_eq!(loader.reclaim(), Ok(()));
+    assert_eq!((loader.unrevoked(), loader.installed()), (0, 0));
+    assert_eq!(call(&load(loader, &bytes).unwrap(), 1), 10);
 }
 
 #[cfg(target_os = "macos")]

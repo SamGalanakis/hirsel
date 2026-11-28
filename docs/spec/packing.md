@@ -227,35 +227,53 @@ admission table.
 
 ## PACK-4: The code slab on Linux
 
-Linux x86-64 and aarch64 publish code by changing page protection, never through a second
-writable mapping. No page is writable and executable at once, and no file descriptor or
-alias can write live code.
+Linux x86-64 and aarch64 keep the whole text band executable and write it through a
+second view of the same memory that only the loader holds. No mapping is writable and
+executable at once, the writer view's address never leaves the loader, and no file
+descriptor can write live code.
 
-1. **Bands.** A slab reserves two adjacent anonymous `PROT_NONE` ranges, a **text band**
-   then a **data band**, each at most 1 GiB, so every text-to-data distance fits every
-   fixup field. A reservation costs address space only.
-2. **Cohorts.** A **cohort** is a page-aligned run in the text band and one in the data
-   band. An open cohort is mapped `PROT_READ | PROT_WRITE`, not executable, and nothing can
-   call into it. Installs are bump-packed into it, each image at the module's alignment
-   (64 bytes or more, so no two images share a cache line).
+1. **Bands.** A slab reserves one range of address space for two adjacent bands, a
+   **text band** then a **data band**, each at most 1 GiB, so every text-to-data distance
+   fits every fixup field. The text band is one shared mapping of a fixed-length `memfd`,
+   `PROT_READ | PROT_EXEC` over its whole length. The loader maps the same file once more
+   at an unrelated address, `PROT_READ | PROT_WRITE`: the **writer view**. The file is
+   then sealed against resizing, against `write` and against any further writable
+   mapping, and its descriptor is closed. Both views are kept out of fork children and
+   core dumps. The data band is anonymous `PROT_NONE` memory. A reservation costs address
+   space only. A slab is not created (`Unsupported`) unless its two code views are exactly
+   two mappings of that file, the text view `r-xs` and the writer view `rw-s`.
+
+   A text page the loader has never written reads as zero. That is a trap on aarch64 and
+   an instruction on x86-64, so on x86-64 the loader fills each range it takes from the
+   text band with the trap pattern before it installs into it. Text the loader has never
+   taken is zero, and no address in it was ever anyone's.
+2. **Cohorts.** A **cohort** is a run in the text band and a page-aligned run in the data
+   band. An open cohort's data run is mapped `PROT_READ | PROT_WRITE`, and its text is
+   written through the writer view. Its text is executable while it is written, and no
+   address in it has left the loader. Installs are bump-packed into it, each image at the
+   module's alignment (64 bytes or more, so no two images share a cache line). An install
+   that is refused after it took its room gives the room back, and a cohort it opened is
+   gone.
 3. **Batch.** A batch is the installs that land in one open cohort. It closes 250 µs after
    its first install, at once when an install asks for an immediate flush, or when the
    cohort is full.
 4. **Publish.** In order:
-   1. copy `text` and `data`, write import slots, apply and range-check fixups;
-   2. fill every text byte outside an image with the trap pattern (x86-64 `0xCC`; aarch64
-      `brk #0`);
-   3. one `mprotect` of the text run to `PROT_READ | PROT_EXEC` and one of the data run to
-      `PROT_READ`;
-   4. aarch64: instruction cache maintenance over the text run (`dc cvau`, `ic ivau`,
-      `isb`);
+   1. copy `data` into the data run and `text` through the writer view, with import slots
+      written and fixups applied and range-checked;
+   2. fill every text byte of the run outside an image with the trap pattern (x86-64
+      `0xCC`; aarch64 the zero word, `udf #0`);
+   3. one `mprotect` of the data run to `PROT_READ`;
+   4. aarch64: cache maintenance over the text run, `dc cvau` through the writer view and
+      `ic ivau` through the text view, then `isb`;
    5. one `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)`;
    6. add the batch's images to the PC table (PACK-9);
    7. release the images to their callers.
 
    No address in the cohort leaves the loader before step 7. A slab whose process cannot
    register for that `membarrier` command is not created (`Unsupported`), and its host runs
-   Places in separate processes.
+   Places in separate processes. When the host refuses step 3 or step 5, every install of
+   the batch is refused `Unsynchronized`, no address of the batch leaves the loader, and
+   its images are retired as dead ones.
 5. **Retire and recycle.** An image is dead when its count is zero (PACK-6). The thread
    that drops the last count only hands the image to the loader: it takes no lock,
    allocates nothing and makes no system call, so a dispatching worker can be that
@@ -265,20 +283,20 @@ alias can write live code.
       digest is there;
    2. removes the image's row from the PC table in every chunk the image spans and waits
       until no hazard slot names an old array (PACK-9);
-   3. maps each text page on which the image was the last live one `PROT_NONE` and
-      returns it (`MADV_DONTNEED`). A stale jump into such a page faults. An image that
-      dies before its cohort is published has its text filled with traps instead, and
-      its wholly dead pages are closed when the cohort is published.
-   A text page that a live image shares is never written on Linux. So the part of a
-   dead image on a page it shares with a live image of its cohort stays mapped and
-   executable, and a stale jump into it runs its old code instead of faulting, until the
-   last image on that page dies. A page the host refuses to close is counted
-   (`unrevoked`) and stays out of use. A dead image's bytes count as installed until its
-   cohort is recycled.
+   3. overwrites the image's text with the trap pattern through the writer view and
+      repeats steps 4.4 and 4.5 over it. A stale jump into it traps, whether or not a
+      live image shares its page. An image that dies before its cohort is published is
+      filled the same way.
 
-   A cohort is dead when every image in it is dead. The loader then maps both its runs
-   `PROT_NONE`, returns their pages, and returns the ranges to the slab. The range may
-   later open as a new cohort; step 2 above runs before it is published again.
+   Dead text the host refuses to synchronize is counted (`unrevoked`). Its cohort stays
+   out of use, `reclaim` answers `Unsynchronized`, and every later reclaim asks the host
+   again before it does anything else. The pool's other cohorts are unaffected and it
+   goes on loading. A dead image's bytes count as installed until its cohort is recycled.
+
+   A cohort is dead when every image in it is dead and none of its text is unrevoked. The
+   loader then returns its text run to the slab with the trap bytes in place, maps its
+   data run `PROT_NONE`, returns the data pages (`MADV_DONTNEED`), and returns both
+   ranges. The range may later open as a new cohort.
 6. **`mseal`** is never applied to a slab.
 
 ## PACK-5: The code slab on Apple targets
@@ -425,9 +443,11 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
      past its `Code[F]`.
    - **A stack fault first.** A fault on a task stack's guard or growth pages keeps its
      own meaning (`Stack`, `HostMemory`, growth) wherever its PC is.
-   - **The join.** The runtime does not link the loader. A pack host registers its
-     loader's text band and PC lookup with the runtime once per process, and takes the
-     row addresses its loader binds imports to from its own image. A row the image lacks
+   - **The join.** The runtime does not link the loader. A pack host registers each
+     pool's bands and its loader's lookups with the runtime when it makes the pool, and
+     takes the row addresses its loader binds imports to from its own image. The
+     runtime finds the pool of an address by its band, and the pool's `Loader`
+     capability handle is the one that registration gave. A row the image lacks
      (the law and measurement rows) has no address, and a module that imports one is
      refused as `Import(row)`.
 7. **Causes (L2, specified).** On supported 64-bit targets the prepaid native cell
@@ -486,6 +506,7 @@ ends the host.
 | `Quarantined` | the digest faulted on this host |
 | `NotPrelinked` | the host has no slab and its image lacks the key |
 | `Unsupported` | the host cannot publish code (PACK-4), or a module's alignment is above a page |
+| `Unsynchronized` | the host refused to synchronize this publication (PACK-4 step 4); the batch's images are retired as dead ones, and `code.load` reports it as `Unsupported` |
 
 ## PACK-11: The context line
 

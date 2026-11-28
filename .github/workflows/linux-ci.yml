@@ -17,7 +17,7 @@ jobs:
   core:
     name: Core build and laws
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash

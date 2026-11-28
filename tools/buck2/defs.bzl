@@ -85,7 +85,8 @@ def _cargo_env(package_name, crate, version):
 # also when a test runs it with a cleared environment. DT_RPATH, unlike
 # DT_RUNPATH, also serves libLLVM's own dependencies. Tests on the pool carry
 # both directories (toolchains//:llvm-libraries).
-LLVM_HOST = HOSTS["x86_64-unknown-linux-gnu"]
+HOST_TRIPLE = "x86_64-unknown-linux-gnu"
+LLVM_HOST = HOSTS[HOST_TRIPLE]
 LLVM_TREE = "$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files"
 LLVM_RPATH = [
     "-Clink-arg=-Wl,--disable-new-dtags",
@@ -709,6 +710,8 @@ def _toolchain_bundle_impl(ctx):
         # Keep the build-tree RPATH valid. Install products with the final
         # compiler because BOLT changes its GNU build ID.
         compiler = ctx.actions.copy_file("hirsel", ctx.attrs._bolt_compiler, executable_bit_override = True)
+    runtime_targets = [HOST_TRIPLE] if ctx.attrs.host_only else RUNTIME_TARGETS.keys()
+    embed_targets = [] if ctx.attrs.host_only else EMBED_RUNTIME_TARGETS.keys()
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'compiler="$1"; mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
@@ -719,10 +722,10 @@ def _toolchain_bundle_impl(ctx):
         " ".join(['--{} "${{{}}}"'.format(slot, i + 2) for i, slot in enumerate(ctx.attrs.runtimes)]) +
         (' --exec-helper "${{{}}}"'.format(len(ctx.attrs.runtimes) + 2) if triple in EXEC_HELPER_TARGETS else '') +
         ' > /dev/null; shift {}'.format(len(ctx.attrs.runtimes) + (2 if triple in EXEC_HELPER_TARGETS else 1))
-        for triple in RUNTIME_TARGETS
+        for triple in runtime_targets
     ] + [
         '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" --embed-runtime "$2" > /dev/null; shift 2'
-        for _ in EMBED_RUNTIME_TARGETS
+        for _ in embed_targets
     ] + [
         'cp "$packages"/*.hpkg "$root/core-packages/"',
         'python3 "$programs" helpers "$product" "$root" "$platform/platform" "$TMPDIR" "$TMPDIR/platform_main"',
@@ -730,13 +733,13 @@ def _toolchain_bundle_impl(ctx):
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     runtimes = []
-    for triple in RUNTIME_TARGETS:
+    for triple in runtime_targets:
         runtimes.append(triple)
         for dep in ctx.attrs.runtimes.values():
             runtimes.append(dep[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
         if triple in EXEC_HELPER_TARGETS:
             runtimes.append(ctx.attrs.exec_helpers[DefaultInfo].sub_targets[triple][DefaultInfo].default_outputs[0])
-    for triple in EMBED_RUNTIME_TARGETS:
+    for triple in embed_targets:
         runtimes.append(triple)
         runtimes.append(ctx.attrs.embed_runtime[DefaultInfo].sub_targets[runtime_target_key(triple)][DefaultInfo].default_outputs[0])
     bundle_memory = "6G" if DIST_BUNDLE_JOBS > 1 else PRODUCT_MEMORY_LIMIT
@@ -760,8 +763,9 @@ hirsel_toolchain_bundle = rule(
     attrs = {
         "hirsel": attrs.dep(),
         "runtimes": attrs.dict(attrs.string(), attrs.dep(), sorted = False),
-        "embed_runtime": attrs.dep(),
+        "embed_runtime": attrs.option(attrs.dep(), default = None),
         "exec_helpers": attrs.dep(),
+        "host_only": attrs.bool(default = False),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
         "_product": attrs.source(default = "root//tools/toolchain-dist:product.hcfg"),
@@ -921,7 +925,7 @@ _pic_staticlib = rule(
 def hirsel_pic_staticlib(name, library):
     _pic_staticlib(name = name, library = library, visibility = ["PUBLIC"])
 
-def hirsel_core_runtime_archives(name, library, archive_name, shipped = True, embed = False):
+def hirsel_core_runtime_archives(name, library, archive_name, shipped = True, embed = False, host_bundle = False):
     """The Core runtime, in its own archive namespace on every runtime target.
 
     Use the library's Cargo-resolved dependencies. A test fixture's archives
@@ -937,6 +941,10 @@ def hirsel_core_runtime_archives(name, library, archive_name, shipped = True, em
         archives[triple] = ":" + configured
     _core_runtime_archives(name = name, archives = archives, archive_name = archive_name,
                            visibility = ["PUBLIC"])
+    if host_bundle:
+        # Selecting a subtarget of the full archive set still configures every runtime.
+        _core_runtime_archives(name = name + "-host", archives = {HOST_TRIPLE: archives[HOST_TRIPLE]},
+                               archive_name = archive_name)
     darwin = [triple for triple in platforms if triple.endswith("-apple-darwin")]
     if darwin:
         darwin_archives = [":" + name + "[" + runtime_target_key(triple) + "]" for triple in darwin]
@@ -1050,6 +1058,7 @@ def _hirsel_exec_helpers(archive):
         native.configured_alias(name = name, actual = ":" + archive, platform = platform)
         archives[triple] = ":" + name
     _exec_helpers(name = "hirsel-exec-helpers", archives = archives, visibility = ["PUBLIC"])
+    _exec_helpers(name = "hirsel-exec-helpers-host", archives = {HOST_TRIPLE: archives[HOST_TRIPLE]})
 
 def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", delegated_cgroup = False):
     files_env = {

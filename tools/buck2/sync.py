@@ -419,7 +419,7 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict, slots=None) 
         rules.append(call('hirsel_library', name=library, deps=deps,
                           **{**attrs, 'features': slot['features']}))
         rules.append(call('hirsel_core_runtime_archives', name=f'{name}{suffix}-archives',
-                          library=f'//:{library}', archive_name=archive))
+                          library=f'//:{library}', archive_name=archive, host_bundle=suffix != '-allocation-count'))
     return '\n'.join(rules)
 
 

@@ -62,28 +62,37 @@ def distribution_gates(out, call, Raw, reads, slots):
                             files_env={"HIRSEL_PACK_COMPILER": "//:hirsel-core-driver-bin-hirsel",
                                        "HIRSEL_PACK_PROGRAMS": "//tools/toolchain-dist:toolchain_programs.py"},
                             extra_env={"HIRSEL_JOBS": "1"}))
+    runtimes = {flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
+                for flag, slot in slots.items()}
+    platform_sources = Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.hcfg", "core/programs/store-archive-tool/hirsel.hcfg"]')
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            runtimes={flag: "//:hirsel-core-rt" + slot["buck_suffix"] + "-archives"
-                                      for flag, slot in slots.items()},
+                            runtimes=runtimes,
                             embed_runtime="//:hirsel-core-rt-ios-embed-archives",
                             exec_helpers="//:hirsel-exec-helpers",
                             toolchain_packages="//:toolchain-packages",
-                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.hcfg", "core/programs/store-archive-tool/hirsel.hcfg"]'),
+                            platform_sources=platform_sources,
+                            visibility=["PUBLIC"]))
+    out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain-host", hirsel="//:hirsel-core-driver-bin-hirsel",
+                            runtimes={flag: archive + "-host" for flag, archive in runtimes.items()},
+                            exec_helpers="//:hirsel-exec-helpers-host",
+                            host_only=True,
+                            toolchain_packages="//:toolchain-packages",
+                            platform_sources=platform_sources,
                             visibility=["PUBLIC"]))
     # The installed Store helpers open Directory grants with openat2.
     out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py", host=True,
                             data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
-                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain-host"}))
     out.append("\n" + call("hirsel_script_test", name="store-archive-recovery", script="tools/tests/store_archive.py", host=True,
                             data=["tools/tests/store_archive_server.py", "tools/tests/store_gap_recovery.py", "tools/tests/fixtures/store-archive-gap-format14.json", "tools/tests/store_index_recovery.py", "tools/tests/fixtures/store-index-damage-format14.json", "tools/tests/fixtures/store-archive-format14.json",
                                   "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                   "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],
-                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain-host"}))
     out.append("\n" + call("hirsel_script_test", name="store-host-recovery", script="tools/tests/store_host_recovery.py", host=True,
                             data=["core/tools/operator_fixture.py", "tools/tests/fixtures/host-admission.hcfg",
                                   "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                   "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],
-                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain-host"}))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
                             files_env={"HIRSEL_CONFIG_EXPORTER":"//:hirsel-config-export-bin-hirsel-config-export"},
                             data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py", "//tools/toolchain-dist:hcfg.py",

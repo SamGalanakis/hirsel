@@ -183,8 +183,11 @@ fn serve(mut peer: UnixStream, state: &State) -> io::Result<()> {
     if crate::host::peer_uid(&peer)? != crate::operator::operator_uid() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    peer.set_read_timeout(Some(IO_WAIT))?;
-    peer.set_write_timeout(Some(IO_WAIT))?;
+    // Darwin inherits O_NONBLOCK from the listener. Read through the
+    // client's half-close under the existing timeout.
+    peer.set_nonblocking(false)?;
+    crate::host::socket_option(peer.set_read_timeout(Some(IO_WAIT)))?;
+    crate::host::socket_option(peer.set_write_timeout(Some(IO_WAIT)))?;
     let mut request = Vec::new();
     (&mut peer).take(MESSAGE_BYTES).read_to_end(&mut request)?;
     let mut state = state.0.lock().unwrap();
@@ -228,12 +231,8 @@ fn query(socket: &Path, request: &[u8]) -> Result<Option<Value>, Failure> {
     if crate::host::peer_uid(&stream).map_err(Failure::io)? != crate::operator::operator_uid() {
         return Err(Failure::input("dev", "dev socket has a different peer UID"));
     }
-    stream
-        .set_read_timeout(Some(IO_WAIT))
-        .map_err(Failure::io)?;
-    stream
-        .set_write_timeout(Some(IO_WAIT))
-        .map_err(Failure::io)?;
+    crate::host::socket_option(stream.set_read_timeout(Some(IO_WAIT))).map_err(Failure::io)?;
+    crate::host::socket_option(stream.set_write_timeout(Some(IO_WAIT))).map_err(Failure::io)?;
     let exchange = || -> io::Result<Vec<u8>> {
         stream.write_all(request)?;
         stream.shutdown(std::net::Shutdown::Write)?;

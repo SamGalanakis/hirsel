@@ -117,6 +117,7 @@ impl CrossedCause {
             let data = block::allocate_admitted(
                 context,
                 held.partition(self.message_charge),
+                self.message_charge,
                 cause.message.capacity as usize,
                 8,
                 block::PLAIN,

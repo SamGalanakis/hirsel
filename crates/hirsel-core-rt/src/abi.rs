@@ -956,16 +956,10 @@ pub unsafe extern "C" fn hirsel_core_alloc_admitted(
     align: usize,
     kind: u8,
 ) -> *mut u8 {
+    let payer = crate::limit::Payer::from_current(payer);
     // SAFETY: caller owns the task and the positive admission pins the payer.
     unsafe {
-        crate::block::allocate_admitted(
-            &*context,
-            crate::limit::Payer::from_current(payer),
-            bytes,
-            align,
-            kind,
-        )
-        .as_ptr()
+        crate::task_heap::Heap::allocate(&*context, payer, bytes, align, kind, false).as_ptr()
     }
 }
 

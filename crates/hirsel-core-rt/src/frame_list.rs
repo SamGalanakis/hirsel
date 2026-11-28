@@ -110,14 +110,20 @@ pub unsafe extern "C" fn hirsel_core_promote_frame_list(
         return data;
     };
     // A matching record proves both sizes fit the frame slot.
-    let replacement = crate::task_heap::Heap::allocate(
-        task,
-        payer,
-        capacity as usize * stride,
-        8,
-        crate::block::PLAIN,
-        true,
-    );
+    let allocate = || {
+        crate::task_heap::Heap::allocate(
+            task,
+            payer,
+            capacity as usize * stride,
+            8,
+            crate::block::PLAIN,
+            true,
+        )
+    };
+    let replacement = match charge {
+        Some(charge) => task.admitted(payer, charge, allocate),
+        None => allocate(),
+    };
     if let Some(charge) = charge {
         unsafe { crate::task_heap::Page::own_raw(replacement, charge, crate::block::free) };
     }

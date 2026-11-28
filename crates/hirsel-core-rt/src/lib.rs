@@ -189,6 +189,8 @@ pub struct Context {
     pub(crate) regions: region::RegionCache,
     pub(crate) heap: std::cell::OnceCell<std::sync::Arc<task_heap::Heap>>,
     pub(crate) frame_lists: frame_list::FrameLists,
+    // A contained charge admitted for a slot the allocator has not yet returned.
+    admitting: std::cell::Cell<Option<(limit::Payer, u64)>>,
     pub(crate) spare_isolate_cell: Option<causes::ReservedStorage>,
     pub(crate) foreign: *const foreign::Run,
     /// The task's contained instances (FFI-13), dropped at its end.
@@ -308,6 +310,7 @@ impl Context {
             host_files: std::ptr::null_mut(),
             isolates: Vec::new(),
             frame_lists: frame_list::FrameLists::default(),
+            admitting: std::cell::Cell::new(None),
             spare_isolate_cell: None,
             foreign: std::ptr::null(),
             contained: Default::default(),
@@ -397,6 +400,26 @@ impl Context {
     pub(crate) fn payer(&self) -> limit::Payer {
         limit::Payer::from_current(self.limit_record())
     }
+
+    /// Run the physical allocation for `charge`, already admitted against
+    /// `payer`. A contained context keeps the charge until the allocator
+    /// returns, so a stop raised inside settles it when the context drops.
+    #[inline(always)]
+    pub(crate) fn admitted<T>(
+        &self,
+        payer: limit::Payer,
+        charge: u64,
+        allocate: impl FnOnce() -> T,
+    ) -> T {
+        if self.allocation_custody == 0 {
+            return allocate();
+        }
+        debug_assert!(self.admitting.get().is_none());
+        self.admitting.set(Some((payer, charge)));
+        let value = allocate();
+        self.admitting.set(None);
+        value
+    }
 }
 
 impl Drop for Context {
@@ -404,6 +427,9 @@ impl Drop for Context {
         data_decode::discard(self);
         // Release all context-owned heap blocks and limit charges while both
         // `self.current` and `self.heap` are still live and open.
+        if let Some((payer, charge)) = self.admitting.take() {
+            payer.settle(charge);
+        }
         self.frame_lists = Default::default();
         self.isolates.clear();
         self.causes = causes::Causes::default();

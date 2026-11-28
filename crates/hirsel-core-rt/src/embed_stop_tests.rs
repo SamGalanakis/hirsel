@@ -488,6 +488,33 @@ fn returned_stops_release_locks_and_allow_restart() {
         other => panic!("expected HostMemory, got {other:?}"),
     }
 
+    unsafe extern "C" fn physical_overflow(
+        context: *mut Context,
+        _: *const Config,
+        _: *mut MainResult,
+    ) -> u8 {
+        // The small logical charge fits. Adding the native prefix to the
+        // requested extent then overflows before the allocator publishes a slot.
+        unsafe {
+            crate::abi::hirsel_core_alloc(
+                context,
+                ptr::null_mut(),
+                usize::MAX,
+                8,
+                11,
+                false,
+                crate::block::PLAIN,
+            )
+        };
+        unreachable!()
+    }
+    let interrupted = Execution::contained();
+    match unsafe { run_contained_worker(&interrupted, &cfg, physical_overflow) } {
+        Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "HostMemory"),
+        other => panic!("expected HostMemory after admission, got {other:?}"),
+    }
+    drop(interrupted);
+
     // Generation 3 acquires the exact same lock and runs to completion.
     unsafe extern "C" fn reuse_lock_entry(
         _: *mut Context,

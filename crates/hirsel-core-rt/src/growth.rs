@@ -57,12 +57,13 @@ pub(crate) unsafe fn replace(
     let old = unsafe { NonNull::new_unchecked(carrier.cast::<*mut u8>().read()) };
     let payer = context.payer();
     block::admit_storage(payer, (!overflow).then_some(charge))?;
-    let frame_payer = context.frame_lists.remove(old).map(|(payer, _)| payer);
+    // A frame record keeps the old charge until the replacement is published.
+    let framed = context.frame_lists.contains(old);
     // Memcheck tracks requested extents and lacks per-slot resize metadata.
     #[cfg(not(feature = "memcheck"))]
     if kind == block::PLAIN
         && bytes <= crate::abi_layout::GROW_SLAB_MAX_PAYLOAD_BYTES as usize
-        && frame_payer.is_none()
+        && !framed
         && let Some(original) =
             unsafe { task_heap::try_reassign_plain_slab(old, payer, bytes, align) }
     {
@@ -76,25 +77,14 @@ pub(crate) unsafe fn replace(
     // SAFETY: the caller owns the carrier and the full charge was admitted.
     Ok(unsafe {
         replace_backing(
-            context,
-            carrier,
-            old,
-            payer,
-            frame_payer,
-            charge,
-            bytes,
-            align,
-            capacity,
-            moved,
-            refund,
-            kind,
-            reuse,
+            context, carrier, old, payer, framed, charge, bytes, align, capacity, moved, refund,
+            kind, reuse,
         )
     })
 }
 
 /// # Safety
-/// As for `replace`, after admission and removal of any frame allocation record.
+/// As for `replace`, after admission. `framed` says `old` has a frame record.
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 unsafe fn replace_backing(
@@ -102,7 +92,7 @@ unsafe fn replace_backing(
     carrier: *mut u8,
     old: NonNull<u8>,
     payer: Payer,
-    frame_payer: Option<Payer>,
+    framed: bool,
     charge: u64,
     bytes: usize,
     align: usize,
@@ -113,7 +103,7 @@ unsafe fn replace_backing(
     reuse: bool,
 ) -> NonNull<u8> {
     if reuse
-        && frame_payer.is_none()
+        && !framed
         && unsafe {
             let heap = context.heap.get_or_init(std::sync::Arc::default);
             task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind)
@@ -126,7 +116,9 @@ unsafe fn replace_backing(
         payer.settle_in(context, refund);
         return old;
     }
-    let replacement = task_heap::Heap::allocate(context, payer, bytes, align, kind, reuse);
+    let replacement = context.admitted(payer, charge, || {
+        task_heap::Heap::allocate(context, payer, bytes, align, kind, reuse)
+    });
     // SAFETY: the new slot is disjoint and large enough for the retained
     // elements. Install the carrier before publishing the old payer's refund.
     unsafe {
@@ -134,7 +126,8 @@ unsafe fn replace_backing(
         std::ptr::copy_nonoverlapping(old.as_ptr(), replacement.as_ptr(), moved);
         carrier.cast::<*mut u8>().write(replacement.as_ptr());
         carrier.add(16).cast::<u64>().write(capacity);
-        if let Some(payer) = frame_payer {
+        if framed {
+            let (payer, _) = context.frame_lists.remove(old).unwrap();
             payer.settle_in(context, refund);
         } else {
             block::free_in(context, old, refund);

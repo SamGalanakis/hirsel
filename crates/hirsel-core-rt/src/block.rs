@@ -129,15 +129,19 @@ pub(crate) fn admit_storage(payer: Payer, charge: Option<u64>) -> Result<(), Cap
     Ok(())
 }
 
+/// Physical storage for `charge`, already admitted against `payer`.
 #[inline]
 pub(crate) fn allocate_admitted(
     context: &Context,
     payer: Payer,
+    charge: u64,
     bytes: usize,
     align: usize,
     kind: u8,
 ) -> NonNull<u8> {
-    task_heap::Heap::allocate(context, payer, bytes, align, kind, false)
+    context.admitted(payer, charge, || {
+        task_heap::Heap::allocate(context, payer, bytes, align, kind, false)
+    })
 }
 pub(crate) fn allocate_guest(
     context: &Context,
@@ -147,7 +151,7 @@ pub(crate) fn allocate_guest(
     align: usize,
     kind: u8,
 ) -> NonNull<u8> {
-    let payload = allocate_admitted(context, payer, bytes, align, kind);
+    let payload = allocate_admitted(context, payer, charge, bytes, align, kind);
     unsafe { task_heap::Page::own_raw(payload, charge, free) };
     payload
 }
@@ -271,11 +275,9 @@ impl Block {
         kind: u8,
     ) -> Result<Self, Capacity> {
         admit_storage(payer, charge)?;
-        let pointer = allocate_admitted(context, payer, bytes, align, kind);
-        Ok(Self {
-            pointer,
-            charge: charge.unwrap(),
-        })
+        let charge = charge.unwrap();
+        let pointer = allocate_admitted(context, payer, charge, bytes, align, kind);
+        Ok(Self { pointer, charge })
     }
     #[inline]
     pub fn pointer(&self) -> NonNull<u8> {

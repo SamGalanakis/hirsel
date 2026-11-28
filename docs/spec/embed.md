@@ -1,11 +1,5 @@
 # Embedding and Apple mobile targets
 
-*Specified 2026-11-26 (lane ios-spec-3137, from the PR #11 review and the iOS prospect).
-Amended the same day after soundness review 3154 (lane ios-spec-fix-3158) and re-review 3167
-(lane ios-spec-fix-2-3169). Rules EMB-1 to EMB-9. Not built: every rule here is a slice in
-the iOS track, and iOS stays in [reserved](reserved.md) until its device gate passes
-(EMB-9).*
-
 This specification adds three general things and one Apple-specific thing:
 
 - a **static-library output kind**, which any native target can build (EMB-1);
@@ -127,8 +121,7 @@ Some keys do not change:
   only executables, and an archive never enters it.
 
 Old keys are not migrated: a build with the new keys misses and rebuilds. The kind is a full
-field, never a suffix on a path or a flag folded into `link_mode`. PR #11's recipe cache
-returned an executable for an archive request because the kind was not in the key.
+field, never a suffix on a path or a flag folded into `link_mode`.
 
 **The target and kind table.** Which kinds a target builds is one exhaustive table in the
 layout crate (`Target::admits(self, OutputKind) -> Result<(), Refusal>`), consulted at
@@ -230,7 +223,7 @@ slot**. It is built from the same runtime crates without the `standalone` featur
   spontaneous teardown end the runtime and are reported to the host (EMB-4). The process
   goes on. No embed-slot code path calls `exit` or `_exit`. The archive may still import
   them through Rust std members that Hirsel never calls, so the law is behavioural
-  (slice 2s, covering startup refusals, run stops and spontaneous teardown), not a symbol
+ , not a symbol
   listing.
 - It never changes the process-wide `SIGPIPE` disposition. Socket sends suppress `SIGPIPE`
   per socket (`SO_NOSIGPIPE` on Darwin, `MSG_NOSIGNAL` on Linux). Pipe writes for `Exec`
@@ -545,9 +538,6 @@ lock, does one of two things *before* taking the lock or entering libc or the al
   check succeeds, the protected path cannot fault on either the hard guard or growth.
 - switches to the worker's host stack (which is already writable for the protected path and
   never takes a recoverable growth fault inside a lock or libc).
-
-This rule is proven by tests (slice 2s), not guarded at run time: no product mechanism
-guards against the runtime breaking its own rule.
 
 **What runs.** The embedded program is a runner program: it declares
 `runner = { major = 1 }`. It is launched as one place with
@@ -932,7 +922,7 @@ entry's schema. A malformed argument is a `Refused` outcome, never a fault.
 
 Every byte string a callback receives is the ordinary value codec's encoding of the type
 below. These types are part of ABI v1 and are written into the generated codec (EMB-5).
-Their test vectors are fixed bytes in the spec harness, not generator output (slice 7).
+Their test vectors are fixed bytes in the spec harness, not generator output.
 
 ```text
 // outcome: the runner's Outcome for the call, exactly the bytes a WebSocket client reads.
@@ -1374,10 +1364,6 @@ Swift files, with `platforms` from the records (`.iOS("26.0")`, `.macOS("26.0")`
 the target records. The application, its Xcode project, signing, entitlements and the device
 run live in the host repository (`gillesmag/hirsel-ios`).
 
-This settles DECISIONS 2026-11-26 20:3xZ ("target + runtime + output mode live in the Hirsel
-repo; Swift host/Xcode glue stays in gillesmag/hirsel-ios"). The Swift glue generated from a
-manifest is Hirsel's; the Swift an application author writes is the host repository's.
-
 ## EMB-6: Link-kit rows for iOS
 
 The link kit (`tools/native-toolchain/README.md`, "Link kit") gains one TBD v4 stub set per
@@ -1397,8 +1383,7 @@ copied from an Apple SDK, and no Apple file is shipped.
 
   As on macOS, every stub is linked. The generated `module.modulemap` links the
   `CoreFoundation` and `Security` frameworks for every program, so the host app needs no
-  per-program framework list. Both frameworks ship on every iOS device. (Lane 3137's report
-  decision 19 said to link only the frameworks used. This rule replaces it.)
+  per-program framework list. Both frameworks ship on every iOS device.
 - The kit's manifest row for each variant records its floor from EMB-2. The kit digest
   enters every iOS build key, as it does for other targets.
 - The import audit (EMB-1) checks a static library's undefined symbols against these stubs.
@@ -1529,9 +1514,7 @@ say so.
 
 macOS keeps its current `System` provider in this track: the Keychain root read through
 `rustls-native-certs`, at `crates/hirsel-core-rt/src/os_tls.rs` (`system_roots`; the
-variant mapping is `protocol_error`). The platform verifier is the likely end state for
-every Darwin target, so that both use one decision procedure and the macOS root read goes.
-That unification is a separate follow-up outside the iOS track.
+variant mapping is `protocol_error`).
 
 ## EMB-8: Refusals
 
@@ -1566,216 +1549,13 @@ with the platform and floor from the record:
 - **Minimum version.** The member's minimum version must be no later than the target's
   `floor`. A member built for a later minimum is refused, because it could use an
   interface the floor lacks. A member with an earlier minimum is admitted: it runs on the
-  floor. PR #11 admitted `minos` up to 28.0, which inverted this rule.
+  floor.
 
 Hirsel's own objects carry exactly the floor. Foreign and prebuilt runtime members (`ring`'s
 C and assembly objects among them) carry their own minimum, no later than the floor.
 
-## EMB-9: Gates and std provisioning
+## EMB-9: Qualification
 
-**The Apple check.** iOS has no host on Linux, so a slice's gate is `cargo check` of the
-shipped feature set for both iOS triples, as `aarch64-apple-darwin` is checked today.
-`tools/apple_check.py` runs it, over one table of `{triple: crates}`.
-
-It checks with the toolchain's own `rustc` and a sysroot that the Rust bootstrap provisions.
-`tools/buck2/toolchain-lock.json` has `rust-std-ios` and `rust-std-ios-sim` rows
-(hermeticbuild rust-redist, at the toolchain's Rust version).
-`tools/buck2/bootstrap_rust_toolchain.py` installs their `lib/rustlib/<triple>/lib`, as it
-does `rust-std-darwin`.
-
-It sets `CC_<triple>`, `CXX_<triple>` and `AR_<triple>` to `true` and
-`CRATE_CC_NO_DEFAULTS=1`, so no build script runs `xcrun` or a host compiler. It is
-therefore a Rust type check only. It never produces `ring`'s native objects. Those are
-produced by the embed slot build in the real target slot (slice 6), whose archive members'
-platforms the FFI-3 rows check.
-
-The iOS crate set grows with the slices: the layout crate first, then the runtime closure
-(the embed slot's crates), then the driver's embed and SDK modules.
-
-**The embed slot.** `tools/toolchain-dist/product.hcfg` gains embed runtime rows for every
-target and both iOS triples. Each is a Buck platform like `runtime-darwin`, built without
-`standalone`. An iOS embed slot is built on Linux like the Darwin runtime archive, from the
-locked Rust std, with the pinned clang for its C and assembly members.
-
-**Qualification gates (Mac).** Two gates are separate from slice gates and need Apple
-hardware.
-
-### Simulator gate
-
-The simulator gate is a GitHub-hosted `macos-26` job in `.github/workflows/mac-ci.yml`,
-beside its existing macOS jobs.
-
-**Triggers.** Pushes land directly on `main`, so the workflow gains a `push` trigger on
-`main`, and the simulator job runs on it as well as on `pull_request`, `schedule` and
-`workflow_dispatch`. The job's `if:` names those events, so a push to main is never skipped.
-
-**Inputs.** A Linux job of the same workflow builds the installation (with the iOS and
-macOS embed slots), runs `hirsel sdk swift` <!-- doc-ref: planned --> on the fixture
-program (and builds the two-library equal-projection Swift packages and the EMB-6 symbol
-reference fixture object), and uploads the generated packages, archives, headers and
-fixture object as artifacts to the `macos-26` job. (The `macos-26` runner never executes an
-ELF Linux driver; alternatively, it may build a native macOS driver and its Mach-O tools
-in the same job and run `hirsel sdk swift` <!-- doc-ref: planned --> locally.) Either way,
-the job never depends on artifacts from another workflow run.
-
-**What it runs.**
-
-1. **Receive or generate the package.** Unpack the Linux-generated Swift package, archives,
-   headers and symbol reference fixture object (or generate them with the native macOS
-   driver built in this job).
-2. **Check the XCFramework against Apple's tool.** Run `xcodebuild -create-xcframework`
-   over the same three archives and headers. Compare its `Info.plist` with the driver's,
-   field by field: for each library, `LibraryIdentifier`, `LibraryPath`, `HeadersPath`,
-   `SupportedArchitectures`, `SupportedPlatform` and `SupportedPlatformVariant`. Apple's
-   tool is the independent oracle for the driver's assembly.
-3. **Check the symbol lists and two-library Swift link.** Link the EMB-6 symbol reference
-   fixture against the iOS SDK for the device and the simulator. Also compile two generated
-   Swift packages with equal binding projections in release mode (`-O`) and link both
-   against both lazy archives in both link orders (`A, B` and `B, A`), asserting a
-   duplicate `hirsel_embed_v1_*` link error in both orders (EMB-1, EMB-5).
-4. **Prepare a simulator.** Run `xcrun simctl list runtimes`, pin the simulator runtime it
-   found (never a version written blind), and create a disposable simulator. Add the TLS
-   test CA to that simulator's trust store (`xcrun simctl keychain <udid> add-root-cert`).
-5. **Run the test.** Build a minimal SwiftUI host with an XCTest target that depends on the
-   **generated package as SwiftPM resolves it**. Run it with `xcodebuild test` on the
-   simulator. The test checks:
-   - the start path, including the anchor and the projection fingerprint: the SHA-256 of
-     the shipped `projection.json` equals the generated `manifest_fp` and the projection
-     the linked library's `hirsel_embed_v1_manifest` gives;
-   - a Hirsel call's decoded result, a call of each entry kind, and a subscription with
-     two changes;
-   - a room with a state, a mixed-Part message-then-leave, a first-`Full` Part, and a
-     leave, matching `sdk/client/room.ts` / `sdk.md`;
-   - abandon, Swift cancellation before issue, held at the C registration boundary, after
-     issue, early outcome before C returns, and late cancellation handler safety;
-   - close from a host thread, from inside a callback, and racing external/deferred close;
-   - the EMB-7 TLS rows:
-     - **on every executing host (simulator, macOS and signed device):** a `Trust.System`
-       handshake to a public HTTPS host succeeds and an unanchored test CA gives
-       `UnknownIssuer`; under `Trust.Roots` matching the test CA, the leaf succeeds and a
-       wrong name, expired leaf and not-yet-valid leaf give their named variants; a `Roots`
-       grant with another digest is `Denied`;
-     - **on hosts deliberately provisioned with the private test CA** (the disposable
-       simulator above, and macOS only when the CI job explicitly provisions trust for that
-       test CA): the test CA's leaf also succeeds under `Trust.System` and gives
-       `NameMismatch`, `Expired` and `NotYetValid` against it;
-   - a stop and a second start, after which the old session handle returns
-     `HIRSEL_STOPPED` and a new call succeeds;
-   - the `Welcome.target` each slice reports.
-
-   The same XCTest runs on the macOS slice without a simulator (with the private-CA-under-
-   `Trust.System` assertion scoped to whether the macOS host provisioned that CA).
-6. **Delete the simulator.**
-
-Daytona macOS machines are for developing the Mac slices by hand. The standing gate is this
-job, because it runs on every change and does not expire.
-
-**Measurements.** The job also records measurements, not pass or fail, in its summary:
-
-- the Swift-to-Hirsel call round trip: p50 and p99 over 1,000 calls of a trivial compute
-  entry;
-- the time from `start` to the first result;
-- resident memory after `start`, physical and virtual separately;
-- the time of a stop then a start;
-- the worker and fiber counts.
-
-It runs a **PR #11 comparison arm** too, recording start time and resident memory only.
-PR #11's app is not a runner fixture: its entry is a renamed `main` (`hirsel_app_main`) run
-on a pthread, and its host drives a `Foreign[ios.Ios]` event loop through `hios_host_*`
-exports. So the comparison is defined by one shared program and one marker:
-
-- **The program.** It is runnable by both pinned toolchains (this repository's, and
-  PR #11 at `65a6f54` in a `/tmp` checkout, never pushed or commented on). It stores one
-  counter durably and returns it.
-- **The host adapter on each arm.** On the embed arm, the host calls the counter's
-  transact entry. On the PR arm, it posts the same input as a lifecycle event, and reads
-  the counter from the main-queue UI command that the program emits. PR #11's host-only
-  bridge symbols stay in the PR checkout; no new general-purpose export is added for them.
-- **The marker.** Both arms measure from process start to the first counter value seen on
-  the main queue. They take resident memory at the same point. Each sample is a fresh
-  process on the same simulator and configuration.
-- **Durability check (outside the timing interval).** Before accepting either arm's
-  fixture as the decided workload, each arm independently relaunches against its own
-  same-container store after observing the acknowledged counter value and confirms that the
-  persisted counter survives relaunch. This check runs outside the timed samples so neither
-  adapter can pass by serving a counter from process memory alone.
-
-PR #11 reserves 1 MiB per fiber stack and commits 256 KiB at first on iOS. The job records
-those values next to Hirsel's. Slice 9 carries that sizing difference into its device check.
-They are not adopted as a semantic limit.
-
-### Device gate
-
-The device gate is **not done**. It needs a physical iPhone and an A12 iPad at the 26.0
-floor, and a signed build. gillesmag runs it on their own devices (Sam's ruling G3 = C), not
-on Hirsel infrastructure. The supervisor asks for it in the PR #11 comment it posts after
-the build. The run is reported with the device models, iOS versions and the build ID.
-
-Until a signed device run passes it, iOS is labelled **simulator only** in reserved.md and
-in release notes. That holds after the simulator gate passes, too. The run qualifies the
-fixed 26.0 floor; it does not choose one.
-
-**First law: confinement.** The test runs inside the signed app's own writable container,
-so the OS sandbox cannot be what refuses:
-
-1. The test creates `root/` and a sibling `outside/` in the same container, with a file in
-   each. It first proves that the host itself can read and write `outside/` directly.
-2. It grants `root/` as a `Dir`. Through the grant, a file inside `root/` opens.
-3. A relative symlink inside `root/` that points inside `root/` is followed, where the
-   operation follows links.
-4. Through the grant, three legal relative names (passing Hirsel's public path check) whose
-   symlink targets lead outside `root/` are refused with `Denied`, with the confined open
-   reaching the kernel (`O_RESOLVE_BENEATH`) each time:
-   - a legal relative name whose symlink inside `root/` has a relative `..` target pointing
-     to `outside/`'s file;
-   - a legal relative name traversing a symlink directory inside `root/` whose relative
-     `..` target points to `outside/`;
-   - a legal relative name whose symlink inside `root/` has an absolute target pointing to
-     `outside/`'s file.
-
-   On the kernel path, `ENOTCAPABLE` maps to `EXDEV` and then to `Denied`
-   (`crates/hirsel-core-rt/src/host/darwin/path.rs`).
-5. `outside/`'s file is unchanged afterwards.
-
-The three public-boundary `Denied` assertions of the macOS law (a literal `..` parent
-component, an absolute path, and a symlink escape) are kept as well; the language boundary
-continues to reject literal `..` and absolute paths before any syscall, while the three
-symlink cases above prove kernel `O_RESOLVE_BENEATH` enforcement on legal relative names.
-A blanket symlink refusal, a sandbox `EACCES` or a lexical refusal does not pass the
-kernel law.
-
-A device that behaves otherwise stops the iOS track. The floor's premise (kernel
-enforcement of `O_RESOLVE_BENEATH`) is then false, and the confinement design is reopened.
-No userspace walk is built.
-
-**Then** the same simulator test runs on device (using the unprovisioned-host TLS suite
-above: public HTTPS `Trust.System` success, unanchored test CA `UnknownIssuer`, and
-`Trust.Roots` leaf-variant checks, without installing a private test CA on the user's
-device), followed by the runtime qualification that the simulator cannot give:
-
-- **Stack depth.** A recursion of a stated depth runs on the A12, and the guard page is
-  observed one frame past the bound.
-- **Faults.** The host survives a guard fault (EMB-3), and debugger attachment does not
-  break stack growth.
-- **The floor and interfaces.** The floor's `O_RESOLVE_BENEATH` holds, and NET-18 works
-  against the device's interfaces.
-- **Clocks.** A deadline spans a suspension: the test records whether the clock counts
-  suspended time (continuous) or only uptime.
-- **Memory.** The virtual reservation that `n_place` takes is recorded, with the resident
-  memory.
-- **Recovery.** An app suspends and resumes with a call in flight. A relaunch in the same
-  container finds every acknowledged commit.
-
-iOS leaves [reserved](reserved.md) when this gate passes.
-
-## Prior art
-
-| Project | Mechanism | Verdict |
-|---|---|---|
-| UniFFI | Logic stays in the Rust core; generated foreign code is a thin typed layer over a C ABI of byte buffers; generated Swift ships beside a static library | ADOPTED: the client protocol stays in the runtime, and Swift is codec plus stubs. NOT TAKEN: its interface definition language, because the runner entries and codec schemas already are the interface |
-| gomobile (`bind`) | Builds a `c-archive` per Apple slice and assembles an XCFramework; one Go runtime per process; exports only bound packages | ADAPTED: per-slice static archives and an assembled XCFramework, without `xcodebuild` and with renamed internals. One runtime per process, made a link error by the per-library anchor |
-| Kotlin/Native | Exports a class graph to Objective-C with reference-counted handles that cross the boundary | NOT TAKEN: no object, closure or reference crosses the embed ABI. Only codec values and generation-checked value handles cross, so there is no cross-runtime lifetime |
-| rustls-platform-verifier | On Apple targets, decides a chain by `SecTrustEvaluateWithError` with an SSL policy for the name, instead of reading roots; maps only a few Apple codes and reports the rest as other errors | ADAPTED for `Trust.System` on iOS (EMB-7): the same SecTrust decision, with the provider's own verification date and no network fetch. REPLACED: its partial mapping, by Hirsel's own leaf checks first and a total code table. The likely Darwin end state |
-| Goose | `export fn` gives a C wrapper per function; `goose_init`/`goose_exit` start and end the program; the compiler writes the header (`--header` <!-- doc-ref: external -->) | ADAPTED: start and stop, and a toolchain-written header. NOT TAKEN: per-function C-typed exports, because Hirsel exports entries with stable schemas, not C signatures |
-| Go `c-archive` | Installs its synchronous-signal handlers with `SA_ONSTACK`, gives each thread it creates its own alternate signal stack, and passes faults outside Go code to the handler it replaced | ADOPTED: one chaining fault handler installed with `SA_ONSTACK`, alternate signal stacks only on the runtime's own worker threads, and host threads untouched (EMB-3) |
-| PR #11 | `/usr/bin/libtool` archive; `hirsel_app_main`; iOS FFI-3 admitting `minos` up to 28.0; CPU and triples written per site | REPLACED by the pinned `llvm-ar`, the EMB-4 ABI, the EMB-8 FFI-3 rule and the EMB-2 records. Its target-enum widening and front array sizing are taken as they are |
+The [Mac workflow](../../.github/workflows/mac-ci.yml) owns the simulator and macOS gates.
+[Embedding verification](../../tools/tests/embed/VERIFICATION.md) lists their oracles and
+the signed-device qualification criteria.

@@ -453,7 +453,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(template) = &out.template {
             self.nested.insert(row, template.clone());
         }
-        self.out.refusals.extend(out.refusals);
+        self.out.merge_refusals(out.refusals, out.resource_refusal);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
         self.out.computed.extend(out.computed);
@@ -569,7 +569,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(template) = out.template {
             self.nested.insert(row, template);
         }
-        self.out.refusals.extend(out.refusals);
+        self.out.merge_refusals(out.refusals, out.resource_refusal);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
         self.out.computed.extend(out.computed);

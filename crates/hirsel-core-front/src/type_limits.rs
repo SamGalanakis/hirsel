@@ -48,6 +48,11 @@ impl Extent {
     fn within(self) -> bool {
         self.nodes <= TYPE_NODES && self.depth <= TYPE_DEPTH
     }
+
+    fn include(&mut self, part: Self) {
+        self.nodes = self.nodes.saturating_add(part.nodes);
+        self.depth = self.depth.max(part.depth.saturating_add(1));
+    }
 }
 
 /// The expansion of a type deeper than [`TYPE_DEPTH`]: the count stopped there.
@@ -59,6 +64,7 @@ pub(crate) struct Expansion<'d> {
     decls: &'d crate::Rows<TypeDecl>,
     counted: HashMap<TyId, Extent>,
     open: HashSet<TyId>,
+    stop_at_limit: bool,
 }
 
 impl<'d> Expansion<'d> {
@@ -67,11 +73,19 @@ impl<'d> Expansion<'d> {
             decls,
             counted: HashMap::default(),
             open: HashSet::default(),
+            stop_at_limit: false,
+        }
+    }
+
+    pub(crate) fn for_body(decls: &'d crate::Rows<TypeDecl>) -> Self {
+        Self {
+            stop_at_limit: true,
+            ..Self::new(decls)
         }
     }
 
     /// The types one level inside `ty` in its expansion.
-    fn parts(&self, t: &mut Types, ty: TyId) -> Vec<TyId> {
+    fn parts(&self, t: &mut impl TyRead, ty: TyId) -> Vec<TyId> {
         match t.kind(ty).clone() {
             TyKind::Tuple(xs) => xs,
             TyKind::Array(x, _) | TyKind::Anchored(x, _) => vec![x],
@@ -104,11 +118,11 @@ impl<'d> Expansion<'d> {
     /// The extent of `ty`'s expansion, counted at most [`TYPE_DEPTH`] levels down from a
     /// root. A type that reaches itself is one node where it does: only a declaration
     /// that holds itself inline, refused by OWN-2, or one behind a pointer.
-    pub(crate) fn extent(&mut self, t: &mut Types, ty: TyId) -> Result<Extent, TooDeep> {
+    pub(crate) fn extent(&mut self, t: &mut impl TyRead, ty: TyId) -> Result<Extent, TooDeep> {
         self.extent_at(t, ty, 1)
     }
 
-    fn extent_at(&mut self, t: &mut Types, ty: TyId, level: u32) -> Result<Extent, TooDeep> {
+    fn extent_at(&mut self, t: &mut impl TyRead, ty: TyId, level: u32) -> Result<Extent, TooDeep> {
         if let Some(&e) = self.counted.get(&ty) {
             return Ok(e);
         }
@@ -122,14 +136,14 @@ impl<'d> Expansion<'d> {
         let mut result = Ok(());
         for part in self.parts(t, ty) {
             match self.extent_at(t, part, level + 1) {
-                Ok(p) => {
-                    e.nodes = e.nodes.saturating_add(p.nodes);
-                    e.depth = e.depth.max(p.depth.saturating_add(1));
-                }
+                Ok(p) => e.include(p),
                 Err(deep) => {
                     result = Err(deep);
                     break;
                 }
+            }
+            if self.stop_at_limit && !e.within() {
+                break;
             }
         }
         self.open.remove(&ty);
@@ -141,6 +155,49 @@ impl<'d> Expansion<'d> {
     fn within(&mut self, t: &mut Types, ty: TyId) -> bool {
         self.extent(t, ty).is_ok_and(Extent::within)
     }
+}
+
+/// An expression or substitution can build a shared tree even behind a pointer,
+/// in a type argument or in a callable signature. Naming and comparing types
+/// still walks those parts, so count them independently of inline expansion.
+pub(crate) fn structural_extent(
+    t: &impl TyRead,
+    counted: &mut HashMap<TyId, Extent>,
+    ty: TyId,
+    level: u32,
+) -> Result<Extent, TooDeep> {
+    if let Some(&extent) = counted.get(&ty) {
+        return Ok(extent);
+    }
+    if level > TYPE_DEPTH {
+        return Err(TooDeep);
+    }
+    let mut extent = Extent::LEAF;
+    let mut include = |part| {
+        extent.include(structural_extent(t, counted, part, level + 1)?);
+        Ok(())
+    };
+    match t.kind(ty) {
+        TyKind::Tuple(parts) | TyKind::Adt(_, parts) => {
+            for &part in parts {
+                include(part)?;
+            }
+        }
+        TyKind::Array(item, _) | TyKind::View(item) => include(*item)?,
+        TyKind::Anchored(item, root) => {
+            include(*item)?;
+            include(*root)?;
+        }
+        TyKind::Fn(params, result, _, _) => {
+            for &(_, part) in params {
+                include(part)?;
+            }
+            include(*result)?;
+        }
+        _ => {}
+    }
+    counted.insert(ty, extent);
+    Ok(extent)
 }
 
 /// The type a declaration stands for, at its own parameters.

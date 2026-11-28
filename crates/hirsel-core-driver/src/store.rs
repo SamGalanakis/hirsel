@@ -103,7 +103,7 @@ const BODY_HEADER: usize = 28;
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
 // Every frame carries its origin; object records name content-addressed blobs.
-pub(crate) const VERSION: u32 = 45;
+pub(crate) const VERSION: u32 = 46;
 /// `MAGIC`, `VERSION` and the frame's origin.
 pub(crate) const HEADER: usize = 44;
 /// The origin of a mapping this machine made. A record signed by another

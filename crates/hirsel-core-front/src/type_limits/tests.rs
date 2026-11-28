@@ -40,6 +40,67 @@ fn chain(first: &str, line: impl Fn(usize) -> String, n: usize) -> String {
     source
 }
 
+fn check_body(source: &str) -> crate::CoreCheck {
+    let p = declared(source);
+    accepted(&p);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.package_is("app", "1") && f.path.0.name == "probe")
+        .unwrap();
+    p.check_lower(f, &mut crate::Emitter::new())
+}
+
+#[test]
+fn inferred_tuple_expansion_stops_at_the_first_oversized_type() {
+    let probe = |n| {
+        chain(
+            "fn probe() -> u64 {\n    let a0 = (1u64, 1u64)",
+            |n| format!("    let a{n} = (a{p}, a{p})", p = n - 1),
+            n,
+        ) + "    1\n}\n"
+    };
+    let positive = check_body(&probe(12));
+    assert!(positive.function.is_some(), "{positive:?}");
+    assert!(positive.resource_refusal.is_none(), "{positive:?}");
+
+    let source = probe(30);
+    let refused = check_body(&source);
+    assert!(refused.function.is_none(), "{refused:?}");
+    assert!(
+        refused.refusals.is_empty() && refused.gaps.is_empty(),
+        "{refused:?}"
+    );
+    let resource = refused.resource_refusal.unwrap();
+    assert!(
+        resource.message.contains("131071 type nodes"),
+        "{resource:?}"
+    );
+    let span = resource.site.span;
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "(a14, a14)"
+    );
+}
+
+#[test]
+fn inferred_layout_size_is_refused_before_frame_emission() {
+    for (count, bytes) in [(1u64 << 20, 1u128 << 23), (1u64 << 63, 1u128 << 66)] {
+        let out = check_body(&format!(
+            "fn probe() -> u64 {{\n    let x = [0u64; {count}]\n    1\n}}\n"
+        ));
+        let refusal = out
+            .resource_refusal
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected body layout limit, got {out:?}"));
+        assert!(
+            refusal.message.contains(&format!("{bytes} bytes")),
+            "{out:?}"
+        );
+        assert!(out.function.is_none() && out.gaps.is_empty(), "{out:?}");
+    }
+}
+
 #[test]
 fn doubling_tuple_alias_chain_is_refused_once_where_it_crosses() {
     // T{n} expands to 2^(n+1) - 1 nodes: T15 is 65,535, within; T16 is 131,071.

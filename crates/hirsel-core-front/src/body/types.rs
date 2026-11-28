@@ -191,6 +191,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.ty_result(n, false)
     }
     pub(super) fn ty_result(&mut self, n: NodeId, scoped_roots: bool) -> TyId {
+        let ty = self.read_type(n, scoped_roots);
+        self.check_type(ty, n)
+    }
+
+    fn read_type(&mut self, n: NodeId, scoped_roots: bool) -> TyId {
         self.out.counts.types += 1;
         let c = self.kids(n);
         match self.kind(n) {

@@ -2,6 +2,8 @@ use super::*;
 mod codec;
 mod data_decode;
 mod numeric;
+mod substitution;
+use substitution::fill_call_type;
 
 #[derive(Clone, Copy)]
 pub(super) enum DiagnosticCallee {
@@ -20,59 +22,6 @@ pub(super) struct CallScratch {
     pub(super) roots: Vec<Option<TyId>>,
     pub(super) ir_params: Vec<Param>,
     pub(super) ir_args: Vec<Arg>,
-}
-
-fn fill_call_type(
-    t: &mut impl TyRead,
-    ty: TyId,
-    found: &[Option<TyId>],
-    roots: &[Option<TyId>],
-) -> TyId {
-    if roots.is_empty() && !has_param(t, ty) {
-        return ty;
-    }
-    match t.kind(ty).clone() {
-        TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => found[i as usize].unwrap_or(HOLE),
-        TyKind::Region(Root::Parameter(i)) => {
-            roots.get(i as usize).copied().flatten().unwrap_or(ty)
-        }
-        TyKind::Anchored(x, root) => {
-            let x = fill_call_type(t, x, found, roots);
-            let root = fill_call_type(t, root, found, roots);
-            t.mk(TyKind::Anchored(x, root))
-        }
-        TyKind::Array(x, n) => {
-            let x = fill_call_type(t, x, found, roots);
-            t.mk(TyKind::Array(x, n))
-        }
-        TyKind::Tuple(xs) => {
-            let xs = xs
-                .into_iter()
-                .map(|x| fill_call_type(t, x, found, roots))
-                .collect();
-            t.mk(TyKind::Tuple(xs))
-        }
-        TyKind::Adt(d, xs) => {
-            let xs = xs
-                .into_iter()
-                .map(|x| fill_call_type(t, x, found, roots))
-                .collect();
-            t.mk(TyKind::Adt(d, xs))
-        }
-        TyKind::View(x) => {
-            let x = fill_call_type(t, x, found, roots);
-            t.mk(TyKind::View(x))
-        }
-        TyKind::Fn(ps, r, w, k) => {
-            let ps = ps
-                .into_iter()
-                .map(|(m, p)| (m, fill_call_type(t, p, found, roots)))
-                .collect();
-            let r = fill_call_type(t, r, found, roots);
-            t.mk(TyKind::Fn(ps, r, w, k))
-        }
-        _ => ty,
-    }
 }
 
 fn slot_push_kind(path: &DefPath) -> Option<slots::SlotPush> {
@@ -311,6 +260,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let g = &p.fns[f];
         self.diagnostic_callee = Some(DiagnosticCallee::Named(f));
+        if !self.admit_type(g.callable, n) {
+            return (ERROR, None);
+        }
         if mentions_error(&self.t, g.callable) {
             // The callee's signature owns the diagnostic.
             self.inherited_refusal = true;
@@ -749,6 +701,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             self.partial_rooted(g.result, found, roots)
         };
+        if self.out.resource_refusal.is_some() || !self.admit_type(result, n) {
+            return (ERROR, None);
+        }
         if result == NEVER {
             self.dead = true;
         }
@@ -1177,14 +1132,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let (key, mut memo) = self.call_substitution(pt, s, roots);
         if let Some(result) = memo.partial {
-            return result;
+            return self.check_type(result, self.node);
         }
         let result = fill_call_type(&mut self.t, pt, s, roots);
         memo.partial = Some(result);
         if let Some(key) = key {
             self.t.call_substitution = Some((key, memo));
         }
-        result
+        self.check_type(result, self.node)
     }
     /// `pt` with the type arguments found so far, when they determine it.
     pub(super) fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
@@ -1224,7 +1179,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let (key, mut memo) = self.call_substitution(pt, s, roots);
         if let Some(known) = memo.known {
-            return known;
+            return known.map(|ty| self.check_type(ty, self.node));
         }
         // A fully bound call environment already proves readiness. The fill
         // still substitutes the same parameters and lexical roots.
@@ -1237,7 +1192,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(key) = key {
             self.t.call_substitution = Some((key, memo));
         }
-        known
+        known.map(|ty| self.check_type(ty, self.node))
     }
 
     /// Find type arguments from one argument type; false when one is found twice
@@ -1259,6 +1214,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             checked[i] = true;
+            if !self.admit_type(t, use_site) {
+                return;
+            }
             if crate::foreign::holds_raw_handle(&p.decls, &self.t, t) {
                 let message = "a raw handle cannot be an inferred type argument";
                 self.refuse("FFI-6", use_site, message);

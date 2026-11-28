@@ -50,3 +50,10 @@ pub(super) fn agree(module: &Module, f: FuncId, args: &[u64], call: &str) -> Opt
     (flat != tree)
         .then(|| format!("run {call}: the flat engine gave {flat:?}, the tree walker {tree:?}"))
 }
+
+#[test]
+fn zst_list_and_literal_capacity() {
+    let fixture = super::root().join("cases/body/list-zst-literal-capacity.hirsel");
+    let failures = super::run_case(&fixture);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

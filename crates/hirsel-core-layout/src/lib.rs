@@ -89,3 +89,11 @@ pub const FROZEN_STATIC_UNCHARGED: u64 = 1;
 /// Bit 63 remains available to the variant niche. Ordinary odd capacities
 /// remain exact, including a one-byte heap String.
 pub const STRING_LITERAL_TAG: u64 = (1 << 62) | 1;
+
+/// Bit 63 is clear in a literal tag. In particular, the all-ones capacity
+/// of an owning zero-sized list is outside the literal encoding.
+pub const STRING_LITERAL_TAG_MASK: u64 = (1 << 63) | STRING_LITERAL_TAG;
+
+pub const fn is_string_literal_capacity(capacity: u64) -> bool {
+    capacity & STRING_LITERAL_TAG_MASK == STRING_LITERAL_TAG
+}

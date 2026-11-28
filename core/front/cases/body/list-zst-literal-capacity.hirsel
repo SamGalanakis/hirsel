@@ -1,0 +1,41 @@
+// expect: accept
+// expect: run zst_capacity_cycle() = true
+// expect: run literal_capacity_cycle() = true
+fn reserve_room[T](mut xs: List[T], n: u64) {
+    list.reserve(mut xs, n)
+}
+
+fn unit_list[T]() -> List[T] {
+    list.with_capacity(18446744073709551615u64)
+}
+
+pub fn zst_capacity_cycle() -> bool {
+    let outcome = bound bytes 0 {
+        let mut xs: List[()] = unit_list()
+        list.push(mut xs, ())
+        reserve_room(mut xs, 18446744073709551614u64)
+        let mut ys: List[()] = clone(xs)
+        let popped = match list.pop(mut ys) {
+            Some(()) => true,
+            None => false
+        }
+        list.push(mut ys, ())
+        list.clear(mut ys)
+        let overflow = match list.try_reserve(mut xs, 18446744073709551615u64) {
+            Ok(()) => false,
+            Error(c) => c.requested == 18446744073709551615u64 && c.available == 0
+        }
+        popped && overflow && list.len(xs) == 1 && list.len(ys) == 0 && list.capacity(xs) == 18446744073709551615u64 && list.capacity(ys) == 18446744073709551615u64
+    }
+    match outcome {
+        Ok(ok) => ok,
+        Error(_) => false
+    }
+}
+
+pub fn literal_capacity_cycle() -> bool {
+    let mut text = "text"
+    let static_len = list.len(string.as_bytes(text))
+    string.push(mut text, "!")
+    static_len == 4 && list.len(string.as_bytes(text)) == 5
+}

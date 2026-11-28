@@ -80,7 +80,7 @@ impl Gap {
 
 /// The implementation's resource refusal (PROG-6): checking needs more than one of its
 /// limits allows. It names no rule; the message names the amount and the limit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceRefusal {
     pub site: Site,
     pub message: String,

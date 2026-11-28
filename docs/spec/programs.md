@@ -698,7 +698,8 @@ language switches. The one named input is the **target** of a build
 ([SEM-8](semantics.md#sem-8-determinism)), chosen with `--target`: it is the only flag that
 reaches a program, and it does so only as below. The one exception is an implementation's resource refusal: a program
 whose checking exceeds the implementation's resources (for example unbounded generic
-instantiation, or instantiation past a depth or count) may be refused with a message that
+instantiation or a declared or body-inferred type past a depth, expansion or layout limit)
+may be refused with a message that
 names no rule; such a refusal is not a meaning of the program. Likewise, where a step bound
 runs out and which admission an over-tight byte bound refuses are a build's resource
 outcomes, fixed for that build but not the same on every engine

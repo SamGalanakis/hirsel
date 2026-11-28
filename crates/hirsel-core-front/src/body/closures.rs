@@ -1119,8 +1119,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let (Some(function), Some(template)) = (function, out.template) {
             self.nested.insert(function, template);
         }
-        let refused = !out.refusals.is_empty();
-        self.out.refusals.extend(out.refusals);
+        let refused = self.out.merge_refusals(out.refusals, out.resource_refusal);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
         self.out.computed.extend(out.computed);

@@ -50,6 +50,8 @@ use order::order_instructions;
 mod callable_abi;
 use callable_abi::loan;
 mod calls;
+mod check;
+pub use check::{CoreCheck, Counts};
 mod cleanup;
 mod clone_glue;
 mod closures;
@@ -93,6 +95,7 @@ mod stable;
 mod stack_frame;
 mod templates;
 mod temporaries;
+mod type_limits;
 mod types;
 mod writers;
 pub use key_glue::{GLUE_OPERATIONS, is_glue};
@@ -106,55 +109,6 @@ pub(crate) use types::{
     float_binary_bits, float_negate_bits, float_suffix, int_magnitude, int_suffix, parse_float_bits,
 };
 pub(crate) use values::quoted_bytes;
-
-/// Work one body check did, for the cost measurements (core/MEASURE.md).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Counts {
-    /// Expression, statement and pattern nodes visited, and steps deciding whether an
-    /// expression synthesises its type.
-    pub nodes: u64,
-    /// Names read.
-    pub uses: u64,
-    /// Place reads and writes of `let mut` slots.
-    pub places: u64,
-    pub calls: u64,
-    /// Type comparisons and type nodes lowered.
-    pub types: u64,
-    /// Bytes of the emitted body's tables.
-    pub bytes: u64,
-}
-impl std::ops::AddAssign for Counts {
-    fn add_assign(&mut self, o: Self) {
-        self.nodes += o.nodes;
-        self.uses += o.uses;
-        self.places += o.places;
-        self.calls += o.calls;
-        self.types += o.types;
-        self.bytes += o.bytes;
-    }
-}
-
-/// The outcome of checking and lowering one definition.
-#[derive(Debug, Default)]
-pub struct CoreCheck {
-    pub refusals: Vec<Refusal>,
-    pub gaps: Vec<Gap>,
-    pub counts: Counts,
-    /// The function row whose body was emitted; None when the body was refused, reached
-    /// a gap, or the definition has no body.
-    pub function: Option<FuncId>,
-    /// Layout/type relocations for a rigid generic body, checked once.
-    pub template: Option<GenericTemplate>,
-    pub flow: flow::Facts,
-    /// The types this body's contextual constructors resolved to.
-    pub constructor_types: std::collections::BTreeSet<DefPath>,
-    /// A contextual constructor resolved by searching its whole candidate set
-    /// (no expected type), so every candidate of that name took part.
-    pub constructor_candidates: bool,
-    /// The computed constants this body reads (LANG-20): their values enter its
-    /// instances' record keys and its groups' constant slots, never its body.
-    pub computed: std::collections::BTreeSet<DefPath>,
-}
 
 /// Source conventions survive physical sealing. Generated fixed-ABI glue has the
 /// same source and physical convention, recorded unchanged here.
@@ -217,6 +171,7 @@ pub struct Emitter {
     /// The recipes of `module.types`, recomputed when rows were added.
     recipes: Vec<RecipeRow>,
     recipe_scratch: hirsel_core_layout::RecipeScratch,
+    native_range: Option<u128>,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
     generic_key_codecs: std::collections::BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
@@ -677,6 +632,7 @@ impl Emitter {
     /// the rows from `mark` on are taken back so the table stays computable.
     fn recipe(&mut self, p: &Program, id: TypeId, mark: usize) -> Option<&Recipe> {
         crate::cost_scope!("phase", "layout/drop recipes");
+        self.native_range = None;
         if self.recipes.len() != self.module.types.len() {
             let shapes = &self.module.types;
             let names = &self.types;
@@ -687,7 +643,10 @@ impl Emitter {
                     layouts.resolve(shapes, names, row, make)
                 }) {
                 Ok(()) => {}
-                Err(_) => {
+                Err(error) => {
+                    if let hirsel_core_layout::LayoutError::NativeRange { bytes, .. } = error {
+                        self.native_range = Some(bytes);
+                    }
                     self.refused = true;
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
@@ -1138,6 +1097,7 @@ struct Cx<'c, 'a, 'e> {
     header: NodeId,
     params: Vec<u16>,
     t: Local<'c>,
+    type_limits: type_limits::TypeLimits<'c>,
     e: &'e mut Emitter,
     b: Body,
     versioned: bool,
@@ -1332,6 +1292,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             header: item.root,
             params: fd.generics.iter().map(|g| g.bounds).collect(),
             t: Local::with_program(p),
+            type_limits: type_limits::TypeLimits::new(p),
             e,
             b: Body::default(),
             versioned: false,
@@ -1938,16 +1899,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.inst(Inst::Const { result, bits }, n);
         Some(result)
     }
-    /// How a value of `ty` is carried in this body.
-    fn rep(&mut self, ty: TyId) -> Result<Rep, &'static str> {
-        if let Some(scalar) = scalar_kind(ty) {
-            return Ok(Rep::Scalar(Ty::Scalar(scalar)));
-        }
-        *self
-            .reps
-            .entry(ty)
-            .or_insert_with(|| self.e.rep(self.p, &mut self.t, ty))
-    }
     /// How a value of `ty` is carried, or the gap that says why it is not built: an
     /// emit step never ends on a representation without naming it (FORM #120).
     fn rep_at(&mut self, ty: TyId, n: NodeId) -> Option<Rep> {
@@ -2254,6 +2205,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
+        if !self.admit_type(self.fd.callable, self.header) {
+            return;
+        }
         let row = self.e.row(self.p, &mut self.t, f);
         self.run_row(row, body);
     }
@@ -2448,6 +2402,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let item = self.p.site(self.at, self.header);
         let refused = self.inherited_refusal
             || !self.out.refusals.is_empty()
+            || self.out.resource_refusal.is_some()
             || self
                 .p
                 .refusals
@@ -2718,6 +2673,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.out.counts.nodes += 1;
         let want = want.filter(|w| w.ty != HOLE);
         let (mut t, mut v) = self.checked(n, want);
+        if self.out.resource_refusal.is_some() {
+            return (ERROR, None);
+        }
         let want = want.filter(|w| w.payload != 0 || self.fixed_want(*w));
         if let Some(w) = want.filter(|w| w.payload == 0)
             && let Some((payload, value)) = self.payload_view_value(t, v, w.ty, n)
@@ -2783,6 +2741,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// `n` checked and emitted: the single place an expression's value is produced. A
     /// live expression of a valued type that produced no value marks the body halted.
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if self.out.resource_refusal.is_some() || want.is_some_and(|w| !self.admit_type(w.ty, n)) {
+            return (ERROR, None);
+        }
         if let Some((node, ty, value)) = self.mapped_error
             && node == n
         {
@@ -2794,6 +2755,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        if self.out.resource_refusal.is_some() || !self.admit_type(t, n) {
+            self.node = outer;
+            self.synth_ty = ERROR;
+            return (ERROR, None);
+        }
         if self.e.editor_types.is_some() {
             self.editor_type(self.span(n), t);
         }

@@ -685,9 +685,13 @@ impl Glue<'_, '_, '_> {
             let literal = self.b.create_block();
             let heap = self.b.create_block();
             self.b.set_cold_block(literal);
+            let masked = self
+                .b
+                .ins()
+                .band_imm(cap, hirsel_core_layout::STRING_LITERAL_TAG_MASK as i64);
             let tagged = self.b.ins().icmp_imm_s(
-                IntCC::UnsignedGreaterThanOrEqual,
-                cap,
+                IntCC::Equal,
+                masked,
                 hirsel_core_layout::STRING_LITERAL_TAG as i64,
             );
             self.b.ins().brif(tagged, literal, &[], heap, &[]);

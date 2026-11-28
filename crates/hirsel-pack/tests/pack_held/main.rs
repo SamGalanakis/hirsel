@@ -428,6 +428,47 @@ fn literal_llvm() {
     literal(Backend::Llvm);
 }
 
+fn list_and_string_capacity(backend: Backend) {
+    let _alone = alone();
+    let (loader, _) = primary_loader();
+    let names = ["zst_capacity_cycle", "literal_capacity_cycle"];
+    let pack = compile_pack_module(
+        include_str!("../../../../core/front/cases/body/list-zst-literal-capacity.hirsel"),
+        &names,
+        backend,
+    );
+    loader.admit_module(&pack.bytes).unwrap();
+    for name in names {
+        let entry = pack.load_raw(loader, name);
+        let mut answer = 0;
+        let mut balance = (0, 0);
+        let status = run_in_worker(1 << 20, |ctx| unsafe {
+            balance.0 = (*ctx).available();
+            // PACK-15: a no-argument export writes its bool through the destination.
+            let call: unsafe extern "C" fn(*mut Context, *mut u8) -> u8 =
+                std::mem::transmute(entry.entry());
+            let status = call(ctx, &mut answer);
+            balance.1 = (*ctx).available();
+            status
+        });
+        assert_eq!(status, Ok(0), "{backend:?} {name}");
+        assert_eq!(answer, 1, "{backend:?} {name}");
+        assert_eq!(balance.0, balance.1, "{backend:?} {name}");
+    }
+    loader.reclaim().unwrap();
+    assert_eq!(loader.installed(), 0, "{backend:?}");
+}
+
+#[test]
+fn list_and_string_capacity_cranelift() {
+    list_and_string_capacity(Backend::Cranelift);
+}
+
+#[test]
+fn list_and_string_capacity_llvm() {
+    list_and_string_capacity(Backend::Llvm);
+}
+
 fn stop(backend: Backend) {
     let _alone = alone();
     // A separate pool makes the balance independent of any other stopped test.

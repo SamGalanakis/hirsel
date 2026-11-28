@@ -36,6 +36,123 @@ pub(crate) fn ir_hash(module: &Module, scratch: &mut Vec<u8>) -> io::Result<Cont
     Ok(Store::ir_hash(scratch))
 }
 
+// Borrow the native result tables for output. No cloned IR, resolver scratch or text.
+// Sites are canonical: each site with an anchor names it by its position in `anchors`.
+#[derive(Serialize)]
+struct DiskCheckRef<'a> {
+    anchors: Vec<&'a DefPath>,
+    key: &'a DefinitionKey,
+    definition: &'a DefPath,
+    refusals: Vec<Refusal>,
+    resource_refusal: Option<hirsel_core_front::ResourceRefusal>,
+    incomplete: Vec<Incomplete>,
+    counts: [u64; 6],
+    template: &'a Option<hirsel_core_front::GenericTemplate>,
+    flow: hirsel_core_front::FlowFacts,
+    function: Option<u32>,
+    constructor_types: &'a std::collections::BTreeSet<DefPath>,
+    constructor_candidates: bool,
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    computed: &'a std::collections::BTreeSet<DefPath>,
+}
+impl<'a> DiskCheckRef<'a> {
+    /// A site is a byte offset from its item's start and the key covers only
+    /// the body's own item, so a body, whose refusals and gaps are reported
+    /// from its record, must cite no other item.
+    fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
+        let c = d.check.counts;
+        let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
+        anchors.sort_unstable();
+        anchors.dedup();
+        if let Some(other) = anchors.iter().find(|p| **p != &d.definition) {
+            return Err(io::Error::other(format!(
+                "internal error: the checked body `{}` cites a site in `{other}`",
+                d.definition
+            )));
+        }
+        let canonical = |site: &mut Site| {
+            if let Some(path) = item_at(site).and_then(|at| d.anchors.get(&at)) {
+                site.module = ANCHORED_MODULE;
+                site.source = Some(ANCHORED);
+                site.item = anchors.binary_search(&path).unwrap() as u32;
+            }
+        };
+        let mut refusals = d.check.refusals.clone();
+        for r in &mut refusals {
+            canonical(&mut r.primary);
+            r.causal.iter_mut().for_each(|c| canonical(&mut c.site));
+        }
+        let mut resource_refusal = d.check.resource_refusal.clone();
+        if let Some(r) = &mut resource_refusal {
+            canonical(&mut r.site);
+        }
+        let mut incomplete = d.incomplete.clone();
+        for g in &mut incomplete {
+            canonical(&mut g.primary);
+            g.causal.iter_mut().for_each(canonical);
+        }
+        let mut flow = d.check.flow.clone();
+        for (site, _) in &mut flow.stages {
+            canonical(site);
+        }
+        Ok(Self {
+            anchors,
+            key: &d.key,
+            definition: &d.definition,
+            refusals,
+            resource_refusal,
+            incomplete,
+            counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
+            template: &d.check.template,
+            flow,
+            function: d.check.function.map(|f| f.0),
+            constructor_types: &d.check.constructor_types,
+            constructor_candidates: d.check.constructor_candidates,
+            computed: &d.check.computed,
+        })
+    }
+}
+#[derive(Deserialize)]
+pub(crate) struct DiskCheck {
+    anchors: Vec<DefPath>,
+    key: DefinitionKey,
+    definition: DefPath,
+    refusals: Vec<Refusal>,
+    resource_refusal: Option<hirsel_core_front::ResourceRefusal>,
+    incomplete: Vec<Incomplete>,
+    counts: [u64; 6],
+    template: Option<hirsel_core_front::GenericTemplate>,
+    flow: hirsel_core_front::FlowFacts,
+    pub(super) function: Option<u32>,
+    constructor_types: std::collections::BTreeSet<DefPath>,
+    constructor_candidates: bool,
+}
+
+pub(crate) fn visit_head_sites(
+    check: &CoreCheck,
+    incomplete: &[Incomplete],
+    visit: &mut impl FnMut(&Site),
+) {
+    for r in &check.refusals {
+        visit(&r.primary);
+        for cause in &r.causal {
+            visit(&cause.site);
+        }
+    }
+    if let Some(r) = &check.resource_refusal {
+        visit(&r.site);
+    }
+    for g in incomplete {
+        visit(&g.primary);
+        for site in &g.causal {
+            visit(site);
+        }
+    }
+    for (site, _) in &check.flow.stages {
+        visit(site);
+    }
+}
+
 /// The checked header's only optional suffix is its nonempty computed-read set.
 pub(crate) fn decode_head(bytes: &[u8]) -> Option<(DiskCheck, BTreeSet<DefPath>)> {
     let (disk, suffix) = encoding::read_fixed_prefix(bytes).ok()?;
@@ -133,6 +250,7 @@ impl DefinitionProduct {
             ir_source: Some(source),
             check: CoreCheck {
                 refusals: disk.refusals,
+                resource_refusal: disk.resource_refusal,
                 gaps: vec![],
                 function: disk.function.map(hirsel_core_ir::FuncId),
                 template: disk.template,

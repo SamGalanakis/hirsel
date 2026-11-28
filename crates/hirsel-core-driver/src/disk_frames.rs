@@ -358,3 +358,41 @@ fn remote_transfer_policy_bounds_both_directions() {
         assert!(remote.object(&local, key).unwrap().is_none());
     }
 }
+
+#[test]
+fn body_resource_refusal_round_trips_and_follows_its_item() {
+    use std::fmt::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = String::from("fn oversized() -> u64 {\n    let a0 = (1u64, 1u64)\n");
+    for n in 1..=30 {
+        writeln!(source, "    let a{n} = (a{p}, a{p})", p = n - 1).unwrap();
+    }
+    source.push_str("    1\n}\n");
+    let check = |source| {
+        Driver::default()
+            .check(request(source, dir.path()), &mut Meter::new(false))
+            .unwrap()
+    };
+    let cold = check(&source);
+    assert!(!cold.accepted());
+    assert!(cold.diagnostics.is_empty() && cold.incomplete.is_empty());
+    let [before] = &cold.resources[..] else {
+        panic!("expected one resource refusal, got {:?}", cold.resources);
+    };
+    assert!(before.message.contains("131071 type nodes"));
+    assert_eq!(before.primary.item, 0);
+
+    let moved = format!("fn first() -> u64 {{ 1 }}\n{source}");
+    let warm = check(&moved);
+    assert!(!warm.accepted());
+    assert_eq!(names(&warm), ["first"]);
+    let [after] = &warm.resources[..] else {
+        panic!(
+            "expected one cached resource refusal, got {:?}",
+            warm.resources
+        );
+    };
+    assert_eq!(after.message, before.message);
+    assert_eq!(after.primary.span, before.primary.span);
+    assert_eq!(after.primary.item, 1);
+}

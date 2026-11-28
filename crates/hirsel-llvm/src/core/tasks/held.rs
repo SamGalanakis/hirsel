@@ -82,10 +82,16 @@ impl FunctionEmitter<'_> {
                 vec![args[0].clone()]
             }
             RtOp::ByteCapacity { .. } => {
-                let tagged = self.cmp(
-                    Predicate::Uge,
+                let masked = self.bin(
+                    Binary::And,
                     &Type::I64,
                     &args[0],
+                    &int(hirsel_core_layout::STRING_LITERAL_TAG_MASK),
+                );
+                let tagged = self.cmp(
+                    Predicate::Eq,
+                    &Type::I64,
+                    &masked,
                     &int(hirsel_core_layout::STRING_LITERAL_TAG),
                 );
                 vec![self.select(&Type::I64, &tagged, &int(0), &args[0])]

@@ -42,8 +42,7 @@ impl Buffer {
     /// The carrier as a host operation may append to it: a loaded String
     /// literal's capacity word names its owner and gives no room.
     pub(crate) fn appendable(mut self) -> Self {
-        let tag = hirsel_core_layout::STRING_LITERAL_TAG;
-        if self.capacity as u64 & tag == tag {
+        if hirsel_core_layout::is_string_literal_capacity(self.capacity as u64) {
             self.capacity = 0;
         }
         self

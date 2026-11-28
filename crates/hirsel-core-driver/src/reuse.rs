@@ -818,21 +818,7 @@ impl Keys {
                 anchors.insert(at, path.clone());
             }
         };
-        for r in &check.refusals {
-            capture(&r.primary);
-            for cause in &r.causal {
-                capture(&cause.site);
-            }
-        }
-        for g in incomplete {
-            capture(&g.primary);
-            for site in &g.causal {
-                capture(site);
-            }
-        }
-        for (site, _) in &check.flow.stages {
-            capture(site);
-        }
+        crate::body::visit_head_sites(check, incomplete, &mut capture);
         anchors
     }
     pub fn bind_site(&self, anchors: &BTreeMap<crate::ItemAt, DefPath>, site: &mut Site) {

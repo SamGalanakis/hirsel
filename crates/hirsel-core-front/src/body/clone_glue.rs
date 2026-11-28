@@ -327,6 +327,17 @@ impl Derive<'_> {
                 let node = c.read(from, Ty::Ptr);
                 self.runtime(c, hirsel_core_ir::RtOp::SharedShare, &[node]);
             }
+            FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.module.types, field) => {
+                let null = c.value(Ty::Ptr);
+                c.inst(Inst::Const {
+                    result: null,
+                    bits: 0,
+                });
+                store(c, to, null);
+                let cap = c.offset(to, 16);
+                let unlimited = c.constant(u64::MAX);
+                store(c, cap, unlimited);
+            }
             FieldTy::Seq(_) | FieldTy::FrozenBytes => {
                 let u = Ty::Scalar(Scalar::U64);
                 let done = c.block(&[]);
@@ -608,6 +619,7 @@ impl Derive<'_> {
                     ty: TypeId(t.0),
                 });
             }
+            FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.module.types, field) => {}
             FieldTy::Seq(_) | FieldTy::FrozenBytes => {
                 // A completed FrozenBytes clone owns heap backing.
                 let byte = FieldTy::Scalar(Scalar::U8);

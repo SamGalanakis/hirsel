@@ -275,7 +275,22 @@ pub unsafe extern "C" fn hirsel_core_static_string(ptr: *const u8, len: usize) -
 
 pub(super) fn string_owner(capacity: u64) -> Option<*const CauseData> {
     let tag = hirsel_core_layout::STRING_LITERAL_TAG;
-    (capacity & tag == tag).then(|| ptr::with_exposed_provenance(((capacity & !tag) << 2) as usize))
+    hirsel_core_layout::is_string_literal_capacity(capacity)
+        .then(|| ptr::with_exposed_provenance(((capacity & !tag) << 2) as usize))
+}
+
+#[cfg(test)]
+#[test]
+fn string_owner_tags_exclude_zero_sized_list_capacity() {
+    let tag = hirsel_core_layout::STRING_LITERAL_TAG;
+    let owner = 0x1238;
+    assert_eq!(
+        string_owner(tag | (owner >> 2)).map(|p| p.addr()),
+        Some(owner as usize)
+    );
+    for capacity in [0, 1, tag - 1, u64::MAX] {
+        assert!(string_owner(capacity).is_none(), "{capacity:#x}");
+    }
 }
 
 /// Relocate a loaded image's owned static `FrozenBytes` literal `[ptr, ptr + len)`

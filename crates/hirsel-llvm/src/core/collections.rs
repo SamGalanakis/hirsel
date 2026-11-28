@@ -92,10 +92,16 @@ impl FunctionEmitter<'_> {
         if byte_seq && self.module.track_pack_owners {
             let literal = Label::new("buffer_literal", n);
             let heap = Label::new("buffer_heap", n);
-            let is_heap = self.cmp(
-                Predicate::Ult,
+            let masked = self.bin(
+                Binary::And,
                 &Type::I64,
                 cap,
+                &int(hirsel_core_layout::STRING_LITERAL_TAG_MASK),
+            );
+            let is_heap = self.cmp(
+                Predicate::Ne,
+                &Type::I64,
+                &masked,
                 &int(hirsel_core_layout::STRING_LITERAL_TAG),
             );
             self.likely(&is_heap, heap, literal);

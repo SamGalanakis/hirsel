@@ -120,9 +120,13 @@ impl Function<'_, '_, '_> {
                 let bytes = self.input.track_pack_owners
                     && hirsel_core_ir::byte_carrier(&self.input.types, carrier);
                 outputs[0] = if bytes {
+                    let masked = self
+                        .b
+                        .ins()
+                        .band_imm(args[0], hirsel_core_layout::STRING_LITERAL_TAG_MASK as i64);
                     let tagged = self.b.ins().icmp_imm_s(
-                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                        args[0],
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        masked,
                         hirsel_core_layout::STRING_LITERAL_TAG as i64,
                     );
                     let zero = self.b.ins().iconst(types::I64, 0);

@@ -392,90 +392,6 @@ pub(crate) fn bind(site: &mut Site, anchor: (ModuleId, SourceId, u32)) {
 const ANCHORED_MODULE: ModuleId = ModuleId(u32::MAX);
 const ANCHORED: SourceId = SourceId(u32::MAX);
 
-// Borrow the native result tables for output. No cloned IR, resolver scratch or text.
-// Sites are canonical: each site with an anchor names it by its position in `anchors`.
-#[derive(Serialize)]
-struct DiskCheckRef<'a> {
-    anchors: Vec<&'a DefPath>,
-    key: &'a DefinitionKey,
-    definition: &'a DefPath,
-    refusals: Vec<Refusal>,
-    incomplete: Vec<Incomplete>,
-    counts: [u64; 6],
-    template: &'a Option<hirsel_core_front::GenericTemplate>,
-    flow: hirsel_core_front::FlowFacts,
-    function: Option<u32>,
-    constructor_types: &'a std::collections::BTreeSet<DefPath>,
-    constructor_candidates: bool,
-    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    computed: &'a std::collections::BTreeSet<DefPath>,
-}
-impl<'a> DiskCheckRef<'a> {
-    /// A site is a byte offset from its item's start and the key covers only
-    /// the body's own item, so a body, whose refusals and gaps are reported
-    /// from its record, must cite no other item.
-    fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
-        let c = d.check.counts;
-        let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
-        anchors.sort_unstable();
-        anchors.dedup();
-        if let Some(other) = anchors.iter().find(|p| **p != &d.definition) {
-            return Err(io::Error::other(format!(
-                "internal error: the checked body `{}` cites a site in `{other}`",
-                d.definition
-            )));
-        }
-        let canonical = |site: &mut Site| {
-            if let Some(path) = item_at(site).and_then(|at| d.anchors.get(&at)) {
-                site.module = ANCHORED_MODULE;
-                site.source = Some(ANCHORED);
-                site.item = anchors.binary_search(&path).unwrap() as u32;
-            }
-        };
-        let mut refusals = d.check.refusals.clone();
-        for r in &mut refusals {
-            canonical(&mut r.primary);
-            r.causal.iter_mut().for_each(|c| canonical(&mut c.site));
-        }
-        let mut incomplete = d.incomplete.clone();
-        for g in &mut incomplete {
-            canonical(&mut g.primary);
-            g.causal.iter_mut().for_each(canonical);
-        }
-        let mut flow = d.check.flow.clone();
-        for (site, _) in &mut flow.stages {
-            canonical(site);
-        }
-        Ok(Self {
-            anchors,
-            key: &d.key,
-            definition: &d.definition,
-            refusals,
-            incomplete,
-            counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
-            template: &d.check.template,
-            flow,
-            function: d.check.function.map(|f| f.0),
-            constructor_types: &d.check.constructor_types,
-            constructor_candidates: d.check.constructor_candidates,
-            computed: &d.check.computed,
-        })
-    }
-}
-#[derive(Deserialize)]
-struct DiskCheck {
-    anchors: Vec<DefPath>,
-    key: DefinitionKey,
-    definition: DefPath,
-    refusals: Vec<Refusal>,
-    incomplete: Vec<Incomplete>,
-    counts: [u64; 6],
-    template: Option<hirsel_core_front::GenericTemplate>,
-    flow: hirsel_core_front::FlowFacts,
-    function: Option<u32>,
-    constructor_types: std::collections::BTreeSet<DefPath>,
-    constructor_candidates: bool,
-}
 impl Driver {
     fn check_inner<const MEASURE: bool>(
         &mut self,
@@ -1081,6 +997,14 @@ impl Driver {
                     }
                     result.diagnostics.push(r);
                 }
+                if let Some(r) = &product.check.resource_refusal {
+                    let mut primary = r.site;
+                    keys.bind_site(&product.anchors, &mut primary);
+                    result.resources.push(ResourceRefusal {
+                        primary,
+                        message: r.message.clone(),
+                    });
+                }
                 for g in &product.incomplete {
                     let mut g = g.clone();
                     keys.bind_site(&product.anchors, &mut g.primary);
@@ -1357,6 +1281,9 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
         for cause in &mut r.causal {
             bind(&mut cause.site);
         }
+    }
+    if let Some(r) = &mut product.check.resource_refusal {
+        bind(&mut r.site);
     }
     for g in &mut product.incomplete {
         bind(&mut g.primary);

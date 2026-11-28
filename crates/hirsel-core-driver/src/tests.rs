@@ -1,4 +1,4 @@
-use super::*;
+use super::{body::DiskCheck, *};
 use hirsel_core_eval as eval;
 use hirsel_core_ir::FuncId;
 

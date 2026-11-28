@@ -41,7 +41,7 @@ are contextual and ordinary elsewhere: `drop` after a resource declaration; `pla
 `streamable`, `codec` and `inert` in a bound list; `via` after a bound list, and `to` and `from` in
 its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `cold` before `fn` at the start of a function item; `grant` after a type's bounds. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern, and after `const` it names an assertion
-([LANG-20](language.md#lang-20-constants))<!-- doc-ref: planned -->; it is not a name.
+([LANG-20](language.md#lang-20-constants)); it is not a name.
 
 ```hirsel
 fn view_count(n: u64) -> u64 { n }                        // `view_count` is one identifier

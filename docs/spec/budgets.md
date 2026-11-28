@@ -606,7 +606,7 @@ and at most **4,096** activations. Each assertion (`const _`) has a budget of it
 every other computed constant has. The budget is part of the meaning of the program
 ([PROG-6](programs.md#prog-6-one-meaning)), so it is counted the same way on every build:
 
-- **Steps**<!-- doc-ref: planned --> are the reference count (MEM-30), not a build's own count. An engine that counts
+- **Steps** are the reference count (MEM-30), not a build's own count. An engine that counts
   otherwise evaluates a constant as if it took the reference count.
 - **Bytes** are the logical charges (MEM-24), exactly. MEM-28's latitude does not apply: an
   allocation the evaluating engine elides is charged as if made, and a scratch block a core

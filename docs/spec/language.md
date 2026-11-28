@@ -733,7 +733,7 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants
 
-`const N: T = e` declares a plain constant, a static string or an assertion. Its initialiser
+`const N: T = e` declares a manifest or computed constant. `const _` declares an assertion. Its initialiser
 `e` is a **closed expression**: it names literals, constants, functions and types, and no
 local or parameter. Hirsel has no other compile-time code: no marker on a function, no
 compile-time parameter and no compile-time block ([reserved](reserved.md#not-in-v1)).
@@ -842,11 +842,11 @@ and its value is kept nowhere. `_` names nothing, so a module may declare any nu
 assertions, none of them can be read, and a `pub` assertion is refused. An assertion whose
 run fails refuses the build, as any constant's failure does.
 
-A **static string** is a constant of type `String` whose
-`e` is a string literal or another static string, `const NAME: String = "hirsel"`. A
+A **static string literal constant** has type `String` and its
+`e` is a string literal or another static string literal constant, `const NAME: String = "hirsel"`. A
 `String` constant whose `e` calls a function or names a computed constant is a static
 computed constant, above. Any other `e` is refused: never a concatenation or a byte
-string. Each use of a static string is its literal,
+string. Each use of a static string literal constant is its literal,
 under the literal's contract ([core](core.md)): static, allocating nothing and never
 charged. A `String` appears in no other constant's type, so `(String, u64)` and a record
 with a `String` field are refused here, at the type, and so is every other non-plain type.

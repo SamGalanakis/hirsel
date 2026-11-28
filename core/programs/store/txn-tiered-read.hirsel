@@ -103,6 +103,25 @@ pub type TxTieredRows {
     to: Bytes
 }
 
+// The transaction indexes its staged table and index edits as it writes them.
+type TieredWrites {
+    rows: std.omap.OMap[Bytes, Option[Arc[Bytes]]],
+    ids: u64
+}
+
+pub fn tx_tiered_snapshot[Event: inert + shareable + send](tx: TxState[Event]) -> std.omap.OMap[Bytes, Option[Arc[Bytes]]] {
+    std.omap.snapshot(tx.tiered_writes.rows)
+}
+
+fn save_table_op[Event: inert + shareable + send](mut tx: TxState[Event], take key: Bytes, take value: Option[format.StagedValue], prior: Option[u32]) -> Result[(u64, Option[u64]), types.Failure] {
+    if let Some(_) = tx.attempt {
+        if read.tiered_staged_key(tx_roots(tx).collections, key) {
+            read.stage_tiered_value(mut tx.tiered_writes.ids, mut tx.tiered_writes.rows, key, value)?
+        }
+    }
+    Ok(save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, take value, prior))
+}
+
 pub fn tx_tiered_descriptor[Event: inert + shareable + send](tx: TxState[Event], collection: u32) -> Result[bool, types.Failure] {
     if let None = tx.attempt {
         return Ok(false)
@@ -118,7 +137,7 @@ pub fn tx_tiered_rows[Event: inert + shareable + send](tx: TxState[Event], colle
         return Ok(None)
     }
     let rows = if staged {
-        read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, Some(collection))?
+        tx_tiered_snapshot(tx)
     } else {
         std.omap.new()
     }
@@ -173,7 +192,7 @@ pub fn tx_tiered_count[Event: inert + shareable + send](tx: TxState[Event], coll
         }
         pager.tiered_count_overlay(overlay, low, high, base_count)?
     }
-    let staged = read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, Some(collection))?
+    let staged = tx_tiered_snapshot(tx)
     let mut total = committed
     let mut cursor = std.omap.range(staged, Included(types.copied(low)?), Excluded(types.copied(high)?))
     while let Some((key, value)) = std.omap.next(mut cursor) {
@@ -204,7 +223,7 @@ fn tx_index_tiered[Event: inert + shareable + send](tx: TxState[Event]) -> Resul
     if let None = tx.attempt {
         return Ok(None)
     }
-    Ok(Some(IndexTiered(attempt: tx.attempt, pins: tx.pins, staged: read.tx_tiered_staged(tx_roots(tx).collections, tx.below, tx.ops, None)?)))
+    Ok(Some(IndexTiered(attempt: tx.attempt, pins: tx.pins, staged: tx_tiered_snapshot(tx))))
 }
 
 pub fn next_index_tiered_row(tree: pages.PageTree, context: IndexTiered, id: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], types.Failure] {

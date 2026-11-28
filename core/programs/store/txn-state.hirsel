@@ -47,6 +47,7 @@ pub opaque scoped type TxState[Event: inert + shareable + send] {
     limits: types.LimitsRep,
     wrote: bool,
     ops: pages.DataOps,
+    tiered_writes: TieredWrites,
     view_tree: core.Cell[Option[TxView]],
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
@@ -207,6 +208,7 @@ pub type Drafted[R, E] {
     frame_bytes: Option[u64],
     wrote: bool,
     ops: pages.DataOps,
+    tiered_writes: TieredWrites,
     view_tree: core.Cell[Option[TxView]],
     stream_ops: pages.DataOps,
     extra_bytes: u64,
@@ -221,8 +223,8 @@ pub type Drafted[R, E] {
 // A callback's Tx, less its shares of the layers beneath, so the parent's own
 // layers are unique again when `install` folds them back.
 pub fn drafted_tx[Event: inert + shareable + send, R, E](take draft: TxState[Event], take result: Result[R, E]) -> Drafted[R, E] {
-    let TxState(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, ..) = take draft
-    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result)
+    let TxState(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, tiered_writes: take tiered_writes, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, ..) = take draft
+    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, tiered_writes: take tiered_writes, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result)
 }
 
 // Moves what `tx` has staged into a layer its callback shares, leaving `tx`
@@ -326,7 +328,7 @@ fn fold_ops(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams: boo
 // stay on a typed Error too; table writes and their frame-tail slot install
 // only on Ok.
 pub fn install[Event: inert + shareable + send, R, E](mut tx: TxState[Event], take d: Drafted[R, E]) -> Result[R, E] {
-    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result) = take d
+    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, index_conflict: take conflict, drift: take drift, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, tiered_writes: take tiered_writes, view_tree: take cached, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, trim_rows: trim_rows, streams: streams, result: take result) = take d
     fold_own(mut tx)
     tx.ids = ids
     tx.refusal = refusal
@@ -352,6 +354,7 @@ pub fn install[Event: inert + shareable + send, R, E](mut tx: TxState[Event], ta
         } else {
             fold_ops(mut tx.ops, tx.below, false, Some(view tx.view_tree), take ops)
         }
+        tx.tiered_writes = take tiered_writes
         tx.rows = rows
         tx.cell_rows = cell_rows
         tx.trim_rows = trim_rows
@@ -436,7 +439,7 @@ pub fn apply_put[Event: inert + shareable + send](mut tx: TxState[Event], take p
     let (old_charge, height, prior) = put_charge(mut tx, p)?
     let _ = reserve_ids(mut tx, height)?
     let value = pages.stage_value(take val, tx_roots(tx).collections.inline)
-    let (slot_order, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value), prior)
+    let (slot_order, replaced) = save_table_op(mut tx, take p, Some(take value), prior)?
     mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
     if tail {
         tx.frame_tail = slot_order
@@ -464,7 +467,7 @@ pub fn stage_chunk[Event: inert + shareable + send](mut tx: TxState[Event], take
     let charge = memory_data_charge(tx, key, stored)
     let (old_charge, height, prior) = put_charge(mut tx, key)?
     let _ = reserve_ids(mut tx, height)?
-    let (slot, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(PendingChunk(arc.new(take stored))), prior)
+    let (slot, replaced) = save_table_op(mut tx, take key, Some(PendingChunk(arc.new(take stored))), prior)?
     pages.mark_chunk_rows(mut tx.ops.rows)
     mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
     if tail {
@@ -605,7 +608,7 @@ pub fn apply_delete[Event: inert + shareable + send](mut tx: TxState[Event], tak
 fn stage_delete[Event: inert + shareable + send](mut tx: TxState[Event], take p: Bytes, refund: indexes.DataRefund, popped: bool) -> Result[(), types.Failure] {
     let height = transaction_write_height(tx, p)?
     let _ = reserve_ids(mut tx, height)?
-    let (_, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None, refund.prior)
+    let (_, replaced) = save_table_op(mut tx, take p, None, refund.prior)?
     if popped {
         if let None = replaced {
             // The primary is already absent from the working tree. Index
@@ -797,11 +800,11 @@ pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], bases: p
     } else {
         None
     }
-    TxState(store: start.store, indexes: scope.indexes, base: scope.base, roots: None, base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    TxState(store: start.store, indexes: scope.indexes, base: scope.base, roots: None, base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), tiered_writes: TieredWrites(rows: std.omap.new(), ids: 0), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
 }
 
 pub fn fork_tx[Event: inert + shareable + send](tx: TxState[Event]) -> TxState[Event] in tx {
-    TxState(store: tx.store, indexes: tx.indexes, base: tx_roots(tx), roots: None, base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+    TxState(store: tx.store, indexes: tx.indexes, base: tx_roots(tx), roots: None, base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), tiered_writes: TieredWrites(rows: tx_tiered_snapshot(tx), ids: tx.tiered_writes.ids), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
 }
 
 pub fn tx_roots[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.Roots] in tx {

@@ -1,0 +1,40 @@
+// A page resumed after "a" must emit its extension, including a winning
+// tombstone. Reading the winning mention a second time adds a Point.
+pub fn check_merge_page[K, V](mut db: store.Db, s: Text[K, V]) -> Result[(), store.Error] waits {
+    let Committed(_) = store.run(mut db, None, store.copy_env(s), fn(mut tx, env) -> Result[(), store.Error] {
+        let mentions = view env.derived.mentions
+        store.put(mut tx, mentions, (1u32, b"a"), Masked)?
+        store.put(mut tx, mentions, (1u32, b"a\x00"), Present(1, list.new()))?
+        store.put(mut tx, mentions, (2u32, b"a\x00"), Masked)
+    })? else {
+        fail("search merge seed did not commit")
+    }
+    let Committed(done) = store.run(mut db, None, store.copy_env(s), fn(mut tx, env) -> Result[(), store.Error] {
+        let mut inputs: List[u32] = list.new()
+        list.push(mut inputs, 1u32)
+        list.push(mut inputs, 2u32)
+        let page = store.Merge(inputs: take inputs, into: 3, masks: true, resume: Some(b"a"))
+        if fold_merge(mut tx, env.derived, page, store.Limits(rows: 1, byte_limit: 4096))? != Some(b"a\x00") {
+            fail("search merge resumed at the wrong key")
+        }
+        let Some(Masked) = store.fetch(tx, env.derived.mentions, (3u32, b"a\x00"))? else {
+            fail("search merge lost the winning mask")
+        }
+        Ok(())
+    })? else {
+        fail("search merge did not commit")
+    }
+    let (_, id) = store.table_identity(s.derived.mentions)
+    for event in done.reads {
+        if let Point(key) = event {
+            let table_id: u32 = list.word_be(key, 0)
+            if table_id == id {
+                let generation: u32 = list.word_be(key, 4)
+                if generation < 3 {
+                    fail("search merge probed an input mention after reading its range")
+                }
+            }
+        }
+    }
+    Ok(())
+}

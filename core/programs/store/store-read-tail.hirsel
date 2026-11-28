@@ -40,24 +40,33 @@ fn tx_tiered_stage_rows(tree: pages.PageTree, rows: pages.DataRows, only: Option
         if only != None && only != Some(collection) {
             continue
         }
-        let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
+        if !tiered_staged_key(tree, op.key) {
             continue
         }
-        let fields = pages.collection_descriptor(descriptor)
-        if fields.residency != ResidentTiered || fields.kind == CellCollection || fields.kind == LogCollection {
-            continue
-        }
-        let value: Option[Arc[Bytes]] = match op.value {
-            Some(PendingChunk(raw)) => Some(arc.share(raw)),
-            Some(SealedChunk(chunk)) => Some(arc.share(chunk.stored)),
-            Some(PageValue(raw)) => Some(arc.new(types.copied(raw)?)),
-            Some(BlobBody(raw)) => Some(arc.share(raw)),
-            None => None,
-        }
-        let held = replace(mut staged, std.omap.new())
-        let (take updated, _) = std.omap.insert_owned(mut ids, take held, types.copied(op.key)?, take value)
-        staged = take updated
+        stage_tiered_value(mut ids, mut staged, op.key, op.value)?
     }
+    Ok(())
+}
+
+pub fn tiered_staged_key(tree: pages.PageTree, key: Bytes) -> bool {
+    let Some(descriptor) = std.page.lookup(tree.root, list.slice(key, 0, 4)) else {
+        return false
+    }
+    let fields = pages.collection_descriptor(descriptor)
+    fields.residency == ResidentTiered && fields.kind != CellCollection && fields.kind != LogCollection
+}
+
+pub fn stage_tiered_value(mut ids: u64, mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]], key: Bytes, source: Option[format.StagedValue]) -> Result[(), types.Failure] {
+    let value: Option[Arc[Bytes]] = match source {
+        Some(PendingChunk(raw)) => Some(arc.share(raw)),
+        Some(SealedChunk(chunk)) => Some(arc.share(chunk.stored)),
+        Some(PageValue(raw)) => Some(arc.new(types.copied(raw)?)),
+        Some(BlobBody(raw)) => Some(arc.share(raw)),
+        None => None,
+    }
+    let held = replace(mut staged, std.omap.new())
+    let (take updated, _) = std.omap.insert_owned(mut ids, take held, types.copied(key)?, take value)
+    staged = take updated
     Ok(())
 }
 

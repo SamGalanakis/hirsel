@@ -1,0 +1,190 @@
+// The input list orders generations by age. Generation 2 wins over 7.
+// Its zero is a tombstone. The key b"a\0" is b"a"'s saved IVF successor.
+fn generation_merge_oracle(mut tx: Tx, rows: Table[(u32, Bytes), u32]) -> Result[(), Error] {
+    let seen: core.Log[(Bytes, u32)] = log.new()
+    let visit: scoped[view] fn(mut Tx, Bytes, take u32) -> Result[(), Error] = scoped fn(mut _tx: Tx, key: Bytes, take value: u32) -> Result[(), Error] {
+        log.append(seen, (clone(key), value))
+        Ok(())
+    }
+    let mut inputs: List[u32] = list.new()
+    for g in[7u32, 11u32, 2u32] {
+        list.push(mut inputs, g)
+    }
+    let first = merge_generations(mut tx, rows, inputs, Unbounded, 2, visit)?
+    put(mut tx, rows, (2u32, b"b"), 23u32)?
+    let second = merge_generations(mut tx, rows, inputs, Excluded(b"a"), 4, visit)?
+    let third = merge_generations(mut tx, rows, inputs, Included(b"a\x00"), 1, visit)?
+    let expected =[(b"", 70u32), (b"a", 0u32), (b"a\x00", 71u32), (b"b", 23u32), (b"c", 72u32), (b"a\x00", 71u32)]
+    let actual = log.finish(take seen)
+    if list.len(actual) != 6 || first != Some(b"a") || second != None || third != Some(b"a\x00") {
+        fail("generation merge changed the page boundary")
+    }
+    for i in 0u64 .. 6 {
+        if actual[i] != expected[i] {
+            fail("generation merge changed the winning row")
+        }
+    }
+    generation_merge_staging(mut tx, rows)
+}
+
+// The scan observes the staged view at entry, including successful nested
+// writes. Writes made by its callback are visible to the following scan.
+fn generation_merge_staging(mut tx: Tx, rows: Table[(u32, Bytes), u32]) -> Result[(), Error] {
+    put(mut tx, rows, (13u32, b"a"), 1u32)?
+    rollback_writes_on_error(mut tx, scoped fn(mut nested: Tx) -> Result[(), Error] {
+        put(mut nested, rows, (13u32, b"c"), 3u32)
+    })?
+    let rolled = rollback_writes_on_error(mut tx, scoped fn(mut nested: Tx) -> Result[(), Error] {
+        let _ = delete(mut nested, rows, (13u32, b"c"))?
+        put(mut nested, rows, (13u32, b"b"), 2u32)?
+        Error(MigrationFault)
+    })
+    if let Error(MigrationFault) = rolled {} else {
+        fail("generation merge fixture lost its nested rollback")
+    }
+    let mut inputs: List[u32] = list.new()
+    list.push(mut inputs, 13u32)
+    let seen: core.Log[u32] = log.new()
+    let _ = merge_generations(mut tx, rows, inputs, Unbounded, 4, scoped fn(mut out: Tx, key: Bytes, take value: u32) -> Result[(), Error] {
+        log.append(seen, value)
+        if key == b"a" {
+            put(mut out, rows, (13u32, b"c"), 33u32)?
+        }
+        Ok(())
+    })?
+    let actual = log.finish(take seen)
+    if list.len(actual) != 2 || actual[0u64] != 1 || actual[1u64] != 3 {
+        fail("generation merge mixed staged versions")
+    }
+    let _ = delete(mut tx, rows, (13u32, b"a"))?
+    let rest: core.Log[u32] = log.new()
+    let _ = merge_generations(mut tx, rows, inputs, Unbounded, 4, scoped fn(mut _out: Tx, _key: Bytes, take value: u32) -> Result[(), Error] {
+        log.append(rest, value)
+        Ok(())
+    })?
+    let remaining = log.finish(take rest)
+    if list.len(remaining) != 1 || remaining[0u64] != 33 {
+        fail("generation merge missed a staged replacement or delete")
+    }
+    Ok(())
+}
+
+@test
+fn generation_merge_cold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let key: std.codec.Key[(u32, Bytes)] = std.codec.key_of()
+    let _ = law_table(mut db, "mentions", key, std.codec.of_u32())?
+    let rows = table(mut db, "mentions", key, std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[(u32, Bytes), u32]) -> Result[(), Error] {
+        put(mut tx, t, (7u32, b""), 70u32)?
+        put(mut tx, t, (7u32, b"a"), 77u32)?
+        put(mut tx, t, (7u32, b"a\x00"), 71u32)?
+        put(mut tx, t, (7u32, b"c"), 72u32)?
+        put(mut tx, t, (2u32, b"a"), 0u32)
+    })? else {
+        fail("generation merge fixture did not commit")
+    }
+    let Committed(_) = run(mut db, None, copy_env(rows), generation_merge_oracle)? else {
+        fail("Memory merge did not commit")
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    close(take db)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let reopened = table(mut cold, "mentions", key, std.codec.of_u32())?
+    let collection = failure_result_from_rep(catalog.prefix(reopened.id))?
+    let Some((ColdPage(_), _)) = std.page.collection_slot(snapshot(cold).roots.collections.root, collection) else {
+        fail("generation merge fixture must start with a Cold input root")
+    }
+    let Committed(_) = run(mut cold, Some(100000), copy_env(reopened), generation_merge_oracle)? else {
+        fail("Cold merge did not commit")
+    }
+    close(take cold)
+}
+
+// With disjoint runs, R consumed heads leave at most G - 1 prefetched
+// rows. Every decoded row contributes a read span, including lookahead.
+@test
+fn generation_merge_bound(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 4194304)
+    let key: std.codec.Key[(u32, Bytes)] = std.codec.key_of()
+    let _ = law_table(mut db, "runs", key, std.codec.of_u64())?
+    let rows = table(mut db, "runs", key, std.codec.of_u64())?
+    let Committed(_) = execute(mut db, 0, 20, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        for g in 0u32 .. 8 {
+            for j in 0u64 .. 16 {
+                let v = j * 8 + int.widen(g)
+                put(mut tx, rows, (g, types.key_word(v)), v)?
+                put(mut tx, rows, (g + 8, types.key_word(j)), v)?
+            }
+        }
+        Ok(())
+    })? else {
+        fail("generation merge bound fixture did not commit")
+    }
+    for width in[2u64, 5u64, 8u64] {
+        let mut inputs: List[u32] = list.new()
+        for g in 0u64 .. width {
+            list.push(mut inputs, int.narrow(g))
+        }
+        for limit in[width, width * 2] {
+            let Committed(done) = execute(mut db, 0, 21, None, scoped fn(mut tx: Tx) -> Result[Option[Bytes], Error] {
+                let ordinal: core.Cell[u64] = cell.new(0u64)
+                merge_generations(mut tx, rows, inputs, Unbounded, limit, scoped fn(mut out: Tx, raw: Bytes, take v: u64) -> Result[(), Error] {
+                    // This point read marks delivery in the transaction read log.
+                    let _ = fetch(out, rows, (99u32, b"visit"))?
+                    let i = cell.get(ordinal)
+                    if v != (i / width) * 8 + i % width || raw != types.key_word(v) {
+                        fail("generation merge bound fixture visited the wrong row")
+                    }
+                    cell.set(ordinal, i + 1)
+                    Ok(())
+                })
+            })? else {
+                fail("generation merge bound traversal did not commit")
+            }
+            let end_slot = limit - 1
+            if done.value != Some(types.key_word((end_slot / width) * 8 + end_slot % width)) {
+                fail("generation merge read beyond its one head per input")
+            }
+            let mut spans = 0u64
+            let mut delivered = 0u64
+            for seen in done.reads {
+                match seen {
+                    Span(_, _) => {
+                        spans += 1
+                    },
+                    Point(raw) => {
+                        let generation: u32 = list.word_be(raw, 4)
+                        if generation != 99 || spans != width + delivered {
+                            fail("generation merge read beyond its heads before delivery")
+                        }
+                        delivered += 1
+                    },
+                }
+            }
+            if delivered != limit || spans != width + limit - 1 {
+                fail("generation merge advanced past its final delivery")
+            }
+        }
+        // All generations now contain the same keys. Each output must
+        // consume one head per generation, with no extra lookahead.
+        for i in 0u64 .. width {
+            inputs[i] += 8
+        }
+        let Committed(overlap) = execute(mut db, 0, 22, None, scoped fn(mut tx: Tx) -> Result[Option[Bytes], Error] {
+            merge_generations(mut tx, rows, inputs, Unbounded, width, scoped fn(mut _out: Tx, raw: Bytes, take v: u64) -> Result[(), Error] {
+                let row: u64 = list.word_be(raw, 0)
+                if v != row * 8 + width - 1 {
+                    fail("generation merge chose an older equal head")
+                }
+                Ok(())
+            })
+        })? else {
+            fail("overlapping generation merge did not commit")
+        }
+        if overlap.value != Some(types.key_word(width - 1)) || list.len(overlap.reads) != width * width {
+            fail("generation merge advanced past the last group of equal heads")
+        }
+    }
+    close(take db)
+}

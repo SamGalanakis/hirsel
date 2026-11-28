@@ -850,3 +850,11 @@ fn block_max_differential(clock: Clock, random: Random) -> Result[(), ()] waits 
     }
     Ok(())
 }
+
+@test
+fn search_merge_page(clock: Clock, random: Random) -> Result[(), store.Error] waits {
+    let (take opened, _, take text) = open_docs(clock, random, stop_the())
+    let mut db = take opened
+    search.check_merge_page(mut db, text)?
+    store.close(take db)
+}

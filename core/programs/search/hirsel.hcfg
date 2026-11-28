@@ -13,7 +13,7 @@ pkg_v1.Package(
         ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
     ],
     tests: Some(Tests(
-        sources: [("tests.hirsel", "tests"), ("example.hirsel", "example")],
+        sources: [("merge_law.hirsel", "search"), ("tests.hirsel", "tests"), ("example.hirsel", "example")],
         limit: 67108864,
         grants: [Clock, Random, Tasks, Dir(".")],
         runs: [],

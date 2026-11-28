@@ -628,73 +628,35 @@ fn successor(key: Bytes) -> Bytes {
     take out
 }
 
-// The first `rows` keys at or above `low` that any input mentions, in key
-// order.
-fn merge_keys[K, V](tx: store.Tx, v: Ivf[K, V], inputs: List[u32], low: Bytes, rows: u64) -> Result[List[Bytes], store.Error] {
-    let mut keys: List[Bytes] = list.new()
-    for generation in inputs {
-        let mut cursor = store.range(tx, v.tables.mentions, Included((generation, clone(low))), Excluded((generation + 1, list.new())))?
-        for _ in 0u64 .. rows {
-            let Some(((_, take key), _)) = store.next_in(tx, mut cursor)? else {
-                break
-            }
-            list.push(mut keys, take key)
-        }
-    }
-    list.sort(mut keys, fn(a, b) -> Order {
-        list.compare_bytes(a, b)
-    })
-    let mut distinct: List[Bytes] = list.new()
-    for key in keys {
-        if list.len(distinct) == rows {
-            break
-        }
-        let n = list.len(distinct)
-        if n == 0 || list.compare_bytes(distinct[n - 1], key) != Equal {
-            list.push(mut distinct, clone(key))
-        }
-    }
-    Ok(take distinct)
-}
-
-// The fold's merge: each key's newest mention among the inputs, its vector
-// encoded again under the output's lineage; a mask only when `masks`.
+// The saved successor is inclusive. A repeated page still consumes keys
+// already in the output generation without appending their vectors twice.
 fn ivf_merge[K, V](mut tx: store.Tx, v: Ivf[K, V], merge: store.Merge, limits: store.Limits) -> Result[Option[Bytes], store.Error] {
-    let low: Bytes = match merge.resume {
-        Some(raw) => clone(raw),
-        None => list.new(),
+    let start: store.Bound[Bytes] = match merge.resume {
+        Some(raw) => Included(clone(raw)),
+        None => Unbounded,
     }
-    let keys = merge_keys(tx, v, merge.inputs, low, limits.rows)?
     let t = generation_lineage(mut tx, v, merge.into)?
     let rotation = rotation_signs(v.padded)
-    for key in keys {
-        if let Some(_) = store.fetch(tx, v.tables.mentions, (merge.into, clone(key)))? {
-            continue
+    let last = store.merge_generations(mut tx, v.tables.mentions, merge.inputs, start, limits.rows, scoped fn(mut out: store.Tx, key: Bytes, take mention: Mention) -> Result[(), store.Error] {
+        if let Some(_) = store.fetch(out, v.tables.mentions, (merge.into, clone(key)))? {
+            return Ok(())
         }
-        let mut newest: Option[Mention] = None
-        for j in 0u64 .. list.len(merge.inputs) {
-            let generation = merge.inputs[list.len(merge.inputs) - 1 - j]
-            if let Some(take found) = store.fetch(tx, v.tables.mentions, (generation, clone(key)))? {
-                newest = Some(take found)
-                break
-            }
-        }
-        match take newest {
-            Some(At(take raw)) => {
+        match take mention {
+            At(take raw) => {
                 let e = encode(t, v.metric, v.dims, v.padded, rotation, raw)
-                append(mut tx, v, merge.into, clone(key), take raw, take e)?
+                append(mut out, v, merge.into, clone(key), take raw, take e)
             },
-            Some(Masked) => if merge.masks {
-                store.put(mut tx, v.tables.mentions, (merge.into, clone(key)), Masked)?
+            Masked => if merge.masks {
+                store.put(mut out, v.tables.mentions, (merge.into, clone(key)), Masked)
+            } else {
+                Ok(())
             },
-            None => return Error(MigrationFault),
         }
+    })?
+    match last {
+        Some(key) => Ok(Some(successor(key))),
+        None => Ok(None),
     }
-    let n = list.len(keys)
-    if n < limits.rows {
-        return Ok(None)
-    }
-    Ok(Some(successor(keys[n - 1])))
 }
 
 // The fold's drop: up to `limits.rows` rows of a retired generation, its

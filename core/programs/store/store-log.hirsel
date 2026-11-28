@@ -189,7 +189,8 @@ pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result
     let codec = std.codec.key_u64()
     let low = lower_bytes(id, typed_bound(codec, lo)?, false)?
     let high = lower_bytes(id, typed_bound(codec, hi)?, true)?
-    Ok(TxRows(cursor: take cursor, decoder: log_decoder(l), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner), low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered))
+    let walk = TxWalk(cursor: take cursor, low: take low, high: take high, reverse: false, log_tail: Some(tail), tiered: take tiered)
+    Ok(TxRows(walk: take walk, decoder: log_decoder(l), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner)))
 }
 
 pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {

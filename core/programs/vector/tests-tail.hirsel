@@ -48,3 +48,12 @@ fn ivf_demoted_source(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Res
     result.unwrap(store.close(take memory))
     Ok(())
 }
+
+@test
+fn ivf_merge_page(clock: Clock, random: Random) -> Result[(), store.Error] waits {
+    let shape = vector.Shape(dims: 1, clusters: 1, steps: 100000)
+    let (take opened, _, _, take far) = open_far(clock, random, L2, code.describe(row_ordinal), shape)
+    let mut db = take opened
+    vector.check_ivf_merge_page(mut db, far)?
+    store.close(take db)
+}

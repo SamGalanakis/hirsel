@@ -13,6 +13,7 @@ pkg_v1.Package(
     ],
     tests: Some(Tests(
         sources: [
+            ("merge_law.hirsel", "vector"),
             ("tests.hirsel", "tests"),
             ("tests-charges.hirsel", "tests"),
             ("tests-tail.hirsel", "tests"),

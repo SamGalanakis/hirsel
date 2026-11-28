@@ -406,68 +406,20 @@ fn fold_apply[K, V](mut tx: store.Tx, env: Derived[K, V], delta: store.Delta[K, 
     }
 }
 
-// The first `rows` key bytes after `after` that any input mentions,
-// ascending. Every input contributes its own first `rows`, so no smaller key
-// of any input is missed.
-fn merge_keys[K, V](tx: store.Tx, env: Derived[K, V], inputs: List[u32], after: Option[Bytes], rows: u64) -> Result[List[Bytes], store.Error] {
-    let mut keys: List[Bytes] = list.new()
-    for generation in inputs {
-        let low: store.Bound[(u32, Bytes)] = match after {
-            Some(raw) => Excluded((generation, clone(raw))),
-            None => Included((generation, list.new())),
-        }
-        let mut cursor = store.range(tx, env.mentions, low, Excluded((generation + 1, list.new())))?
-        for _ in 0u64 .. rows {
-            let Some(((_, take raw), _)) = store.next_in(tx, mut cursor)? else {
-                break
-            }
-            list.push(mut keys, take raw)
-        }
-    }
-    std.list.sort(mut keys, list.compare_bytes)
-    let mut distinct: List[Bytes] = list.new()
-    for take raw in take keys {
-        if list.len(distinct) == rows {
-            break
-        }
-        let n = list.len(distinct)
-        if n == 0 || list.compare_bytes(distinct[n - 1], raw) != Equal {
-            list.push(mut distinct, take raw)
-        }
-    }
-    Ok(take distinct)
-}
-
-// One page of a merge: per key, the newest input's mention, in key order,
-// so `into`'s blocks are built as a fold builds them. A mask is kept only
-// when older generations remain below the run.
+// A mask is kept only when older generations remain below the run.
 fn fold_merge[K, V](mut tx: store.Tx, env: Derived[K, V], merge: store.Merge, limits: store.Limits) -> Result[Option[Bytes], store.Error] {
-    let keys = merge_keys(tx, env, merge.inputs, merge.resume, limits.rows)?
-    for raw in keys {
-        let mut newest: Option[Mention] = None
-        let mut at = list.len(merge.inputs)
-        while at > 0 {
-            at -= 1
-            if let Some(take found) = store.fetch(tx, env.mentions, (merge.inputs[at], clone(raw)))? {
-                newest = Some(take found)
-                break
+    let start: store.Bound[Bytes] = match merge.resume {
+        Some(raw) => Excluded(clone(raw)),
+        None => Unbounded,
+    }
+    store.merge_generations(mut tx, env.mentions, merge.inputs, start, limits.rows, scoped fn(mut out: store.Tx, key: Bytes, take mention: Mention) -> Result[(), store.Error] {
+        if let Masked = view mention {
+            if !merge.masks {
+                return Ok(())
             }
         }
-        match take newest {
-            Some(Masked) => {
-                if merge.masks {
-                    store.put(mut tx, env.mentions, (merge.into, clone(raw)), Masked)?
-                }
-            },
-            Some(take present) => write_present(mut tx, env, merge.into, raw, take present)?,
-            None => return Error(MigrationFault),
-        }
-    }
-    let n = list.len(keys)
-    if n < limits.rows {
-        return Ok(None)
-    }
-    Ok(Some(clone(keys[n - 1])))
+        write_present(mut out, env, merge.into, key, take mention)
+    })
 }
 
 // Deletes at most `rows` rows of `t` in [low, high); true while rows remain.

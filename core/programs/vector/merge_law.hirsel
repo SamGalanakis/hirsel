@@ -1,0 +1,44 @@
+// The saved successor is itself an input key. Replaying this full page
+// returns the same successor and leaves exactly one vector in the block.
+pub fn check_ivf_merge_page[K, V](mut db: store.Db, v: Ivf[K, V]) -> Result[(), store.Error] waits {
+    let Committed(_) = store.run(mut db, None, store.copy_env(v), fn(mut tx, env) -> Result[(), store.Error] {
+        let mut raw: List[i8] = list.new()
+        list.push(mut raw, 12i8)
+        store.put(mut tx, env.tables.mentions, (1u32, b"a"), Masked)?
+        store.put(mut tx, env.tables.mentions, (1u32, b"a\x00"), Masked)?
+        store.put(mut tx, env.tables.mentions, (2u32, b"a\x00"), At(take raw))?
+        store.put(mut tx, env.tables.gens, 3u32, GenMeta(lineage: None))
+    })? else {
+        fail("IVF merge seed did not commit")
+    }
+    for _ in 0u64 .. 2 {
+        let Committed(done) = store.run(mut db, None, store.copy_env(v), fn(mut tx, env) -> Result[(), store.Error] {
+            let mut inputs: List[u32] = list.new()
+            list.push(mut inputs, 1u32)
+            list.push(mut inputs, 2u32)
+            let page = store.Merge(inputs: take inputs, into: 3, masks: true, resume: Some(b"a\x00"))
+            if ivf_merge(mut tx, env, page, store.Limits(rows: 1, byte_limit: 4096))? != Some(b"a\x00\x00") {
+                fail("IVF merge skipped the saved successor")
+            }
+            if store.fetch(tx, env.tables.fill, (3u32, 0u32))? != Some(1u32) {
+                fail("IVF merge lost or duplicated the output vector")
+            }
+            Ok(())
+        })? else {
+            fail("IVF merge did not commit")
+        }
+        let (_, id) = store.table_identity(v.tables.mentions)
+        for event in done.reads {
+            if let Point(key) = event {
+                let table_id: u32 = list.word_be(key, 0)
+                if table_id == id {
+                    let generation: u32 = list.word_be(key, 4)
+                    if generation < 3 {
+                        fail("IVF merge probed an input mention after reading its range")
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

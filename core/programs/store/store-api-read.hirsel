@@ -55,10 +55,6 @@ fn prefix_limits[K, Q](id: u32, full: std.codec.Key[K], leading: std.codec.Key[Q
     failure_result_from_rep(read.prefix_limits(id, full, leading, q))
 }
 
-fn tx_tiered_staged(tree: pages.PageTree, below: List[Arc[pages.Staged]], ops: pages.DataOps, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Option[Arc[Bytes]]], Error] {
-    failure_result_from_rep(read.tx_tiered_staged(tree, below, ops, only))
-}
-
 fn tx_tiered_stopped(attempt: core.Cell[pager.TieredTouchSet]) -> Result[(), Error] {
     failure_result_from_rep(read.tx_tiered_stopped(attempt))
 }
@@ -349,15 +345,20 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
 
 fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
     let (take cursor, take tiered) = failure_result_from_rep(txn.open_range_bounds(tx.inner, t.id, low, high, reverse))?
-    Ok(TxRows(cursor: take cursor, decoder: table_decoder(t), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner), low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered))
+    let walk = TxWalk(cursor: take cursor, low: take low, high: take high, reverse: reverse, log_tail: None, tiered: take tiered)
+    Ok(TxRows(walk: take walk, decoder: table_decoder(t), owner: tx.info.id, depth: txn.tx_own(tx.inner), reads: txn.tx_reads(tx.inner)))
 }
 
 pub opaque scoped type TxRows[K, V] {
-    cursor: Option[pages.CollectionCursor],
+    walk: TxWalk,
     decoder: RowDecoder[K, V],
     owner: CallId,
     depth: u64,
-    reads: View[core.Log[Read]],
+    reads: View[core.Log[Read]]
+}
+
+type TxWalk {
+    cursor: Option[pages.CollectionCursor],
     low: Bytes,
     high: Bytes,
     reverse: bool,
@@ -371,8 +372,12 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     if !types.same(tx.info.id.store.hi, tx.info.id.store.lo, r.owner.store.hi, r.owner.store.lo) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || txn.tx_own(tx.inner) != r.depth {
         return Error(Foreign)
     }
+    step_tx_walk(tx, r.reads, r.decoder, mut r.walk)
+}
+
+fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K, V], mut r: TxWalk) -> Result[Option[(K, V)], Error] {
     if let Some(mut cursor) = r.cursor {
-        let found = next_tx_page(mut cursor.walk, cursor.leading, r.decoder, r.reads, r.low, r.high, r.reverse)
+        let found = next_tx_page(mut cursor.walk, cursor.leading, decoder, reads, r.low, r.high, r.reverse)
         if let Some(take row) = take found {
             let (take boundary, take decoded_row) = take row
             if r.reverse {
@@ -394,14 +399,14 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     }
     match take found {
         Some((key, raw)) => {
-            note_tx_row(r.reads, mut r.low, mut r.high, r.reverse, key)?
-            Ok(Some(decode_table_row(r.decoder, list.slice(key, 4, list.len(key)), raw)?))
+            note_tx_row(reads, mut r.low, mut r.high, r.reverse, key)?
+            Ok(Some(decode_table_row(decoder, list.slice(key, 4, list.len(key)), raw)?))
         },
         None => {
             if r.low < r.high {
                 let low = replace(mut r.low, list.new())
                 let high = replace(mut r.high, list.new())
-                log.append(r.reads, Span(take low, take high))
+                log.append(reads, Span(take low, take high))
             }
             Ok(None)
         },

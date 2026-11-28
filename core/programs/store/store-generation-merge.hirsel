@@ -1,0 +1,127 @@
+// Walks belong to this call. They never carry a Tx or its read log across
+// a callback. Each head is the next unconsumed row of its input generation.
+type GenerationWalk[V] {
+    walk: TxWalk,
+    key: Bytes,
+    value: Option[V]
+}
+
+fn generation_head[V](tx: Tx, decoder: RowDecoder[(u32, Bytes), V], mut source: GenerationWalk[V], slot: u64) -> Result[Option[u64], Error] {
+    let Some(((_, take key), take value)) = step_tx_walk(tx, txn.tx_reads(tx.inner), decoder, mut source.walk)? else {
+        source.value = None
+        return Ok(None)
+    }
+    source.key = take key
+    source.value = Some(take value)
+    Ok(Some(slot))
+}
+
+// An internal node names the input with the least head key. Equal keys
+// choose the newest input slot, irrespective of the tree's leaf order.
+fn generation_winner[V](runs: List[GenerationWalk[V]], left: Option[u64], right: Option[u64]) -> Option[u64] {
+    let Some(a) = left else {
+        return right
+    }
+    let Some(b) = right else {
+        return left
+    }
+    match list.compare_bytes(runs[a].key, runs[b].key) {
+        Less => left,
+        Greater => right,
+        Equal => Some(order.max(a, b)),
+    }
+}
+
+// Only descend into subtrees whose old winner matches the consumed key.
+// A single matching leaf costs one path. Even when every leaf matches,
+// each tree node is visited at most once for this output.
+fn advance_generation_group[V](tx: Tx, decoder: RowDecoder[(u32, Bytes), V], mut runs: List[GenerationWalk[V]], mut winners: List[Option[u64]], node: u64, key: Bytes) -> Result[(), Error] {
+    let Some(slot) = winners[node] else {
+        return Ok(())
+    }
+    if runs[slot].key != key {
+        return Ok(())
+    }
+    if node >= list.len(runs) {
+        winners[node] = generation_head(tx, decoder, mut runs[slot], slot)?
+    } else {
+        let left = node * 2
+        advance_generation_group(tx, decoder, mut runs, mut winners, left, key)?
+        advance_generation_group(tx, decoder, mut runs, mut winners, left + 1, key)?
+        winners[node] = generation_winner(runs, winners[left], winners[left + 1])
+    }
+    Ok(())
+}
+
+type GenerationView = ResidentRuns(pages.PageTree) | TieredRuns(std.omap.OMap[Bytes, Option[Arc[Bytes]]])
+
+fn generation_walk[V](t: Table[(u32, Bytes), V], data: GenerationView, generation: u32, start: Bound[Bytes]) -> Result[GenerationWalk[V], Error] {
+    let lo: Bound[(u32, Bytes)] = match start {
+        Included(key) => Included((generation, clone(key))),
+        Excluded(key) => Excluded((generation, clone(key))),
+        Unbounded => Included((generation, b"")),
+    }
+    let hi: Bound[(u32, Bytes)] = match int.checked_add(generation, 1u32) {
+        Some(g) => Excluded((g, b"")),
+        None => Unbounded,
+    }
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let pair: (Option[pages.CollectionCursor], Option[txn.TxTieredRows]) = match data {
+        TieredRuns(overlay) => (None, Some(txn.TxTieredRows(collection: t.id, staged: std.omap.snapshot(overlay), from: clone(low), to: clone(high)))),
+        ResidentRuns(tree) => (failure_result_from_rep(catalog.collection_cursor(tree, t.id, low, high, false))?, None),
+    }
+    let (take cursor, take tiered) = take pair
+    let walk = TxWalk(cursor: take cursor, low: take low, high: take high, reverse: false, log_tail: None, tiered: take tiered)
+    Ok(GenerationWalk(walk: take walk, key: b"", value: None))
+}
+
+/// Visit at most `rows` distinct keys in byte order in a generation-keyed
+/// table using the canonical (u32, Bytes) key codec. Inputs are oldest first.
+/// The walks see writes staged before entry. The callback may stage output.
+/// A full page returns its last visited key, even if that key ends the input.
+pub fn merge_generations[V](mut tx: Tx, t: Table[(u32, Bytes), V], inputs: List[u32], start: Bound[Bytes], rows: u64, visit: scoped[view] fn(mut Tx, Bytes, take V) -> Result[(), Error]) -> Result[Option[Bytes], Error] {
+    check_table_read(tx, t)?
+    if rows == 0 || list.len(inputs) == 0 {
+        return Ok(None)
+    }
+    let canonical: std.codec.Key[(u32, Bytes)] = std.codec.key_of()
+    if t.readers.schemas.key != (std.codec.key_schema(canonical) ?=> |_| Schema(0)) {
+        return Error(Schema(0))
+    }
+    let data = if failure_result_from_rep(txn.tx_tiered_descriptor(tx.inner, t.id))? {
+        TieredRuns(txn.tx_tiered_snapshot(tx.inner))
+    } else {
+        ResidentRuns(failure_result_from_rep(txn.transaction_collection_pages(tx.inner))?)
+    }
+    let decoder = table_decoder(t)
+    let mut runs: List[GenerationWalk[V]] = list.with_capacity(list.len(inputs))
+    // In the one-based tree, slots [G, 2G) are the leaves. This layout
+    // also works for a non-power-of-two G.
+    let mut winners: List[Option[u64]] = list.new()
+    list.fill(mut winners, list.len(inputs), None)
+    for generation in inputs {
+        let slot = list.len(runs)
+        let mut source = generation_walk(t, data, generation, start)?
+        list.push(mut winners, generation_head(tx, decoder, mut source, slot)?)
+        list.push(mut runs, take source)
+    }
+    let mut node = list.len(runs)
+    while node > 1 {
+        node -= 1
+        winners[node] = generation_winner(runs, winners[node * 2], winners[node * 2 + 1])
+    }
+    for at in 0u64 .. rows {
+        let Some(newest) = winners[1u64] else {
+            return Ok(None)
+        }
+        let key: Bytes = clone(runs[newest].key)
+        let value = option.unwrap(replace(mut runs[newest].value, None))
+        visit(mut tx, key, take value)?
+        if at + 1 == rows {
+            return Ok(Some(take key))
+        }
+        advance_generation_group(tx, decoder, mut runs, mut winners, 1, key)?
+    }
+    Ok(None)
+}

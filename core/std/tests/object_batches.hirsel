@@ -340,3 +340,44 @@ fn dispatch_scratch_one_lane(tasks: Tasks) -> bool waits {
 fn dispatch_scratch_eight_lanes(tasks: Tasks) -> bool waits {
     batch_test_scratch_bound(tasks, 8)
 }
+
+fn opener_batch_peer(take source: (List[Receiver[LaneMessage]], u64)) waits {
+    let (take inputs, count) = take source
+    let width = list.len(inputs)
+    for i in 0u64 .. count {
+        let lane = width - 1 - i % width
+        let Ok(Work(take job, Some(take reply))) = channel.receive(inputs[lane]) else {
+            return
+        }
+        if !batch_test_reply(reply, lane, take job, count, false, false) {
+            return
+        }
+    }
+}
+
+// expect: run opener_dispatch_scratch_is_lane_bounded(tasks) = true
+fn opener_dispatch_scratch_is_lane_bounded(tasks: Tasks) -> bool waits {
+    for width in[1u64, 8u64] {
+        for count in[8u64, 128u64] {
+            let (clock, hand) = provide.clock(0, 0)
+            let (take requests, take inputs, shared) = batch_test_client(clock, width)
+            let c = attach(take requests, None)
+            let o = opener(c)
+            let peer = task.spawn(tasks, bytes 65536, (take inputs, count), opener_batch_peer)
+            let scratch = option.unwrap(charge.seq(bytes[(RangeReply, u64)], width))
+            let room = batch_test_output_rows(count) + scratch + width * (ISOLATED_REPLY_BYTES + 128)
+            let ranges = batch_test_ranges(count, false)
+            let checked = bound bytes room {
+                let rows = read_ranges(o, take ranges, width)
+                batch_test_ranges_ok(rows, count, false)
+            }
+            let _ = take o
+            let _ = take c
+            result.unwrap(task.join(take peer))
+            if let Ok(true) = checked {} else {
+                return false
+            }
+        }
+    }
+    true
+}

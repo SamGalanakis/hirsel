@@ -213,8 +213,8 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //   lane: 1,048,576
 //   history: 2 × round8(65,536 + 112 + 33) + 2 × 65,776 + round8(60) = 262,992
 //   worker: 4 × 65,536 + 524,288 + 1,000 × (1,032 + 8 + 72) + 288 + 64 = 1,898,784
-//   timer: 4,096 + 288 = 4,384 plus its 64-byte channel. Journal channels: 28,739. State: 1,768.
-//   lifetime before resident = 3,245,307. Resident adds 1,048,576.
+//   timer: 4,096 + 288 = 4,384 plus its 64-byte channel. Journal channels: 28,763. State: 1,768.
+//   lifetime before resident = 3,245,331. Resident adds 1,048,576.
 // Journal holds two 16,777,296 B frames. Recovery holds an entry and
 // decoded frame (33,554,744 B), or one checkpoint entry and one pack.
 // The cut wins at 68,493,692 B:
@@ -224,7 +224,7 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //     16,777,704 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
 //   PUT: max(8 MiB + 24 for one multipart part, 16,777,704 for the encoded MANIFEST)
 //   cut work: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
-// T_floor = 72,787,575. The place needs T_floor + 80 + 1,434 = 72,789,089
+// T_floor = 72,787,599. The place needs T_floor + 80 + 1,434 = 72,789,089
 // (the follower starter's 1,434 is L85's; Options carries its 32-byte limits
 // and its 80-byte claim_auth).
 @test
@@ -233,8 +233,8 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let kind: Kind = Bucket(lanes)
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
-    let writer_need = 72787575u64
-    let need = 72789089u64
+    let writer_need = 72787599u64
+    let need = 72789113u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != history.MIB {
         fail("§1.1: the Bucket place plan at its exact share")
@@ -271,7 +271,7 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 }
 
 // §1.1 and §11.1 AP4a: the same Bucket place with the small limits. The
-// lifetime terms (3,245,307 before resident) do not depend on the limits.
+// lifetime terms (3,245,331 before resident) do not depend on the limits.
 // The cut still wins, at 1,909,140 B:
 //   output: round8(72 + 16 + 236 + 65,536 + 20 + 141) = 66,024 (MANIFEST file bound)
 //   workspace: 1,057,000 for the packet, 66,024 for the comparison
@@ -280,7 +280,7 @@ fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 //   cut work: 65,536 + 2 × 95,326 + (4,096 + 262,144) = 522,428
 // above the write peak 2 × 327,760 = 655,520 and recovery
 // max(327,912 + 327,760, 1,057,000 + 66,024) = 1,123,024.
-// T_floor = 3,245,307 + 1,048,576 + 1,909,140 = 6,203,023; the place needs
+// T_floor = 3,245,331 + 1,048,576 + 1,909,140 = 6,203,023; the place needs
 // 6,203,023 + 80 + 1,434 = 6,204,537 (72,789,089 at the ceilings).
 @test
 fn small_bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {

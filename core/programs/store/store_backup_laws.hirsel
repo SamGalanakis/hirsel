@@ -365,9 +365,10 @@ fn backup_residual_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Opt
     }
     let _ = result.unwrap(restore(tasks, target, restored, c, r, options, Latest, restore_attempt(r)))
     let twin = open(tasks, restored, c, r, options)?
+    let restored_rows = system_table(twin, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let read = reader(twin, 0)?
     let snap = snapshot(twin)
-    if version(snap) != head || get(read, snap, rows, 0u64)? != Some(wide) || get(read, snap, rows, 1u64)? != Some(b"one") || get(read, snap, rows, 2u64)? != Some(b"two") || get(read, snap, rows, 3u64)? != Some(b"three") {
+    if version(snap) != head || get(read, snap, restored_rows, 0u64)? != Some(wide) || get(read, snap, restored_rows, 1u64)? != Some(b"one") || get(read, snap, restored_rows, 2u64)? != Some(b"two") || get(read, snap, restored_rows, 3u64)? != Some(b"three") {
         fail("restore lost a checkpointed blob or a recovered suffix row")
     }
     close(take twin)
@@ -484,8 +485,11 @@ fn backup_mutilations(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Option
             _ => fail("backup accepted a mutilated listed pack"),
         }
         match restore(tasks, target, incomplete, c, r, options, Latest, restore_attempt(r)) {
-            Error(Store(Corrupt(found))) if damage == 1 && found.file == pack => (),
-            Error(Scratch(Io(NotFound))) if damage != 1 => (),
+            Error(Store(Corrupt(found))) if found.file == pack => match found.why {
+                Truncated if damage == 1 => (),
+                Absent if damage != 1 => (),
+                _ => fail("restore reported the wrong pack fault"),
+            },
             _ => fail("restore accepted a mutilated listed pack"),
         }
         if failure_result_from_rep(journal.disk_exists(output, "EXPORT"))? || !failure_result_from_rep(journal.disk_exists(incomplete, "EXPORT"))? {

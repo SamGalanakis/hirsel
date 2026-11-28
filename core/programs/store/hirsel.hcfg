@@ -709,6 +709,8 @@ pkg_v1.Package(
             ("store@1/store/test_la10_directory_thirteen_handoff_cuts", TestRun(limit: Some(268435456))),
             ("store@1/store/test_la4_archive_target_resolution", TestRun(limit: Some(536870912))),
             ("store@1/store/test_la5_backup_fresh_child", TestRun(limit: Some(536870912))),
+            ("store@1/store/test_la11_tiered_bucket_above_resident_limit", TestRun(limit: Some(1342177280))),
+            ("store@1/store/test_la11_tiered_bucket_restore", TestRun(limit: Some(536870912))),
             ("store@1/store/test_la11_bucket_genesis", TestRun(limit: Some(536870912))),
             ("store@1/store/test_la7_expiry_fences", TestRun(limit: Some(536870912))),
         ],

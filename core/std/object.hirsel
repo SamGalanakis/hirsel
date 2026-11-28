@@ -136,58 +136,9 @@ fn size_or(n: Option[u64], fallback: u64) -> u64 {
     }
 }
 
-/// The half-open span [first, end) that `want` selects from an object of
-/// `size` bytes (RFC 9110 §14.1.2), or None when it is unsatisfiable: no byte
-/// of the object lies in it, as for any range of an empty object, or
-/// `Span(first, last)` has last < first.
+/// The half-open span selected from the object, or None for an unsatisfiable range.
 pub fn range_span(want: Want, size: u64) -> Option[(u64, u64)] {
-    match want {
-        Whole => Some((0, size)),
-        From(first) if first < size => Some((first, size)),
-        Span(first, last) if first <= last && first < size => Some((first, order.min(last, size - 1) + 1)),
-        Last(n) if n != 0 && size != 0 => Some((size - order.min(n, size), size)),
-        _ => None,
-    }
-}
-
-fn decimal(b: Bytes, lo: u64, hi: u64) -> Result[u64, Error] {
-    match int.parse_decimal_span(b, lo, hi, MAX_U64) {
-        Ok(n) => Ok(n),
-        Error(_) => Error(Fatal(Malformed)),
-    }
-}
-
-type Range: send {
-    lo: u64,
-    hi: u64,
-    size: u64
-}
-
-fn content_range(b: Bytes) -> Result[Range, Error] {
-    if list.len(b) < 11 || list.slice(b, 0, 6) != string.as_bytes("bytes ") {
-        return Error(Fatal(Malformed))
-    }
-    let mut dash = 6u64
-    while dash < list.len(b) && b[dash] != b'-' {
-        dash += 1
-    }
-    if dash == list.len(b) {
-        return Error(Fatal(Malformed))
-    }
-    let mut slash = dash + 1
-    while slash < list.len(b) && b[slash] != b'/' {
-        slash += 1
-    }
-    if slash == list.len(b) {
-        return Error(Fatal(Malformed))
-    }
-    let lo = decimal(b, 6, dash)?
-    let last = decimal(b, dash + 1, slash)?
-    let size = decimal(b, slash + 1, list.len(b))?
-    if lo > last || last >= size {
-        return Error(Fatal(Malformed))
-    }
-    Ok(Range(lo, hi: last + 1, size))
+    object_ranges.range_span(want, size)
 }
 
 fn empty_tag() -> ETag {
@@ -633,7 +584,7 @@ fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Re
         return Error(Fatal(Malformed))
     }
     object_xml.decode_xml(mut decoded, raw_etag)?
-    let size = decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
+    let size = object_ranges.decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
     Ok(Entry(key: name, size, etag: etag(string.as_bytes(decoded))?))
 }
 
@@ -893,7 +844,7 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
             let Some(field) = object_request.header(head, "content-range") else {
                 return Invalid(Fatal(Malformed))
             }
-            let range = match content_range(field) {
+            let range = match object_ranges.content_range(field) {
                 Ok(value) => value,
                 Error(take e) => return Invalid(take e),
             }
@@ -979,7 +930,7 @@ fn open_part(head: http_client.ResponseHead, want: Want, status: u16) -> Exchang
     let Some(field) = object_request.header(head, "content-range") else {
         return Invalid(Fatal(Malformed))
     }
-    let range = match content_range(field) {
+    let range = match object_ranges.content_range(field) {
         Ok(value) => value,
         Error(take e) => return Invalid(take e),
     }
@@ -2488,6 +2439,11 @@ fn as_unit(take result: Result[Value, Error]) -> Result[(), Error] {
     Ok(())
 }
 
+/// Wall time in milliseconds on the clock supplied at client startup.
+pub fn client_wall_ms(c: Client) -> u64 {
+    host.wall_ms(c.requests.clock)
+}
+
 /// The deadline `ms` milliseconds from now on the clock the client was started with.
 pub fn deadline_after_ms(c: Client, ms: u64) -> u64 {
     clock.deadline_after_ms(host.mono_ns(c.requests.clock), ms)
@@ -2578,6 +2534,48 @@ pub type GetRange: send {
     hi: u64,
     buffer: Bytes,
     deadline: u64
+}
+
+type RangeReply = Result[Receiver[LaneEvent], (Error, Bytes)]
+
+fn issue_read_range(o: Opener, lane: u64, take range: GetRange) -> RangeReply waits {
+    let GetRange(key: take key, lo, hi, buffer: take buffer, deadline) = take range
+    if lo >= hi {
+        return Error((Precondition, take buffer))
+    }
+    let mut job = new_job(S3FetchRange, request_path(o.bucket, key, false), take buffer, deadline)
+    job.lo = lo
+    job.hi = hi
+    match isolated_admit(o.lanes[lane], take job, o.clock) {
+        Ok(take rx) => Ok(take rx),
+        Error((Job(data: take data, ..), take problem)) => Error((take problem, take data)),
+    }
+}
+
+fn finish_read_range(o: Opener, take pending: RangeReply, deadline: u64) -> (Result[Meta, Error], Bytes) waits {
+    match take pending {
+        Error((take problem, take data)) => (Error(take problem), take data),
+        Ok(take reply) => match channel.receive_until(reply, At(o.clock, deadline)) {
+            Ok(Finished(Reply(result: take result, data: take data, ..))) => (as_meta(take result), take data),
+            Error(Empty) => (Error(Retriable(Deadline)), list.new()),
+            _ => (Error(Retriable(Cancelled)), list.new()),
+        },
+    }
+}
+
+/// Buffered range read through an opener. The object lane owns the connection.
+pub fn read_range(o: Opener, take range: GetRange) -> (Result[Meta, Error], Bytes) waits {
+    let deadline = range.deadline
+    finish_read_range(o, issue_read_range(o, 0, take range), deadline)
+}
+
+pub fn read_ranges(o: Opener, take ranges: List[GetRange], streams: u64) -> List[(Result[Meta, Error], Bytes)] waits {
+    let width = order.min(list.len(ranges), order.min(streams, list.len(o.lanes)))
+    object_ranges.read_batch(take ranges, width, scoped fn(lane: u64, take range: GetRange) -> RangeReply waits {
+        issue_read_range(o, lane, take range)
+    }, scoped fn(take reply: RangeReply, until: u64) -> (Result[Meta, Error], Bytes) waits {
+        finish_read_range(o, take reply, until)
+    })
 }
 
 /// Fetch ranges concurrently on up to `streams` lanes. Results and their

@@ -146,7 +146,7 @@ fn restore_emit_bucket(mut dst: std.object.Client, d: Dir, child: StoreId, origi
     let mname = failure_result_from_rep(history.history_read_key("m-", mref))?
     expiry_hold(mut held, mname)?
     expiry_hold(mut held, ekey)?
-    let _ = failure_result_from_rep(object_writer.history_validate_manifest(mut dst, located, due, id, mname, take checked, None))?
+    let _ = failure_result_from_rep(object_writer.validate_bucket_graph(mut dst, located, due, id, mname, take checked, true, None))?
     match restore_check_keys(mut dst, held, due) {
         Ok(_) => (),
         Error(Exists(_)) => {

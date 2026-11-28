@@ -186,7 +186,7 @@ fn stream_no_hold_scan(mut client: std.object.Client, mut source_lane: host_stre
 // only `live` at the register's current incarnation with no sealed tail;
 // every other ATTACH refuses before any write. `workspace.witness` holds
 // step 1's head bytes on entry.
-fn stream_open_attached[T](take input: history.ObjectPackRead, mut link: host_stream.SlotLink, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, cleanup_ms: u64, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> (history.ObjectPackRead, Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error]) waits {
+fn stream_open_attached[T](take input: history.ObjectPackRead, mut link: host_stream.SlotLink, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, cleanup_ms: u64, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, u64, bool, std.object.Client, pager.JournalReplay) -> Result[T, Error]) -> (history.ObjectPackRead, Result[(history.HistoryRegister, pager.JournalReplay, T, Bytes), Error]) waits {
     let mut read_source = take input
     let initial = stream_claim_side(link, authority_kind, holder)
     let mut side = match take initial {
@@ -359,7 +359,7 @@ type LiveClaimInput {
 type StreamClaimPreflight[T] = ClaimTryAgain | ClaimFinished((history.HistoryRegister, pager.JournalReplay, T, Bytes)) | ClaimReady(LiveClaimInput)
 
 // Authorize and recover the settled and live prefixes before issuing any Hold.
-fn stream_claim_prepare[T](mut read_source: history.ObjectPackRead, mut link: host_stream.SlotLink, mut side: host_stream.ClaimStream, holder: StoreId, mut options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[StreamClaimPreflight[T], Error] waits {
+fn stream_claim_prepare[T](mut read_source: history.ObjectPackRead, mut link: host_stream.SlotLink, mut side: host_stream.ClaimStream, holder: StoreId, mut options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, u64, bool, std.object.Client, pager.JournalReplay) -> Result[T, Error]) -> Result[StreamClaimPreflight[T], Error] waits {
     let deadline = read_source.deadline
     let (take capture, take attached) = failure_result_from_rep(history.history_decode_head_attach(workspace.witness))?
     let auth = history_check_open(read_source.client, capture, requested_levels, authority_kind, options)?
@@ -386,7 +386,7 @@ fn stream_claim_prepare[T](mut read_source: history.ObjectPackRead, mut link: ho
             let grant = failure_result_from_rep(host_stream.slot_attach(mut link, store, epoch + 1, place_prefix, replay.limits))?
             side.granted = Some(grant)
         }
-        let Some((take admitted, tag)) = stream_claim_final_head(mut read_source.client, deadline, store_key_from_rep(store), replay, mut workspace, prepare_writer)? else {
+        let Some((take admitted, tag)) = stream_claim_final_head(mut read_source.client, deadline, head, history.has_deferred_pages(read_source.admitted_base), replay, mut workspace, prepare_writer)? else {
             return Ok(ClaimTryAgain)
         }
         let claimed = history_claim_head(head, holder, auth)?
@@ -463,7 +463,7 @@ fn stream_claim_prepare[T](mut read_source: history.ObjectPackRead, mut link: ho
     Ok(ClaimReady(LiveClaimInput(head, attach: take attach, tail, auth: take auth, cursor, replay: take replay, place_prefix: string.from(place_prefix), no_hold, next_slot)))
 }
 
-fn stream_claim_live_attempt[T](take input: history.ObjectPackRead, take side: host_stream.ClaimStream, take request: LiveClaimInput, r: Random, holder: StoreId, options: Options, cleanup_ms: u64, mut link: host_stream.SlotLink, mut work: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> (history.ObjectPackRead, host_stream.ClaimStream, Result[Option[(history.HistoryRegister, pager.JournalReplay, T, Bytes)], Error]) waits {
+fn stream_claim_live_attempt[T](take input: history.ObjectPackRead, take side: host_stream.ClaimStream, take request: LiveClaimInput, r: Random, holder: StoreId, options: Options, cleanup_ms: u64, mut link: host_stream.SlotLink, mut work: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, u64, bool, std.object.Client, pager.JournalReplay) -> Result[T, Error]) -> (history.ObjectPackRead, host_stream.ClaimStream, Result[Option[(history.HistoryRegister, pager.JournalReplay, T, Bytes)], Error]) waits {
     let LiveClaimInput(head, attach: take attach, tail, auth: take auth, cursor, replay: take replay, place_prefix: take place_prefix, no_hold, next_slot) = take request
     let minted: Result[types.StoreKey, types.Failure] = if no_hold {
         Ok(types.StoreKey(hi: 0, lo: 0))
@@ -490,7 +490,7 @@ fn stream_claim_live_attempt[T](take input: history.ObjectPackRead, take side: h
         if !delta_ok {
             return Ok(None)
         }
-        let final_read = stream_claim_final_head(mut c, deadline, store_key_from_rep(head.store), replayed, mut buffers_h, prepare_writer) ?=> |problem| failure_to_rep(take problem)
+        let final_read = stream_claim_final_head(mut c, deadline, head, history.has_deferred_pages(base), replayed, mut buffers_h, prepare_writer) ?=> |problem| failure_to_rep(take problem)
         let Some((take admitted, tag)) = take final_read else {
             return Ok(None)
         }
@@ -517,8 +517,10 @@ fn stream_claim_conflict[T](client: std.object.Client, head: history.HistoryHead
 
 // Step 5: prepares the writer state and re-reads `head`; exact step 1 bytes go
 // on with its tag, another pair returns `Lost`, and a same-pair move restarts.
-fn stream_claim_final_head[T](mut client: std.object.Client, deadline: u64, store: StoreId, replay: pager.JournalReplay, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
-    let admitted = prepare_writer(store, replay)?
+fn stream_claim_final_head[T](mut client: std.object.Client, deadline: u64, head: history.HistoryHead, deferred: bool, replay: pager.JournalReplay, mut workspace: history.HistoryBuffers, prepare_writer: scoped fn(StoreId, u64, bool, std.object.Client, pager.JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+    let store = store_key_from_rep(head.store)
+    let next_epoch = failure_result_from_rep(history.history_next_id(head.pair.epoch))?
+    let admitted = prepare_writer(store, next_epoch, deferred, client, replay)?
     let tag = match history.history_fetch_head(mut client, mut workspace.compare, deadline) {
         Ok(found) => found,
         Error(take problem) => return Error(Remote(take problem)),

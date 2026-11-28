@@ -106,11 +106,24 @@ pub fn history_dead_upload(pass: ReclaimPass, key: String) -> bool {
     name.kind == b'p' && name.epoch < pass.epoch
 }
 
+// Keep the immutable pack maps without retaining an inventory lease ourselves.
+pub type ReadPackMaps: send = List[std.omap.OMap[u64, pages.TieredPagerPack]]
+
+pub fn reclaim_read_packs(held: List[Arc[pages.TieredReadInventory]]) -> Result[ReadPackMaps, types.Failure] {
+    let mut maps: ReadPackMaps = list.new()
+    types.capacity(list.try_reserve(mut maps, list.len(held)))?
+    for inventory in held {
+        list.push(mut maps, std.omap.snapshot(inventory.packs))
+    }
+    Ok(take maps)
+}
+
 pub type ObjectReclaimCapture: send {
     head: history.HistoryHead,
     recovered: pages.HistoryRef,
     generation: u64,
-    next_pack: u64
+    next_pack: u64,
+    read_packs: ReadPackMaps
 }
 
 pub fn live_reclaim_name(mut live_bytes: Map[String, ()], lead: String, item: pages.HistoryRef) -> Result[(), types.Failure] {
@@ -275,6 +288,14 @@ fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lea
 
 pub fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture, deadline: u64, drop_released: bool) -> Result[ReclaimPass, types.Failure] waits {
     let mut pass = reclaim_capture(mut lane.client, fixed, deadline)?
+    for packs in fixed.read_packs {
+        let mut cursor = std.omap.range(packs, Unbounded, Unbounded)
+        while let Some((_, pack)) = std.omap.next(mut cursor) {
+            if let Some(item) = pack.object {
+                live_reclaim_name(mut pass.leased, "p-", item)?
+            }
+        }
+    }
     let released = match lane.export_lease {
         Some(leased) => {
             if let Error(Empty) = channel.try_receive(leased.lifetime) {
@@ -316,8 +337,8 @@ pub const RECLAIM_FORMAT_VERSION: u64 = format.DISK_FORMAT
 
 pub const RECLAIM_TOOL_VERSION: u64 = 1u64
 
-pub fn schedule_reclaim(mut lane: ObjectJournalSession, recovered: pages.HistoryRef, generation: u64, next_pack: u64) {
-    lane.reclaim = Some(ObjectReclaimCapture(head: history.register_head(lane.register), recovered, generation, next_pack))
+pub fn schedule_reclaim(mut lane: ObjectJournalSession, recovered: pages.HistoryRef, generation: u64, next_pack: u64, take read_packs: ReadPackMaps) {
+    lane.reclaim = Some(ObjectReclaimCapture(head: history.register_head(lane.register), recovered, generation, next_pack, read_packs: take read_packs))
 }
 
 pub fn paused_sweep(lane: ObjectJournalSession) -> manifest.SweepCursor {

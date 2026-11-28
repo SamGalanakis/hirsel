@@ -101,6 +101,106 @@ fn restore_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result
 }
 
 @test
+fn test_la11_tiered_bucket_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let sim = df_complete_expired_sim(tasks, c, 334712)
+    let checked = restore_tiered_bucket_law(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn restore_tiered_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let source = disk_test_directory(d)
+    let backup_dir = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let local_opts = deploy_result(l96_tiered_options(182375272, 65536, 500))?
+    let mut db = deploy_result(open(tasks, source, sim.time, r, local_opts))?
+    let rows = deploy_result(archive_hold_table(mut db))?
+    let before = l96_blob_value(17, 8192)
+    let after = l96_blob_value(71, 4096)
+    deploy_result(l96_put_bytes(mut db, rows, 5, before))?
+    deploy_result(set_residency(mut db, rows.id, Tiered))?
+    let attempt = exit_attempt(4)
+    let job = begin_backup(mut db, backup_dir, clone(attempt))?
+    let _ = export_copy(take job)?
+    release_export(mut db, attempt)
+    deploy_result(close(take db))?
+    let mut dst = deploy_result(arch_law_sink_client(sim, tasks, 852, "tiered-child/"))?
+    let names = RestoreNamespaces(source_place: None, host_stream: None)
+    let restored = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, local_opts, Latest,[4; 16], DF_OP_MS, plain_restore_release)?
+    let mut opts = exit_open_opts(false, 1)
+    opts.expect = Some(restored.child)
+    opts.retain = 1
+    let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
+    let due = std.object.deadline_after_ms(dst, DF_OP_MS)
+    let first = result.unwrap(history.history_fetch_head(mut dst, mut raw, due))
+    let mut unfunded: Options = clone(opts)
+    unfunded.cache_bytes = 0
+    unfunded.writer_pin_bytes = 1
+    let challenger = deploy_result(arch_law_sink_client(sim, tasks, 854, "tiered-child/"))?
+    match open_authority(tasks, object_authority(take challenger, "bucket", DF_OP_MS), sim.time, r, unfunded) {
+        Error(Refusal(error: Missing(field), ..)) if field == "cache_bytes" => (),
+        _ => fail("Tiered Bucket admitted an unfunded pager"),
+    }
+    if result.unwrap(history.history_fetch_head(mut dst, mut raw, due)) != first {
+        fail("refused Tiered Bucket opener changed the incumbent head")
+    }
+    let mut child = match open_authority(tasks, object_authority(take dst, "bucket", DF_OP_MS), sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    let t = deploy_result(table(mut child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    if deploy_result(residency_mode(child, t.id))? != (TableCollection, ResidentTiered) || deploy_result(get(deploy_result(reader(child, READER_PIN_MIN))?, snapshot(child), t, 5u64))? != Some(clone(before)) {
+        fail("Bucket restore lost the Cold row or its residency")
+    }
+    let seq = deploy_result(compact_blob_pack(child))?
+    let key = {
+        let item = option.unwrap(map.get(history.locator_rows(object_writer.object_locator(object_state(child))), seq))
+        history.history_key("p-", item)
+    }
+    {
+        let held = snapshot(child)
+        deploy_result(l96_put_bytes(mut child, t, 5, after))?
+        for _ in 0u64 .. 5 {
+            let cut = deploy_result(checkpoint(mut child))?
+            deploy_result(durable(mut child, cut))?
+        }
+        if compact_listed(child, seq) {
+            fail("the overwritten Cold pack still appears in the installed manifest")
+        }
+        let plan = deploy_result(reclaim_preview(mut child, 256))?
+        if plan.status != Complete || count_reclaim_item(plan.items, PackObject, key) != 0 {
+            fail("Bucket reclaim offered a pack held by the Snapshot")
+        }
+        if deploy_result(get(deploy_result(reader(child, READER_PIN_MIN))?, held, t, 5u64))? != Some(before) {
+            fail("the Snapshot lost its retired Cold blob")
+        }
+    }
+    deploy_result(close(take child))?
+    let again = deploy_result(arch_law_sink_client(sim, tasks, 853, "tiered-child/"))?
+    let mut reopened = match open_authority(tasks, object_authority(take again, "bucket", DF_OP_MS), sim.time, r, opts) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    if deploy_result(get(deploy_result(reader(reopened, READER_PIN_MIN))?, snapshot(reopened), t, 5u64))? != Some(clone(after)) {
+        fail("reopened Tiered Bucket lost the replacement")
+    }
+    let second = disk_test_directory(d)
+    let copy_attempt = exit_attempt(5)
+    let copied = begin_backup(mut reopened, second, clone(copy_attempt))?
+    let _ = export_copy(take copied)?
+    release_export(mut reopened, copy_attempt)
+    deploy_result(close(take reopened))?
+    let final_dir = disk_test_directory(d)
+    let _ = restore(tasks, second, final_dir, sim.time, r, local_opts, Latest,[5; 16])?
+    let mut final_db = deploy_result(open(tasks, final_dir, sim.time, r, local_opts))?
+    let final_rows = deploy_result(table(mut final_db, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    if deploy_result(get(deploy_result(reader(final_db, READER_PIN_MIN))?, snapshot(final_db), final_rows, 5u64))? != Some(after) {
+        fail("Tiered Bucket backup lost the replacement")
+    }
+    deploy_result(close(take final_db))
+}
+
+@test
 fn test_bucket_cut_preserves_listed_cold_pack(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let sim = bucket_law_sim(tasks, c, 3450, None, list.new())
     let checked = bucket_cut_locator_law(sim, tasks)
@@ -130,7 +230,7 @@ fn bucket_cut_locator_law(sim: BucketSim, tasks: Tasks) -> Result[(), Error] wai
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(plan, cut_manifest_size(db, NoHolderChange), 65536))?
     let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
     let deadline = std.object.deadline_after_ms(source.client, BUCKET_LAW_OP_MS)
-    let (_, take refs) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(owner), 1, 1, take plan, source.locator, None, mut buffers, mut workspace, deadline))?
+    let (_, take refs) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(owner), 1, 1, take plan, list.new(), source.locator, None, mut buffers, mut workspace, deadline))?
     if list.len(refs) == 0 || refs[0u64].seq != kept.seq || refs[0u64].digest != kept.digest {
         fail("Bucket cut locator disagrees with Tiered pack retirement")
     }
@@ -140,4 +240,118 @@ fn bucket_cut_locator_law(sim: BucketSim, tasks: Tasks) -> Result[(), Error] wai
         }
     }
     close(take db)
+}
+
+// The simulator owns its object bytes in a separate task. The restored Store
+// pages 192 MiB through a writer whose entire resident limit is smaller.
+@test
+fn test_la11_tiered_bucket_above_resident_limit(d: Dir, real: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let seed = 345011u64
+    let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
+    let (endpoint, take server) = bucket_law_server_sized(tasks, time, Some(bucket_law_wire_cut(0xffffffffffffffffu64, false)), list.new(), list.new(), std.sim.world.plan(seed), 536870912)
+    let sim = BucketSim(network: std.sim.s3.endpoint_network(endpoint), endpoint, time, server: take server, driver: take driver, stop: take stop)
+    let checked = restore_large_tiered_bucket(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn restore_large_tiered_bucket(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let row_count = 6144u64
+    let width = 32768u64
+    let source = disk_test_directory(d)
+    let backup_dir = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let mut options = deploy_result(l96_tiered_options(182375272, 65536, 500))?
+    options.pack_bytes = 262144
+    let mut db = deploy_result(open(tasks, source, sim.time, r, options))?
+    let rows = deploy_result(archive_hold_table(mut db))?
+    deploy_result(set_residency(mut db, rows.id, Tiered))?
+    for batch in 0u64 .. row_count / 64 {
+        let table_handle: Table[u64, Bytes] = clone(rows)
+        let result = deploy_result(run(mut db, Some(1099511627776u64), copy_env((table_handle, batch, width)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
+            for offset in 0u64 .. 64 {
+                let key = 64 * env.1 + offset
+                let mut body: Bytes = list.with_capacity(env.2)
+                list.fill(mut body, env.2, int.truncate(key))
+                list.set_word_le(mut body, 0, key)
+                put(mut tx, env.0, key, take body)?
+            }
+            Ok(())
+        }))?
+        let Committed(_) = take result else {
+            fail("large Tiered source commit refused")
+        }
+        let _ = deploy_result(checkpoint(mut db))?
+    }
+    let attempt = exit_attempt(9)
+    let job = begin_backup(mut db, backup_dir, clone(attempt))?
+    let _ = export_copy(take job)?
+    release_export(mut db, attempt)
+    deploy_result(close(take db))?
+    let mut dst = deploy_result(arch_law_sink_client(sim, tasks, 345012, "large-child/"))?
+    let names = RestoreNamespaces(source_place: None, host_stream: None)
+    let restored = restore_to_bucket(tasks, StampedBackup(backup_dir), mut dst, "bucket", names, work, sim.time, r, options, Latest,[9; 16], 120000, plain_restore_release)?
+    options.create = false
+    options.claim_auth = Some(bucket_law_adopt_auth())
+    options.expect = Some(restored.child)
+    let mut child = match open_authority(tasks, object_authority(take dst, "bucket", 120000), sim.time, r, options) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    if row_count * width <= disk_state(child).options.resident_limit {
+        fail("Cold payload fits the restored Store's resident limit")
+    }
+    let t = deploy_result(table(mut child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let snap = snapshot(child)
+    let handle = deploy_result(reader(child, READER_PIN_MIN))?
+    for k in[0u64, row_count / 2, row_count - 1] {
+        let Some(value) = deploy_result(get(handle, snap, t, k))? else {
+            fail("missing large restore row")
+        }
+        if list.len(value) != width || list.word_le(value, 0) != k || value[width - 1] != int.truncate(k) {
+            fail("large restore returned another row")
+        }
+    }
+    let changed = row_count / 2
+    let replacement = l96_blob_value(82, 8192)
+    deploy_result(l96_put_bytes(mut child, t, changed, replacement))?
+    let cut = deploy_result(checkpoint(mut child))?
+    deploy_result(durable(mut child, cut))?
+    let Some(old) = deploy_result(get(handle, snap, t, changed))? else {
+        fail("cut lost the original Cold row held by the Snapshot")
+    }
+    if list.len(old) != width || list.word_le(old, 0) != changed {
+        fail("cut changed the held Cold row")
+    }
+    deploy_result(close(take child))?
+    let client = deploy_result(arch_law_sink_client(sim, tasks, 345013, "large-child/"))?
+    let mut reopened = match open_authority(tasks, object_authority(take client, "bucket", 120000), sim.time, r, options) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(Store(take e)),
+    }
+    let second_copy = disk_test_directory(d)
+    let second_attempt = exit_attempt(10)
+    let second = begin_backup(mut reopened, second_copy, clone(second_attempt))?
+    let _ = export_copy(take second)?
+    release_export(mut reopened, second_attempt)
+    deploy_result(close(take reopened))?
+    let final_dir = disk_test_directory(d)
+    options.expect = None
+    let _ = restore(tasks, second_copy, final_dir, sim.time, r, options, Latest,[10; 16])?
+    let mut final_db = deploy_result(open(tasks, final_dir, sim.time, r, options))?
+    let final_rows = deploy_result(table(mut final_db, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let final_handle = deploy_result(reader(final_db, READER_PIN_MIN))?
+    let final_snap = snapshot(final_db)
+    if deploy_result(get(final_handle, final_snap, final_rows, changed))? != Some(replacement) {
+        fail("the second backup lost the replacement row")
+    }
+    let Some(last_value) = deploy_result(get(final_handle, final_snap, final_rows, row_count - 1))? else {
+        fail("the second backup lost an inherited pack")
+    }
+    if list.len(last_value) != width || list.word_le(last_value, 0) != row_count - 1 {
+        fail("the second backup changed an inherited row")
+    }
+    deploy_result(close(take final_db))
 }

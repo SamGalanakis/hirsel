@@ -72,6 +72,10 @@ fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.si
 }
 
 fn bucket_law_server(tasks: Tasks, time: Clock, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan) -> (std.sim.s3.Endpoint, Task[std.sim.s3.Report]) {
+    bucket_law_server_sized(tasks, time, cut, take faults, take holds, take plan, 33554432)
+}
+
+fn bucket_law_server_sized(tasks: Tasks, time: Clock, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan, server_room: u64) -> (std.sim.s3.Endpoint, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut net_model = std.sim.net.new(std.sim.net.defaults())
     let mut primary: List[Ip] = list.with_capacity(1)
@@ -84,7 +88,7 @@ fn bucket_law_server(tasks: Tasks, time: Clock, cut: Option[std.sim.s3.Cut], tak
     let key = bucket_law_signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
     let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
-    std.sim.s3.start_service(tasks, take config, take plan, time, 1048576, 33554432)
+    std.sim.s3.start_service(tasks, take config, take plan, time, 1048576, server_room)
 }
 
 fn bucket_law_place(host_name: String) -> std.object.Bucket {

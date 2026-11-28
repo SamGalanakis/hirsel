@@ -19,7 +19,7 @@ fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: types.Store
             let end = pager.checked_tiered_index(path, owner, request.pack, at, width, wire)?
             (take wire, end)
         },
-        PagerObjects(mut client, op_ms, cache) => {
+        PagerObjects(client, op_ms, cache) => {
             let Some(item) = request.listed.object else {
                 return Error(format.disk_fault(path, at, Absent))
             }
@@ -27,12 +27,12 @@ fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: types.Store
                 return Error(format.disk_fault(path, at, Malformed))
             }
             let deadline = if request.deadline == 0 {
-                std.object.deadline_after_ms(client, op_ms)
+                std.object.opener_deadline_ms(client, op_ms)
             } else {
                 request.deadline
             }
             let read = pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: at, hi: at + width), deadline)
-            read_checked_bucket_window(mut client, cache, read, scoped fn(wire: Bytes) -> Result[u64, types.Failure] {
+            read_checked_bucket_window(client, cache, read, scoped fn(wire: Bytes) -> Result[u64, types.Failure] {
                 pager.checked_tiered_index(path, owner, request.pack, at, width, wire)
             })?
         },

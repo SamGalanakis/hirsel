@@ -59,8 +59,7 @@ pub fn history_load_data_pack(mut client: std.object.Client, locator: history.Hi
 }
 
 pub fn history_validate_manifest(mut client: std.object.Client, locator: history.HistoryLocator, deadline: u64, id: types.StoreKey, file: String, take page_record: manifest.PageManifest, cache: Option[pager.ObjectsCache]) -> Result[manifest.ValidatedPageManifest, types.Failure] waits {
-    manifest.require_object_memory_manifest(page_record)?
-    validate_bucket_graph(mut client, locator, deadline, id, file, take page_record, false, cache)
+    validate_bucket_graph(mut client, locator, deadline, id, file, take page_record, true, cache)
 }
 
 pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.HistoryLocator, deadline: u64, id: types.StoreKey, file: String, take page_record: manifest.PageManifest, allow_tiered: bool, cache: Option[pager.ObjectsCache]) -> Result[manifest.ValidatedPageManifest, types.Failure] waits {
@@ -145,7 +144,7 @@ pub fn history_open_checkpoint(mut source: history.ObjectPackRead, head: history
     if let Some(local) = cache {
         pack_cache_trim(local)
     }
-    let validated = history_validate_manifest(mut source.client, source.locator, source.deadline, head.store, name, take page_record, cache)?
+    let validated = validate_bucket_graph(mut source.client, source.locator, source.deadline, head.store, name, take page_record, true, cache)?
     let loaded = history.rebuild_page_store(take validated, Some(view source.locator))?
     let initial = manifest.disk_allocation(scoped fn() -> Result[pages.State, types.Failure] {
         types.capacity(manifest.manifest_state(loaded.manifest, loaded.holders))

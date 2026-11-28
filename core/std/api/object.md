@@ -42,6 +42,10 @@ discards it, and discards anything still queued when it starts. A batch
 
 `isolated_request` pre-encodes an object path for the supplied prefix and key. Use it with the client that prepared it. `fetch_isolated` and `store_if_isolated` send each request with its own reply channel and use the pre-encoded storage instead of the client's path buffer, so cancellation cleanup can call them inside a finalizer grant. The supplied deadline covers queue admission and the reply. If it passes after the lane accepted the request, the lane owns the request storage and the prepared request expires. An isolated conditional PUT reports that outcome as uncertain. `ISOLATED_REPLY_BYTES` is the charge for one reply channel.
 
+`read_range` and `read_ranges` accept a read-only `Opener`. They send buffered GETs through the existing object lanes. Each outstanding request has a private reply channel. Batched results follow input order and dispatch uses at most the requested stream count or available lane count, whichever is smaller. A timeout after admission leaves the buffer with the worker.
+
+`client_wall_ms` returns wall time in milliseconds from the client's clock. `deadline_after_ms` uses its monotonic clock for request deadlines.
+
 `split` moves the request state and the worker lifetime out of a client.
 `Requests` can move to another task, where `attach(requests, None)` makes it a client again. On the opening task, pass the original Workers to `attach` to restore the split client.
 The original task keeps `Workers` until the request task has stopped.

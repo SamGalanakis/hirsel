@@ -46,7 +46,7 @@ fn run_tiered_pager(take launch: pager.TieredPagerStart) waits {
             if let Some(directory) = local {
                 pack_cache_trim(directory)
             }
-            PagerObjects(std.object.attach(take requests, None), op_ms, local)
+            PagerObjects(take requests, op_ms, local)
         },
     }
     let mut private_cache = pager.new_tiered_cache(shared)
@@ -366,16 +366,16 @@ fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: page
                 manifest.read_tiered_frame(path, owner, demand.edge, raw, expected.offset, demand.next_stamp)
             })?
         },
-        PagerObjects(mut client, op_ms, cache) => {
+        PagerObjects(client, op_ms, cache) => {
             let item = option.unwrap(demand.object)
             let window = pager.tiered_bucket_range(path, demand.edge, item.len, demand.direction)?
             let deadline = if demand.deadline == 0 {
-                std.object.deadline_after_ms(client, op_ms)
+                std.object.opener_deadline_ms(client, op_ms)
             } else {
                 demand.deadline
             }
             let request = pager.TieredBucketGet(pack_ref: item, window, deadline)
-            let (_, take checked_frame) = read_checked_bucket_window(mut client, cache, request, scoped fn(raw: Bytes) -> Result[Arc[format.TieredFrame], types.Failure] {
+            let (_, take checked_frame) = read_checked_bucket_window(client, cache, request, scoped fn(raw: Bytes) -> Result[Arc[format.TieredFrame], types.Failure] {
                 manifest.disk_allocation(scoped fn() -> Result[Arc[format.TieredFrame], types.Failure] {
                     manifest.read_tiered_frame(path, owner, demand.edge, raw, window.lo, demand.next_stamp)
                 })

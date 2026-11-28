@@ -1744,7 +1744,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         cut_participants(db, delta)
     })?
     let manifest.CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads, promote: promote) = take participants
-    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes)?
+    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes, manifest.pack_next(disk_state(db).packs))?
     pages.set_next_node(mut db.holders, staged.stamp_end - 1)
     raise_materialized_pin(mut delta, staged)
     let holders = failure_result_from_rep(pager.sealed_cut_holders(take participants_held, staged))?
@@ -1790,7 +1790,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
     let PreparedDiskCut(pages: take prepared_pages, compaction: take compaction, removals: take removals, manifest: take page_record, archive_plan: take archive_plan) = take prepared
-    let settled_tiered = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), generation, next_stamp))?
+    let settled_tiered = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(prepared_pages), None, generation, next_stamp))?
     let tail_bases = prepare_sealed_tail_bases(db, delta, staged, heads)?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.

@@ -204,11 +204,12 @@ pub fn reclaim_preview(mut db: Db, max_items: u64) -> Result[ReclaimList, Error]
     durable(mut db, latest_receipt)?
     let recovered = object_writer.recovered_checkpoint(object_state(db))
     let generation = db.accounting.checkpointed
+    let read_packs = failure_result_from_rep(object_writer.reclaim_read_packs(pager.disk_compaction(disk_state(db).tiered).held))?
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let store_id = db.store
     let (take paused, take resume) = take_object_journal(mut db)?
     let mut lane = take paused
-    let fixed = object_writer.ObjectReclaimCapture(head: object_writer.paused_head(lane), recovered, generation, next_pack)
+    let fixed = object_writer.ObjectReclaimCapture(head: object_writer.paused_head(lane), recovered, generation, next_pack, read_packs: take read_packs)
     let outcome = preview_on_lane(mut lane, store_id, fixed, max_items)
     if let Error(problem) = outcome {
         record_object_lane_failure(mut db, lane, problem)
@@ -313,10 +314,11 @@ pub fn reclaim_purge(mut db: Db, plan: ReclaimList) -> Result[PurgeReport, Recla
     durable(mut db, latest_receipt) ?=> Store
     let recovered = object_writer.recovered_checkpoint(object_state(db))
     let generation = db.accounting.checkpointed
+    let read_packs = failure_result_from_rep(object_writer.reclaim_read_packs(pager.disk_compaction(disk_state(db).tiered).held)) ?=> Store
     let next_pack = manifest.pack_next(disk_state(db).packs)
     let (take paused, take resume) = take_object_journal(mut db) ?=> Store
     let mut lane = take paused
-    let fixed = object_writer.ObjectReclaimCapture(head: object_writer.paused_head(lane), recovered, generation, next_pack)
+    let fixed = object_writer.ObjectReclaimCapture(head: object_writer.paused_head(lane), recovered, generation, next_pack, read_packs: take read_packs)
     let outcome = purge_on_lane(mut lane, fixed, plan)
     if let Error(problem) = outcome {
         record_object_lane_failure(mut db, lane, problem)

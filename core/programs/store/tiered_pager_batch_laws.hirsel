@@ -39,7 +39,7 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks, cache: Option[pager.Ob
     list.push(mut siblings, clone(large_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
     let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredBackward, paths: list.new(), siblings: take siblings, ahead: NoAhead, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
-    let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, history.pack_cache_directory(cache))
+    let mut input: pager.TieredPagerInput = PagerObjects(std.object.opener(client), BUCKET_LAW_OP_MS, history.pack_cache_directory(cache))
     let runs = if let None = cache {
         2u64
     } else {
@@ -81,7 +81,7 @@ fn l84_bucket_pager_paths(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
     list.push(mut paths, pager.TieredPath(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone))
     list.push(mut paths, pager.TieredPath(target: clone(first_blobs[0u64]), key: types.key_word(40), values: ValuesNone))
     let demand = pager.TieredPointDemand(target: clone(second_blobs[0u64]), key: types.key_word(42), values: ValuesNone, room: 0, direction: TieredForward, paths: take paths, siblings: list.new(), ahead: NoAhead, packs: take packs, next_stamp: 43, deadline: 0, grant: None)
-    let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, None)
+    let mut input: pager.TieredPagerInput = PagerObjects(std.object.opener(client), BUCKET_LAW_OP_MS, None)
     let mut cache_state = pager.new_tiered_cache(1048576)
     let delivered = failure_result_from_rep(object_writer.tiered_pager_point(mut input, mut cache_state, store_key_to_rep(owner), demand))?
     if let Some(_) = delivered.failure {
@@ -128,7 +128,7 @@ fn l84_bucket_pager_values(model: BucketSim, tasks: Tasks) -> Result[(), Error] 
     let blank: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take one, _) = std.omap.insert(mut ids, blank, blobs.seq, pages.TieredPagerPack(inventory: blob_pack, object: Some(blobs)))
     let (take packs, _) = std.omap.insert(mut ids, one, leaves.seq, pages.TieredPagerPack(inventory: leaf_pack, object: Some(leaves)))
-    let mut input: pager.TieredPagerInput = PagerObjects(take client, BUCKET_LAW_OP_MS, None)
+    let mut input: pager.TieredPagerInput = PagerObjects(std.object.opener(client), BUCKET_LAW_OP_MS, None)
     let mut cache_state = pager.new_tiered_cache(1048576)
     // (values, room, the delivered frames: the leaf (43), then the BLOBs of
     // keys 2 (41) and 3 (42) while delivered, held)

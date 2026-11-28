@@ -20,7 +20,7 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     page_manifest.branches[0].version = 1
     let page_record = failure_result_from_rep(history.history_create_manifest(mut source.client, id, history.register_head(held).pair.epoch, 1, page_manifest, mut workspace, source.deadline))?
     let location = failure_result_from_rep(history.history_make_locator(mut source.client, id, 4, 1, 1, list.new(), mut workspace, source.deadline))?
-    let activation = history.HistoryActivation(number: 1, binding:[42; 32])
+    let activation = history.HistoryActivation(number: 1, binding: [42; 32])
     let HistoryApplied(_) = failure_result_from_rep(history.history_publish_checkpoint(mut source.client, mut held, metadata, page_record, retained, location, Some(activation), None, mut workspace, source.deadline))? else {
         fail("checkpoint did not advance the register")
     }
@@ -65,7 +65,7 @@ fn object_locator_boundary(mut source: history.ObjectPackRead, head: history.His
     }
     let ctx = format.DiskContext(store: head.store, role: 2, seq: 5)
     let retained = history.HistoryRetention(floor: 5, earlier: list.new())
-    let mark_entry = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, head.entry, manifest, retained, split, history.HistoryActivation(number: 0, binding:[0; 32])))?
+    let mark_entry = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, head.entry, manifest, retained, split, history.HistoryActivation(number: 0, binding: [0; 32])))?
     let mark = failure_result_from_rep(history.history_read_mark("test checkpoint", head.store, mark_entry, workspace.packet))?
     let mut observed = head
     observed.checkpoint = mark_entry
@@ -102,8 +102,8 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let manifest = pages.HistoryRef(seq: 1, epoch: 1, len: 88, digest: 7)
     let kept = history.HistoryRetention(floor: 20, earlier: list.new())
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 20)
-    let prior_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, parent, manifest, kept, previous, history.HistoryActivation(number: 0, binding:[0; 32])))?
-    let base = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: store_key_to_rep(id)), activation: 0, entry: prior_cut, checkpoint: prior_cut, floor: 20, binding:[0; 32], origin: None)
+    let prior_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, ctx, 1, 1, parent, manifest, kept, previous, history.HistoryActivation(number: 0, binding: [0; 32])))?
+    let base = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: store_key_to_rep(id)), activation: 0, entry: prior_cut, checkpoint: prior_cut, floor: 20, binding: [0; 32], origin: None)
     let mark = failure_result_from_rep(history.history_read_mark("locator at 20", store_key_to_rep(id), prior_cut, workspace.packet))?
     let inherited = failure_result_from_rep(history.history_locator(mut client, base, mark, workspace.packet, deadline))?
     let mut located = history.empty_history_locator()
@@ -114,7 +114,7 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     }
     let current_ctx = format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 24)
     let retained = history.HistoryRetention(floor: 24, earlier: list.new())
-    let current_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, current_ctx, 1, 1, prior_cut, manifest, retained, updated, history.HistoryActivation(number: 0, binding:[0; 32])))?
+    let current_cut = failure_result_from_rep(history.history_checkpoint_packet(mut workspace.packet, current_ctx, 1, 1, prior_cut, manifest, retained, updated, history.HistoryActivation(number: 0, binding: [0; 32])))?
     let mut captured = base
     captured.entry = current_cut
     captured.checkpoint = current_cut
@@ -607,7 +607,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let mut next_stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(draft.holders)))?
     let cut_plan = plan_page_cut(base, participants.holders, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, 1, 65536, map.new(), None, mut next_stamp)?
     let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), 65536))?
-    let (take layout, take packed) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(store_key_from_rep(history.register_head(held).store)), history.register_head(held).pair.epoch, 1, take cut_plan, source.locator, None, mut buffers, mut workspace, source.deadline))?
+    let (take layout, take packed) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(store_key_from_rep(history.register_head(held).store)), history.register_head(held).pair.epoch, 1, take cut_plan, list.new(), source.locator, None, mut buffers, mut workspace, source.deadline))?
     if list.len(packed) != 3 {
         fail("object cut did not emit exactly the three live pack classes")
     }

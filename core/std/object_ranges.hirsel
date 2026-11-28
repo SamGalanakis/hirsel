@@ -1,0 +1,78 @@
+/// The half-open span [first, end) that `want` selects from an object of
+/// `size` bytes (RFC 9110 §14.1.2), or None when it is unsatisfiable: no byte
+/// of the object lies in it, as for any range of an empty object, or
+/// `Span(first, last)` has last < first.
+pub fn range_span(want: object.Want, size: u64) -> Option[(u64, u64)] {
+    match want {
+        Whole => Some((0, size)),
+        From(first) if first < size => Some((first, size)),
+        Span(first, last) if first <= last && first < size => Some((first, order.min(last, size - 1) + 1)),
+        Last(n) if n != 0 && size != 0 => Some((size - order.min(n, size), size)),
+        _ => None,
+    }
+}
+
+pub fn decimal(b: Bytes, lo: u64, hi: u64) -> Result[u64, object.Error] {
+    match int.parse_decimal_span(b, lo, hi, 18446744073709551615u64) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Fatal(Malformed)),
+    }
+}
+
+pub type Range: send {
+    lo: u64,
+    hi: u64,
+    size: u64
+}
+
+pub fn content_range(b: Bytes) -> Result[Range, object.Error] {
+    if list.len(b) < 11 || list.slice(b, 0, 6) != string.as_bytes("bytes ") {
+        return Error(Fatal(Malformed))
+    }
+    let mut dash = 6u64
+    while dash < list.len(b) && b[dash] != b'-' {
+        dash += 1
+    }
+    if dash == list.len(b) {
+        return Error(Fatal(Malformed))
+    }
+    let mut slash = dash + 1
+    while slash < list.len(b) && b[slash] != b'/' {
+        slash += 1
+    }
+    if slash == list.len(b) {
+        return Error(Fatal(Malformed))
+    }
+    let lo = decimal(b, 6, dash)?
+    let last = decimal(b, dash + 1, slash)?
+    let size = decimal(b, slash + 1, list.len(b))?
+    if lo > last || last >= size {
+        return Error(Fatal(Malformed))
+    }
+    Ok(Range(lo, hi: last + 1, size))
+}
+
+/// Read in input order with at most one private reply outstanding per active lane.
+pub fn read_batch[P](take ranges: List[object.GetRange], width: u64, issue: scoped fn(u64, take object.GetRange) -> P waits, collect_reply: scoped fn(take P, u64) -> (Result[object.Meta, object.Error], Bytes) waits) -> List[(Result[object.Meta, object.Error], Bytes)] waits {
+    let count = list.len(ranges)
+    let mut results: List[(Result[object.Meta, object.Error], Bytes)] = list.with_capacity(count)
+    let mut pending: List[(P, u64)] = list.with_capacity(width)
+    for take range in take ranges {
+        if width == 0 {
+            let object.GetRange(buffer: take buffer, ..) = take range
+            list.push(mut results, (Error(Precondition), take buffer))
+            continue
+        }
+        let deadline = range.deadline
+        let issued = issue(list.len(pending), take range)
+        list.push(mut pending, (take issued, deadline))
+        if list.len(pending) == width || list.len(results) + list.len(pending) == count {
+            for take item in take pending {
+                let (take answer, until) = take item
+                list.push(mut results, collect_reply(take answer, until))
+            }
+            pending = list.with_capacity(width)
+        }
+    }
+    take results
+}

@@ -1,6 +1,6 @@
-pub type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Requests, u64, Option[ObjectsCache])
+pub type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Opener, u64, Option[ObjectsCache])
 
-pub type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Client, u64, Option[ObjectsCache])
+pub type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Opener, u64, Option[ObjectsCache])
 
 pub type TieredPagerTarget: send {
     edge: format.TieredTarget,

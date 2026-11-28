@@ -1,12 +1,19 @@
-pub fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: pages.HistoryRef, window: pager.TieredRange, deadline: u64) -> Result[Bytes, types.Failure] waits {
-    let path = history_key("p-", pack_ref)
-    let mut raw: Bytes = list.new()
-    types.capacity(list.try_reserve(mut raw, window.hi - window.lo))?
-    history_range(mut client, path, pack_ref, window.lo, window.hi, mut raw, deadline)?
-    Ok(take raw)
+pub fn read_tiered_bucket_window(client: std.object.Opener, pack_ref: pages.HistoryRef, window: pager.TieredRange, deadline: u64) -> Result[Bytes, types.Failure] waits {
+    if window.lo >= window.hi || window.hi > pack_ref.len {
+        return Error(format.disk_fault(history_key("p-", pack_ref), window.lo, Malformed))
+    }
+    let raw = manifest.disk_read_buffer(window.hi - window.lo)?
+    let range = std.object.GetRange(key: history_key("p-", pack_ref), lo: window.lo, hi: window.hi, buffer: take raw, deadline)
+    let (take status, take response) = std.object.read_range(client, take range)
+    match take status {
+        Ok(meta) if meta.size == pack_ref.len && list.len(response) == window.hi - window.lo => Ok(take response),
+        Ok(_) => Error(format.disk_fault(history_key("p-", pack_ref), window.lo, Truncated)),
+        Error(NotFound) => Error(pager.history_missing_object(history_key("p-", pack_ref), pack_ref)),
+        Error(take problem) => Error(Remote(take problem)),
+    }
 }
 
-pub fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[pager.TieredBucketGet], streams: u64) -> Result[List[Result[Bytes, types.Failure]], types.Failure] waits {
+pub fn read_tiered_bucket_windows(client: std.object.Opener, gets: List[pager.TieredBucketGet], streams: u64) -> Result[List[Result[Bytes, types.Failure]], types.Failure] waits {
     let width = list.len(gets)
     let prepared = manifest.disk_allocation(scoped fn() -> Result[List[std.object.GetRange], types.Failure] {
         let mut requests: List[std.object.GetRange] = list.with_capacity(width)
@@ -18,7 +25,7 @@ pub fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[page
         }
         Ok(take requests)
     })?
-    let responses = std.object.fetch_ranges(mut client, take prepared, streams)
+    let responses = std.object.read_ranges(client, take prepared, streams)
     let mut outcomes: List[Result[Bytes, types.Failure]] = list.new()
     types.capacity(list.try_reserve(mut outcomes, width))?
     let mut at = 0u64

@@ -245,7 +245,7 @@ fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: pages.HistoryRef, wind
     let until = std.object.deadline_after_ms(source, BUCKET_LAW_OP_MS)
     let (take stored, _) = std.object.store(mut source, history.history_key("p-", item), take data, until)
     let _ = stored ?=> |problem| Remote(problem)
-    let raw = failure_result_from_rep(history.read_tiered_bucket_window(mut source, item, window, until))?
+    let raw = failure_result_from_rep(history.read_tiered_bucket_window(std.object.opener(source), item, window, until))?
     if list.len(raw) != 253782 || raw[0u64] != 17 || raw[253781u64] != 29 {
         fail("L84: provider did not return the expected merged byte range")
     }
@@ -473,7 +473,7 @@ fn l84_parallel_read(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits 
     list.push(mut requests, pager.TieredBucketGet(pack_ref: item, window: near, deadline: until))
     list.push(mut requests, pager.TieredBucketGet(pack_ref: missing_pack, window: near, deadline: until))
     list.push(mut requests, pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: 300000, hi: 431072), deadline: until))
-    let received = failure_result_from_rep(history.read_tiered_bucket_windows(mut source, requests, 2))?
+    let received = failure_result_from_rep(history.read_tiered_bucket_windows(std.object.opener(source), requests, 2))?
     if list.len(received) != 3 {
         fail("L84: a range response disappeared")
     }

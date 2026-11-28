@@ -48,9 +48,8 @@ fn queue_superseded(db: Db, delta: HolderDelta, mut seen: Map[(u32, u64, u64), (
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
-fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[pager.TieredCutStage, Error] waits {
+fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64, first_pack: u64) -> Result[pager.TieredCutStage, Error] waits {
     let id = db.store
-    let first_pack = manifest.pack_next(disk_state(db).packs)
     let pager_link: Option[View[Sender[pager.TieredPagerMessage]]] = match pager.pager_requests(db.pager) {
         Some(requests) => Some(view requests),
         None => None,
@@ -130,7 +129,7 @@ fn drain_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]],
         return Error(Io(Closed))
     }
     let kept = list.len(queue.added)
-    let drained = match failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), None, db.accounting.checkpointed, next_stamp)) {
+    let drained = match failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), cut_locator(db), db.accounting.checkpointed, next_stamp)) {
         Ok(paging) => {
             let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
             failure_result_from_rep(pager.drain_cut_queue(source, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut queue, moving, budget))

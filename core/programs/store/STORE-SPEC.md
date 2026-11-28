@@ -1,4 +1,4 @@
-# Store spec v2.185
+# Store spec v2.186
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -6561,7 +6561,7 @@ Verify, reseal and stream a frame at a time. Each child frame binds its child St
 
 **Bucket destination.** Reserve a fresh non-root prefix. Refuse overlapping namespaces, existing foreign keys or an unrelated attempt. Retry may adopt only the same attempt's exact bytes and child identity. Create the child packs, locator, MANIFEST and standalone genesis CHECKPOINT, then verify every exact reference and the release binding through the destination endpoint. Create `head` last with `If-None-Match: *`. On an ambiguous reply use §12.3 Q5 readback. A committed head for this attempt, child and boundary completes the same restore. Another head is a conflict. No ordinary open can observe a partial child. A streamed destination first publishes this standalone child, then follows RUNNER §14.5. A failed or expired plan cannot partially replace an existing store.
 
-A Cold Directory can restore to Directory with memory bounded by frame, traversal and pager limits. Resident inputs can restore to Bucket. Tiered → Bucket returns `UnsupportedResidency` before publication until Bucket Cold paging, write/cut/reclaim, reopen and another backup pass on a larger-than-RAM image.
+A Cold Directory can restore to Directory with memory bounded by frame, traversal and pager limits. A Bucket child preserves the restored collections’ residency. Opening a Tiered child funds its pager before claiming the head. Its cuts publish the deferred-free queue and Cold pack inventory, and its reclaim protects packs needed by held Snapshots. A subsequent backup carries the child’s updated roots and their pack closure.
 
 ### 15.4 `hirsel store backup` and `hirsel store restore`
 

@@ -1,15 +1,5 @@
 fn bucket_restore_release(db: Db, selected: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestorePoint, DeployError] waits {
     let mut point = selected
-    for branch_head in pages.holder_heads(db.holders) {
-        if pages.tiered_collections(branch_head.roots.collections.root) {
-            return Error(UnsupportedResidency)
-        }
-    }
-    for pin_row in pages.holder_pins(db.holders) {
-        if pages.tiered_collections(pin_row.roots.collections.root) {
-            return Error(UnsupportedResidency)
-        }
-    }
     let release = verified_point_release(db, point, verify)?
     point.activation = release.activation
     point.binding = release.binding
@@ -27,10 +17,6 @@ fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.o
         return Ok(Restored(child: published, point: restore_saved_point(point, saved), attempt))
     }
     restore_fold(tasks, work, c, r, options, point, stamp)?
-    let (_, take checked) = deploy_result(read_page_manifest_file(work))?
-    if let Error(_) = manifest.require_object_memory_manifest(checked) {
-        return Error(UnsupportedResidency)
-    }
     let (child, origin) = deploy_result(restore_bucket_reservation(mut dst, requested, exact_retry, r, deadline))?
     point = restore_saved_point(point, origin)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(work, "foundation"))))?

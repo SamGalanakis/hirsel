@@ -1,23 +1,28 @@
+fn upload_cut_pack(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, seq: u64, mut wire: Bytes, cache: Option[pager.ObjectsCache], mut workspace: history.HistoryBuffers, deadline: u64) -> Result[pages.HistoryRef, types.Failure] waits {
+    history.history_copy_header(mut wire, format.DiskContext(store: id, role: 3, seq: seq), epoch, kind)?
+    let item = history.history_new_ref(seq, epoch, wire)
+    pager.history_fill_key(mut workspace.key, "p-", item)
+    history.history_upload_pack(mut client, workspace.key, wire, mut workspace.compare, deadline)?
+    if let Some(local) = cache {
+        if item.len <= local.capacity_bytes {
+            pack_cache_write(local, workspace.key, wire, false)
+        }
+    }
+    Ok(item)
+}
+
 fn history_write_pack_run(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, cache: Option[pager.ObjectsCache], pack_layout: manifest.PackRun, mut known: manifest.PageLocations, mut pack_objects: Map[u64, pages.HistoryRef], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(), types.Failure] waits {
     for pack in pack_layout.packs {
         manifest.encode_pack(id, pack_layout, pack, mut known, mut buffers.out)?
-        history.history_copy_header(mut buffers.out, format.DiskContext(store: id, role: 3, seq: pack.seq), epoch, kind)?
-        let item = history.history_new_ref(pack.seq, epoch, buffers.out)
-        pager.history_fill_key(mut workspace.key, "p-", item)
-        history.history_upload_pack(mut client, workspace.key, buffers.out, mut workspace.compare, deadline)?
-        if let Some(local) = cache {
-            if item.len <= local.capacity_bytes {
-                pack_cache_write(local, workspace.key, buffers.out, false)
-            }
-        }
+        let item = upload_cut_pack(mut client, id, epoch, kind, pack.seq, mut buffers.out, cache, mut workspace, deadline)?
         map.insert(mut pack_objects, pack.seq, item)
     }
     Ok(())
 }
 
-pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
     let (take uploaded, take covered_packs) = manifest.disk_allocation(scoped fn() -> Result[(Map[u64, pages.HistoryRef], List[pages.HistoryRef]), types.Failure] {
-        let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
+        let new_packs = list.len(tiered) + list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
         let mut refs: Map[u64, pages.HistoryRef] = map.new()
         types.capacity(map.try_reserve(mut refs, new_packs))?
         Ok((take refs, list.with_capacity(std.omap.len(prepared.locations.packs.values))))
@@ -28,6 +33,13 @@ pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey,
     let mut known = take locations
     let mut packs = take uploaded
     let mut rows = take covered_packs
+    for pack in tiered {
+        list.clear(mut buffers.out)
+        types.capacity(list.try_reserve(mut buffers.out, list.len(pack.wire)))?
+        list.append(mut buffers.out, pack.wire)
+        let item = upload_cut_pack(mut client, id, epoch, kind, pack.seq, mut buffers.out, cache, mut workspace, deadline)?
+        map.insert(mut packs, pack.seq, item)
+    }
     history_write_pack_run(mut client, id, epoch, kind, cache, blobs, mut known, mut packs, mut buffers, mut workspace, deadline)?
     history_write_pack_run(mut client, id, epoch, kind, cache, data_pages, mut known, mut packs, mut buffers, mut workspace, deadline)?
     history_write_pack_run(mut client, id, epoch, kind, cache, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
@@ -111,12 +123,12 @@ pub fn read_checkpoint(mut lane: ObjectJournalSession, head: history.HistoryHead
     history.history_checkpoint(mut lane.client, head, deadline)
 }
 
-pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead, take cut_plan: manifest.PagedCutLayout, inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, now: u64) -> Result[(u64, manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead, take cut_plan: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, now: u64) -> Result[(u64, manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
     // Refused cuts can leave orphaned objects, so this epoch does not reuse their numbers.
     let generation = history.history_next_id(lane.issued_generation)?
     lane.issued_generation = generation
     lane.next_pack = cut_plan.lists.run_packs.next_pack
-    let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, inherited, cache, mut buffers, mut workspace, now)?
+    let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, tiered, inherited, cache, mut buffers, mut workspace, now)?
     Ok((generation, take layout, take refs))
 }
 
@@ -130,7 +142,7 @@ pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead
         let checked = manifest.disk_allocation(scoped fn() -> Result[manifest.PageManifest, types.Failure] {
             Ok(clone(page_record))
         })?
-        match history_validate_manifest(mut lane.client, candidate_locator, now, old.store, "prepared MANIFEST", take checked, None) {
+        match validate_bucket_graph(mut lane.client, candidate_locator, now, old.store, "prepared MANIFEST", take checked, true, None) {
             Ok(_) => (),
             Error(HistoryMissing(take name, _)) => {
                 history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, now)?

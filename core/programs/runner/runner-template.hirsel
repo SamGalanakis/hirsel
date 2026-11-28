@@ -48,18 +48,17 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     at: u64,
     seen: u64,
     slots: List[RegisteredSlot[G, H]],
-    bound_slots: Map[Bytes, List[BoundSlot]],
     trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
 
 pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
     let empty: Template[G] = Template(exported: list.new(), rows: list.new(), by_key: map.new(), bindings: list.new(), keyed: map.new(), gone: map.new())
-    Registry(t: arc.new(take empty), replay: false, at: 0u64, seen: 0u64, slots: list.new(), bound_slots: map.new(), trigger_tables: None)
+    Registry(t: arc.new(take empty), replay: false, at: 0u64, seen: 0u64, slots: list.new(), trigger_tables: None)
 }
 
 // A fresh Registry that makes adapters against `t`.
 fn replaying[G: send, H: shareable + inert + send](t: Arc[Template[G]]) -> Registry[G, H] {
-    Registry(t: arc.share(t), replay: true, at: 0u64, seen: 0u64, slots: list.new(), bound_slots: map.new(), trigger_tables: None)
+    Registry(t: arc.share(t), replay: true, at: 0u64, seen: 0u64, slots: list.new(), trigger_tables: None)
 }
 
 // Changes the Template; a shared one is copied first (arc.update), so no other Registry

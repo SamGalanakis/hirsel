@@ -1,3 +1,14 @@
+fn replace_publication_for_law[G: send, H: shareable + inert + send](mut reg: Registry[G, H], key: Bytes, take replacement: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error]) {
+    let ordinal = option.unwrap(registered_ordinal(reg, key))
+    if let Query(_, _, mut entry) = reg.slots[ordinal].adapter {
+        if let Some(mut entries) = entry.bindings {
+            entries[0u64].publish_value = take replacement
+            return
+        }
+    }
+    fail("expected bound query slots")
+}
+
 pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let h = result.unwrap(install_subs_data(mut db))
@@ -15,10 +26,7 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
         Error(Schema(schema))
     }
     let value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take rejected
-    let mut next = Some(take value)
-    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_loss)), scoped fn(mut entries: List[BoundSlot]) {
-        entries[0u64].publish_value = option.unwrap(replace(mut next, None))
-    })
+    replace_publication_for_law(mut b.r, query_key(code.describe(q_loss)), take value)
     set(mut db, t, 1u64, 7u64)
     let owes = step(mut b, db)
     if list.len(owes) != 3u64 {
@@ -579,14 +587,8 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     }
     let faulting_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take faults
     let losing_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take loses
-    let mut faulting = Some(take faulting_value)
-    let mut losing = Some(take losing_value)
-    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_fault)), scoped fn(mut entries: List[BoundSlot]) {
-        entries[0u64].publish_value = option.unwrap(replace(mut faulting, None))
-    })
-    let _ = map.update(mut b.r.bound_slots, query_key(code.describe(q_loss)), scoped fn(mut entries: List[BoundSlot]) {
-        entries[0u64].publish_value = option.unwrap(replace(mut losing, None))
-    })
+    replace_publication_for_law(mut b.r, query_key(code.describe(q_fault)), take faulting_value)
+    replace_publication_for_law(mut b.r, query_key(code.describe(q_loss)), take losing_value)
     set(mut db, t, 2u64, 2u64)
     b.newest = Some(store.snapshot(db))
     let mut at_c = Fenced(sessions: map.new())

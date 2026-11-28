@@ -133,7 +133,12 @@ fn http_group_for[G: send, H: shareable + inert + send](b: Board[G, H], who: u64
     if !lease.http {
         return None
     }
-    let bindings = option.unwrap(map.get(b.r.bound_slots, entry.input.key))
+    let Some(Query(_, _, registered)) = registered_adapter(b.r, entry.input.key) else {
+        fail("runner: missing HTTP query")
+    }
+    let Some(bindings) = view registered.bindings else {
+        fail("runner: unbound query")
+    }
     let result = http_group_keys(packed, bindings, subscription_frame_limit(entry.input))
     match take result {
         Ok(payload) if list.len(payload) > available => Some(Error(Refused(Budget(Room(requested: list.len(payload), available: available))))),

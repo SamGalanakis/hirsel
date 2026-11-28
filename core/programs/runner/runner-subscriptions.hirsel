@@ -521,7 +521,9 @@ fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, acce
     let Some(Query(_, _, registered)) = registered_adapter(r, input.key) else {
         return Stopped(Refused(NoEntry))
     }
-    let bindings = option.unwrap(map.get(r.bound_slots, input.key))
+    let Some(bindings) = view registered.bindings else {
+        fail("runner: unbound query")
+    }
     (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
 }
 
@@ -666,8 +668,10 @@ fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64
 
 fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: List[Cover], rows: Log[Row]) -> Result[(), Queried] waits {
     match registered_adapter(b.r, key) {
-        Some(Query(allowance, steps, _)) => {
-            let bindings = option.unwrap(map.get(b.r.bound_slots, key))
+        Some(Query(allowance, steps, registered)) => {
+            let Some(bindings) = view registered.bindings else {
+                fail("runner: unbound query")
+            }
             let projected = bound bytes allowance {
                 bound steps steps {
                     covered_all_pages(b.reads, b.read_handle, published_rows(b.base), newest, c, bindings, rows)

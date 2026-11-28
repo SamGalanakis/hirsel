@@ -130,6 +130,7 @@ fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca:
 
 type QueryEntry[H: send]: send {
     by_caller: bool,
+    bindings: Option[List[BoundSlot]],
     ephemeral: Option[RoomEntry],
     slots: Slots[H],
     run: own[send] fn(Slots[H], List[BoundSlot], PublisherReads, store.Reader, H, Caller, Bytes, store.Snapshot, store.Snapshot, Log[Row], Option[View[List[Cover]]]) -> Queried waits
@@ -178,14 +179,14 @@ fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert
         As(_) => true,
         Plain(_) => false
     }
-    insert(mut r, take key, mark, take d, Query(n, s, QueryEntry(by_caller: by_caller, ephemeral: take ephemeral, slots: take registered_slots, run: take go)), Some(checked_argument(ca, n, s)))
+    insert(mut r, take key, mark, take d, Query(n, s, QueryEntry(by_caller: by_caller, bindings: None, ephemeral: take ephemeral, slots: take registered_slots, run: take go)), Some(checked_argument(ca, n, s)))
 }
 
 fn bind_query_slots[G: send, H: shareable + inert + send](mut r: Registry[G, H], h: H) -> Result[(), RegisterError] {
     for i in 0u64 .. list.len(r.slots) {
-        if let Query(_, _, entry_query) = r.slots[i].adapter {
+        if let Query(_, _, mut entry_query) = r.slots[i].adapter {
             let bindings = bind_slots(entry_query.slots, h)?
-            map.insert(mut r.bound_slots, clone(r.t.rows[i].key), take bindings)
+            entry_query.bindings = Some(take bindings)
         }
     }
     Ok(())

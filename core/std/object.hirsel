@@ -191,7 +191,7 @@ fn content_range(b: Bytes) -> Result[Range, Error] {
 }
 
 fn empty_tag() -> ETag {
-    ETag(octets:[0; 64], len: 0)
+    ETag(octets: [0; 64], len: 0)
 }
 
 fn etag(data: Bytes) -> Result[ETag, Error] {
@@ -609,7 +609,7 @@ fn xml_text(b: Bytes) -> Result[String, Error] {
 }
 
 fn empty_key() -> Key {
-    Key(octets:[0; 1024], len: 0)
+    Key(octets: [0; 1024], len: 0)
 }
 
 fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Result[Entry, Error] {
@@ -1169,7 +1169,7 @@ fn update_peers(mut peers: List[Peer], ips: List[Ip]) {
         if let Some(index) = peer_index(peers, ip) {
             peers[index].listed = true
         } else {
-            list.push(mut peers, Peer(ip, listed: true, open: 0, blocked: 0, health: Untried, count: 0, next: 0, rates:[0; 9]))
+            list.push(mut peers, Peer(ip, listed: true, open: 0, blocked: 0, health: Untried, count: 0, next: 0, rates: [0; 9]))
         }
     }
     list.retain(mut peers, fn(p: Peer) -> bool {
@@ -2252,6 +2252,8 @@ pub opaque type Upload: send {
     upload_id: String,
     put_id: Inline[u8, 16],
     mode: Mode,
+    // Only this prefix is usable if a batch stops before committing its receipts.
+    committed: u64,
     parts: List[PartReceipt]
 }
 
@@ -2299,7 +2301,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     let mut inputs: List[Sender[LaneMessage]] = list.with_capacity(lanes)
     let mut workers: List[Task[()]] = list.with_capacity(lanes)
     let mut reports: List[Latest[LaneCounts]] = list.with_capacity(lanes)
-    let initial = object_request.LaneCounts(rows:[object_request.EMPTY_REQUEST_COUNTS; 19])
+    let initial = object_request.LaneCounts(rows: [object_request.EMPTY_REQUEST_COUNTS; 19])
     let mut replies: List[Sender[PoolReply]] = list.with_capacity(lanes + 1)
     let mut send_credentials: List[Sender[cred.Credentials]] = list.new()
     if has_source(source) {
@@ -2581,34 +2583,30 @@ pub type GetRange: send {
 /// Fetch ranges concurrently on up to `streams` lanes. Results and their
 /// buffers follow request order, including errors.
 pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) -> List[(Result[Meta, Error], Bytes)] waits {
-    let n = list.len(ranges)
-    let mut queued: List[Option[Job]] = list.with_capacity(n)
-    let mut slots: List[u64] = list.with_capacity(n)
-    let mut results: List[Option[(Result[Meta, Error], Bytes)]] = list.with_capacity(n)
-    for take range_request in take ranges {
-        let GetRange(key: name, lo: lo, hi: hi, buffer: take into, deadline: until) = take range_request
-        if streams == 0 || lo >= hi {
-            list.push(mut results, Some((Error(Precondition), take into)))
-            continue
-        }
-        let mut request = object_job(mut c, S3FetchRange, name, take into, until)
-        request.lo = lo
-        request.hi = hi
-        list.push(mut slots, list.len(results))
-        list.push(mut queued, Some(take request))
-        list.push(mut results, None)
-    }
-    let replies = run_batch(mut c, take queued, streams)
-    let mut at = 0u64
-    for take one in replies {
-        let Reply(result: take status, data: take data, ..) = option.unwrap(take one)
-        let _ = list.set(mut results, slots[at], Some((as_meta(take status), take data)))
-        at += 1
-    }
+    let mut input = take ranges
+    let n = list.len(input)
+    let mut count = 0u64
     let mut ordered: List[(Result[Meta, Error], Bytes)] = list.with_capacity(n)
-    for take one in take results {
-        list.push(mut ordered, option.unwrap(take one))
+    for i in 0u64 .. n {
+        if streams != 0 && input[i].lo < input[i].hi {
+            count += 1
+        }
+        list.push(mut ordered, (Error(Precondition), replace(mut input[i].buffer, list.new())))
     }
+    run_batch(mut c, mut ordered, n, count, streams, scoped fn(mut rows: List[(Result[Meta, Error], Bytes)], mut client: Client, i: u64) -> Option[Job] {
+        let item = view input[i]
+        if item.lo >= item.hi {
+            return None
+        }
+        let (_, take data) = list.set(mut rows, i, (Error(Precondition), list.new()))
+        let mut request = object_job(mut client, S3FetchRange, item.key, take data, item.deadline)
+        request.lo = item.lo
+        request.hi = item.hi
+        Some(take request)
+    }, scoped fn(mut rows: List[(Result[Meta, Error], Bytes)], i: u64, take reply: Reply) {
+        let Reply(result: take outcome, data: take data, ..) = take reply
+        let _ = list.set(mut rows, i, (as_meta(take outcome), take data))
+    })
     take ordered
 }
 
@@ -2844,7 +2842,7 @@ pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Resul
     request.query = string.from("uploads=")
     let Reply(result: take result, ..) = run(mut c, take request)
     match take result {
-        Ok(Initiated(take upload_id)) => Ok(Upload(path: take path, upload_id: take upload_id, put_id: id, mode, parts: list.new())),
+        Ok(Initiated(take upload_id)) => Ok(Upload(path: take path, upload_id: take upload_id, put_id: id, mode, committed: 0, parts: list.new())),
         Error(take e) => Error(take e),
         _ => Error(Fatal(Malformed)),
     }
@@ -2890,7 +2888,7 @@ fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], de
 fn pending_handle(mut c: Client, key: String, take id: String) -> Upload {
     let path = request_path(c.requests.bucket, key, false)
     let put_id = object_request.fresh_id(c.requests.random, mut c.requests.entropy)
-    Upload(path: take path, upload_id: take id, put_id, mode: Overwrite, parts: list.new())
+    Upload(path: take path, upload_id: take id, put_id, mode: Overwrite, committed: 0, parts: list.new())
 }
 
 /// Appends handles for up to 16 multipart uploads still pending under the
@@ -2935,7 +2933,7 @@ pub fn pending_uploads_page(mut c: Client, prefix: String, after: Option[UploadC
     Ok(take cursor)
 }
 
-fn upload_query(u: Upload, number: u64) -> String {
+fn upload_query(upload_id: String, number: u64) -> String {
     let mut query = string.from("")
     if number != 0 {
         string.push(mut query, "partNumber=")
@@ -2943,101 +2941,110 @@ fn upload_query(u: Upload, number: u64) -> String {
         string.push_char(mut query, '&')
     }
     string.push(mut query, "uploadId=")
-    object_request.percent_encode(mut query, string.as_bytes(u.upload_id), false)
+    object_request.percent_encode(mut query, string.as_bytes(upload_id), false)
     take query
 }
 
-fn first_error(mut current: Result[(), Error], take next: Error) {
-    if let Ok(()) = current {
-        current = Error(take next)
+type BatchError {
+    ordinal: u64,
+    status: Result[(), Error]
+}
+
+fn record_batch_error(mut first: BatchError, i: u64, take problem: Error) {
+    if i < first.ordinal {
+        first.ordinal = i
+        first.status = Error(take problem)
     }
 }
 
-fn dispatch_next(c: Client, first: u64, lane_index: u64, mut jobs: List[Option[Job]], mut replies: List[Option[Reply]], mut next: u64) -> bool waits {
-    while next < list.len(jobs) {
-        let ticket = next
-        next += 1
-        let Some(take pending) = list.set(mut jobs, ticket, None) else {
-            fail("object batch dispatched a job twice")
-        }
-        let mut request = take pending
-        request.ticket = first + ticket
-        let returned = submit(c.requests.lanes[lane_index], lane_index, take request)
-        if let Some(take reply) = take returned {
-            let _ = list.set(mut replies, ticket, Some(take reply))
-        } else {
-            return true
-        }
-    }
-    false
-}
-
-fn run_batch(mut c: Client, take queued: List[Option[Job]], streams: u64) -> List[Option[Reply]] waits {
-    let mut jobs = take queued
-    let first = draw_tickets(mut c, list.len(jobs))
-    let mut replies: List[Option[Reply]] = list.with_capacity(list.len(jobs))
-    for _ in 0u64 .. list.len(jobs) {
-        list.push(mut replies, None)
-    }
+// Each lane holds the input ordinal of its current ticket. The ticket range
+// counts only submitted requests, while the ordinals also cover skipped rows.
+fn run_batch[S](mut c: Client, mut state: S, end: u64, count: u64, streams: u64, prepare: scoped fn(mut S, mut Client, u64) -> Option[Job], on_reply: scoped fn(mut S, u64, take Reply)) waits {
+    let first = draw_tickets(mut c, count)
+    let width = order.min(streams, order.min(list.len(c.requests.lanes), count))
+    let mut slots: List[u64] = list.with_capacity(width)
     let mut next = 0u64
+    let mut issued = 0u64
     let mut active = 0u64
-    let width = order.min(streams, order.min(list.len(c.requests.lanes), list.len(jobs)))
-    for lane_index in 0u64 .. width {
-        if dispatch_next(c, first, lane_index, mut jobs, mut replies, mut next) {
-            active += 1
-        }
-    }
-    while active > 0 {
-        let reply = receive_ticket(c, first, list.len(jobs), 0, width)
-        let lane_index = reply.lane
-        let ticket = reply.ticket - first
-        let _ = list.set(mut replies, ticket, Some(take reply))
-        if !dispatch_next(c, first, lane_index, mut jobs, mut replies, mut next) {
+    loop {
+        let lane_index = if list.len(slots) < width {
+            let fresh = list.len(slots)
+            list.push(mut slots, 0)
+            fresh
+        } else if active != 0 {
+            let reply = receive_ticket(c, first, count, 0, width)
+            let ready = reply.lane
+            on_reply(mut state, slots[ready], take reply)
             active -= 1
+            ready
+        } else {
+            break
+        }
+        while next < end {
+            let i = next
+            next += 1
+            let Some(take pending) = prepare(mut state, mut c, i) else {
+                continue
+            }
+            let mut request = take pending
+            request.ticket = first + issued
+            issued += 1
+            match submit(c.requests.lanes[lane_index], lane_index, take request) {
+                Some(take reply) => on_reply(mut state, i, take reply),
+                None => {
+                    let _ = list.set(mut slots, lane_index, i)
+                    active += 1
+                    break
+                },
+            }
         }
     }
-    take replies
 }
 
 pub const MULTIPART_MAX_PARTS: u64 = 10000
 
 pub const MULTIPART_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024
 
+fn send_parts(mut c: Client, mut bodies: List[Bytes], mut receipts: List[PartReceipt], existing: u64, path: String, upload_id: String, deadline_ns: u64) -> Result[(), Error] waits {
+    let count = list.len(bodies)
+    let mut first = BatchError(ordinal: MAX_U64, status: Ok(()))
+    run_batch(mut c, mut bodies, count, count, list.len(c.requests.lanes), scoped fn(mut pending: List[Bytes], mut client: Client, i: u64) -> Option[Job] {
+        let data = list.set(mut pending, i, list.new())
+        let mut request = new_job(S3Part, clone(path), take data, deadline_ns)
+        request.query = upload_query(upload_id, existing + i + 1)
+        Some(take request)
+    }, scoped fn(mut pending: List[Bytes], i: u64, take reply: Reply) {
+        let Reply(result: take outcome, data: take data, ..) = take reply
+        let size = list.len(data)
+        let _ = list.set(mut pending, i, take data)
+        match as_meta(take outcome) {
+            Ok(meta) if meta.etag.len != 0 => {
+                let _ = list.set(mut receipts, existing + i, PartReceipt(size, tag: meta.etag))
+            },
+            Ok(_) => record_batch_error(mut first, i, Fatal(Malformed)),
+            Error(take problem) => record_batch_error(mut first, i, take problem),
+        }
+    })
+    let BatchError(status: take status, ..) = take first
+    take status
+}
+
 pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns: u64) -> (Result[(), Error], List[Bytes]) waits {
     let mut returned = take bodies
     let count = list.len(returned)
-    let existing = list.len(u.parts)
+    let existing = u.committed
     if count > MULTIPART_MAX_PARTS - existing {
         return (Error(TooLarge), take returned)
     }
-    let mut queued: List[Option[Job]] = list.with_capacity(count)
-    for i in 0u64 .. count {
-        let data = list.set(mut returned, i, list.new())
-        let mut request = new_job(S3Part, clone(u.path), take data, deadline_ns)
-        request.query = upload_query(u, existing + i + 1)
-        list.push(mut queued, Some(take request))
+    list.truncate(mut u.parts, existing)
+    list.fill(mut u.parts, count, PartReceipt(size: 0, tag: empty_tag()))
+    let status = send_parts(mut c, mut returned, mut u.parts, existing, u.path, u.upload_id, deadline_ns)
+    u.committed = if let Ok(()) = status {
+        existing + count
+    } else {
+        existing
     }
-    let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(mut c, take queued, list.len(c.requests.lanes))
-    let mut i = 0u64
-    for take slot in rv {
-        let Reply(result: take outcome, data: take data, ..) = option.unwrap(take slot)
-        match as_meta(take outcome) {
-            Ok(meta) => {
-                if meta.etag.len == 0 {
-                    first_error(mut status, Fatal(Malformed))
-                } else {
-                    list.push(mut u.parts, PartReceipt(size: list.len(data), tag: meta.etag))
-                }
-            },
-            Error(take e) => first_error(mut status, take e),
-        }
-        let _ = list.set(mut returned, i, take data)
-        i += 1
-    }
-    if let Error(_) = status {
-        list.truncate(mut u.parts, existing)
-    }
+    list.truncate(mut u.parts, u.committed)
     (take status, take returned)
 }
 
@@ -3065,12 +3072,12 @@ pub fn complete_unresolved(mut c: Client, u: Upload, deadline_ns: u64) -> Result
 }
 
 fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, deadline_ns: u64) -> Result[Created, Error] waits {
-    if list.len(u.parts) == 0 {
+    if u.committed == 0 {
         return Error(Precondition)
     }
     let mut xml = string.from("<CompleteMultipartUpload>")
     let mut size = 0u64
-    for i in 0u64 .. list.len(u.parts) {
+    for i in 0u64 .. u.committed {
         let p = u.parts[i]
         string.push(mut xml, "<Part><PartNumber>")
         string.push_u64(mut xml, i + 1)
@@ -3085,7 +3092,7 @@ fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, d
     } else {
         S3Complete
     }
-    let query = upload_query(u, 0)
+    let query = upload_query(u.upload_id, 0)
     let mut request = new_job(operation, take path, string.into_bytes(take xml), deadline_ns)
     request.query = take query
     request.id = Some(u.put_id)
@@ -3102,7 +3109,7 @@ fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, d
 }
 
 pub fn abort(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[(), Error] waits {
-    let query = upload_query(u, 0)
+    let query = upload_query(u.upload_id, 0)
     let Upload(path: take path, ..) = take u
     let mut request = new_job(S3Abort, take path, list.new(), deadline_ns)
     request.query = take query
@@ -3135,39 +3142,30 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
     if count > 0 && info.etag.len == 0 {
         return (Error(Fatal(Malformed)), take buffers)
     }
-    let mut queued: List[Option[Job]] = list.with_capacity(count)
-    let mut slots: List[u64] = list.with_capacity(count)
     let mut offset = 0u64
-    for i in 0u64 .. prefix {
-        let spare = int.saturating_sub(list.capacity(buffers[i]), list.len(buffers[i]))
+    let mut first = BatchError(ordinal: MAX_U64, status: Ok(()))
+    run_batch(mut c, mut buffers, prefix, count, list.len(c.requests.lanes), scoped fn(mut pending: List[Bytes], mut client: Client, i: u64) -> Option[Job] {
+        let spare = int.saturating_sub(list.capacity(pending[i]), list.len(pending[i]))
         if spare == 0 {
-            continue
+            return None
         }
-        let data = list.set(mut buffers, i, list.new())
+        let data = list.set(mut pending, i, list.new())
         let mut request = new_job(S3FetchRange, clone(path), take data, deadline_ns)
         request.lo = offset
         offset += order.min(spare, info.size - offset)
         request.hi = offset
         request.tag = info.etag
-        list.push(mut slots, i)
-        list.push(mut queued, Some(take request))
-    }
-    let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(mut c, take queued, list.len(c.requests.lanes))
-    let mut i = 0u64
-    for take slot in rv {
-        let Reply(result: take part, data: take data, ..) = option.unwrap(take slot)
-        let _ = list.set(mut buffers, slots[i], take data)
+        Some(take request)
+    }, scoped fn(mut pending: List[Bytes], i: u64, take reply: Reply) {
+        let Reply(result: take part, data: take data, ..) = take reply
+        let _ = list.set(mut pending, i, take data)
         match as_meta(take part) {
-            Ok(part_meta) => {
-                if part_meta.size != info.size {
-                    first_error(mut status, Precondition)
-                }
-            },
-            Error(take e) => first_error(mut status, take e),
+            Ok(part_meta) if part_meta.size == info.size => {},
+            Ok(_) => record_batch_error(mut first, i, Precondition),
+            Error(take problem) => record_batch_error(mut first, i, take problem),
         }
-        i += 1
-    }
+    })
+    let BatchError(status: take status, ..) = take first
     match take status {
         Ok(()) => (Ok(take info), take buffers),
         Error(take e) => (Error(take e), take buffers),

@@ -1,0 +1,342 @@
+// test-of: std.object
+// test-reason: Script the shared reply queue and meter the calling task without charging its payloads or lane setup.
+fn batch_test_client(clock: Clock, width: u64) -> (Requests, List[Receiver[LaneMessage]], Sender[LaneEvent]) {
+    let mut lanes: List[Sender[LaneMessage]] = list.with_capacity(width)
+    let mut inputs: List[Receiver[LaneMessage]] = list.with_capacity(width)
+    let (tx, rx): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(width + 1)
+    for _ in 0u64 .. width {
+        let (lane, input): (Sender[LaneMessage], Receiver[LaneMessage]) = channel.new(2)
+        list.push(mut lanes, take lane)
+        list.push(mut inputs, take input)
+    }
+    let bucket = Bucket(endpoint: "", aws_region: "", bucket: "batch", prefix: "", style: Path)
+    let monitor = RequestMonitor(lanes: list.new(), renewal: None)
+    let requests = Requests(bucket: take bucket, simulated: true, proven: true, lanes: take lanes, lane_bytes: 0, output: take rx, next: 0, serial: 20, random: provide.random(1), entropy: list.new(), path: string.new(), clock, monitor: take monitor)
+    (take requests, take inputs, take tx)
+}
+
+fn batch_test_tag(octet: u8) -> ETag {
+    let mut octets: Inline[u8, 64] =[0u8; 64]
+    octets[0] = octet
+    ETag(octets, len: 1)
+}
+
+fn batch_test_answer(job: Job, count: u64, faults: bool, download: bool) -> Result[Value, Error] {
+    let mut meta = new_meta()
+    meta.etag = batch_test_tag(65)
+    match job.op {
+        S3Part => {
+            let number = job.data[0]
+            let mut expected_query = string.from("partNumber=")
+            let part_number: u64 = int.widen(number)
+            string.push_u64(mut expected_query, part_number + 1)
+            string.push(mut expected_query, "&uploadId=one%2Ftwo%2Bthree")
+            if job.path != "/batch/object" || job.query != expected_query {
+                fail("multipart request was numbered or encoded incorrectly")
+            }
+            meta.etag = batch_test_tag(number)
+            if faults && number == 1 {
+                return Error(NotFound)
+            }
+            if faults && number == 2 {
+                meta.etag = empty_tag()
+            }
+        },
+        S3Head => {
+            meta.size = count
+        },
+        S3FetchRange => {
+            meta.size = count
+            if download {
+                if job.tag != batch_test_tag(65) || job.hi != job.lo + 1 {
+                    fail("the multipart download lost its tag or byte range")
+                }
+                if job.lo == 0 {
+                    return Error(NotFound)
+                }
+                if job.lo == 1 {
+                    meta.size += 1
+                }
+            }
+        },
+        S3Abort => return Error(Fatal(Status(403, b"cleanup refused"))),
+        _ => fail("unexpected batch fixture operation"),
+    }
+    Ok(Object(take meta))
+}
+
+fn batch_test_reply(output: Sender[LaneEvent], lane: u64, take request: Job, count: u64, faults: bool, download: bool) -> bool waits {
+    let status = batch_test_answer(request, count, faults, download)
+    let Job(ticket, path: take path, data: take body, entries: take entries, op, lo, ..) = take request
+    let mut data = take body
+    if op == S3FetchRange {
+        list.push(mut data, int.truncate(lo))
+    }
+    let reply = Reply(lane, ticket, path: take path, result: take status, data: take data, entries: take entries)
+    match channel.send(output, Finished(take reply)) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+// Reply in reverse lane order in each wave. Inject the old ticket only once
+// the new request is pending, after the caller's initial queue drain.
+fn batch_test_peer(take setup: (List[Receiver[LaneMessage]], Sender[LaneEvent], u64, bool, bool)) waits {
+    let (take inputs, take output, count, faults, download) = take setup
+    let width = list.len(inputs)
+    if download {
+        let Ok(Work(take request, None)) = channel.receive(inputs[0]) else {
+            return
+        }
+        if !batch_test_reply(output, 0, take request, count, faults, download) {
+            return
+        }
+    }
+    for i in 0u64 .. count {
+        let lane = width - 1 - i % width
+        let Ok(Work(take request, None)) = channel.receive(inputs[lane]) else {
+            return
+        }
+        if i == 0 && faults {
+            let stale = Reply(lane, ticket: 19, path: string.new(), result: Error(TooLarge), data: b"stale", entries: list.new())
+            if let Error(_) = channel.send(output, Finished(take stale)) {
+                return
+            }
+        }
+        if !batch_test_reply(output, lane, take request, count, faults, download) {
+            return
+        }
+    }
+    if faults {
+        if let Ok(Work(take request, None)) = channel.receive(inputs[0]) {
+            let _ = batch_test_reply(output, 0, take request, count, faults, download)
+        }
+    }
+}
+
+fn batch_test_ranges(count: u64, invalid: bool) -> List[GetRange] {
+    let mut ranges: List[GetRange] = list.with_capacity(count + int.widen(if invalid {
+        1u8
+    } else {
+        0u8
+    }))
+    for i in 0u64 .. count {
+        let mut b: Bytes = list.with_capacity(16)
+        list.push(mut b, int.truncate(i))
+        list.push(mut ranges, GetRange(key: "object", lo: i, hi: i + 1, buffer: take b, deadline: 100))
+        if invalid && i == 0 {
+            let mut rejected: Bytes = list.with_capacity(16)
+            list.push(mut rejected, 255u8)
+            list.push(mut ranges, GetRange(key: "object", lo: 9, hi: 8, buffer: take rejected, deadline: 100))
+        }
+    }
+    take ranges
+}
+
+fn batch_test_ranges_ok(rows: List[(Result[Meta, Error], Bytes)], count: u64, invalid: bool) -> bool {
+    let mut index = 0u64
+    let mut good = 0u64
+    for row in rows {
+        let (status, data) = row
+        if invalid && index == 1 {
+            let Error(Precondition) = status else {
+                return false
+            }
+            if list.len(data) != 1 || data[0] != 255u8 || list.capacity(data) != 16 {
+                return false
+            }
+        } else {
+            let Ok(meta) = status else {
+                return false
+            }
+            if meta.size != count || list.len(data) != 2 || list.capacity(data) != 16 || data[0] != int.truncate(good) || data[1] != int.truncate(good) {
+                return false
+            }
+            good += 1
+        }
+        index += 1
+    }
+    good == count && index == count + int.widen(if invalid {
+        1u8
+    } else {
+        0u8
+    })
+}
+
+fn batch_test_bodies(count: u64) -> List[Bytes] {
+    let mut bodies: List[Bytes] = list.with_capacity(count)
+    for i in 0u64 .. count {
+        let mut b: Bytes = list.with_capacity(16)
+        list.push(mut b, int.truncate(i + 1))
+        list.push(mut bodies, take b)
+    }
+    take bodies
+}
+
+fn batch_test_bodies_ok(bodies: List[Bytes], count: u64) -> bool {
+    if list.len(bodies) != count {
+        return false
+    }
+    for i in 0u64 .. count {
+        let body = view bodies[i]
+        if list.capacity(body) != 16 || list.len(body) != 1 || body[0] != int.truncate(i + 1) {
+            return false
+        }
+    }
+    true
+}
+
+fn batch_test_upload(count: u64) -> Upload {
+    let mut receipts: List[PartReceipt] = list.with_capacity(count + 1)
+    list.push(mut receipts, PartReceipt(size: 11, tag: batch_test_tag(65)))
+    Upload(path: "/batch/object", upload_id: "one/two+three", put_id: [0u8; 16], mode: Overwrite, committed: 1, parts: take receipts)
+}
+
+// expect: run ranges_reorder_skip_invalid_and_ignore_cancelled_tickets(tasks) = true
+fn ranges_reorder_skip_invalid_and_ignore_cancelled_tickets(tasks: Tasks) -> bool waits {
+    let (clock, hand) = provide.clock(0, 0)
+    let (take requests, take inputs, take output) = batch_test_client(clock, 8)
+    let peer = task.spawn(tasks, bytes 65536, (take inputs, take output, 16u64, true, false), batch_test_peer)
+    let mut c = attach(take requests, None)
+    let zero = fetch_ranges(mut c, batch_test_ranges(1, false), 0)
+    let rows = fetch_ranges(mut c, batch_test_ranges(16, true), 8)
+    let _ = take c
+    result.unwrap(task.join(take peer))
+    let (status, data) = zero[0]
+    let Error(Precondition) = status else {
+        return false
+    }
+    list.len(zero) == 1 && list.len(data) == 1 && data[0] == 0u8 && list.capacity(data) == 16 && batch_test_ranges_ok(rows, 16, true)
+}
+
+// expect: run multipart_uses_first_input_error_and_reports_failed_abort(tasks) = true
+fn multipart_uses_first_input_error_and_reports_failed_abort(tasks: Tasks) -> bool waits {
+    let (clock, hand) = provide.clock(0, 0)
+    let (take requests, take inputs, take output) = batch_test_client(clock, 8)
+    let peer = task.spawn(tasks, bytes 65536, (take inputs, take output, 16u64, true, false), batch_test_peer)
+    let mut c = attach(take requests, None)
+    let mut u = batch_test_upload(16)
+    let (status, take bodies) = parts(mut c, mut u, batch_test_bodies(16), 100)
+    let rolled_back = list.len(u.parts) == 1 && u.parts[0].size == 11 && u.parts[0].tag == batch_test_tag(65)
+    let cleanup = abort(mut c, take u, 100)
+    let _ = take c
+    result.unwrap(task.join(take peer))
+    let (Error(NotFound), Error(Fatal(Status(403, details)))) = (status, cleanup) else {
+        return false
+    }
+    rolled_back && batch_test_bodies_ok(bodies, 16) && details == b"cleanup refused"
+}
+
+// expect: run multipart_download_keeps_sparse_buffers_and_first_error(tasks) = true
+fn multipart_download_keeps_sparse_buffers_and_first_error(tasks: Tasks) -> bool waits {
+    let (clock, hand) = provide.clock(0, 0)
+    let (take requests, take inputs, take output) = batch_test_client(clock, 8)
+    let peer = task.spawn(tasks, bytes 65536, (take inputs, take output, 8u64, false, true), batch_test_peer)
+    let mut supplied: List[Bytes] = list.with_capacity(10)
+    list.push(mut supplied, list.with_capacity(1))
+    list.push(mut supplied, b"full")
+    for _ in 1u64 .. 8 {
+        list.push(mut supplied, list.with_capacity(1))
+    }
+    list.push(mut supplied, list.with_capacity(32))
+    let mut c = attach(take requests, None)
+    let (status, take back) = fetch_parts(mut c, "object", take supplied, 100)
+    let _ = take c
+    result.unwrap(task.join(take peer))
+    let Error(NotFound) = status else {
+        return false
+    }
+    if list.len(back) != 10 || back[1] != b"full" || list.len(back[9]) != 0 || list.capacity(back[9]) != 32 {
+        return false
+    }
+    for i in 0u64 .. 8 {
+        let slot = if i == 0 {
+            0u64
+        } else {
+            i + 1
+        }
+        if list.len(back[slot]) != 1 || back[slot][0] != int.truncate(i) {
+            return false
+        }
+    }
+    true
+}
+
+fn batch_test_ranges_bound(take input: (Requests, List[GetRange], u64, u64)) -> bool waits {
+    let (take requests, take ranges, room, width) = take input
+    let mut c = attach(take requests, None)
+    let count = list.len(ranges)
+    result.unwrap(bound bytes room {
+        let rows = fetch_ranges(mut c, take ranges, width)
+        batch_test_ranges_ok(rows, count, false)
+    })
+}
+
+fn batch_test_parts_bound(take input: (Requests, Upload, List[Bytes], u64)) -> bool waits {
+    let (take requests, take handle, take bodies, room) = take input
+    let mut c = attach(take requests, None)
+    let mut u = take handle
+    let count = list.len(bodies)
+    result.unwrap(bound bytes room {
+        let (status, take back) = parts(mut c, mut u, take bodies, 100)
+        let mut receipts_ok = list.len(u.parts) == count + 1
+        for i in 0u64 .. count {
+            receipts_ok = receipts_ok && u.parts[i + 1].size == 1 && u.parts[i + 1].tag == batch_test_tag(int.truncate(i + 1))
+        }
+        let Ok(()) = status else {
+            return false
+        }
+        receipts_ok && batch_test_bodies_ok(back, count)
+    })
+}
+
+fn batch_test_trial(tasks: Tasks, width: u64, count: u64, multipart: bool, room: u64) -> bool waits {
+    let (clock, hand) = provide.clock(0, 0)
+    let (take requests, take inputs, take output) = batch_test_client(clock, width)
+    let peer = task.spawn(tasks, bytes 65536, (take inputs, take output, count, false, false), batch_test_peer)
+    let caller = if multipart {
+        task.spawn(tasks, bytes 1048576, (take requests, batch_test_upload(count), batch_test_bodies(count), room), batch_test_parts_bound)
+    } else {
+        task.spawn(tasks, bytes 1048576, (take requests, batch_test_ranges(count, false), room, width), batch_test_ranges_bound)
+    }
+    let verdict = task.join(take caller)
+    result.unwrap(task.join(take peer))
+    match take verdict {
+        Ok(true) => true,
+        Error(Failed(causes)) => {
+            for cause in causes {
+                if let Capacity(_) = cause.kind {
+                    return false
+                }
+            }
+            fail("the bounded batch failed for a reason other than capacity")
+        },
+        _ => fail("the bounded batch returned an incorrect result"),
+    }
+}
+
+fn batch_test_output_rows(count: u64) -> u64 {
+    option.unwrap(charge.seq(bytes[(Result[Meta, Error], Bytes)], count))
+}
+
+// Payloads, the input lists, and multipart receipts are allocated before the
+// bound. Range results allocate their final public row array inside it.
+fn batch_test_scratch_bound(tasks: Tasks, width: u64) -> bool waits {
+    let room = 128 * width
+    for count in[8u64, 32u64, 128u64] {
+        if !batch_test_trial(tasks, width, count, false, batch_test_output_rows(count) + room) || !batch_test_trial(tasks, width, count, true, room) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run dispatch_scratch_one_lane(tasks) = true
+fn dispatch_scratch_one_lane(tasks: Tasks) -> bool waits {
+    batch_test_scratch_bound(tasks, 1)
+}
+
+// expect: run dispatch_scratch_eight_lanes(tasks) = true
+fn dispatch_scratch_eight_lanes(tasks: Tasks) -> bool waits {
+    batch_test_scratch_bound(tasks, 8)
+}

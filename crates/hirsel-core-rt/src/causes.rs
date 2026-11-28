@@ -803,11 +803,10 @@ pub unsafe extern "C" fn hirsel_core_resource_origin(
     pointer: std::ptr::NonNull<u8>,
     recipe: crate::counted::Recipe,
 ) {
-    if let Some(pin) = crate::code::ExecutionPin::pin_pc(None, recipe as usize) {
-        let resource = unsafe { &mut *block::resource_state(pointer) };
-        resource.recipe = Some(recipe);
-        resource.origin = Some(pin);
-    }
+    // SAFETY: the freshly admitted resource owns its unpublished state.
+    let resource = unsafe { &mut *block::resource_state(pointer) };
+    resource.recipe = Some(recipe);
+    resource.origin = crate::code::ExecutionPin::pin_pc(None, recipe as usize);
 }
 
 /// Begin a resource's cleanup through a drain: `recipe` runs the trace hook

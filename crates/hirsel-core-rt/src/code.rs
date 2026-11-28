@@ -77,13 +77,20 @@ struct Pool {
 /// The newest registered pool.
 static POOLS: AtomicPtr<Pool> = AtomicPtr::new(std::ptr::null_mut());
 
+/// Registered pools and private executions share the same never-reused namespace.
+pub(crate) fn fresh_pool_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("pool identifiers exhausted")
+}
+
 /// Make `band` one of this process's pools and take the signals a fault or a trap in
 /// loaded code raises (PACK-9). Gives the pool's `Loader` capability handle, which is
 /// never zero.
 pub fn register(band: &'static Band) -> Result<u64, crate::fiber::ArmError> {
     crate::fiber::arm_code()?;
     let pool = Box::into_raw(Box::new(Pool {
-        handle: 0,
+        handle: fresh_pool_id(),
         band,
         next: std::ptr::null(),
     }));
@@ -93,7 +100,6 @@ pub fn register(band: &'static Band) -> Result<u64, crate::fiber::ArmError> {
         // registered pool is never freed.
         unsafe {
             (*pool).next = newest;
-            (*pool).handle = newest.as_ref().map_or(1, |newest| newest.handle + 1);
         }
         match POOLS.compare_exchange_weak(newest, pool, Ordering::AcqRel, Ordering::Acquire) {
             // SAFETY: as above.
@@ -119,13 +125,6 @@ pub(crate) fn text(pc: usize) -> Option<&'static Band> {
     pools()
         .map(|(_, band)| band)
         .find(|band| (band.low..band.high).contains(&pc))
-}
-
-/// The handle of the pool whose data band holds `address`, or zero when none does.
-pub(crate) fn data(address: usize) -> u64 {
-    pools()
-        .find(|(_, band)| (band.data_low..band.data_high).contains(&address))
-        .map_or(0, |(handle, _)| handle)
 }
 
 /// `None` when `pc` is outside every pool's text band. Inside one, the image that owns

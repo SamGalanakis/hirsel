@@ -100,11 +100,6 @@ fn ops() -> Option<&'static CodeOps> {
     }
 }
 
-/// The handle of the pool whose data band holds a witness, or zero for a host one.
-pub(super) fn witness_pool(address: usize) -> u64 {
-    super::data(address)
-}
-
 /// Pin the live image owning `pc`. A `pc` outside every pool's text band costs the
 /// band comparisons alone, and one inside a band takes no lock.
 pub(crate) fn pin_pc(pc: usize) -> Option<CodePin> {
@@ -118,7 +113,7 @@ pub(crate) fn pin_pc(pc: usize) -> Option<CodePin> {
 /// Normal drop releases the underlying pin immediately from any task in the
 /// execution (including after cross-task `Held[send]` transfer). When the
 /// execution stops abnormally (skipping Hirsel cleanup per FAIL-15),
-/// [`crate::run_stop::Execution::release_pins`] drops every still-live pin.
+/// the execution owns the remaining slots until generation teardown.
 pub(crate) struct ExecutionPin {
     execution: *const crate::run_stop::Execution,
     slot: u32,
@@ -132,6 +127,13 @@ unsafe impl Send for ExecutionPin {}
 unsafe impl Sync for ExecutionPin {}
 
 impl ExecutionPin {
+    pub(crate) fn recipe(
+        ctx: &crate::Context,
+        recipe: Option<crate::counted::Recipe>,
+    ) -> Option<Self> {
+        recipe.and_then(|f| Self::pin_pc(Some(ctx), f as usize))
+    }
+
     pub(crate) fn pin_pc(ctx: Option<&crate::Context>, pc: usize) -> Option<Self> {
         let pin = pin_pc(pc)?;
         let execution = ctx

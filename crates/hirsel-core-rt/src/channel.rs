@@ -32,6 +32,7 @@ pub struct Channel {
     item: ValueLayout,
     storage: Storage,
     _charge: Block,
+    _item_pin: Option<crate::code::ExecutionPin>,
 }
 #[repr(C)]
 pub struct New {
@@ -99,6 +100,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
             item,
             storage: Storage::new(bytes, item.align),
             _charge: charge,
+            _item_pin: crate::code::ExecutionPin::recipe(&*context, item.clean),
         }));
         crate::backing_observation::observe!(
             allocate,

@@ -553,22 +553,7 @@ impl Cx<'_, '_, '_> {
         // Empty slot: drop any taken arguments (0 steps for bookkeeping), return Error(Empty).
         self.start(empty_block);
         let outer_fail = self.fail_to(n);
-        for &(ty, val) in &taken_for_empty {
-            if let Some(val) = val
-                && let Ok(Rep::Place(row)) = self.rep(ty)
-                && self.e.needs_drop(row)
-            {
-                let at = self.address(AddressBase::Value(val), &[], PlaceTy::Declared(row), n);
-                self.inst(
-                    Inst::Drop {
-                        address: at,
-                        ty: row,
-                        fail: outer_fail,
-                    },
-                    n,
-                );
-            }
-        }
+        self.drop_dispatch_arguments(&taken_for_empty, n);
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -644,22 +629,9 @@ impl Cx<'_, '_, '_> {
             self.start(step_fail);
             let fail_token = self.read_bits(token_slot, Ty::Scalar(Scalar::U64), n);
             let _ = self.runtime_row(RtOp::CodeDispatchEnd, &[Arg::Value(fail_token)], n);
-            for &(ty, val) in &taken_for_empty {
-                if let Some(val) = val
-                    && let Ok(Rep::Place(row)) = self.rep(ty)
-                    && self.e.needs_drop(row)
-                {
-                    let at = self.address(AddressBase::Value(val), &[], PlaceTy::Declared(row), n);
-                    self.inst(
-                        Inst::Drop {
-                            address: at,
-                            ty: row,
-                            fail: None,
-                        },
-                        n,
-                    );
-                }
-            }
+            let was_failing = std::mem::replace(&mut self.failing, true);
+            self.drop_dispatch_arguments(&taken_for_empty, n);
+            self.failing = was_failing;
             if let Some(target) = outer_fail {
                 let edge = self.edge(target, &[]);
                 self.end(Terminator::Jump(edge), Some(n));
@@ -683,6 +655,16 @@ impl Cx<'_, '_, '_> {
         let p = self.pointer(to, n);
         self.temp(out_ty, Some(p));
         (out_ty, Some(p))
+    }
+
+    /// On a branch where the callee did not receive its arguments, the caller
+    /// owns them as temporaries again. Ordinary scope cleanup handles FAIL-12.
+    fn drop_dispatch_arguments(&mut self, taken: &[(TyId, Option<ValueId>)], n: NodeId) {
+        let mark = self.owners.len();
+        for &(ty, value) in taken {
+            self.temp(ty, value);
+        }
+        self.end_owners(mark, None, false, n);
     }
 
     fn pack_call_args(

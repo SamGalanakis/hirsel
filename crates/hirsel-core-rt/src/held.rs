@@ -1,6 +1,6 @@
 //! PACK-16 erased storage. The owner keeps the producer's resumable cleanup
 //! until it has finished every staged child.
-use super::ops::{ExecutionPin, witness_pool};
+use super::ops::ExecutionPin;
 use crate::{
     Context,
     block::Block,
@@ -62,13 +62,14 @@ unsafe extern "C" fn hirsel_core_held_new(
             frame: MaybeUninit::uninit(),
             cursor: 0,
             witness: *witness,
-            pool: witness_pool(witness.addr()),
+            pool: ctx
+                .execution
+                .as_ref()
+                .map_or(0, crate::run_stop::Execution::pool),
             layout: *layout,
             payload,
             charge,
-            _pin: layout
-                .clean
-                .and_then(|recipe| ExecutionPin::pin_pc(Some(ctx), recipe as usize)),
+            _pin: ExecutionPin::recipe(ctx, layout.clean),
         });
     }
     Admission {
@@ -98,7 +99,8 @@ unsafe extern "C" fn hirsel_core_held_take(
     output: *mut u8,
 ) -> bool {
     unsafe {
-        if (*handle).pool != witness_pool(witness.addr()) || (*handle).witness != *witness {
+        let pool = crate::run_stop::current_execution().map_or(0, crate::run_stop::Execution::pool);
+        if (*handle).pool != pool || (*handle).witness != *witness {
             return false;
         }
         ptr::copy_nonoverlapping((*handle).payload, output, (*handle).layout.bytes);

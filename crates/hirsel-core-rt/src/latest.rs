@@ -1,6 +1,5 @@
 //! `Latest[T]` roots (CONC-13): one swappable `Arc[T]` holder shared by its handles.
-//! The root record is the payload of its own admitted block, so the charge is
-//! exactly the bookkeeping it holds. `read` and `publish` are scheduler events
+//! The root record and its cleanup pin share one admitted block. `read` and `publish` are scheduler events
 //! that record no value. The associated Arc share or release commits
 //! immediately after its Latest event, before another task or input.
 //! The last handle's cleanup releases the root through the compiler's
@@ -25,8 +24,10 @@ pub struct Latest {
     id: u64,
     /// The compiler's cleanup of an `Arc[T]` place; it cannot fail (T is shareable).
     clean: Recipe,
+    _pin: Option<crate::code::ExecutionPin>,
 }
-const _: () = assert!(size_of::<Latest>() as u64 == charge::LATEST_ROOT);
+// The guest pays for the four root words. The native recipe pin follows them.
+const _: () = assert!(std::mem::offset_of!(Latest, _pin) as u64 == charge::LATEST_ROOT);
 const _: () = assert!(
     std::mem::offset_of!(Latest, id) == std::mem::offset_of!(Latest, handles) + 8
         && size_of::<Holder>() == 16
@@ -72,6 +73,7 @@ pub unsafe extern "C" fn hirsel_core_latest_new(
             handles: 1,
             id,
             clean,
+            _pin: crate::code::ExecutionPin::pin_pc(Some(&*context), clean as usize),
         });
         tasks::event(tasks::SENDERS, id, 1);
         New {
@@ -153,6 +155,7 @@ unsafe fn latest_step(context: *mut Context, holder: *mut Holder, list: *mut Wor
             (*latest).root = ptr::null_mut();
             return false;
         }
+        ptr::drop_in_place(latest);
         drop(Block::from_raw(
             NonNull::new_unchecked(latest.cast()),
             charge::LATEST_ROOT,

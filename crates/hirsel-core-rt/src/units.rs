@@ -974,6 +974,7 @@ fn run_slot(p: &'static Pool, ix: usize) {
         if pool_done(p) {
             break;
         }
+        crate::code::worker_park();
         handed = park_slot(p, ix);
     }
 }

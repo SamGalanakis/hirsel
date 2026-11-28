@@ -654,3 +654,25 @@ fn busy_pure_code_peer_worker_exits_on_run_stop_and_host_stop() {
         assert_eq!(generation.end_reason(), Some(EndReason::HostStop));
     }
 }
+
+#[test]
+fn stopped_worker_leaves_peer_pin_with_generation() {
+    unsafe extern "C" fn stop(_: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"PeerStop"));
+    }
+    unsafe fn release(data: *const ()) {
+        unsafe { drop(Arc::from_raw(data.cast::<()>())) };
+    }
+    let observed = Arc::new(());
+    let generation = Execution::contained();
+    let scope = unsafe { crate::run_stop::ExecutionScope::enter(&generation) };
+    let pin = unsafe { crate::code::CodePin::from_raw(Arc::into_raw(observed.clone()), release) };
+    generation.register_pin(pin);
+    let cfg = test_config(ptr::null_mut());
+    let end = unsafe { run_contained_worker(&generation, &cfg, stop) };
+    assert!(matches!(end, Err(EndReason::RunStop(_))));
+    assert_eq!(Arc::strong_count(&observed), 2);
+    drop(scope);
+    drop(generation);
+    assert_eq!(Arc::strong_count(&observed), 1);
+}

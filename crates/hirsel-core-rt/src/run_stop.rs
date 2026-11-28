@@ -118,10 +118,10 @@ pub struct Execution {
     bytes: [AtomicU8; MAX_STOP_BYTES],
     /// The first hardware fault in loaded code (PACK-9).
     pub(crate) code_fault: crate::code::Record,
-    /// Host-owned loaded-code pins (`Held` and `Resource` origin glue leases)
-    /// released on normal drop or execution teardown without running Hirsel
-    /// cleanup at FAIL-15 run stops.
+    /// Normal drops return their own slots. Abandoned pins stay here until
+    /// the host drops the generation after joining its workers and closing admission.
     pins: std::sync::Mutex<PinTable>,
+    pool: std::sync::OnceLock<u64>,
 }
 
 impl Execution {
@@ -136,6 +136,7 @@ impl Execution {
             bytes: [const { AtomicU8::new(0) }; MAX_STOP_BYTES],
             code_fault: crate::code::Record::new(),
             pins: std::sync::Mutex::new(PinTable::new()),
+            pool: std::sync::OnceLock::new(),
         }
     }
 
@@ -168,29 +169,23 @@ impl Execution {
         drop(pin);
     }
 
-    /// Drop every still-live loaded-code pin owned by this execution (FAIL-15
-    /// teardown). Drops pins outside the lock and leaves slot indices valid so
-    /// any concurrent unregister safely observes `None`.
-    pub(crate) fn release_pins(&self) {
-        let released: Vec<crate::code::CodePin> = {
-            let mut guard = self.pins.lock().unwrap_or_else(|e| e.into_inner());
-            let table = &mut *guard;
-            let mut out = Vec::new();
-            for (idx, slot) in table.slots.iter_mut().enumerate() {
-                if let Some(pin) = slot.take() {
-                    out.push(pin);
-                    table.free.push(idx as u32);
-                }
-            }
-            out
-        };
-        drop(released);
-    }
-
     /// The hardware fault in loaded code that stopped this execution with `Code`, for
     /// the reporter to read after the pool has stopped (PACK-9).
     pub fn code_fault(&self) -> Option<crate::code::Fault> {
         self.code_fault.get()
+    }
+
+    /// A contained execution in the named registered pool and its admitted ABI.
+    /// Host, prelinked and loaded entries inherit this identity from their caller.
+    pub fn in_pool(handle: u64) -> Option<Self> {
+        crate::code::pools().find(|(pool, _)| *pool == handle)?;
+        let mut execution = Self::contained();
+        execution.pool = std::sync::OnceLock::from(handle);
+        Some(execution)
+    }
+
+    pub(crate) fn pool(&self) -> u64 {
+        *self.pool.get_or_init(crate::code::fresh_pool_id)
     }
 
     pub const fn contained() -> Self {

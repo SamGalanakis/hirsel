@@ -1,8 +1,40 @@
-use super::{Task, TaskLayout, ValueLayout};
+use super::{Body, Context, Task};
+use crate::code::ExecutionPin;
 use std::{
     alloc::{Layout, alloc, dealloc},
     ptr::NonNull,
 };
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ValueLayout {
+    pub bytes: usize,
+    pub align: usize,
+    pub logical: u64,
+    /// The compiler's resumable cleanup of one value in place, run on the
+    /// active drain (counted::Recipe). None for a task input, which the child
+    /// body always cleans itself.
+    pub clean: Option<crate::counted::Recipe>,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TaskLayout {
+    pub input: ValueLayout,
+    pub result: ValueLayout,
+}
+
+impl TaskLayout {
+    pub(super) fn pin_recipes(&self, context: &Context, body: Body) -> Box<[ExecutionPin]> {
+        [
+            ExecutionPin::pin_pc(Some(context), body as usize),
+            ExecutionPin::recipe(context, self.input.clean),
+            ExecutionPin::recipe(context, self.result.clean),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
 
 // Keep one small block per scheduler. Large or unusually aligned tasks must
 // release their backing if the combined layout exceeds this bound.

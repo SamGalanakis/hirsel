@@ -160,6 +160,7 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
                     holder: std::mem::MaybeUninit::uninit(),
                     cursor: 0,
                     code_pins: Vec::new(),
+                    _recipe_pins: Box::default(),
                     sanitizer: hirsel_stack::sanitizer::FiberState::new(),
                 })
             })

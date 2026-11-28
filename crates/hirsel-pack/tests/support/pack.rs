@@ -175,6 +175,17 @@ fn run_in_worker<F>(root_limit: u64, body: F) -> Result<u8, EndReason>
 where
     F: FnOnce(*mut Context) -> u8,
 {
+    run_with_grants(root_limit, &[], body)
+}
+
+fn run_with_grants<F>(
+    root_limit: u64,
+    grants: &[hirsel_core_rt::entry::Grant],
+    body: F,
+) -> Result<u8, EndReason>
+where
+    F: FnOnce(*mut Context) -> u8,
+{
     unsafe extern "C" fn trampoline<F: FnOnce(*mut Context) -> u8>(
         ctx: *mut Context,
         config: *const process::Config,
@@ -201,8 +212,8 @@ where
         describe: None,
         scheduler: SchedulerProvider::default(),
         stop_fd: 2,
-        capabilities: std::ptr::null(),
-        capabilities_len: 0,
+        capabilities: grants.as_ptr(),
+        capabilities_len: grants.len(),
         close_grants: None,
     };
     let execution = Execution::contained();

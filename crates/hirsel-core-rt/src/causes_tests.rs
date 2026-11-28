@@ -600,3 +600,29 @@ fn cause_cell_owner_prefix_handles_single_pair_host_exhausted_payer_and_drop_ord
     assert_eq!(detached, lit_a);
     assert_eq!(root.available(), 512);
 }
+
+#[test]
+fn extracted_resource_runs_host_construction_recipe() {
+    use crate::counted::Worklist;
+
+    unsafe extern "C" fn record<const VERSION: u8>(
+        _: *mut Context,
+        payload: *mut u8,
+        _: *mut u64,
+        _: *mut Worklist,
+    ) -> bool {
+        // SAFETY: this resource stores a pointer to the test's live trace byte.
+        unsafe { payload.cast::<*mut u8>().read().write(VERSION) };
+        true
+    }
+
+    let mut context = Context::new(4096);
+    let mut version = 0u8;
+    let resource = new(&context).unwrap();
+    unsafe {
+        resource.as_ptr().cast::<*mut u8>().write(&raw mut version);
+        causes::hirsel_core_resource_origin(resource, record::<1>);
+        crate::abi::hirsel_core_resource_release(&raw mut context, resource, record::<2>, 8, 0);
+    }
+    assert_eq!(version, 1);
+}

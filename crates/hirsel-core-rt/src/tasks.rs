@@ -42,26 +42,10 @@ pub(crate) use storage::Storage;
 pub use transfer::hirsel_core_transfer;
 use transfer::{Moved, ZeroBlock};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ValueLayout {
-    pub bytes: usize,
-    pub align: usize,
-    pub logical: u64,
-    /// The compiler's resumable cleanup of one value in place, run on the
-    /// active drain (counted::Recipe). None for a task input, which the child
-    /// body always cleans itself.
-    pub clean: Option<crate::counted::Recipe>,
-}
+pub use storage::{TaskLayout, ValueLayout};
 /// A generated body cleans every local owner, including task handles, before
 /// returning. The runtime trusts that cleanup; it never scans for omitted drops.
 pub type Body = unsafe extern "C" fn(*mut Context, *mut u8, *mut u8) -> u8;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TaskLayout {
-    pub input: ValueLayout,
-    pub result: ValueLayout,
-}
 
 pub use hirsel_core_layout::event::{
     ARC_NEW, ARC_RELEASE, ARC_SHARE, ARC_UNWRAP, CANCEL, CANCELLED, CAPACITY, CHECK_CANCEL, CLOSE,
@@ -220,6 +204,7 @@ pub struct Task {
     /// Owning pins on loaded code generations promoted when this task leaves
     /// worker custody (PACK-14). Must be last so it drops after frame/result cleanup.
     pub(crate) code_pins: Vec<(u64, crate::code::CodePin)>,
+    _recipe_pins: Box<[crate::code::ExecutionPin]>,
     sanitizer: hirsel_stack::sanitizer::FiberState,
 }
 #[derive(Clone, Copy, Eq)]
@@ -1048,6 +1033,9 @@ impl Scheduler {
     }
 
     fn net_idle_wait(&self, timeout: i32) -> (i32, Option<u64>) {
+        if timeout != 0 {
+            crate::code::worker_park();
+        }
         crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || !self.warm.is_null())
     }
 
@@ -1143,6 +1131,7 @@ impl Scheduler {
             }
             return;
         }
+        crate::code::worker_park();
         // The scheduler thread waits here, never in a provider: readiness from
         // any thread unparks it (hirsel_core_ready).
         let release = match deadline {
@@ -2409,6 +2398,7 @@ unsafe fn alone(
     readies.take(0);
     // Wait until readiness (true) or the deadline (false).
     let block = |deadline: Option<u64>| -> bool {
+        crate::code::worker_park();
         loop {
             if crate::units::running().is_some() {
                 // mc-units-untied: the unit parks; its worker runs other units.
@@ -3731,6 +3721,7 @@ unsafe fn run_root_scheduler(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
         code_pins: Vec::new(),
+        _recipe_pins: Box::default(),
         sanitizer: hirsel_stack::sanitizer::FiberState::new(),
     });
     // A recorded helper's root task runs in its own tape group.
@@ -4010,6 +4001,7 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
             code_pins: Vec::new(),
+            _recipe_pins: layout.pin_recipes(&*context, body),
             sanitizer: hirsel_stack::sanitizer::FiberState::new(),
         });
         // The scheduler's published task now owns the allocation until retire.

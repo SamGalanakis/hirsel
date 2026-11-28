@@ -1,6 +1,7 @@
 //! PACK-16 exercises the compiled producers and consumers in separate loaded images.
 include!("../support/pack.rs");
 hirsel_guard::install!();
+mod host;
 
 type Make = unsafe extern "C" fn(*mut Context, *mut usize, u64) -> u8;
 type Take = unsafe extern "C" fn(*mut Context, *mut u64, *mut usize) -> u8;
@@ -534,4 +535,167 @@ fn transfers_cranelift() {
 #[test]
 fn transfers_llvm() {
     transfer_and_refusal(Backend::Llvm);
+}
+
+#[test]
+fn empty_dispatch_finishes_taken_arguments_in_reverse_order() {
+    use hirsel_core_rt::{abi_sites, causes::Causes};
+
+    let _alone = alone();
+    let (loader, pool) = primary_loader();
+    for backend in BACKENDS {
+        let module = compile_pack_module(
+            r#"
+pub resource type Mark { n: u64 } drop(m) {
+    if m.n == 1 { fail("first argument") }
+    fail("second argument")
+}
+pub fn run(l: Loader) -> u64 {
+    let slot: CodeSlot[fn(take Mark, take Mark) -> u64] = code.slot(l)
+    let a = result.unwrap(Mark(n: 1))
+    let b = result.unwrap(Mark(n: 2))
+    let _ = code.dispatch(slot, take a, take b)
+    0
+}
+"#,
+            &["run"],
+            backend,
+        );
+        loader.admit_module(&module.bytes).unwrap();
+        let code = module.load_raw(loader, "run");
+        let mut messages = Vec::new();
+        let status = run_in_worker(1 << 20, |context| unsafe {
+            let entry: unsafe extern "C" fn(*mut Context, *mut u64, u64) -> u8 =
+                std::mem::transmute(code.entry());
+            let status = entry(context, &mut 0, pool);
+            let raw = hirsel_core_rt::abi::hirsel_core_causes_take(context);
+            let causes = Causes::from_raw(raw);
+            for cell in causes.iter_cells() {
+                messages.push(abi_sites::format_cell(cell, std::ptr::null()));
+            }
+            u8::from(status != 1)
+        });
+        assert_eq!(status, Ok(0));
+        assert_eq!(messages.len(), 2, "{backend:?} {messages:?}");
+        assert!(messages[0].contains("second argument"), "{messages:?}");
+        assert!(messages[1].contains("first argument"), "{messages:?}");
+        drop(code);
+        loader.reclaim().unwrap();
+    }
+}
+
+fn recipe_lifetime(make_source: &str, finish_source: &str) {
+    let _alone = alone();
+    use hirsel_mod::Class;
+    let mask = Mask::of(&[Class::Pure, Class::Metered, Class::Task, Class::Launch]);
+    let loader = hirsel_pack::start(hirsel_pack::config(0, mask, 16 << 20, 8 << 20)).unwrap();
+    let make_module = compile_pack_module(make_source, &["make"], Backend::Cranelift);
+    let finish_module = compile_pack_module(finish_source, &["finish"], Backend::Cranelift);
+    for module in [&make_module, &finish_module] {
+        loader.admit_module(&module.bytes).unwrap();
+    }
+    let make = make_module.load_raw(loader, "make");
+    let finish = finish_module.load_raw(loader, "finish");
+    let producer_pc = make.entry();
+    let mut result = 0;
+    let status = run_in_worker(1 << 20, |ctx| unsafe {
+        let create: Make = std::mem::transmute(producer_pc);
+        let consume: Take = std::mem::transmute(finish.entry());
+        let mut handle = 0;
+        let status = create(ctx, &mut handle, 0);
+        if status != 0 {
+            return status;
+        }
+        drop(make);
+        loader.reclaim().unwrap();
+        if loader.resolve(producer_pc).is_none() {
+            // Leave the worker before running a recipe from the retired producer.
+            hirsel_core_rt::run_stop::raise(hirsel_core_rt::run_stop::Stop::from_static(
+                b"MissingRecipePin",
+            ));
+        }
+        consume(ctx, &mut result, &mut handle)
+    });
+    assert_eq!(status, Ok(0));
+    assert_eq!(result, 42);
+    drop(finish);
+    loader.reclaim().unwrap();
+    assert!(loader.resolve(producer_pc).is_none());
+}
+
+#[test]
+fn task_keeps_producer_through_join() {
+    recipe_lifetime(
+        "fn child(take x: u64) -> u64 { x }
+         pub fn make(tasks: Tasks) -> Task[u64] { task.spawn(tasks, bytes 4096, 42u64, child) }",
+        "pub fn finish(take t: Task[u64]) -> u64 waits { result.unwrap(task.join(take t)) }",
+    );
+}
+
+#[test]
+fn channel_keeps_item_recipe_until_receiver_drop() {
+    recipe_lifetime(
+        "pub fn make(seed: u64) -> Receiver[String] {
+            let (tx, rx): (Sender[String], Receiver[String]) = channel.new(1)
+            let _ = channel.try_send(tx, \"forty-two\")
+            rx
+         }",
+        "pub fn finish(take rx: Receiver[String]) -> u64 { 42 }",
+    );
+}
+
+#[test]
+fn latest_keeps_root_recipe_until_last_handle_drop() {
+    recipe_lifetime(
+        "pub fn make(seed: u64) -> Latest[u64] { latest.new(arc.new(42u64)) }",
+        "pub fn finish(take head: Latest[u64]) -> u64 { 42 }",
+    );
+}
+
+#[test]
+fn parked_worker_releases_dropped_slot_image() {
+    use hirsel_core_rt::{code, entry, host_ops, os, provider};
+    let _alone = alone();
+    let (loader, pool) = primary_loader();
+    let module = compile_pack_module(
+        "pub fn answer() -> u64 { 42 }",
+        &["answer"],
+        Backend::Cranelift,
+    );
+    loader.admit_module(&module.bytes).unwrap();
+    let raw = module.load_raw(loader, "answer");
+    let pc = raw.entry();
+    let null_fd = || std::fs::File::open("/dev/null").unwrap().into();
+    let mut os = os::OsProvider::new(null_fd(), null_fd());
+    let provider = os.provider();
+    let grant = entry::Grant {
+        kind: entry::CLOCK,
+        provider: &provider,
+        handle: 0,
+        terminal: false,
+    };
+    let mut retained = [false; 2];
+    let status = run_with_grants(1 << 20, &[grant], |ctx| unsafe {
+        let c = code::hirsel_core_code_bind(raw.descriptor() as *const u8);
+        let slot = code::hirsel_core_code_slot_new(pool);
+        assert_eq!(code::hirsel_core_code_activate(slot, 0, c, &mut 0), 0);
+        let mut token = 0;
+        assert_eq!(
+            code::hirsel_core_code_dispatch_begin(slot, &mut token).addr(),
+            pc
+        );
+        code::hirsel_core_code_dispatch_end(token);
+        code::hirsel_core_code_slot_drop(slot);
+        code::hirsel_core_code_drop(c);
+        drop(raw);
+        retained[0] = loader.pin_pc(pc).is_some();
+        let now =
+            host_ops::hirsel_core_host_clock(ctx, provider::MONO_NS, 1, std::ptr::null_mut(), 0, 0);
+        let slept = host_ops::hirsel_core_host_sleep_until(ctx, 1, now.value + 40_000_000, 0);
+        assert_eq!(slept.error.tag, 0);
+        retained[1] = loader.pin_pc(pc).is_some();
+        0
+    });
+    assert_eq!(status, Ok(0));
+    assert_eq!(retained, [true, false]);
 }

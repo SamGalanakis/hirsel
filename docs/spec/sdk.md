@@ -265,10 +265,7 @@ Each entry has `module` (an array of decoded module path components) and
 `name` (the decoded function name). Together they give the TypeScript stub
 path from section 4. `identity` retains the full PROG-9 entry identity,
 including the instance and signature. `kind` is `compute`, `transact`,
-`query`, `granted`, or `room`. A transact entry also has `recovery`,
-`recovered` or `unrecovered` (RUNNER-SPEC §1.2 "Reply recovery"), and it is part
-of the Want, so a release that changes it makes the old Want `Gone`.
-`args_fp`, `result_fp`, and `revision` come from
+`query`, `granted`, or `room`. `args_fp`, `result_fp`, and `revision` come from
 Describe. The launch's `n_place` and both fingerprints are decimal strings
 to preserve all 64 bits. `digest`, `identity`, and `revision` are arrays of
 byte integers.
@@ -372,46 +369,24 @@ in the owning process and commits state snapshots atomically with no disk I/O. A
 NodeStorage claim records the owner's PID and a unique token.
 After the PID exits, contenders advance to a new claim without deleting the
 old one. A PID that has been reused can delay recovery until it exits.
-To upgrade from JSON snapshots, finish pending calls with the old clients and
-open the new adapter in a fresh directory.
 Recovery format 4 stores a random installation ID and random fencing generation.
 Generation validation and each work send share the installation lock. Missing
 stream records fence the generation. Pending requests keep their original Caller.
 
-A stream passes a position only after its reply is stored (STORE-SPEC §1.8
-S7), so a stream carries one call at a time and the client multiplexes calls
-as lanes: each in-flight call holds its own leased stream of the session's
-Caller. How many lanes may hold a call is set by the connection's call credit
-(RUNNER-SPEC §3 "Call credit"), not by a fixed width. Hello sends a `want`:
-the calls and bytes the client would run at once. Welcome and each later
-`Credit` carry the cumulative grant and the client's share, fenced by the
-connection's epoch. The client applies a `Credit` only when its epoch matches
-and its totals exceed the ones it holds. An item costs one call and 36 + |arg|
-bytes, or 20 + |arg| for an unrecovered call's `LocalItem`. The client never sends past its grant, so it never earns a close or a
-refusal by itself. When its demand falls, or a `Credit` lowers its share below
-what it holds unspent, it sends `Window` with a new `want` and raises its spent
-counters to forfeit the excess. Calls past the credit wait in memory in
-submission order.
+A stream passes a position only after its reply is stored (STORE-SPEC §1.8 S7).
+Each active lane leases one stream belonging to the session's Caller. On the
+`hirsel.4` wire, Welcome carries `q`, the number of queued calls beyond the one
+running call. The client admits up to `1 + q` active lanes and keeps later
+calls in memory in submission order.
 
-The pump has no timer. On each turn it puts every ready call that fits the
-credit into one `Call` list of at most 256 items, and it has at most one frame
-write pending. So a lone call goes out at once, and calls that arrive while a
-write is pending ride the next list. Each `Call` list is persisted as pending
-before it is sent. A lane sends its next position only after the previous
-position's terminal is durably settled. That successor is the place's only sign
-of settlement, and there is no acknowledgement message. Settlement writes each lane's terminal outcome and next
-position in one durable write per received frame. Recovery resends unsettled
-calls, oldest first, with their original bytes on their own streams, inside
-the new connection's grant. Items of a list that may not have been sent count
-as unsettled. Items are never merged, split or re-encoded, and a smaller grant
-only slows recovery (RUNNER-SPEC §3 "Recovery under credit"). The queue of
-calls not yet issued is application memory and is not bounded by credit. Recovery format 4 is unchanged. Opening the client leases every free stream of one Caller
-that still holds a call, so each recovered call resumes on its own lane next to
-new work. Completions settle their own lane in any order; Returned and Failed
-answers in one Batch commit in one storage write. Adjacent reply-only Batches
-also share a commit when the client has no subscription, optimistic overlay
-or Batch observer. Calls that start together share a pending write and a
-subsequent in-flight write under the same installation lock. Each Call frame carries
+The client sends one Call frame per delivery. It records pending calls and
+marks their deliveries in flight before sending. Calls admitted together share
+the pending write and the in-flight write under the installation lock. Opening
+the client leases each free stream of the Caller that still holds a call, so
+recovery can resume it on the same stream. Completions settle their own lanes
+in any order. Returned and Failed answers in one Batch commit in one storage
+write. Adjacent reply-only Batches also share a commit when the client has no
+subscription, optimistic overlay or Batch observer. Each Call frame carries
 `min(deadlineMs, the call's remaining time)`. When a call's own deadline passes
 or its `signal` aborts before any delivery, its pending record is deleted, the
 position stays free, and the call is refused with Deadline (or rejected with
@@ -429,15 +404,8 @@ together with the next position. A compute or granted call is sent at the
 stream's next position, which only labels its Outcome row, and its outcome
 leaves the position unchanged. Nothing is stored for it, so a re-send runs it
 again, and a granted call whose delivery is uncertain is reported
-LocallyUnknown and never re-sent. The client reads each call's kind and recovery from
-the generated `kind` and `recovery`, one per `want`. An unrecovered transact
-call is sent once as a `LocalItem` with a connection-local id. It has no stream,
-position, lease or durable pending record. Its stub returns the same
-`Outcome` type. Before dispatch, a deadline or abort gives its usual answer.
-After possible dispatch, a lost reply, timeout, abort or `Abandoned` settles it
-`LocallyUnknown`, and its optimistic overlay is dropped. A reconnect or restart
-never resends it, and it never reaches `onRecovered`. A fresh explicit call is a
-new call. A lost attempt of a stored or compute call
+LocallyUnknown and never re-sent. The client reads the generated `kind` for each
+Want. A lost attempt of a stored or compute call
 retries the original identity after backoff. A decisive refusal reuses the position only when every attempt received
 a no-commit answer.
 
@@ -529,8 +497,9 @@ as the TypeScript client's is. It sends Hello without an application credential.
 It mints a fresh stream ID from the keyed time in Welcome and a random nonce,
 sends one Call at position zero, and reads Batch and Reset frames until the
 matching Done arrives. A place applies its credential binding to the CLI's
-empty credential as it would to any other client. The upgrade offers `hirsel.4` and checks
-`Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
+empty credential as it would to any other client. The upgrade offers `hirsel.4`
+and checks `Sec-WebSocket-Accept` and the selected subprotocol. The CLI sends
+one call within the window advertised by Welcome. `--timeout` bounds the
 connection and is the Call's `deadline_ms`; default 10 seconds. A session that
 ends after the Call was sent reports LocallyUnknown. The command sends once
 and prints the received outcome, including HistoryUnavailable or Overloaded.
@@ -604,12 +573,3 @@ print as the Frame codec decodes them, for example
 `{"tag":"Failed","value":{"tag":"Raised","value":1}}`. The exit status is 0 for
 Returned and 1 for any other outcome. Refusals before sending, and transport
 errors, exit 2 with a message on stderr.
-
-Design notes:
-
-- Integers must be exact JSON integers, not strings or a second syntax, so there
-  is one form for every type and nothing silently rounds through f64.
-- Primitive flags take plain text because it is unambiguous for those types.
-- Composite values are JSON rather than Hirsel literal syntax: the driver
-  already parses JSON, and section 4 already defines the tagged shapes.
-- The command is `call`, beside `sdk`, because both read a server's Describe.

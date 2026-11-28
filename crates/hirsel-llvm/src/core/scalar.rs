@@ -364,8 +364,8 @@ impl FunctionEmitter<'_> {
                 let ok = self.bin(Binary::And, &Type::I1, &a, &b);
                 let status = self.zext(&Type::I1, &ok, &Type::I8);
                 self.put(flag.unwrap(), &status);
-                let raw = self.zext(&ft, &x, &i128);
-                self.cast(Cast::Trunc, &i128, &raw, &tt)
+                // The extended value, so a signed source widened by a narrow keeps its sign.
+                self.cast(Cast::Trunc, &i128, &wide, &tt)
             }
             ConvertMode::FloatToInt => {
                 let (sign, w) = to.int().unwrap();

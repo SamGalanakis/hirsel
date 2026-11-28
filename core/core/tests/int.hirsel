@@ -21,6 +21,24 @@ fn rotate_right_wraps() -> bool {
     int.rotate_right(a, 1) == 192 && int.rotate_right(a, 0) == 129 && int.rotate_right(a, 8) == 129 && int.rotate_right(c, 1) == 9223372036854775808 && int.rotate_right(d, 33) == 2147483648 && int.rotate_right(e, 1) == -32768
 }
 
+// A narrow into a wider type keeps the value, so a negative signed source stays negative:
+// i16 -20569 is -20569 at i32 and i64, i8 -1 is -1 at i16, and the same through try_narrow.
+// A zero-extended source would read 0xAFA7 = 44967 and 0xFF = 255 instead.
+// expect: run narrow_widening_keeps_sign() = true
+fn narrow_widening_keeps_sign() -> bool {
+    let x: i16 = -20569
+    let y: i8 = -1
+    let a: i32 = int.narrow(x)
+    let b: i64 = int.narrow(x)
+    let c: i16 = int.narrow(y)
+    let d: Option[i32] = int.try_narrow(x)
+    let some = match d {
+        Some(v) => v == -20569,
+        None => false
+    }
+    a == -20569 && b == -20569 && c == -1 && some
+}
+
 // u32 0x01020304 = 16909060 swaps to 0x04030201 = 67305985; u16 0x0102 = 258 to 0x0201 = 513;
 // u8 0xAB stays; i16 0x00FF = 255 to 0xFF00 = -256; i64 1 to 0x0100_0000_0000_0000 = 2^56.
 // expect: run swap_bytes_reverses() = true

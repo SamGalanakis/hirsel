@@ -12,7 +12,11 @@ pub(crate) fn convert(mode: ConvertMode, from: Ty, to: Ty, x: u64) -> (u64, u64)
         }
         ConvertMode::Widen => (fit(to, int(from, x)).expect("widen fits"), 0),
         ConvertMode::Truncate => (mask(to, x), 0),
-        ConvertMode::TryNarrow => (mask(to, x), u64::from(fit(to, int(from, x)).is_some())),
+        // The source's value, not its bits: a signed source widened by a narrow keeps its sign.
+        ConvertMode::TryNarrow => {
+            let v = int(from, x);
+            (mask(to, v as u64), u64::from(fit(to, v).is_some()))
+        }
         ConvertMode::FloatToInt => {
             let f = float(from, x);
             let (lo, hi) = range(to);

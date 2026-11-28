@@ -15,10 +15,11 @@ pub use derive::{
 };
 pub use format::{format, format_verified};
 pub use lexer::{LexOutput, lex};
-pub use literals::{byte_value, character_value, quoted_bytes};
+pub use literals::{byte_value, character_value, quoted_bytes, quoted_into};
 pub use package_format::{FormatAction, FormatRefusal, FormatReport, format_files, format_package};
 pub use parser::{
-    PARSER_NESTING_LIMIT, ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes,
+    DataParseError, DataSyntax, PARSER_NESTING_LIMIT, ParseMode, ParseOutput, ResourceRefusal,
+    parse, parse_bytes, parse_data, parse_data_file,
 };
 use std::ops::Range;
 pub use symbols::{Symbol, Symbols, keyword_symbol, sym};

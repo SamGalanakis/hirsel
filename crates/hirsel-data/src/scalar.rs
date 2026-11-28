@@ -1,6 +1,22 @@
 use super::*;
-use hirsel_core_syntax::{TokenKind, byte_value, character_value, quoted_bytes};
+use crate::decoded::{host_memory, storage};
+use hirsel_core_syntax::{TokenKind, byte_value, character_value, quoted_into};
 use serde_json::json;
+use std::fmt::Write;
+
+fn text(raw: &str) -> Result<String, DataError> {
+    let mut s = String::new();
+    s.try_reserve_exact(raw.len()).map_err(|_| host_memory())?;
+    s.extend(raw.chars().filter(|&c| c != '_'));
+    Ok(s)
+}
+
+fn display(n: impl std::fmt::Display, capacity: usize) -> Result<Value, DataError> {
+    let mut s = String::new();
+    s.try_reserve_exact(capacity).map_err(|_| host_memory())?;
+    write!(s, "{n}").expect("writing to String");
+    Ok(Value::String(s))
+}
 
 macro_rules! scalars {
     ($($name:literal => $variant:ident),*) => {
@@ -16,53 +32,77 @@ scalars!("String"=>String,"Bytes"=>Bytes,"bool"=>Bool,"char"=>Char,"u8"=>U8,"u16
          "u32"=>U32,"u64"=>U64,"i8"=>I8,"i16"=>I16,"i32"=>I32,"i64"=>I64,"f32"=>F32,"f64"=>F64);
 
 impl Scalar {
-    /// Return the lossless projection and its decoded payload size.
-    pub(crate) fn literal(self, at: Site) -> Option<(Value, usize)> {
+    pub(crate) fn literal(self, at: Site) -> Result<Option<(Decoded<'static>, usize)>, DataError> {
         let negative = at.kind() == NodeKind::Unary && at.token() == Some("-");
-        let leaf = if negative { at.kids().next()? } else { at };
+        let leaf = if negative {
+            at.kids().next().unwrap()
+        } else {
+            at
+        };
         if leaf.kind() != NodeKind::Literal {
-            return None;
+            return Ok(None);
         }
-        let token = leaf.0.tree.node(leaf.1).token?;
+        let token = leaf.0.tree.node(leaf.1).token.unwrap();
         let kind = leaf.0.tree.tokens[token.0 as usize].kind;
-        let raw = leaf.token()?;
+        let raw = leaf.token().unwrap();
         if negative && !matches!(kind, TokenKind::Integer | TokenKind::Float) {
-            return None;
+            return Ok(None);
         }
-        match (self, kind) {
-            (Self::Bool, TokenKind::KwTrue | TokenKind::KwFalse) => Some((json!(raw == "true"), 1)),
-            (Self::Char, TokenKind::Character) => Some((json!(character_value(raw)?), 4)),
-            (Self::U8, TokenKind::Byte) => Some((json!(byte_value(raw)?), 1)),
-            (Self::String, TokenKind::String) => {
-                let text = String::from_utf8(quoted_bytes(raw, false)?).ok()?;
-                let len = text.len();
-                Some((Value::String(text), len))
-            }
-            (Self::Bytes, TokenKind::Bytes) => {
-                let bytes = quoted_bytes(raw, true)?;
+        let (value, size) = match (self, kind) {
+            (Self::Bool, TokenKind::KwTrue | TokenKind::KwFalse) => (json!(raw == "true"), 1),
+            (Self::Char, TokenKind::Character) => (display(character_value(raw).unwrap(), 4)?, 4),
+            (Self::U8, TokenKind::Byte) => (json!(byte_value(raw).unwrap()), 1),
+            (Self::String, TokenKind::String) | (Self::Bytes, TokenKind::Bytes) => {
+                let mut bytes = storage(raw.len())?;
+                quoted_into(raw, self == Self::Bytes, &mut bytes)
+                    .expect("lexer checked the literal");
                 let len = bytes.len();
-                Some((json!(bytes), len))
+                if self == Self::Bytes {
+                    return Ok(Some((Decoded::Bytes(bytes), len)));
+                }
+                (
+                    Value::String(String::from_utf8(bytes).expect("lexer checked UTF-8")),
+                    len,
+                )
             }
             (Self::F32 | Self::F64, TokenKind::Float) => {
-                let spelling = raw
-                    .strip_suffix(self.name())
-                    .unwrap_or(raw)
-                    .replace('_', "");
+                let raw = text(raw.strip_suffix(self.name()).unwrap_or(raw))?;
                 if self == Self::F32 {
-                    let n = spelling.parse::<f32>().ok()?;
-                    n.is_finite()
-                        .then(|| (json!((if negative { -n } else { n }).to_string()), 4))
+                    let Ok(n) = raw.parse::<f32>() else {
+                        return Ok(None);
+                    };
+                    if !n.is_finite() {
+                        return Ok(None);
+                    }
+                    (display(if negative { -n } else { n }, 64)?, 4)
                 } else {
-                    let n = spelling.parse::<f64>().ok()?;
-                    n.is_finite()
-                        .then(|| (json!((if negative { -n } else { n }).to_string()), 8))
+                    let Ok(n) = raw.parse::<f64>() else {
+                        return Ok(None);
+                    };
+                    if !n.is_finite() {
+                        return Ok(None);
+                    }
+                    (display(if negative { -n } else { n }, 350)?, 8)
                 }
             }
-            (_, TokenKind::Integer) => self.integer(raw, negative),
-            _ => None,
-        }
+            (_, TokenKind::Integer) => {
+                let Some((n, width)) = self.integer(raw, negative) else {
+                    return Ok(None);
+                };
+                (
+                    if width == 8 {
+                        display(n, 20)?
+                    } else {
+                        json!(n as i64)
+                    },
+                    width,
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some((Decoded::Scalar(value), size)))
     }
-    fn integer(self, raw: &str, negative: bool) -> Option<(Value, usize)> {
+    fn integer(self, raw: &str, negative: bool) -> Option<(i128, usize)> {
         let width: usize = match self {
             Self::I8 | Self::U8 => 1,
             Self::I16 | Self::U16 => 2,
@@ -79,7 +119,13 @@ impl Scalar {
             .into_iter()
             .find_map(|(prefix, radix)| raw.strip_prefix(prefix).map(|s| (s, radix)))
             .unwrap_or((raw, 10));
-        let magnitude = u64::from_str_radix(&digits.replace('_', ""), radix).ok()?;
+        let magnitude = digits
+            .chars()
+            .filter(|&c| c != '_')
+            .try_fold(0u64, |n, c| {
+                n.checked_mul(u64::from(radix))?
+                    .checked_add(u64::from(c.to_digit(radix)?))
+            })?;
         let n = if negative {
             -i128::from(magnitude)
         } else {
@@ -89,13 +135,6 @@ impl Scalar {
         if n >= high || n < -high {
             return None;
         }
-        Some((
-            if width == 8 {
-                json!(n.to_string())
-            } else {
-                json!(n as i64)
-            },
-            width,
-        ))
+        Some((n, width))
     }
 }

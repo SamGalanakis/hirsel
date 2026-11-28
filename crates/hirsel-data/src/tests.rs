@@ -56,3 +56,45 @@ fn checked_data_laws() {
         ErrorKind::Limit("input bytes")
     );
 }
+
+#[test]
+fn proposal_host_and_guest_values_and_error_spans_agree() {
+    let grants = include_str!("../../hirsel-config-schema/schemas/grants.hirsel");
+    let package = include_str!("../../hirsel-config-schema/schemas/pkg_v1.hirsel");
+    let host = include_str!("../../hirsel-config-schema/schemas/host_v1.hirsel");
+    let package = format!("{package}\n{grants}");
+    let host = format!("{host}\n{grants}");
+    let schemas = [
+        ("pkg_v1", "Package", package.as_str()),
+        ("pkg_v1", "Workspace", package.as_str()),
+        (
+            "user_v1",
+            "Config",
+            include_str!("../../hirsel-config-schema/schemas/user_v1.hirsel"),
+        ),
+        ("host_v1", "Group", host.as_str()),
+        (
+            "orders_v1",
+            "Site",
+            include_str!("../../hirsel-config-schema/fixtures/orders_v1.hirsel"),
+        ),
+    ]
+    .map(|(module, root, source)| Descriptor::lower(module, source, root).unwrap());
+    let docs: [&[u8]; 5] = [
+        include_bytes!("../../hirsel-config-schema/fixtures/app/hirsel.hcfg"),
+        include_bytes!("../../hirsel-config-schema/fixtures/hirsel.hcfg"),
+        include_bytes!("../../hirsel-config-schema/fixtures/config.hcfg"),
+        include_bytes!("../../hirsel-config-schema/fixtures/group.hcfg"),
+        include_bytes!("../../hirsel-config-schema/fixtures/site.hcfg"),
+    ];
+    for (i, doc) in docs.into_iter().enumerate() {
+        for (j, schema) in schemas.iter().enumerate() {
+            let limits = Limits::default();
+            let host = decode(doc, &[schema], limits).map(|d| d.value);
+            let guest = read::guest_with_budget(doc, schema, limits, &mut |_| Ok(()))
+                .map(Decoded::projection);
+            assert_eq!(guest, host, "document {i}, schema {j}");
+            assert_eq!(host.is_ok(), i == j);
+        }
+    }
+}

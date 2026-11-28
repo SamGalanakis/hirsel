@@ -1,7 +1,7 @@
 //! LANG-5: an `if`, `while` or `match` subject that ends in a block.
 use super::*;
 
-impl Parser<'_> {
+impl<const BORROWED: bool> Parser<'_, BORROWED> {
     pub(super) fn subject(&mut self, mut n: NodeId) -> Parsed<()> {
         let whole = n;
         loop {
@@ -26,6 +26,12 @@ impl Parser<'_> {
                 | NodeKind::Labelled => {
                     // The primary site is the whole subject, so its fix wraps that span.
                     let span = self.tree.node(whole).origin.span;
+                    if BORROWED {
+                        return self.data_refusal(Span {
+                            start: self.base + span.start,
+                            end: self.base + span.end,
+                        });
+                    }
                     let message = if self.two_key_comparison(whole) {
                         "subject cannot end in an unparenthesized block; wrap the subject in \
                          parentheses, or compare tuples: `(k1, v1) < (k2, v2)`"

@@ -14,6 +14,14 @@ pub(super) fn parse_pack(
         "code_dispatch_end" => RtOp::CodeDispatchEnd,
         "code_identity" => RtOp::CodeIdentity,
         "code_revision" => RtOp::CodeRevision,
+        "data_decode" => {
+            let rows = tys(3)?;
+            RtOp::DataDecode {
+                witness: rows[0],
+                bytes: rows[1],
+                output: rows[2],
+            }
+        }
         "held_new" => RtOp::HeldNew { item: tys(1)?[0] },
         "held_take" => RtOp::HeldTake { item: tys(1)?[0] },
         "resource_origin" => RtOp::ResourceOrigin { item: tys(1)?[0] },
@@ -40,6 +48,11 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::Join { r } => format!("rt.join[t{}]", r.0),
         RtOp::Cancel => "rt.cancel".into(),
         RtOp::CheckCancel => "rt.check_cancel".into(),
+        RtOp::DataDecode {
+            witness,
+            bytes,
+            output,
+        } => format!("rt.data_decode[t{},t{},t{}]", witness.0, bytes.0, output.0),
         RtOp::HeldNew { item } => format!("rt.held_new[t{}]", item.0),
         RtOp::HeldTake { item } => format!("rt.held_take[t{}]", item.0),
         RtOp::ResourceOrigin { item } => format!("rt.resource_origin[t{}]", item.0),

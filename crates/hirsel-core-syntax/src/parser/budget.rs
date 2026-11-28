@@ -1,6 +1,6 @@
 use super::*;
 
-impl Parser<'_> {
+impl<const BORROWED: bool> Parser<'_, BORROWED> {
     fn step_argument_starts(&self) -> bool {
         matches!(
             self.token(1).kind,
@@ -37,7 +37,7 @@ impl Parser<'_> {
             return self.expr(0);
         };
         let v = self.expr(0)?;
-        Ok(self.node(st, kind, token, &[v]))
+        self.node(st, kind, token, &[v])
     }
 
     pub(super) fn bytes_of(&mut self) -> Parsed<NodeId> {
@@ -48,7 +48,7 @@ impl Parser<'_> {
         let result = (|| {
             let ty = self.ty()?;
             self.expect(sym::RBRACKET)?;
-            Ok(self.node(start, NodeKind::BytesOf, Some(keyword), &[ty]))
+            self.node(start, NodeKind::BytesOf, Some(keyword), &[ty])
         })();
         self.whitespace -= 1;
         result

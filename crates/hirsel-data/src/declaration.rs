@@ -218,8 +218,8 @@ impl<'a> Lower<'a, '_> {
                         return Err(n.error("field default requires codec"));
                     }
                     if let Shape::Scalar(s) = shape {
-                        s.literal(n)
-                            .map(|(v, _)| v)
+                        s.literal(n)?
+                            .map(|(v, _)| v.projection())
                             .ok_or_else(|| n.error("invalid scalar default"))
                     } else {
                         Err(n.error("non-scalar default"))

@@ -1,0 +1,38 @@
+/// Compiler-produced descriptor and construction plan for a concrete record.
+pub opaque type Witness[T] {
+    plan: String,
+}
+
+pub type Limits {
+    input_bytes: u64,
+    depth: u64,
+    nodes: u64,
+    collection: u64,
+    decoded_bytes: u64,
+    comparison_bytes: u64,
+    diagnostics: u64,
+}
+
+pub type Span {
+    start: u64,
+    end: u64,
+}
+
+pub type Reason = Invalid(String) | Limit(String)
+
+pub type DataError {
+    reason: Reason,
+    path: List[String],
+    primary: Span,
+    related: Option[Span],
+}
+
+/// Bind T to the literal module alias used by its documents.
+pub fn witness[T](alias: String) -> Witness[T] {
+    witness(alias)
+}
+
+/// Decode one document using the witness and the caller's limits.
+pub fn decode[T](w: Witness[T], input: Bytes, limits: Limits) -> Result[T, DataError] {
+    decode(w, input, limits)
+}

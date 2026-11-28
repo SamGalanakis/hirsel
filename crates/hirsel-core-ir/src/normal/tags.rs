@@ -438,6 +438,7 @@ tags!(RtOp {
     102 => StaticString,
     103 => StaticFrozen,
     104 => ReleaseStaticBytes,
+    105 => DataDecode { witness, bytes, output },
 });
 
 tags!(Wait {

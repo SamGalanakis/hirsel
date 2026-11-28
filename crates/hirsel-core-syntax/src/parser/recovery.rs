@@ -18,7 +18,7 @@ fn delimiter_slot(close: Symbol) -> usize {
     }
 }
 
-impl Parser<'_> {
+impl<const BORROWED: bool> Parser<'_, BORROWED> {
     fn push_delimiter(&mut self, pos: usize, close: Symbol) {
         let index = self.delimiters.len();
         self.delimiters.push((pos, close));
@@ -61,6 +61,9 @@ impl Parser<'_> {
         self.delimiter_pos = self.pos;
     }
     pub(super) fn expected<T>(&mut self, word: Symbol) -> Parsed<T> {
+        if BORROWED {
+            return self.data_refusal(self.current.span);
+        }
         self.sync_delimiters();
         if let Some(&(opener, close)) = self.delimiters.last()
             && (word == close
@@ -69,7 +72,7 @@ impl Parser<'_> {
                         || self.newline() && close != sym::RBRACE
                         || matches!(self.word(0), sym::RPAREN | sym::RBRACKET | sym::RBRACE)))
         {
-            let required = self.symbols.text(close);
+            let required = self.symbols.unwrap().text(close);
             let declared = if self.eof() {
                 "end of file"
             } else {
@@ -92,8 +95,8 @@ impl Parser<'_> {
         }
         self.fail_expected(
             "LANG-5",
-            self.symbols.text(word),
-            format!("expected `{}`", self.symbols.text(word)),
+            self.symbols.unwrap().text(word),
+            format!("expected `{}`", self.symbols.unwrap().text(word)),
         )
     }
     pub(super) fn recover(&mut self, start: usize, item: bool) {

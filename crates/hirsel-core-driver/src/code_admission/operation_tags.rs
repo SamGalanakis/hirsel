@@ -111,6 +111,11 @@ fn runtime_probes() -> Module {
         RtOp::StaticString,
         RtOp::StaticFrozen,
         RtOp::ReleaseStaticBytes,
+        RtOp::DataDecode {
+            witness: ITEM,
+            bytes: ITEM,
+            output: ITEM,
+        },
         RtOp::Closed(0),
     ]
     .into_iter()

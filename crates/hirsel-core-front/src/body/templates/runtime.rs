@@ -27,6 +27,15 @@ impl Substitution<'_> {
             RtOp::ConnTryReceive { item } => RtOp::ConnTryReceive {
                 item: self.ty(item),
             },
+            RtOp::DataDecode {
+                witness,
+                bytes,
+                output,
+            } => RtOp::DataDecode {
+                witness: self.ty(witness),
+                bytes: self.ty(bytes),
+                output: self.ty(output),
+            },
             RtOp::Join { r } => RtOp::Join { r: self.ty(r) },
             RtOp::HeldNew { item } => RtOp::HeldNew {
                 item: self.ty(item),

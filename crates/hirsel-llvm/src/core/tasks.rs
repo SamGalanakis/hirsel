@@ -2,6 +2,7 @@
 //! carry producer-computed storage, charge and the value's drain recipe.
 use super::storage::zeroext;
 mod held;
+mod layout;
 
 use super::*;
 const P: Ty = Ty::Ptr;
@@ -11,42 +12,6 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl FunctionEmitter<'_> {
-    /// A `ValueLayout`'s words before its cleanup: bytes, alignment and
-    /// logical size. A task input's bytes and alignment cover its entry's
-    /// code word.
-    pub(super) fn layout_words(&self, t: TypeId, task_input: bool) -> [u64; 3] {
-        let (mut bytes, mut align) = self.place_layout(PlaceTy::Declared(t));
-        if task_input {
-            bytes += task_entry::input_offset(self.module, self.recipes, t);
-            align = align.max(8);
-        }
-        let logical = hirsel_core_layout::field_size(
-            &self.module.types,
-            self.recipes,
-            &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(t.0)),
-        )
-        .2;
-        [bytes, align, logical]
-    }
-    fn value_descriptors(&mut self, types: &[TypeId], task_input: bool) -> Value {
-        let buffer = self.temp(Type::bytes(32 * types.len() as u64));
-        for (i, &t) in types.iter().enumerate() {
-            let words = self.layout_words(t, task_input && i == 0);
-            for (j, value) in words.into_iter().enumerate() {
-                let at = self.offset(&buffer, (i * 32 + j * 8) as u64);
-                self.store(&Type::I64, &int(value), &at, 8);
-            }
-            let at = self.offset(&buffer, (i * 32 + 24) as u64);
-            // A task input has no cleanup here: the child body always cleans it.
-            let clean = if task_input && i == 0 {
-                Value::Null
-            } else {
-                Value::global(format!("core_clean_{}", t.0))
-            };
-            self.store(&Type::Ptr, &clean, &at, 8);
-        }
-        buffer
-    }
     /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
     /// of `shift + size(ty)`: its words, the second (the owner rows' address)
     /// zero, and its owner rows. It spans the value a recorder writes (a task
@@ -444,6 +409,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::CheckCancel
                 | RtOp::Argon2id
                 | RtOp::StepEnter
+                | RtOp::DataDecode { .. }
                 | RtOp::WorkSteps
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
@@ -501,6 +467,24 @@ impl FunctionEmitter<'_> {
                 "hirsel_core_step_enter_at",
                 &[B],
                 &[ptr(CONTEXT), u(&args[0]), u(&at)],
+            ),
+            RtOp::DataDecode { .. } => self.native_call(
+                "hirsel_core_data_decode",
+                &[K],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    p(&args[1]),
+                    u(&args[2]),
+                    u(&args[3]),
+                    u(&args[4]),
+                    u(&args[5]),
+                    u(&args[6]),
+                    u(&args[7]),
+                    u(&args[8]),
+                    p(&args[9]),
+                    u(&at),
+                ],
             ),
             RtOp::WorkSteps => self.native_call(
                 "hirsel_core_work_steps",

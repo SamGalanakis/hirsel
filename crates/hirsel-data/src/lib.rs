@@ -1,6 +1,10 @@
 //! Closed data schemas, typed literal documents and source-preserving edits.
 mod declaration;
+mod decoded;
+use decoded::{Decoded, Members};
 mod edit;
+pub mod guest;
+pub mod image;
 mod read;
 mod scalar;
 
@@ -24,6 +28,28 @@ pub struct Limits {
     pub comparison_bytes: usize,
     pub diagnostics: usize,
 }
+impl From<[u64; 7]> for Limits {
+    fn from(words: [u64; 7]) -> Self {
+        let [
+            input_bytes,
+            depth,
+            nodes,
+            collection,
+            decoded_bytes,
+            comparison_bytes,
+            diagnostics,
+        ] = words.map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+        Self {
+            input_bytes,
+            depth,
+            nodes,
+            collection,
+            decoded_bytes,
+            comparison_bytes,
+            diagnostics,
+        }
+    }
+}
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -40,6 +66,8 @@ impl Default for Limits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
+    HostMemory,
+    Capacity { requested: u64, available: u64 },
     Invalid(&'static str),
     Limit(&'static str),
 }
@@ -64,6 +92,11 @@ impl std::fmt::Display for DataError {
     }
 }
 impl std::error::Error for DataError {}
+impl DataError {
+    pub fn resource(kind: ErrorKind) -> Self {
+        error(kind, Span::default())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Shape {

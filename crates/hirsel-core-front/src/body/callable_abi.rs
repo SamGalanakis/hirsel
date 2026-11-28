@@ -173,6 +173,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn checked_function_item(&mut self, f: usize, n: NodeId) -> Option<TyId> {
         let g = &self.p.fns[f];
+        if g.path.package_is("std", "1")
+            && g.path.0.modules == ["data"]
+            && g.path.0.name == "witness"
+        {
+            self.refuse(
+                "LANG-12",
+                n,
+                "a data witness binds its type and literal alias at the call",
+            );
+            return None;
+        }
         if g.path.0.modules == ["code"]
             && g.path.package_is("core", "1")
             && matches!(

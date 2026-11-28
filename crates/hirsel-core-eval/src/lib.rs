@@ -26,6 +26,7 @@ mod convert;
 use convert::convert;
 mod cleanup;
 mod crc;
+mod data_decode;
 mod field_steps;
 mod metering;
 pub use metering::{
@@ -3711,20 +3712,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
             None => vec![0; size as usize],
         };
-        let id = self.mem.insert(Blk {
-            bytes,
-            align: 8,
-            live: true,
-            limit,
-            charge,
-            lent_size: None,
-            res,
-            counted: None,
-            class: None,
-            fixed: false,
-            marks: BTreeMap::new(),
-        });
-        ptr(id, 0)
+        self.block_with_bytes(bytes, limit, charge, res)
     }
     fn get(&self, p: u64, n: usize) -> &[u8] {
         let (b, o) = split(p);
@@ -4285,6 +4273,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     fn rt(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         let cur = t.limits.last().unwrap();
         Ok(match op {
+            RtOp::DataDecode { .. } => return self.data_decode(t, a),
             RtOp::WorkSteps => {
                 let work = hirsel_core_ids::work_steps::Work::from_operands(a[1], a[2]);
                 self.take_work(t, work, &a[..1])?;

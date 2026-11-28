@@ -67,6 +67,7 @@ macro_rules! rows {
             hirsel_core_crc64nvme Pure,
             hirsel_core_crc64nvme_combine Pure,
             hirsel_core_cred_fetch Provider,
+            hirsel_core_data_decode Metered,
             hirsel_core_describe_emit Launch,
             hirsel_core_dest_id Task,
             hirsel_core_drop_frozen_bytes Metered,

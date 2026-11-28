@@ -1,19 +1,19 @@
 use super::*;
 
-impl Parser<'_> {
-    fn data_document(&mut self) -> Parsed<NodeId> {
+impl<const BORROWED: bool> Parser<'_, BORROWED> {
+    pub(super) fn data_document(&mut self) -> Parsed<NodeId> {
         let start = self.pos;
         let module = self.name()?;
         self.expect(sym::DOT)?;
         self.name()?;
-        let head = self.node(start, NodeKind::Path, Some(module), &[]);
+        let head = self.node(start, NodeKind::Path, Some(module), &[])?;
         self.expect(sym::LPAREN)?;
         let mut children = smallvec![head];
         self.list_into(sym::RPAREN, &mut children, Self::call_argument)?;
         if !self.eof() {
             return self.fail("LANG-5", "expected end of data document");
         }
-        Ok(self.node(start, NodeKind::Call, None, &children))
+        self.node(start, NodeKind::Call, None, &children)
     }
 }
 
@@ -37,8 +37,10 @@ pub(super) fn items(p: &mut Parser, text: &str, lexical_diagnostics: usize) -> S
         let nodes_start = p.tree.nodes.len() as u32;
         p.resolution_size = ResolutionSize::default();
         let root = if p.mode == ParseMode::Data {
-            p.data_document()
-                .unwrap_or_else(|()| p.node(start, NodeKind::Error, None, &[]))
+            p.data_document().unwrap_or_else(|()| {
+                p.node(start, NodeKind::Error, None, &[])
+                    .expect("compiler arena")
+            })
         } else {
             match p.item() {
                 Ok(root) => {
@@ -50,27 +52,11 @@ pub(super) fn items(p: &mut Parser, text: &str, lexical_diagnostics: usize) -> S
                 Err(()) => {
                     p.recover(start, true);
                     p.node(start, NodeKind::Error, None, &[])
+                        .expect("compiler arena")
                 }
             }
         };
-        let mut end = p.index();
-        let consumed = p
-            .significant
-            .get(p.pos.saturating_sub(1))
-            .copied()
-            .map_or(owned, |i| i + 1);
-        let mut byte_end = p.tokens[end].span.start;
-        // Split the first line break after the item, retaining following documentation.
-        // Whitespace occupies source gaps instead of rows in the token table.
-        for i in consumed..=end {
-            let gap_start = if i == 0 { 0 } else { p.tokens[i - 1].span.end } as usize;
-            let next_start = p.tokens[i].span.start as usize;
-            if let Some(newline) = text[gap_start..next_start].find('\n') {
-                end = i;
-                byte_end = (gap_start + newline + 1) as u32;
-                break;
-            }
-        }
+        let (end, byte_end) = item_end(p, text, owned);
         let has_errors = p.resource.is_some()
             || p.diagnostics.len() != diagnostic_start
             || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
@@ -96,4 +82,30 @@ pub(super) fn items(p: &mut Parser, text: &str, lexical_diagnostics: usize) -> S
     }
     syntax.trailing_start = byte_owned;
     syntax
+}
+
+pub(super) fn item_end<const BORROWED: bool>(
+    p: &Parser<BORROWED>,
+    text: &str,
+    owned: usize,
+) -> (usize, u32) {
+    let mut end = p.index();
+    let consumed = p
+        .significant
+        .get(p.pos.saturating_sub(1))
+        .copied()
+        .map_or(owned, |i| i + 1);
+    let mut byte_end = p.tokens[end].span.start;
+    // Split the first line break after the item, retaining following documentation.
+    // Whitespace occupies source gaps instead of rows in the token table.
+    for i in consumed..=end {
+        let gap_start = if i == 0 { 0 } else { p.tokens[i - 1].span.end } as usize;
+        let next_start = p.tokens[i].span.start as usize;
+        if let Some(newline) = text[gap_start..next_start].find('\n') {
+            end = i;
+            byte_end = (gap_start + newline + 1) as u32;
+            break;
+        }
+    }
+    (end, byte_end)
 }

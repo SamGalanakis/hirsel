@@ -2,6 +2,8 @@
   "scope": "First-party features in generated production roots: the installed driver and the shipping runtime archive library. Cargo compilation units also enforce exact external and host-context feature resolution.",
   "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
+    "hirsel-core-syntax/default": "runtime-option",
+    "hirsel-core-syntax/formatter": "runtime-option",
     "hirsel-core-front/cost-profile": "test-only",
     "hirsel-core-eval/map-observation": "test-only",
     "hirsel-core-eval/host-instructions": "test-only",

@@ -1,0 +1,261 @@
+// test-vectors
+fn limits() -> data.Limits {
+    data.Limits(input_bytes: 1048576, depth: 64, nodes: 131072, collection: 65536, decoded_bytes: 4194304, comparison_bytes: 16777216, diagnostics: 1)
+}
+
+// expect: run proposal_roots() = true
+fn proposal_roots() -> bool {
+    let pkg: data.Witness[Package] = data.witness("pkg_v1")
+    let ws: data.Witness[Workspace] = data.witness("pkg_v1")
+    let user: data.Witness[Config] = data.witness("user_v1")
+    let host: data.Witness[Group] = data.witness("host_v1")
+    let app: data.Witness[Site] = data.witness("orders_v1")
+    let Ok(p) = data.decode(pkg, package_bytes(), limits()) else {
+        return false
+    }
+    let Ok(w) = data.decode(ws, workspace_bytes(), limits()) else {
+        return false
+    }
+    let Ok(c) = data.decode(user, config_bytes(), limits()) else {
+        return false
+    }
+    let Ok(g) = data.decode(host, group_bytes(), limits()) else {
+        return false
+    }
+    let Ok(s) = data.decode(app, site_bytes(), limits()) else {
+        return false
+    }
+    let Some(dep) = map.get(p.dependencies, "ffi_laws") else {
+        return false
+    }
+    let Some(context) = map.get(c.contexts, "lab") else {
+        return false
+    }
+    let Some(main) = map.get(p.sources, "main.hirsel") else {
+        return false
+    }
+    let path_ok = match dep {
+        Path(package: package, major: 1, path: path, authority: authority) => package == "local/ffi_laws" && path == "../ffi_laws" && list.len(authority) == 0,
+        _ => false,
+    }
+    let package_ok = p.name == "local/app" && p.version == "1.0.0" && match p.charge {
+        ChargeV1 => true,
+        _ => false
+    } && map.len(p.sources) == 1 && main == "main" && map.len(p.dependencies) == 1 && path_ok && absent(p.program) && absent(p.tests) && absent(p.foreign) && absent(p.selections)
+    let workspace_ok = list.len(w.members) == 2 && w.members[0] == "app" && w.members[1] == "ffi_laws" && absent(w.charge) && absent(w.dependencies) && absent(w.root_package) && absent(w.selections)
+    let context_ok = match context {
+        Host(state: state, catalog_id: id, principal: Uid(1001)) => state == "/srv/hirsel/lab" && id == "94ca5f976fff4830bf575ca41a870fc6",
+        _ => false,
+    }
+    let config_ok = context_ok && map.len(c.contexts) == 1 && c.default_context == Some("lab") && list.len(c.routes) == 0 && absent(c.cache)
+    let clock = match g.grants[0] {
+        Clock => true,
+        _ => false
+    }
+    let group_ok = g.name == "orders" && g.tenant == "sales" && g.listen == "127.0.0.1:8400" && g.store == "/srv/orders/store" && g.workdir == "/srv/orders" && !g.trusted && g.memory_bytes == Some(268435456u64) && list.len(g.grants) == 1 && clock && list.len(g.package_roots) == 0 && list.len(g.args) == 0 && absent(g.front) && absent(g.recording) && absent(g.retention)
+    let mut keys: List[String] = list.new()
+    let mut values: List[String] = list.new()
+    for (key, value) in s.labels {
+        list.push(mut keys, clone(key));
+        list.push(mut values, clone(value))
+    }
+    let labels_ok = list.len(keys) == 2 && keys[0] == "region" && values[0] == "eu" && keys[1] == "role" && values[1] == "writer"
+    let credential_ok = match s.credential {
+        Some(Binding(label)) => label == "orders_api",
+        _ => false
+    }
+    let dir = match s.grants[0] {
+        Dir(path) => path == "data",
+        _ => false
+    }
+    let site_clock = match s.grants[1] {
+        Clock => true,
+        _ => false
+    }
+    let tier = match s.residency {
+        Tiered(cache: MiB(n)) => n == 64
+    }
+    let timeout = match s.timeout {
+        Sec(n) => n == 2
+    }
+    let site_ok = s.banner == "orders ready" && timeout && tier && list.len(s.grants) == 2 && dir && site_clock && labels_ok && credential_ok && s.retries == 3
+    package_ok && workspace_ok && config_ok && group_ok && site_ok
+}
+
+fn absent[T](value: Option[T]) -> bool {
+    match value {
+        None => true,
+        _ => false
+    }
+}
+
+type Keys {
+    labels: Map[String, u8]
+}
+
+// expect: run duplicate_spans() = true
+fn duplicate_spans() -> bool {
+    let w: data.Witness[Keys] = data.witness("app")
+    let Error(e) = data.decode(w, b"app.Keys(labels: [(\"a\", 1), (\"\\u{61}\", 2)])", limits()) else {
+        return false
+    }
+    let duplicate = match e.reason {
+        Invalid(why) => why == "duplicate map key",
+        _ => false
+    }
+    let Some(first) = e.related else {
+        return false
+    }
+    duplicate && list.len(e.path) == 1 && e.path[0] == "labels" && e.primary.start == 29 && e.primary.end == 37 && first.start == 19 && first.end == 22
+}
+
+fn refused(w: data.Witness[Keys], input: Bytes, l: data.Limits, why: String) -> bool {
+    match data.decode(w, input, l) {
+        Error(e) => match e.reason {
+            Limit(label) => label == why,
+            _ => false
+        },
+        Ok(_) => false,
+    }
+}
+
+// expect: run explicit_limits() = true
+fn explicit_limits() -> bool {
+    let w: data.Witness[Keys] = data.witness("app")
+    let source = b"app.Keys(labels: [(\"x\", 1)])"
+    let mut l = limits()
+    l.input_bytes = 0
+    let input = refused(w, b"\xff", l, "input bytes")
+    l = limits()
+    l.depth = 1
+    let depth = refused(w, source, l, "depth")
+    l = limits()
+    l.nodes = 1
+    let nodes = refused(w, source, l, "nodes")
+    l = limits()
+    l.decoded_bytes = 0
+    input && depth && nodes && refused(w, source, l, "decoded bytes")
+}
+
+fn wrong_root[T](w: data.Witness[T], source: Bytes, end: u64) -> bool {
+    match data.decode(w, source, limits()) {
+        Error(e) => match e.reason {
+            Invalid(reason) => reason == "wrong nominal root" && e.primary.start == 0 && e.primary.end == end && list.len(e.path) == 0 && match e.related {
+                None => true,
+                _ => false
+            },
+            _ => false,
+        },
+        Ok(_) => false,
+    }
+}
+
+// expect: run fixture_errors() = true
+fn fixture_errors() -> bool {
+    let pkg: data.Witness[Package] = data.witness("pkg_v1")
+    let ws: data.Witness[Workspace] = data.witness("pkg_v1")
+    let user: data.Witness[Config] = data.witness("user_v1")
+    let group: data.Witness[Group] = data.witness("host_v1")
+    let app: data.Witness[Site] = data.witness("orders_v1")
+    wrong_root(ws, package_bytes(), 14) && wrong_root(user, workspace_bytes(), 16) && wrong_root(group, config_bytes(), 14) && wrong_root(app, group_bytes(), 13) && wrong_root(pkg, site_bytes(), 14)
+}
+
+fn fits(w: data.Witness[Keys], source: Bytes, room: u64) -> bool {
+    let attempt = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes room {
+            match data.decode(w, source, limits()) {
+                Ok(_) => true,
+                _ => false
+            }
+        }
+    })
+    match attempt {
+        Ok(Ok(Ok(answer))) => answer,
+        _ => false
+    }
+}
+
+fn capacity_refused(w: data.Witness[Keys], source: Bytes, room: u64) -> bool {
+    let last = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes room {
+            match data.decode(w, source, limits()) {
+                Ok(_) => true,
+                _ => false
+            }
+        }
+    })
+    match last {
+        Ok(Error(causes)) => {
+            let mut found = false
+            for c in causes {
+                found = match c.kind {
+                    Capacity(k) => k.requested > k.available,
+                    _ => false
+                }
+            }
+            found
+        },
+        _ => false,
+    }
+}
+
+// expect: run guest_refunds() = true
+fn guest_refunds() -> bool {
+    let w: data.Witness[Keys] = data.witness("app")
+    let source = b"app.Keys(labels: [(\"first\", 1), (\"second\", 2)])"
+    result.unwrap(bound bytes 131072 {
+        // A caught failure replaces the task's primary cause cell from this
+        // limit. Fund it before measuring the decoder's allocations.
+        let _ = isolate(fn() -> bool {
+            fail("prime cause cell")
+        })
+        let available = match (bound bytes 131073 {
+            true
+        }) {
+            Error(c) => c.available,
+            Ok(_) => 0u64,
+        }
+        let mut lo: u64 = 0
+        let mut hi: u64 = 65536
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2
+            if fits(w, source, mid) {
+                hi = mid
+            } else {
+                lo = mid
+            }
+        }
+        let capacity = capacity_refused(w, source, lo)
+        let timed = bound steps 12 {
+            match data.decode(w, source, limits()) {
+                Ok(_) => true,
+                _ => false
+            }
+        }
+        let short = match timed {
+            Error(t) => t.steps == 12,
+            _ => false
+        }
+        let success = fits(w, source, hi)
+        let full = match (bound bytes available {
+            true
+        }) {
+            Ok(true) => true,
+            _ => false
+        }
+        capacity && short && success && full
+    })
+}
+
+type Units {
+    values: List[()]
+}
+
+// expect: run zero_sized_list() = true
+fn zero_sized_list() -> bool {
+    let w: data.Witness[Units] = data.witness("app")
+    let Ok(r) = data.decode(w, b"app.Units(values: [(), ()])", limits()) else {
+        return false
+    }
+    list.len(r.values) == 2 && list.capacity(r.values) == 18446744073709551615u64
+}

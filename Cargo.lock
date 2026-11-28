@@ -1029,6 +1029,7 @@ dependencies = [
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-net",
+ "hirsel-data",
  "hirsel-guard",
  "hirsel-intern",
  "serde_json",
@@ -1177,6 +1178,7 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-layout",
  "hirsel-core-net",
+ "hirsel-data",
  "hirsel-guard",
  "hirsel-observation-format",
  "hirsel-stack",
@@ -1228,6 +1230,7 @@ dependencies = [
 name = "hirsel-data"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-layout",
  "hirsel-core-syntax",
  "hirsel-guard",
  "serde",

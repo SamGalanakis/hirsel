@@ -1,5 +1,7 @@
 //! Recovery, significant-token cursor, precedence climbing and item-local arena/origin
 //! mechanics adapted from hirsel-parser. Every grammar visitor is for the new language.
+mod borrowed;
+pub use borrowed::{DataParseError, DataSyntax, parse_data, parse_data_file};
 mod budget;
 mod document;
 mod recovery;
@@ -72,103 +74,15 @@ pub struct ParseOutput {
     pub resource_refusal: Option<ResourceRefusal>,
 }
 
-/// Decode external source bytes. Invalid UTF-8 has a raw byte span (PROG-7).
-pub fn parse_bytes(bytes: &[u8], mode: ParseMode, symbols: &mut Symbols) -> ParseOutput {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => parse(text, mode, symbols),
-        Err(error) => {
-            if bytes.len() > u32::MAX as usize {
-                return ParseOutput {
-                    syntax: SyntaxFile::default(),
-                    diagnostics: vec![],
-                    resource_refusal: Some(ResourceRefusal::SourceTooLarge {
-                        bytes: bytes.len() as u64,
-                    }),
-                };
-            }
-            let start = error.valid_up_to();
-            let end = start + error.error_len().unwrap_or(bytes.len() - start);
-            ParseOutput {
-                syntax: SyntaxFile::default(),
-                diagnostics: vec![Diagnostic::error(
-                    "LANG-1",
-                    Span {
-                        start: start as u32,
-                        end: end as u32,
-                    },
-                    "source is not UTF-8",
-                )],
-                resource_refusal: None,
-            }
-        }
-    }
-}
+mod entry;
+pub(crate) use entry::parse_derived;
+pub use entry::{parse, parse_bytes};
 
-pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput {
-    parse_derived(text, mode, symbols, usize::MAX)
-}
-/// Parse `text` whose bytes from `derived` on are generated (see `lexer::lex_derived`).
-pub(crate) fn parse_derived(
-    text: &str,
-    mode: ParseMode,
-    symbols: &mut Symbols,
-    derived: usize,
-) -> ParseOutput {
-    if text.len() > u32::MAX as usize {
-        return ParseOutput {
-            syntax: SyntaxFile::default(),
-            diagnostics: vec![],
-            resource_refusal: Some(ResourceRefusal::SourceTooLarge {
-                bytes: text.len() as u64,
-            }),
-        };
-    }
-    let output = crate::lexer::lex_derived(text, symbols, derived);
-    let lexical_diagnostics = output.diagnostics.len();
-    let significant = output.significant;
-    let canonical = output.canonical;
-    let canonical_offsets = output.canonical_offsets;
-    let node_capacity = significant.len();
-    let mut p = Parser {
-        text,
-        symbols,
-        current: output.tokens[significant[0]],
-        current_index: significant[0],
-        resolution_size: ResolutionSize::default(),
-        tokens: output.tokens,
-        significant,
-        pos: 0,
-        tree: Tree {
-            tokens: vec![],
-            nodes: Vec::with_capacity(node_capacity),
-            edges: Vec::with_capacity(node_capacity),
-            canonical,
-            canonical_offsets,
-        },
-        base: 0,
-        whitespace: 0,
-        depth: 0,
-        delimiter_pos: 0,
-        delimiters: smallvec![],
-        delimiter_openings: [Vec::new(), Vec::new(), Vec::new()],
-        diagnostics: output.diagnostics,
-        resource: None,
-        mode,
-    };
-    let mut syntax = document::items(&mut p, text, lexical_diagnostics);
-    syntax.source = text.to_owned();
-    p.tree.tokens = p.tokens;
-    syntax.tree = p.tree;
-    ParseOutput {
-        syntax,
-        diagnostics: p.diagnostics,
-        resource_refusal: p.resource,
-    }
-}
-
-struct Parser<'a> {
+struct Parser<'a, const BORROWED: bool = false> {
+    host_memory: bool,
+    data_error: Option<Span>,
     text: &'a str,
-    symbols: &'a Symbols,
+    symbols: Option<&'a Symbols>,
     tokens: Vec<Token>,
     significant: Vec<usize>,
     current: Token,
@@ -187,7 +101,7 @@ struct Parser<'a> {
     mode: ParseMode,
 }
 
-impl Parser<'_> {
+impl<const BORROWED: bool> Parser<'_, BORROWED> {
     fn index(&self) -> usize {
         self.current_index
     }
@@ -240,6 +154,9 @@ impl Parser<'_> {
         required: &str,
         message: impl Into<String>,
     ) -> Parsed<T> {
+        if BORROWED {
+            return self.data_refusal(self.current.span);
+        }
         if self.newline() && line_continuation(self.word(0)) {
             return self.fail("LANG-4", "this position cannot continue across a newline");
         }
@@ -253,7 +170,14 @@ impl Parser<'_> {
         self.diagnostics.push(d);
         Err(())
     }
+    fn data_refusal<T>(&mut self, at: Span) -> Parsed<T> {
+        self.data_error.get_or_insert(at);
+        Err(())
+    }
     fn fail<T>(&mut self, rule: &str, message: impl Into<String>) -> Parsed<T> {
+        if BORROWED {
+            return self.data_refusal(self.current.span);
+        }
         self.diagnostics
             .push(Diagnostic::error(rule, self.token(0).span, message));
         Err(())
@@ -268,6 +192,9 @@ impl Parser<'_> {
     }
     #[cold]
     fn name_error(&mut self) -> Parsed<TokenId> {
+        if BORROWED {
+            return self.data_refusal(self.current.span);
+        }
         self.fail_expected(
             if self.token(0).kind.is_keyword() {
                 "LANG-2"
@@ -297,7 +224,14 @@ impl Parser<'_> {
         kind: NodeKind,
         token: Option<TokenId>,
         children: &[NodeId],
-    ) -> NodeId {
+    ) -> Parsed<NodeId> {
+        if BORROWED
+            && (self.tree.nodes.try_reserve(1).is_err()
+                || self.tree.edges.try_reserve(children.len()).is_err())
+        {
+            self.host_memory = true;
+            return Err(());
+        }
         self.resolution_size.add(kind);
         let first = self.significant[start];
         let last = if self.pos > start {
@@ -325,7 +259,7 @@ impl Parser<'_> {
             },
             children: edge..self.tree.edges.len() as u32,
         });
-        id
+        Ok(id)
     }
     fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Parsed<T>) -> Parsed<T> {
         // A finite compiler stack allocation, not a language nesting limit. The incomplete
@@ -345,6 +279,14 @@ impl Parser<'_> {
     fn required<T>(&mut self, f: impl FnOnce(&mut Self) -> Parsed<T>) -> Parsed<T> {
         f(self)
     }
+    #[inline]
+    fn reserve_children(&mut self, nodes: &mut Nodes, additional: usize) -> Parsed<()> {
+        if BORROWED && nodes.try_reserve(additional).is_err() {
+            self.host_memory = true;
+            return Err(());
+        }
+        Ok(())
+    }
     fn list(&mut self, close: Symbol, f: impl FnMut(&mut Self) -> Parsed<NodeId>) -> Parsed<Nodes> {
         let mut nodes = smallvec![];
         self.list_into(close, &mut nodes, f)?;
@@ -362,6 +304,7 @@ impl Parser<'_> {
                 if p.eof() {
                     return p.expected(close);
                 }
+                p.reserve_children(nodes, 1)?;
                 nodes.push(f(p)?);
                 if p.eat(close) {
                     break;
@@ -435,17 +378,20 @@ impl Parser<'_> {
                         self.tokens[n.0 as usize].span,
                         "unknown attribute",
                     )
-                    .with_comparison(self.symbols.text(word), "test or compact attribute"),
+                    .with_comparison(
+                        self.symbols.unwrap().text(word),
+                        "test or compact attribute",
+                    ),
                 );
                 return Err(());
             }
-            c.push(self.node(a, NodeKind::Attribute, Some(n), &[]));
+            c.push(self.node(a, NodeKind::Attribute, Some(n), &[])?);
         }
         let public = self.eat(sym::PUB);
         if public {
-            c.push(self.node(self.pos - 1, NodeKind::Public, None, &[]));
+            c.push(self.node(self.pos - 1, NodeKind::Public, None, &[])?);
             if self.eat(sym::OPAQUE) {
-                c.push(self.node(self.pos - 1, NodeKind::Opaque, None, &[]));
+                c.push(self.node(self.pos - 1, NodeKind::Opaque, None, &[])?);
             }
         }
         // `cold` is contextual: it marks the function item that follows (LANG-8).
@@ -457,7 +403,7 @@ impl Parser<'_> {
                 );
             }
             self.bump();
-            c.push(self.node(self.pos - 1, NodeKind::Cold, None, &[]));
+            c.push(self.node(self.pos - 1, NodeKind::Cold, None, &[])?);
         }
         if self.eat(sym::FN) {
             let name = self.name()?;
@@ -479,14 +425,14 @@ impl Parser<'_> {
                 );
                 return Err(());
             }
-            return Ok(self.node(s, NodeKind::Function, Some(name), &c));
+            return self.node(s, NodeKind::Function, Some(name), &c);
         }
         // `clone` is contextual: an item starting `clone [` or `clone (` is a clone body.
         if self.at(sym::CLONE) && matches!(self.word(1), sym::LBRACKET | sym::LPAREN) {
             let name = self.name()?;
             c.extend(self.header(Header::Function)?);
             c.push(self.block()?);
-            return Ok(self.node(s, NodeKind::CloneHook, Some(name), &c));
+            return self.node(s, NodeKind::CloneHook, Some(name), &c);
         }
         if self.eat(sym::CONST) {
             // `const _` is an assertion (LANG-20): it names nothing, so it is not `pub`.
@@ -503,7 +449,7 @@ impl Parser<'_> {
             if self.eat(sym::EQ) {
                 c.push(self.required(|p| p.expr(0))?); // Without `=`: a toolchain constant (LANG-20).
             }
-            return Ok(self.node(s, NodeKind::Constant, Some(name), &c));
+            return self.node(s, NodeKind::Constant, Some(name), &c);
         }
         let kind = if self.eat(sym::RESOURCE) {
             NodeKind::ResourceType
@@ -527,15 +473,15 @@ impl Parser<'_> {
                 self.expect(sym::COLON)?;
                 let start_to = self.pos;
                 let to_name = self.name()?;
-                let to = self.node(start_to, NodeKind::Path, Some(to_name), &[]);
+                let to = self.node(start_to, NodeKind::Path, Some(to_name), &[])?;
                 self.expect(sym::COMMA)?;
                 self.expect(sym::FROM)?;
                 self.expect(sym::COLON)?;
                 let start_from = self.pos;
                 let from_name = self.name()?;
-                let from = self.node(start_from, NodeKind::Path, Some(from_name), &[]);
+                let from = self.node(start_from, NodeKind::Path, Some(from_name), &[])?;
                 self.expect(sym::RPAREN)?;
-                c.push(self.node(start, NodeKind::CodecVia, None, &[ty, to, from]));
+                c.push(self.node(start, NodeKind::CodecVia, None, &[ty, to, from])?);
             }
         }
         if self.eat(sym::GRANT) {
@@ -549,7 +495,7 @@ impl Parser<'_> {
                 );
             }
             let t = self.bump();
-            c.push(self.node(st, NodeKind::Literal, Some(t), &[]));
+            c.push(self.node(st, NodeKind::Literal, Some(t), &[])?);
         }
         if self.eat(sym::LBRACE) {
             let st = self.pos - 1;
@@ -579,10 +525,10 @@ impl Parser<'_> {
                     },
                     Some(n),
                     &children,
-                ));
+                )?);
                 self.entry_end(sym::RBRACE)?;
             }
-            c.push(self.node(st, NodeKind::Fields, None, &fields));
+            c.push(self.node(st, NodeKind::Fields, None, &fields)?);
         } else if self.eat(sym::EQ) {
             let st = self.pos;
             if self.at(sym::PIPE) {
@@ -601,7 +547,7 @@ impl Parser<'_> {
                 while self.eat(sym::PIPE) {
                     vs.push(self.variant()?);
                 }
-                c.push(self.node(st, NodeKind::Variants, None, &vs));
+                c.push(self.node(st, NodeKind::Variants, None, &vs)?);
             } else {
                 c.push(self.ty()?);
             }
@@ -613,10 +559,10 @@ impl Parser<'_> {
             let n = self.name()?;
             self.expect(sym::RPAREN)?;
             let body = self.block()?;
-            c.push(self.node(st, NodeKind::Drop, Some(n), &[body]));
+            c.push(self.node(st, NodeKind::Drop, Some(n), &[body])?);
         }
 
-        Ok(self.node(s, kind, Some(name), &c))
+        self.node(s, kind, Some(name), &c)
     }
     /// SEM-10 uses the scalar grammar, not a constant expression.
     fn field_default(&mut self) -> Parsed<NodeId> {
@@ -631,7 +577,7 @@ impl Parser<'_> {
                 );
             }
             let value = self.primary()?;
-            return Ok(self.node(s, NodeKind::Unary, Some(op), &[value]));
+            return self.node(s, NodeKind::Unary, Some(op), &[value]);
         }
         if matches!(
             self.token(0).kind,
@@ -688,10 +634,10 @@ impl Parser<'_> {
                 }
                 labelled = Some(label.is_some());
                 let ty = p.ty()?;
-                Ok(p.node(st, NodeKind::Payload, label, &[ty]))
+                p.node(st, NodeKind::Payload, label, &[ty])
             })?;
         }
-        Ok(self.node(
+        self.node(
             s,
             if removed {
                 NodeKind::RemovedVariant
@@ -700,7 +646,7 @@ impl Parser<'_> {
             },
             Some(n),
             &c,
-        ))
+        )
     }
     fn generics(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
@@ -713,7 +659,7 @@ impl Parser<'_> {
             if p.eat(sym::COLON) {
                 c.push(p.bounds(false)?);
             }
-            Ok(p.node(
+            p.node(
                 st,
                 if region {
                     NodeKind::RegionGeneric
@@ -722,12 +668,12 @@ impl Parser<'_> {
                 },
                 Some(n),
                 &c,
-            ))
+            )
         })?;
         if c.is_empty() {
             return self.fail("LANG-5", "generic list is nonempty");
         }
-        Ok(self.node(s, NodeKind::Generics, None, &c))
+        self.node(s, NodeKind::Generics, None, &c)
     }
     fn bounds(&mut self, callable: bool) -> Parsed<NodeId> {
         let s = self.pos;
@@ -735,20 +681,24 @@ impl Parser<'_> {
         loop {
             let st = self.pos;
             if !BOUNDS.contains(&self.word(0)) && !(callable && self.at(sym::VIEW)) {
+                if BORROWED {
+                    return self.data_refusal(self.current.span);
+                }
                 let required = BOUNDS
                     .iter()
-                    .map(|&b| self.symbols.text(b))
+                    .map(|&b| self.symbols.unwrap().text(b))
                     .collect::<Vec<_>>()
                     .join(", ");
                 return self.fail_expected("LANG-5", &required, "unknown bound");
             }
             let n = self.bump();
-            c.push(self.node(st, NodeKind::BoundName, Some(n), &[]));
+            self.reserve_children(&mut c, 1)?;
+            c.push(self.node(st, NodeKind::BoundName, Some(n), &[])?);
             if !self.continuing() || !self.eat(sym::PLUS) {
                 break;
             }
         }
-        Ok(self.node(s, NodeKind::Bounds, None, &c))
+        self.node(s, NodeKind::Bounds, None, &c)
     }
     fn header(&mut self, kind: Header) -> Parsed<Nodes> {
         let mut c: Nodes = smallvec![];
@@ -758,14 +708,14 @@ impl Parser<'_> {
         let s = self.pos;
         self.expect(sym::LPAREN)?;
         let ps = self.list(sym::RPAREN, |p| p.parameter(kind))?;
-        c.push(self.node(s, NodeKind::Parameters, None, &ps));
+        c.push(self.node(s, NodeKind::Parameters, None, &ps)?);
         if self.eat(sym::ARROW) {
             let st = self.pos - 1;
             let t = self.ty()?;
-            c.push(self.node(st, NodeKind::ResultType, None, &[t]));
+            c.push(self.node(st, NodeKind::ResultType, None, &[t])?);
         }
         if self.eat(sym::WAITS) {
-            c.push(self.node(self.pos - 1, NodeKind::Waits, None, &[]));
+            c.push(self.node(self.pos - 1, NodeKind::Waits, None, &[])?);
         }
         if kind == Header::Function && self.eat(sym::WHERE) {
             let st = self.pos - 1;
@@ -778,7 +728,7 @@ impl Parser<'_> {
                     break;
                 }
             }
-            c.push(self.node(st, NodeKind::Outlives, None, &cs));
+            c.push(self.node(st, NodeKind::Outlives, None, &cs)?);
         }
         Ok(c)
     }
@@ -807,7 +757,7 @@ impl Parser<'_> {
         {
             let n = self.name()?;
             if header == Header::Closure && !self.at(sym::COLON) {
-                return Ok(self.node(s, k, Some(n), &[]));
+                return self.node(s, k, Some(n), &[]);
             }
             self.expect(sym::COLON)?;
             Some(n)
@@ -815,7 +765,7 @@ impl Parser<'_> {
             None
         };
         let t = self.ty()?;
-        Ok(self.node(s, k, n, &[t]))
+        self.node(s, k, n, &[t])
     }
     fn ty(&mut self) -> Parsed<NodeId> {
         self.nested(|p| p.ty_inner())
@@ -852,7 +802,7 @@ impl Parser<'_> {
                 },
                 None,
                 &c,
-            )
+            )?
         } else if self.eat(sym::LPAREN) {
             let c = self.list(sym::RPAREN, |p| p.ty())?;
             let k = if c.is_empty() {
@@ -862,7 +812,7 @@ impl Parser<'_> {
             } else {
                 NodeKind::TupleType
             };
-            self.node(s, k, None, &c)
+            self.node(s, k, None, &c)?
         } else {
             let path = self.path(NodeKind::TypePath)?;
             if self.eat(sym::LBRACKET) {
@@ -871,11 +821,11 @@ impl Parser<'_> {
                     if p.eat(sym::IN) {
                         let st = p.pos - 1;
                         let path = p.path(NodeKind::Path)?;
-                        Ok(p.node(st, NodeKind::Anchor, None, &[path]))
+                        p.node(st, NodeKind::Anchor, None, &[path])
                     } else if p.token(0).kind == TokenKind::Integer {
                         let st = p.pos;
                         let token = p.bump();
-                        Ok(p.node(st, NodeKind::Literal, Some(token), &[]))
+                        p.node(st, NodeKind::Literal, Some(token), &[])
                     } else {
                         p.ty()
                     }
@@ -883,15 +833,16 @@ impl Parser<'_> {
                 if args.is_empty() {
                     return self.fail("LANG-5", "type arguments are nonempty");
                 }
+                self.reserve_children(&mut c, args.len())?;
                 c.extend(args);
-                self.node(s, NodeKind::TypeArguments, None, &c)
+                self.node(s, NodeKind::TypeArguments, None, &c)?
             } else {
                 path
             }
         };
         if self.eat(sym::IN) {
             let b = self.path(NodeKind::Path)?;
-            n = self.node(s, NodeKind::Anchor, None, &[n, b]);
+            n = self.node(s, NodeKind::Anchor, None, &[n, b])?;
         }
         Ok(n)
     }
@@ -918,7 +869,7 @@ impl Parser<'_> {
             self.bump();
             self.name()?;
         }
-        Ok(self.node(s, kind, Some(n), &[]))
+        self.node(s, kind, Some(n), &[])
     }
     fn block(&mut self) -> Parsed<NodeId> {
         self.nested(|p| p.block_inner())
@@ -938,18 +889,20 @@ impl Parser<'_> {
                     continue;
                 }
                 let st = self.pos;
+                self.reserve_children(&mut c, 1)?;
                 match self.statement() {
                     Ok(n) => c.push(n),
+                    Err(()) if BORROWED => return Err(()),
                     Err(()) => {
                         self.recover(st, false);
-                        c.push(self.node(st, NodeKind::Error, None, &[]));
+                        c.push(self.node(st, NodeKind::Error, None, &[])?);
                     }
                 }
                 if self.resource.is_some() {
                     return Err(());
                 }
             }
-            Ok(self.node(s, NodeKind::Block, None, &c))
+            self.node(s, NodeKind::Block, None, &c)
         })();
         self.whitespace = old;
         result
@@ -969,7 +922,7 @@ impl Parser<'_> {
                 // existing type lowering and anchor walks remain unchanged.
                 while self.tree.node(ty).kind == NodeKind::Anchor && self.eat(sym::COMMA) {
                     let root = self.path(NodeKind::Path)?;
-                    ty = self.node(s, NodeKind::Anchor, None, &[ty, root]);
+                    ty = self.node(s, NodeKind::Anchor, None, &[ty, root])?;
                 }
                 c.push(ty);
             }
@@ -988,6 +941,9 @@ impl Parser<'_> {
                         NodeKind::BindPattern | NodeKind::TakePattern
                     ))
             {
+                if BORROWED {
+                    return self.data_refusal(self.tokens[self.significant[s]].span);
+                }
                 self.diagnostics.push(Diagnostic::error(
                     "LANG-5",
                     self.tokens[self.significant[s]].span,
@@ -996,7 +952,7 @@ impl Parser<'_> {
                 return Err(());
             }
             self.end(false)?;
-            return Ok(self.node(
+            return self.node(
                 s,
                 if mutable {
                     NodeKind::LetMut
@@ -1005,7 +961,7 @@ impl Parser<'_> {
                 },
                 None,
                 &c,
-            ));
+            );
         }
         if line_continuation(self.word(0)) || ASSIGN.contains(&self.word(0)) {
             return self.fail("LANG-4", "a continuation token cannot start a statement");
@@ -1018,10 +974,10 @@ impl Parser<'_> {
             let op = self.bump();
             let v = self.required(|p| p.expr(0))?;
             self.end(false)?;
-            return Ok(self.node(s, NodeKind::Assign, Some(op), &[e, v]));
+            return self.node(s, NodeKind::Assign, Some(op), &[e, v]);
         }
         let discard = self.end(false)?;
-        Ok(self.node(
+        self.node(
             s,
             if discard {
                 NodeKind::Discard
@@ -1030,7 +986,7 @@ impl Parser<'_> {
             },
             None,
             &[e],
-        ))
+        )
     }
     fn expr(&mut self, minimum: u8) -> Parsed<NodeId> {
         self.nested(|p| p.expr_inner(minimum))
@@ -1074,19 +1030,22 @@ impl Parser<'_> {
                     self.bump();
                     let mut c: Nodes = smallvec![left];
                     self.list_into(sym::RPAREN, &mut c, Self::call_argument)?;
-                    left = self.node(s, NodeKind::Call, None, &c);
+                    left = self.node(s, NodeKind::Call, None, &c)?;
                 }
                 Continuation::Index if minimum <= 12 => {
                     self.bump();
                     let i = self.required(|p| p.expr(0))?;
                     self.expect(sym::RBRACKET)?;
-                    left = self.node(s, NodeKind::Index, None, &[left, i]);
+                    left = self.node(s, NodeKind::Index, None, &[left, i])?;
                 }
                 Continuation::Projection if minimum <= 12 => {
                     self.bump();
                     if self.tree.node(left).kind == NodeKind::Literal && self.eof() {
                         let start = self.base + self.tree.node(left).origin.span.start;
                         let end = self.tokens[self.significant[self.pos - 1]].span.end;
+                        if BORROWED {
+                            return self.data_refusal(Span { start, end });
+                        }
                         self.diagnostics.push(Diagnostic::error(
                             "LANG-3",
                             Span { start, end },
@@ -1104,16 +1063,16 @@ impl Parser<'_> {
                     } else {
                         self.name()?
                     };
-                    left = self.node(s, NodeKind::Projection, Some(n), &[left]);
+                    left = self.node(s, NodeKind::Projection, Some(n), &[left])?;
                 }
                 Continuation::Try if minimum <= 12 => {
                     self.bump();
-                    left = self.node(s, NodeKind::Try, None, &[left]);
+                    left = self.node(s, NodeKind::Try, None, &[left])?;
                 }
                 Continuation::TryMap if minimum <= 12 => {
                     let op = self.bump();
                     let mapper = self.required(|p| p.mapper())?;
-                    left = self.node(s, NodeKind::Try, Some(op), &[left, mapper]);
+                    left = self.node(s, NodeKind::Try, Some(op), &[left, mapper])?;
                     mapped = true;
                 }
                 Continuation::Binary(prec, na) if prec >= minimum => {
@@ -1122,7 +1081,7 @@ impl Parser<'_> {
                     }
                     let op = self.bump();
                     let right = self.required(|p| p.expr(prec + 1))?;
-                    left = self.node(s, NodeKind::Binary, Some(op), &[left, right]);
+                    left = self.node(s, NodeKind::Binary, Some(op), &[left, right])?;
                     if na {
                         nonassoc = Some(prec);
                     }
@@ -1139,7 +1098,7 @@ impl Parser<'_> {
             let pattern = self.pattern()?;
             self.expect(sym::PIPE)?;
             let value = self.required(|p| p.expr(11))?;
-            return Ok(self.node(s, NodeKind::Arm, None, &[pattern, value]));
+            return self.node(s, NodeKind::Arm, None, &[pattern, value]);
         }
         if self.token(0).kind == TokenKind::Ident {
             return self.path_inner(NodeKind::Path, true);
@@ -1164,7 +1123,7 @@ impl Parser<'_> {
                 | TokenKind::KwFalse
         ) {
             let t = self.bump();
-            return Ok(self.node(s, NodeKind::Literal, Some(t), &[]));
+            return self.node(s, NodeKind::Literal, Some(t), &[]);
         }
         if self.token(0).kind == TokenKind::Ident {
             return self.path_inner(NodeKind::Path, true);
@@ -1183,7 +1142,7 @@ impl Parser<'_> {
         if PREFIX.contains(&self.word(0)) {
             let op = self.bump();
             let e = self.required(|p| p.expr(11))?;
-            return Ok(self.node(s, NodeKind::Unary, Some(op), &[e]));
+            return self.node(s, NodeKind::Unary, Some(op), &[e]);
         }
         if self.token(0).kind == TokenKind::Label {
             let t = self.bump();
@@ -1199,7 +1158,7 @@ impl Parser<'_> {
             ) {
                 return self.fail("LANG-5", "label needs block or loop");
             }
-            return Ok(self.node(s, NodeKind::Labelled, Some(t), &[e]));
+            return self.node(s, NodeKind::Labelled, Some(t), &[e]);
         }
         if self.eat(sym::RETURN) || self.eat(sym::BREAK) || self.eat(sym::CONTINUE) {
             let k = match self.tokens[self.significant[s]].symbol {
@@ -1231,7 +1190,7 @@ impl Parser<'_> {
             {
                 c.push(self.expr(0)?);
             }
-            return Ok(self.node(s, k, label, &c));
+            return self.node(s, k, label, &c);
         }
         if self.at(sym::LBRACE) {
             return self.block();
@@ -1241,7 +1200,7 @@ impl Parser<'_> {
             let result = (|| {
                 let mut children: Nodes = smallvec![];
                 if self.eat(sym::RBRACKET) {
-                    return Ok(self.node(s, NodeKind::Array, None, &children));
+                    return self.node(s, NodeKind::Array, None, &children);
                 }
                 children.push(self.expr(0)?);
                 if self.eat(sym::SEMICOLON) {
@@ -1254,18 +1213,19 @@ impl Parser<'_> {
                     }
                     let st = self.pos;
                     let token = self.bump();
-                    children.push(self.node(st, NodeKind::Literal, Some(token), &[]));
+                    children.push(self.node(st, NodeKind::Literal, Some(token), &[])?);
                     self.expect(sym::RBRACKET)?;
-                    return Ok(self.node(s, NodeKind::RepeatArray, None, &children));
+                    return self.node(s, NodeKind::RepeatArray, None, &children);
                 }
                 while !self.eat(sym::RBRACKET) {
                     self.expect(sym::COMMA)?;
                     if self.eat(sym::RBRACKET) {
                         break;
                     }
+                    self.reserve_children(&mut children, 1)?;
                     children.push(self.expr(0)?);
                 }
-                Ok(self.node(s, NodeKind::Array, None, &children))
+                self.node(s, NodeKind::Array, None, &children)
             })();
             self.whitespace -= 1;
             return result;
@@ -1287,7 +1247,7 @@ impl Parser<'_> {
                     self.block()?
                 });
             }
-            return Ok(self.node(s, NodeKind::If, None, &c));
+            return self.node(s, NodeKind::If, None, &c);
         }
         if self.eat(sym::MATCH) {
             let subject = self.expr(0)?;
@@ -1305,19 +1265,20 @@ impl Parser<'_> {
                 }
                 self.expect(sym::FATARROW)?;
                 a.push(self.required(|p| p.expr(0))?);
-                c.push(self.node(st, NodeKind::Arm, None, &a));
+                self.reserve_children(&mut c, 1)?;
+                c.push(self.node(st, NodeKind::Arm, None, &a)?);
                 self.entry_end(sym::RBRACE)?;
             }
-            return Ok(self.node(s, NodeKind::Match, None, &c));
+            return self.node(s, NodeKind::Match, None, &c);
         }
         if self.eat(sym::LOOP) {
             let b = self.block()?;
-            return Ok(self.node(s, NodeKind::Loop, None, &[b]));
+            return self.node(s, NodeKind::Loop, None, &[b]);
         }
         if self.eat(sym::WHILE) {
             let c = self.condition()?;
             let b = self.block()?;
-            return Ok(self.node(s, NodeKind::While, None, &[c, b]));
+            return self.node(s, NodeKind::While, None, &[c, b]);
         }
         if self.eat(sym::FOR) {
             let take = self.eat(sym::TAKE);
@@ -1325,7 +1286,7 @@ impl Parser<'_> {
             self.expect(sym::IN)?;
             let value = self.expr(0)?;
             let body = self.block()?;
-            return Ok(self.node(
+            return self.node(
                 s,
                 if take {
                     NodeKind::ForTake
@@ -1334,12 +1295,12 @@ impl Parser<'_> {
                 },
                 None,
                 &[pat, value, body],
-            ));
+            );
         }
         if self.eat(sym::REGION) {
             let n = self.name()?;
             let b = self.block()?;
-            return Ok(self.node(s, NodeKind::Region, Some(n), &[b]));
+            return self.node(s, NodeKind::Region, Some(n), &[b]);
         }
         if self.eat(sym::BOUND) {
             let unit = if self.at(sym::STEPS) {
@@ -1350,7 +1311,7 @@ impl Parser<'_> {
             };
             let value = self.expr(0)?;
             let body = self.block()?;
-            return Ok(self.node(s, NodeKind::Bound, unit, &[value, body]));
+            return self.node(s, NodeKind::Bound, unit, &[value, body]);
         }
         if self.at(sym::FN) && self.word(1) != sym::LPAREN {
             return self.fail("LANG-5", "expected expression before next function");
@@ -1360,7 +1321,7 @@ impl Parser<'_> {
             self.expect(sym::FN)?;
             let mut c = self.header(Header::Closure)?;
             c.push(self.block()?);
-            return Ok(self.node(
+            return self.node(
                 s,
                 if scoped {
                     NodeKind::ScopedClosure
@@ -1369,28 +1330,28 @@ impl Parser<'_> {
                 },
                 None,
                 &c,
-            ));
+            );
         }
         self.path(NodeKind::Path)
     }
     fn parenthesized(&mut self, start: usize) -> Parsed<NodeId> {
         if self.eat(sym::RPAREN) {
-            return Ok(self.node(start, NodeKind::Unit, None, &[]));
+            return self.node(start, NodeKind::Unit, None, &[]);
         }
         let value = self.expr(0)?;
         if self.at(sym::COLON) {
             let colon = self.bump();
             let ty = self.ty()?;
             self.expect(sym::RPAREN)?;
-            return Ok(self.node(start, NodeKind::Ascription, Some(colon), &[value, ty]));
+            return self.node(start, NodeKind::Ascription, Some(colon), &[value, ty]);
         }
         if self.eat(sym::RPAREN) {
-            return Ok(self.node(start, NodeKind::Group, None, &[value]));
+            return self.node(start, NodeKind::Group, None, &[value]);
         }
         self.expect(sym::COMMA)?;
         let mut values = smallvec![value];
         self.list_into(sym::RPAREN, &mut values, |p| p.expr(0))?;
-        Ok(self.node(start, NodeKind::Tuple, None, &values))
+        self.node(start, NodeKind::Tuple, None, &values)
     }
     fn condition(&mut self) -> Parsed<NodeId> {
         if self.eat(sym::LET) {
@@ -1398,7 +1359,7 @@ impl Parser<'_> {
             let p = self.pattern()?;
             self.expect(sym::EQ)?;
             let e = self.expr(0)?;
-            Ok(self.node(s, NodeKind::ConditionLet, None, &[p, e]))
+            self.node(s, NodeKind::ConditionLet, None, &[p, e])
         } else {
             let n = self.expr(0)?;
             self.subject(n)?;
@@ -1411,19 +1372,19 @@ impl Parser<'_> {
     fn pattern_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
         if self.eat(sym::UNDERSCORE) {
-            return Ok(self.node(s, NodeKind::Wildcard, None, &[]));
+            return self.node(s, NodeKind::Wildcard, None, &[]);
         }
         if self.eat(sym::TAKE) {
             let n = self.name()?;
-            return Ok(self.node(s, NodeKind::TakePattern, Some(n), &[]));
+            return self.node(s, NodeKind::TakePattern, Some(n), &[]);
         }
         if self.eat(sym::MUT) {
             let n = self.name()?;
-            return Ok(self.node(s, NodeKind::MutPattern, Some(n), &[]));
+            return self.node(s, NodeKind::MutPattern, Some(n), &[]);
         }
         if self.eat(sym::LPAREN) {
             let c = self.list(sym::RPAREN, |p| p.pattern())?;
-            return Ok(self.node(
+            return self.node(
                 s,
                 if c.is_empty() {
                     NodeKind::UnitPattern
@@ -1432,7 +1393,7 @@ impl Parser<'_> {
                 },
                 None,
                 &c,
-            ));
+            );
         }
         if self.eat(sym::MINUS)
             || matches!(
@@ -1448,10 +1409,10 @@ impl Parser<'_> {
             )
         {
             let t = self.bump();
-            let left = self.node(s, NodeKind::LiteralPattern, Some(t), &[]);
+            let left = self.node(s, NodeKind::LiteralPattern, Some(t), &[])?;
             if self.continuing() && self.eat(sym::DOTDOTEQ) {
                 let right = self.pattern()?;
-                return Ok(self.node(s, NodeKind::RangePattern, None, &[left, right]));
+                return self.node(s, NodeKind::RangePattern, None, &[left, right]);
             }
             return Ok(left);
         }
@@ -1460,14 +1421,14 @@ impl Parser<'_> {
         if self.continuing() && self.eat(sym::LPAREN) {
             let mut rest = false;
             let mut c: Nodes = smallvec![p];
-            c.extend(self.list(sym::RPAREN, |p| {
+            let payload = self.list(sym::RPAREN, |p| {
                 let st = p.pos;
                 if rest {
                     return p.fail("LANG-5", "rest pattern must be last");
                 }
                 if p.eat(sym::DOTDOT) {
                     rest = true;
-                    return Ok(p.node(st, NodeKind::RestPattern, None, &[]));
+                    return p.node(st, NodeKind::RestPattern, None, &[]);
                 }
                 let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON {
                     let n = p.bump();
@@ -1477,15 +1438,17 @@ impl Parser<'_> {
                     None
                 };
                 let pat = p.pattern()?;
-                Ok(p.node(st, NodeKind::PatternField, label, &[pat]))
-            })?);
-            Ok(self.node(s, NodeKind::ConstructorPattern, None, &c))
+                p.node(st, NodeKind::PatternField, label, &[pat])
+            })?;
+            self.reserve_children(&mut c, payload.len())?;
+            c.extend(payload);
+            self.node(s, NodeKind::ConstructorPattern, None, &c)
         } else {
             let path = &self.tree.node(p).origin.tokens;
             if path.end - path.start > 1 {
-                Ok(self.node(s, NodeKind::ConstructorPattern, None, &[p]))
+                self.node(s, NodeKind::ConstructorPattern, None, &[p])
             } else {
-                Ok(self.node(s, NodeKind::BindPattern, name, &[]))
+                self.node(s, NodeKind::BindPattern, name, &[])
             }
         }
     }

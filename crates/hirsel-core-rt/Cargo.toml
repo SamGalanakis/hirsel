@@ -28,6 +28,7 @@ mimalloc = ["dep:libmimalloc-sys"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(hirsel_runtime_size)"] }
 
 [dependencies]
+hirsel-data = { path = "../hirsel-data" }
 foldhash = { version = "0.2.0", default-features = false }
 hirsel-core-net = { path = "../hirsel-core-net" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }

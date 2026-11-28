@@ -126,6 +126,7 @@ impl Node {
             | RtOp::GluePush
             | RtOp::GluePop
             | RtOp::GlueCut
+            | RtOp::DataDecode { .. }
             | RtOp::HeldNew { .. }
             | RtOp::HeldTake { .. }
             | RtOp::ResourceOrigin { .. }

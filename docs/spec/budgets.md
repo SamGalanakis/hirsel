@@ -210,6 +210,16 @@ constant, alignment or chunk size of an engine enters a charge. A later policy h
 name; a package states the policy it was written for
 ([PROG-1](programs.md#prog-1-packages)).
 
+A call to `std.data.decode` temporarily admits 16 bytes per byte of its compiler
+witness before opening it. If the input fits `input_bytes`, parsing admits 128
+bytes per input byte plus 128. Each record visited admits another 128 bytes per
+declared field. Construction admits each staged block's byte length plus a
+96-byte journal entry, including the inline result. These reservations stay
+with the current payer until the call returns or its task is torn down. Owned
+strings, lists and maps admit their normal collection charges before publication.
+On failure the operation refunds staged allocations and leaves the result slot
+uninitialized. A document error is an initialized `Error(DataError)` result.
+
 ### MEM-25: The bound scope
 
 `bound bytes n { body }` sets a byte limit for its body and evaluates to
@@ -428,6 +438,8 @@ is core's plain record `{ steps: u64 }`.
   | structural `==` and ordering (derived) | the value's bytes plus one, and for a list, `min` of the lengths times (element bytes plus one); a zero-sized element counts one | 32 | 0 |
   | `list.sum`, the elements `deque.remove` shifts | elements | 32 | 0 |
   | `columns.fill` | elements times (row bytes plus one) | 64 | 0 |
+  | `std.data.decode`, compiler witness | witness bytes | 32 | 1 |
+  | `std.data.decode`, source | input bytes if within `input_bytes`, otherwise zero | 1 | 0 |
   | `int.parse` | input bytes | 16 | 0 |
   | `string.from_utf8`, its ASCII prefix | bytes | 256 | 0 |
   | `string.from_utf8`, past the prefix | bytes | 8 | 0 |

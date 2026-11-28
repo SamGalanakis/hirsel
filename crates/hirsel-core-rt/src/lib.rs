@@ -29,6 +29,7 @@ mod coverage;
 mod crc;
 mod crc32c;
 pub mod cred;
+mod data_decode;
 mod destination;
 #[cfg(not(feature = "standalone"))]
 pub mod embed;
@@ -195,6 +196,7 @@ pub struct Context {
     pub(crate) root_refusal: *const causes::Cause,
     /// FAIL-17's glue worklist ([`glue`]).
     pub(crate) glue: Vec<[u64; 4]>,
+    decode: Option<data_decode::Pending>,
 }
 
 const _: () = {
@@ -306,6 +308,7 @@ impl Context {
             root_limit,
             root_refusal: std::ptr::null(),
             glue: Vec::new(),
+            decode: None,
         }
     }
 
@@ -392,6 +395,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        data_decode::discard(self);
         while self.bound_depth != 0 {
             self.limit_exit();
         }

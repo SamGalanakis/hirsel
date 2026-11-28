@@ -119,3 +119,28 @@ impl std::ops::IndexMut<usize> for Blocks {
 #[cfg(test)]
 #[path = "block_table_tests.rs"]
 mod block_table_tests;
+
+impl<'m, H: super::Host<'m>> super::Machine<'m, H> {
+    pub(super) fn block_with_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        limit: Option<Limit>,
+        charge: u64,
+        res: Option<Res>,
+    ) -> u64 {
+        let id = self.mem.insert(Blk {
+            bytes,
+            align: 8,
+            live: true,
+            limit,
+            charge,
+            lent_size: None,
+            res,
+            counted: None,
+            class: None,
+            fixed: false,
+            marks: BTreeMap::new(),
+        });
+        super::ptr(id, 0)
+    }
+}

@@ -76,6 +76,15 @@ fn quoted_scalar(body: &str, hex: bool) -> Option<char> {
 /// byte strings), and in strings `\u{..}` as UTF-8; a raw body is its source bytes. The
 /// lexer has refused every malformed spelling; None marks one anyway.
 pub fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(spelling.len()).ok()?;
+    quoted_into(spelling, bytes, &mut out)?;
+    Some(out)
+}
+
+/// Decode into storage reserved by the caller for at least spelling.len()
+/// additional bytes. The decoded body never exceeds the original spelling.
+pub fn quoted_into(spelling: &str, bytes: bool, out: &mut Vec<u8>) -> Option<()> {
     let spelling = if bytes {
         spelling.strip_prefix('b')?
     } else {
@@ -85,10 +94,10 @@ pub fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
         let hashes = raw.len() - raw.trim_start_matches('#').len();
         let body = raw[hashes..].strip_prefix('"')?;
         let body = body.strip_suffix(&raw[..hashes])?.strip_suffix('"')?;
-        return Some(body.as_bytes().to_vec());
+        out.extend_from_slice(body.as_bytes());
+        return Some(());
     }
     let body = spelling.strip_prefix('"')?.strip_suffix('"')?.as_bytes();
-    let mut out = Vec::with_capacity(body.len());
     let mut i = 0;
     while i < body.len() {
         if body[i] != b'\\' {
@@ -120,5 +129,5 @@ pub fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
         out.push(b);
         i += 2;
     }
-    Some(out)
+    Some(())
 }

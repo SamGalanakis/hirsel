@@ -393,8 +393,10 @@ impl Symbols {
     }
 }
 #[inline(always)]
-fn fixed_symbol(text: &str) -> Option<Symbol> {
+pub(crate) fn fixed_symbol(text: &str) -> Option<Symbol> {
     Some(match text {
+        "_" => sym::UNDERSCORE,
+        "steps" => sym::STEPS,
         "fn" => sym::FN,
         "let" => sym::LET,
         "mut" => sym::MUT,

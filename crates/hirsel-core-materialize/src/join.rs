@@ -111,6 +111,15 @@ impl Remap {
                         *x = self.types[x.index()];
                         *r = self.types[r.index()];
                     }
+                    RtOp::DataDecode {
+                        witness,
+                        bytes,
+                        output,
+                    } => {
+                        *witness = self.types[witness.index()];
+                        *bytes = self.types[bytes.index()];
+                        *output = self.types[output.index()];
+                    }
                     RtOp::Join { r } => *r = self.types[r.index()],
                     RtOp::LaunchTarget { view } => *view = self.types[view.index()],
                     RtOp::ChannelNew { item }

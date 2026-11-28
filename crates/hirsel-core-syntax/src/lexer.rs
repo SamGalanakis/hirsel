@@ -24,15 +24,75 @@ pub(crate) fn lex_derived(text: &str, symbols: &mut Symbols, derived: usize) -> 
     }
     scanner.finish()
 }
-struct Scanner<'a> {
+trait Names {
+    fn intern(&mut self, text: &str) -> Symbol;
+    fn keyword(&self, text: &str) -> bool;
+}
+impl Names for &mut Symbols {
+    fn intern(&mut self, text: &str) -> Symbol {
+        Symbols::intern(self, text)
+    }
+    fn keyword(&self, text: &str) -> bool {
+        self.find(text).is_some_and(keyword_symbol)
+    }
+}
+struct DataNames;
+impl Names for DataNames {
+    fn intern(&mut self, text: &str) -> Symbol {
+        crate::symbols::fixed_symbol(text).unwrap_or(sym::NONE)
+    }
+    fn keyword(&self, text: &str) -> bool {
+        crate::symbols::fixed_symbol(text).is_some_and(keyword_symbol)
+    }
+}
+
+struct Scanner<'a, N, const DATA: bool> {
     text: &'a str,
     bytes: &'a [u8],
     pos: usize,
     output: LexOutput,
-    symbols: &'a mut Symbols,
+    symbols: N,
+    first_error: Option<Span>,
     newline: bool,
     derived: usize,
 }
+/// Scan borrowed data text without interning its names, retaining canonical
+/// token copies or constructing diagnostic messages. At most one token and one
+/// significant index are added by each call to `next`.
+pub(crate) fn lex_data(
+    text: &str,
+) -> Result<Result<LexOutput, Span>, std::collections::TryReserveError> {
+    let mut scanner = Scanner::<_, true> {
+        text,
+        bytes: text.as_bytes(),
+        pos: 0,
+        output: LexOutput::default(),
+        symbols: DataNames,
+        first_error: None,
+        newline: false,
+        derived: usize::MAX,
+    };
+    loop {
+        scanner.output.tokens.try_reserve(1)?;
+        scanner.output.significant.try_reserve(1)?;
+        if scanner.pos == text.len() {
+            let span = scanner.span(scanner.pos, scanner.pos);
+            scanner.output.significant.push(scanner.output.tokens.len());
+            scanner.output.tokens.push(Token {
+                kind: TokenKind::Eof,
+                span,
+                symbol: sym::NONE,
+                line_before: scanner.newline,
+            });
+            return Ok(Ok(scanner.output));
+        }
+        scanner.next();
+        if let Some(span) = scanner.first_error {
+            return Ok(Err(span));
+        }
+    }
+}
+
 const BYTE_OTHER: u8 = 0;
 const BYTE_IDENT: u8 = 1;
 const BYTE_DIGIT: u8 = 2;
@@ -62,7 +122,7 @@ const fn byte_classes() -> [u8; 256] {
     }
     classes
 }
-impl<'a> Scanner<'a> {
+impl<'a> Scanner<'a, &'a mut Symbols, false> {
     fn new(text: &'a str, symbols: &'a mut Symbols, derived: usize) -> Self {
         let bytes = text.as_bytes();
         Self {
@@ -77,48 +137,9 @@ impl<'a> Scanner<'a> {
                 canonical_offsets: vec![0],
             },
             symbols,
+            first_error: None,
             newline: false,
             derived,
-        }
-    }
-    fn span(&self, start: usize, end: usize) -> Span {
-        Span {
-            start: start as u32,
-            end: end as u32,
-        }
-    }
-    fn error(&mut self, rule: &str, start: usize, end: usize, message: &str) {
-        self.output
-            .diagnostics
-            .push(Diagnostic::error(rule, self.span(start, end), message));
-    }
-
-    fn emit(&mut self, start: usize, kind: TokenKind, symbol: Symbol) {
-        if !kind.is_trivia() {
-            self.output.significant.push(self.output.tokens.len());
-        }
-        self.output.tokens.push(Token {
-            kind,
-            span: self.span(start, self.pos),
-            symbol,
-            line_before: self.newline,
-        });
-        if !kind.is_trivia() && !matches!(kind, TokenKind::Eof) {
-            let length = (self.pos - start + 1) as u64;
-            self.output
-                .canonical
-                .extend_from_slice(&length.to_le_bytes());
-            self.output.canonical.push(kind as u8);
-            self.output
-                .canonical
-                .extend_from_slice(&self.bytes[start..self.pos]);
-        }
-        self.output
-            .canonical_offsets
-            .push(self.output.canonical.len() as u32);
-        // No token spans a line feed (LANG-1), so only whitespace sets the flag.
-        if !kind.is_trivia() {
-            self.newline = false;
         }
     }
     fn finish(mut self) -> LexOutput {
@@ -133,6 +154,55 @@ impl<'a> Scanner<'a> {
             .canonical_offsets
             .push(self.output.canonical.len() as u32);
         self.output
+    }
+}
+impl<N: Names, const DATA: bool> Scanner<'_, N, DATA> {
+    fn span(&self, start: usize, end: usize) -> Span {
+        Span {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+    fn error(&mut self, rule: &str, start: usize, end: usize, message: &str) {
+        let span = self.span(start, end);
+        if DATA {
+            self.first_error.get_or_insert(span);
+        } else {
+            self.output
+                .diagnostics
+                .push(Diagnostic::error(rule, span, message));
+        }
+    }
+
+    fn emit(&mut self, start: usize, kind: TokenKind, symbol: Symbol) {
+        if !kind.is_trivia() {
+            self.output.significant.push(self.output.tokens.len());
+        }
+        self.output.tokens.push(Token {
+            kind,
+            span: self.span(start, self.pos),
+            symbol,
+            line_before: self.newline,
+        });
+        if !DATA && !kind.is_trivia() && !matches!(kind, TokenKind::Eof) {
+            let length = (self.pos - start + 1) as u64;
+            self.output
+                .canonical
+                .extend_from_slice(&length.to_le_bytes());
+            self.output.canonical.push(kind as u8);
+            self.output
+                .canonical
+                .extend_from_slice(&self.bytes[start..self.pos]);
+        }
+        if !DATA {
+            self.output
+                .canonical_offsets
+                .push(self.output.canonical.len() as u32);
+        }
+        // No token spans a line feed (LANG-1), so only whitespace sets the flag.
+        if !kind.is_trivia() {
+            self.newline = false;
+        }
     }
     fn starts(&self, spelling: &[u8]) -> bool {
         self.bytes[self.pos..].starts_with(spelling)
@@ -198,7 +268,7 @@ impl<'a> Scanner<'a> {
                 }
             }
         };
-        let kind = if self.output.diagnostics.len() > errors {
+        let kind = if self.first_error.is_some() || self.output.diagnostics.len() > errors {
             TokenKind::Invalid
         } else {
             kind
@@ -221,7 +291,7 @@ impl<'a> Scanner<'a> {
         let start = self.pos;
         self.pos = self.label_end().expect("checked label prefix");
         let name = &self.text[start + 1..self.pos];
-        if name == "_" || self.symbols.find(name).is_some_and(crate::keyword_symbol) {
+        if name == "_" || self.symbols.keyword(name) {
             self.error(
                 "LANG-2",
                 start,

@@ -86,6 +86,7 @@ impl Function<'_, '_, '_> {
             RtOp::Host(_)
             | RtOp::Returnable(_)
             | RtOp::CheckCancel
+            | RtOp::DataDecode { .. }
             | RtOp::WorkSteps
             | RtOp::StepEnter
             | RtOp::Join { .. }
@@ -124,6 +125,19 @@ impl Function<'_, '_, '_> {
                     &[self.context, args[0], site],
                 )?[0];
                 1
+            }
+            RtOp::DataDecode { .. } => {
+                let mut operands = [self.context; 12];
+                operands[1..11].copy_from_slice(&args[..10]);
+                operands[11] = site;
+                let status = self.c_call(
+                    "hirsel_core_data_decode",
+                    &[P, P, P, U, U, U, U, U, U, U, P, U],
+                    &[K],
+                    &operands,
+                )?[0];
+                self.call_failure(status, call.fail)?;
+                0
             }
             RtOp::WorkSteps => {
                 let status = self.c_call(

@@ -200,7 +200,7 @@ impl CheckProduct {
         }
         let target = Target::from_triple(&options.target)
             .ok_or_else(|| build_error(format_args!("no target {}", options.target)))?;
-        let mut seen_instances: BTreeMap<Identity, Vec<u8>> = BTreeMap::new();
+        let mut seen_instances: BTreeMap<Identity, Arc<[u8]>> = BTreeMap::new();
         let mut all_revisions: BTreeMap<Identity, ContentHash> = BTreeMap::new();
         let mut all_items: BTreeSet<DefPath> = BTreeSet::new();
         let mut address_parts: Vec<ContentHash> = Vec::with_capacity(exports.len());
@@ -234,6 +234,7 @@ impl CheckProduct {
                 }
             }
             let (objects, _) = self.emit_reached(&decl.path, &reached, options)?;
+            drop(reached);
             let mut counters = crate::reach::ReachCounters::default();
             let refs: Vec<_> = objects.iter().collect();
             let members = match super::link_input::object_members(&refs, &mut counters)? {
@@ -244,10 +245,8 @@ impl CheckProduct {
                     )));
                 }
             };
-            for (obj, member) in objects.iter().zip(members) {
-                seen_instances
-                    .entry(obj.instance.clone())
-                    .or_insert_with(|| member.to_vec());
+            for (object, bytes) in objects.into_iter().zip(members) {
+                seen_instances.entry(object.instance).or_insert(bytes);
             }
             adapter_objects.push(emit_export_adapter(decl, options)?);
         }
@@ -280,7 +279,7 @@ impl CheckProduct {
         };
         let mut inputs: Vec<&[u8]> = vec![&support];
         inputs.extend(adapter_objects.iter().map(|b| b.as_slice()));
-        inputs.extend(seen_instances.values().map(|b| b.as_slice()));
+        inputs.extend(seen_instances.values().map(AsRef::as_ref));
         let roots: Vec<link::Root<'_>> = decls
             .iter()
             .map(|e| link::Root {

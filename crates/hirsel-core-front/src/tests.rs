@@ -1235,7 +1235,7 @@ fn aggregate_constant_errors_are_checked_before_use() {
         "const BAD: Inline[u8,2] = [1,256]",
         "const BAD: Inline[u8,3] = [1,2]",
         "const BAD: Inline[u8,0] = [200u8 + 100u8;0]",
-        "type Point { x:u8 }\nfn id(x:u8)->u8{x}\nconst BAD: Point = Point(x:id(7))",
+        "type Point { x:u8 }\nconst BAD: Point = Point(x:256)",
         "const A: (u8,u8) = (0,B.0)\nconst B: (u8,u8) = (A.0,0)",
         "const _: u8 = 1\nconst _: u8 = 200u8 + 100u8",
     ] {

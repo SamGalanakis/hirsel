@@ -21,6 +21,10 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     || entry.module == "map"
                     || entry.module == "list" && entry.name.starts_with("slots_")
                     || matches!(entry.module, "deque" | "heap")
+                    || matches!(
+                        (entry.module, entry.name),
+                        ("int" | "string" | "list" | "deque", "work_steps")
+                    )
             );
         }
     }

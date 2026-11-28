@@ -19,7 +19,7 @@ type Cache {
 const NONE: u32 = 4294967295
 
 fn empty() -> Slot {
-    Slot(key:[0; 32], key_len: 0, payload:[0; 128], len: 0, prev: NONE, next: NONE, generation: 0)
+    Slot(key: [0; 32], key_len: 0, payload: [0; 128], len: 0, prev: NONE, next: NONE, generation: 0)
 }
 
 fn key(c: Cache, h: u32) -> Result[String, m1.support.Error] {

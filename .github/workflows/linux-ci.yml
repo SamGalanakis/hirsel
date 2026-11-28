@@ -63,8 +63,9 @@ jobs:
       - name: Run compiler, runtime, driver and standard library laws
         run: |
           .buck2/bin/buck2 test -j4 \
-            //:hirsel-core-ir-unittest //:hirsel-core-rt-unittest-openat2 \
-            //:core-driver-comptime-native //:core-m1-cranelift
+            //:hirsel-core-front-unittest //:hirsel-core-ir-unittest \
+            //:hirsel-core-rt-unittest-openat2 //:core-driver-comptime-native \
+            //:core-m1-cranelift
       - name: Check formatting and source metadata
         run: python3 tools/buck2/fmt.py --check
 

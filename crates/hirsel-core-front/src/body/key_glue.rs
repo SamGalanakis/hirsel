@@ -2363,9 +2363,7 @@ mod tests {
     #[test]
     fn metadata_is_built_once_per_key_type() {
         let mut source = String::from("fn repeated[T:key,U:key](a:T,b:T,c:U,d:U)->bool {\n");
-        for _ in 0..256 {
-            source.push_str("let _ = a == b; let _ = c == d;\n");
-        }
+        source.push_str(&"let _ = a == b; let _ = c == d;\n".repeat(256));
         source.push_str("true }");
         let (index, inputs) = crate::tests::program_inputs(&source);
         let p = Program::declare(&index, &inputs);
@@ -2377,14 +2375,14 @@ mod tests {
         let mut emitter = Emitter::new();
         let mut cx = Cx::new(&p, f, &mut emitter);
         cx.run(f, p.fns[f].body.unwrap());
-        assert!(
-            cx.out.refusals.is_empty() && cx.out.gaps.is_empty(),
-            "{:?} {:?}",
-            cx.out.refusals,
-            cx.out.gaps
-        );
+        let out = (&cx.out.refusals, &cx.out.gaps);
+        assert!(out.0.is_empty() && out.1.is_empty(), "{out:?}");
         assert_eq!(cx.key_metadata_builds, 2);
-        assert_eq!(cx.b.calls.len(), 512);
+        let glue: Vec<_> = cx.key_functions.values().map(|(_, f, _)| *f).collect();
+        assert_eq!(glue.len(), 2);
+        let key = |c: &CallSite| matches!(c.callee, Callee::Direct(f) if glue.contains(&f));
+        let key_calls = cx.b.calls.iter().filter(|c| key(*c)).count();
+        assert_eq!(key_calls, 512);
         assert!(cx.finish().function.is_some());
     }
 

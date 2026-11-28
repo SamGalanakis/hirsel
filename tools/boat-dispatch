@@ -270,6 +270,7 @@ class LocalBudget:
         self.state = state
         self.db = sqlite3.connect(state / "starts.sqlite" if state else ":memory:")
         self.db.execute("CREATE TABLE IF NOT EXISTS attempts (at INTEGER NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS vopr_nights (day TEXT PRIMARY KEY)")
 
     def count(self, now, seconds):
         since = now - seconds
@@ -323,17 +324,34 @@ class LocalBudget:
         with self.db:
             self.db.execute("INSERT INTO attempts VALUES (?)", (int(time.time()),))
 
+    def unused_vopr_night(self, job_class, lane):
+        if self.state is None or job_class != "vopr":
+            return None
+        # sweep2.py names nightly campaigns by run timestamp, suffix and batch index.
+        nightly = re.fullmatch(r"vopr-nightly-([0-9]{8})T[0-9]{6}Z-[A-Za-z0-9]{6}-[0-9]{3,}", lane)
+        if nightly is None:
+            return None
+        day = nightly[1]
+        used = self.db.execute("SELECT 1 FROM vopr_nights WHERE day = ?", (day,)).fetchone()
+        return day if used is None else None
+
     @contextmanager
-    def admission(self, job_class):
-        if self.state is None:
-            yield
-        else:
-            with exclusive(self.state / "start.lock"), self.vopr_turn(job_class):
+    def admission(self, job_class, lane, invoke):
+        start = exclusive(self.state / "start.lock") if self.state is not None else nullcontext()
+        with start:
+            night = self.unused_vopr_night(job_class, lane)
+            turn = self.vopr_turn(job_class) if night is None else nullcontext()
+            with turn:
+                limits = invoke("--json", "limits", "--all", check=True, capture_output=True)
+                self.reserve(json.loads(limits.stdout), job_class)
+                if night is not None:
+                    with self.db:
+                        self.db.execute("INSERT INTO vopr_nights VALUES (?)", (night,))
                 yield
 
     @contextmanager
     def vopr_turn(self, job_class):
-        if job_class in ("vopr", "chaos"):
+        if self.state is not None and job_class in ("vopr", "chaos"):
             with (self.state / "laws.lock").open("a") as lock:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -469,9 +487,7 @@ def run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root, bundle
             vm = []
             log = None
             try:
-                with budget.admission(job_class):
-                    limits = invoke("--json", "limits", "--all", check=True, capture_output=True)
-                    budget.reserve(json.loads(limits.stdout), job_class)
+                with budget.admission(job_class, group[0].lane, invoke):
                     if not dry_run:
                         log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=log_root))
                     critical = True
@@ -549,7 +565,7 @@ def main():
     parser.add_argument("--manifest", type=Path, help="JSON array of timed jobs")
     parser.add_argument("--controller", type=Path, help="local driver for a single guest job over stdin/stdout")
     parser.add_argument("--job-class", choices=("law", "vopr", "chaos"), default="law",
-                        help="VOPR and chaos yield to law dispatches and uses spare starts only")
+                        help="VOPR and chaos use spare starts. Only the first nightly VOPR start can pass pending laws.")
     parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
     parser.add_argument("--log-dir", type=Path,

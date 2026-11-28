@@ -93,13 +93,23 @@ raise SystemExit(subprocess.call(job["command"], shell=True, cwd=manifest.parent
         with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()):
             root = Path(scratch)
             job = dispatcher["Job"]("vopr", dispatcher["Input"](root, False), "true", 1, ())
+            night_batches = [dispatcher["Job"](f"vopr-nightly-20261129T011500Z-aB3dE6-{index:03}",
+                                              job.inputs, "true", 1, ()) for index in (1, 2)]
             backend = FakeBoat()
             with (root / "laws.lock").open("a") as law:
                 fcntl.flock(law, fcntl.LOCK_SH)
                 with self.assertRaisesRegex(ValueError, "law shards are pending"):
                     dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr")
-                self.assertEqual(backend.started, [])
-            self.assertEqual(dispatch([[job]] * 179, 60, root, backend, dry_run=True), 0)
+                backend.day_limit = 20
+                with self.assertRaisesRegex(ValueError, "preserve start capacity for laws"):
+                    dispatch([[night_batches[0]]], 60, root, backend, dry_run=True, job_class="vopr")
+                backend.day_limit = 200
+                self.assertEqual(dispatch([[night_batches[0]]], 60, root, backend,
+                                          dry_run=True, job_class="vopr"), 0)
+                with self.assertRaisesRegex(ValueError, "law shards are pending"):
+                    dispatch([[night_batches[1]]], 60, root, backend, dry_run=True, job_class="vopr")
+                self.assertEqual(len(backend.started), 1)
+            self.assertEqual(dispatch([[job]] * 178, 60, root, backend, dry_run=True), 0)
             self.assertEqual(dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr"), 0)
             with self.assertRaisesRegex(ValueError, "preserve start capacity for laws"):
                 dispatch([[job]], 60, root, backend, dry_run=True, job_class="vopr")

@@ -60,6 +60,20 @@ NATIVE_EXEC_TEST_CASES = [
     "native::tests::exec_child_records_its_own_replayable_output",
 ]
 
+# Dev builds launch a Place with a real Dir. The process must use openat2
+# even when the fixture's input and content stores come from the pool.
+DEV_TEST_CASES = ["native::tests::dev_laws::" + case for case in [
+    "package_dev_public_identity_vectors",
+    "package_dev_releases_held_runs",
+    "package_dev_s1_persistence_and_fencing",
+    "package_dev_s1_recovers_after_store_install",
+    "package_dev_s1_recovers_before_state_publication_and_after_refused_edits",
+    "package_dev_s1_recovers_before_store_install",
+    "package_dev_s1_store_ownership",
+    "package_dev_takes_grants_from_program",
+    "package_dev_wait_reports_failed_edit_and_serving_predecessor",
+]]
+
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute
 # only on the invoking host; each body executes the shared fail-loud precondition.
 # The key is the owning test suite. core-driver-native is the native-integration
@@ -119,7 +133,7 @@ OPENAT2_TEST_CASES = {
         "terminal_fixture::terminal_bits_follow_each_granted_descriptor",
         "terminal_fixture::terminal_size_follows_each_granted_descriptor",
         "terminal_fixture::terminal_size_replays_from_the_tape_and_a_pipe_records_none",
-    ],
+    ] + DEV_TEST_CASES + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
     "core-driver-native": [
         "native::tests::xdg_directory_is_resolved_created_and_granted",
         "native::tests::xdg_shaped_relative_path_is_a_path",
@@ -215,9 +229,5 @@ OPENAT2_TEST_CASES = {
         "native::tests::cli_replays_resolution_without_resolver",
         "native::tests::cli_replays_public_reach",
         "native::tests::run_tape_replays_process_stop",
-        "native::tests::dev_laws::package_dev_s1_persistence_and_fencing",
-        "native::tests::dev_laws::package_dev_s1_store_ownership",
-        "native::tests::dev_laws::package_dev_releases_held_runs",
-        "native::tests::dev_laws::package_dev_takes_grants_from_program",
-    ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
+    ] + DEV_TEST_CASES + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
 }

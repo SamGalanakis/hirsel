@@ -399,15 +399,7 @@ fn logged_version(log: &str) -> u64 {
         .unwrap()
 }
 
-#[test]
-fn package_dev_s1_persistence_and_fencing() {
-    let fixture = Fixture::new();
-    fixture.prepare_faults();
-    let (before_state, cut) = fixture.fault("before-state", "hold-state");
-    before_state.interrupt_at(&cut);
-    fixture.wait_unlocked();
-    assert!(!fixture.law.path("runner/.hirsel-dev/state.json").exists());
-
+fn seed_old(fixture: &Fixture) -> (Value, PathBuf, StoreId) {
     let mut old = fixture.dev("old", &[]);
     old.wait_for("hirsel dev listening on ");
     let old_ref = fixture.state()[2]["active"].clone();
@@ -424,39 +416,11 @@ fn package_dev_s1_persistence_and_fencing() {
         String::from_utf8_lossy(&seeded.stderr)
     );
     let id = fixture.probe(&old_image, None, 1, 271828);
+    (old_ref, old_image, id)
+}
 
-    let mut live = fixture.dev("live", &[]);
-    live.wait_for("hirsel dev listening on ");
-    let live_pid = live.place_pid();
-    fixture.law.write(
-        "runner/dev_place.hirsel",
-        format!("{FIXTURE}\n// same program\n"),
-    );
-    live.wait_for("hirsel dev: unchanged");
-    assert_eq!(live.place_pid(), live_pid);
-    fixture.release(1);
-    live.wait_for("OLD reopened");
-    assert!(live.log().contains("migration refused: Migration"));
-    let live_ref = fixture.state()[2]["active"].clone();
-    assert_eq!(old_ref["identity"], live_ref["identity"]);
-    live.stop();
-    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
-
+fn activate_release_two(fixture: &Fixture, old_ref: &Value) -> (Value, PathBuf, u64) {
     fixture.release(2);
-    let (before_cut, cut) = fixture.fault("before-cut", "hold-before");
-    before_cut.interrupt_at(&cut);
-    fixture.wait_unlocked();
-    let mut recovered = fixture.dev("before-recovered", &[]);
-    recovered.wait_for("OLD reopened");
-    assert!(!recovered.stop().contains("installed activation"));
-    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
-
-    let (mut lost_before, cut) = fixture.fault("lost-before", "exit-before");
-    lost_before.wait_for("OLD reopened");
-    assert!(cut.exists());
-    assert!(!lost_before.stop().contains("installed activation"));
-    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
-
     let mut changed = fixture.dev("changed", &[]);
     changed.wait_for("hirsel dev listening on ");
     let new_ref = fixture.state()[2]["active"].clone();
@@ -474,6 +438,89 @@ fn package_dev_s1_persistence_and_fencing() {
         .unwrap();
     assert!(version > 1);
     assert!(changed.contains(&format!("activation {version},")));
+    (new_ref, new_image, version)
+}
+
+fn restore_predecessor(
+    fixture: &Fixture,
+    old_ref: &Value,
+    old_image: &Path,
+    new_ref: &Value,
+    new_image: &Path,
+    id: StoreId,
+) {
+    // A non-dev writer can install after a dev supervisor stops its predecessor.
+    let old_version = match fixture.install(old_image, id, new_ref) {
+        Some(HostReply::Installed(version, false)) => version,
+        reply => panic!("outside writer did not install: {reply:?}"),
+    };
+    let binding: Vec<u8> = serde_json::from_value(old_ref["identity"].clone()).unwrap();
+    assert_eq!(
+        fixture.install(new_image, id, new_ref),
+        Some(HostReply::InstallRefused(InstallRefusal::Predecessor(
+            binding
+        )))
+    );
+    assert_eq!(fixture.probe(old_image, Some(id), old_version, 271828), id);
+}
+
+#[test]
+fn package_dev_s1_recovers_before_state_publication_and_after_refused_edits() {
+    let fixture = Fixture::new();
+    fixture.prepare_faults();
+    let (before_state, cut) = fixture.fault("before-state", "hold-state");
+    before_state.interrupt_at(&cut);
+    fixture.wait_unlocked();
+    assert!(!fixture.law.path("runner/.hirsel-dev/state.json").exists());
+
+    let (old_ref, old_image, id) = seed_old(&fixture);
+
+    let mut live = fixture.dev("live", &[]);
+    live.wait_for("hirsel dev listening on ");
+    let live_pid = live.place_pid();
+    fixture.law.write(
+        "runner/dev_place.hirsel",
+        format!("{FIXTURE}\n// same program\n"),
+    );
+    live.wait_for("hirsel dev: unchanged");
+    assert_eq!(live.place_pid(), live_pid);
+    fixture.release(1);
+    live.wait_for("OLD reopened");
+    assert!(live.log().contains("migration refused: Migration"));
+    let live_ref = fixture.state()[2]["active"].clone();
+    assert_eq!(old_ref["identity"], live_ref["identity"]);
+    live.stop();
+    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
+}
+
+#[test]
+fn package_dev_s1_recovers_before_store_install() {
+    let fixture = Fixture::new();
+    fixture.prepare_faults();
+    let (old_ref, old_image, id) = seed_old(&fixture);
+
+    fixture.release(2);
+    let (before_cut, cut) = fixture.fault("before-cut", "hold-before");
+    before_cut.interrupt_at(&cut);
+    fixture.wait_unlocked();
+    let mut recovered = fixture.dev("before-recovered", &[]);
+    recovered.wait_for("OLD reopened");
+    assert!(!recovered.stop().contains("installed activation"));
+    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
+
+    let (mut lost_before, cut) = fixture.fault("lost-before", "exit-before");
+    lost_before.wait_for("OLD reopened");
+    assert!(cut.exists());
+    assert!(!lost_before.stop().contains("installed activation"));
+    assert_eq!(fixture.probe(&old_image, Some(id), 1, 271828), id);
+    activate_release_two(&fixture, &old_ref);
+}
+
+#[test]
+fn package_dev_s1_persistence_and_fencing() {
+    let fixture = Fixture::new();
+    let (old_ref, old_image, id) = seed_old(&fixture);
+    let (new_ref, new_image, version) = activate_release_two(&fixture, &old_ref);
 
     let mut same = fixture.dev("same", &[]);
     same.wait_for("hirsel dev listening on ");
@@ -495,19 +542,16 @@ fn package_dev_s1_persistence_and_fencing() {
     assert_eq!(logged_version(&backend), version);
     assert!(!backend.contains("installed activation"));
 
-    // A non-dev writer can install after a dev supervisor stops its predecessor.
-    let old_version = match fixture.install(&old_image, id, &new_ref) {
-        Some(HostReply::Installed(version, false)) => version,
-        reply => panic!("outside writer did not install: {reply:?}"),
-    };
-    let binding: Vec<u8> = serde_json::from_value(old_ref["identity"].clone()).unwrap();
-    assert_eq!(
-        fixture.install(&new_image, id, &new_ref),
-        Some(HostReply::InstallRefused(InstallRefusal::Predecessor(
-            binding
-        )))
-    );
-    assert_eq!(fixture.probe(&old_image, Some(id), old_version, 271828), id);
+    restore_predecessor(&fixture, &old_ref, &old_image, &new_ref, &new_image, id);
+}
+
+#[test]
+fn package_dev_s1_recovers_after_store_install() {
+    let fixture = Fixture::new();
+    fixture.prepare_faults();
+    let (old_ref, old_image, id) = seed_old(&fixture);
+    let (new_ref, new_image, _) = activate_release_two(&fixture, &old_ref);
+    restore_predecessor(&fixture, &old_ref, &old_image, &new_ref, &new_image, id);
 
     let lock = File::open(fixture.store().join("LOCK")).unwrap();
     // SAFETY: acquire a writer lock on the test's own store for the held case.
@@ -559,8 +603,11 @@ fn package_dev_s1_persistence_and_fencing() {
         ),
         id
     );
+}
 
-    fixture.vectors();
+#[test]
+fn package_dev_public_identity_vectors() {
+    Fixture::new().vectors();
 }
 
 #[test]

@@ -95,12 +95,16 @@ BOUNDS["preview"] = {
 BOUNDS["direct"] = {**BOUNDS["archive"], "MaxPack": "4"}
 BOUNDS["foreign"] = BOUNDS["preview"]
 BOUNDS["direct_replay"] = {"MaxOps": "4"}
+# Directory follower capture retention (STORE-SPEC §13.5 "Followers"): three
+# publishes, three packs, one lost or kept unsynced rename, one erased pack.
+BOUNDS["follower_capture"] = {"MaxPub": "3", "MaxPack": "3", "MaxCrash": "1", "MaxErase": "1"}
 ARCHIVE_INVARIANTS = ["ArchiveComplete", "ArchiveIntervals", "ArchiveBounded", "ArchiveSourceReadable", "ArchiveStagedSafe"]
 
 INVARIANTS = {
     "StoreRetention": ["RetainReachable", "SnapReadable", "ImageComplete", "AckedDurable",
                        "IdleReachesNoFrame", "ProbeClaim", "Progress", "CellsListed", "IdleProgress"],
     "StoreDirectReplay": ["StampDisjoint", "CounterCovers"],
+    "StoreFollowerCapture": ["NoReclaimedRead", "NoFalseReclaim", "CaptureDurable"],
     "StoreDirectPack": [*ARCHIVE_INVARIANTS, "DirectReadable", "FollowerReadable"],
     "StorePreviewPack": ["ForeignBound", "ChildDeleteAuthority", "LocalReadable"],
     "StoreCatchUp": ["NoFalseCorrupt", "InstallExact", "BackfillNoneEmpty", "HolderNoCorrupt",
@@ -125,6 +129,7 @@ PREVIEW_WATCH = ["retireOverExtend", "extendOverRetire", "lapsedExtend", "bumpOv
 # (about 5 minutes each on 8 workers) run only with --deep.
 BASELINES = [
     ("direct-replay", "StoreDirectReplay", None, "direct_replay", False),
+    ("follower-capture", "StoreFollowerCapture", None, "follower_capture", False),
     ("direct-pack", "StoreDirectPack", "v2164", "direct", False),
     ("foreign-pack", "StorePreviewPack", "v2164", "foreign", False),
     ("archive", "StoreRetention", "v2164", "archive", False),
@@ -150,8 +155,16 @@ HOLES = [
 
 # (witness invariant, bounds): each must be violated under the current rules, with
 # Track on, so every behaviour the v2.164 fold adds is reachable (not vacuous).
-COVER_MODULE = {"direct_replay": "StoreDirectReplay", "direct": "StoreDirectPack", "foreign": "StorePreviewPack"}
+COVER_MODULE = {"direct_replay": "StoreDirectReplay", "direct": "StoreDirectPack", "foreign": "StorePreviewPack",
+                "follower_capture": "StoreFollowerCapture"}
+UNRULED = ("direct_replay", "follower_capture")
 COVERS = [
+    # One per §13.12 L66 follower-capture case (follower_laws, tiered_open_laws,
+    # store_mixed_tail_laws via the warm hit, follower_crash_laws).
+    ("NoWarmReclaim", "follower_capture"), ("NoColdReclaim", "follower_capture"),
+    ("NoAbsent", "follower_capture"), ("NoRemovedReclaim", "follower_capture"),
+    ("NoLostRenameRead", "follower_capture"), ("NoSyncedReclaim", "follower_capture"),
+    ("NoWitIo", "follower_capture"),
     ("NoReplayRebase", "direct_replay"),
     ("NoDirectReopen", "direct"), ("NoDirectRestore", "direct"),
     ("NoDirectAbandon", "direct"), ("NoDirectAdopt", "direct"),
@@ -549,7 +562,7 @@ def main():
         print("== reachability witnesses (retention, replay and Preview pack reads)", flush=True)
         for inv, bounds in COVERS:
             ok, violated, stats, out = tlc(COVER_MODULE.get(bounds, "StoreRetention"),
-                                           None if bounds == "direct_replay" else "v2164", "none",
+                                           None if bounds in UNRULED else "v2164", "none",
                                            bounds, [inv], tmp, track=True)
             hit = inv in violated
             print(f"  {'REACHED' if hit else 'UNREACHED'}  {inv}; {stats}", flush=True)

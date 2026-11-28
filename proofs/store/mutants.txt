@@ -42,3 +42,5 @@ StorePreviewPack v2164 preview_foreign_delete foreign ChildDeleteAuthority
 StoreDirectPack v2164 direct_follow_early direct FollowerReadable
 StoreDirectReplay - direct_replay_no_reserve direct_replay StampDisjoint
 StoreDirectReplay - direct_follower_stamp_alias direct_replay StampDisjoint
+StoreFollowerCapture - cache_skips_witness follower_capture NoReclaimedRead  a pin-map, pager-cache or projector hit releases its value without the MANIFEST witness, so a follower reads a generation a durable cut already replaced (§13.5 "Followers", Decide a Cold read)
+StoreFollowerCapture - reclaim_before_sync follower_capture NoFalseReclaim   the witness reports Reclaimed(G) from a renamed MANIFEST before its O1 directory sync, and a power cut keeps the old generation (§13.5 "Followers", Ordering)

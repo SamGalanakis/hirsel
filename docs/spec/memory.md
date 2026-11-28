@@ -1,9 +1,10 @@
 # Memory
 
-## Memory model: settled
+## Memory model
 
-1. **The type decides who frees.** An ordinary `type` is own: one owner, freed when the owner
-   goes away ([OWN-3](ownership.md#own-3-kinds)). Sharing is opt-in and counted (`Rc`, `Arc`),
+1. **The type decides who frees.** An ordinary `type` is plain or own under [OWN-1](ownership.md#own-1-representation-is-declared-once)
+   and [OWN-2](ownership.md#own-2-type-summaries). An own value has one owner and is freed
+   when that owner goes away ([OWN-3](ownership.md#own-3-kinds)). Sharing is opt-in and counted (`Rc`, `Arc`),
    resources stay resources, loans stay loans.
 2. **`@compact(W) type` declares region data** ([MEM-2](#mem-2-region-data)): a document that
    dies together lives in one region and is freed at once, with no per-node walk. It is the one
@@ -489,7 +490,7 @@ the payload to `f` as `f`'s `mut` parameter, runs `f` once in place and returns 
 when the count is greater than 1 it returns `None` and `f` does not run. The operation
 itself copies nothing, admits nothing and leaves the count unchanged; `f` may admit as any
 code does. The test is one event, of the same kind as `try_unwrap`'s and ordered the same
-way (CONC-10, [CONC-11](tasks.md#conc-11-arc-across-tasks)), and a `None` is a poll. The
+way (CONC-10), and a `None` is a poll. The
 payload is the one place reached through a counted value that is ever writable
 ([OWN-12](ownership.md#own-12-assignment)), and only as `f`'s parameter. That is sound
 because, while `f` runs, `h` is the only holder and nothing else can reach the payload or
@@ -523,7 +524,7 @@ add a holder:
   other holder. A run stop ends the run without cleanup
   ([FAIL-15](failure.md#fail-15-run-stops)).
 - **Charges follow the existing rules.** The node stays charged to the limit that created
-  it (CONC-11). Growing a collection in the payload charges the current limit and refunds
+  it ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)). Growing a collection in the payload charges the current limit and refunds
   the old storage to the limit its record leads to
   ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)). A refund that crosses
   tasks is an event ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).

@@ -292,10 +292,10 @@ fn wait_gate(tx: Sender[()]) {
 
 ### CONC-11: Arc across tasks
 
-An `Arc` node stays charged to the limit that created it; its last release, in whichever
-task it happens, refunds it there. Counts are exact under the event order: `try_unwrap`
-succeeds, and `with_unique` runs its callback, in exactly the runs whose order puts the
-test after every other holder's release ([MEM-15](memory.md#mem-15-arc)).
+[CONC-10](#conc-10-event-order) defines the events for an `Arc` across tasks.
+[MEM-15](memory.md#mem-15-arc) and [MEM-16](memory.md#mem-16-counting) define the
+count tests. The last release refunds the creating limit under
+[MEM-20](budgets.md#mem-20-limit-records-and-hand-over).
 
 ### CONC-12: No shared mutable state
 

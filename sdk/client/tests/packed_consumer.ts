@@ -3,10 +3,43 @@ import {readFile} from 'node:fs/promises';
 import {Client, type Installation, type Socket, type Storage, type Subscription} from '@hirsel/client';
 import {MemoryStorage} from '@hirsel/client/memory';
 import {NodeStorage} from '@hirsel/client/node';
-import {Frame} from './generated/frame.js';
-import * as codec from './generated/codec.js';
-import {bind, identity, kind, tables, want} from './generated/entries.js';
+import type {Part} from './generated/codec.js';
 import {reopenWhileCalling, watchItem} from './subscription-cache.ts';
+
+// The generated codecs are frozen at module initialization. Observe their real methods
+// before freezing them, then restore Object.freeze before opening the client.
+const codecCounts = new WeakMap<object, {encodes: number; decodes: number}>();
+let countExchange = false;
+async function loadCodecs() {
+  const freeze = Object.freeze;
+  Object.freeze = <T,>(value: T): Readonly<T> => {
+    if (value && typeof value === 'object' &&
+        'encode' in value && typeof value.encode === 'function' &&
+        'decode' in value && typeof value.decode === 'function') {
+      const {encode, decode} = value;
+      const counts = {encodes: 0, decodes: 0};
+      codecCounts.set(value, counts);
+      value.encode = (input: unknown) => {
+        if (countExchange) counts.encodes++;
+        return encode.call(value, input);
+      };
+      value.decode = (input: unknown) => {
+        if (countExchange) counts.decodes++;
+        return decode.call(value, input);
+      };
+    }
+    return freeze(value);
+  };
+  try {
+    return await import('./generated/codec.js');
+  } finally {
+    Object.freeze = freeze;
+  }
+}
+const codec = await loadCodecs();
+type Frame = import('./generated/frame.js').Frame;
+const {Frame} = codec;
+const {bind, identity, kind, tables, want} = await import('./generated/entries.js');
 
 const produced = await readFile(new URL('./payload.bin', import.meta.url));
 const replyEnd = 4 + produced.readUInt32LE();
@@ -39,7 +72,7 @@ async function memoryStorageIsolation() {
 await memoryStorageIsolation();
 
 type SentCall = {stream: {t: bigint; n: bigint}; p: bigint; args: Uint8Array};
-function openSocket(captured?: SentCall[]): Socket {
+function openSocket(captured?: SentCall[], onSend?: () => void): Socket {
   let version = 1n;
   const emit = (frame: Frame) => {
     const data = Frame.encode(frame);
@@ -48,6 +81,7 @@ function openSocket(captured?: SentCall[]): Socket {
   const socket: Socket = {
     binaryType: '', onopen: null, onmessage: null, onclose: null, onerror: null,
     send(data) {
+      onSend?.();
       const frame = Frame.decode(data);
       if (frame.tag === 'Hello') {
         assert.deepEqual(frame.values[1], want);
@@ -77,8 +111,21 @@ function openSocket(captured?: SentCall[]): Socket {
   return socket;
 }
 
+const wireCounts = {callEncodes: 0, batchDecodes: 0, sends: 0};
+const clientFrame = {
+  encode(frame: Frame) {
+    if (countExchange && frame.tag === 'Call') wireCounts.callEncodes++;
+    return Frame.encode(frame);
+  },
+  decode(bytes: Uint8Array) {
+    const frame = Frame.decode(bytes);
+    if (countExchange && frame.tag === 'Batch') wireCounts.batchDecodes++;
+    return frame;
+  },
+};
 const client = await Client.open({
-  url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity, socket: () => openSocket(),
+  url: 'ws://scripted', frame: clientFrame, wants: want, kinds: kind, identity,
+  socket: () => openSocket(undefined, () => { if (countExchange) wireCounts.sends++; }),
   storage: new NodeStorage('state'), onDiagnostic: message => diagnostic(new Error(message)),
 });
 try {
@@ -92,11 +139,19 @@ try {
   const clone = globalThis.structuredClone;
   let clones = 0;
   globalThis.structuredClone = value => { clones++; return clone(value); };
+  countExchange = true;
   try {
     assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined), expected);
   } finally {
+    countExchange = false;
     globalThis.structuredClone = clone;
   }
+  assert.deepEqual({
+    argumentEncodes: codecCounts.get(codec.Args0)?.encodes,
+    resultDecodes: codecCounts.get(codec.Result0)?.decodes,
+    ...wireCounts,
+  }, {argumentEncodes: 1, resultDecodes: 1, callEncodes: 1, batchDecodes: 1, sends: 1},
+  'one steady-state packed exchange must perform each client codec operation and wire send once');
   assert.equal(clones, 0, 'steady-state dispatch/settle must not deep-clone lane state');
 
   // Raw wire calls own their input bytes on submission and their returned bytes on completion.
@@ -229,7 +284,7 @@ const roomSocket = (): Socket => {
   queueMicrotask(() => socket.onopen?.());
   return socket;
 };
-const live = (part: Partial<codec.Part> & {sub: number}): Frame => ({tag: 'Live', value: [{
+const live = (part: Partial<Part> & {sub: number}): Frame => ({tag: 'Live', value: [{
   complete: false, you: {tag: 'None'}, incarnation: [1n, 2n], revision: 1n, snapshot: true,
   joined: [], states: [], msgs: [], left: [], gap: 0, lost: 0, full: false, ...part,
 }]});

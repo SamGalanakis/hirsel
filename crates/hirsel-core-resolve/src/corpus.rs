@@ -131,7 +131,9 @@ impl Corpus {
     }
     pub fn index(&self, parsed: &ParsedCorpus) -> NameIndex {
         let mut index = NameIndex::new(parsed.symbols.clone());
-        index.add_manifests(&self.manifest.packages);
+        index
+            .add_manifests(&self.manifest.packages)
+            .expect("a corpus manifest lists every package it depends on");
         for (source, output) in self.sources.iter().zip(&parsed.files) {
             let module = index.module(&source.module).unwrap();
             let occurrence = index.add_source();

@@ -65,11 +65,16 @@ def inputs(root, tests=False, package='store', with_tests=()):
         listed = dict(manifest['sources'])
         if (tests and selected) or manifest['name'] in with_tests:
             listed.update(manifest.get('tests', {}).get('sources', {}))
+        # A CorpusManifest binds a dependency by package, and its source names that
+        # package by the last `/` component; it carries no hcfg aliases.
+        for alias, dep in manifest['dependencies'].items():
+            if alias != dep['package'].rsplit('/', 1)[-1]:
+                raise ValueError(f"{manifest['name']}: --inputs cannot carry alias {alias} for {dep['package']}")
         packages.append({
             'package': {'name': manifest['name'], 'version': str(manifest['version'].split('.')[0])},
             'dependencies': [{'name': 'core', 'version': '1'}] +
-                            [{'name': name, 'version': str(dep['major'])}
-                             for name, dep in manifest['dependencies'].items()],
+                            [{'name': dep['package'], 'version': str(dep['major'])}
+                             for dep in manifest['dependencies'].values()],
             'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
                         for file, module in listed.items()],
             # These are the toolchain's own package sources, which the installed toolchain

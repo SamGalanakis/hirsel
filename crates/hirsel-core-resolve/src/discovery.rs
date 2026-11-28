@@ -324,9 +324,37 @@ impl PackageManifest {
         }
     }
 }
+/// A manifest names a dependency that neither the request nor the index binds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnboundDependency {
+    pub package: PackageId,
+    pub dependency: PackageId,
+}
+impl std::fmt::Display for UnboundDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "package {}@{} depends on {}@{}, which the inputs do not list",
+            self.package.name, self.package.version, self.dependency.name, self.dependency.version
+        )
+    }
+}
+impl std::error::Error for UnboundDependency {}
+impl From<UnboundDependency> for std::io::Error {
+    fn from(refusal: UnboundDependency) -> Self {
+        std::io::Error::other(refusal)
+    }
+}
+
 impl NameIndex {
     /// External package discovery is converted once, before header indexing.
-    pub fn add_manifests(&mut self, manifests: &[PackageManifest]) -> Vec<ModuleId> {
+    /// An `--inputs` manifest is outside input: a dependency it names must be one
+    /// of its packages (or already indexed), else the request is refused. The
+    /// index is left partly extended on refusal; callers discard it.
+    pub fn add_manifests(
+        &mut self,
+        manifests: &[PackageManifest],
+    ) -> Result<Vec<ModuleId>, UnboundDependency> {
         let packages: Vec<_> = manifests
             .iter()
             .map(|m| {
@@ -339,20 +367,21 @@ impl NameIndex {
             })
             .collect();
         for (m, &p) in manifests.iter().zip(&packages) {
-            let deps = m
-                .dependencies
-                .iter()
-                .flat_map(|d| {
-                    let key = self
-                        .package(
-                            self.symbols.find(&d.name).unwrap(),
-                            self.symbols.find(&d.version).unwrap(),
-                        )
-                        .unwrap();
-                    m.aliases(d).into_iter().map(move |alias| (alias, key))
-                })
-                .map(|(alias, key)| (self.symbols.find(alias).unwrap(), key))
-                .collect::<Vec<_>>();
+            let mut deps = Vec::with_capacity(m.dependencies.len());
+            for d in &m.dependencies {
+                let key = self
+                    .symbols
+                    .find(&d.name)
+                    .zip(self.symbols.find(&d.version))
+                    .and_then(|(name, version)| self.package(name, version))
+                    .ok_or_else(|| UnboundDependency {
+                        package: m.package.clone(),
+                        dependency: d.clone(),
+                    })?;
+                for alias in m.aliases(d) {
+                    deps.push((self.symbols.find(alias).unwrap(), key));
+                }
+            }
             self.set_dependencies(p, deps);
         }
         let source_count = manifests.iter().map(|m| m.sources.len()).sum();
@@ -369,7 +398,7 @@ impl NameIndex {
                 modules.push(module);
             }
         }
-        modules
+        Ok(modules)
     }
     pub fn module(&self, path: &ModulePath) -> Option<ModuleId> {
         let p = self.package(

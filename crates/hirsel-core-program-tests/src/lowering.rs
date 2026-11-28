@@ -134,7 +134,7 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
     })
     .collect::<Vec<_>>();
     let mut index = NameIndex::new(std::sync::Arc::new(symbols));
-    let ids = index.add_manifests(&[manifest]);
+    let ids = index.add_manifests(&[manifest]).unwrap();
     let modules = ids
         .into_iter()
         .zip(syntax)

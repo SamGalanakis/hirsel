@@ -85,7 +85,7 @@ pub(super) fn inputs_in(source: &str, dir: &Path, module: &str) -> (NameIndex, V
     let diagnostics = parsed.diagnostics;
     syntax.push(parsed.syntax);
     let mut index = NameIndex::new(std::sync::Arc::new(symbols));
-    let ids = index.add_manifests(&[core, app]);
+    let ids = index.add_manifests(&[core, app]).unwrap();
     let modules = ids
         .into_iter()
         .zip(syntax)

@@ -128,7 +128,7 @@ fn generated_names_survive_lowering_again_and_specialization() {
         .unwrap();
     assert!(parsed.parsed.diagnostics.is_empty());
     let mut index = hirsel_core_resolve::NameIndex::new(Arc::new(symbols));
-    index.add_manifests(&request.inputs.packages);
+    index.add_manifests(&request.inputs.packages).unwrap();
     let input = hirsel_core_front::ModuleInput {
         id: index.module(&parsed.module).unwrap(),
         source: index.add_source(),

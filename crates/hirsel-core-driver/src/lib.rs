@@ -615,7 +615,7 @@ impl Driver {
         index.symbols = symbols;
         // Both traversals follow the request's package and source order.
         // Manifests retained from the image have no sources in this request.
-        let module_ids = index.add_manifests(&resolution_inputs.packages);
+        let module_ids = index.add_manifests(&resolution_inputs.packages)?;
         let modules: Vec<_> = modules
             .into_iter()
             .zip(module_ids)

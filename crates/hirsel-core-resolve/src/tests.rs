@@ -71,7 +71,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
         })
         .collect::<Vec<_>>();
     let mut index = NameIndex::new(Arc::new(symbols));
-    index.add_manifests(&manifests);
+    index.add_manifests(&manifests).unwrap();
     let mut files = vec![];
     for ((pkg, m, _), syntax) in all.into_iter().zip(parsed) {
         let module = index

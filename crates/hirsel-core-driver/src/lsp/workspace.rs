@@ -568,7 +568,7 @@ impl EditorSession {
                     package
                 }),
         );
-        index.add_manifests(&manifests);
+        index.add_manifests(&manifests)?;
         Ok(Some(Arc::new(index)))
     }
 }

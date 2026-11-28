@@ -4,6 +4,7 @@ from decimal import Decimal
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -28,9 +29,10 @@ JOBS = 4
 BUNDLE = "//:hirsel-toolchain"
 NOTES_ORIGIN = "https://github.com/SamGalanakis/lash-hirsel.git"
 NOTES_REV = "f8d230c3165f2caa17ed74eab812404e493e60b8"
+NOTES_CONFIG = Path(__file__).resolve().with_name("notes-config")
 NOTES_EDIT = ('emit(out, "you: ", prompt)', 'emit(out, "You: ", prompt)')
 # The default allocator arenas hit the 2 GiB admission limit at four jobs.
-NOTES_ALLOCATOR = {"MIMALLOC_DISALLOW_ARENA_ALLOC": "1", "MIMALLOC_PURGE_DELAY": "0", "MALLOC_ARENA_MAX": "2"}
+LOW_MEMORY_ALLOCATOR = {"MIMALLOC_DISALLOW_ARENA_ALLOC": "1", "MIMALLOC_PURGE_DELAY": "0", "MALLOC_ARENA_MAX": "2"}
 ALLOCATIONS = "allocations_per_packet"
 INSTRUCTIONS = "instructions_per_packet"
 CHURN = "Place churn"
@@ -127,7 +129,7 @@ def compare(report, baseline=None):
 
 def identity():
     return {"cpu_model": board_host.facts(())["cpu_model"], "jobs": JOBS, "notes_revision": NOTES_REV,
-            "notes_allocator": NOTES_ALLOCATOR, "notes_edit": list(NOTES_EDIT), "version": 1}
+            "notes_allocator": LOW_MEMORY_ALLOCATOR, "notes_edit": list(NOTES_EDIT), "version": 1}
 
 
 def run_script(path, out, env, *args, allow_gate_fail=False):
@@ -209,10 +211,18 @@ def notes_source(out):
         archive = subprocess.check_output(["git", "-C", checkout, "archive", NOTES_REV])
     with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
         tree.extractall(out, filter="data")
+    # This revision predates typed package manifests. Declare the Notes target
+    # and its harness library, without the separate operator publisher and tools.
+    shutil.copytree(NOTES_CONFIG, out, dirs_exist_ok=True)
+    (out / "hirsel.lock").unlink()
     # The pinned app predates Store's explicit limits. None retains the defaults.
     source = out / "notes/main.hirsel"
     edit_notes(source, "pager_task_bytes: None, readers: None)",
                "pager_task_bytes: None, readers: None, limits: None)")
+    edit_notes(out / "harness/gateway.hirsel", "platform.local.Config(root: root, options:",
+               "platform.local.Config(root: root, backing: DiskBacking, options:")
+    edit_notes(out / "harness/gateway.hirsel", "net: net, watch: take watch)",
+               "net: net, watch: take watch, journal: None)")
 
 
 def edit_notes(source, old, new):
@@ -224,7 +234,7 @@ def edit_notes(source, old, new):
 
 def notes_phase(board, out, env, toolchain, phase, cold_parts=None):
     source = out / "source"
-    notes_env = env | NOTES_ALLOCATOR | {"XDG_CACHE_HOME": str(out / "cache"), "XDG_DATA_HOME": str(out / "xdg"),
+    notes_env = env | LOW_MEMORY_ALLOCATOR | {"XDG_CACHE_HOME": str(out / "cache"), "XDG_DATA_HOME": str(out / "xdg"),
                                          "HIRSEL_DAEMON": "off"}
     image = out / "notes"
     metrics = out / f"{phase}-metrics.json"

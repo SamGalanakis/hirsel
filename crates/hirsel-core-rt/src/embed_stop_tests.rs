@@ -392,11 +392,45 @@ fn returned_stops_release_locks_and_allow_restart() {
 
     unsafe extern "C" fn count_overflow_entry(
         context: *mut Context,
-        _: *const Config,
+        config: *const Config,
         _: *mut MainResult,
     ) -> u8 {
         // SAFETY: seed a counted node to u64::MAX and trigger CountOverflow.
         unsafe {
+            // The first caught failure installs the isolate's reserved cell.
+            assert!(crate::isolate::hirsel_core_isolate_enter(context).entered);
+            crate::causes::record(
+                &mut *context,
+                crate::causes::Cause::new(crate::causes::BOUNDS, 0),
+            );
+            let caught = crate::isolate::hirsel_core_isolate_catch(context);
+            crate::abi::hirsel_core_causes_drop(caught.causes);
+            let text = crate::abi::hirsel_core_alloc(
+                context,
+                ptr::null_mut(),
+                8,
+                8,
+                8,
+                false,
+                crate::block::PLAIN,
+            )
+            .pointer;
+            ptr::copy_nonoverlapping(b"retained".as_ptr(), text, 8);
+            crate::abi::hirsel_core_raise_string(context, 0, text, 8, 8);
+            let out = (*config).state.cast::<*mut crate::causes::Cell>();
+            out.write(crate::abi::hirsel_core_causes_take(context));
+
+            // Physical size differs from logical charge on emitted allocations.
+            let other = crate::abi::hirsel_core_alloc(
+                context,
+                ptr::null_mut(),
+                96,
+                8,
+                37,
+                false,
+                crate::block::PLAIN,
+            );
+            assert!(!other.pointer.is_null());
             let node = crate::block::Block::graph(&*context, Some(16), 16, 8)
                 .unwrap()
                 .into_raw();
@@ -408,10 +442,24 @@ fn returned_stops_release_locks_and_allow_restart() {
     }
 
     let gen1 = Execution::contained();
-    let cfg = test_config(ptr::null_mut());
+    let mut retained: *mut crate::causes::Cell = ptr::null_mut();
+    let cfg = test_config((&raw mut retained).cast());
     match unsafe { run_contained_worker(&gen1, &cfg, count_overflow_entry) } {
         Err(EndReason::RunStop(stop)) => assert_eq!(stop.name(), "CountOverflow"),
         other => panic!("expected CountOverflow, got {other:?}"),
+    }
+
+    drop(gen1);
+    // SAFETY: the worker transferred the native cause chain before it stopped.
+    unsafe {
+        assert!(!retained.is_null());
+        let cell = &*retained;
+        assert!(cell.reserved);
+        assert_eq!(
+            cell.detached_message_bytes().as_deref(),
+            Some(b"retained".as_slice())
+        );
+        crate::abi::hirsel_core_causes_drop(retained);
     }
 
     // Lock-held HostMemory: fallible allocation fails inside lock, drops guard

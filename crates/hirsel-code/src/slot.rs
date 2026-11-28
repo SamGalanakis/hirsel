@@ -445,6 +445,50 @@ impl Worker {
         with: impl FnOnce(F) -> R,
     ) -> Result<Option<R>, Refusal> {
         const { assert!(size_of::<F>() == size_of::<usize>()) };
+        self.with_registration(checkout, ordinal, |image, index| {
+            let candidate = selection.candidate();
+            if !std::ptr::eq(image, candidate.image.as_ptr()) || index != candidate.index {
+                return Err(Refusal::NoEntry);
+            }
+            let (entry, _) = image.addresses(index);
+            // SAFETY: resolve checked F on this installation, pinned through the call.
+            Ok(with(unsafe { std::mem::transmute_copy(&entry) }))
+        })
+    }
+
+    /// Invoke the entry selected at this checkout's registration ordinal. The caller
+    /// needs only the expected callable type, including its waits effect.
+    pub fn dispatch_registered<F: Signature, R>(
+        &mut self,
+        checkout: &Checkout,
+        ordinal: usize,
+        with: impl FnOnce(F) -> R,
+    ) -> Result<Option<R>, Refusal> {
+        const { assert!(size_of::<F>() == size_of::<usize>()) };
+        self.with_registration(checkout, ordinal, |image, index| {
+            let (digest, waits) = match &image.entries {
+                super::ImageEntries::Native { entries, .. } => {
+                    let row = &entries[index];
+                    (row.signature, row.waits)
+                }
+                super::ImageEntries::Prelinked(entries) => (entries[index].1, false),
+            };
+            if (digest, waits) != (F::DIGEST, F::WAITS) {
+                return Err(Refusal::NoEntry);
+            }
+            let (entry, _) = image.addresses(index);
+            // SAFETY: the selected row has F's checked signature. Its worker pin
+            // covers execution and failure cleanup, including concurrent replacement.
+            Ok(with(unsafe { std::mem::transmute_copy(&entry) }))
+        })
+    }
+
+    fn with_registration<R>(
+        &mut self,
+        checkout: &Checkout,
+        ordinal: usize,
+        with: impl FnOnce(&Image, usize) -> Result<R, Refusal>,
+    ) -> Result<Option<R>, Refusal> {
         if !Arc::ptr_eq(&self.shared, &checkout.lease.0.shared) {
             return Err(Refusal::NotAdmitted);
         }
@@ -460,16 +504,8 @@ impl Worker {
                 BorrowToken::Promoted => None,
             }
             .ok_or(Refusal::NoEntry)?;
-            let candidate = selection.candidate();
-            if !std::ptr::eq(image, candidate.image.as_ptr())
-                || checkout.order.get(ordinal).map(|&i| i as usize) != Some(candidate.index)
-            {
-                return Err(Refusal::NoEntry);
-            }
-            let (entry, _) = image.addresses(candidate.index);
-            // SAFETY: resolve checked F on this exact installation and the worker
-            // owns the generation until the callback returns or unwinds.
-            Ok(with(unsafe { std::mem::transmute_copy(&entry) }))
+            let index = checkout.order.get(ordinal).ok_or(Refusal::NoEntry)?;
+            with(image, *index as usize)
         })
         .transpose()
     }

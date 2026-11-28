@@ -110,9 +110,9 @@ fn main() {
             let entry = image.resolve::<Main>(&identity)?;
             let code = image.code::<Main>(&identity)?;
             let registered = code.register([entry.candidate()])?;
-            Ok::<_, hirsel_code::Refusal>((entry, registered))
+            Ok::<_, hirsel_code::Refusal>(registered)
         };
-        let (entry, registered) = match select() {
+        let registered = match select() {
             Ok(selection) => selection,
             Err(refusal) => {
                 println!("round {round}: refused {refusal:?}");
@@ -126,7 +126,7 @@ fn main() {
             })
             .unwrap();
         let outcome = place
-            .dispatch(&mut worker, 0, &entry, |main, execution, &limit| {
+            .dispatch(&mut worker, 0, |main, execution, &limit| {
                 run_main(main, execution, limit)
             })
             .unwrap()

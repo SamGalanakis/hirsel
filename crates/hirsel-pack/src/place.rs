@@ -1,7 +1,5 @@
 //! A synchronous Place's activation authority and its generation-bound invocation state.
-use hirsel_code::{
-    Checkout, EntryIndex, Loader, Refusal, Registered, Signature, Slot, Stop, Worker,
-};
+use hirsel_code::{Checkout, Loader, Refusal, Registered, Signature, Slot, Stop, Worker};
 use hirsel_core_rt::run_stop::Execution;
 
 /// The host retains the slot across replacements. Each activation gives its caller
@@ -69,10 +67,9 @@ impl<B> Place<B> {
         &self,
         worker: &mut Worker,
         ordinal: usize,
-        entry: &EntryIndex<F>,
         invoke: impl FnOnce(F, &Execution, &B) -> R,
     ) -> Result<Option<R>, Refusal> {
-        worker.dispatch_entry(&self.checkout, ordinal, entry, |entry| {
+        worker.dispatch_registered(&self.checkout, ordinal, |entry| {
             invoke(entry, &self.execution, &self.bindings)
         })
     }

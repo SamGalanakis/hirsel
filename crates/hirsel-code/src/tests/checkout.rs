@@ -81,6 +81,14 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         worker.dispatch_entry(&third, 1, &new, |f| unsafe { f(1) }),
         Ok(Some(22))
     );
+    assert_eq!(
+        worker.dispatch_registered(&third, 0, |_: Other| unreachable!()),
+        Err::<Option<()>, _>(Refusal::NoEntry)
+    );
+    assert_eq!(
+        worker.dispatch_registered(&second, 0, |_: Leaf| unreachable!()),
+        Err::<Option<()>, _>(Refusal::NoEntry)
+    );
     drop((first, second, third));
     drop((b, code, selected, reversed));
     drop(slot);

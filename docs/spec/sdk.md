@@ -375,10 +375,26 @@ stream records fence the generation. Pending requests keep their original Caller
 A stream passes a position only after its reply is stored (STORE-SPEC §1.8
 S7), so a stream carries one call at a time and the client multiplexes calls
 as lanes: each in-flight call holds its own leased stream of the session's
-Caller. At most 1+q lanes hold a call, where q comes from Welcome; this matches
-the place's session limit of 1+q owed units, so the client never earns an
-Overloaded refusal by itself. Calls past that width wait in memory in
-submission order. Opening the client leases every free stream of one Caller
+Caller. How many lanes may hold a call is set by the connection's call credit
+(RUNNER-SPEC §3 "Call credit"), not by a fixed width. Hello sends a `want`:
+the calls and bytes the client would run at once. Welcome and each later
+`Credit` carry the cumulative grant and the client's share, fenced by the
+connection's epoch. The client applies a `Credit` only when its epoch matches
+and its totals exceed the ones it holds. An item costs one call and 36 + |arg|
+bytes. The client never sends past its grant, so it never earns a close or a
+refusal by itself. When its demand falls, or a `Credit` lowers its share below
+what it holds unspent, it sends `Window` with a new `want` and raises its spent
+counters to forfeit the excess. Calls past the credit wait in memory in
+submission order.
+
+The pump has no timer. On each turn it puts every ready call that fits the
+credit into one `Call` list of at most 256 items, and it has at most one frame
+write pending. So a lone call goes out at once, and calls that arrive while a
+write is pending ride the next list. Each `Call` list is persisted as pending
+before it is sent. Settlement writes each lane's terminal outcome and next
+position in one durable write per received frame. Recovery resends unsettled
+calls with their original bytes on their own streams, inside the new
+connection's grant. Recovery format 4 is unchanged. Opening the client leases every free stream of one Caller
 that still holds a call, so each recovered call resumes on its own lane next to
 new work. Completions settle their own lane in any order; Returned and Failed
 answers in one Batch commit in one storage write. Adjacent reply-only Batches

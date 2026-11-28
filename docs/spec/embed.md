@@ -651,8 +651,8 @@ The runtime's client side reuses the TypeScript client kernel delivered by lane 
 (`sdk/client/state.ts`, `sdk/client/lanes.ts`); this ABI specifies no second multiplexer.
 Because a store stream passes a position only after its reply is stored (STORE-SPEC §1.8
 S7), the kernel multiplexes concurrent calls through one host session as **lanes**, each
-in-flight call holding its own leased store stream, up to the session's `1 + q` owed units
-from `Welcome`. Calls beyond `1 + q` wait in memory in submission order. Each call keeps
+in-flight call holding its own leased store stream, within the connection's call credit
+(RUNNER-SPEC §3 "Call credit"). Calls beyond the credit wait in memory in submission order. Each call keeps
 its own deadline (`deadline_ms`) and cancellation (`abandon`); in the shared kernel, a
 reconnect replays every lane's pending call once under its unchanged idempotency key and
 drops old-connection answers. Both `client.ts` and the runtime's client run one set of
@@ -1162,8 +1162,8 @@ No step of this waits while holding a lock that delivery needs. A producer insid
 gets `HIRSEL_FULL` rather than blocking, so a reentrant producer cannot deadlock delivery.
 
 **Sessions.** A session is one dialled connection whose client kernel (lane 3145)
-multiplexes concurrent calls across leased stream lanes (up to `1 + q` in flight, from
-`Welcome`). `open` registers the session once its admission succeeds and returns
+multiplexes concurrent calls across leased stream lanes (as many in flight as its call
+credit allows, RUNNER-SPEC §3 "Call credit"). `open` registers the session once its admission succeeds and returns
 `HIRSEL_OK`. The dial, Hello and credential then proceed on the runtime's threads. Calls
 made before the session is ready wait in the client, as in `client.ts`.
 

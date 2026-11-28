@@ -355,6 +355,9 @@ The client calls it before its first Hello and once per credential recovery
 The optional `socket` factory and `clock` override the platform WebSocket and
 time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
+`onCallTiming` observes enqueue, durable lane admission and caller settlement in
+milliseconds on the client clock. A call that ends while waiting has no admission
+time. An HTTP caller that joins recovered work records admission when it joins.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
 Locks. Node storage commits mutations by syncing checksummed WAL frames and

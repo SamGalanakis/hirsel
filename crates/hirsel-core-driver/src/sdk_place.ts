@@ -20,6 +20,7 @@ export interface PlaceOptions {
   refreshToken?: () => Promise<ScopedToken>;
   onState?: Options['onState'];
   onRecovered?: Options['onRecovered'];
+  onCallTiming?: Options['onCallTiming'];
 }
 
 export async function openPlace(path: string | URL, options: PlaceOptions = {}) {
@@ -81,6 +82,7 @@ export async function openPlace(path: string | URL, options: PlaceOptions = {}) 
     url: socket.href, storage: new BrowserStorage('hirsel:' + url.href + ':' + identity.n_place),
     frame: Frame, wants: want, kinds: kind, identity, credential: refresh && acquire,
     http: {url: url.href, fetch: send}, onState: options.onState, onRecovered: options.onRecovered,
+    onCallTiming: options.onCallTiming,
   });
   client = connection;
   const {call, subscribe, subscribeDecoded} = bind(connection);

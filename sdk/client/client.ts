@@ -13,7 +13,6 @@ export type {LiveRoom, PeerId, RoomCodec, RoomHandlers, RoomPeer, RoomPeersChang
 export type {Access, CallOptions, Change, Draft, Frozen, RowChange, Subscription, SubscriptionCodec, SubscriptionControl} from './image.js';
 
 import {canReconnect, credential, current, initialPhase, laneOwed, stableMs, step, type Action, type Event, type Phase} from './state.js';
-
 import {Inbox, type Codec, type Done, type Entry, type Fault, type Frame, type Group, type Option, type Outcome,
   type Part, type Refusal, type Room, type SlotRow, type SubscriptionEnd, type Want, type WireOutcome} from './wire.js';
 export type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want} from './wire.js';
@@ -28,7 +27,8 @@ export interface Transport {
   room<S, M, V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
     handlers: RoomHandlers<S, M, V, Slots, Keys>, decode: SubscriptionCodec<V, Slots, Keys>, live: RoomCodec<S, M>): LiveRoom<S, M, V, Slots, Keys>;
 }
-import {deadlineRefused, expired, owner, pendingFor, settle, type Completion, type Lane, type QueuedCall, type Waiter} from './lanes.js';
+import {copyWant, deadlineRefused, expired, owner, pendingFor, recoverLanes, resolveBinding, sameWant, settle, takeCalls, timeCall,
+  type Binding, type Completion, type Lane, type Leased, type QueuedCall, type Waiter} from './lanes.js';
 import {authorization, httpVerdict, sendHttp, type HttpAttempt, type HttpOptions, type HttpReply} from './delivery.js';
 export type {HttpReply} from './delivery.js';
 export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'CredentialNeeded' | 'Fenced' | 'StorageUnavailable' | 'Closed';
@@ -36,6 +36,8 @@ export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
 // The generated bindings' `kind`, one per `want`. Only a transact call is stored, so only its
 // reply moves the stream position; a granted call's body is never re-sent once it may have run.
 export type EntryKind = 'compute' | 'transact' | 'query' | 'granted' | 'room';
+/** Milliseconds on the client clock. A call can end while still waiting for a lane. */
+export interface CallTiming { readonly enqueuedAt: number; readonly admittedAt?: number; readonly outcomeAt: number }
 export interface Options {
   url: string; storage: Storage; frame: Codec; wants: Want[]; kinds: readonly EntryKind[]; identity?: Identity;
   // Called for the first Hello and once per credential recovery, outside the client's
@@ -48,12 +50,9 @@ export interface Options {
   onDiagnostic?: (diagnostic: string) => void;
   onRecovered?: (outcome: Outcome<Uint8Array>) => void;
   onBatch?: (version: bigint) => void;
+  onCallTiming?: (timing: CallTiming) => void;
 }
-const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
-const kindOf = (options: Options, want: Want): EntryKind | undefined => options.kinds[options.wants.findIndex(w => sameWant(w, want))];
-const granted = (options: Options) => (want: Want) => kindOf(options, want) === 'granted';
 const lost = (options: Options) => () => options.onRecovered?.({tag: 'LocallyUnknown'});
-const copyWant = (w: Want): Want => ({identity: new Uint8Array(w.identity), args_fp: w.args_fp, result_fp: w.result_fp});
 const futureSlackMs = 300000n;
 const credentialUsable = (state: State) => state === 'Ready' || state === 'Connecting' || state === 'Backoff';
 
@@ -74,7 +73,6 @@ export class Client implements Transport {
   private readonly inbox = new Inbox();
   private work: Promise<void> = Promise.resolve();
   private pumpQueued = false;
-  private wants: Want[];
   private keyedAt = 0n;
   private keyedAtClock = 0;
   private retention = 0n;
@@ -100,18 +98,18 @@ export class Client implements Transport {
   private readyReject!: (error: unknown) => void;
   private ready: Promise<void>;
 
-  private constructor(private options: Options, state: Installation, leased: ReadonlyArray<readonly [string, Lease]>) {
+  private constructor(private options: Options, state: Installation, private readonly wants: Want[],
+    private readonly kinds: readonly EntryKind[], leased: readonly Leased[]) {
     this.generation = state.generation; this.installationId = state.installation;
     this.caller = state.streams[leased[0][0]].caller;
-    for (const [stream, lease] of leased) this.addLeased(stream, state.streams[stream], lease);
-    this.wants = options.wants.map(copyWant);
+    for (const [stream, lease, binding] of leased) this.addLeased(stream, state.streams[stream], lease, binding);
     this.clock = options.clock ?? defaultClock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     void this.ready.catch(() => {});
   }
 
-  private addLeased(stream: string, record: StreamRecord, lease: Lease): Lane {
-    const lane: Lane = {id: this.nextLane++, stream, record, lease};
+  private addLeased(stream: string, record: StreamRecord, lease: Lease, binding?: Binding): Lane {
+    const lane: Lane = {id: this.nextLane++, stream, record, lease, binding};
     this.lanes.set(lane.id, lane);
     this.watchLease(lane, lease);
     return lane;
@@ -124,6 +122,7 @@ export class Client implements Transport {
 
   static async open(options: Options): Promise<Client> {
     if (options.kinds.length !== options.wants.length) throw new ClientError('InvalidBindings');
+    const wants = options.wants.map(copyWant), kinds = options.kinds.slice();
     const lock = await options.storage.lock('install', true);
     if (!lock) throw new ClientError('StorageUnavailable');
     const leased: Array<[string, Lease]> = [];
@@ -140,11 +139,10 @@ export class Client implements Transport {
       }
       leased.push(...await leaseStreams(options.storage, state));
       if (leased.length === 0) throw new ClientError('StreamLeaseUnavailable');
-      let changed = false;
-      for (const [n] of leased) changed = recover(state, n, granted(options), lost(options)) || changed;
+      const {changed, lanes} = recoverLanes(state, leased, wants, kinds, lost(options));
       if (changed) await options.storage.write(state, replaceRecords);
       if (reset) options.onRecovered?.({tag: 'LocallyUnknown'});
-      const client = new Client(options, state, leased);
+      const client = new Client(options, state, wants, kinds, lanes);
       await lock.release();
       await client.run({tag: 'Start'});
       client.removeBrowserWake = listenForBrowserWake(() => client.wakeBackoff());
@@ -431,7 +429,7 @@ export class Client implements Transport {
       // A recovered call whose entry the loaded bindings no longer name has no known kind, so
       // neither its re-send nor its position can be decided: report it unknown and retire its stream.
       const pending = lane.record.pending;
-      if (pending && !pending.http && kindOf(this.options, pending.want) === undefined) await this.retire(lane, 'LocallyUnknown');
+      if (pending && !pending.http && !lane.binding) await this.retire(lane, 'LocallyUnknown');
       else if (lane.remintOnWelcome) {
         lane.remintOnWelcome = false;
         await this.remint(lane, this.keyedAt);
@@ -481,16 +479,19 @@ export class Client implements Transport {
   private queueCall(want: Want, args: Uint8Array, options?: CallOptions, http?: HttpRequest): Promise<Outcome<Uint8Array>> {
     const copied = copyWant(want), arg = new Uint8Array(args), {optimistic, signal, deadlineMs} = options ?? {};
     if (signal?.aborted) return Promise.reject(signal.reason);
+    const timing = this.options.onCallTiming && timeCall(this.clock, this.options.onCallTiming);
+    const binding = http ? undefined : resolveBinding(this.wants, this.kinds, copied);
     // Shown on the calling tick when Ready; the queued step still decides whether the call is sent.
-    let overlay = optimistic && this.state === 'Ready' && this.wants.some(w => sameWant(w, copied)) ? this.addOverlay(optimistic) : undefined;
+    let overlay = optimistic && this.state === 'Ready' && binding ? this.addOverlay(optimistic) : undefined;
     let queued = false;
     return new Promise((resolve, reject) => {
       let timer: unknown;
       const done = () => {
         if (timer !== undefined) this.clock.clear(timer);
         signal?.removeEventListener('abort', cancel);
+        timing?.settle();
       };
-      const call: QueuedCall = {want: copied, args: arg, slot: 0, http,
+      const call: QueuedCall = {want: copied, args: arg, binding, http, timing,
         resolve: outcome => { done(); resolve(outcome); }, reject: error => { done(); reject(error); }};
       const cancel = () => void this.enqueue(() => this.drop(call, {error: signal!.reason})).catch(() => {});
       signal?.addEventListener('abort', cancel, {once: true});
@@ -501,13 +502,13 @@ export class Client implements Transport {
       void this.enqueue(async () => {
         if (overlay) this.earlyOverlays.delete(overlay);
         if (this.state !== 'Ready') throw new ClientError(this.state);
-        call.slot = http ? 0 : this.wants.findIndex(w => sameWant(w, copied));
-        if (call.slot < 0) throw new ClientError('UnknownWant');
+        if (!http && !binding) throw new ClientError('UnknownWant');
         const recovered = http && [...this.lanes.values()].find(({record: {pending}}) => pending?.http && sameWant(pending.want, copied)
           && pending.http.path === http.path && pending.http.body === http.body);
         if (recovered) {
           if (recovered.call) throw new ClientError('AlreadySending');
           recovered.call = call;
+          timing?.admit();
           await this.pump();
           return;
         }
@@ -553,6 +554,7 @@ export class Client implements Transport {
       await this.edit(lane, record => { delete record.pending; }, state);
       if (lane.call !== call) return;
       lane.call = undefined;
+      lane.binding = undefined;
       await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
       end(deadlineRefused);
     } else {
@@ -562,9 +564,8 @@ export class Client implements Transport {
   }
   private async pump(): Promise<void> {
     if (this.phase.tag !== 'Ready') return;
-    const room = this.phase.width - [...this.lanes.values()].filter(lane => lane.record.pending).length;
-    const take: QueuedCall[] = [...this.calls].slice(0, Math.max(0, room));
-    if (take.length === 0) { await this.sendLanes(); return; }
+    const take = takeCalls(this.calls, this.lanes.values(), this.phase.width);
+    if (take.length === 0) return this.sendLanes();
     // Pending and in-flight are separate durable writes under one installation lock.
     await this.installation(async state => {
       await this.dispatch(state, take);
@@ -592,9 +593,11 @@ export class Client implements Transport {
           claimed.push({lane, stream, lease: await claimStream(this.options.storage, state, lane.stream, stream, record, false)});
         } else state.streams[lane.stream] = {...before, pending: pendingFor(before, call, state.installation)};
         lane.call = call;
+        lane.binding = call.binding;
         used.push(lane);
       }
       await this.options.storage.write(state, replaceRecords);
+      for (const call of take) call.timing?.admit();
       for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
       for (const lane of used) lane.record = state.streams[lane.stream];
     } catch (error) {
@@ -614,7 +617,7 @@ export class Client implements Transport {
       if (ours.has(n) || record.retired || record.pending || !sameCaller(record.caller, this.caller)) continue;
       const lease = await this.options.storage.lock(streamLock(state, n), false);
       if (!lease) continue;
-      recover(state, n, granted(this.options), lost(this.options));
+      recover(state, n, false, lost(this.options));
       return this.addLeased(n, state.streams[n], lease);
     }
     let stream: string;
@@ -646,7 +649,7 @@ export class Client implements Transport {
         await this.moveStream(lane, state, streamHex(id), record);
       }
       const pending = record.pending!;
-      const slot = pending.http ? pending.slot : this.wants.findIndex(w => sameWant(w, pending.want));
+      const slot = pending.http ? pending.slot : lane.binding!.slot;
       state.streams[lane.stream] = {...record, sent: true,
         pending: {...pending, slot, inflight: true, untouched: pending.untouched && !pending.inflight}};
     }
@@ -706,10 +709,6 @@ export class Client implements Transport {
     this.watchLease(lane, lease);
     await previous.release();
   }
-  private granted(lane: Lane): boolean {
-    const pending = lane.record.pending;
-    return !!pending && !pending.http && kindOf(this.options, pending.want) === 'granted';
-  }
   // Each attempt these lanes had in flight may have been delivered. A granted one may have run
   // its body, and nothing is stored to dedup a re-send, so its call ends LocallyUnknown and the
   // position stays where it was; any other is re-sent under its key.
@@ -717,7 +716,7 @@ export class Client implements Transport {
     const lost = lanes.filter(lane => lane.record.pending?.inflight);
     if (lost.length === 0) return;
     await this.installation(async state => {
-      const granted = lost.filter(lane => this.granted(lane));
+      const granted = lost.filter(lane => lane.binding?.kind === 'granted');
       for (const lane of lost) {
         const record = {...state.streams[lane.stream]};
         if (granted.includes(lane)) delete record.pending;
@@ -806,7 +805,7 @@ export class Client implements Transport {
       // Only a transact call's reply is stored at p (STORE-SPEC §1.8 P1); a compute or
       // granted answer leaves the position for the next stored call.
       if (outcome.tag === 'Returned' || outcome.tag === 'Failed')
-        plain.push({lane, outcome, advance: kindOf(this.options, lane.record.pending!.want) === 'transact'});
+        plain.push({lane, outcome, advance: lane.binding?.kind === 'transact'});
       else rest.push([lane, row]);
     }
     if (plain.length > 0) await this.completeCalls(plain);
@@ -847,6 +846,7 @@ export class Client implements Transport {
   private finish(lane: Lane, outcome: Outcome<Uint8Array>): void {
     void this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
     const call = lane.call; lane.call = undefined;
+    lane.binding = undefined;
     if (call?.overlay) {
       const overlay = this.overlays.get(call.overlay);
       if (outcome.tag === 'Returned' && overlay) overlay.done = true;

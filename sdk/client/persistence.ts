@@ -277,12 +277,12 @@ export async function leaseStreams(storage: Storage, state: Installation): Promi
 // nothing is stored for it, so an attempt that may have been delivered is reported LocallyUnknown
 // (`onLost`) and never re-sent; any other such attempt is resent
 // under its key but is no longer untouched. A stream minted by another installation is imported.
-export function recover(state: Installation, stream: string, granted: (want: Want) => boolean, onLost: () => void): boolean {
+export function recover(state: Installation, stream: string, granted: boolean, onLost: () => void): boolean {
   const before = state.streams[stream], pending = before.pending;
   const imported = before.id !== undefined && before.minter !== state.installation;
   if (!pending?.inflight && !imported) return false;
   const record = {...before};
-  if (pending?.inflight && !pending.http && granted(pending.want)) {
+  if (pending?.inflight && granted) {
     delete record.pending;
     onLost();
   } else if (pending) record.pending = {...pending, inflight: false, untouched: false};

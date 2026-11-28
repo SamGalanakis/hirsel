@@ -315,7 +315,8 @@ export async function laws(codec, only, mutant, entries, http) {
   };
   // Calls multiplex as lanes, one store stream each, at most 1+q owed at once (q from Welcome).
   tests.calls_multiplex_within_width=async()=>{
-    const h=await setup(new Memory(),{prepare:server=>{server.q=1;}});await ready(h);
+    const timings=[],kinds=['transact'];
+    const h=await setup(new Memory(),{kinds,prepare:server=>{server.q=1;},onCallTiming:timing=>timings.push(timing)});await ready(h);
     const args=bytes(7),a=h.client.call(want,args,x=>x);args[0]=0;
     const b=h.client.call(want,bytes(8),x=>x),c=h.client.call(want,bytes(9),x=>x);
     await settle();
@@ -324,14 +325,24 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.notEqual(ka,kb);
     assert.deepEqual(sent(),[[ka,0n,7],[kb,0n,8]],'the third call waits for a unit');
     // b's answer arrives first and reaches b alone; its unit sends c on b's stream at its next position.
+    kinds[0]='compute';
+    await h.time.advance(30);
     h.server.answer(h.server.sockets[0],h.server.calls[1].frame.values[0],0n,returned(80));await settle();
     assert.deepEqual(await b,returned(80));
     assert.deepEqual(sent(),[[ka,0n,7],[kb,0n,8],[kb,1n,9]]);
     const d=h.client.call(want,bytes(10),x=>x);const closed=assert.rejects(d,{code:'Closed'});await settle();
     assert.equal(h.server.calls.length,3);
+    await h.time.advance(10);
     await h.client.close();
     assert.deepEqual([await a,await c],[{tag:'LocallyUnknown'},{tag:'LocallyUnknown'}]);
-    await closed;h.server.check();
+    await closed;
+    assert.deepEqual(timings,[
+      {enqueuedAt:0,admittedAt:0,outcomeAt:30},
+      {enqueuedAt:30,outcomeAt:40},
+      {enqueuedAt:0,admittedAt:0,outcomeAt:40},
+      {enqueuedAt:0,admittedAt:30,outcomeAt:40},
+    ]);
+    h.server.check();
   };
   tests.adjacent_replies_share_a_durable_completion=async()=>{
     for(const observe of [false,true]) {

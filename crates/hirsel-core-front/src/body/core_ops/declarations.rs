@@ -23,7 +23,10 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     || matches!(entry.module, "deque" | "heap")
                     || matches!(
                         (entry.module, entry.name),
-                        ("int" | "string" | "list" | "deque", "work_steps")
+                        (
+                            "int" | "string" | "list" | "deque" | "compiler",
+                            "work_steps"
+                        )
                     )
             );
         }

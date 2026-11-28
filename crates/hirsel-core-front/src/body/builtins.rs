@@ -23,7 +23,7 @@ fn builtin_arity(module: &str, name: &str) -> Option<(usize, usize)> {
         ) => (1, 2),
         ("list" | "deque" | "heap", "slots_put" | "slots_shift") => (1, 3),
         ("list" | "deque" | "heap", "slots_move" | "slots_list_move") => (1, 5),
-        ("int" | "string" | "list" | "deque", "work_steps") => (0, 2),
+        ("int" | "string" | "list" | "deque" | "compiler", "work_steps") => (0, 2),
         ("bytebuf", "append_inline") => (1, 4),
         ("bytebuf", "freeze" | "as_bytes" | "with_tail" | "file_buffer") => (0, 1),
         ("bytebuf", "from_tail" | "file_partner") => (0, 2),
@@ -149,7 +149,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
         }
         if name == "work_steps"
-            && matches!(module, [m] if matches!(m.as_str(), "int" | "string" | "list" | "deque"))
+            && matches!(module, [m] if matches!(m.as_str(), "int" | "string" | "list" | "deque" | "compiler"))
         {
             // MEM-30's work charge for a loop written in core source: the
             // table row is named by a constant code (hirsel_core_ids

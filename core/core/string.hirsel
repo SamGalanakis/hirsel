@@ -193,63 +193,122 @@ fn utf8_back_up(b: Bytes, at: u64) -> u64 {
 // scan 128 bytes per step (`utf8_ascii_prefix`); multibyte text then validates 64
 // bytes per step in vectors (`utf8_block_prefix`) and returns the last known-good
 // scalar boundary on error so the scalar loop recovers the exact valid_up_to and
-// error_len.
+// error_len. Each stage pays its own row of the work table, a whole quantum per
+// loop iteration and the rest on leaving, so the steps are those of one charge
+// for the stage's bytes and the verifier sees a charge on every loop cycle.
 fn utf8_ascii_prefix(b: Bytes) -> u64 {
     let n = list.len(b)
     let mut i: u64 = 0
-    // Fast ASCII prefix: 128 bytes per step.
-    if n >= 128 {
-        let last_ascii = n - 128
-        while i <= last_ascii {
-            let run = list.slice(b, i, i + 128)
-            let a: Simd[u8, 32] = list.lanes(run, 0)
-            let c: Simd[u8, 32] = list.lanes(run, 32)
-            let d: Simd[u8, 32] = list.lanes(run, 64)
-            let e: Simd[u8, 32] = list.lanes(run, 96)
-            if simd.bitmask((a | c) | (d | e)) != 0 {
+    let mut paid: u64 = 0
+    // Fast ASCII prefix: two 128-byte runs, one 256-byte quantum, per step.
+    if n >= 256 {
+        let last_pair = n - 256
+        while i <= last_pair {
+            if !ascii_run(b, i) {
                 break
             }
             i = int.wrapping_add(i, 128)
-        }
-    }
-    // Finish remaining 32-byte pure ASCII blocks.
-    if n - i >= 32 {
-        let last_32 = n - 32
-        while i <= last_32 {
-            let block: Simd[u8, 32] = list.lanes(b, i)
-            if simd.bitmask(block) != 0 {
+            if !ascii_run(b, i) {
                 break
             }
-            i = int.wrapping_add(i, 32)
+            i = int.wrapping_add(i, 128)
+            work_steps(6, 256)
+            paid = int.wrapping_add(paid, 256)
         }
     }
+    if n - i >= 128 && ascii_run(b, i) {
+        i = int.wrapping_add(i, 128)
+    }
+    // Fewer than 128 bytes remain, or the next 128 hold a non-ASCII byte, so
+    // at most three whole 32-byte ASCII blocks follow.
+    if ascii_block(b, i) {
+        i = int.wrapping_add(i, 32)
+        if ascii_block(b, i) {
+            i = int.wrapping_add(i, 32)
+            if ascii_block(b, i) {
+                i = int.wrapping_add(i, 32)
+            }
+        }
+    }
+    work_steps(6, i - paid)
     i
 }
 
-// The vector stage, from the ASCII prefix's end `start`.
+// The 128 bytes at `at`, which exist, are ASCII.
+fn ascii_run(b: Bytes, at: u64) -> bool {
+    let run = list.slice(b, at, at + 128)
+    let a: Simd[u8, 32] = list.lanes(run, 0)
+    let c: Simd[u8, 32] = list.lanes(run, 32)
+    let d: Simd[u8, 32] = list.lanes(run, 64)
+    let e: Simd[u8, 32] = list.lanes(run, 96)
+    simd.bitmask((a | c) | (d | e)) == 0
+}
+
+// 32 bytes remain at `at` and are ASCII.
+fn ascii_block(b: Bytes, at: u64) -> bool {
+    if list.len(b) - at < 32 {
+        return false
+    }
+    let block: Simd[u8, 32] = list.lanes(b, at)
+    simd.bitmask(block) == 0
+}
+
+// The vector stage, from the ASCII prefix's end `start`. It pays the UTF-8 row
+// for every byte from `start`, those the scalar loop checks after it included.
 fn utf8_block_prefix(b: Bytes, start: u64) -> u64 {
+    let mut paid: u64 = 0
+    let i = utf8_blocks(b, start, mut paid)
+    work_steps(2, list.len(b) - start - paid)
+    i
+}
+
+// The end of the scalar at `i`, or `i` when no valid scalar starts there.
+fn utf8_lead_end(b: Bytes, i: u64) -> u64 {
+    let x = b[i]
+    if x < 0x80 {
+        return i + 1
+    }
+    let Some(head) = utf8_head(x) else {
+        return i
+    }
+    if let Error(_) = utf8_tail(head, list.len(b) - i, fn(offset: u64) -> u8 {
+        b[i + offset]
+    }) {
+        return i
+    }
+    i + head.width
+}
+
+// The vector stage proper, adding to `paid` the bytes its steps paid for.
+fn utf8_blocks(b: Bytes, start: u64, mut paid: u64) -> u64 {
     let n = list.len(b)
     let mut i = start
     if n - i < 64 {
         return i
     }
     // Ensure i >= 3 at a valid scalar boundary so prev1/prev2/prev3 loads at
-    // i - 1, i - 2, i - 3 stay in bounds.
-    while i < 3 {
-        let x = b[i]
-        if x < 0x80 {
-            i += 1
-            continue
-        }
-        let Some(head) = utf8_head(x) else {
+    // i - 1, i - 2, i - 3 stay in bounds. Each scalar moves i on, so at most
+    // three start below 3.
+    if i < 3 {
+        let first = utf8_lead_end(b, i)
+        if first == i {
             return i
         }
-        if let Error(_) = utf8_tail(head, n - i, fn(offset: u64) -> u8 {
-            b[i + offset]
-        }) {
-            return i
+        i = first
+        if i < 3 {
+            let second = utf8_lead_end(b, i)
+            if second == i {
+                return i
+            }
+            i = second
+            if i < 3 {
+                let third = utf8_lead_end(b, i)
+                if third == i {
+                    return i
+                }
+                i = third
+            }
         }
-        i += head.width
     }
     if n - i < 64 {
         return i
@@ -266,6 +325,9 @@ fn utf8_block_prefix(b: Bytes, start: u64) -> u64 {
     let mut base = i - 3
     let last_base = n - 67
     while base <= last_base {
+        // The 64 bytes after base + 3 exist: eight UTF-8 quanta.
+        work_steps(2, 64)
+        paid = int.wrapping_add(paid, 64)
         let win = list.slice(b, base, int.wrapping_add(base, 67))
         let v0: Simd[u8, 32] = list.lanes(win, 3)
         let v1: Simd[u8, 32] = list.lanes(win, 35)
@@ -367,17 +429,11 @@ pub fn validate_utf8(b: Bytes) -> Result[(), Utf8Error] {
     // Below the SIMD crossover, start with the scalar ASCII word scan. The ASCII
     // prefix takes the cheap row; every byte past it, multibyte vectors included,
     // the UTF-8 row.
-    let ascii: u64 = if n >= 128 {
-        utf8_ascii_prefix(b)
+    let mut i: u64 = 0
+    if n >= 128 {
+        i = utf8_block_prefix(b, utf8_ascii_prefix(b))
     } else {
-        0
-    }
-    work_steps(6, ascii)
-    work_steps(2, n - ascii)
-    let mut i: u64 = if n >= 128 {
-        utf8_block_prefix(b, ascii)
-    } else {
-        0
+        work_steps(2, n)
     }
     while i < n {
         if i & 7 == 0 {
@@ -471,8 +527,17 @@ pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)] {
         x & 0x07
     }
     let mut v: u32 = int.widen(lead)
-    for k in 1 .. w {
-        let y: u32 = int.widen(b[at + k] & 0x3F)
+    // Up to three continuation bytes, in order.
+    if w > 1 {
+        let y: u32 = int.widen(b[at + 1] & 0x3F)
+        v = (v << 6) | y
+    }
+    if w > 2 {
+        let y: u32 = int.widen(b[at + 2] & 0x3F)
+        v = (v << 6) | y
+    }
+    if w > 3 {
+        let y: u32 = int.widen(b[at + 3] & 0x3F)
         v = (v << 6) | y
     }
     // s is valid UTF-8, so v is a scalar.

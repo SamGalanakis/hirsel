@@ -348,6 +348,40 @@ fn from_utf8_steps() -> bool {
     }
 }
 
+// Lengths off the quanta, where a charge split into whole quanta and a remainder
+// must still take ceil(ascii / 256) + ceil((n - ascii) / 8) steps, `ascii` being
+// the whole 128- and 32-byte ASCII blocks before the first non-ASCII block.
+// 300 ASCII bytes: ascii = 256 + 32, so 1 + 2 + ceil(12 / 8) = 5 steps.
+// 1,000 bytes with a two-byte character at 600: ascii = 512 + 2 * 32 = 576, so
+// 1 + 3 + ceil(424 / 8) = 57 steps.
+// expect: run from_utf8_split_steps() = true
+fn from_utf8_split_steps() -> bool {
+    let mut mixed: Bytes = list.with_capacity(1000)
+    list.fill(mut mixed, 600, 0x61u8)
+    list.push(mut mixed, 0xc3u8)
+    list.push(mut mixed, 0xa9u8)
+    list.fill(mut mixed, 398, 0x61u8)
+    let mixed_short: Bytes = clone(mixed)
+    let short_ascii = input(300)
+    let short_ascii_refused = input(300)
+    let done = bound steps 5 {
+        string.from_utf8(take short_ascii)
+    }
+    let refused = bound steps 4 {
+        string.from_utf8(take short_ascii_refused)
+    }
+    let mixed_done = bound steps 57 {
+        string.from_utf8(take mixed)
+    }
+    let mixed_refused = bound steps 56 {
+        string.from_utf8(take mixed_short)
+    }
+    match (done, refused, mixed_done, mixed_refused) {
+        (Ok(Ok(_)), Error(OutOfTime(steps: 4)), Ok(Ok(_)), Error(OutOfTime(steps: 56))) => true,
+        _ => false,
+    }
+}
+
 // string.encode_base64 of 58,368 bytes: the base64 row, quantum 8, over its input
 // (7,296), and the copy row over the 77,824 bytes it appends (ceil(77,824 / 4,096) = 19):
 // 1 + 7,296 + 19 steps.

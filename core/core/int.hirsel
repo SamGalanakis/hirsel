@@ -183,7 +183,8 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
 /// Writes n's unpadded ASCII digits into the suffix of digits and returns its
 /// start offset. Radix is 2 through 36 with lowercase letters. Zero writes one
 /// digit. Fails: Fail for an invalid radix, before changing digits.
-/// Alloc: nothing. Cost: O(number of digits).
+/// Alloc: nothing. Cost: O(number of digits); a radix other than 10 takes one
+/// step per digit.
 pub fn radix_digits(n: u64, radix: u32, mut digits: Inline[u8, 64]) -> u64 {
     if radix < 2 || radix > 36 {
         fail("int.radix_digits: radix outside 2..=36")
@@ -195,6 +196,8 @@ pub fn radix_digits(n: u64, radix: u32, mut digits: Inline[u8, 64]) -> u64 {
     let mut start: u64 = 64
     let mut value = n
     loop {
+        // One walk step per digit: up to 64 for radix 2.
+        work_steps(0, 1)
         let digit: u8 = int.narrow(value % base)
         start -= 1
         digits[start] = if digit < 10 {
@@ -221,22 +224,38 @@ fn decimal_four(n: u64, mut digits: Inline[u8, 64], at: u64) {
     digits[at + 3] = int.truncate(word >> 24)
 }
 
+// Eight digits of a chunk below 10^8 at `at`. The chunk splits into two groups
+// of four and then four pairs. Each pair occupies 16 bits, so its decimal
+// arithmetic stays in its lane.
+fn decimal_eight(chunk: u64, mut digits: Inline[u8, 64], at: u64) {
+    let halves = chunk / 10000 | (chunk % 10000) << 32
+    let upper = (int.wrapping_mul(halves, 10486) >> 20) & 0x0000007F0000007F
+    let pairs = upper | int.wrapping_sub(halves, int.wrapping_mul(upper, 100)) << 16
+    let tens = (int.wrapping_mul(pairs, 103) >> 10) & 0x000F000F000F000F
+    let word = (tens | int.wrapping_sub(pairs, int.wrapping_mul(tens, 10)) << 8) | 0x3030303030303030
+    digits[at] = int.truncate(word)
+    digits[at + 1] = int.truncate(word >> 8)
+    digits[at + 2] = int.truncate(word >> 16)
+    digits[at + 3] = int.truncate(word >> 24)
+    digits[at + 4] = int.truncate(word >> 32)
+    digits[at + 5] = int.truncate(word >> 40)
+    digits[at + 6] = int.truncate(word >> 48)
+    digits[at + 7] = int.truncate(word >> 56)
+}
+
+// A u64 has at most 20 digits: at most two chunks of eight, then four, then
+// three single digits, so every step is written out and no loop needs a charge.
 fn decimal_digits(n: u64, mut digits: Inline[u8, 64]) -> u64 {
     let mut start: u64 = 64
     let mut value = n
-    // Split eight digits into two groups of four and then four pairs.
-    // Each pair occupies 16 bits, so its decimal arithmetic stays in its lane.
-    while value >= 100000000 {
-        let chunk = value % 100000000
-        value /= 100000000
+    if value >= 100000000 {
         start -= 8
-        let halves = chunk / 10000 | (chunk % 10000) << 32
-        let upper = (int.wrapping_mul(halves, 10486) >> 20) & 0x0000007F0000007F
-        let pairs = upper | int.wrapping_sub(halves, int.wrapping_mul(upper, 100)) << 16
-        let tens = (int.wrapping_mul(pairs, 103) >> 10) & 0x000F000F000F000F
-        let word = (tens | int.wrapping_sub(pairs, int.wrapping_mul(tens, 10)) << 8) | 0x3030303030303030
-        for i in 0u64 .. 8 {
-            digits[start + i] = int.truncate(word >> (i * 8))
+        decimal_eight(value % 100000000, mut digits, start)
+        value /= 100000000
+        if value >= 100000000 {
+            start -= 8
+            decimal_eight(value % 100000000, mut digits, start)
+            value /= 100000000
         }
     }
     if value >= 10000 {
@@ -249,15 +268,22 @@ fn decimal_digits(n: u64, mut digits: Inline[u8, 64]) -> u64 {
         decimal_four(value, mut digits, start)
         return start
     }
-    loop {
-        let digit: u8 = int.truncate(value % 10)
-        start -= 1
-        digits[start] = b'0' + digit
-        value /= 10
-        if value == 0 {
-            return start
-        }
+    // Below 1000: one to three digits.
+    start -= 1
+    digits[start] = b'0' + int.truncate(value % 10)
+    value /= 10
+    if value == 0 {
+        return start
     }
+    start -= 1
+    digits[start] = b'0' + int.truncate(value % 10)
+    value /= 10
+    if value == 0 {
+        return start
+    }
+    start -= 1
+    digits[start] = b'0' + int.truncate(value % 10)
+    start
 }
 
 // MEM-30's work charge for a loop in this module: `code` names a row of the

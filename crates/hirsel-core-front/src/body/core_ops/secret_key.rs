@@ -266,7 +266,9 @@ impl Cx<'_, '_, '_> {
         available: ValueId,
         n: NodeId,
     ) {
-        let Some(invalid) = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 1, n) else {
+        // Seal and derive use the u8 outcome tag. Stdin policy errors use the u32 code.
+        let tag_ty = self.b.values[tag.index()];
+        let Some(invalid) = self.runtime_compare(tag_ty, tag, 1, n) else {
             return;
         };
         let yes = self.new_block(&[]);

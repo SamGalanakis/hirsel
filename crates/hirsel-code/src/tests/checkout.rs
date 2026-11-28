@@ -38,7 +38,7 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
     let sibling = b.resolve::<Leaf>(&ContentHash([91; 32])).unwrap();
     let code = b.code::<Leaf>(&IDENTITY).unwrap();
     assert!(matches!(
-        code.register([old.candidate()]),
+        code.register([new.candidate(), sibling.candidate(), old.candidate()]),
         Err(Refusal::NoEntry)
     ));
     let selected = code
@@ -89,7 +89,22 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         worker.dispatch_registered(&second, 0, |_: Leaf| unreachable!()),
         Err::<Option<()>, _>(Refusal::NoEntry)
     );
-    drop((first, second, third));
+    // A repeated executable can serve two registrations with different bound arguments.
+    let repeated = code.register([new.candidate(), new.candidate()]).unwrap();
+    let fourth = slot.activate_checkout(third.version(), &repeated).unwrap();
+    for ordinal in [0, 1] {
+        assert_eq!(
+            worker.dispatch_entry(&fourth, ordinal, &new, |f| unsafe { f(1) }),
+            Ok(Some(22))
+        );
+    }
+    let empty = code.register([]).unwrap();
+    let fifth = slot.activate_checkout(fourth.version(), &empty).unwrap();
+    assert_eq!(
+        worker.dispatch_registered(&fifth, 0, |_: Leaf| ()),
+        Err(Refusal::NoEntry)
+    );
+    drop((first, second, third, fourth, fifth, repeated, empty));
     drop((b, code, selected, reversed));
     drop(slot);
     worker.park();

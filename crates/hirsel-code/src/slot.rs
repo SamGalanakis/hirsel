@@ -152,7 +152,48 @@ impl<F> Clone for Slot<F> {
 #[derive(Clone)]
 pub struct Registered<F> {
     code: Code<F>,
-    order: Arc<[u32]>,
+    order: RegistrationOrder,
+}
+
+/// Consecutive ordinals borrow the image's own entry order. Only a selection
+/// with gaps, repeats or reversals needs a separate array of indices.
+#[derive(Clone)]
+enum RegistrationOrder {
+    Empty,
+    Image { first: u32, last: u32 },
+    Selected(Arc<[u32]>),
+}
+
+impl RegistrationOrder {
+    fn new(mut indices: impl Iterator<Item = Result<u32, Refusal>>) -> Result<Self, Refusal> {
+        let Some(first) = indices.next().transpose()? else {
+            return Ok(Self::Empty);
+        };
+        let mut last = first;
+        while let Some(index) = indices.next().transpose()? {
+            if Some(index) != last.checked_add(1) {
+                let selected = (first..=last)
+                    .map(Ok)
+                    .chain([Ok(index)])
+                    .chain(indices)
+                    .collect::<Result<_, _>>()?;
+                return Ok(Self::Selected(selected));
+            }
+            last = index;
+        }
+        Ok(Self::Image { first, last })
+    }
+
+    fn get(&self, ordinal: usize) -> Option<u32> {
+        match self {
+            Self::Empty => None,
+            Self::Image { first, last } => {
+                let index = first.checked_add(u32::try_from(ordinal).ok()?)?;
+                (index <= *last).then_some(index)
+            }
+            Self::Selected(indices) => indices.get(ordinal).copied(),
+        }
+    }
 }
 
 impl<F> Code<F> {
@@ -162,18 +203,15 @@ impl<F> Code<F> {
         &self,
         candidates: impl IntoIterator<Item = &'a Candidate>,
     ) -> Result<Registered<F>, Refusal> {
-        let order = candidates
-            .into_iter()
-            .map(|candidate| {
-                if !std::ptr::eq(candidate.image.as_ptr(), Arc::as_ptr(&self.image)) {
-                    return Err(Refusal::NoEntry);
-                }
-                u32::try_from(candidate.index).map_err(|_| Refusal::Capacity)
-            })
-            .collect::<Result<Arc<[_]>, _>>()?;
+        let indices = candidates.into_iter().map(|candidate| {
+            if !std::ptr::eq(candidate.image.as_ptr(), Arc::as_ptr(&self.image)) {
+                return Err(Refusal::NoEntry);
+            }
+            u32::try_from(candidate.index).map_err(|_| Refusal::Capacity)
+        });
         Ok(Registered {
             code: self.clone(),
-            order,
+            order: RegistrationOrder::new(indices)?,
         })
     }
 }
@@ -201,7 +239,7 @@ impl<F: Signature> Slot<F> {
         Ok(Checkout {
             lease: Arc::clone(&self.lease),
             version,
-            order: Arc::clone(&registration.order),
+            order: registration.order.clone(),
         })
     }
 
@@ -220,7 +258,7 @@ impl<F: Signature> Slot<F> {
 pub struct Checkout {
     lease: Arc<Lease>,
     version: u64,
-    order: Arc<[u32]>,
+    order: RegistrationOrder,
 }
 
 impl Checkout {
@@ -505,7 +543,7 @@ impl Worker {
             }
             .ok_or(Refusal::NoEntry)?;
             let index = checkout.order.get(ordinal).ok_or(Refusal::NoEntry)?;
-            with(image, *index as usize)
+            with(image, index as usize)
         })
         .transpose()
     }

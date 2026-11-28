@@ -62,16 +62,7 @@ or a recipe (FFI-4). Before any process runs with the grant, the launcher writes
 `foreign: D: target T, archive sha256 E, recipe R`, with `E` the selected archive's pin and
 `R` the recipe's root (launch). The operator who passes the grant has seen what it trusts.
 
-The reasons are these. A raw pointer in a same-process callee can read, write or keep
-anything in the address space. A helper thread in the same process shares the process's
-fate. No Hirsel-side check can contain such a callee, so this chapter promises only what the
-Hirsel side enforces. In-process foreign code is for audited, pinned packages only. A
-contained boundary is required before any unaudited extension is accepted. The Wasm boundary
-is FFI-10 to FFI-16 ([contained foreign code](#contained-foreign-code)); FFI-1's trust and
-FFI-4's launch rules apply only to native modules. A restricted worker process per interface
-or package stays a later design ([reserved](reserved.md), R5). Moving only the `waits` calls out of process is not that
-boundary: the ABI lets one package use a handle from `waits` and host-stack calls alike, so a
-statement prepared on a helper could be read by a host-stack call on the calling thread, and neither process could use the other's C pointers or byte loans.
+FFI-10 to FFI-16 define the containment boundary for unaudited extensions.
 
 ## Declaring foreign code
 
@@ -339,11 +330,7 @@ The capability is on every call. Each foreign function's first parameter is `For
 no native code runs without a capability argument (CAP-1, [CAP-3](capabilities.md#cap-3-authority-is-received)).
 The argument is erased at the C boundary and passes nothing to the callee. A wrapper that
 keeps a connection open stores the capability in the resource, and the resource's finalizer
-uses it from there ([FAIL-11](failure.md#fail-11-resources)). The report that this chapter
-follows also proposed a link-policy opt-in by the root package on top of the capability. It is
-not adopted. The grant is already an explicit, per-interface decision by whoever launches the
-run, and the archive pin already binds the bytes. A second switch would gate nothing that
-these two leave open.
+uses it from there ([FAIL-11](failure.md#fail-11-resources)).
 
 ```hirsel unbuilt
 pub fn main(out: Stdout, db: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
@@ -602,7 +589,7 @@ fifth, and the queue always moves. A package whose native library needs one call
 another unissued one, such as a lock released only by a later call, cannot be audited for v1.
 SQLite meets it: two calls on one connection wait only for each other's issued C on the
 connection's mutex, it has no busy handler, its only sleep is the finite WAL read retry on
-the Directory VFS, and its file locks never block (slice 2).
+the Directory VFS, and its file locks never block.
 While a helper runs, the other tasks keep running. **Shutdown with a call in flight**: a run
 ends only after its tasks end, and a task parked in a `waits` call ends only after delivery.
 Its own cancellation and cleanup wait for C as well
@@ -687,50 +674,8 @@ code: it calls the SQLite API and gives each call the FFI-5 shape. The interface
 there. Its archive rows are `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
 `aarch64-apple-darwin`.
 
-**The pinned build.** The archive is rebuilt from the text below and from nothing else, and
-the package's directory holds the adapter source, the build script `build.sh` that runs these
-steps, and the pinned archive:
-
-- **SQLite.** Release 3.54.1 (`SQLITE_SOURCE_ID` `2026-10-16 14:45:20
-  555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76`), as the amalgamation
-  `https://sqlite.org/2026/sqlite-amalgamation-3540100.zip`, whose SHA3-256 is
-  `92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30`, as sqlite.org
-  publishes it. `build.sh` downloads it, checks that digest before unpacking, and uses its
-  `sqlite3.c` and `sqlite3.h`. The amalgamation is not vendored.
-- **Tools.** The repository's pinned LLVM 23.1.5 tree (`tools/buck2/bootstrap_llvm.py`): its
-  `clang`, `ld.lld`, `llvm-objcopy` and `llvm-ar`, and no host compiler. The
-  `aarch64-unknown-linux-gnu` row reads the pinned Arm sysroot's glibc headers
-  (`HIRSEL_AARCH64_SYSROOT`); the `aarch64-apple-darwin` row reads the pinned Zig's Darwin
-  headers (`lib/libc/include/any-darwin-any` at the link kit's Zig commit,
-  `ZIG_DARWIN_INCLUDE`).
-- **Options.** `-DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=1 -DSQLITE_TEMP_STORE=3
-  -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME
-  -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1`, and no other
-  `SQLITE_` option and no extension.
-- **Steps.** For each ELF row `T`, and each of `sqlite3.c`, `hirsel_sqlite.c` and `hirsel_sqlite_os.c`: `clang --target=T -std=c11 -O2
-  -fPIC -fno-ident -ffile-prefix-map=$PWD=. OPTIONS -c F.c -o F.o`. Then `ld.lld -r sqlite3.o
-  hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o`; `llvm-objcopy --wildcard --keep-global-symbol='hsq_*' hsq.o`,
-  which makes every SQLite symbol local so the one member's global definitions all carry the
-  prefix (FFI-3); and `llvm-ar rcs libhirsel_sqlite.a hsq.o`, which writes no timestamps or
-  owners. The `aarch64-unknown-linux-gnu` row is `libhirsel_sqlite-aarch64-unknown-linux-gnu.a`,
-  built alike with `--sysroot`. ld64 has no relocatable link that makes symbols local, so the
-  `aarch64-apple-darwin` row compiles one unit that includes the three files with
-  `SQLITE_API`, and the OS layer's shared names, `static`: `clang
-  --target=arm64-apple-macos26.0 -nostdlibinc -isystem DARWIN -std=c11 -O2 -fno-ident
-  -D_FORTIFY_SOURCE=0 -DSQLITE_WITHOUT_ZONEMALLOC OPTIONS`, then `llvm-ar --format=darwin rcs
-  libhirsel_sqlite-aarch64-apple-darwin.a`. On Darwin the adapter syncs with
-  `fcntl(F_FULLFSYNC)`, never `fsync`, and opens beneath its directory with `openat` and
-  `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY`. The build is byte-reproducible: two runs give one SHA-256, and the pin is that
-  digest. The adapter includes the header that `hirsel inspect --foreign-header
-  hirsel.ai/sqlite@1/native` prints, and expands `HIRSEL_ABI_TEXT` once (FFI-3).
-- **Native laws.** `build.sh --test DIR` builds no archive: it links `native_laws.c` against
-  the checked-in archive, with the SQLite symbols the laws call made global again and `fcntl`
-  wrapped to time a peer's release, and runs it in a fresh directory under `DIR`. Its cases
-  are the `-shm` allocation law (it needs `DIR` on a filesystem with 32 to 64 KiB free, such
-  as a `tmpfs` mounted with `size=64k`), the three dead-man opener cases, the trusted-schema
-  and persistent-prepare settings, `POWERSAFE_OVERWRITE` clear, and the two `xSleep`s.
-  `//:core-sqlite-native-laws` runs it on the host, in a 64 KiB tmpfs the test launcher
-  mounts, with `SQLITE_HEADER` naming 3.54.1's `sqlite3.h` in place of the fetched amalgamation.
+The [SQLite build script](../../core/programs/sqlite/build.sh) owns the archive recipe.
+The [native laws](../../core/programs/sqlite/native_laws.c) check the adapter.
 
 `SQLITE_THREADSAFE=1` (serialized) is chosen because tasks move between threads, helpers are
 threads, and a statement and its connection are separate handles that two tasks may use at
@@ -760,7 +705,7 @@ and `sqlite3_os_end`, and it registers its VFSes itself. SQLite gets no ambient 
   needs the time binds a value from `Clock`.
 - No busy handler is installed, so a busy database returns `SQLITE_BUSY` at once. The memory
   VFS's `xSleep` returns at once, having slept 0 microseconds. The Directory VFS's `xSleep`
-  (slice 2) sleeps the requested microseconds with `nanosleep` and returns them: its only
+  sleeps the requested microseconds with `nanosleep` and returns them: its only
   caller is SQLite's finite WAL read retry, whose delays total under 10 seconds before it
   returns `SQLITE_PROTOCOL`, and it runs on the call's helper thread, never a scheduler
   thread. File locks stay nonblocking.
@@ -782,7 +727,7 @@ and `sqlite3_os_end`, and it registers its VFSes itself. SQLite gets no ambient 
   functions or virtual tables that are not marked innocuous.
 
 **The control record.** A `DbHandle`'s pointer is the adapter's control record, not the
-`sqlite3 *`: it holds the connection, a reference count and, in slice 2, the connection's VFS
+`sqlite3 *`: it holds the connection, a reference count and, the connection's VFS
 context. A `StmtHandle`'s pointer is a statement record holding the `sqlite3_stmt *`, a
 pointer to its connection's control record, the statement's column count and its **row
 state**. A connection's count is one for its `DbHandle` and one for each statement prepared on
@@ -795,7 +740,7 @@ SQLite zombie connection is ever made. A release reports only a code. The messag
 comes from `sqlite3_errstr(code)`, which reads no connection, through the native function
 `errstr` below.
 
-### Slice 1: in-memory databases
+### In-memory databases
 
 The only VFS is `hirsel-none`. Its `xOpen` refuses every name with `SQLITE_CANTOPEN`, its
 `xAccess` reports every name as absent, and its `xDelete` returns `SQLITE_IOERR_DELETE`. A
@@ -949,7 +894,7 @@ pub fn errstr(f: Foreign[sqlite.Sqlite], code: i32, mut e: Bytes)
   `sqlite3_interrupt`, progress-handler budgets and a heap limit are later work
   ([reserved](reserved.md), R5).
 
-### Slice 2: databases in a granted directory
+### Databases in a granted directory
 
 Slice 2 adds persistent databases under a granted `Dir`. Every file that SQLite opens, deletes
 or checks for the database goes through that directory: the database, its rollback journal,
@@ -1044,73 +989,9 @@ its WAL and its `-shm`. Temporary files never reach a directory.
 
 ## Laws
 
-Each law's expected value comes from this chapter, from a published test vector, from SQLite's
-documented result codes or from the fixture's own counters. None comes from a run's output.
-Every law that runs code runs on both native backends. Laws FL1 to FL7, FL12 to FL18 and FL23
-use the fixture package `ffi_laws` in the program tests, with interface `Laws` and handle kind
-`Obj`, both in module `laws`. Its adapter `laws.c`, prefix `hfl_`, owns a static pool of 8 one-byte cells, and a
-freed cell is the first one reused, so a `make` after a `free` returns the same address. It
-defines:
-
-- `make(f) -> Option[foreign.Ptr[Obj]]` and `make_w`, the same declared `waits`: take a cell,
-  store in it the count of makes so far plus 1, increment `made`, and return the cell;
-- `free(f, take p) -> i32`, declared `waits`, the kind's release: write `freed K` and a line
-  feed to file descriptor 2 with `write(2)`, `K` the cell's stored count, return the cell to
-  the pool, increment `freed` and return 0;
-- `freed(f) -> u64` and `made(f) -> u64`;
-- `same(f, p) -> Option[foreign.Ptr[Obj]]`, with `p` a handle in use, declared `waits`: return `p`'s own pointer;
-- `mark(f, mut b) -> u64` and `mark_w`, the same declared `waits`: write `0xAB` to each of the
-  loan's `len` bytes and return `len`;
-- `loan_length(f, b: Bytes) -> u64` returns the length of the immutable loan, and
-  `loan_sum(f, b: Bytes) -> u64` returns the sum of its bytes;
-- `gate(f, on: u32) -> i32`, on the host stack: sets or clears the gate that FL17 uses;
-- `touch(f) -> i32`: write `touched` and a line feed to file descriptor 2 and return 0;
-- `hold(f) -> i32`, declared `waits`: increment `held`, then wait on a semaphore; `held(f) ->
-  u64`; and `open(f, n: u32) -> i32`, on the host stack, which posts the semaphore `n` times.
-  `hold` breaks FFI-7's progress clause on purpose, and only `open`, which needs no helper,
-  ends its wait.
-
-A **refusal case** is a multi-package case in the program tests' case harness
-(`crates/hirsel-core-program-tests/src/cases.rs`, under `core/front/cases/ffi/`), with a real
-foreign manifest, and its diagnostic is checked at the stated site. The `` ```hirsel unbuilt ``
-fences of this chapter stay documentation.
-
-| law | bug | oracle and setup |
-|---|---|---|
-| **FL1** a wrong archive digest | a pin checked after linking, or not at all | `ffi_laws`' x86_64 row names a file whose bytes are exactly `abc`, pinned to the SHA-256 of the empty string. `hirsel build` of an entry that calls `native.make` is refused with `FFI-3: archive F of ffi_laws@1/native for x86_64-unknown-linux-gnu does not match its pin: expected sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855, found sha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad` (FIPS 180-2 vectors), and the linker is never started. With the pin changed to `ba78…15ad`, the same build is refused with `… is not an indexed ar archive`, so the digest is checked before the bytes are parsed. |
-| **FL2** a missing target row | a missing row passed through as a linker error, or a row required when nothing is reached | With only the x86_64 row, `hirsel build --target aarch64-unknown-linux-gnu` of the FL1 entry, with its real pin, is refused with `FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for x86_64-unknown-linux-gnu`, before the linker starts. An entry of the same package that never names `native` gets no FFI-3 refusal for aarch64. This is a negative test: it gives no AArch64 coverage. |
-| **FL3** double release | a second release that reaches C | A test takes `f: Foreign[Laws]`, makes `p` with `native.make`, calls `native.free(f, p)`, then calls `native.free(f, p)` again inside an `isolate`. The `isolate` returns `Ok(Error(causes))`, with primary cause `Fail("foreign handle released")` at the second `free`, and then `native.freed(f)` returns 1. |
-| **FL4** stale use and a racing release | a released handle's pointer passed to C, a copy that escapes the check, or two releases that both reach C | As FL3, but the second call is `native.free(f, q)`, where `q` is a copy of `p` that a resource field held: the same cause, and `freed` returns 1. Then two `send` resources `ObjBox` of the fixture each hold a copy of one fresh handle (the fixture breaks FFI-6's one-field rule on purpose), each moves into its own task, and both tasks release it at once with `close_obj`: one returns 0, the other fails with `Fail("foreign handle released")` (it waited for the first and found it consumed, FFI-6), never `in use`, and `freed` returns 2. |
-| **FL5** byte loans preserve length, storage and range | capacity passed as the length, storage that moves while a helper writes it, or a read beyond an immutable slice | `let mut b: Bytes = list.with_capacity(16)`, then `list.fill(mut b, 4, 0)`. `native.mark(f, mut b)` returns 4. Afterwards `list.len(b)` is 4 and every byte of `b` is `0xAB`. Then `list.push(mut b, 0)` admits nothing, because the capacity is still 16. An empty `b` gives `mark` 0, and the adapter checks that `ptr` is not `NULL`. In a separate test, fill an owned `Bytes` list `d` with four zero bytes. `native.mark_w(f, mut d)` returns 4 while another task runs 10⁴ allocations. Afterwards every byte of `d` is `0xAB`. For the immutable range test, fill `c: Bytes` with the twelve values 0 through 11 and pass `list.slice(c, 4, 8)` to `native.loan_length` and `native.loan_sum`. They return 4 and 22, the length and sum of bytes 4 through 7. |
-| **FL6** an FFI-reaching test refused a cached pass | a pass key made for a test whose reach holds C | A parameterless test calls `probe(None)`, where `fn probe(f: Option[Foreign[Laws]]) -> u64 { match f { Some(f) => native.freed(f), None => 0 } }`, and passes. Run `hirsel test` twice with one cache: both runs report it executed, and neither reports it reused. A parameterless test beside it that does not call `probe` is reported reused on the second run. The same holds when the only path to `native` is a resource's finalizer, on a fresh and on a warm reach record. |
-| **FL7** recording and replay refused before C runs | a live recording half, a recording host or a stored replay that enters native code | `hirsel test --replay` of a test that calls `native.touch` fails with a line ending `refused: FFI-8: a recording build cannot reach foreign code: ffi_laws@1/tests/touches reaches ffi_laws@1/native/touch`. Its stderr holds no `touched`, and no recording file exists. `hirsel tape replay` of an entry that reaches `touch`, given any tape path, exits 2 with `replay: refused: FFI-8: …` and does not open the tape. `hirsel build --recording` is refused the same way. A deploy of that entry's recipe to a recording group exits 2 with `FFI-8: a recording build cannot reach foreign code: …`, the group keeps serving its old image, and the host's code store gains no copy of the recipe; `hirsel deploy --create SPEC` with `recording` enabled exits 2 with `FFI-8: …` and creates neither the recording directory nor any host state. `hirsel tape replay --state` given a host state whose assembly record holds that recipe, and a tape whose routing header names it and whose records after the header are not valid records, exits 2 with `replay: refused: FFI-8: …`, not a tape error. |
-| **FL8** SQLite round trip | a loan, `SQLITE_TRANSIENT` or `NULL`/empty mistake | In `sqlite`'s own tests, with grant `Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite`: create `t(b blob)`, insert `x''`, `NULL` and `x'00ff'` with `bind_bytes` and `bind_null`, after which the bound list is cleared and refilled. Selecting in insertion order gives `Blob` with 0 bytes, `Null`, and `Blob` with `00 ff`. |
-| **FL9** SQLite release paths | a finalizer that runs after an explicit release, a busy close, or a last release that frees the mutex it reports through | Four tests, each preparing `s` from `select 1` on a fresh connection `db`: (a) `finalize(take s)` then `close(take db)`; (b) `close(take db)` then `finalize(take s)`; (c) `close(take db)` with `s` dropped at scope end; (d) both dropped at scope end, in either order. Every explicit call returns `Ok(())`. In (b), `step(mut s)` between the two calls still returns `Row`, because the connection stays open until its count is zero. With `s` from `select abs(-9223372036854775808)` stepped once, so its last result is an error, `close(take db)` returns `Ok(())` and `finalize(take s)` then returns `Error(SqliteError(code: 1, message: "SQL logic error"))`, `sqlite3_errstr(1)`'s text; each test passes with no cause, so no finalizer met a consumed handle. |
-| **FL10** no ambient input | the OS layer, libc or a pragma reading or changing process state | `select random()` returns the same value in two runs of a fresh process. `select date('now')`, `select datetime(0, 'localtime')` and `select datetime(0, 'utc')` each return `NULL`. `attach ':memory:' as x` fails at `prepare` with code 23, and `vacuum` and `vacuum into 'x.db'` fail at `step` with code 23 (`SQLITE_AUTH`). `pragma temp_store_directory = '/tmp'` and `pragma soft_heap_limit = 1` fail with code 23. |
-| **FL11** directory confinement (slice 2) | a sidecar, temp file, super-journal or attach outside the grant | In a granted scratch `Dir` whose parent holds a sentinel directory: open `a.db`, run a WAL transaction from two connections, then a rollback-journal transaction. The files created are exactly `a.db`, `a.db-wal` and `a.db-shm` (WAL), and `a.db-journal` only while the journal transaction runs. The parent and the sentinel are unchanged. `open(f, d, "../x")` and `open(f, d, "file:a.db?vfs=unix")` give code 14 before C runs. A hot journal whose super-journal name is `/tmp/evil` fails recovery with `SQLITE_CANTOPEN` and opens no file outside. A `sort` over 10⁶ rows creates no file. Two connections to one leaf under two grants of different directories each see only their own rows. |
-| **FL12** an archive whose code is outside its pin | a thin archive, or a member that is not a relocatable object, admitted because its digest matches | `ffi_laws`' x86_64 row names an indexed thin archive made with `ar --thin` from the adapter's `laws.o`, which lies beside it, pinned to the thin archive's true SHA-256. `hirsel build` of the FL1 entry is refused with `FFI-3: archive F of ffi_laws@1/native for x86_64-unknown-linux-gnu is a thin archive; its members are not inside the pinned bytes`, and the linker is never started. With the row naming a regular archive whose one member is `laws.o` compiled for `aarch64`, again with its true pin, the refusal is `… member laws.o is not a relocatable object for x86_64-unknown-linux-gnu`. With a regular x86_64 archive whose index lists `hfl_make` but whose member does not define it, the refusal is `… does not define hfl_make, declared at SITE`. |
-| **FL13** a recipe-only build of a foreign program | a recipe from which a reader cannot recompute the foreign address, or one that links archives the leaves do not select | `ffi_laws` gets a second row, `aarch64-unknown-linux-gnu`, naming any file with its true pin. `hirsel build --emit recipe --code-store DIR` of the FL1 entry for x86_64 prints R. Delete the package's directory: `hirsel build --recipe R --code-store DIR` succeeds, and the executable's `native.make` call works. Change only the aarch64 row's bytes and pin and publish again: the new R differs from R (FFI-9), and it builds from the code store alone the same way. A recipe made from R's bytes by removing the x86_64 archive's entry from its foreign archives part, with its objects in the store, is refused as `Missing`, and one made by adding the aarch64 archive's entry as `Extra`. |
-| **FL14** archive code that runs with no grant | an initializer, an indirect function or an out-of-prefix symbol admitted, so C runs before main or with no call | Each archive below has its true pin, and a parameterless test of `ffi_laws` that never names `native` sits beside the FL1 entry. `laws.c` plus `__attribute__((constructor)) static void hfl_c(void) { write(2, "ctor\n", 5); }` makes the build of the FL1 entry refused with `FFI-3: archive F of ffi_laws@1/native for x86_64-unknown-linux-gnu: member laws.o has section .init_array of type SHT_INIT_ARRAY, which is not an admitted object feature` before linking. With the same archive, `hirsel test` of the package, whose tests are the parameterless one and one that takes `Foreign[Laws]`, is refused at its build with the same text, and its output holds no `ctor`. An archive with a prefixed symbol `hfl_unique` bound as `STB_GNU_UNIQUE` is refused with `… member laws.o has symbol hfl_unique with binding STB_GNU_UNIQUE, which is not an admitted object feature`. An archive defining the global `malloc` is refused with `… member laws.o defines malloc, which does not start with the prefix hfl_`. One defining `hfl_x` as an `ifunc` is refused with `… has indirect function hfl_x, …`. |
-| **FL15** a header that disagrees with its archive | a wrapper whose header says `handle` or `u64` where the audited C takes `take` or a loan | `ffi_laws`' header declares `free(f, p: foreign.Ptr[Obj]) -> i32 waits` (no `take`), while the archive's `.hirsel_abi` comes from the true header. `make` still makes `Obj`, so its first use of the kind is refused with FFI-5 because the kind has no release. No archive is admitted. An archive with no `.hirsel_abi` is refused with `… has no ABI text`. A refusal case with two kinds `A` and `B` in one package stores a `foreign.Ptr[A]` in a field of type `foreign.Ptr[B]` and is refused at that field by the type checker. |
-| **FL16** a lost or misplaced release | a cancelled close, a failed finalizer or an un-released local that leaks or double-releases | (a) A task with a cancellation already requested calls `close_obj(take o)`, where `o: ObjBox` holds `p` and `close_obj` destructures it and calls `native.free`: `free` is issued and returns, `freed` rises by 1, and the task's next cancellation point fails with `Cancelled`. (b) `ObjBox`'s finalizer variant `drop(o) { fail("x") }`: after the box is dropped, `freed` has risen by 1, by the mechanical release, and the finalizer's cause is reported (FAIL-12). (c) `hirsel run` of an entry that makes three handles with `native.make` into locals and returns: stderr ends with exactly `freed 3`, `freed 2`, `freed 1` on three lines, in descending ordinal order. |
-| **FL17** an address reused or handed back | a released pointer that leaves the index only at delivery, refusing a new object made at its address while the release is still in C, or a returned pointer that aliases a live owner | With `gate(f, 1)` set (a host-stack fixture function after which `free` returns its cell to the pool, increments `held` and then waits on the semaphore before returning), a task makes `p` with `make` and calls `free(f, p)`. The test calls `held` until it returns 1, so the release is in C with the cell already free, and then calls `q = make` on the host stack: `q` is accepted though the pool returned `p`'s cell, because `p`'s pointer left the index at issue. `open(f, 1)` ends the release; `made` returns 2 and `freed` 1. With `gate(f, 0)`, `native.same(f, q)` fails with `Fail("foreign pointer already held")`, `made` is unchanged, and `free(f, q)` then returns 0 and `freed` returns 2. A refusal case binds `ffi_laws`' `make` in a second interface's module, naming `Obj` there too, and is refused at the second (FFI-6). |
-| **FL18** a full helper pool | four calls holding every helper and starving a fifth, a lost queue entry, or a cancellation in the queue that leaves a handle in flight | Four tasks call `hold`; the test calls `held` on the host stack until it returns 4. In a `hirsel run` entry, a fifth task makes its own `p` with `make` on the host stack, the `K`-th make, and calls `native.same(f, p)`; a sixth calls `make_w`; both wait in the queue. Cancelling the fifth makes it fail with `Cancelled`, whether it was observed at entry or in the queue. Then `open(f, 4)` ends the four holds, every task ends, and the sixth's `make_w` returns a handle with `made` one more than before. The run's stderr then holds `freed K`, written by run-end release, so the cancelled call left `p` live, not in flight. |
-| **FL19** a SQLite column read with no row, or an unsafe SQL input | C reading a column with no current row or out of range, a C string reader past the loan, or a second statement prepared silently | `column_i64` right after `prepare` fails with `fail("sqlite: no current row")`; after `step` returns `Done`, the same; with a row of 1 column, `column_i64(mut s, 1)` fails with `fail("sqlite: column index out of range")`; `bind_i64(mut s, 0, 1)` gives `Error(SqliteError(code: 25, message: "sqlite: parameter index out of range"))`. `exec` of the bytes `create table t(x); `, a zero byte and `drop table t` gives `SqliteError(code: 1, message: "sqlite: SQL holds a zero byte")` and `t` does not exist afterwards. `prepare` of `select 1; select 2` gives `Error(SqliteError(code: 1, message: "sqlite: prepare takes one statement"))`, `prepare` of ` -- c` gives `… "sqlite: no statement"`, and `exec` of ` -- c` gives `Ok(())`. |
-| **FL20** a SQLite error message at the buffer's edge | a scan past the buffer, a cut inside a character, or a code decoded with the wrong width | In `sqlite`'s own tests through its private `read_error`: a buffer whose bytes 0 to 3 are `01 00 00 00` and bytes 4 to 259 are 256 `a`s decodes to code 1 and a 256-byte message; bytes 0 to 3 `0a 04 00 00` decode to code 1034 (`SQLITE_IOERR_FSYNC`, 10 + 4 · 256) and bytes `ff ff ff ff` to code −1; bytes 4 and 5 `c3 28` decode to `"sqlite: error text is not UTF-8"` and an all-zero payload to `"sqlite: no error text"`. Through the adapter: `prepare` of `select * from ` followed by 240 `a`s and `é` (`c3 a9`) fails with code 1 and the message `no such table: ` and the 240 `a`s, 255 bytes: SQLite's message is 257 bytes, and a cut at 256 would split the `é`. |
-| **FL21** SQLite contention from two tasks (`Db` and `Stmt` are `send`) | a bind or column call that blocks a scheduler thread on the connection's mutex, or an error message replaced between the failing call and its read | Two tasks each hold a statement of one connection, one stepping `with recursive c(x) as (select 1 union all select x+1 from c where x < 10⁶) select count(*) from c` and the other binding and stepping `select ?1` 1000 times; both return their expected values (10⁶, and each bound value), and a third task with no SQLite call finishes while they run on a 1-thread scheduler. With `create table u(x unique)` holding 1, a step of `insert into u values (1)` in one task while the other task's statements succeed on the same connection returns `SqliteError(code: 2067, message: "UNIQUE constraint failed: u.x")` (`SQLITE_CONSTRAINT_UNIQUE`, 19 + 8 · 256). |
-| **FL22** SQLite in a granted directory under contention (slice 2) | a lock released by a sibling's close, a second writer admitted, a stale `-shm` read, a read-only `Dir` that writes, or a sync error dropped | With `a.db` in a scratch `Dir`: two connections in one process both begin `immediate`; the second gets `SQLITE_BUSY` (5) at once. Closing a third connection to `a.db` while the first holds its write lock leaves the lock held: the second still gets 5. A second process does the same. Opening `a.db` through a read-only grant and running `insert` gives `SQLITE_READONLY` (8), and the directory's bytes are unchanged; with `a.db` in WAL mode, `open` through the read-only grant succeeds and its first `select` fails with `SQLITE_CANTOPEN` (14). A `-shm` file of 32 KiB of `0xFF` left by a killed process is truncated by the next first opener, which reads the database correctly. A hard link `b.db` to `a.db` makes `open(f, d, "a.db")` fail with code 14. |
-| **FL23** a raw handle that escapes its owner | a handle reached outside its owner through projection, inference, a generic argument or a capture | Refusal cases in package `ffi_laws`, each refused with FFI-6 at the stated site: `pub resource type Open { f: Foreign[Laws], p: foreign.Ptr[Obj] } drop(o) { let _ = native.free(o.f, o.p) }`, which is not `opaque`, at the type; `let l: List[foreign.Ptr[Obj]] = list.new()`, where the binding supplies the expected type (LANG-11), at the raw handle element type; `fn id[T: plain](x: T) -> T { x }` called as `id(p)`, at the call, for its inferred type argument; and a closure that names `p` in its body, at the capture. Accepted: `fn keep(o: ObjBox) -> List[ObjBox]`, because an owning resource holds no raw handle, and `let q = p` with `q` then unused, after which `freed` is unchanged. |
-
-## Build slices
-
-1. FFI-1 to FFI-9 with the in-memory `sqlite` package (slice 1), and laws FL1 to FL10, FL12 to
-   FL21 and FL23. Slice 1 is done only when every one of them passes on both native backends.
-2. The `Dir` ABI form and the per-connection `hirsel-dir` VFS (slice 2), and laws FL11 and FL22.
-   Slice 2 is enabled only when they pass on both native backends.
-
-A red law whose cause is memory safety, a release (one too few or too many), containment of
-foreign code or of SQLite's files, or data integrity blocks its slice, whatever the law's
-number. A slice whose law is red for such a cause does not ship.
+The [native FFI fixture](../../core/programs/ffi_laws/), [front refusal cases](../../core/front/cases/ffi/)
+and [SQLite fixtures](../../core/programs/sqlite/) own the native laws.
+[Native verification](../../core/programs/ffi_laws/VERIFICATION.md) lists their oracles.
 
 ## Contained foreign code
 
@@ -1137,21 +1018,6 @@ contained `Foreign[I]` grant from its test configuration alone. Deploy accepts t
 contained binding, and the driver emits no `foreign:` line for it (FFI-14). A build
 keeps each artifact in its part cache (FFI-15 Caching), and a recipe pins the module
 and rebuilds it from the code store (FFI-16). Darwin images remain planned for W2.
-
-Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
-contained-foreign-review-2903: the artifact is loaded in place from the image's executable
-segment through a custom code memory (FFI-15 Loading); one fuel-granule mechanism gives exact
-steps at return, a bounded charge at a trap, a bound enforced before each bulk operation, and
-slice ends that follow the build (FFI-13 Steps); the cache key holds the toolchain image
-(FFI-15 Caching); contained tests are not reused (FFI-14 Replay); the fixture and laws FW3,
-FW7 to FW12, FW16 and FW17 are rebuilt, and FW21 to FW28 added (contained laws); the runtime
-links no compiler (FFI-15 The pin); the admitted feature set is one named constant (FFI-11);
-and the opening claim on memory is narrowed (above). The open items O1 to O17 are ruled
-(Rulings).
-
-The section has one acceptance consumer, the fixture package `wasm_laws` (laws FW1 to FW28).
-It is not a port of `sqlite`. SQLite's slice 2 needs a `Dir`, and a contained module has none
-(FFI-12).
 
 ### FFI-10: Contained modules and their build
 
@@ -1195,10 +1061,6 @@ these:
   pinned wasi-libc sysroot. Its WASI imports are then held to the null imports below.
 - **Rust**: `cargo build --target wasm32-unknown-unknown --release` with `panic = "abort"`, or
   `wasm32-wasip1` held to the null imports.
-
-The brief asked for "wasm32-wasip-none". No such triple exists. The two triples above are the
-real ones: `wasm32-unknown-unknown`, which has no imports, and `wasm32-wasip1`, which uses
-WASI preview 1 and has no capabilities here.
 
 The adapter includes the header that `hirsel inspect --foreign-header P` prints. For a
 contained module, that header declares every pointer as a 32-bit linear-memory address and
@@ -1680,10 +1542,6 @@ calls the custom memory and writes nothing to the text. An artifact whose text h
 is refused at load (code_memory.rs:178-192), and `precompile_module` makes none. So no
 executable memory is mapped or written at run time, on any target (O3).
 
-This loader was checked with a scratch program on x86-64 Linux only: a runtime-only build
-(`runtime`, `async`, `std`) loaded a 11,168-byte artifact from a 64 KiB-aligned object in the
-image's `.text`, instantiated it and ran it. The AArch64 rows are checked at W1 and W2.
-
 Wasmtime marks `deserialize_raw` `unsafe` because a modified artifact can run arbitrary code,
 and says it may be "considered safe" only for the unmodified output of `precompile_module`.
 The image is the toolchain's own output, as its native code is. The run never deserializes
@@ -1728,187 +1586,6 @@ this module, and every host assembly compiles the module for its own target (FFI
 
 ### Contained laws
 
-Each law's expected value comes from this section, the WebAssembly specification, Wasmtime's
-documented behaviour, or the fixture's own source. None comes from a run's output. Each law runs
-on both native backends, on x86-64 and AArch64 Linux. The fixture package `wasm_laws`, with
-interface `Box` and kind `Cell`, has a module `box.wasm` built by its `build.sh` from `box.c`
-with prefix `hwl_`. Its `build.sh` compiles `box.c` with clang 21 as FFI-10 says, and
-assembles `box_traps.s`, written in LLVM's WebAssembly assembly, with the same clang. The
-repository's pinned LLVM tree builds only the X86 and AArch64 targets, so `build.sh` takes an
-LLVM 21 clang, `wasm-ld` and `llvm-objcopy` that have the WebAssembly target from the
-environment. `wasm-ld` links both with `--initial-memory=131072` <!-- doc-ref: external -->,
-`-z stack-size=16384` <!-- doc-ref: external -->, `--stack-first` <!-- doc-ref: external --> and
-`--table-base=3` <!-- doc-ref: external -->, so the memory's 2 pages and the table's 4 elements
-are stated link inputs, and the stack and static data lie in the first page.
-The functions whose operators a law counts are written in `box_traps.s`, so no optimizer
-folds a loop, removes a recursion or chooses the trapping operator: at `-O2`, a C loop that
-returns `n` folds to `return n`, and signed overflow, a wild load and a mistyped indirect call
-are undefined behaviour in C. The module imports exactly two null imports,
-`wasi_snapshot_preview1.clock_time_get` and `wasi_snapshot_preview1.proc_exit` (declared in
-`box.c` with clang's `import_module` and `import_name` attributes), defines one table of 4
-`funcref` elements (slots 0 to 2 null, slot 3 a function of type `[] -> []`), and
-exports:
-
-- `make(f) -> Option[foreign.Ptr[Cell]]` and `free(f, take p) -> i32`, which use a static pool
-  of 8 cells, and `live(f) -> u64`, the number of cells in use (`box.c`);
-- `spin(f, n: u64) -> u64`, which loops `n` times and returns `n` (`box_traps.s`);
-- `straight(f) -> i32`, which runs 2,000 `i32.const 1; i32.add` pairs, 4,000 straight-line
-  operators with no loop and no call, from 0, and returns 2,000 (`box_traps.s`);
-- `straight_trap(f) -> i32`, which runs the same operators and ends in `unreachable`
-  (`box_traps.s`);
-- `loop_div(f, n: u64) -> i32`, which loops `n` times with no call and then executes
-  `i32.div_u` of 1 by 0 (`box_traps.s`);
-- `fill_mem(f, n: u32) -> u32`, which executes one `memory.fill` of `n` bytes of `0xAB` at
-  address 65,536 and returns the byte there (`box_traps.s`);
-- `grow(f, pages: u32) -> i32`, which returns `memory.grow`'s result;
-- `tgrow(f, n: u64) -> i32`, which `n` times asks `table.grow` for `2^32 − 1` null elements,
-  each refused with −1 but charged its requested count, and returns the last answer
-  (`box_traps.s`);
-- `fill(f, mut b: Bytes) -> u64`, which writes `0xAB` to each byte, and `sum(f, b: Bytes) ->
-  u64`;
-- `nan32(f) -> f32`, which returns `f32.reinterpret_i32(0x7fa00001)`, a NaN that no float
-  operator made (`box_traps.s`);
-- `div_bits(f, a: f64, b: f64) -> u64`, which executes `f64.div` of `a` by `b` in the guest,
-  stores the quotient to memory and returns its bits read back as an `i64` (`box_traps.s`);
-- `trap(f, k: u32) -> i32`, which for `k` from 1 to 10 traps as row `k` of FFI-14's table, in
-  its order (`box_traps.s`): `unreachable`; an `i32.load` at `0xFFFFFFF0`; `call_indirect` of
-  slot 4; of slot 0; of slot 3 with type `[] -> [i32]`; `i32.div_s` of `-2^31` by `-1`;
-  `i32.div_u` by 0; `i32.trunc_f32_s` of a NaN; a call of `recurse` with depth `2^32 − 1`; and
-  `proc_exit(7)`;
-- `clock(f) -> i32`, which calls `clock_time_get(0, 1, a)` with an address `a` in its static
-  data and returns the answer;
-- `count(f) -> u64`, the number of entries so far into the instance's exported functions other
-  than `loan_area`, this one included;
-- `fill_trap(f, mut b: Bytes) -> u64`, which writes `0xAB` to each byte and then executes
-  `unreachable`;
-- `set_area(f, mode: u32) -> i32`: with mode 1, `loan_area` from then on returns the memory's
-  size in bytes minus 8, which is a multiple of 8 but leaves no room for 16 bytes;
-- `recurse(f, d: u32) -> u32`, which recurses `d` frames deep and returns `d`, holding its
-  depth in Wasm locals only (`box_traps.s`);
-- `loan_area(n)`, which in mode 0 returns the address of a static 4,096-byte area, and traps
-  when `n` is larger.
-
-`box.wasm` declares an initial memory of 2 pages and no maximum, and one table of 4 elements.
-At instantiation they are charged 131,072 + 32 = 131,104 bytes (FFI-13 Bytes).
-
-Refusal cases live under `core/front/cases/ffi/` in the existing case harness, with real
-manifests.
-
-| law | bug | oracle and setup |
-|---|---|---|
-| **FW1** a wrong module digest | a pin checked after parsing or not at all | The row names a file of exactly `abc` pinned to the empty string's SHA-256. The build is refused with `FFI-11: module F of wasm_laws@1/native does not match its pin: expected sha256 e3b0…b855, found sha256 ba78…15ad` (FIPS 180-2). With the true pin, it is refused as `not a core WebAssembly module`. |
-| **FW2** a component, or a disabled proposal | a validator run with Wasmtime's default features | A component-layer file with its true pin is refused as not a core module. A module using one `i32.atomic.rmw.add` on a shared memory is refused with `not valid with the admitted features`. So are one `f32x4.relaxed_madd`, one `memory64` memory, and one `externref` table, which is valid WebAssembly 2.0 but needs `GC_TYPES` (FFI-11). |
-| **FW3** an OS import | a module that reaches a clock, a file or randomness | A module importing `wasi_snapshot_preview1.path_open` is refused with `imports wasi_snapshot_preview1.path_open, which is not a null import`. So is `env.getenv`. `box.wasm`, which imports `clock_time_get`, is admitted, and `clock(f)` returns 52 (`ENOSYS`, WASI preview 1). |
-| **FW4** a header that disagrees with its module | an export of the wrong type, or ABI text that does not bind | Exporting `hwl_fill` as `[i32] -> [i64]` is refused with `… exports hwl_fill as [i32] -> [i64], but its header gives [i32 i32] -> [i64]`. A module with no `hirsel_abi` section is refused with `has no ABI text`. A header with `waits` is refused with FFI-12's text. |
-| **FW5** loans are copies | a loan passed by pointer, copied back after a trap, or measured by capacity | `b = list.with_capacity(16)` filled to 4 zeros: `fill(f, mut b)` returns 4, `list.len(b)` is 4, and every byte is `0xAB`. `c` is the bytes 0..11: `sum(f, list.slice(c, 4, 8))` returns 22. An empty `b` gives `fill` 0. With `d` of four zeros, `fill_trap(f, mut d)` fails with `Fail("contained trap: unreachable")`, and `d` is still four zeros. |
-| **FW6** a loan area outside memory | a write past linear memory into host memory | In a fresh task, `set_area(f, 1)`, then `sum(f, b)` with a 16-byte `b` fails with `Fail("contained loan area out of bounds")`. Then `count(f)` returns 2 (`set_area` and itself): `sum` was never entered, and the instance was not discarded. |
-| **FW7** a step bound around contained code | fuel not tied to `bound steps`, or tied to wall time | `bound steps 1000 { spin(f, 10⁹) }` returns `Error(OutOfTime(steps: 1000))`. `bound steps 10⁶ { spin(f, 10) }` returns `Ok(10)`. In one build, `spin(f, n)` for n = 10⁴ takes the same steps on 3 runs: read with a step bound searched by bisection, and compared only within the build. |
-| **FW8** fuel and traps are deterministic per build | a count read from leftover fuel that varies by run at a trap | `trap(f, 7)` (integer division by zero) after a fixed prologue: the bisected smallest `n` with `bound steps n { trap(f, 7) }` failing with the trap, not `OutOfTime`, is the same on 3 runs of one build. |
-| **FW9** slice ends inside a contained call | a contained call that holds a scheduler thread past a slice end | On a 1-thread scheduler, task A runs `bound steps 10⁹ { spin(f, 10⁸) }`, and task B prints a line and ends. B's line appears before A's result. With no bound current, the same order is not required. |
-| **FW10** bytes charged to the program's limit | linear memory outside every limit, or growth past a refused admission | In a task that has already called `count(f)`, `bound bytes 2²⁰ { (grow(f, 32), grow(f, 1)) }` returns `Ok((-1, 2))`: 32 × 65,536 > 2²⁰ is refused and the guest sees −1, and one page is admitted, the old size being 2 pages. In a fresh task, `isolate { bound bytes 65536 { count(f) } }` returns `Ok(Error(causes))` with primary cause `Capacity`, because 2 initial pages and a 4-element table are 131,104 bytes. A following `count(f)` outside it returns 1, so no instance was made. A task that grows by 16 pages and ends returns its charge: its spawner's limit then admits `bound bytes` of what it had before the spawn. |
-| **FW11** NaN bits | a non-canonical NaN reaching Hirsel or linear memory | `float.to_bits32(nan32(f))` is `0x7fc00000` (SEM-2): the guest returns `0x7fa00001` unchanged by any float operator, so the boundary rule (FFI-5) is what makes it canonical. `div_bits(f, 0.0, 0.0)` divides inside the guest by `f64.div` and returns `0x7ff8000000000000`, on x86-64 and on AArch64. x86-64's own NaN for that division is `0xfff8000000000000`, so the law is red without NaN canonicalization. |
-| **FW12** the trap map | a trap that aborts the process, is caught as the wrong text, or leaves the instance live | For each `k` from 1 to 10 (rows 1 to 10 of FFI-14's table; row 10 is `proc_exit(7)`, so its `X` is `exit 7`), `isolate { trap(f, k) }` returns `Ok(Error(causes))` with primary cause `Fail("contained trap: X")` and the listed `X`. Then `count(f)` returns 1, because the instance was discarded and the new generation's counter starts again. |
-| **FW13** a discarded instance's handles | a use of a handle into freed linear memory, or a release run on a discarded instance | `p = make(f)`, then `trap(f, 1)`, then `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`, and a second `isolate { free(f, p) }` gives `Fail("foreign handle released")`. An `ObjBox` holding a handle made before a trap, when dropped, reports its finalizer's cause `Fail("foreign instance discarded")`, and `count(f)` shows no entry into `free`. |
-| **FW14** instances are per task | state shared between tasks, or a handle crossing tasks | Two tasks each call `count(f)` 3 times, and each sees 1, 2, 3. A refusal case declares `pub opaque resource type CellBox: send { f: Foreign[Box], p: foreign.Ptr[Cell] }` and is refused at the type (FFI-12, CONC-2). |
-| **FW15** a resource's mechanical release | a contained handle that a dropped resource leaks or releases twice | `ObjBox { f, p }` with `drop(o) { let _ = free(o.f, o.p) }`. Make two boxes: `live` is 2. Drop one: `live` is 1. Destructure the other, call `free` on its handle, then drop nothing more: `live` is 0, and the test passes with no cause. A box whose finalizer fails (`fail("x")`) still leaves `live` one lower, through the mechanical release. |
-| **FW16** guest stack overflow | a guest overflow that aborts the process | `recurse(f, 10⁷)` fails with `Fail("contained trap: stack overflow")`, and the run goes on to print a following line. |
-| **FW17** replay of a contained program | a contained call that changes replay, or a contained test's pass reused | `hirsel test --replay` of a test calling `spin`, `fill`, `grow` under `bound bytes`, and `trap` inside `isolate` replays `Sealed`. `hirsel test` twice with one cache runs the test both times and reports no reuse: it takes `Foreign[Box]`, so PROG-4 never reuses its pass. A test that reaches both `wasm_laws` and `ffi_laws` is refused as in FL7. |
-| **FW18** addresses and recipes | a recipe that does not pin the module, or an address that ignores it | Changing one byte of `box.c`'s output and its pin changes the caller's revision (FFI-16). `hirsel build --recipe R --code-store DIR` with the package deleted builds and runs `count`. A recipe with the module's object missing is refused as `Missing`. |
-| **FW19** cross-compiled artifacts | a host-inferred CPU feature, or an artifact that differs by host | The `aarch64-unknown-linux-gnu` artifact precompiled on an x86-64 host and on an AArch64 host is byte-identical. The image built on x86-64 runs FW5 and FW11 on AArch64. |
-| **FW20** an unbuilt key refuses | a parsed and ignored `containment` | Until slice W1, a manifest with `containment = "wasm"` is refused with `FFI-10: containment = "wasm" is not built yet`. After W1, `containment = "native"` is refused as a bad field. |
-| **FW21** a straight-line call past its bound | a return or trap taken with its stored fuel overdrawn | `bound steps 2 { straight(f) }` and `bound steps 2 { straight_trap(f) }` both return `Error(OutOfTime(steps: 2))`. After the call's own step, the entry starts with 17 fuel, passes its entry check and stores about 4,000 fuel consumed at `return` or `unreachable` (FFI-13 Bounds). `bound steps 300 { straight(f) }` returns `Ok(2000)`: 4,000 operators cost at most 4,016 fuel (the pinned cost table), 251 steps, plus the call's one step. |
-| **FW22** a trapping call's charge | a trap charged the store's stale fuel, so a caller that catches it and calls again does quadratic work | Let `L` be the fuel of `loop_div(f, 10⁵)` up to its division, counted from `box_traps.s` with the pinned cost table. The bisected smallest `n` with `bound steps n { (isolate { loop_div(f, 10⁵) }, isolate { loop_div(f, 10⁵) }) }` returning two traps, not `OutOfTime`, lies between 2⌈`L` / 16⌉ and 2⌈`L` / 16⌉ + 1,030 (FFI-14 Fuel at a trap: each call is charged within one granule of its work). Charging the stale value puts it near ⌈`L` / 16⌉. |
-| **FW23** a bulk operation under a bound | a dropped per-byte cost, or a bulk operation's check placed after it | `bound steps 100 { fill_mem(f, 65536) }` returns `Error(OutOfTime(steps: 100))`: one `memory.fill` of 65,536 bytes costs 65,536 fuel, 4,096 steps, and the entry starts with 16 × 99 + 1 = 1,585 fuel. `bound steps 10⁴ { fill_mem(f, 65536) }` returns `Ok(0xAB)`. |
-| **FW24** `OutOfTime` discards the instance | a call stopped by its bound whose instance is entered again | `p = make(f)`, then `bound steps 1000 { spin(f, 10⁹) }` returns `Error(OutOfTime(steps: 1000))`. Then `count(f)` returns 1, and `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`. |
-| **FW25** the pointer index is per instance | one pointer index shared by every instance, so equal addresses collide | Two tasks each call `make(f)` and get `Some(p)`, then `free(f, p)`, which returns 0. Both cells sit at the same address in their own instance (the pool's first cell), and neither `make` fails with `foreign pointer already held`. |
-| **FW26** a handle's generation is checked | a handle of a discarded generation that releases a live cell at the same address | `p = make(f)`, then `isolate { trap(f, 1) }`, then `q = make(f)`, which is `Some` at `p`'s address in the new generation. `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`, and `live(f)` then returns 1: `q`'s cell is still in use. |
-| **FW27** a guest overflow replays | a stack overflow point that depends on the run, not the build | `hirsel test --replay` of a test that runs `isolate { recurse(f, 10⁷) }` under `bound steps 10⁹`, beside a task that prints a line, on a 2-thread scheduler, replays `Sealed`: the steps at the overflow, and so the slice ends around it, are those of the recording. |
-| **FW28** Wasmtime's signal handlers beside the runtime's | a guest fault taken as a host crash, or a Hirsel stack overflow taken as a guest trap | On a 2-thread scheduler, task A runs `isolate { trap(f, 2) }` 1,000 times and prints each primary cause, while task B recurses in Hirsel with no bound. Every line A prints is `contained trap: memory out of bounds`, and B's unbounded recursion fails with `Stack` (FAIL-17), ending the run with status 101 and a first stderr line beginning `Stack at`, not a signal. |
-| **FW29** fuel exhaustion without a bound | a guest fuel trap that aborts the process | On the slow tier, with no bound current, `isolate { tgrow(f, 2^33) }` exhausts Wasmtime's `2^64 − 1` fuel in about ten minutes (each refused `table.grow` is charged `2^32 − 1`). Its isolate returns the primary cause `Fail("contained trap: out of fuel")` and the program prints a line after it. |
-| **FW30** host memory refusal in contained code | an instantiation `mmap`/`mprotect` `ENOMEM` or `OutOfMemory` error that aborts in `trap_text` instead of stopping as `HostMemory` | Under `RLIMIT_AS` = 2 GiB (below Wasmtime's 4 GiB + 64 MiB linear memory reservation), a program prints a line and calls `count(f)`. Under `RLIMIT_DATA` = 96 MiB, it runs one task that calls `count(f)`, so its slot is cached, and then a task under a 192 MiB grant whose instance takes that slot and calls `grow(f, 2048)`. Each stops with status 102 and `run stop: HostMemory` (FFI-13 Bytes, FAIL-15), not `SIGABRT`. |
-| **FW31** a reused linear-memory slot | a cached slot that keeps the previous instance's bytes, its size or its open pages, or that charges a grow against the previous grant | A task under 4 MiB calls `count(f)`, `grow(f, 16)` and `fill_mem(f, 1114112)`, which reads back `0xAB` at page 1. The next task, under `bound bytes 196640` (its initial 131,104 bytes plus one page), takes that slot and reads `count(f)` = 1, `fill_mem(f, 0)` = 0 and `grow(f, 0)` = 2 pages, then `grow(f, 1)` = 2 and `grow(f, 1)` = −1. |
-
-### Contained build slices
-
-- **W1.** FFI-10 to FFI-16 on `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, with
-  laws FW1 to FW18 and FW20 to FW28. W1 is done only when every one passes on both native
-  backends.
-- **W2.** `aarch64-apple-darwin` and FW19.
-
-A red law whose cause is containment (FW3, FW5, FW6, FW12, FW14, FW16, FW25, FW26, FW28),
-determinism or the step bound (FW7, FW8, FW11, FW17, FW21, FW22, FW23, FW27) or a release
-(FW13, FW15, FW24) blocks its slice.
-
-### Prior art
-
-| system | what it does | verdict | where it lands |
-|---|---|---|---|
-| Goose (`/tmp/ref-goose` at `d5ae5bb`, `docs/implementation.md:5595` <!-- doc-ref: external -->) | `CheckExternSpec` admits scalars and flat fixed-size values. It lends references, slices and builders in place, and states that C must not retain or invalidate them: "These are obligations on C, not proofs the Goose compiler performs". It has no contained boundary. `docs/design/wasm.md` <!-- doc-ref: external --> is about running Goose itself on Wasm. | **NOT TAKEN** for contained code, which proves its loans by copying them rather than trusting C. **ADOPTED** earlier for FFI-5's in-place loans to audited code. | FFI-12 copies |
-| Wasmtime's deterministic-execution guide (`docs.wasmtime.dev/examples-deterministic-wasm-execution.html`) and its `Config`/`Store` docs at 48.0.10 | NaN canonicalization, relaxed SIMD made deterministic or off, fuel rather than epochs, `memory_init_cow` off for fuel, growth limited by a store limiter, no nondeterministic imports | **ADOPTED**: each item. **ADAPTED**: growth is decided by Hirsel limits through `ResourceLimiter` rather than by rejecting grow, so C allocators work. **REPLACED**: `relaxed_simd_deterministic` by refusing relaxed SIMD outright. | FFI-13, FFI-14, FFI-15 |
-| Shopify Functions (`shopify.dev`, WebAssembly for Functions) | untrusted merchant code as Wasm under Wasmtime, one export per target, input through imported read functions, stderr ignored | **NOT TAKEN**: its host-read import API. Contained calls take typed arguments and copied loans, so no import exists to audit. The published page states no fuel or memory limits, and none is quoted here. | none |
-
-### Rulings
-
-The items left open in the first text are ruled here, after the soundness review
-contained-foreign-review-2903. Where this text differs from the review, it says so.
-
-- **O1. A modified artifact is code execution.** The trust is accepted as written. A contained
-  artifact comes only from the build user's own part cache or is compiled in place. Kiln RE and
-  the code store carry module bytes, never artifacts. The cache key holds the toolchain image
-  identity (FFI-15 Caching). No signature binds an artifact.
-- **O2. Signal handlers.** `signals_based_traps(true)` stays. The runtime installs its handlers
-  before Wasmtime's, and their coexistence on Linux is law FW28, a W1 law, not an open
-  question. Mach exception ports on macOS, and their loss across `fork()`, belong to W2.
-- **O3. Executable memory on macOS arm64.** Closed by the loader (FFI-15): the artifact's code
-  sits in the image's signed `__TEXT`, and no executable memory is mapped or written at run
-  time. W2 confirms it on a Mac.
-- **O4. Spectre and side channels.** In-process containment is enough for v1. The guest has no
-  clock, no threads and no shared memory, so it has no timer to read a cache channel with. The
-  heap mitigations stay on, and FFI-10 says timing channels are not a promise.
-- **O5. Steps across a trap.** The reported value is deterministic but was wrong by an unbounded
-  amount: a loop with no call never wrote the counter. A trapping entry is now charged its
-  stored fuel plus one granule, capped at the bound (FFI-14 Fuel at a trap), and the granule
-  makes the stored value lag by less than one granule plus one straight-line run. Laws FW8 and
-  FW22.
-- **O6. Does a contained interface need a grant?** Yes (FFI-14 Grants).
-- **O7. Address space per instance.** Per-task instances and the 4 GiB reservation stay for
-  W1. The ceiling, about 30,000 live instances and then `HostMemory`, is stated in FFI-13
-  Bytes. Discarded instances' slots are reused (FFI-13 Slot reuse). A per-unit lease would
-  add CONC-10 events.
-- **O8. Per-task instances cost the shared-handle model.** Accepted. The target libraries
-  hold no state across tasks, and the other design adds to the total-order promise, which is
-  not allowed.
-- **O9. Two Cranelifts.** Both are built, in the driver only (FFI-15 The pin). The backend is
-  not downgraded and Wasmtime stays on the LTS line.
-- **O10. `loan_area` is guest code.** The guest's own business, as FFI-12 says. A run-owned
-  region needs multi-memory, which widens the feature set for no safety gain.
-- **O11. Unbounded calls.** Kept: no slice end without a bound, exactly as for Hirsel code. A
-  caller that runs an untrusted module wraps the call in `bound steps`.
-- **O12. Trusting Wasmtime and Cranelift.** Accepted as the price of in-process containment
-  (FFI-15 The pin).
-- **O13. Loan copies cost no steps.** They now do: one step for each 16 KiB, or part, copied
-  in and again copied back, all taken at the call before anything is copied (FFI-13 Steps,
-  MEM-30).
-- **O14. `OutOfTime` takes the instance.** The discard stays. The stopped call's state is
-  partway through an update, and resuming it after its scope has exited would be a
-  continuation. A wrapper puts its bound outside the handle's lifetime. Law FW24.
-- **O15. The `Provider` stop.** Neither a clause nor a new name. An unlisted trap under a closed
-  feature set is a failed runtime invariant and aborts as one. `OutOfFuel` is listed because
-  both bounded and unbounded calls can reach it (FFI-14 Traps).
-- **O16. Pass keys and the toolchain.** Already met: the pass key holds the toolchain image. The
-  real defect was that FFI-14 promised reuse for tests that take `Foreign[I]`, which PROG-4
-  never reuses. This text differs from the review here. The review recommended amending PROG-4
-  so that a test whose only parameters are contained `Foreign[I]` could be reused. This lane
-  was directed to keep PROG-4 and the driver (`crates/hirsel-core-driver/src/test_run.rs`
-  lines 342-349) as they are, so FFI-14 and FW17 now say a contained test is run every time.
-  Extending reuse to contained tests stays possible later, as a PROG-4 change.
-- **O17. Mixed programs.** Agreed. Nothing changes here.
-
-The review's fuel mechanism is adopted with one change. The review gave the store the bound's
-fuel plus `2^40`, counted the bound at granule ends, and never used `Trap::OutOfFuel`. A granule
-end counts one granule however much a bulk operation charged, though. Under `bound steps 10⁹`,
-about 65,000 fills of 16 MiB pass the `2^40` margin while the granule ends count only about
-6.7 × 10⁷ steps, so the bound would have run far over before anything stopped it. Here the
-store holds the bound's fuel plus one. Wasmtime's fuel checks stop the entry with
-`Trap::OutOfFuel` if it runs out. The run also checks the stored fuel at return and at
-any other trap (FFI-13 Bounds). Granule counting decides only slice ends.
+The [contained module harness](../../crates/hirsel-core-driver/src/test_run_contained.rs)
+and [Wasm fixture](../../core/programs/wasm_laws/) own these cases.
+[Contained verification](../../core/programs/wasm_laws/VERIFICATION.md) lists their oracles.

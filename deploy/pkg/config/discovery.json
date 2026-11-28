@@ -1,0 +1,12 @@
+{
+  "origin": "https://pkg.hirsel.ai",
+  "release_key": "pkg.hirsel.ai/log+ee71224e+AQK3oOLh5Of7WBgCTTtOqAmo3l9ze3UvDU93B+IMUNLm",
+  "status_key": "pkg.hirsel.ai/status+a062169c+AQXYpltyNmd9BNMXU0j8/ZBVYdDsh9mL5FRNcfV+3L0d",
+  "mode": "preview",
+  "witness_keys": [],
+  "allowed_origins": [
+    "https://pkg.hirsel.ai"
+  ],
+  "mcp_port": 8112,
+  "json_port": 8113
+}

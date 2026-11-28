@@ -315,21 +315,41 @@ fn witness(cl: std.http_client.Client, base: String, p: String, b: String, deadl
     Ok(tlog.witness.HttpResponse(status: std.http_client.status(h), content_type: take ct, body: take data))
 }
 
-pub fn main(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, config: Dir, aws: Cred, release_signer: Secret, status_signer: Secret) -> Result[(), Exit] waits {
-    let fail_config = Exit(status: 2)
-    let down = Exit(status: 1)
+fn configuration(config: Dir, release_signer: Secret, status_signer: Secret) -> Result[Settings, Exit] waits {
+    let invalid = Exit(status: 2)
     let Ok(raw) = std.file.read_string_bounded(config, "registry.json", 1048576) else {
-        return Error(fail_config)
+        return Error(invalid)
     }
-    let Ok(Settings(admission: take cfg, bucket: take bucket, seq: take empty, urls: take urls, port)) = settings(raw, release_signer, status_signer) else {
-        return Error(fail_config)
+    let Ok(cfg) = settings(raw, release_signer, status_signer) else {
+        return Error(invalid)
     }
-    let mut seq = take empty
+    Ok(take cfg)
+}
+
+pub fn main(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, config: Dir, aws: Cred, release_signer: Secret, status_signer: Secret) -> Result[(), Exit] waits {
+    let cfg = configuration(config, release_signer, status_signer)?
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 30000)
     let Ok(credentials) = std.cred.credentials(aws, At(clock, deadline)) else {
-        return Error(down)
+        return Error(Exit(status: 1))
     }
-    let Ok(started) = std.object.start(n, tasks, take bucket, take credentials, Some(aws), System, clock, random, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), deadline) else {
+    start(c, n, clock, random, tasks, take cfg, take credentials, Some(aws), deadline)
+}
+
+pub fn static_main(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, config: Dir, vars: Env, bucket_secret: Secret, release_signer: Secret, status_signer: Secret) -> Result[(), Exit] waits {
+    let cfg = configuration(config, release_signer, status_signer)?
+    let Ok(Some(id)) = env.get(vars, "AWS_ACCESS_KEY_ID") else {
+        return Error(Exit(status: 2))
+    }
+    let credentials = std.cred.from_secret(string.from(id), secret.share(bucket_secret), "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 30000)
+    start(c, n, clock, random, tasks, take cfg, take credentials, None, deadline)
+}
+
+fn start(c: Compiler, n: Net, clock: Clock, random: Random, tasks: Tasks, take configured: Settings, take credentials: std.cred.Credentials, refresh: Option[Cred], deadline: u64) -> Result[(), Exit] waits {
+    let down = Exit(status: 1)
+    let Settings(admission: take cfg, bucket: take bucket, seq: take empty, urls: take urls, port) = take configured
+    let mut seq = take empty
+    let Ok(started) = std.object.start(n, tasks, take bucket, take credentials, refresh, System, clock, random, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), deadline) else {
         return Error(down)
     }
     let mut client = take started

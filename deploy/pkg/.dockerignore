@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!config
+!config/*.json
+!discovery
+!hirsel
+!nginx.conf
+!start.py
+!writer

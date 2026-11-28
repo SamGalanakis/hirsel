@@ -9,7 +9,13 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
     let slot = loader.slot::<Leaf>();
     let mut worker = loader.worker();
     let install = |k| {
-        let bytes = image(k).encode();
+        let mut module = image(k);
+        let second = hirsel_mod::Entry {
+            identity: ContentHash([91; 32]),
+            ..module.entries[0]
+        };
+        module.entries.push(second);
+        let bytes = module.encode();
         loader.admit_module(&bytes).unwrap();
         loader.image(&bytes, true).unwrap()
     };
@@ -19,17 +25,31 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         a.resolve::<Other>(&IDENTITY),
         Err(Refusal::NoEntry)
     ));
-    let first = slot
-        .activate_checkout(0, a.code::<Leaf>(&IDENTITY).unwrap())
+    let original = a
+        .code::<Leaf>(&IDENTITY)
+        .unwrap()
+        .register([old.candidate()])
         .unwrap();
+    let first = slot.activate_checkout(0, &original).unwrap();
+    drop(original);
     drop(a);
     let b = install(20);
     let new = b.resolve::<Leaf>(&IDENTITY).unwrap();
+    let sibling = b.resolve::<Leaf>(&ContentHash([91; 32])).unwrap();
+    let code = b.code::<Leaf>(&IDENTITY).unwrap();
+    assert!(matches!(
+        code.register([old.candidate()]),
+        Err(Refusal::NoEntry)
+    ));
+    let selected = code
+        .register([new.candidate(), sibling.candidate()])
+        .unwrap();
+    let reversed = code
+        .register([sibling.candidate(), new.candidate()])
+        .unwrap();
     let (answer, second) = worker
-        .dispatch_entry(&first, &old, |entry| {
-            let second = slot
-                .activate_checkout(first.version(), b.code::<Leaf>(&IDENTITY).unwrap())
-                .unwrap();
+        .dispatch_entry(&first, 0, &old, |entry| {
+            let second = slot.activate_checkout(first.version(), &selected).unwrap();
             // SAFETY: the callback owns the original generation through the call.
             (unsafe { entry(1) }, second)
         })
@@ -37,28 +57,32 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         .unwrap();
     assert_eq!(answer, 12);
     assert_eq!(
-        worker.dispatch_entry(&first, &old, |_| ()),
+        worker.dispatch_entry(&first, 0, &old, |_| ()),
         Err(Refusal::NoEntry)
     );
     assert_eq!(
-        worker.dispatch_entry(&second, &old, |_| ()),
+        worker.dispatch_entry(&second, 0, &old, |_| ()),
         Err(Refusal::NoEntry)
     );
     // A second checkout of B can have a different selection or grant binding.
-    let third = slot
-        .activate_checkout(second.version(), b.code::<Leaf>(&IDENTITY).unwrap())
-        .unwrap();
+    let third = slot.activate_checkout(second.version(), &reversed).unwrap();
     assert_eq!(
-        worker.dispatch_entry(&second, &new, |_| ()),
+        worker.dispatch_entry(&second, 0, &new, |_| ()),
         Err(Refusal::NoEntry)
     );
+    for ordinal in [0, 2] {
+        assert_eq!(
+            worker.dispatch_entry(&third, ordinal, &new, |_| ()),
+            Err(Refusal::NoEntry)
+        );
+    }
     // SAFETY: the selected leaf belongs to B.
     assert_eq!(
-        worker.dispatch_entry(&third, &new, |f| unsafe { f(1) }),
+        worker.dispatch_entry(&third, 1, &new, |f| unsafe { f(1) }),
         Ok(Some(22))
     );
     drop((first, second, third));
-    drop(b);
+    drop((b, code, selected, reversed));
     drop(slot);
     worker.park();
     assert_eq!((loader.installed(), loader.retired()), (0, 0));

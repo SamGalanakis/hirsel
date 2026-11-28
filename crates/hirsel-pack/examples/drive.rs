@@ -16,12 +16,19 @@ use hirsel_mod::Mask;
 
 hirsel_guard::install!();
 
-/// `main(context, result_place) -> failed` (PACK-15 typed export ABI).
+/// The program root for a grant-free `main() -> Result[(), Exit]`.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-struct Main(unsafe extern "C" fn(*mut Context, *mut u8) -> u8);
-// SAFETY: the driver's module is checked to have this signature digest, which is the
-// compiler's PACK-14 `hirsel.pack-export.v1` for `main() -> Result[(), Exit]`.
+struct Main(unsafe extern "C" fn(*mut Context, *mut ExitResult, u64) -> u8);
+
+#[repr(C)]
+struct ExitResult {
+    tag: u8,
+    status: u8,
+}
+
+// SAFETY: native_entry::Plan::signature hashes the fixed result layout, Exit
+// offset and empty provider parameter list. Program roots take a final call site.
 unsafe impl Signature for Main {
     const DIGEST: ContentHash = ContentHash([
         90, 130, 168, 22, 134, 2, 110, 130, 136, 95, 75, 141, 3, 203, 123, 214, 37, 80, 251, 187,
@@ -31,15 +38,47 @@ unsafe impl Signature for Main {
 
 unsafe extern "C" fn silent(_: *mut u8, _: *const u8, _: usize) {}
 
-unsafe extern "C" fn root(context: *mut Context, config: *const Config, _: *mut MainResult) -> u8 {
-    #[repr(align(16))]
-    struct Room([u8; 64]);
-    let mut room = Room([0; 64]);
-    // SAFETY: `state` is the `Main` the driver put there, live for the run.
+unsafe extern "C" fn root(
+    context: *mut Context,
+    config: *const Config,
+    out: *mut MainResult,
+) -> u8 {
+    let mut result = ExitResult { tag: 0, status: 0 };
+    // SAFETY: the run pins Main and its image. Only normal return initializes
+    // the tag, and only the Error variant initializes its Exit payload.
     unsafe {
         let main = *(*config).state.cast::<Main>();
-        (main.0)(context, room.0.as_mut_ptr())
+        let failed = (main.0)(context, &raw mut result, 0);
+        if failed == 0 && result.tag == 1 {
+            (*out).kind = 2;
+            (*out).exit = result.status;
+        }
+        failed
     }
+}
+
+fn run_main(main: Main, execution: &Execution, root_limit: u64) -> Result<u8, EndReason> {
+    let mut main = main;
+    let config = Config {
+        launch: std::ptr::null(),
+        describe_output: None,
+        root_limit,
+        args: std::ptr::null(),
+        args_len: 0,
+        grants: std::ptr::null(),
+        grants_len: 0,
+        provider: std::ptr::null(),
+        state: (&raw mut main).cast(),
+        diagnostic: silent,
+        describe: None,
+        scheduler: SchedulerProvider::default(),
+        stop_fd: 2,
+        capabilities: std::ptr::null(),
+        capabilities_len: 0,
+        close_grants: None,
+    };
+    // SAFETY: the worker joins before the checkout releases its entry and configuration.
+    unsafe { run_contained_worker(execution, &config, root) }
 }
 
 fn main() {
@@ -57,37 +96,40 @@ fn main() {
         32 << 20,
     ))
     .unwrap();
-    loader.admit(module.header.key(), hirsel_mod::digest(&bytes));
+    loader.admit_module(&bytes).unwrap();
+    let pool = hirsel_pack::loader_handle(loader).unwrap();
+    let mut worker = loader.worker();
     for round in 0..rounds {
-        let code = match loader.load::<Main>(&bytes, &identity, true) {
-            Ok(code) => code,
+        let image = match loader.image(&bytes, true) {
+            Ok(image) => image,
             Err(refusal) => {
                 println!("round {round}: refused {refusal:?}");
                 continue;
             }
         };
-        let mut main = code.entry();
-        let config = Config {
-            launch: std::ptr::null(),
-            describe_output: None,
-            root_limit,
-            args: std::ptr::null(),
-            args_len: 0,
-            grants: std::ptr::null(),
-            grants_len: 0,
-            provider: std::ptr::null(),
-            state: (&raw mut main).cast(),
-            diagnostic: silent,
-            describe: None,
-            scheduler: SchedulerProvider::default(),
-            stop_fd: 2,
-            capabilities: std::ptr::null(),
-            capabilities_len: 0,
-            close_grants: None,
+        let select = || {
+            let entry = image.resolve::<Main>(&identity)?;
+            let code = image.code::<Main>(&identity)?;
+            let registered = code.register([entry.candidate()])?;
+            Ok::<_, hirsel_code::Refusal>((entry, registered))
         };
-        let execution = Execution::contained();
-        // SAFETY: `config` and `code` outlive the call.
-        match unsafe { run_contained_worker(&execution, &config, root) } {
+        let (entry, registered) = match select() {
+            Ok(selection) => selection,
+            Err(refusal) => {
+                println!("round {round}: refused {refusal:?}");
+                continue;
+            }
+        };
+        let slot = loader.slot();
+        let checkout = slot.activate_checkout(0, &registered).unwrap();
+        let execution = Execution::in_pool(pool).unwrap();
+        let outcome = worker
+            .dispatch_entry(&checkout, 0, &entry, |main| {
+                run_main(main, &execution, root_limit)
+            })
+            .unwrap()
+            .unwrap();
+        match outcome {
             Ok(status) => println!("round {round}: returned {status}"),
             Err(EndReason::RunStop(stop)) => {
                 let name = String::from_utf8_lossy(stop.as_bytes()).into_owned();
@@ -98,6 +140,8 @@ fn main() {
             Err(EndReason::HostStop) => println!("round {round}: host stop"),
         }
     }
+    worker.park();
+    hirsel_core_rt::code::worker_park();
     drop(module);
     loader.reclaim();
     println!(

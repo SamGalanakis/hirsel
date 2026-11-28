@@ -1,4 +1,4 @@
-use super::{Code, EntryIndex, Image, Refusal, Shared, Signature, Stop};
+use super::{Candidate, Code, EntryIndex, Image, Refusal, Shared, Signature, Stop};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -147,6 +147,36 @@ impl<F> Clone for Slot<F> {
     }
 }
 
+/// A launch's selected native adapters in Runner registration order. A release
+/// with a canonical order can activate any number of slots from this one value.
+pub struct Registered<F> {
+    code: Code<F>,
+    order: Arc<[u32]>,
+}
+
+impl<F> Code<F> {
+    /// Bind the installer-selected rows to this realization before activation.
+    /// Several distinct routes can use one executable with different bindings.
+    pub fn register<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a Candidate>,
+    ) -> Result<Registered<F>, Refusal> {
+        let order = candidates
+            .into_iter()
+            .map(|candidate| {
+                if !std::ptr::eq(candidate.image.as_ptr(), Arc::as_ptr(&self.image)) {
+                    return Err(Refusal::NoEntry);
+                }
+                u32::try_from(candidate.index).map_err(|_| Refusal::Capacity)
+            })
+            .collect::<Result<Arc<[_]>, _>>()?;
+        Ok(Registered {
+            code: self.clone(),
+            order,
+        })
+    }
+}
+
 impl<F: Signature> Slot<F> {
     pub(super) fn new(shared: Arc<Shared>) -> Self {
         Self {
@@ -161,11 +191,16 @@ impl<F: Signature> Slot<F> {
 
     /// Publish a complete installation and issue dispatch permission for exactly
     /// the version selected under the activation lock.
-    pub fn activate_checkout(&self, expected: u64, code: Code<F>) -> Result<Checkout, Stop> {
-        let version = self.activate(expected, code)?;
+    pub fn activate_checkout(
+        &self,
+        expected: u64,
+        registration: &Registered<F>,
+    ) -> Result<Checkout, Stop> {
+        let version = self.activate(expected, registration.code.clone())?;
         Ok(Checkout {
             lease: Arc::clone(&self.lease),
             version,
+            order: Arc::clone(&registration.order),
         })
     }
 
@@ -184,6 +219,7 @@ impl<F: Signature> Slot<F> {
 pub struct Checkout {
     lease: Arc<Lease>,
     version: u64,
+    order: Arc<[u32]>,
 }
 
 impl Checkout {
@@ -403,6 +439,7 @@ impl Worker {
     pub fn dispatch_entry<F: Signature, R>(
         &mut self,
         checkout: &Checkout,
+        ordinal: usize,
         selection: &EntryIndex<F>,
         with: impl FnOnce(F) -> R,
     ) -> Result<Option<R>, Refusal> {
@@ -422,10 +459,13 @@ impl Worker {
                 BorrowToken::Promoted => None,
             }
             .ok_or(Refusal::NoEntry)?;
-            if !std::ptr::eq(image, selection.image.as_ptr()) {
+            let candidate = selection.candidate();
+            if !std::ptr::eq(image, candidate.image.as_ptr())
+                || checkout.order.get(ordinal).map(|&i| i as usize) != Some(candidate.index)
+            {
                 return Err(Refusal::NoEntry);
             }
-            let (entry, _) = image.addresses(selection.index);
+            let (entry, _) = image.addresses(candidate.index);
             // SAFETY: resolve checked F on this exact installation and the worker
             // owns the generation until the callback returns or unwinds.
             Ok(with(unsafe { std::mem::transmute_copy(&entry) }))

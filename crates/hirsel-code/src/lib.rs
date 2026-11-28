@@ -29,7 +29,7 @@ use host::Access;
 pub use raw::RawCode;
 use retire::Retire;
 use runs::Runs;
-pub use slot::{BorrowToken, Checkout, CodePin, RawSlot, Slot, Worker};
+pub use slot::{BorrowToken, Checkout, CodePin, RawSlot, Registered, Slot, Worker};
 pub use table::Hit;
 use table::{DataRow, Owner, Table};
 
@@ -717,11 +717,7 @@ impl Installed {
                 waits: F::WAITS,
             })
             .ok_or(Refusal::NoEntry)?;
-        Ok(EntryIndex {
-            image: Arc::downgrade(&self.0),
-            index,
-            callable: PhantomData,
-        })
+        Ok(EntryIndex::new(&self.0, index))
     }
 
     /// The `Code` of the entry `identity`, when its signature and `waits` flag match `F`.
@@ -748,9 +744,30 @@ impl Installed {
 /// A typed ordinal in one installation. It can reside in the installation's
 /// registration table without keeping that installation's executable pages alive.
 pub struct EntryIndex<F> {
+    candidate: Candidate,
+    callable: PhantomData<fn() -> F>,
+}
+
+/// One image-relative entry, usable in a registration order with mixed signatures.
+pub struct Candidate {
     image: Weak<Image>,
     index: usize,
-    callable: PhantomData<fn() -> F>,
+}
+
+impl<F> EntryIndex<F> {
+    fn new(image: &Arc<Image>, index: usize) -> Self {
+        Self {
+            candidate: Candidate {
+                image: Arc::downgrade(image),
+                index,
+            },
+            callable: PhantomData,
+        }
+    }
+
+    pub fn candidate(&self) -> &Candidate {
+        &self.candidate
+    }
 }
 
 /// A counted handle to one entry of one image (PACK-6).

@@ -2,8 +2,6 @@
 //! entry of this installation. All offsets refer to the image's read-only data band.
 use super::{ContentHash, EntryIndex, ImageEntries, Installed, Refusal, Signature};
 use hirsel_mod::Module;
-use std::marker::PhantomData;
-use std::sync::Arc;
 
 pub(super) struct Description {
     entry: usize,
@@ -64,10 +62,6 @@ impl Installed {
         if matching.next().is_some() {
             return Err(Refusal::NoEntry);
         }
-        Ok(EntryIndex {
-            image: Arc::downgrade(&self.0),
-            index,
-            callable: PhantomData,
-        })
+        Ok(EntryIndex::new(&self.0, index))
     }
 }

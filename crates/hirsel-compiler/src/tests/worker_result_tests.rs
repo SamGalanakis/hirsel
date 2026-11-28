@@ -21,6 +21,13 @@ fn capped_worker_emits_the_selected_typed_exports() {
         files: &files,
         ..request(Target::X86_64Linux)
     };
+    let program = service.compile(&request).unwrap();
+    let root = hirsel_mod::Module::parse(&program.bytes).unwrap();
+    assert_eq!(root.entries().count(), 1);
+    assert_eq!(
+        root.entries().next().unwrap().descriptor,
+        hirsel_mod::NO_DESCRIPTOR
+    );
     let names = ["local/app@1/main/left", "local/app@1/main/right"];
     let built = service.compile_exports(&request, &names).unwrap();
     let module = hirsel_mod::Module::parse(&built.bytes).unwrap();

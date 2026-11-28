@@ -780,9 +780,8 @@ fn run_compiler_request(
     let temporary_output = (matches!(command, "run" | "test") && output_path.is_none())
         .then(|| request_store.scratch())
         .transpose()?;
-    // Native options come before the reach: a Cranelift development build
-    // walks its instance records, which its options address. An options
-    // error is reported only for a request check accepts.
+    // The Cranelift reach walks records keyed by these options. Report option
+    // errors only after check accepts the request.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
             if release && (recipe_command || command == "run") && root_limit.is_none() {
@@ -917,9 +916,10 @@ fn run_compiler_request(
         return packages::answer_check(&product, &sources);
     }
     let grant_lines = command == "run" && !grants.foreign.is_empty();
-    let use_recipe = recipe_command
-        || grant_lines
-        || matches!(&prepared, Some(Ok(options)) if options.llvm_release());
+    let use_recipe = output_kind != OutputKind::Module
+        && (recipe_command
+            || grant_lines
+            || matches!(&prepared, Some(Ok(options)) if options.llvm_release()));
     let mut reach = None;
     if foreign_replay {
         let entry = selected_entry.as_ref().ok_or("replay requires an entry")?;

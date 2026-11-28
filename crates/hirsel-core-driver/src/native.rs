@@ -878,15 +878,15 @@ impl CheckProduct {
         .with_foreign(foreign_modules.values(), Some(&link_archives));
         let module_exports: Vec<&crate::PackExportDecl> =
             if options.output_kind == OutputKind::Module {
-                if options.module_exports.is_empty() {
-                    self.pack_exports.get(entry).into_iter().collect()
-                } else {
-                    options
-                        .module_exports
-                        .iter()
-                        .filter_map(|p| self.pack_exports.get(p))
-                        .collect()
-                }
+                options
+                    .module_exports
+                    .iter()
+                    .map(|path| {
+                        self.pack_exports.get(path).ok_or_else(|| {
+                            NativeStop::Entry(format!("missing checked module export {path}"))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?
             } else {
                 vec![]
             };

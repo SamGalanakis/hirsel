@@ -19,6 +19,7 @@ use std::time::Duration;
 
 pub(crate) mod adopt;
 pub(crate) mod archive;
+pub(crate) mod preview_mount;
 mod archive_decision;
 mod bucket;
 mod config;

@@ -331,6 +331,7 @@ pkg_v1.Package(
         ("store-log.hirsel", "store"),
         ("store-blobs.hirsel", "store"),
         ("store-witness.hirsel", "store"),
+        ("store-witness-rows.hirsel", "store"),
         ("store-edge.hirsel", "store"),
         ("main.hirsel", "main"),
     ],

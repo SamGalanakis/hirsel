@@ -136,6 +136,9 @@ pub fn archive_command(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, o
             Error(e) => refused(err, deploy_refusal(e)),
         }
     }
+    if string.starts_with(verb, "preview-") {
+        return preview_command(work, tasks, c, r, out, err, mut src, parent, verb, argv)
+    }
     if verb == "describe" {
         return archive_review(mut src, parent, work, out, err, DescribeArchive)
     }

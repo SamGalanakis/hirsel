@@ -1,0 +1,139 @@
+fn preview_failure(err: Stderr, problem: store.PreviewError) -> Result[(), Exit] waits {
+    match problem {
+        PreviewExpired => refused(err, "PreviewExpired"),
+        PreviewHoldsFull => refused(err, "PreviewHoldsFull"),
+        Store(e) => archive_failure(err, e),
+    }
+}
+
+fn preview_result(out: Stdout, hold: store.PreviewHold, until: u64, state: String) -> Result[(), Exit] waits {
+    let (incarnation, stamp) = store.preview_identity(hold)
+    let mut bytes_in: Bytes = list.with_capacity(16)
+    for byte in incarnation {
+        list.push(mut bytes_in, byte)
+    }
+    let mut text = string.new()
+    std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
+        std.json.object(w, 0, scoped fn(obj: std.json.Writer, mut fields: std.json.Items) {
+            text_field(obj, mut fields, "incarnation", std.hex.encode(bytes_in))
+            counter_field(obj, mut fields, "stamp", stamp)
+            counter_field(obj, mut fields, "until_ms", until)
+            text_field(obj, mut fields, "state", state)
+        })
+    })
+    say(out, text)
+}
+
+fn preview_command(work: Dir, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, mut src: std.object.Client, parent: store.StoreId, verb: String, argv: Args) -> Result[(), Exit] waits {
+    if verb == "preview-select" {
+        let target = selector(argv)?
+        let selection = match target {
+            At(branch, ms) => store.resolve_at(mut src, parent, branch, ms, ARCHIVE_OP_MS),
+            _ => store.plan_archive_restore(mut src, parent, target, ARCHIVE_OP_MS),
+        }
+        return match take selection {
+            Ok(take found) => selected_point(found, err, out),
+            Error(e) => archive_failure(err, e),
+        }
+    }
+    let BranchBoundary(branch, token) = selector(argv)? else {
+        return Error(usage())
+    }
+    if token.parent != parent {
+        return Error(usage())
+    }
+    let child = archive_parent(operand(argv, 4)?)?
+    if verb == "preview-admit" {
+        let until = count_arg(argv, 5)?
+        return match store.preview_admit(mut src, child, token, until, ARCHIVE_OP_MS) {
+            Ok(hold) => preview_result(out, hold, until, "held"),
+            Error(e) => preview_failure(err, e),
+        }
+    }
+    let hold = store.resume_preview(child, token, attempt_arg(argv, 5)?, count_arg(argv, 6)?)
+    if verb == "preview-release" {
+        return match store.preview_release(mut src, hold, ARCHIVE_OP_MS) {
+            Ok(()) => preview_result(out, hold, 0, "released"),
+            Error(e) => preview_failure(err, e),
+        }
+    }
+    if verb == "preview-extend" {
+        if let Error(e) = store.preview_extend(mut src, hold, count_arg(argv, 7)?, ARCHIVE_OP_MS) {
+            return preview_failure(err, e)
+        }
+    } else if verb == "preview-mount" {
+        let point = match store.plan_archive_restore(mut src, parent, BranchBoundary(branch, token), ARCHIVE_OP_MS) {
+            Ok(RestorePresent(take point)) => take point,
+            Ok(take other) => return selected_point(other, err, out),
+            Error(e) => return archive_failure(err, e),
+        }
+        let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
+        let reader = std.object.opener(src)
+        let receipt = match store.mount_preview_directory(tasks, reader, hold, point, work, attempt_arg(argv, 7)?, c, r, options, ARCHIVE_OP_MS) {
+            Ok(take mounted) => take mounted,
+            Error(Store(e)) => return archive_failure(err, e),
+            Error(e) => return refused(err, deploy_refusal(e)),
+        }
+        // Open only the archive-backed Store. No application release runs here.
+        let db = match store.open_preview_directory(tasks, work, c, r, options, reader, ARCHIVE_OP_MS) {
+            Ok(take db) => take db,
+            Error(e) => return archive_failure(err, e),
+        }
+        if let Error(e) = store.close(take db) {
+            return archive_failure(err, e)
+        }
+        return say(out, point_text(receipt.point, Some(receipt.child))?)
+    } else if verb != "preview-status" {
+        return Error(usage())
+    }
+    match store.preview_until(std.object.opener(src), hold, ARCHIVE_OP_MS) {
+        Ok(until) => preview_result(out, hold, until, "held"),
+        Error(PreviewExpired) if verb == "preview-status" => preview_result(out, hold, 0, "released"),
+        Error(e) => preview_failure(err, e),
+    }
+}
+
+fn preview_bucket(work: Dir, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, mut src: std.object.Client, parent: store.StoreId, take destination: std.object.Client, level: String, names: store.RestoreNamespaces, target: store.RestoreTarget, argv: Args) -> Result[(), Exit] waits {
+    let BranchBoundary(branch, token) = target else {
+        return Error(usage())
+    }
+    if token.parent != parent {
+        return Error(usage())
+    }
+    let child = archive_parent(operand(argv, 4)?)?
+    let hold = store.resume_preview(child, token, attempt_arg(argv, 5)?, count_arg(argv, 6)?)
+    let point = match store.plan_archive_restore(mut src, parent, BranchBoundary(branch, token), ARCHIVE_OP_MS) {
+        Ok(RestorePresent(take point)) => take point,
+        Ok(take other) => return selected_point(other, err, out),
+        Error(e) => return archive_failure(err, e),
+    }
+    let mut dst = take destination
+    let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
+    let receipt = match store.mount_preview_bucket(tasks, store.preview_archive(src), hold, point, mut dst, level, names, work, attempt_arg(argv, 7)?, c, r, options, ARCHIVE_OP_MS) {
+        Ok(take mounted) => take mounted,
+        Error(Store(e)) => return archive_failure(err, e),
+        Error(e) => return refused(err, deploy_refusal(e)),
+    }
+    let mut opts = store.sized(Bucket(std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080)), 2147483648u64) ?=> |_| Exit(status: 1u8)
+    let initial = match store.head_view(mut dst, Some(child), ARCHIVE_OP_MS) {
+        Ok(take current) => take current,
+        Error(e) => return archive_failure(err, e),
+    }
+    if initial.claim.epoch != 1 || initial.origin != None {
+        return refused(err, "Superseded")
+    }
+    let mut permit: Bytes = list.with_capacity(16)
+    for byte in attempt_arg(argv, 7)? {
+        list.push(mut permit, byte)
+    }
+    opts.expect = Some(child)
+    opts.claim_auth = Some(store.ClaimAuth(expect: Some(clone(initial.claim)), attempt: take permit, class: Permit))
+    let db = match store.open_preview_bucket(tasks, take dst, level, std.object.opener(src), c, r, opts, ARCHIVE_OP_MS) {
+        Ok(take db) => take db,
+        Error(e) => return archive_failure(err, e),
+    }
+    if let Error(e) = store.close(take db) {
+        return archive_failure(err, e)
+    }
+    say(out, point_text(receipt.point, Some(receipt.child))?)
+}

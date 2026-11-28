@@ -46,6 +46,10 @@ fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Re
         fail("witness law: row 40")
     }
     list.push(mut reply, small[0u64])
+    let counted = result.unwrap(count(tx, t, Included(42u64), Included(42u64)))
+    list.push(mut reply, int.truncate(counted))
+    let overlay_count = result.unwrap(count(tx, t, Included(43u64), Included(43u64)))
+    list.push(mut reply, int.truncate(overlay_count))
     let Some(wide) = result.unwrap(fetch(tx, t, 900u64)) else {
         fail("witness law: row 900")
     }
@@ -217,6 +221,12 @@ fn witness_replays_resident_call_from_its_pages(d: Dir, c: Clock, r: Random, tas
     if !witness_law_same(witness_law_replay(w, None)?) {
         return Error(Missing("witness law: the slice did not replay the call"))
     }
+    if !witness_law_outside(witness_law_replay(w, Some(41u64))?) {
+        return Error(Missing("witness law: read an unwitnessed sibling inline value"))
+    }
+    if !witness_law_outside(witness_law_replay(w, Some(42u64))?) {
+        return Error(Missing("witness law: count disclosed the value of a row it only counted"))
+    }
     // The source has a second BLOB on the same leaf. Its page is present
     // in the slice, but the recorded call never read that body.
     if !witness_law_outside(witness_law_replay(w, Some(901u64))?) {
@@ -269,6 +279,14 @@ fn witness_replays_tiered_call_from_its_frames(d: Dir, c: Clock, r: Random, task
     close(take first)?
     let mut db = open(tasks, directory, c, r, options)?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    // The historical root for this CALL overlays the checkpoint with this
+    // journal write. The CALL counts it without opening the new value.
+    let Committed(edit) = run(mut db, Some(WITNESS_LAW_STEPS), rows, fn(mut tx: Tx, t: Table[u64, Bytes]) -> Result[(), Error] {
+        put(mut tx, t, 43u64, b"overlay-count-only-value-canary")
+    })? else {
+        return Error(Missing("witness law: post-checkpoint edit"))
+    }
+    durable(mut db, edit.ticket)?
     let mark = witness_law_serve(mut db, rows)?
     let Ok(source) = prepare_reexecute_claim(db, mark)? else {
         return Error(Missing("witness law: replay source"))
@@ -291,6 +309,12 @@ fn witness_replays_tiered_call_from_its_frames(d: Dir, c: Clock, r: Random, task
     close(take db)?
     if !witness_law_same(witness_law_replay(w, None)?) {
         return Error(Missing("witness law: the frames did not replay the call"))
+    }
+    if !witness_law_outside(witness_law_replay(w, Some(42u64))?) {
+        return Error(Missing("witness law: Tiered count exposed a Cold frame value"))
+    }
+    if !witness_law_outside(witness_law_replay(w, Some(43u64))?) {
+        return Error(Missing("witness law: Tiered count exposed an overlay value"))
     }
     for frame in frames {
         let thinner = witness_law_without(w, frame.stamp)

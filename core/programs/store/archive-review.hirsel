@@ -171,14 +171,30 @@ pub fn preview_release(mut src: std.object.Client, hold: PreviewHold, op_ms: u64
     change_preview_hold(mut src, hold, None, op_ms)
 }
 
-pub fn preview_check(src: std.object.Opener, hold: PreviewHold, op_ms: u64) -> Result[(), PreviewError] waits {
+// Operator receipts retain the admitting identity across processes. Every
+// operation on a resumed handle still compares that identity at the archive.
+pub fn preview_identity(hold: PreviewHold) -> (Inline[u8, 16], u64) {
+    (hold.incarnation, hold.record.stamp)
+}
+
+pub fn resume_preview(child: StoreId, token: RestoreToken, incarnation: Inline[u8, 16], stamp: u64) -> PreviewHold {
+    let record = format.PreviewHoldRep(child: store_key_to_rep(child), binding_id: token.binding_id, boundary: token.boundary, until_ms: 0, stamp)
+    PreviewHold(parent: token.parent, incarnation, record)
+}
+
+pub fn preview_until(src: std.object.Opener, hold: PreviewHold, op_ms: u64) -> Result[u64, PreviewError] waits {
     let parent = store_key_to_rep(hold.parent)
     let due = std.object.opener_deadline_ms(src, op_ms)
     match pager.held_preview_head(src, parent, hold.incarnation, hold.record, due) {
-        Ok(_) => Ok(()),
+        Ok(head) => Ok(head.holds[preview_position(head, hold.record.child)].until_ms),
         Error(PreviewExpired) => Error(PreviewExpired),
         Error(take problem) => Error(Store(failure_from_rep(take problem))),
     }
+}
+
+pub fn preview_check(src: std.object.Opener, hold: PreviewHold, op_ms: u64) -> Result[(), PreviewError] waits {
+    let _ = preview_until(src, hold, op_ms)?
+    Ok(())
 }
 
 fn directory_pager(d: Dir, preview: Option[pager.PreviewRead]) -> pager.TieredPagerSource {

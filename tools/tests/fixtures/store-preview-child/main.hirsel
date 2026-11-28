@@ -1,0 +1,31 @@
+// Opens the held Directory through the read-only archive principal. The
+// second invocation verifies a durable child edit after closing the first.
+pub fn main(d: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, secret_key: Secret, argv: Args) -> Result[(), Exit] waits {
+    let Some(endpoint) = args.get(argv, 0) else {
+        return Error(Exit(status: 2u8))
+    }
+    let bucket = std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "drill", prefix: "fixture/", style: Path)
+    let credentials = std.cred.from_secret("reader", secret.share(secret_key), "")
+    let started = result.unwrap(std.object.start(net, tasks, take bucket, take credentials, None, System, clock, random, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), std.clock.deadline_after_ms(host.mono_ns(clock), 30000u64)))
+    let reader = std.object.opener(started)
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open_preview_directory(tasks, d, clock, random, options, reader, 30000u64))
+    let rows = result.unwrap(store.table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes()))
+    let second = args.get(argv, 1) == Some("after")
+    let mut payload: Bytes = list.with_capacity(100)
+    list.fill(mut payload, 100, 2u8)
+    let expected = if second { b"child edit" } else { take payload }
+    if result.unwrap(store.get(result.unwrap(store.reader(db, 0)), store.snapshot(db), rows, 2u64)) != Some(take expected) {
+        return Error(Exit(status: 3u8))
+    }
+    if args.get(argv, 1) == Some("write") {
+        let Committed(done) = result.unwrap(store.run(mut db, None, rows, fn(mut tx, t) -> Result[(), store.Error] {
+            store.put(mut tx, t, 2u64, b"child edit")
+        })) else {
+            return Error(Exit(status: 4u8))
+        }
+        result.unwrap(store.durable(mut db, done.ticket))
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

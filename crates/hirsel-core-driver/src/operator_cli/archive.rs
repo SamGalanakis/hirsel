@@ -60,13 +60,23 @@ impl Archive {
         args: &[String],
         expiry: bool,
     ) -> Result<Value, Failure> {
-        let mut cmd = store_process::command("archive_tool", scratch, scratch)
-            .map_err(|e| Failure::blocked("Unavailable", &e.to_string()))?;
         let role = if expiry {
             "HIRSEL_ARCHIVE_EXPIRY"
         } else {
             "HIRSEL_ARCHIVE_READ"
         };
+        self.invoke_role(scratch, verb, args, role)
+    }
+
+    pub(super) fn invoke_role(
+        &self,
+        work: &File,
+        verb: &str,
+        args: &[String],
+        role: &str,
+    ) -> Result<Value, Failure> {
+        let mut cmd = store_process::command("archive_tool", work, work)
+            .map_err(|e| Failure::blocked("Unavailable", &e.to_string()))?;
         self.configure(&mut cmd, role)?;
         let bytes = answer(cmd.arg(verb).args(args))?;
         serde_json::from_slice(&bytes).map_err(Failure::damaged)

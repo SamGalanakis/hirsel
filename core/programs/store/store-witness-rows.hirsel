@@ -1,0 +1,64 @@
+// A point is the half-open byte interval [key, key followed by zero).
+fn witness_point(key: Bytes) -> (Bytes, Bytes) {
+    let mut end: Bytes = clone(key)
+    list.push(mut end, 0u8)
+    (clone(key), take end)
+}
+
+fn witness_union(take spans: List[(Bytes, Bytes)]) -> List[(Bytes, Bytes)] {
+    std.list.sort(mut spans, scoped fn(a: (Bytes, Bytes), b: (Bytes, Bytes)) -> Order {
+        list.compare_bytes(a.0, b.0)
+    })
+    let mut joined: List[(Bytes, Bytes)] = list.new()
+    for (low, high) in spans {
+        if low < high {
+            let n = list.len(joined)
+            if n > 0 && joined[n - 1].1 >= low {
+                if joined[n - 1].1 < high {
+                    joined[n - 1].1 = clone(high)
+                }
+            } else {
+                list.push(mut joined, (clone(low), clone(high)))
+            }
+        }
+    }
+    take joined
+}
+
+fn witness_contains_reads(spans: List[(Bytes, Bytes)], reads: List[Read]) -> bool {
+    for seen in reads {
+        let (low, high) = match seen {
+            Point(key) => witness_point(key),
+            Span(a, b) => (clone(a), clone(b)),
+        }
+        if low < high && !std.list.any(spans, scoped fn(span: (Bytes, Bytes)) -> bool {
+            span.0 <= low && high <= span.1
+        }) {
+            return false
+        }
+    }
+    true
+}
+
+// Preserve row offsets, charges and keys while erasing values outside the
+// capture. Detached replay checks the read intervals before returning a verdict.
+fn witness_inline(image: std.page.Image, slots: Map[(u64, u64), ()]) -> Result[std.page.Image, std.page.Error] {
+    let id = std.page.stamp(image)
+    let mut rows: List[std.page.Entry] = list.with_capacity(std.page.count(image))
+    for slot in 0u64 .. std.page.count(image) {
+        let Some(take row) = std.page.entry(image, slot) else {
+            return Error(MalformedPage)
+        }
+        let std.page.Entry(key: take key, cell: take original) = take row
+        let cell: std.page.Cell = match take original {
+            InlineValue(take data) if !map.contains(slots, (id, slot)) => {
+                let mut blank: Bytes = list.with_capacity(list.len(data))
+                list.fill(mut blank, list.len(data), 0u8)
+                InlineValue(take blank)
+            },
+            take other => take other,
+        }
+        list.push(mut rows, std.page.Entry(key: take key, cell: take cell))
+    }
+    std.page.encode(rows, 0, id, Collection)
+}

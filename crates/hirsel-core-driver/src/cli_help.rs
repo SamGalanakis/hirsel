@@ -104,6 +104,12 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
                 "exact incarnation held for decision",
                 true,
             ),
+            ReadContract::PreviewChange => {
+                ("preview", "hold credential", "archive hold updated", false)
+            }
+            ReadContract::PreviewStatus => {
+                ("preview", "read credential", "archive hold observed", false)
+            }
             ReadContract::Archive => (
                 "archive",
                 "read credential",
@@ -163,7 +169,8 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
             | ReadContract::Decision
             | ReadContract::Restore
             | ReadContract::PackageEdit => "submit",
-            ReadContract::TapeExport
+            ReadContract::PreviewChange
+            | ReadContract::TapeExport
             | ReadContract::DevStream
             | ReadContract::Execute
             | ReadContract::Rehearsal

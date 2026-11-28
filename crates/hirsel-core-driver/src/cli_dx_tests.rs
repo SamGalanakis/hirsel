@@ -466,3 +466,19 @@ fn released_command_schema_covers_parser() {
         assert_eq!(schema["result"]["--plan"]["contract"], "plan");
     }
 }
+
+#[test]
+fn preview_commands_describe_and_enforce_their_options() {
+    let run = |words: &[&str]| parse(words.iter().map(|s| s.to_string()));
+    for verb in ["create", "status", "extend", "release"] {
+        let Action::Help(Some(spec)) = run(&["preview", verb, "--help", "--json"]).unwrap() else {
+            panic!("missing preview help");
+        };
+        let metadata = crate::cli::describe(spec);
+        assert_eq!(metadata["formats"], serde_json::json!(["text", "json"]));
+        assert!(run(&["preview", verb, "place", "--json", "--json"]).is_err());
+    }
+    assert!(run(&["preview", "create", "place", "--at", "123", "--ttl", "3m"]).is_ok());
+    assert!(run(&["preview", "create", "place", "--ttl", "3m", "--ttl", "1s"]).is_err());
+    assert!(run(&["preview", "release", "place", "--ttl", "3m"]).is_err());
+}

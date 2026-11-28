@@ -189,6 +189,16 @@ commands! {
         [DevWait] DevControl(DevControlOption), One: HELP, Json;
     "dev stop", "dev stop [DIR] [--json]", "Stop this package's running dev session.";
         [DevStop] DevControl(DevControlOption), One: HELP, Json;
+    "preview", "preview <create|extend|release|status>", "Mount and manage an archive-backed Preview.";
+        Simple(NoOption), Namespace: HELP;
+    "preview create", "preview create PLACE [--at POINT] [--ttl DURATION] [--to @BUCKET_PROFILE] [--json]", "Mount a Directory or Bucket Preview from a Place archive descriptor.";
+        [PreviewChange] Store(StoreOption), One: HELP, PreviewAt as Once, Ttl as Once, RestoreTo as Once, Json as Once;
+    "preview extend", "preview extend CHILD --ttl DURATION [--json]", "Extend the exact archive hold for this child.";
+        [PreviewChange] Store(StoreOption), One: HELP, Ttl as Once, Json as Once;
+    "preview release", "preview release CHILD [--json]", "Release the archive hold while preserving local child files.";
+        [PreviewChange] Store(StoreOption), One: HELP, Json as Once;
+    "preview status", "preview status CHILD [--json]", "Read the child's exact hold from the archive.";
+        [PreviewStatus] Store(StoreOption), One: HELP, Json as Once;
     "store rehearse", "store rehearse DIR --release EXE [-- arguments...]", "Preview a candidate’s migration against a store.";
         [Rehearsal] Store(StoreOption), Tail: HELP, StoreRelease, Json;
     "store", "store <inspect|stats|verify|repair|backup|restore|rehearse|archive>", "Inspect, verify, repair, back up or restore a store.";

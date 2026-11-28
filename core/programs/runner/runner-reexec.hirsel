@@ -62,7 +62,8 @@ fn reexecute_at[G: send, H: shareable + inert + send](db: store.Db, branch: stor
     let mut declaration = store.declare_replay(db, source) ?=> Store
     let h = (code.callable(schema))(mut declaration) ?=> Store
     let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-    Ok((go.replay)(db, source, take declaration, plan, h, caller, recorded_entry.record.args) ?=> Store)
+    let body = (go.replay)(h, caller, recorded_entry.record.args)
+    Ok(store.reexecute_body(db, source, take declaration, plan, replay_fault, body) ?=> Store)
 }
 
 fn failed_stop(stop: store.Stop) -> Result[Outcome, store.Error] {
@@ -157,4 +158,103 @@ fn tapes_emit(line: String) -> Result[(), StartError] {
     } else {
         Error(Missing("tapes check report output"))
     }
+}
+
+// A portable claim must name the certified binding from this release and the
+// immutable policy at its admission. A missing certificate refuses the claim
+// before any request bytes reach the exporter.
+pub type WitnessError = IneligibleWitness | Unavailable(store.UnknownReason) | Open(OpenError)
+
+fn eligible_claim[G: send, H: shareable + inert + send](db: store.Db, registered: Registry[G, H], source: store.ReplaySource, record: store.Recorded) -> Result[(), WitnessError] {
+    let Some(key) = view record.claim else {
+        return Error(IneligibleWitness)
+    }
+    let parts = store.claim_key_parts(key) ?=> |take e| Open(Store(take e))
+    let origin = claim_origin(db)
+    if !list.starts_with_at(parts.op, 0, origin) {
+        return Error(IneligibleWitness)
+    }
+    let name = claim_operation_name(parts.op) ?=> |_| IneligibleWitness
+    if claim_operation(origin, name) != parts.op {
+        return Error(IneligibleWitness)
+    }
+    let Some(registration) = map.get(registered.t.keyed, name) else {
+        return Error(IneligibleWitness)
+    }
+    let Some(current) = view registration.policy else {
+        return Error(IneligibleWitness)
+    }
+    let Some(saved) = store.replay_claim_policy(source) ?=> |take e| Open(Store(take e)) else {
+        return Error(IneligibleWitness)
+    }
+    if current.record != saved.record {
+        return Error(IneligibleWitness)
+    }
+    let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+    let entry = std.codec.decode(codec, saved.record) ?=> |_| IneligibleWitness
+    if !public_claim_identity(entry.claim_identity) || entry.entry != record.record.key {
+        return Error(IneligibleWitness)
+    }
+    Ok(())
+}
+
+pub fn capture_recorded_claim[G: send, H: shareable + inert + send](db: store.Db, version: u64, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Witness, WitnessError] waits {
+    let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema)) ?=> Open
+    capture_recorded_claim_at(db, version, place, n_place, identity, schema)
+}
+
+fn capture_recorded_claim_at[G: send, H: shareable + inert + send](db: store.Db, version: u64, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, identity: Bytes, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Witness, WitnessError] waits {
+    let loaded = store.prepare_reexecute_claim(db, version) ?=> |take e| Open(Store(take e))
+    let source = (take loaded) ?=> Unavailable
+    let registered = placed(place, n_place) ?=> |take e| Open(Place(take e))
+    let recorded = store.replay_record(source)
+    eligible_claim(db, registered, source, recorded)?
+    let Some(Transact(n, s, revision, check, go)) = registered_adapter(registered, recorded.record.key) else {
+        return Error(Unavailable(NoEntry))
+    }
+    let expected = code_bytes(n, s, identity) ?=> |e| Open(Store(Full(Allocation(e))))
+    if list.len(identity) != 32 || none(revision) || revision != recorded.record.revision || expected != recorded.record.code {
+        return Error(Unavailable(RevisionUnknown))
+    }
+    if let Some(Malformed(_)) = check(recorded.record.args) {
+        return Error(Unavailable(ArgsUnresolved))
+    }
+    let mut declared = store.declare_replay(db, source) ?=> |take e| Open(Store(take e))
+    let handles = (code.callable(schema))(mut declared) ?=> |take e| Open(Store(take e))
+    let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8)
+    let body = (go.replay)(handles, recorded.record.stream.caller, recorded.record.args)
+    match store.capture_witness_with(db, source, take declared, plan, body) ?=> |take e| Open(Store(take e)) {
+        Some(take witness) => Ok(take witness),
+        None => Error(Unavailable(StateGone)),
+    }
+}
+
+pub fn replay_detached[G: send, H: shareable + inert + send](witness: store.Witness, mode: ReplayMode, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.SliceVerdict, WitnessError] {
+    let identity = match mode {
+        RecordedCode => Some(activation_identity(code.identity(place), on_migrate, code.identity(schema)) ?=> Open),
+        Candidate => None,
+    }
+    replay_detached_at(witness, identity, place, n_place, schema)
+}
+
+fn replay_detached_at[G: send, H: shareable + inert + send](witness: store.Witness, identity: Option[Bytes], place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.SliceVerdict, WitnessError] {
+    let registered = placed(place, n_place) ?=> |take e| Open(Place(take e))
+    let recorded = store.witness_record(witness)
+    let Some(Transact(n, s, revision, check, go)) = registered_adapter(registered, recorded.record.key) else {
+        return Error(Unavailable(NoEntry))
+    }
+    if let Some(selected) = identity {
+        let expected = code_bytes(n, s, selected) ?=> |e| Open(Store(Full(Allocation(e))))
+        if list.len(selected) != 32 || none(revision) || revision != recorded.record.revision || expected != recorded.record.code {
+            return Error(Unavailable(RevisionUnknown))
+        }
+    }
+    if let Some(Malformed(_)) = check(recorded.record.args) {
+        return Error(Unavailable(ArgsUnresolved))
+    }
+    let mut declared = store.declare_witness(witness) ?=> |take e| Open(Store(take e))
+    let handles = (code.callable(schema))(mut declared) ?=> |take e| Open(Store(take e))
+    let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8)
+    let body = (go.replay)(handles, recorded.record.stream.caller, recorded.record.args)
+    Ok(store.replay_witness_body(witness, take declared, plan, replay_fault, body) ?=> |take e| Open(Store(take e)))
 }

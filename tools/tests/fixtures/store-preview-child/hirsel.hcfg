@@ -1,0 +1,10 @@
+pkg_v1.Package(
+    name: "hirsel.ai/preview_child",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Toolchain(package: "store", major: 1, authority: [])),
+    ],
+)

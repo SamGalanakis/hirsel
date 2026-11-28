@@ -1,36 +1,61 @@
-// The frame records data rows in key order; the re-run's rows are sorted the same way.
-pub fn same_writes(rows: pages.DataRows, committed: List[format.JournalOp]) -> Result[bool, types.Failure] {
-    if pages.data_row_count(rows) != list.len(committed) {
-        return Ok(false)
+// The journal and the private draft use the same logical ordering. Frame each
+// key and value and distinguish deletes, empty puts, direct chunks and trims.
+fn digest_write(mut hash: std.sha256.Sha256, key: Bytes, floor: Option[u64], value: Option[View[Bytes]], direct: Option[View[format.DirectBlob]]) {
+    digest_part(mut hash, key)
+    if let Some(trim) = floor {
+        std.sha256.add_byte(mut hash, 2)
+        for i in 0u64 .. 8 {
+            std.sha256.add_byte(mut hash, int.truncate(trim >> int.truncate(i * 8)))
+        }
+    } else if let Some(place) = direct {
+        std.sha256.add_byte(mut hash, 3)
+        for word in[place.stamp, place.len, place.checksum, place.pack, place.offset, place.epoch, place.pack_len, place.digest] {
+            for i in 0u64 .. 8 {
+                std.sha256.add_byte(mut hash, int.truncate(word >> int.truncate(i * 8)))
+            }
+        }
+    } else if let Some(raw) = value {
+        std.sha256.add_byte(mut hash, 1)
+        digest_part(mut hash, raw)
+    } else {
+        std.sha256.add_byte(mut hash, 0)
     }
+}
+
+pub fn journal_writes(committed: List[format.JournalOp]) -> Inline[u8, 32] {
+    let mut hash = std.sha256.start()
+    for op in committed {
+        digest_write(mut hash, op.key, match op.trim {
+            Some(trim) => Some(trim.floor),
+            None => None,
+        }, match op.value {
+            Some(raw) => Some(view raw),
+            None => None,
+        }, match op.direct {
+            Some(place) => Some(view place),
+            None => None,
+        })
+    }
+    std.sha256.finish(hash)
+}
+
+pub fn replayed_writes(rows: pages.DataRows) -> Result[Inline[u8, 32], types.Failure] {
     let order = types.capacity(pages.data_order(rows))?
-    for slot_order in 0u64 .. pages.data_row_count(rows) {
-        let op = pager.ordered_row(rows, order, slot_order)
-        let other = view committed[slot_order]
-        if op.key != other.key {
-            return Ok(false)
-        }
-        if let Some(trim) = op.trim {
-            let Some(expected) = other.trim else {
-                return Ok(false)
-            }
-            if trim.floor != expected.floor {
-                return Ok(false)
-            }
-            continue
-        } else if let Some(_) = other.trim {
-            return Ok(false)
-        }
-        let equal = match (view op.value, view other.value) {
-            (Some(staged), Some(raw)) => format.staged_bytes(staged) == raw,
-            (None, None) => true,
-            _ => false,
-        }
-        if !equal {
-            return Ok(false)
-        }
+    let mut hash = std.sha256.start()
+    for slot in 0u64 .. pages.data_row_count(rows) {
+        let op = pager.ordered_row(rows, order, slot)
+        digest_write(mut hash, op.key, match op.trim {
+            Some(trim) => Some(trim.floor),
+            None => None,
+        }, match op.value {
+            Some(raw) => Some(format.staged_bytes(raw)),
+            None => None,
+        }, match op.value {
+            Some(SealedChunk(chunk)) => Some(view chunk.place),
+            _ => None,
+        })
     }
-    Ok(true)
+    Ok(std.sha256.finish(hash))
 }
 
 pub fn replay_base_state(take validated: manifest.ValidatedPageManifest) -> Result[(manifest.PageManifest, pages.State), types.Failure] {

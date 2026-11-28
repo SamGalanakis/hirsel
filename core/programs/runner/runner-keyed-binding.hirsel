@@ -118,6 +118,50 @@ pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H],
     if reg.replay {
         return Ok(())
     }
+    let identity: Bytes = clone(code.identity(rule.claim.f))
+    register_keyed(mut reg, take binding, take rule, take identity)
+}
+
+// The binding author certifies that its post-bind caller, idempotency key and
+// argument bytes may be exported. The immutable admission policy retains the
+// certification for that exact binder revision across recovery and retirement.
+pub fn bind_portable_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding, take rule: KeyedRule[G]) -> Result[(), RegisterError] {
+    if reg.replay {
+        return Ok(())
+    }
+    let Some(take identity) = portable_claim_identity(rule.claim) else {
+        return Error(keyed_registration_error(binding.op, MetadataBytes))
+    }
+    register_keyed(mut reg, take binding, take rule, take identity)
+}
+
+fn portable_claim_identity[G: send](claim: Claim[G]) -> Option[Bytes] {
+    let revision = code.revision(claim.f)?
+    if list.len(revision) != 32 {
+        return None
+    }
+    // PROG-9 identities begin with 1. This distinct envelope contains the
+    // binder revision and the complete PROG-9 identity.
+    let mut identity: Bytes = list.with_capacity(33 + list.len(code.identity(claim.f)))
+    list.push(mut identity, 2u8)
+    list.append(mut identity, revision)
+    list.append(mut identity, code.identity(claim.f))
+    Some(take identity)
+}
+
+fn public_claim_identity(identity: Bytes) -> bool {
+    list.len(identity) > 34 && identity[0u64] == 2u8 && identity[33u64] == 1u8
+}
+
+fn claim_definition(identity: Bytes) -> View[Bytes] in identity {
+    if public_claim_identity(identity) {
+        list.slice(identity, 33, list.len(identity))
+    } else {
+        view identity
+    }
+}
+
+fn register_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding, take rule: KeyedRule[G], take identity: Bytes) -> Result[(), RegisterError] {
     if binding.mode != Keyed {
         return Error(keyed_registration_error(binding.op, Mode))
     }
@@ -135,7 +179,7 @@ pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H],
     }
     let entry_args: Bytes = clone(reg.t.exported[index].described.args)
     let entry_result: Bytes = clone(reg.t.exported[index].described.result)
-    let activation = KeyedEntryRecord(entry: clone(binding.entry), deadline_ms: binding.deadline_ms, n_e: n_e, s_e: s_e, args: take entry_args, output: take entry_result, defaults: take defaults, fields: clone(binding.fields), method: binding.method, ok_status: binding.ok_status, error_status: binding.error_status, body_max: binding.body_max, claim_identity: clone(code.identity(claim.f)), headers: clone(claim.headers))
+    let activation = KeyedEntryRecord(entry: clone(binding.entry), deadline_ms: binding.deadline_ms, n_e: n_e, s_e: s_e, args: take entry_args, output: take entry_result, defaults: take defaults, fields: clone(binding.fields), method: binding.method, ok_status: binding.ok_status, error_status: binding.error_status, body_max: binding.body_max, claim_identity: take identity, headers: clone(claim.headers))
     let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
     let mut record_bytes: Bytes = list.new()
     std.codec.encode(codec, activation, mut record_bytes) ?=> |_| keyed_registration_error(binding.op, MetadataBytes)
@@ -190,7 +234,7 @@ fn check_keyed_registrations[G: send, H: shareable + inert + send](db: store.Db,
             if registration.method != entry_record.method {
                 return Error(KeyedOpChanged(clone(name), "method"))
             }
-            if code.identity(registration.claim.f) != entry_record.claim_identity || registration.claim.headers != entry_record.headers {
+            if code.identity(registration.claim.f) != claim_definition(entry_record.claim_identity) || registration.claim.headers != entry_record.headers {
                 return Error(KeyedOpChanged(clone(name), "claim"))
             }
             let (take captures, _) = std.router.captures(registration.route) ?=> |_| KeyedOpChanged(clone(name), "path")

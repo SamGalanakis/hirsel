@@ -27,7 +27,7 @@ type TransactAdapters[H: shareable + inert + send]: send {
     resume: own[send] fn(mut store.Db, take store.Parked, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
     trigger: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits,
     attempt: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits,
-    replay: own[send] fn(store.Db, store.ReplaySource, take store.Declare, store.Plan, H, Caller, Bytes) -> Result[store.Verdict, store.Error] waits
+    replay: own[send] fn(H, Caller, Bytes) -> store.ReplayBody
 }
 
 type TransactEntry[H, Env: inert + send, A, R, E]: send {
@@ -182,9 +182,9 @@ pub fn transact_via[G: send, H: shareable + inert + send, F, Env: inert + send, 
         let body = TransactBody(entry: store.copy_env(attempt_descriptor), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
         store.run(mut db, Some(s), (take body, store.copy_env(tables), store.copy_env(active), n), run_transact_attempt)
     }
-    let replay = fn(db: store.Db, source: store.ReplaySource, take declaration: store.Declare, plan: store.Plan, h: H, author: Caller, arg: Bytes) -> Result[store.Verdict, store.Error] waits {
+    let replay = fn(h: H, author: Caller, arg: Bytes) -> store.ReplayBody {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
-        store.reexecute_with(db, source, take declaration, plan, replay_fault, env, transact_replay)
+        store.replay_body(take env, transact_replay)
     }
     let adapters = TransactAdapters(key: clone(key), serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
     insert(mut r, take key, code.identity(definition), take d, Transact(n, s, take revision, check, take adapters), Some(checked_argument(ca, n, s)))

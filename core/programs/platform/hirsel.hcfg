@@ -38,6 +38,7 @@ pkg_v1.Package(
         ("store-tool-pitr.hirsel", "store_tool"),
         ("store-tool-bucket.hirsel", "store_tool"),
         ("store-tool-archive.hirsel", "store_tool"),
+        ("store-tool-preview.hirsel", "store_tool"),
         ("local.hirsel", "local"),
         ("local-bucket.hirsel", "local"),
         ("local-shards.hirsel", "local"),

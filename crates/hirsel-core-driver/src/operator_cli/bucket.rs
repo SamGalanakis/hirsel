@@ -16,8 +16,8 @@ use std::{
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Destination {
-    location: Coordinates,
+pub(super) struct Destination {
+    pub(super) location: Coordinates,
     level: String,
     #[serde(deserialize_with = "Deserialize::deserialize")]
     source_place: Option<Coordinates>,
@@ -26,7 +26,8 @@ struct Destination {
 }
 
 impl Destination {
-    fn read(path: &Path) -> Result<Self, Failure> {
+    pub(super) fn read(path: &Path) -> Result<Self, Failure> {
+        super::context::trusted_path(path, crate::operator::operator_uid())?;
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -59,7 +60,7 @@ impl Destination {
         Ok(dest)
     }
 
-    fn run(
+    pub(super) fn run(
         &self,
         source: Option<&File>,
         src: Option<&Archive>,
@@ -114,7 +115,6 @@ pub(super) fn plan(
     target: &[String],
 ) -> Result<BucketPlan, Failure> {
     let profile = std::path::absolute(destination).map_err(Failure::io)?;
-    super::context::trusted_path(&profile, crate::operator::operator_uid())?;
     pitr::check_evidence_paths(source, &profile)?;
     let dest = Destination::read(&profile)?;
     let from = pitr::source_handle(source, archive.is_some())?;

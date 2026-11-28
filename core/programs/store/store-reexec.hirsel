@@ -299,7 +299,8 @@ fn rerun[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: Call
 pub opaque type ReplaySource {
     store: StoreId,
     open: u64,
-    commit: format.JournalCommit,
+    reply: Inline[u8, 32],
+    writes: Inline[u8, 32],
     call: Recorded,
     base: pages.Roots
 }
@@ -314,13 +315,14 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
     if call.settle == 2 {
         return Ok(Error(AdmissionRefused))
     }
-    if let None = recorded_reply(commit, call.record.stream) {
+    let Some(reply) = stream_reply_digest(commit, call.record.stream) else {
         return Ok(Error(NotRecorded))
     }
     let Some(take base) = base_roots(db, b, call.base)? else {
         return Ok(Error(StateGone))
     }
-    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
+    let format.JournalCommit(data: take writes, ..) = take commit
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), reply, writes: txn.journal_writes(writes), call: take call, base: take base)))
 }
 
 // A claim key is `len8 ‖ op ‖ issuer ‖ len8 ‖ subject ‖ len8 ‖ key` (http.md K-4).
@@ -366,26 +368,31 @@ fn claim_source_from_commit(db: Db, b: Branch, take commit: format.JournalCommit
     if call.settle == 2 {
         return Ok(Error(AdmissionRefused))
     }
+    let Some(reply) = claim_reply_digest(commit, call) else {
+        return Ok(Error(NotRecorded))
+    }
     let Some(take base) = base_roots(db, b, call.base)? else {
         return Ok(Error(StateGone))
     }
-    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
+    let format.JournalCommit(data: take writes, ..) = take commit
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), reply, writes: txn.journal_writes(writes), call: take call, base: take base)))
 }
 
-// The reply the recorded run committed: a stream's Replied value, or the
-// claim's. Both start with a 41-byte header.
-fn replay_source_reply(source: ReplaySource) -> Option[View[Bytes]] in source {
-    if let Some(_) = source.call.claim {
-        for edit in source.commit.keyed {
-            if let Some(_) = edit.call {
-                if let Some(raw) = view edit.value {
-                    return Some(view raw)
+// Strip the claim-row envelope while the validated journal frame is in scope.
+fn claim_reply_digest(commit: format.JournalCommit, call: Recorded) -> Option[Inline[u8, 32]] {
+    let Some(claim) = view call.claim else {
+        return None
+    }
+    for edit in commit.keyed {
+        if let Some(_) = edit.call {
+            if let Some(raw) = view edit.value {
+                if claim == edit.key && list.len(raw) >= 41 {
+                    return Some(std.sha256.hash(list.slice(raw, 41, list.len(raw))))
                 }
             }
         }
-        return None
     }
-    recorded_reply(source.commit, source.call.record.stream)
+    None
 }
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
@@ -420,11 +427,10 @@ fn replay_verdict(source: ReplaySource, plan: Plan, take reran: Rerun[Bytes], fa
         Halted(stop) => (failed(stop)?, pages.new_data_rows()),
         RoomRefused => return Ok(Unknown(StateGone)),
     }
-    let stored = option.unwrap(replay_source_reply(source))
-    if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
+    if std.sha256.hash(output) != source.reply {
         return Ok(Different(Reply))
     }
-    if !failure_result_from_rep(txn.same_writes(writes, source.commit.data))? {
+    if failure_result_from_rep(txn.replayed_writes(writes))? != source.writes {
         return Ok(Different(Writes))
     }
     Ok(Same)
@@ -470,6 +476,19 @@ pub fn replay_claim(source: ReplaySource) -> Option[Bytes] {
     clone(source.call.claim)
 }
 
+// Admission policy on the recorded base, including calls settled after a
+// restart. Never substitute the current head's policy for this one.
+pub fn replay_claim_policy(source: ReplaySource) -> Result[Option[KeyedPolicy], Error] {
+    let Some(key) = view source.call.claim else {
+        return Ok(None)
+    }
+    let end = failure_result_from_rep(txn.claim_op_end(key))?
+    match pages.keyed_lookup(source.base.keyed, txn.KEYED_OPS, list.slice(key, 0, end)) {
+        Some(raw) => Ok(Some(read_keyed_policy(raw)?)),
+        None => Ok(None),
+    }
+}
+
 fn replay_source_matches(db: Db, source: ReplaySource) -> bool {
     source.store == db.store && source.open == open_number(db)
 }
@@ -490,16 +509,45 @@ pub fn replay_record(source: ReplaySource) -> Recorded {
     clone(source.call)
 }
 
-pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Result[Bytes, Error], env: Env, body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+// Type-erased entry for runner registration. Only an inert environment and
+// a plain transaction function can construct a replay body.
+pub opaque type ReplayBody {
+    run: own fn(Recorded, mut Tx) -> Result[Bytes, Bytes]
+}
+
+pub fn replay_body[E: inert](take env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> ReplayBody {
+    ReplayBody(run: fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        body(call, mut tx, env)
+    })
+}
+
+fn replay_bindings(source: ReplaySource, take selected: Declare) -> Result[indexes.IndexRegistry, Error] {
     let Open = selected.mode else {
         return Error(Foreign)
     }
-    if !replay_source_matches(db, source) || !catalog.same_declaration_base(selected.inner, replay_declaration_base(source)) {
+    if !catalog.same_declaration_base(selected.inner, replay_declaration_base(source)) {
         return Error(Foreign)
     }
     complete_declaration(selected)?
     let Declare(plan: SchemaPlan(bindings: take bindings, ..), ..) = take selected
-    let registry = indexes.declared_index_registry(take bindings)
+    Ok(indexes.declared_index_registry(take bindings))
+}
+
+pub fn reexecute_body(db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Result[Bytes, Error], body: ReplayBody) -> Result[Verdict, Error] waits {
+    if !replay_source_matches(db, source) {
+        return Error(Foreign)
+    }
+    let registry = replay_bindings(source, take selected)?
+    replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        (body.run)(call, mut tx)
+    })
+}
+
+pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan, failed: fn(Stop) -> Result[Bytes, Error], env: Env, body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    if !replay_source_matches(db, source) {
+        return Error(Foreign)
+    }
+    let registry = replay_bindings(source, take selected)?
     replay_run(db, registry, source, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
         body(call, mut tx, env)
     })
@@ -550,6 +598,11 @@ pub fn recorded_claim(db: Db, wanted: u64) -> Result[Option[RecordedClaim], Erro
         }
     }
     Ok(None)
+}
+
+fn stream_reply_digest(commit: format.JournalCommit, stream: StreamKey) -> Option[Inline[u8, 32]] {
+    let raw = recorded_reply(commit, stream)?
+    Some(std.sha256.hash(list.slice(raw, 41, list.len(raw))))
 }
 
 fn recorded_reply(commit: format.JournalCommit, stream: StreamKey) -> Option[View[Bytes]] in commit {

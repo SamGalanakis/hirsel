@@ -209,6 +209,8 @@ pub enum StoreOption {
     Deep,
     KeepFrom(String),
     ArchiveAt(String),
+    PreviewAt(String),
+    Ttl(String),
     RestoreFrom(String),
     RestoreTarget(String),
     RestoreTo(String),

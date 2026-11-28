@@ -142,6 +142,8 @@ flags! {
     Store ["--store"] "DIRECTORY" => "Select the database for dry-run, or the request or product store.";
     Deep ["--deep"] => "Walk every reachable page graph.";
     KeepFrom ["--keep-from"] "BASE" => "Keep the selected base and its successors.";
+    PreviewAt ["--at"] "POINT" => "Select a main timestamp in ms or a Store restore selector. Defaults to latest.";
+    Ttl ["--ttl"] "DURATION" => "Set the hold duration in ms, s, m or h. Creation defaults to one hour.";
     ArchiveAt ["--at"] "MS" => "Select a retention floor by time.";
     RestoreFrom ["--from"] "SOURCE" => "Restore from this stamped backup or archive.";
     RestoreTarget ["--target"] "SELECTOR" => "Select latest, version:BRANCH,V, at:BRANCH,MS, or boundary:TOKEN.";

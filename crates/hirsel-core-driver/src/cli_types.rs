@@ -4,6 +4,8 @@ use super::*;
 pub(crate) enum ReadContract {
     Retirement,
     Archive,
+    PreviewChange,
+    PreviewStatus,
     Expiry,
     Restore,
     Help,

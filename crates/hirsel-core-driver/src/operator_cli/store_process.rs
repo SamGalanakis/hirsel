@@ -14,6 +14,7 @@ pub(crate) fn command(
     let mut command = Command::new(super::installed(helper)?);
     for role in [
         "HIRSEL_ARCHIVE_READ",
+        "HIRSEL_ARCHIVE_HOLD",
         "HIRSEL_ARCHIVE_EXPIRY",
         "HIRSEL_RESTORE_BUCKET",
     ] {

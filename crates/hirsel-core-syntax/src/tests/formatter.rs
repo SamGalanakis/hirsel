@@ -34,6 +34,17 @@ fn formatter_wraps_at_syntax_boundaries() {
         formatted(&input, ParseMode::Foreign),
         format!("pub fn f({first}: u64,\n    {over}: u64) -> u64\n")
     );
+
+    let field = "go: own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport])";
+    let input = format!(
+        "type GrantedLaunch[G: send]: send {{ {field} -> Result[Task[Outcome], Capacity] }}"
+    );
+    assert_eq!(
+        formatted(&input, ParseMode::Source),
+        format!(
+            "type GrantedLaunch[G: send]: send {{\n    {field} ->\n        Result[Task[Outcome], Capacity]\n}}\n"
+        )
+    );
 }
 
 #[test]

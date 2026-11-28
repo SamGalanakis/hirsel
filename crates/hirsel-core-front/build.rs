@@ -3,17 +3,15 @@ use std::fs;
 use std::path::Path;
 
 fn hirsel_cases(text: &str) -> Vec<String> {
-    let start = text
-        .find("pub type AddressClass =")
+    let (_, declaration) = text
+        .split_once("pub type AddressClass =")
         .expect("core AddressClass type");
-    let line = text[start..]
-        .lines()
-        .next()
-        .expect("core AddressClass line");
-    line.split_once('=')
-        .expect("core AddressClass cases")
-        .1
-        .split('|')
+    let mut lines = declaration.lines().map(str::trim);
+    let first = lines.next().expect("core AddressClass cases");
+    let continuations = lines.map_while(|line| line.strip_prefix('|'));
+    std::iter::once(first)
+        .chain(continuations)
+        .flat_map(|line| line.split('|'))
         .map(|case| case.trim().to_owned())
         .collect()
 }

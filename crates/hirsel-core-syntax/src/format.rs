@@ -217,7 +217,11 @@ fn item_text(item: &Item, roles: &mut [Role]) -> String {
                     }
                 }
             }
-            NodeKind::ResultType | NodeKind::Outlives => roles[range.start].wrap_before = true,
+            NodeKind::ResultType => {
+                // In a callable field, a newline before the arrow can end the field.
+                roles[tree.node(children[0]).origin.tokens.start as usize].wrap_before = true;
+            }
+            NodeKind::Outlives => roles[range.start].wrap_before = true,
             NodeKind::Variants => {
                 for pair in children.windows(2) {
                     let start = tree.node(pair[0]).origin.tokens.end as usize;

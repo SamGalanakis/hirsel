@@ -5,11 +5,9 @@ specification and never inside `fleet@1`
 ([FLT-1](fleet.md#flt-1-three-workload-archetypes),
 [FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)).
 
-Hirsel Compute (`compute@1`) is the core scheduler for Archetype C elastic remote workloads:
-native units and contained Wasm tasks, run inside the existing single-binary `hirsel` launcher
-and `platform` host. It is a reusable part of the Hirsel ecosystem that any program or service
-can use to run work on enrolled hosts. Workers alone admit work against real host resources;
-`fleet@1` never tracks compute slots or sits on the create path.
+`compute@1` defines worker, credit desk and dispatcher reducers for Archetype C
+elastic remote workloads. Workers alone admit work against their capacity vectors.
+`fleet@1` neither tracks compute slots nor sits on the create path.
 
 A **principal** is the owner of grants on whose behalf compute runs. Every create names exactly
 one principal; the principal's grants bound what the execution may do, and its hard
@@ -181,14 +179,12 @@ shard** — the **credit desk** (equivalently, an exclusive ordinal pop at the s
 one active owner per worker-shard offer). All placement-specific roles, types, roster fields,
 and safety invariants are encapsulated in this section.
 
-- the Archetype C capacity-report picker in `fleet@1` or ingress;
-- any broadcast two-choice placement path or stale-view fallback beside credits;
-- epsilon overcommit on offers;
-- any second placement route for in-fleet callers (every create takes the same placement path).
+All creates use the same credit desk. A worker reserves capacity before funding an
+offer. The desk assigns neither slots from capacity reports nor overcommitted slots.
 
 ### Roles and exclusive credit protocol
 
-Three soft-state roles run inside the single `hirsel` binary:
+Three reducers own the placement state:
 
 - **Worker.** Owns its physical slots and mints exact, single-use credits only for capacity it
   has reserved (COMP-2 hold), within a bounded per-class window `W`. Credit ordinals are drawn
@@ -206,7 +202,7 @@ Three soft-state roles run inside the single `hirsel` binary:
   per-principal demand counts (`Ask(class, principal, n)`) — never payloads — and pops each offer
   to at most one dispatcher (`GrantExclusive`). It drops any offer whose `desk_session` is not
   its current one. The shard uses self-clocked fair queueing with weights
-  `allocation[p][cell]` (Golestani 1994). When an eligible waiting principal's head becomes
+  `allocation[p][cell]`. When an eligible waiting principal's head becomes
   ready, stamp it once with `max(F_prev[p], V) + 1 / allocation[p][cell]`, where `F_prev[p]` is
   the last served tag for that principal and `V` is the last tag served at the shard. Keep the
   tag while that head stays ready. Grant the head with the smallest stored tag, breaking ties
@@ -312,7 +308,7 @@ state with exactly that `generation`; any other event of these kinds is a no-op
      symmetric **Handoff** returns `W`'s offers to `A`. Asks are versioned and cancelled on
      supersede so a delayed grant cannot resurrect an expired request. Safety follows strictly
      from serialized worker checks on the credit, independent of clock accuracy.
-- **Liveness assumptions for bounded recovery.** The timed bounds of COMP-9 (`ReOffer`,
+- **Liveness assumptions for bounded recovery.** The timed bounds in the [verification obligations](../../core/programs/fleet/COMPUTE-VERIFICATION.md) (`ReOffer`,
   `StrandBound`, `MintLatency`, `OrphanReclaim`) assume: (i) a continuously common reachable team
   member `B` for `W` and `D`, (ii) a working direct `D -> W` route, (iii) one-way message delay
   at most `delta`, (iv) local service delay at most `sigma` for any ready event at `W`, `B`, and
@@ -471,7 +467,7 @@ definitive first-send refusal from the worker permits a new attempt within budge
   principal's limit is exhausted cell-wide or fleet-wide. `Refused(Capacity)` is returned for a
   `WorkerCapacityRefusal` or a `PlaceNoCredit` miss.
 
-## COMP-5: Restart custody (`AccountBeforeMint` by `ReapBeforeMint`) and volatile scope
+## COMP-5: Restart custody and volatile scope
 
 Compute kernels operate under the volatile scope clause **K11-V** of
 [FLT-7](fleet.md#flt-7-proof-ready-protocol-kernel-contract-k1k13): a volatile ledger persists
@@ -486,40 +482,13 @@ then rebuilds its spending ledger from its current assignments. An acknowledgeme
 any other session leaves admission closed. Prior credits and sessions remain fenced by
 the run identity (COMP-3, COMP-4).
 
-## COMP-6: Opaque, versioned handles
+## COMP-6: Checkout identity
 
-Every running compute execution is addressed by an **opaque, versioned handle**:
-
-```hirsel
-pub type ComputeHandle: codec + key + send {
-    version: u8,
-    cell: u16,
-    host: u32,
-    run: u64,
-    slot: u32,
-    generation: u64,
-    secret: Bytes
-}
-```
-
-- **Opaque and versioned.** Callers treat handles as opaque tokens; the leading `version` tag
-  governs wire format evolution without exposing internal layout to callers.
-- **Internal tuple and freshness.** Internally the handle carries `(cell, host, run, slot,
-  generation)` plus an **authenticated secret**. `run` is a fresh per-host-process-start value
-  (also fencing pre-restart placement credits and attempt sessions, COMP-3–COMP-5), and `generation` is a non-wrapping per-slot sequence (refusing counter wrap).
-  Together with a fresh cryptographic boot key, `(run, slot, generation)` derives a
-  domain-separated authenticated secret whose wire width is sized to the fleet-lifetime
-  collision/forgery risk budget before freezing the wire format.
-- **No `fleet@1` node incarnation.** The durable node incarnation stored in `fleet@1`
-  ([FLT-2](fleet.md#flt-2-move-protocol-claimauth-origin-superseded-settlement-deposed),
-  [FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)) is **not** part of the
-  compute handle. Compute fencing never requires a `fleet@1` write on host-process restart.
-- **Rights checked on every use (`HandleFresh`).** Routing fields (`cell`, `host`) confer no
-  authority. Every operation on a handle (`activate`, `exec`, `signal`, `kill`, `status`)
-  authenticates the caller and verifies principal identity, current grants, live `(run, slot,
-  generation)`, and the authenticated secret. Host identifiers are never reused within a fleet:
-  a known retired slot, `run`, or host returns `Gone`, while an unreachable owner returns
-  `Undecided` (neither settles prior external effects).
+A [checkout](../../core/programs/compute/protocol.hirsel) binds a credit, the principal
+and the slot generation. The worker checks host, run, slot and generation against the
+current credit and verifies that the slot is still occupied by the same principal.
+A handle check or activation also requires authorization for that principal. Stale
+or unauthorized checkouts confer no authority.
 
 ## COMP-7: Contained foreign modules
 
@@ -527,7 +496,7 @@ pub type ComputeHandle: codec + key + send {
 contained foreign module boundary. The worker accounts for a class's declared capacity
 vector under COMP-2.
 
-## COMP-8: Multi-cell federation and one-hop spill
+## COMP-8: One-hop spill
 
 - **One-hop spill (`SpillDepth <= 1`).** When local placement in the home cell cannot satisfy a
   create, the coordinator may spill **at most once** to one compatible remote cell. A spill is

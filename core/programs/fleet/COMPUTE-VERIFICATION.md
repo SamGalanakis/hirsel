@@ -15,7 +15,7 @@ Each invariant names the rule it follows from:
 | Worker custody | `RetireOnce` | each Redeem charge and each Mint hold is returned exactly once, by the event matching `(host, run, slot, generation, principal)` | COMP-3 retirement table |
 | Worker custody | `ActivateOnce` | user code holding grants starts at most once per `(run, slot, generation)` | COMP-3 **Activate**; COMP-4 inert create |
 | Worker custody | `AccountBeforeMint` (by `ReapBeforeMint`) | no Mint in a `run` before the empty-custody acknowledgement of that run's own launcher session | COMP-5 |
-| Worker custody | `HandleFresh` | every handle operation acts only on the live `(run, slot, generation)` with a valid secret | COMP-6 |
+| Worker custody | `HandleFresh` | the worker accepts a checkout only for the authorized principal and the live credit and slot generation | COMP-6 |
 | Attempts | attempt deduplication, `LateUnknownId` | a repeated attempt replays its outcome; one below the retirement floor never runs | COMP-4 attempt identity |
 | Attempts | `RunFence` | no attempt, credit, or handle of an earlier `run` acts in a later one | COMP-4 restart fence; COMP-5 step 1 |
 | Placement | `OneLiveCredit`, `SingleUse`, `OrdinalFresh`, `GrantExclusive`, `WithdrawIsFinal` | as stated in COMP-3 | COMP-3 credit protocol, desk sessions |

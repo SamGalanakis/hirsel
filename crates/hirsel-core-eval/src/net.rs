@@ -160,7 +160,7 @@ impl Machine<'_> {
             let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
                 unreachable!()
             };
-            handles[&id].accepted_socket
+            handles.get(&id).is_some_and(|h| h.accepted_socket)
         }) else {
             self.socket_drop(key);
             return Ok(vec![0, 1, 0, 0]);

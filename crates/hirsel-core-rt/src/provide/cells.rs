@@ -1,8 +1,11 @@
-//! MEM-24: a clock, random or process cell is charged to the limit current at
-//! its construction and withdrawn when that limit ends. A port keeps its run
-//! lifetime. Slots outlive their cells: a withdrawn slot is reused by the next
-//! cell of its kind, and the generation a live designation carries tells a copy
-//! that outlived its limit from the slot's current cell.
+//! MEM-24: every cell, a port included, is charged to the limit current at its
+//! construction and withdrawn when that limit ends. Slots outlive their cells:
+//! a withdrawn clock, random or process slot is reused by the next cell of its
+//! kind, and the generation a live designation carries tells a copy that
+//! outlived its limit from the slot's current cell. A port's designations
+//! carry no generation (a grant's handle is its rules, a `Call`'s its id), so a
+//! withdrawn port keeps its slot until teardown, sealed and empty, and answers
+//! every operation but a close with Bounds.
 use super::*;
 use crate::limit::Payer;
 use std::collections::HashMap;
@@ -17,7 +20,7 @@ pub(crate) struct Slot {
 }
 
 /// The run's slots, each charged cell's payer and charge, and the withdrawn
-/// slots of each reusable kind.
+/// slots of each reusable kind (a withdrawn port's is never reused).
 #[derive(Default)]
 pub(crate) struct Table {
     slots: Vec<Box<Slot>>,
@@ -52,13 +55,14 @@ pub(super) unsafe fn cell<'a>(state: *mut u8) -> &'a Cell {
     unsafe { &slot(state).cell }
 }
 
-/// The withdrawable cells of every run by the address of the limit record
+/// The cells of every run by the address of the limit record
 /// they are charged to, with their run's table.
 static BY_LIMIT: Mutex<BTreeMap<usize, Vec<(usize, usize)>>> = Mutex::new(BTreeMap::new());
 /// How many entries `BY_LIMIT` holds: a limit end looks it up only when some
 /// cell is withdrawable.
 static WITHDRAWABLE: AtomicUsize = AtomicUsize::new(0);
 
+/// A reusable cell's kind: the free list its withdrawn slot joins.
 fn kind(cell: &Cell) -> Option<usize> {
     match cell {
         Cell::Clock(_) => Some(0),
@@ -143,14 +147,11 @@ impl Cells {
         };
         table.charged.insert(address, (payer, charge));
         drop(table);
-        if kind.is_some() {
-            let key = payer.address();
-            lock(&BY_LIMIT)
-                .entry(key)
-                .or_default()
-                .push((address, std::ptr::from_ref(self) as usize));
-            WITHDRAWABLE.fetch_add(1, Ordering::Relaxed);
-        }
+        lock(&BY_LIMIT)
+            .entry(payer.address())
+            .or_default()
+            .push((address, std::ptr::from_ref(self) as usize));
+        WITHDRAWABLE.fetch_add(1, Ordering::Relaxed);
         Ok((
             Provider {
                 state: address as *mut u8,
@@ -182,7 +183,9 @@ impl Cells {
 
     /// Withdraw one cell: its designations stop designating it, its waits
     /// are readied (and fail at issue), its state is freed and its charge
-    /// refunded to its limit, and its slot waits for the next cell of its kind.
+    /// refunded to its limit, and its slot waits for the next cell of its
+    /// kind. A port's calls settle and its `next` waits are readied, each
+    /// failing with Bounds.
     fn withdraw(&self, address: usize) {
         // SAFETY: the table owns the slot until teardown.
         let slot = unsafe { slot(address as *mut u8) };
@@ -212,13 +215,20 @@ impl Cells {
                 tokens = std::mem::take(&mut process.waiters);
                 *process = ProcessCell::default();
             }
-            Cell::Port(_) => unreachable!("a port is never withdrawn"),
+            Cell::Port(port) => {
+                let retired;
+                (tokens, retired) = lock(port).withdraw();
+                drop(retired);
+            }
         }
         lock(&IDLE).retain(|_, (cell, _)| *cell != address);
+        lock(&SERVERS).retain(|_, (cell, _)| *cell != address);
         let (charged, words) = {
             let mut table = lock(&self.0);
             let charged = table.charged.remove(&address);
-            table.free[kind(&slot.cell).unwrap()].push(address);
+            if let Some(kind) = kind(&slot.cell) {
+                table.free[kind].push(address);
+            }
             (charged, table.words.remove(&address))
         };
         // The words are forgotten through the withdrawing task's registry,
@@ -240,6 +250,34 @@ impl Cells {
             payer.refund_run_owned(charge);
         }
         WITHDRAWABLE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Port {
+    /// Withdraw the port (MEM-24): seal it, settle every unsettled call with
+    /// Bounds and free what the room held. A `Call` the server holds stays
+    /// until it is closed or replied to, as a settled call's does. Answers
+    /// the callers and `next` waits to ready, and the UDP retirements to drop
+    /// once the port is unlocked.
+    pub(super) fn withdraw(
+        &mut self,
+    ) -> (Vec<u64>, BTreeMap<u64, crate::udp_net::served::Retirement>) {
+        self.sealed = true;
+        self.withdrawn = true;
+        let ids: Vec<u64> = self.calls.keys().copied().collect();
+        let mut tokens: Vec<u64> = ids
+            .iter()
+            .filter_map(|&id| self.settle(id, WITHDRAWN))
+            .collect();
+        for id in ids {
+            self.free_staged(id);
+            self.prune(id);
+        }
+        tokens.extend(self.servers.drain(..).map(|(token, _)| token));
+        self.handles = BTreeMap::new();
+        self.keys = BTreeMap::new();
+        self.used = 0;
+        (tokens, std::mem::take(&mut self.udp_retired))
     }
 }
 

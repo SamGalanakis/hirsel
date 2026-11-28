@@ -150,3 +150,94 @@ pub(super) fn reply_error(vocab: Vocab, call: &PortCall, tag: u64, code: u64) ->
         code: code as u32,
     })
 }
+
+/// A caller key's Net port, when `provider` (the socket's recorded one) is
+/// a port's.
+pub(super) fn net_port(provider: &Provider) -> Option<&Mutex<Port>> {
+    if !owns(provider) {
+        return None;
+    }
+    // SAFETY: the run pins every cell until teardown.
+    match unsafe { cell(provider.state) } {
+        Cell::Port(port) => Some(port),
+        _ => None,
+    }
+}
+
+pub(crate) fn exec_port(provider: &Provider) -> bool {
+    net_port(provider).is_some_and(|port| lock(port).vocab == Vocab::Exec)
+}
+
+/// `net.split` on a port's socket: both halves are live and the server is
+/// asked nothing. Allocates nothing.
+pub(crate) fn split_socket(provider: &Provider, key: u64) {
+    if let Some(port) = net_port(provider) {
+        let mut p = lock(port);
+        if let Some(&id) = p.keys.get(&(key & !3))
+            && let Some(h) = p.handles.get_mut(&id)
+        {
+            h.write = Some(State::Live);
+        }
+    }
+}
+
+/// `net.join` on a port socket's live halves: whole again, the server asked
+/// nothing. False when the halves are not both live.
+pub(crate) fn join_socket(provider: &Provider, key: u64) -> bool {
+    let Some(port) = net_port(provider) else {
+        return false;
+    };
+    let mut p = lock(port);
+    let Some(&id) = p.keys.get(&(key & !3)) else {
+        return false;
+    };
+    match p.handles.get_mut(&id) {
+        Some(h)
+            if h.kind == Kind::Socket && h.state == State::Live && h.write == Some(State::Live) =>
+        {
+            h.write = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A dropped port socket, half or listener (FAIL-13): queue its `Released`
+/// and ready the servers, allocating nothing. Returns whether the caller now
+/// holds no part of it, so its key is forgotten.
+pub(crate) fn release_socket(provider: &Provider, key: u64) -> bool {
+    let Some(port) = net_port(provider) else {
+        return true;
+    };
+    let mut p = lock(port);
+    let Some(&id) = p.keys.get(&(key & !3)) else {
+        return true;
+    };
+    let stamp = p.next_id;
+    let Some(h) = p.handles.get_mut(&id) else {
+        return true;
+    };
+    let slot = if key & 3 == 2 && h.kind != Kind::PipeWrite {
+        h.write.as_mut()
+    } else {
+        Some(&mut h.state)
+    };
+    let marked = match slot {
+        Some(s) if *s == State::Live => {
+            *s = State::Released(stamp);
+            true
+        }
+        _ => false,
+    };
+    let gone = h.state != State::Live && h.write.is_none_or(|w| w != State::Live);
+    if gone {
+        p.keys.remove(&(key & !3));
+    }
+    if marked {
+        p.next_id += 1;
+        let servers = p.servers.iter().map(|&(t, _)| t).collect();
+        drop(p);
+        ready_all(servers);
+    }
+    gone
+}

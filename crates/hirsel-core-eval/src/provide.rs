@@ -330,6 +330,7 @@ impl Machine<'_> {
     /// MEM-24: the limit `l` ends; withdraw the cells charged to it. Their
     /// waits are readied: a deadline passes, a stop and an idle wake, and the
     /// operation then fails with Bounds, as every later one on the cell does.
+    /// A port is sealed, its calls settle as withdrawn and its room is freed.
     pub(super) fn withdraw_cells(&mut self, l: &Limit) {
         let world = &mut self.host.world;
         let ending: Vec<usize> = world
@@ -363,7 +364,7 @@ impl Machine<'_> {
                     *stopped = true;
                     ready.append(waiters);
                 }
-                VirtualCell::Port { .. } => unreachable!("a port keeps its run lifetime"),
+                port @ VirtualCell::Port { .. } => ready = withdraw_port(port),
             }
             for k in receivers {
                 if matches!(
@@ -449,13 +450,14 @@ impl Machine<'_> {
                 | HostOp::ProvideNet
                 | HostOp::ProvideExec
         ) {
-            // A port's room with its own record, held until the run ends.
+            // A port's room with its cell's charge, held until its limit ends.
             let payer = t.limits.last().unwrap();
             let charge = hirsel_core_layout::charge::PROVIDE_CELL.saturating_add(a[0]);
             if let Err(available) = self.admit(payer, charge) {
                 return Some(Ok(ok(0, available)));
             }
-            self.host.world.grant_charges.push((payer.clone(), charge));
+            let (w, held) = (&mut self.host.world, (payer.clone(), charge));
+            w.cell_charges.insert(w.cells.len(), held);
         }
         let new = |w: &mut World, cell| {
             w.cells.push(cell);
@@ -916,6 +918,72 @@ impl Machine<'_> {
         }
         Some(Ok(reply))
     }
+}
+
+/// A sealed port's answer: `Closed`, or a Net's `Reset`.
+pub(super) fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
+    let error = match vocab {
+        Vocab::Net => 5,
+        Vocab::Exec if !exec::exec_error_op(op) => 5,
+        _ => 4,
+    };
+    [0, error, 0, 0, 0]
+}
+/// A port outcome shaped as the host model's row for the call's operation:
+/// a Stat's carries the kind, a Net Listen's or Accept's an address.
+pub(super) fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
+    match (vocab, op) {
+        (Vocab::Dir, op) if matches!(DirOp::from_word(op), Some(DirOp::Stat | DirOp::StatFile)) => {
+            v.to_vec()
+        }
+        (Vocab::Net, 2 | 3 | 6 | NET_LOCAL_ADDR | NET_PEER_ADDR) => [&v[..4], &[0; 4]].concat(),
+        (Vocab::Exec, exec::SPAWN) => [&v[..4], &[0; 3]].concat(),
+        _ => v[..4].to_vec(),
+    }
+}
+/// A withdrawn port's operation: a close succeeds, all else fails with Bounds.
+pub(super) fn withdrawn_call(vocab: Vocab, op: u64) -> X<Vec<u64>> {
+    let close = vocab == Vocab::Dir && op == DirOp::Close.word();
+    close.then(|| vec![0; 4]).ok_or(Stop::Cause("Bounds"))
+}
+/// A settled call's answer to its caller; a withdrawn port's fails with Bounds.
+pub(super) fn answered(answer: Vec<u64>) -> X<Vec<u64>> {
+    Some(answer)
+        .filter(|a| *a != WITHDRAWN_ANSWER)
+        .ok_or(Stop::Cause("Bounds"))
+}
+
+/// A withdrawn port's call answer: its caller fails with Bounds.
+pub(super) const WITHDRAWN_ANSWER: Vec<u64> = Vec::new();
+
+/// Seal a port whose limit ended (native `Port::withdraw`): every unsettled
+/// call settles as withdrawn and the room is freed. A `Call` the server holds
+/// stays until it is dropped or replied to. Answers the tasks to ready.
+fn withdraw_port(port: &mut VirtualCell) -> Vec<usize> {
+    let ids: Vec<u64> = port.port().0.keys().copied().collect();
+    let mut ready: Vec<usize> = ids
+        .iter()
+        .filter_map(|&id| port.settle(id, WITHDRAWN_ANSWER))
+        .collect();
+    for id in ids {
+        port.free_staged(id);
+        port.prune(id);
+    }
+    let VirtualCell::Port {
+        sealed,
+        servers,
+        handles,
+        used,
+        ..
+    } = port
+    else {
+        unreachable!("a port")
+    };
+    *sealed = true;
+    ready.extend(servers.drain(..).map(|(k, _)| k));
+    handles.clear();
+    *used = 0;
+    ready
 }
 
 pub(super) fn zero_at_error(mode: u8, at: u64, len: u64) -> Option<(u64, u64)> {

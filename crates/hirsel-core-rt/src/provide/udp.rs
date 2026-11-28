@@ -207,7 +207,12 @@ fn deliver(
 pub(crate) fn release_udp(provider: &Provider, key: u64, retirement: Retirement) {
     let port = net_port(provider).unwrap();
     let mut p = lock(port);
-    let id = p.keys.remove(&key).unwrap();
+    // A withdrawn port forgot its keys and handles with their room.
+    let Some(id) = p.keys.remove(&key) else {
+        drop(p);
+        drop(retirement);
+        return;
+    };
     if p.sealed {
         p.handles.remove(&id);
         p.used -= HANDLE_ROOM;

@@ -8,8 +8,7 @@
 //! quiescence (`quiesce`). Host time never reaches a cell.
 //!
 //! Each cell admits `charge::PROVIDE_CELL` from the limit current at its
-//! construction (MEM-24). A clock, random or process cell is withdrawn when
-//! that limit ends (`cells`); a port is held until teardown.
+//! construction (MEM-24) and is withdrawn when that limit ends (`cells`).
 mod cells;
 mod clock;
 mod net;
@@ -22,6 +21,8 @@ use quiet::{IDLE, SERVERS, register};
 pub(crate) mod random;
 mod replies;
 mod udp;
+use net::net_port;
+pub(crate) use net::{exec_port, join_socket, release_socket, split_socket};
 use replies::{answer, unix_reply};
 pub(crate) use udp::release_udp;
 
@@ -69,6 +70,9 @@ struct Port {
     /// Cleaning the `Served` end seals the port: every unsettled and later
     /// call completes as `sealed` answers.
     sealed: bool,
+    /// Its limit ended (MEM-24): sealed, every call settled and every
+    /// operation but a close failing with Bounds.
+    withdrawn: bool,
     /// The outcome a sealed port gives: `Closed` for Dir and the streams.
     closed: Outcome,
     /// The order of calls and Released notices: a call's id is its stamp.
@@ -737,6 +741,9 @@ fn done(outcome: Outcome) -> Step {
 /// `None` once quiescence woke this wait, or register and stay pending.
 fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     let mut port = lock(port);
+    if port.withdrawn {
+        return done(WITHDRAWN);
+    }
     let queued = port.queued();
     let quiesced = port.servers.iter().any(|&(t, q)| t == token && q);
     if queued.is_some() || quiesced {
@@ -931,6 +938,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             };
             if p.sealed {
                 outcome = match request.operation {
+                    CLOSE if p.withdrawn => Outcome::default(),
+                    _ if p.withdrawn => WITHDRAWN,
                     EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL => crate::exec_runtime::failure(4, 0),
                     _ => p.closed,
                 };
@@ -1301,8 +1310,8 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
     }
 }
 
-/// `provide.stdout/stderr/dir(bytes n)`: a port with room `n`, admitted
-/// with the port's own record and held until the run ends (NOTES 18). `value`
+/// `provide.stdout/stderr/dir(bytes n)`: a port with room `n`, admitted with
+/// its cell's charge from the current limit until that limit ends. `value`
 /// is the capability's grant (id 0, a Dir port's root) and `written` the
 /// `Served` key; a refusal answers as `Cells::add`.
 /// # Safety
@@ -1412,97 +1421,6 @@ pub unsafe extern "C" fn hirsel_core_provide_exec(
 ) -> Outcome {
     // SAFETY: forwarded.
     unsafe { provide_port(context, n, Vocab::Exec, crate::host_file::Terminal::No) }
-}
-
-/// A caller key's Net port, when `provider` (the socket's recorded one) is
-/// a port's.
-fn net_port(provider: &Provider) -> Option<&Mutex<Port>> {
-    if !owns(provider) {
-        return None;
-    }
-    // SAFETY: the run pins every cell until teardown.
-    match unsafe { cell(provider.state) } {
-        Cell::Port(port) => Some(port),
-        _ => None,
-    }
-}
-
-pub(crate) fn exec_port(provider: &Provider) -> bool {
-    net_port(provider).is_some_and(|port| lock(port).vocab == Vocab::Exec)
-}
-
-/// `net.split` on a port's socket: both halves are live and the server is
-/// asked nothing. Allocates nothing.
-pub(crate) fn split_socket(provider: &Provider, key: u64) {
-    if let Some(port) = net_port(provider) {
-        let mut p = lock(port);
-        if let Some(&id) = p.keys.get(&(key & !3))
-            && let Some(h) = p.handles.get_mut(&id)
-        {
-            h.write = Some(State::Live);
-        }
-    }
-}
-
-/// `net.join` on a port socket's live halves: whole again, the server asked
-/// nothing. False when the halves are not both live.
-pub(crate) fn join_socket(provider: &Provider, key: u64) -> bool {
-    let Some(port) = net_port(provider) else {
-        return false;
-    };
-    let mut p = lock(port);
-    let Some(&id) = p.keys.get(&(key & !3)) else {
-        return false;
-    };
-    match p.handles.get_mut(&id) {
-        Some(h)
-            if h.kind == Kind::Socket && h.state == State::Live && h.write == Some(State::Live) =>
-        {
-            h.write = None;
-            true
-        }
-        _ => false,
-    }
-}
-
-/// A dropped port socket, half or listener (FAIL-13): queue its `Released`
-/// and ready the servers, allocating nothing. Returns whether the caller now
-/// holds no part of it, so its key is forgotten.
-pub(crate) fn release_socket(provider: &Provider, key: u64) -> bool {
-    let Some(port) = net_port(provider) else {
-        return true;
-    };
-    let mut p = lock(port);
-    let Some(&id) = p.keys.get(&(key & !3)) else {
-        return true;
-    };
-    let stamp = p.next_id;
-    let Some(h) = p.handles.get_mut(&id) else {
-        return true;
-    };
-    let slot = if key & 3 == 2 && h.kind != Kind::PipeWrite {
-        h.write.as_mut()
-    } else {
-        Some(&mut h.state)
-    };
-    let marked = match slot {
-        Some(s) if *s == State::Live => {
-            *s = State::Released(stamp);
-            true
-        }
-        _ => false,
-    };
-    let gone = h.state != State::Live && h.write.is_none_or(|w| w != State::Live);
-    if gone {
-        p.keys.remove(&(key & !3));
-    }
-    if marked {
-        p.next_id += 1;
-        let servers = p.servers.iter().map(|&(t, _)| t).collect();
-        drop(p);
-        ready_all(servers);
-    }
-    gone
 }
 
 /// A virtual stream's terminal from its word (`provide.size_word`): zero is

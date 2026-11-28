@@ -1082,8 +1082,8 @@ pub fn trigger(take t: StopTrigger)
 `advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
 - **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
   bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;
-  the room is held until the run ends, since the capability is plain and outlives the
-  `Served` end. Each operation on the capability waits after issue as a `Call`
+  the room is held until that limit ends, when the port is withdrawn (Cell lifetime,
+  below). Each operation on the capability waits after issue as a `Call`
   queued on the port, in the order the operations were issued. `provide.next` returns the
   first queued call, and `provide.dir_op`, `net_op` and `stream_op` read its `Op`, which holds
   only scalars: a path, name or data field is its byte length, which `provide.payload(c,
@@ -1168,15 +1168,20 @@ pub fn trigger(take t: StopTrigger)
   `process.trigger` has run, including a trigger before the call; dropping a `StopTrigger`
   without triggering never stops. Dropping a `ClockHand` freezes its clock: pending sleeps
   and deadlines on it never fire.
-- **Cell lifetime.** A Clock, Random or Process cell is charged to the limit current at its
-  construction and withdrawn when that limit ends: its bound scope exits, its finalizer
-  returns or its task finishes, by a fault too ([MEM-24](budgets.md#mem-24-logical-charges)).
+- **Cell lifetime.** A Clock, Random or Process cell or a port is charged to the limit
+  current at its construction and withdrawn when that limit ends: its bound scope exits,
+  its finalizer returns or its task finishes, by a fault too
+  ([MEM-24](budgets.md#mem-24-logical-charges)).
   Its charge is refunded then, not handed over. Its capability is plain, so a copy can
   outlive the limit; every operation through such a copy, a `ClockHand`'s and a
   `StopTrigger`'s included, fails at issue with `Bounds`, as an exhausted
   `provide.random_tape` does. A wait parked on the cell when it is withdrawn is readied
-  and fails the same way, and an `Until` on a withdrawn clock has passed. A port keeps its
-  run lifetime.
+  and fails the same way, and an `Until` on a withdrawn clock has passed. A withdrawn port
+  is sealed: every unsettled call, a parked one included, fails its caller with `Bounds`,
+  and so does every later operation through its capability or handles but a close, which
+  succeeds; a parked `provide.next` fails with `Bounds`, and so does every later one. A
+  `Call` its server already holds is settled: `payload` and `fill` supply nothing and
+  `reply` returns `Error(Withdrawn)`.
 - **Replay.** A virtual provider's results are computed by the run, so they are not
   inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
   host operations a server makes pass the replay point as every provider operation does.

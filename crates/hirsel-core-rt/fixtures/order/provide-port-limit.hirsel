@@ -1,0 +1,148 @@
+// expect: returned stdout=ticks=40,copy=1,wait=1,next=1,reply=1
+// MEM-24: a port (stdout, stderr, dir, net, exec) is charged to the limit
+// current at its construction and withdrawn when that limit ends, by a fault
+// too, so MEM-19 holds: 40 ticks, half of them faulting, that each build 20
+// ports inside `bound bytes` all fit a parent with room for one tick
+// (ticks=40; before the rule each tick handed 20 ports' charges to the parent
+// and the second was refused). A copy of a Stdout that outlives its bound
+// fails its next write with Bounds (copy=1), as does a write parked on the
+// port when the bound ends (wait=1) and a server's parked `next` (next=1). A Call the
+// server took before the bound ended is settled: its reply is Withdrawn
+// (reply=1).
+type Writer:send { out: Stdout, tx: Sender[u64] }
+type Server:send { port: Served[StreamOp], tx: Sender[u64] }
+fn build() {
+    for _ in 0u64 .. 4 {
+        let _ = provide.stdout(bytes 64, None)
+        let _ = provide.stderr(bytes 64, None)
+        let _ = provide.dir(bytes 64)
+        let _ = provide.net(bytes 64)
+        let _ = provide.exec(bytes 64)
+    }
+}
+fn tick() -> u64 {
+    build()
+    0
+}
+fn faulting_tick() -> u64 {
+    build()
+    fail("after_provide")
+    0
+}
+// 1 when the primary cause is Bounds.
+fn bounds(causes: Causes) -> u64 {
+    for c in causes {
+        return match c.kind { Bounds => 1, _ => 2 }
+    }
+    3
+}
+fn write_once(take s: Writer) waits {
+    let Writer(out: out, tx: tx) = take s
+    result.unwrap(channel.send(tx, 1u64))
+    result.unwrap(stdout.write(out, "x"))
+}
+fn joined_bounds(take h: Task[()]) -> u64 waits {
+    match task.join(take h) {
+        Error(Failed(causes)) => bounds(causes),
+        _ => 5
+    }
+}
+fn copy_write(tasks: Tasks) -> u64 waits {
+    let got = bound bytes 4096 {
+        let (out, take port) = provide.stdout(bytes 64, None)
+        out
+    }
+    let out = match got { Ok(out) => out, Error(_) => return 4 }
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let h = task.spawn(tasks, bytes 4096, Writer(out: out, tx: take tx), write_once)
+    joined_bounds(take h)
+}
+// The Served leaves the bound with the writer, so the write parked on the
+// port is settled by the withdrawal, not by the Served's drop (Closed).
+fn parked_write(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let spawned = bound bytes 16384 {
+        let (out, take port) = provide.stdout(bytes 64, None)
+        let h = task.spawn(tasks, bytes 4096, Writer(out: out, tx: take tx), write_once)
+        let _ = result.unwrap(channel.receive(rx))
+        (take port, take h)
+    }
+    match take spawned {
+        Ok((take served, take h)) => joined_bounds(take h),
+        Error(_) => 7
+    }
+}
+fn serve(take s: Server) waits {
+    let Server(port: take port, tx: tx) = take s
+    let mut p = take port
+    result.unwrap(channel.send(tx, 1u64))
+    while let Some(take call) = provide.next(mut p) {
+        let _ = provide.reply(mut p, take call, provide.stream_reply(Done))
+    }
+}
+fn parked_next(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let spawned = bound bytes 16384 {
+        let (out, take port) = provide.stdout(bytes 64, None)
+        let h = task.spawn(tasks, bytes 4096, Server(port: take port, tx: take tx), serve)
+        let _ = result.unwrap(channel.receive(rx))
+        h
+    }
+    match take spawned {
+        Ok(take h) => joined_bounds(take h),
+        Error(_) => 7
+    }
+}
+fn taken_reply(tasks: Tasks) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let got = bound bytes 16384 {
+        let (out, take port) = provide.stdout(bytes 64, None)
+        let mut p = take port
+        let h = task.spawn(tasks, bytes 4096, Writer(out: out, tx: take tx), write_once)
+        let _ = result.unwrap(channel.receive(rx))
+        match provide.next(mut p) {
+            Some(take call) => Some((take p, take call, take h)),
+            None => None
+        }
+    }
+    let (take served, take call, take h) = match take got {
+        Ok(Some(take parts)) => take parts,
+        _ => return 8
+    }
+    let mut p = take served
+    let replied = match provide.reply(mut p, take call, provide.stream_reply(Done)) {
+        Error(_) => 1u64,
+        Ok(()) => 9
+    }
+    if joined_bounds(take h) == 1 { replied } else { 10 }
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    // Each tick's bound fits its parent only while earlier ticks gave all
+    // their bytes back; one tick's 20 ports leaked would refuse the next.
+    let admitted = match (bound bytes 66560 {
+        let mut n = 0u64
+        for _ in 0u64 .. 20 {
+            match (bound bytes 65536 { isolate(fn() -> u64 { faulting_tick() }) }) {
+                Ok(_) => { n = n + 1 },
+                Error(_) => {}
+            }
+            match (bound bytes 65536 { isolate(fn() -> u64 { tick() }) }) {
+                Ok(_) => { n = n + 1 },
+                Error(_) => {}
+            }
+        }
+        n
+    }) { Ok(n) => n, Error(_) => 0 }
+    let mut s = string.from("ticks=")
+    string.push_u64(mut s, admitted)
+    string.push(mut s, ",copy=")
+    string.push_u64(mut s, copy_write(tasks))
+    string.push(mut s, ",wait=")
+    string.push_u64(mut s, parked_write(tasks))
+    string.push(mut s, ",next=")
+    string.push_u64(mut s, parked_next(tasks))
+    string.push(mut s, ",reply=")
+    string.push_u64(mut s, taken_reply(tasks))
+    result.unwrap(stdout.write(out, s))
+    Ok(())
+}

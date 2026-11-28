@@ -81,7 +81,7 @@ use hirsel_core_ids::dir_port::{DirOp, reply};
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_ids::host_op::{DIRECT_ALIGNMENT, MODE_DIRECT, MODE_DURABLE};
 use hirsel_core_ir::*;
-use provide::zero_at_error;
+use provide::{port_closed, port_outcome, zero_at_error};
 mod fs;
 use fs::{FileLock, ModelFile, OpenFile};
 use hirsel_core_layout::{
@@ -409,27 +409,6 @@ enum VirtualCell {
         room: u64,
         used: u64,
     },
-}
-/// A sealed port's answer: `Closed`, or a Net's `Reset`.
-fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
-    let error = match vocab {
-        Vocab::Net => 5,
-        Vocab::Exec if !exec::exec_error_op(op) => 5,
-        _ => 4,
-    };
-    [0, error, 0, 0, 0]
-}
-/// A port outcome shaped as the host model's row for the call's operation:
-/// a Stat's carries the kind, a Net Listen's or Accept's an address.
-fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
-    match (vocab, op) {
-        (Vocab::Dir, op) if matches!(DirOp::from_word(op), Some(DirOp::Stat | DirOp::StatFile)) => {
-            v.to_vec()
-        }
-        (Vocab::Net, 2 | 3 | 6 | NET_LOCAL_ADDR | NET_PEER_ADDR) => [&v[..4], &[0; 4]].concat(),
-        (Vocab::Exec, exec::SPAWN) => [&v[..4], &[0; 3]].concat(),
-        _ => v[..4].to_vec(),
-    }
 }
 /// A deadline on the host model's clock or on a virtual clock's own timers.
 #[derive(Clone, Copy)]
@@ -2197,6 +2176,9 @@ impl Machine<'_> {
             unreachable!()
         };
         let vocab = *vocab;
+        if self.host.world.withdrawn.contains(&c) {
+            return provide::withdrawn_call(vocab, words[0]);
+        }
         if *sealed {
             return Ok(port_outcome(vocab, words[0], port_closed(vocab, words[0])));
         }
@@ -2257,7 +2239,7 @@ impl Machine<'_> {
             if let Some(answer) = call.answer.clone() {
                 call.finished = true;
                 self.host.world.cells[c].prune(id);
-                return Ok(answer);
+                return provide::answered(answer);
             }
             if deadline.is_some_and(|due| self.passed(due)) {
                 let cell = &mut self.host.world.cells[c];
@@ -2348,6 +2330,9 @@ impl Machine<'_> {
     fn port_next(&mut self, t: &Task, c: usize) -> X<Vec<u64>> {
         self.check_cancel(t)?;
         loop {
+            if self.host.world.withdrawn.contains(&c) {
+                return Err(Stop::Cause("Bounds"));
+            }
             let queued = self.host.world.cells[c].queued();
             let VirtualCell::Port {
                 vocab,

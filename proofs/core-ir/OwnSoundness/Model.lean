@@ -731,8 +731,8 @@ def validate (P : Prog) (start : Nat → Option AState) : Bool :=
         | none => false
     | _, _ => true
 
-/-- `wf::own` accepts the body: the block start states `solve` computes are such a
-`start`. -/
+/-- The model's `wf::own` accepts the body. The block start states `solve` computes are
+meant to be such a `start`; that `solve` ends at one is not proved. -/
 def Accepted (P : Prog) : Prop := ∃ start, validate P start = true
 
 /-! ## The machine -/

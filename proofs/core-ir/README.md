@@ -153,11 +153,12 @@ agree because `begun` and `dropped` keep which halves of a state are present.
 ## Test bodies
 
 `Examples.lean` transcribes the bodies of `crates/hirsel-core-ir/src/tests/own.rs` that
-the modelled checks decide. For each body the test expects accepted, the start states
-`solve` computes pass `validate` (`_accepted`), so it reaches no fault (`_safe`). For
-each body the test expects rejected, `exec` runs it to a fault, the kernel checks the
-run, and so the body is not `Accepted` (`_rejected`). The verdicts are the tests', not
-the model's.
+the modelled checks decide. For each body the test expects accepted, start states that
+pass `validate` (`_accepted`), so it reaches no fault (`_safe`). Those start states are
+a fixed point of the model's analysis, found by a worklist over `blockOuts`; they were
+not read out of the Rust `solve`. For each body the test expects rejected, `exec` runs
+it to a fault, the kernel checks the run, and so the body is not `Accepted`
+(`_rejected`). Which bodies are accepted and which rejected is taken from the tests.
 
 | Test (`tests/own.rs`) | Lean | Accepted | Rejected: the fault reached |
 |---|---|---|---|

@@ -20,7 +20,8 @@ abbrev Row := List Nat × List Bool × List Bool
 def Row.state (r : Row) : AState :=
   ⟨fun x => .ofNat (r.1.getD x 0), fun k => r.2.1.getD k false, fun ri => r.2.2.getD ri false⟩
 
-/-- The start states of the blocks `solve` reaches. -/
+/-- Start states for the blocks the analysis reaches: a fixed point of the model's
+analysis, found by a worklist over `blockOuts`. -/
 def table (rows : List (Option Row)) : Nat → Option AState := fun b =>
   (rows.getD b none).map Row.state
 

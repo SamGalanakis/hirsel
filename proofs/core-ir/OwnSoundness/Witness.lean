@@ -5,10 +5,11 @@ import OwnSoundness.Sound
 /-!
 # The test bodies, accepted and rejected
 
-For each body `wf::own` accepts in `crates/hirsel-core-ir/src/tests/own.rs`, the start
-states `solve` computes pass `validate`, so the body reaches no fault. For each body it
-rejects, a run that faults, so the model's `wf::own` rejects it too: an accepted body
-would not fault.
+For each body `wf::own` accepts in `crates/hirsel-core-ir/src/tests/own.rs`, start
+states that pass `validate`, so the body reaches no fault. They are a fixed point of the
+model's analysis, found by a worklist over `blockOuts`; they were not read out of the
+Rust `solve`. For each body it rejects, a run that faults, so the model's `wf::own`
+rejects it too: an accepted body would not fault.
 -/
 
 namespace Hirsel.CoreIR.Own

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import runpy
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -143,12 +144,15 @@ class Capped(unittest.TestCase):
                          ['MemoryMax=4G', 'MemorySwapMax=0', 'OOMPolicy=continue', 'CPUQuota=200%'])
 
     def test_without_a_user_manager_process_limits_apply(self):
-        result = self.capped('sh', '-c', 'ulimit -d; nproc; echo "$HIRSEL_MEMORY_LIMIT $HIRSEL_JOBS"',
+        stats = self.root / 'usage.json'
+        result = self.capped('--stats', str(stats), 'sh', '-c',
+                             'ulimit -d; nproc; echo "$HIRSEL_MEMORY_LIMIT $HIRSEL_JOBS"',
                              env={'CAPPED_NO_BUS': '1', 'HIRSEL_MEMORY_LIMIT': '512M'})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f'{512 * 1024}\n{min(2, os.cpu_count())}\n512M 2\n')
         self.assertIn('using process limits', result.stderr)
         self.assertRegex(result.stderr, r'capped: peak .* of 512M \(process limits\), [0-9.]+ s, exit 0\n')
+        self.assertIsNone(json.loads(stats.read_text())['memory_events'])
 
     def test_a_malformed_limit_or_job_count_refuses_before_running(self):
         for env in ({'HIRSEL_MEMORY_LIMIT': '4GB'}, {'HIRSEL_MEMORY_LIMIT': '0'}, {'HIRSEL_JOBS': '0'},
@@ -162,16 +166,22 @@ class Capped(unittest.TestCase):
         cgroup = Path(self.directory.name) / 'cgroup'
         cgroup.mkdir()
         events = cgroup / 'memory.events'
+        stats = self.root / 'usage.json'
         (cgroup / 'memory.peak').write_text(str(5 << 20))
-        # The session's cgroup already saw two kills; the first run adds none.
-        for command, note in ((['true'], False),
-                              (['sh', '-c', f'printf "oom 3\\noom_kill 3\\n" > {events}'], True)):
-            events.write_text('oom 2\noom_kill 2\n')
+        start = {'high': 2, 'max': 4, 'oom': 2, 'oom_kill': 2}
+        subsequent = [start, {'high': 2, 'max': 7, 'oom': 3, 'oom_kill': 3}]
+        for end in subsequent:
+            events.write_text(''.join(f'{name} {count}\n' for name, count in start.items()))
+            readings = ''.join(f'{name} {count}\n' for name, count in end.items())
+            command = [sys.executable, '-c', 'from pathlib import Path; import sys; '
+                       'Path(sys.argv[1]).write_text(sys.argv[2])', str(events), readings]
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr), patch.object(capped, 'own_cgroup', return_value=cgroup):
-                self.assertEqual(capped.inside('4G', command), 0)
+                self.assertEqual(capped.inside('4G', command, stats=stats), 0)
             self.assertRegex(stderr.getvalue(), r'^capped: peak 5 MiB of 4G \(systemd scope\), [0-9.]+ s, exit 0')
-            self.assertEqual('memory limit 4G reached' in stderr.getvalue(), note, stderr.getvalue())
+            delta = {name: count - start[name] for name, count in end.items()}
+            self.assertEqual(json.loads(stats.read_text())['memory_events'], delta)
+            self.assertEqual('memory limit 4G reached' in stderr.getvalue(), bool(delta['oom_kill']))
 
     def test_two_runs_acquire_distinct_slots_and_a_third_waits(self):
         with capped.slot(self.root, 2, ['first', 'two words']):

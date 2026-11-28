@@ -278,13 +278,16 @@ def notes_rows(board, out, env, toolchain):
 
 def churn_row(board, out, env, toolchain):
     result = out.with_suffix(".json")
+    scope = out.with_suffix(".scope.json")
     # Genesis assembles the place inside this same 2 GiB scope.
     env = env | LOW_MEMORY_ALLOCATOR
     with out.with_suffix(".log").open("w") as log:
-        subprocess.run([CAP, sys.executable, ROOT / "bench/place-density/run.py",
+        subprocess.run([CAP, "--stats", scope, sys.executable, ROOT / "bench/place-density/run.py",
                         "--hirsel", toolchain / "hirsel", "--churn", result], cwd=ROOT,
                        env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     raw = receipt.read(result)
+    memory_events = receipt.read(scope)["memory_events"]
+    receipt.write(result, raw | {"memory_events": memory_events})
     if raw["cycles"] != 1000:
         raise ValueError("Place churn did not complete 1,000 cycles")
     start, end = ({f"{process}_{metric}": value
@@ -292,7 +295,8 @@ def churn_row(board, out, env, toolchain):
                    for metric, value in counts.items()} for tag in ("before", "after"))
     if start.keys() != set(RESOURCES) or not all(type(value) is int and value > 0 for value in start.values()):
         raise ValueError("Place churn missing valid resource starting counts")
-    add(board, CHURN, CHURN_ROW, end | {"starting": start, "cycles": raw["cycles"]})
+    add(board, CHURN, CHURN_ROW, end | {"starting": start, "cycles": raw["cycles"],
+                                       "memory_events": memory_events})
 
 
 def collect(board, artifact_file, artifacts):

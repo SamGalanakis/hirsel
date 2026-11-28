@@ -250,13 +250,14 @@ def cgroup_ancestors():
         group = group.parent
 
 
-def oom_kills(cgroup: Path | None) -> int:
-    """The cgroup's count of OOM kills so far (0 when unreadable)."""
+def memory_events(cgroup: Path | None) -> dict[str, int]:
+    if cgroup is None:
+        return {}
     try:
-        events = dict(line.split() for line in (cgroup / 'memory.events').read_text().splitlines())
-        return int(events.get('oom_kill', '0'))
-    except (OSError, TypeError, ValueError):
-        return 0
+        return {name: int(count) for name, count in
+                (line.split() for line in (cgroup / 'memory.events').read_text().splitlines())}
+    except (OSError, ValueError):
+        return {}
 
 
 def inside(limit: str, command: list[str], limits=None, stats=None) -> int:
@@ -266,7 +267,7 @@ def inside(limit: str, command: list[str], limits=None, stats=None) -> int:
     the child before it runs the command). Only an OOM kill during this run
     counts, so a cgroup's earlier kills never read as this command's."""
     cgroup = None if limits else own_cgroup()
-    kills_before = oom_kills(cgroup)
+    events_before = memory_events(cgroup)
     start = time.monotonic()
     child = subprocess.Popen(command, start_new_session=True, preexec_fn=limits)
     try:
@@ -278,8 +279,13 @@ def inside(limit: str, command: list[str], limits=None, stats=None) -> int:
     if status < 0:
         status = 128 - status
     wall = time.monotonic() - start
+    events_after = memory_events(cgroup)
     if stats is not None:
-        Path(stats).write_text(json.dumps(dict(seconds=wall, max_rss_kib=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)) + '\n')
+        events = {name: count - events_before[name] for name, count in events_after.items()
+                  if name in events_before}
+        usage = dict(seconds=wall, max_rss_kib=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
+                     memory_events=events or None)
+        Path(stats).write_text(json.dumps(usage) + '\n')
     peak = 'unknown'
     oom = False
     if limits:
@@ -289,7 +295,7 @@ def inside(limit: str, command: list[str], limits=None, stats=None) -> int:
             peak = mib(int((cgroup / 'memory.peak').read_text()))
         except (OSError, ValueError):
             pass
-        oom = oom_kills(cgroup) > kills_before
+        oom = events_after.get('oom_kill', 0) > events_before.get('oom_kill', 0)
     notes = []
     if oom:
         notes.append(f'memory limit {limit} reached (HIRSEL_MEMORY_LIMIT): the kernel killed the command')
@@ -342,7 +348,7 @@ def main() -> int:
         description='Run one command under the HIRSEL_MEMORY_LIMIT cap, a HIRSEL_JOBS CPU quota.')
     parser.add_argument('--long', action='store_true',
                         help='use the separate single long-job slot')
-    parser.add_argument('--stats', type=Path, help='write harness wall seconds and child peak RSS in KiB')
+    parser.add_argument('--stats', type=Path, help='write wall seconds, child peak RSS in KiB, and cgroup memory events')
     parser.add_argument('--inside', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()

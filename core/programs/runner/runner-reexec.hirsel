@@ -198,9 +198,27 @@ fn eligible_claim[G: send, H: shareable + inert + send](db: store.Db, registered
     Ok(())
 }
 
-pub fn capture_recorded_claim[G: send, H: shareable + inert + send](db: store.Db, version: u64, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Witness, WitnessError] waits {
-    let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema)) ?=> Open
-    capture_recorded_claim_at(db, version, place, n_place, identity, schema)
+// A package's replay entry returns this pair without running its serving main.
+// The optional migration contributes its identity to the recorded selection.
+pub opaque type ReplayEntry[G: send, H: shareable + inert + send] {
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
+    n_place: u64
+}
+
+pub fn replay_entry[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], n_place: u64) -> ReplayEntry[G, H] {
+    ReplayEntry(place, schema, on_migrate, n_place)
+}
+
+pub fn capture_recorded_claim[G: send, H: shareable + inert + send](db: store.Db, version: u64, entry: ReplayEntry[G, H]) -> Result[store.Witness, WitnessError] waits {
+    let identity = activation_identity(code.identity(entry.place), entry.on_migrate, code.identity(entry.schema)) ?=> Open
+    capture_recorded_claim_at(db, version, entry.place, entry.n_place, identity, entry.schema)
+}
+
+pub fn export_recorded_claim[G: send, H: shareable + inert + send](db: store.Db, version: u64, entry: ReplayEntry[G, H]) -> Result[Bytes, WitnessError] waits {
+    let witness = capture_recorded_claim(db, version, entry)?
+    Ok(store.encode_witness(witness) ?=> |take problem| Open(Store(take problem)))
 }
 
 fn capture_recorded_claim_at[G: send, H: shareable + inert + send](db: store.Db, version: u64, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, identity: Bytes, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Witness, WitnessError] waits {
@@ -229,12 +247,12 @@ fn capture_recorded_claim_at[G: send, H: shareable + inert + send](db: store.Db,
     }
 }
 
-pub fn replay_detached[G: send, H: shareable + inert + send](witness: store.Witness, mode: ReplayMode, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.SliceVerdict, WitnessError] {
+pub fn replay_detached[G: send, H: shareable + inert + send](witness: store.Witness, mode: ReplayMode, entry: ReplayEntry[G, H]) -> Result[store.SliceVerdict, WitnessError] {
     let identity = match mode {
-        RecordedCode => Some(activation_identity(code.identity(place), on_migrate, code.identity(schema)) ?=> Open),
+        RecordedCode => Some(activation_identity(code.identity(entry.place), entry.on_migrate, code.identity(entry.schema)) ?=> Open),
         Candidate => None,
     }
-    replay_detached_at(witness, identity, place, n_place, schema)
+    replay_detached_at(witness, identity, entry.place, entry.n_place, entry.schema)
 }
 
 fn replay_detached_at[G: send, H: shareable + inert + send](witness: store.Witness, identity: Option[Bytes], place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.SliceVerdict, WitnessError] {

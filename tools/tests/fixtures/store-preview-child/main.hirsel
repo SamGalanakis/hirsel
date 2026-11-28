@@ -14,11 +14,19 @@ pub fn main(d: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, secret
     let second = args.get(argv, 1) == Some("after")
     let mut payload: Bytes = list.with_capacity(100)
     list.fill(mut payload, 100, 2u8)
-    let expected = if second { b"child edit" } else { take payload }
+    let expected = if second {
+        b"child edit"
+    } else {
+        take payload
+    }
     if result.unwrap(store.get(result.unwrap(store.reader(db, 0)), store.snapshot(db), rows, 2u64)) != Some(take expected) {
         return Error(Exit(status: 3u8))
     }
     if args.get(argv, 1) == Some("write") {
+        match store.begin_export_copy(mut db, d, b"preview-export01", 0) {
+            Error(Store(PreviewSource)) => (),
+            _ => fail("deploy export accepted a Preview source or returned the wrong refusal"),
+        }
         let Committed(done) = result.unwrap(store.run(mut db, None, rows, fn(mut tx, t) -> Result[(), store.Error] {
             store.put(mut tx, t, 2u64, b"child edit")
         })) else {

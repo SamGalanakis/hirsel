@@ -243,9 +243,10 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = indexes.empty_index_registry()
-            let scope = txn.TxViews(base: view s.roots, indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+            let values = txn.ValueSink(point: point_event, observed: None, unresolved_upload: None)
+            let scope = txn.TxViews(base: view s.roots, indexes: view registry, reads: view reads, values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
             let start = txn.TxStart(store: types.StoreKey(hi: s.store.hi, lo: s.store.lo), ids: 0, resident: 0, retain_old: false, journaled: false, limits: types.default_limits())
-            let tx = Tx(inner: txn.begin_tx(scope, s.bases, start, false), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
+            let tx = Tx(inner: txn.begin_tx(scope, s.bases, start, false), values: view values, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
             body(tx, env)
         }
         match steps {
@@ -278,13 +279,13 @@ fn tx_start(db: Db) -> txn.TxStart {
 }
 
 fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    draft_at(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, keep_reply, reads, issued, attempt, pins, body)
+    draft_at(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, keep_reply, reads, txn.ValueSink(point: point_event, observed: None, unresolved_upload: None), issued, attempt, pins, body)
 }
 
-fn draft_at[R, A](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_at[R, A](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], values: txn.ValueSink[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let observed_info: core.Cell[bool] = cell.new(false)
-    let scope = txn.TxViews(base: view base, indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
-    let mut tx = Tx(inner: txn.begin_tx(scope, bases, start, true), info: ci)
+    let scope = txn.TxViews(base: view base, indexes: view registry, reads: view reads, values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+    let mut tx = Tx(inner: txn.begin_tx(scope, bases, start, true), values: view values, info: ci)
     let outcome = body(mut tx)
     let Tx(inner: take state, ..) = take tx
     match txn.finish_body(take state, take outcome, keep_reply, base, start.resident, tiered_bytes, if let Some(_) = attempt {

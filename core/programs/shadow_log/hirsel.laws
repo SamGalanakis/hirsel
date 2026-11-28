@@ -1,5 +1,5 @@
 hirsel.laws 1
-hirsel.ai/shadow_log@1/laws/crash_after_each_ack src=b859da1bbf356e58 sig=04680e26ff1d568b run=b8720e32dc0c26eb bug=- oracle=- rows=pending
-hirsel.ai/shadow_log@1/laws/idle_children_append_steps src=904bcdd3b6130d85 sig=686c66ec32b18e9b run=9fb8ef06378478a6 bug=- oracle=- rows=pending
-hirsel.ai/shadow_log@1/laws/live_cursor_and_lease_lifecycle src=52e38beb172b0259 sig=90f7c89f3745ba8c run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
-hirsel.ai/shadow_log@1/laws/retention_and_authority src=0a5bc6cedd10af6b sig=e98cbda045cd1063 run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
+hirsel.ai/shadow_log@1/laws/crash_after_each_ack src=b859da1bbf356e58 sig=86ffc9d75da444aa run=b8720e32dc0c26eb bug=- oracle=- rows=pending
+hirsel.ai/shadow_log@1/laws/idle_children_append_steps src=904bcdd3b6130d85 sig=b10b3af625e41cdb run=9fb8ef06378478a6 bug=- oracle=- rows=pending
+hirsel.ai/shadow_log@1/laws/live_cursor_and_lease_lifecycle src=52e38beb172b0259 sig=b0c4bd402acf901b run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
+hirsel.ai/shadow_log@1/laws/retention_and_authority src=0a5bc6cedd10af6b sig=ce46f1b4d52201a5 run=5ffc56bae06a36d7 bug=- oracle=- rows=pending

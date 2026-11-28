@@ -1,8 +1,14 @@
+pub opaque scoped type Tx {
+    inner: txn.TxState[Read],
+    values: View[txn.ValueSink[Read]],
+    info: CallInfo,
+}
+
 // The issued-id log and read set survive a typed error.
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     txn.freeze(mut tx.inner)
     let staged = {
-        let mut draft = Tx(inner: txn.fork_tx(tx.inner), info: tx.info)
+        let mut draft = Tx(inner: txn.fork_tx(tx.inner), values: tx.values, info: tx.info)
         let result = body(mut draft)
         let Tx(inner: take ready, ..) = take draft
         txn.drafted_tx(take ready, take result)
@@ -14,7 +20,7 @@ pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) 
 pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[Result[R, E], OutOfTime] {
     txn.freeze(mut tx.inner)
     let ran: Result[txn.Drafted[R, E], OutOfTime] = {
-        let work = Tx(inner: txn.fork_tx(tx.inner), info: tx.info)
+        let work = Tx(inner: txn.fork_tx(tx.inner), values: tx.values, info: tx.info)
         match (bound steps steps {
             let mut draft = take work
             let result = body(mut draft)

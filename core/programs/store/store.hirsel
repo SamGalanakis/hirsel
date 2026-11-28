@@ -281,11 +281,6 @@ pub type Page[K, V]: send {
 
 pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
-pub opaque scoped type Tx {
-    inner: txn.TxState[Read],
-    info: CallInfo,
-}
-
 pub opaque type Snapshot: shareable + send {
     store: StoreId,
     open: u64,
@@ -1767,7 +1762,7 @@ pub type CallRecord: codec + shareable + send {
     code: Bytes
 }
 
-pub type StopKind: key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
+pub type StopKind: codec + key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
 
 fn journal_decode_commit(file: String, raw: Bytes) -> Result[format.JournalCommit, Error] {
     let mut at = 0u64

@@ -377,7 +377,7 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
 
 fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K, V], mut r: TxWalk) -> Result[Option[(K, V)], Error] {
     if let Some(mut cursor) = r.cursor {
-        let found = next_tx_page(mut cursor.walk, cursor.leading, decoder, reads, r.low, r.high, r.reverse)
+        let found = next_tx_page(mut cursor.walk, cursor.leading, decoder, reads, tx.values.observed, r.low, r.high, r.reverse)
         if let Some(take row) = take found {
             let (take boundary, take decoded_row) = take row
             if r.reverse {
@@ -399,7 +399,7 @@ fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K
     }
     match take found {
         Some((key, raw)) => {
-            note_tx_row(reads, mut r.low, mut r.high, r.reverse, key)?
+            note_tx_row(reads, tx.values.observed, mut r.low, mut r.high, r.reverse, key, raw)?
             Ok(Some(decode_table_row(decoder, list.slice(key, 4, list.len(key)), raw)?))
         },
         None => {
@@ -413,28 +413,44 @@ fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K
     }
 }
 
-fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], reads: View[core.Log[Read]], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Result[(K, V), Error])] {
+fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], reads: core.Log[Read], observed: Option[log.Samples], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Result[(K, V), Error])] {
     std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[(K, V), Error]) {
         let mut key = pages.collection_row_key(leading, suffix)
         if reverse {
-            log.append(reads, Span(clone(key), clone(high)))
+            let event: Read = Span(clone(key), clone(high))
+            match view observed {
+                Some(samples) => log.append_sampled(reads, take event, samples, key, false, raw),
+                None => log.append(reads, take event),
+            }
         } else {
             list.push(mut key, 0u8)
-            log.append(reads, Span(clone(low), clone(key)))
+            let event: Read = Span(clone(low), clone(key))
+            match view observed {
+                Some(samples) => log.append_sampled(reads, take event, samples, key, true, raw),
+                None => log.append(reads, take event),
+            }
         }
         (take key, decode_table_row(decoder, suffix, raw))
     })
 }
 
-fn note_tx_row(reads: View[core.Log[Read]], mut low: Bytes, mut high: Bytes, reverse: bool, key: Bytes) -> Result[(), Error] {
+fn note_tx_row(reads: core.Log[Read], observed: Option[log.Samples], mut low: Bytes, mut high: Bytes, reverse: bool, key: Bytes, raw: Bytes) -> Result[(), Error] {
     if reverse {
         let new_high = failure_result_from_rep(types.copied(key))?
         let end = replace(mut high, take new_high)
-        log.append(reads, Span(failure_result_from_rep(types.copied(key))?, take end))
+        let event: Read = Span(failure_result_from_rep(types.copied(key))?, take end)
+        match view observed {
+            Some(samples) => log.append_sampled(reads, take event, samples, key, false, raw),
+            None => log.append(reads, take event),
+        }
     } else {
         let mut end = failure_result_from_rep(pager.scan_page_after(key))?
         let start = replace(mut low, failure_result_from_rep(types.copied(end))?)
-        log.append(reads, Span(take start, take end))
+        let event: Read = Span(take start, take end)
+        match view observed {
+            Some(samples) => log.append_sampled(reads, take event, samples, key, false, raw),
+            None => log.append(reads, take event),
+        }
     }
     Ok(())
 }

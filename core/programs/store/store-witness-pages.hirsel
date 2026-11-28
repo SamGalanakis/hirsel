@@ -1,0 +1,149 @@
+// Pages are in postorder. A Hot edge refers to an earlier row. A Cold
+// edge keeps only the location in its parent's sealed PAGE.
+type WitnessPage: codec {
+    domain: u8,
+    sealed: Bytes,
+    children: List[Option[u64]],
+    blobs: List[Option[Bytes]]
+}
+
+type WitnessTree: codec {
+    inline: u64,
+    inventory: Option[(u64, u64)],
+    nodes: List[WitnessPage]
+}
+
+fn witness_domain(domain: std.page.Domain) -> u8 {
+    match domain {
+        Collection => 1u8,
+        CollectionMap => 2u8,
+        Unprefixed => 3u8,
+    }
+}
+
+fn witness_pack_page(page: Arc[std.page.Page], mut nodes: List[WitnessPage]) -> Result[u64, Error] {
+    let image = std.page.image_of(page)
+    let mut children: List[Option[u64]] = list.new()
+    let mut blobs: List[Option[Bytes]] = list.new()
+    for slot in 0u64 .. std.page.count(image) {
+        match std.page.owning_edge(image, slot) {
+            Some(PageEdge(_)) => {
+                let child = match option.unwrap(std.page.child_slot(page, slot)) {
+                    HotPage(kid) => Some(witness_pack_page(kid, mut nodes)?),
+                    ColdPage(_) => None,
+                }
+                list.push(mut children, take child)
+            },
+            Some(BlobEdge(ref)) => {
+                let payload: Option[Bytes] = match option.unwrap(std.page.blob_slot(page, ref.body)) {
+                    HotBlob(value) => Some(failure_result_from_rep(types.copied(value))?),
+                    ColdBlob(_) => None,
+                }
+                list.push(mut blobs, take payload)
+            },
+            None => (),
+        }
+    }
+    let mut sealed: Bytes = list.new()
+    if std.page.count(image) != 0 {
+        failure_result_from_rep(pages.page_result(std.page.seal_located(mut sealed, page, std.page.sealed_size(image), std.page.unlocated)))?
+    }
+    let pos = list.len(nodes)
+    list.push(mut nodes, WitnessPage(domain: witness_domain(std.page.key_domain(image)), sealed: take sealed, children: take children, blobs: take blobs))
+    Ok(pos)
+}
+
+fn witness_pack_tree(tree: pages.PageTree) -> Result[WitnessTree, Error] {
+    let mut nodes: List[WitnessPage] = list.new()
+    let _ = witness_pack_page(tree.root, mut nodes)?
+    let inventory = match tree.paging {
+        Some(saved) => Some((saved.generation, saved.next_stamp)),
+        None => None,
+    }
+    Ok(WitnessTree(inline: tree.inline, inventory, nodes: take nodes))
+}
+
+fn bad_witness() -> Error {
+    Decode(Invalid(0))
+}
+
+fn witness_unpack_page(node: WitnessPage, earlier: List[Arc[std.page.Page]]) -> Result[Arc[std.page.Page], Error] {
+    let domain: std.page.Domain = match node.domain {
+        1u8 => Collection,
+        2u8 => CollectionMap,
+        3u8 => Unprefixed,
+        _ => return Error(bad_witness()),
+    }
+    if list.len(node.sealed) == 0 {
+        if list.len(node.children) != 0 || list.len(node.blobs) != 0 {
+            return Error(bad_witness())
+        }
+        return Ok(std.page.empty(0, 0, domain))
+    }
+    let image = failure_result_from_rep(pages.page_result(std.page.decode(clone(node.sealed), domain)))?
+    let mut kids: List[std.page.Slot] = list.new()
+    let mut bodies: List[std.page.BlobSlot] = list.new()
+    for slot in 0u64 .. std.page.count(image) {
+        match std.page.owning_edge(image, slot) {
+            Some(PageEdge(ptr)) => {
+                if slot >= list.len(node.children) {
+                    return Error(bad_witness())
+                }
+                let child: std.page.Slot = match node.children[slot] {
+                    Some(child_pos) => {
+                        if child_pos >= list.len(earlier) {
+                            return Error(bad_witness())
+                        }
+                        let expected: std.page.Domain = if std.page.level(image) == 0 {
+                            Collection
+                        } else {
+                            domain
+                        }
+                        if std.page.key_domain(std.page.image_of(earlier[child_pos])) != expected {
+                            return Error(bad_witness())
+                        }
+                        HotPage(arc.share(earlier[child_pos]))
+                    },
+                    None => ColdPage(ptr),
+                }
+                list.push(mut kids, take child)
+            },
+            Some(BlobEdge(ref)) => {
+                let n: u64 = int.widen(ref.body)
+                if n >= list.len(node.blobs) {
+                    return Error(bad_witness())
+                }
+                let body: std.page.BlobSlot = match view node.blobs[n] {
+                    Some(value) => HotBlob(arc.new(failure_result_from_rep(types.copied(value))?)),
+                    None => ColdBlob(ref),
+                }
+                list.push(mut bodies, take body)
+            },
+            None => (),
+        }
+    }
+    if list.len(node.children) != list.len(kids) || list.len(node.blobs) != list.len(bodies) {
+        return Error(bad_witness())
+    }
+    failure_result_from_rep(pages.page_result(std.page.attach(take image, take kids, take bodies)))
+}
+
+fn witness_unpack_tree(wire: WitnessTree, domain: std.page.Domain) -> Result[pages.PageTree, Error] {
+    let mut nodes: List[Arc[std.page.Page]] = list.with_capacity(list.len(wire.nodes))
+    for node in wire.nodes {
+        let page = witness_unpack_page(node, nodes)?
+        list.push(mut nodes, take page)
+    }
+    let Some(take root) = list.pop(mut nodes) else {
+        return Error(bad_witness())
+    }
+    if std.page.key_domain(std.page.image_of(root)) != domain {
+        return Error(bad_witness())
+    }
+    let mut tree = pages.new_page_tree(domain, wire.inline)
+    tree.root = take root
+    if let Some((gen, next_stamp)) = wire.inventory {
+        tree.paging = Some(arc.new(pages.TieredReadInventory(packs: std.omap.new(), generation: gen, next_stamp)))
+    }
+    Ok(take tree)
+}

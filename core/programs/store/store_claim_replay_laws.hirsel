@@ -196,6 +196,28 @@ fn claim_replay_reads_upload_by_reference(d: Dir, c: Clock, r: Random, tasks: Ta
     if !verdict_is(same, Same) || !verdict_is(renamed, Different(Reply)) {
         fail("a by-reference re-run gave the wrong verdict")
     }
+    let Ok(source) = prepare_reexecute_claim(db, mark)? else {
+        fail("the upload claim has no replay source")
+    }
+    let Some(witness) = capture_witness(db, source, plan, b, fn(call, mut tx, target) -> Result[Bytes, Bytes] {
+        claim_replay_upload_entry(mut tx, target, call.record.args)
+    })? else {
+        fail("the upload claim has no witness")
+    }
+    for sequence in 0u64 .. staged.chunks {
+        let chunk_key = blob_chunk_key(b.binding.id, staged.upload, sequence, false)?
+        if map.contains(witness.touches.value_keys, chunk_key) {
+            fail("portable witness retained a staged upload payload")
+        }
+    }
+    let mut detached = declare_witness(witness)?
+    let named = declare_blobs(mut detached, "bodies", std.codec.key_u64(), BlobLimits(chunk: BLOB_LAW_CHUNK, max: 65536))?
+    let missing = replay_witness(witness, take detached, plan, claim_replay_failed, named, fn(call, mut tx, target) -> Result[Bytes, Bytes] {
+        claim_replay_upload_entry(mut tx, target, call.record.args)
+    })?
+    let UnresolvedUpload = missing else {
+        fail("detached chunk read did not identify its missing upload")
+    }
     let Duplicate(saved) = admit_claim(mut db, first, digest, reference, Some(take policy))? else {
         fail("the by-reference reply was not kept")
     }

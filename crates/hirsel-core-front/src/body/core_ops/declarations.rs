@@ -24,7 +24,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     || matches!(
                         (entry.module, entry.name),
                         (
-                            "int" | "string" | "list" | "deque" | "compiler",
+                            "int" | "string" | "list" | "deque" | "log" | "compiler",
                             "work_steps"
                         )
                     )

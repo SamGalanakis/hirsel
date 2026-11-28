@@ -104,8 +104,8 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, record: indexes.Cata
 
 pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
     readable_value(tx.info.id.store, txn.tx_roots(tx.inner), c.binding)?
-    failure_result_from_rep(txn.note_read(tx.inner, Point(failure_result_from_rep(types.copied(c.key))?)))?
-    let value = match txn.cell_current(tx.inner, c.binding.id, c.key) {
+    let key = failure_result_from_rep(types.copied(c.key))?
+    let value = match txn.fetch_cell(tx.inner, c.binding.id, take key, point_event) {
         Some(raw) => Some(row_value(c.binding.readers, c.binding.id, raw)?),
         None => None,
     }

@@ -62,3 +62,156 @@ fn witness_inline(image: std.page.Image, slots: Map[(u64, u64), ()]) -> Result[s
     }
     std.page.encode(rows, 0, id, Collection)
 }
+
+// Every logical range has a collection-prefixed upper bound. During capture,
+// this otherwise unused encoding marks a successful fetch from the base.
+// It occupies the existing Read slot and moves the same owned key.
+fn witness_point_event(take key: Bytes) -> Read {
+    Span(take key, b"")
+}
+
+fn witness_samples(raw: Bytes) -> List[txn.ValueRead] {
+    let mut values: List[txn.ValueRead] = list.new()
+    let mut at = 0u64
+    while at < list.len(raw) {
+        let k: u64 = list.word_le(raw, at)
+        let v: u64 = list.word_le(raw, at + 8)
+        at += 16
+        let key: Bytes = clone(list.slice(raw, at, at + k))
+        at += k
+        let value: Bytes = clone(list.slice(raw, at, at + v))
+        at += v
+        list.push(mut values, txn.ValueRead(key: take key, cursor_value: Some(take value)))
+    }
+    take values
+}
+
+fn witness_edge(edge: std.page.Slot, w: WitnessTouches) -> Option[Arc[std.page.Page]] {
+    match edge {
+        HotPage(page) => Some(arc.share(page)),
+        ColdPage(ptr) => {
+            let frame = map.get(w.frames, pager.tiered_cache_key(format.tiered_frame_id(TieredPage(ptr))))?
+            let TieredImage(page) = view frame.payload else {
+                return None
+            }
+            Some(arc.share(page))
+        },
+    }
+}
+
+// A projector's older root can carry a different inline Cell under the
+// same collection key. Identify its value by the physical map leaf and slot.
+fn witness_cell_slot(tree: pages.PageTree, key: Bytes) -> Option[(u64, u64)] {
+    let mut page = arc.share(tree.root)
+    loop {
+        let next_page = {
+            let image = std.page.image_of(page)
+            let Some(slot) = std.page.descend(image, key) else {
+                let (at, hit) = std.page.search(image, key)
+                return if hit {
+                    Some((std.page.stamp(image), at))
+                } else {
+                    None
+                }
+            }
+            arc.share(std.page.child(page, slot)?)
+        }
+        page = take next_page
+    }
+}
+
+// Cursor reads can come from the transaction's own edits. Admit the base
+// payload only when its bytes equal the value the operation actually opened.
+fn witness_value(tree: pages.PageTree, found: txn.ValueRead, mut w: WitnessTouches) {
+    if list.len(found.key) < 4 {
+        return
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(found.key, 0, 4)) else {
+        return
+    }
+    let kind = pages.collection_descriptor(descriptor).kind
+    if kind == BlobsCollection && list.len(found.key) == 21 && found.key[4u64] == 2u8 {
+        return
+    }
+    if list.len(found.key) == 4 && kind == CellCollection {
+        if let Some(_) = pages.inline_cell(descriptor) {
+            let Some(location) = witness_cell_slot(tree, found.key) else {
+                return
+            }
+            map.insert(mut w.inline_slots, location, ())
+            map.insert(mut w.value_keys, clone(found.key), ())
+            return
+        }
+    }
+    let key = list.slice(found.key, 4, list.len(found.key))
+    let Some(take root) = witness_edge(edge, w) else {
+        return
+    }
+    let mut page = take root
+    loop {
+        let Some(slot) = std.page.descend(std.page.image_of(page), key) else {
+            break
+        }
+        let next_page = {
+            let child = option.unwrap(std.page.child_slot(page, slot))
+            witness_edge(child, w)
+        }
+        let Some(take below) = take next_page else {
+            return
+        }
+        page = take below
+    }
+    let image = std.page.image_of(page)
+    let (slot, hit) = std.page.search(image, key)
+    if !hit {
+        return
+    }
+    if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+        if let Some(expected) = view found.cursor_value {
+            let matches = match option.unwrap(std.page.blob_slot(page, reference.body)) {
+                HotBlob(raw) => list.compare_bytes(raw, expected) == Equal,
+                ColdBlob(ptr) => {
+                    let Some(frame) = map.get(w.frames, pager.tiered_cache_key(format.tiered_frame_id(TieredBlob(ptr)))) else {
+                        return
+                    }
+                    let TieredValue(raw) = view frame.payload else {
+                        return
+                    }
+                    list.compare_bytes(raw, expected) == Equal
+                },
+            }
+            if !matches {
+                return
+            }
+        }
+        map.insert(mut w.bodies, reference.stamp, ())
+    } else {
+        let Some(raw) = std.page.value_at(page, slot) else {
+            return
+        }
+        if let Some(expected) = view found.cursor_value {
+            if raw != expected {
+                return
+            }
+        }
+        map.insert(mut w.inline_slots, (std.page.stamp(image), slot), ())
+    }
+    map.insert(mut w.value_keys, clone(found.key), ())
+}
+
+fn witness_project_frames(w: WitnessTouches) -> Result[Map[pager.TieredCacheKey, Arc[format.TieredFrame]], Error] {
+    let mut out: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    for (key, frame) in w.frames {
+        match frame.payload {
+            TieredImage(page) => {
+                let safe = failure_result_from_rep(pages.page_result(witness_data_page(page, w)))?
+                map.insert(mut out, (key.0, key.1), arc.new(format.TieredFrame(identity: frame.identity, payload: TieredImage(take safe))))
+            },
+            TieredValue(_) if map.contains(w.bodies, frame.identity.stamp) => {
+                map.insert(mut out, (key.0, key.1), arc.share(frame))
+            },
+            _ => (),
+        }
+    }
+    Ok(take out)
+}

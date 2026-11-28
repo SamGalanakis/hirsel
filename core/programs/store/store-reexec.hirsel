@@ -195,6 +195,10 @@ type Rerun[R] = RanTo(R, pages.DataRows) | Halted(Stop) | RoomRefused
 // What a witness capture keeps of one attempt (store-witness.hirsel): the
 // logical reads, and whether the body stopped on a page outside the slice.
 type RerunTrace {
+    detached: bool,
+    unresolved_upload: bool,
+    sample_bytes: u64,
+    values: List[txn.ValueRead],
     reads: List[Read],
     outside: bool
 }
@@ -204,12 +208,20 @@ type RerunTrace {
 // data writes (F2).
 fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], mut trace: Option[RerunTrace], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
+    let values: txn.ValueSink[Read] = match trace {
+        Some(kept) => txn.ValueSink(point: witness_point_event, observed: Some(log.samples(kept.sample_bytes)), unresolved_upload: if kept.detached {
+            Some(cell.new(false))
+        } else {
+            None
+        }),
+        None => txn.ValueSink(point: point_event, observed: None, unresolved_upload: None),
+    }
     let issued: core.Cell[u64] = cell.new(0)
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(R) -> bool] = None
-                let staged = draft_at(start, bases, tiered_bytes, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
+                let staged = draft_at(start, bases, tiered_bytes, registry, base, ci, keep, reads, values, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(base, issued, attempt, pins, take staged) {
@@ -223,7 +235,27 @@ fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u6
     })
     let logged = log.finish(take reads)
     if let Some(mut kept) = trace {
-        kept.reads = take logged
+        let txn.ValueSink(observed: take observed, unresolved_upload: take missing, ..) = take values
+        if let Some(take flag) = take missing {
+            kept.unresolved_upload = cell.into_inner(take flag)
+        }
+        match log.finish_samples(option.unwrap(take observed)) {
+            Ok(take raw) => {
+                kept.values = witness_samples(raw)
+            },
+            Error(needed) => {
+                kept.sample_bytes = needed
+            },
+        }
+        for take event in take logged {
+            match take event {
+                Span(take key, upper) if list.len(upper) == 0 => {
+                    list.push(mut kept.values, txn.ValueRead(key: clone(key), cursor_value: None))
+                    list.push(mut kept.reads, Point(take key))
+                },
+                take read => list.push(mut kept.reads, take read),
+            }
+        }
     }
     let _ = cell.into_inner(take issued)
     if pager.call_attempt_latched(attempt) {

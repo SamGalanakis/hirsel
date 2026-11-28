@@ -1,5 +1,5 @@
 hirsel.laws 1
-hirsel.ai/vector@1/tests/exact_charges src=41b3b31107e6ffb5 sig=17bdb82cd80c1bb4 run=b1818af2b24835d3 bug=bec4706c04aaf412 oracle=a60c4f805aa43718 rows=pending
+hirsel.ai/vector@1/tests/exact_charges src=41b3b31107e6ffb5 sig=ca5f6e823804d1ac run=b1818af2b24835d3 bug=bec4706c04aaf412 oracle=a60c4f805aa43718 rows=pending
 hirsel.ai/vector@1/tests/exact_top_k src=d1eecb42b1cc4891 sig=42b6eb32e05f7727 run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=bad99df420b769cb rows=pending
 hirsel.ai/vector@1/tests/extremes src=c39a0b502dbad033 sig=1e0f4f53ee90f5ec run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=942efce730b65f50 rows=pending
 hirsel.ai/vector@1/tests/ivf_demoted_source src=4861490998454767 sig=cf26fecd3bd3734b run=0fbf0f9c200aa0aa bug=5d1cedecf5d8f2a5 oracle=3f79b6be7081ad31 rows=pending
@@ -8,4 +8,4 @@ hirsel.ai/vector@1/tests/ivf_merge_page src=d6792b9663462b6b sig=9ff989a00db258f
 hirsel.ai/vector@1/tests/ivf_recall src=81dfcfd99f54335f sig=c966241f2c956d88 run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=d65554b07e0e965a rows=pending
 hirsel.ai/vector@1/tests/ivf_tiered_blocks src=0de1933f7df161e5 sig=8e63a295d983ad79 run=0fbf0f9c200aa0aa bug=061ea883d85015a3 oracle=3d9e06a56fdb1099 rows=pending
 hirsel.ai/vector@1/tests/ivf_tiered_source src=4a43a4bb4d8df7ea sig=8e63a295d983ad79 run=0fbf0f9c200aa0aa bug=b5a7842ed535d167 oracle=0239a9897f80fa7b rows=pending
-hirsel.ai/vector@1/tests/prefilter src=85cbef42637760a0 sig=77510b1b35129754 run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=ea7d41976400dacd rows=pending
+hirsel.ai/vector@1/tests/prefilter src=85cbef42637760a0 sig=2010ef97181d6062 run=b1818af2b24835d3 bug=b67c20d33c1394f8 oracle=ea7d41976400dacd rows=pending

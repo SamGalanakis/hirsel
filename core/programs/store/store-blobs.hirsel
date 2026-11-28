@@ -490,6 +490,12 @@ pub fn blob_chunk[K](tx: Tx, b: Blobs[K], of: BlobInfo, n: u64) -> Result[Option
         return Ok(None)
     }
     let key = blob_chunk_key(b.binding.id, of.upload, n, false)?
+    if let Some(missing) = view tx.values.unresolved_upload {
+        if txn.needs_upload(tx.inner, key) {
+            cell.set(missing, true)
+            return Error(Missed)
+        }
+    }
     match (txn.fetch_logical(tx.inner, take key, point_event) ?=> failure_from_rep) {
         Some(stored) => Ok(Some(blob_payload(stored)?)),
         None => Ok(None),

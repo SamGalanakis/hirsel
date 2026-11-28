@@ -17,3 +17,61 @@ pub fn finish[E: inert](take l: Log[E]) -> List[E] {
     let Log(entries: take entries) = take l
     cell.into_inner(take entries)
 }
+
+// An append-only observation buffer. Its owner supplies all storage before
+// entering the computation it observes. Overflow counts the full required
+// size so the owner can repeat a deterministic computation with enough room.
+pub opaque type Samples {
+    buffer: Cell[SampleBuffer]
+}
+
+type SampleBuffer {
+    storage: Bytes,
+    required: u64
+}
+
+fn samples(capacity: u64) -> Samples {
+    let mut raw: Bytes = list.with_capacity(capacity)
+    list.fill(mut raw, capacity, 0u8)
+    work_steps(0, capacity)
+    Samples(buffer: cell.new(SampleBuffer(storage: take raw, required: 0)))
+}
+
+// Append the ordinary event before sampling it. The sample contains two
+// length-prefixed byte strings. skip_last strips a forward cursor's end byte.
+pub fn append_sampled[E: inert](l: Log[E], take event: E, observer: Samples, key: Bytes, skip_last: bool, value: Bytes) {
+    cell.with(l.entries, take event, list.push)
+    let mut b = cell.replace(observer.buffer, SampleBuffer(storage: list.new(), required: 0))
+    let start = b.required
+    let k = if skip_last && list.len(key) > 0 {
+        list.len(key) - 1
+    } else {
+        list.len(key)
+    }
+    let v = list.len(value)
+    b.required = int.saturating_add(start, int.saturating_add(16u64, int.saturating_add(k, v)))
+    if b.required <= list.len(b.storage) {
+        list.set_word_le(mut b.storage, start, k)
+        list.set_word_le(mut b.storage, start + 8, v)
+        for i in 0u64 .. k {
+            b.storage[start + 16 + i] = key[i]
+        }
+        for i in 0u64 .. v {
+            b.storage[start + 16 + k + i] = value[i]
+        }
+    }
+    cell.set(observer.buffer, take b)
+}
+
+pub fn finish_samples(take observer: Samples) -> Result[Bytes, u64] {
+    let Samples(buffer: take saved) = take observer
+    let SampleBuffer(storage: take bytes_in, required: needed) = cell.into_inner(take saved)
+    if needed > list.len(bytes_in) {
+        return Error(needed)
+    }
+    let mut out = take bytes_in
+    list.truncate(mut out, needed)
+    Ok(take out)
+}
+
+fn work_steps(code: u64, units: u64)

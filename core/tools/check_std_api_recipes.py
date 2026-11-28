@@ -12,7 +12,6 @@ import argparse
 import json
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -198,13 +197,8 @@ def declaration_key(source):
 
 
 def store_interfaces(compiler, work):
-    package = work / "store-package"
-    package.mkdir()
-    for source in STORE_PACKAGE.glob("*.hirsel"):
-        shutil.copy(source, package / source.name)
-    shutil.copy(STORE_PACKAGE / "hirsel.hcfg", package / "hirsel.hcfg")
     inspected = run(
-        [compiler, "inspect", str(package), "--interface", "--json", "--libraries", str(ROOT / "core")],
+        [compiler, "inspect", str(STORE_PACKAGE), "--interface", "--json", "--libraries", str(ROOT / "core")],
         cwd=work,
     )
     if inspected.returncode:

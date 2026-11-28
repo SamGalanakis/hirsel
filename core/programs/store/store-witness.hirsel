@@ -15,6 +15,7 @@ pub opaque type Witness {
 
 type WitnessTouches {
     observed: List[(Bytes, Bytes)],
+    value_keys: Map[Bytes, ()],
     inline_slots: Map[(u64, u64), ()],
     // Memory pages by stamp: the collection-map path of each collection the
     // call reached and the resident pages its reads and writes descend.
@@ -37,9 +38,10 @@ pub type WitnessFrame {
 }
 
 // `Outside`: the run asked for a page or a body the witness does not hold.
-pub type SliceVerdict = Within(Verdict) | Outside
+pub type SliceVerdict = Within(Verdict) | Outside | UnresolvedUpload
 
 type Captured {
+    values: List[txn.ValueRead],
     reran: Rerun[Bytes],
     reads: List[Read],
     stamps: Map[u64, ()],
@@ -47,21 +49,26 @@ type Captured {
 }
 
 fn uncaptured() -> Captured {
-    Captured(reran: RoomRefused, reads: list.new(), stamps: map.new(), frames: map.new())
+    Captured(values: list.new(), reran: RoomRefused, reads: list.new(), stamps: map.new(), frames: map.new())
 }
 
 // As `rerun`, keeping the completing attempt's reads, touches and frames.
-fn rerun_capture(db: Db, registry: indexes.IndexRegistry, mut start: txn.TxStart, mut base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Captured, Error] waits {
-    let root = capture_pin_root(open_number(db), ci.id.branch, base.collections, pages.holder_bases(db.holders))
+fn rerun_capture(db: Db, registry: indexes.IndexRegistry, start: txn.TxStart, base: pages.Roots, bases: pages.TailBases, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Captured, Error] waits {
+    let root = capture_pin_root(open_number(db), ci.id.branch, base.collections, bases)
     let mut pins = pager.empty_tiered_pins(root, pager.pin_partition(db.pager))
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
+    let mut sample_bytes = 0u64
     loop {
-        let attempt = pager.call_attempt(captured_tiered(base.collections, pages.holder_bases(db.holders), ci.id.branch), pager.pin_partition(db.pager), pager.tiered_window(pins))
-        let mut trace: Option[RerunTrace] = Some(RerunTrace(reads: list.new(), outside: false))
-        let reran = rerun_attempt(start, pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, plan, call, attempt, pins.frames, mut trace, body)
-        let RerunTrace(reads: take reads, ..) = option.unwrap(take trace)
+        let attempt = pager.call_attempt(captured_tiered(base.collections, bases, ci.id.branch), pager.pin_partition(db.pager), pager.tiered_window(pins))
+        let mut trace: Option[RerunTrace] = Some(RerunTrace(detached: false, unresolved_upload: false, sample_bytes, values: list.new(), reads: list.new(), outside: false))
+        let reran = rerun_attempt(start, bases, db.accounting.tiered, registry, base, ci, plan, call, attempt, pins.frames, mut trace, body)
+        let RerunTrace(sample_bytes: needed, values: take values, reads: take reads, ..) = option.unwrap(take trace)
+        if needed > sample_bytes {
+            sample_bytes = needed
+            continue
+        }
         let Some(state) = pager.call_attempt_finish(take attempt) else {
-            return Ok(Captured(reran: take reran, reads: take reads, stamps: map.new(), frames: map.new()))
+            return Ok(Captured(values: take values, reran: take reran, reads: take reads, stamps: map.new(), frames: map.new()))
         }
         match state.stopped {
             None => {
@@ -71,10 +78,10 @@ fn rerun_capture(db: Db, registry: indexes.IndexRegistry, mut start: txn.TxStart
                         map.insert(mut frames, (key.0, key.1), arc.share(frame))
                     }
                 }
-                return Ok(Captured(reran: take reran, reads: take reads, stamps: clone(state.stamps), frames: take frames))
+                return Ok(Captured(values: take values, reran: take reran, reads: take reads, stamps: clone(state.stamps), frames: take frames))
             },
             Some(AttemptMiss(_)) => {
-                match deliver_call_miss(db, base.collections, pages.holder_bases(db.holders), state, mut pins, mut pending) {
+                match deliver_call_miss(db, base.collections, bases, state, mut pins, mut pending) {
                     Ok(()) => (),
                     Error(Full(_)) => return Ok(uncaptured()),
                     Error(Io(_)) => return Ok(uncaptured()),
@@ -83,25 +90,6 @@ fn rerun_capture(db: Db, registry: indexes.IndexRegistry, mut start: txn.TxStart
                     Error(Corrupt(Fault(why: Absent, ..))) => return Ok(uncaptured()),
                     Error(take problem) => return Error(take problem),
                 }
-            },
-            Some(AttemptFold(_)) => {
-                // Journal replay may represent the original writer's Hot rows
-                // as an overlay. Fold only this historical copy and give the
-                // completing attempt a fresh pin root for its new pages.
-                if let None = view base.collections.replay {
-                    return Ok(uncaptured())
-                }
-                let requests = match pager.pager_requests(db.pager) {
-                    Some(sender) => Some(view sender),
-                    None => None,
-                }
-                let source = failure_result_from_rep(pager.tx_page_source(requests, base.collections))?
-                let mut next_stamp = failure_result_from_rep(catalog.stamp_after(start.ids))?
-                let _ = failure_result_from_rep(pager.fold_page_tree(source, mut base.collections, mut next_stamp))?
-                start.ids = next_stamp
-                let folded = capture_pin_root(open_number(db), ci.id.branch, base.collections, pages.holder_bases(db.holders))
-                pins = pager.empty_tiered_pins(take folded, pager.pin_partition(db.pager))
-                pending = None
             },
             Some(_) => return Ok(uncaptured()),
         }
@@ -125,26 +113,7 @@ fn witness_outside(causes: Causes) -> bool {
 fn witness_pages(page: Arc[std.page.Page], low: Bytes, high: Bytes, point: bool, mut w: WitnessTouches) {
     let image = std.page.image_of(page)
     map.insert(mut w.resident, std.page.stamp(image), ())
-    let slots = std.page.count(image)
     if std.page.level(image) == 0 {
-        let (start, _) = std.page.search(image, low)
-        for slot in start .. slots {
-            let Some(row) = std.page.entry(image, slot) else {
-                break
-            }
-            let past = if point {
-                list.compare_bytes(row.key, low) != Equal
-            } else {
-                list.compare_bytes(row.key, high) != Less
-            }
-            if past {
-                break
-            }
-            map.insert(mut w.inline_slots, (std.page.stamp(image), slot), ())
-            if let BlobValue(reference) = row.cell {
-                map.insert(mut w.bodies, reference.stamp, ())
-            }
-        }
         return
     }
     let Some(start) = std.page.descend(image, low) else {
@@ -204,8 +173,8 @@ fn witness_reach(tree: pages.PageTree, low: Bytes, high: Bytes, point: bool, mut
 }
 
 fn witness_of(base: pages.Roots, take captured: Captured) -> Option[WitnessTouches] {
-    let Captured(reran: take reran, reads: take reads, stamps: take stamps, frames: take frames) = take captured
-    let mut w = WitnessTouches(observed: list.new(), inline_slots: map.new(), resident: map.new(), bodies: map.new(), tiered: take stamps, frames: take frames)
+    let Captured(values: take values, reran: take reran, reads: take reads, stamps: take stamps, frames: take frames) = take captured
+    let mut w = WitnessTouches(observed: list.new(), value_keys: map.new(), inline_slots: map.new(), resident: map.new(), bodies: map.new(), tiered: take stamps, frames: take frames)
     let tree = view base.collections
     match reran {
         RanTo(_, writes) => {
@@ -230,6 +199,9 @@ fn witness_of(base: pages.Roots, take captured: Captured) -> Option[WitnessTouch
             },
         }
     }
+    for read_value in values {
+        witness_value(tree, read_value, mut w)
+    }
     let spans = replace(mut w.observed, list.new())
     w.observed = witness_union(take spans)
     Some(take w)
@@ -251,7 +223,7 @@ fn witness_collections(page: Arc[std.page.Page], mut keys: List[Bytes]) {
 // Rebuild only the data pages in the slice. A missing edge has a Cold
 // slot with no resolver in resident replay. PAGEs and BLOBs are independent
 // edges, including BLOBs mentioned by the same leaf.
-fn witness_data_page(page: Arc[std.page.Page], w: WitnessTouches, resident: bool) -> Result[Arc[std.page.Page], std.page.Error] {
+fn witness_data_page(page: Arc[std.page.Page], w: WitnessTouches) -> Result[Arc[std.page.Page], std.page.Error] {
     let image = std.page.image_of(page)
     if std.page.count(image) == 0 {
         return Ok(arc.share(page))
@@ -261,7 +233,7 @@ fn witness_data_page(page: Arc[std.page.Page], w: WitnessTouches, resident: bool
         std.page.PagePtr(pack: 18446744073709551615u64, offset: 72, len: 1, checksum: 0, stamp)
     })?
     let mut sealed = std.page.decode(take raw, Collection)?
-    if std.page.level(sealed) == 0 && resident {
+    if std.page.level(sealed) == 0 {
         sealed = witness_inline(sealed, w.inline_slots)?
     }
     let mut kids: List[std.page.Slot] = list.new()
@@ -270,7 +242,7 @@ fn witness_data_page(page: Arc[std.page.Page], w: WitnessTouches, resident: bool
         match std.page.owning_edge(sealed, slot) {
             Some(PageEdge(ptr)) => {
                 let child: std.page.Slot = match std.page.child_slot(page, slot) {
-                    Some(HotPage(kid)) if map.contains(w.resident, ptr.stamp) || map.contains(w.tiered, ptr.stamp) => HotPage(witness_data_page(kid, w, resident)?),
+                    Some(HotPage(kid)) if map.contains(w.resident, ptr.stamp) || map.contains(w.tiered, ptr.stamp) => HotPage(witness_data_page(kid, w)?),
                     _ => ColdPage(ptr),
                 }
                 list.push(mut kids, take child)
@@ -279,7 +251,7 @@ fn witness_data_page(page: Arc[std.page.Page], w: WitnessTouches, resident: bool
                 let Some(BlobEdge(prior)) = std.page.owning_edge(image, slot) else {
                     return Error(MalformedPage)
                 }
-                let body: std.page.BlobSlot = if map.contains(w.bodies, reference.stamp) || map.contains(w.tiered, reference.stamp) {
+                let body: std.page.BlobSlot = if map.contains(w.bodies, reference.stamp) {
                     clone(option.unwrap(std.page.blob_slot(page, prior.body)))
                 } else {
                     ColdBlob(reference)
@@ -303,16 +275,58 @@ fn witness_roots(base: pages.Roots, w: WitnessTouches, first: u64) -> Result[pag
     witness_collections(base.collections.root, mut keys)
     let mut ids = first
     for key in keys {
-        let Some((HotPage(_), descriptor)) = std.page.collection_slot(base.collections.root, key) else {
+        let Some((HotPage(child), descriptor)) = std.page.collection_slot(base.collections.root, key) else {
             continue
         }
-        let resident = pages.collection_descriptor(descriptor).residency == ResidentMemory
+        if pages.collection_descriptor(descriptor).kind == CellCollection {
+            if let Some(raw) = pages.inline_cell(descriptor) {
+                if !map.contains(w.inline_slots, option.unwrap(witness_cell_slot(base.collections, key))) {
+                    let mut blank: Bytes = list.with_capacity(list.len(raw))
+                    list.fill(mut blank, list.len(raw), 0u8)
+                    let safe = failure_result_from_rep(pages.cell_record(child, Some(view blank)))?
+                    failure_result_from_rep(pages.page_result(std.page.insert(mut sparse.collections.root, key, safe, Some(arc.share(child)), sparse.collections.inline, 1, mut ids)))?
+                }
+                continue
+            }
+        }
         failure_result_from_rep(pages.page_result(std.page.edit_collection(mut sparse.collections.root, key, 1, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            root = witness_data_page(root, w, resident)?
+            root = witness_data_page(root, w)?
             Ok(())
         })))?
     }
     Ok(take sparse)
+}
+
+// Fold journal overlays on historical copies before collecting any touches.
+// Read-only calls can finish without demanding a fold, and their witnesses
+// must not retain the overlay's unrelated ReplayPut payloads either.
+fn fold_witness_tree(db: Db, mut tree: pages.PageTree, mut ids: u64) -> Result[(), Error] waits {
+    if let None = view tree.replay {
+        return Ok(())
+    }
+    let requests = match pager.pager_requests(db.pager) {
+        Some(sender) => Some(view sender),
+        None => None,
+    }
+    let source = failure_result_from_rep(pager.tx_page_source(requests, tree))?
+    let mut next_stamp = failure_result_from_rep(catalog.stamp_after(ids))?
+    let _ = failure_result_from_rep(pager.fold_page_tree(source, mut tree, mut next_stamp))?
+    ids = next_stamp - 1
+    Ok(())
+}
+
+fn witness_tail_bases(db: Db, mut ids: u64) -> Result[pages.TailBases, Error] waits {
+    let Some(held) = pages.holder_bases(db.holders) else {
+        return Ok(None)
+    }
+    let mut out: List[pages.TailBase] = list.with_capacity(list.len(held))
+    for i in 0u64 .. list.len(held) {
+        let tail = view held[i]
+        let mut roots = pages.share_roots(tail.roots)
+        fold_witness_tree(db, mut roots.collections, mut ids)?
+        list.push(mut out, pages.TailBase(name: clone(tail.name), branch: tail.branch, version: tail.version, roots: take roots))
+    }
+    Ok(Some(arc.new(take out)))
 }
 
 fn witness_run(db: Db, registry: indexes.IndexRegistry, source: ReplaySource, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes], plan: Plan) -> Result[Option[Witness], Error] waits {
@@ -320,15 +334,18 @@ fn witness_run(db: Db, registry: indexes.IndexRegistry, source: ReplaySource, bo
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
     let mut start = tx_start(db)
     let mut base = pages.share_roots(source.base)
-    let captured = rerun_capture(db, registry, mut start, mut base, ci, plan, call, body)?
-    let Some(take touches) = witness_of(base, take captured) else {
+    fold_witness_tree(db, mut base.collections, mut start.ids)?
+    let bases = witness_tail_bases(db, mut start.ids)?
+    let captured = rerun_capture(db, registry, start, base, bases, ci, plan, call, body)?
+    let Some(take reached) = witness_of(base, take captured) else {
         return Ok(None)
     }
     let Some(first) = int.checked_add(start.ids, 1099511627776u64) else {
         return Error(Limit(Ids))
     }
+    let mut touches = take reached
+    touches.frames = witness_project_frames(touches)?
     let sparse = witness_roots(base, touches, first)?
-    let bases = pages.holder_bases(db.holders)
     let projected: pages.TailBases = if let Some(held) = bases {
         let mut out: List[pages.TailBase] = list.new()
         for i in 0u64 .. list.len(held) {
@@ -349,21 +366,36 @@ fn witness_replay_run(registry: indexes.IndexRegistry, w: Witness, plan: Plan, f
     let source = view w.source
     let call = view source.call
     let ci = CallInfo(id: CallId(store: source.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let attempt = pager.call_attempt(w.retry_capable, w.partition, 0)
-    let mut trace: Option[RerunTrace] = Some(RerunTrace(reads: list.new(), outside: false))
-    let reran = rerun_attempt(w.start, w.bases, w.tiered_bytes, registry, source.base, ci, plan, call, attempt, w.touches.frames, mut trace, body)
-    let RerunTrace(outside: outside, reads: take reads) = option.unwrap(take trace)
-    let missed = match pager.call_attempt_finish(take attempt) {
-        Some(state) => match state.stopped {
+    let mut sample_bytes = 0u64
+    loop {
+        let attempt = pager.call_attempt(w.retry_capable, w.partition, 0)
+        let mut trace: Option[RerunTrace] = Some(RerunTrace(detached: true, unresolved_upload: false, sample_bytes, values: list.new(), reads: list.new(), outside: false))
+        let reran = rerun_attempt(w.start, w.bases, w.tiered_bytes, registry, source.base, ci, plan, call, attempt, w.touches.frames, mut trace, body)
+        let RerunTrace(sample_bytes: needed, unresolved_upload: missing, outside: outside, values: take values, reads: take reads, ..) = option.unwrap(take trace)
+        if missing {
+            return Ok(UnresolvedUpload)
+        }
+        if needed > sample_bytes {
+            sample_bytes = needed
+            continue
+        }
+        let missed = match pager.call_attempt_finish(take attempt) {
+            Some(state) => match state.stopped {
+                None => false,
+                Some(_) => true,
+            },
             None => false,
-            Some(_) => true,
-        },
-        None => false,
+        }
+        if outside || missed || !witness_contains_reads(w.touches.observed, reads) {
+            return Ok(Outside)
+        }
+        for found in values {
+            if !map.contains(w.touches.value_keys, found.key) {
+                return Ok(Outside)
+            }
+        }
+        return Ok(Within(replay_verdict(source, plan, take reran, failed)?))
     }
-    if outside || missed || !witness_contains_reads(w.touches.observed, reads) {
-        return Ok(Outside)
-    }
-    Ok(Within(replay_verdict(source, plan, take reran, failed)?))
 }
 
 // The touch closure of the call `source` names, taken by re-running it on

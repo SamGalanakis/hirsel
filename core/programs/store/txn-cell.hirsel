@@ -113,6 +113,25 @@ pub fn cell_current[Event: inert + shareable + send](tx: TxState[Event], id: u32
     }
 }
 
+// Return the value and record the same point dependency for staged and
+// historical cells. Only the historical payload is eligible for a witness.
+pub fn fetch_cell[Event: inert + shareable + send](tx: TxState[Event], id: u32, take key: Bytes, point: fn(take Bytes) -> Event) -> Option[View[Bytes]] in tx {
+    let (stored, event) = match cell_edit(tx, id) {
+        Some(CellPut(value)) => (Some(format.staged_bytes(value)), point),
+        Some(CellDelete) => (None, point),
+        _ => {
+            let base = cell_page_row(tx_roots(tx).collections, key)
+            let selected = match base {
+                Some(_) => tx.values.point,
+                None => point,
+            }
+            (base, selected)
+        },
+    }
+    log.append(tx.reads, event(take key))
+    stored
+}
+
 pub fn stage_cell[Event: inert + shareable + send](mut tx: TxState[Event], id: u32, take wanted: Option[Bytes]) -> Result[(), types.Failure] {
     let key = catalog.prefix(id)?
     let (reverts, old_width, old_charge) = {

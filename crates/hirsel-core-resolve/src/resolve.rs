@@ -3,6 +3,7 @@ use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, Symbol, TokenId, sym};
 
 mod constructors;
 mod lengths;
+mod private_access;
 
 /// Expression nesting the resolver walks before it refuses the item as a resource
 /// refusal (PROG-6).
@@ -476,7 +477,10 @@ impl<'a> Resolver<'a, '_> {
             self.record(n, ns, scope, name, construct, LookupResult::Missing);
             return None;
         };
-        let result = if d.site.module != self.module && !d.public && !self.codec_storage_access(id)
+        let result = if d.site.module != self.module
+            && !d.public
+            && !self.codec_storage_access(id)
+            && !self.witness_access(id)
         {
             LookupResult::Private(id)
         } else if construct && d.site.module != self.module && d.opaque {
@@ -506,29 +510,6 @@ impl<'a> Resolver<'a, '_> {
         }
         self.record(n, ns, scope, name, construct, result);
         Some(Target::Definition(id))
-    }
-    // The parser only admits a dollar in compiler-generated items. The codec
-    // derive may use std's descriptor protocol without exporting its makers.
-    fn codec_storage_access(&self, id: DefinitionId) -> bool {
-        let Some(token) = self.item.tree.node(self.item.root).token else {
-            return false;
-        };
-        let item = self.index.symbols.text(self.item.symbol(token));
-        let Some((_, operation)) = item.rsplit_once('$') else {
-            return false;
-        };
-        let path = self.index.definition_path(id);
-        if !path.package_is("std", "1") || path.0.modules != ["codec"] {
-            return false;
-        }
-        match operation {
-            "codec" => matches!(path.0.name.as_str(), "storage_make" | "storage_checked"),
-            "schema" => matches!(
-                path.0.name.as_str(),
-                "storage_mode" | "storage_via" | "storage_to" | "storage_field_end"
-            ),
-            _ => false,
-        }
     }
     fn module_lookup(
         &mut self,

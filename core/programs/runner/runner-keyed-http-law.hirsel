@@ -759,6 +759,17 @@ fn keyed_http_portable_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), 
     bind_portable_keyed(mut r, take binding, KeyedRule(claim: keyed_http_law_claim(), retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
 }
 
+// The old adapter rejects this input before touching the Store. The fixed
+// adapter registers the same wire entry and accepts it without any grants.
+fn keyed_http_fixed_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact_via(mut r, code.describe(http_op_increment), (), fn(mut tx: store.Tx, handles: HttpLawHandles, caller: Caller, take input: HttpOpInput, _unit: ()) -> Result[u64, ()] {
+        if input.name == "previously-rejected" {
+            return Ok(1u64)
+        }
+        http_op_increment(mut tx, handles, caller, take input)
+    }, 65536u64, DEFAULT_STEPS)
+}
+
 // Exercise the registered HTTP claim function and settle its CALL via the
 // production transact adapter. Supply the same image digest as the offline
 // release resolver, since a law executable has no installed Place image.
@@ -781,10 +792,18 @@ fn keyed_http_portable_witness_requires_certified_binding(d: Dir, clock: Clock, 
         let sealed = result.unwrap(store.seal(mut db, take schema))
         result.unwrap(store.durable(mut db, sealed))
         let registered = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
-        let op = if portable { b"increment" } else { b"first" }
+        let op = if portable {
+            b"increment"
+        } else {
+            b"first"
+        }
         let binding = option.unwrap(map.get(registered.t.keyed, op))
         let mut headers: List[(String, Bytes)] = list.new()
-        list.push(mut headers, ("authorization", if portable { b"token" } else { b"raw-credential-canary" }))
+        list.push(mut headers, ("authorization", if portable {
+            b"token"
+        } else {
+            b"raw-credential-canary"
+        }))
         if !portable {
             list.push(mut headers, ("idempotency-key", b"one"))
         }
@@ -798,14 +817,14 @@ fn keyed_http_portable_witness_requires_certified_binding(d: Dir, clock: Clock, 
         }
         let args_codec: std.codec.Codec[HttpOpInput] = std.codec.of()
         let mut arguments: Bytes = list.new()
-        result.unwrap(std.codec.encode(args_codec, HttpOpInput(name: "saved"), mut arguments))
+        result.unwrap(std.codec.encode(args_codec, HttpOpInput(name: "previously-rejected"), mut arguments))
         let record = result.unwrap(claim_run_record(entry, arguments, revision, identity))
         let Accepted(claim) = result.unwrap(store.admit_claim(mut db, key, store.request_digest(entry.entry, arguments), arguments, Some(take policy))) else {
             fail("portable witness law: claim admission")
         }
         let complete = store.keyed_completion(take claim, take record)
         let plan = store.Plan(n_e: n, s_e: steps, reply_max: store.CLAIM_DONE_MAX)
-        let Committed(done) = result.unwrap((go.serve)(mut db, take complete, plan, None, handles, claimed.caller, mut arguments)) else {
+        let Kept(done) = result.unwrap((go.serve)(mut db, take complete, plan, None, handles, claimed.caller, mut arguments)) else {
             fail("portable witness law: keyed CALL settlement")
         }
         result.unwrap(store.durable(mut db, done.ticket))
@@ -818,6 +837,14 @@ fn keyed_http_portable_witness_requires_certified_binding(d: Dir, clock: Clock, 
             Ok(witness) if portable => {
                 let Ok(Within(Same)) = replay_detached_at(witness, Some(clone(identity)), definition, HTTP_LAW_PLACE_BYTES, schema_def) else {
                     fail("portable witness law: detached opaque principal did not replay")
+                }
+                let candidate = replay_entry(definition, schema_def, None, HTTP_LAW_PLACE_BYTES)
+                let Ok(Within(Same)) = replay_detached(witness, Candidate, candidate) else {
+                    fail("portable witness law: zero-grant candidate could not bind the historical schema")
+                }
+                let fixed = replay_entry(code.describe(keyed_http_fixed_place), schema_def, None, HTTP_LAW_PLACE_BYTES)
+                let Ok(Within(Different(Reply))) = replay_detached(witness, Candidate, fixed) else {
+                    fail("portable witness law: the candidate fix did not change the recorded rejection")
                 }
             },
             _ => fail("portable witness law: incorrect post-bind eligibility"),

@@ -19,7 +19,6 @@ use std::time::Duration;
 
 pub(crate) mod adopt;
 pub(crate) mod archive;
-pub(crate) mod preview_mount;
 mod archive_decision;
 mod bucket;
 mod config;
@@ -27,6 +26,7 @@ mod context;
 mod decision;
 pub(crate) mod pitr;
 pub(crate) mod pitr_decision;
+pub(crate) mod preview_mount;
 mod receipt;
 pub(crate) mod retire;
 pub(crate) mod store_process;

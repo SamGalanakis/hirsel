@@ -39,6 +39,29 @@ fn witness_law_fill(mut db: Db, t: Table[u64, Bytes]) -> Result[(), Error] waits
     Ok(())
 }
 
+// Return the first nested step budget that admits a one-row payload read.
+// Each arm starts with a fresh cursor and includes its opening charges.
+fn witness_cursor_steps(tx: Tx, t: Table[u64, Bytes]) -> u64 {
+    let mut lo = 0u64
+    let mut hi = 4096u64
+    while lo < hi {
+        let middle = lo + (hi - lo) / 2
+        let checked = bound steps middle {
+            let mut probe_rows = result.unwrap(range(tx, t, Included(2000u64), Included(2000u64)))
+            let Some((k, _)) = result.unwrap(next_in(tx, mut probe_rows)) else {
+                fail("witness law: cursor probe did not return its row")
+            }
+            k
+        }
+        if let Ok(_) = checked {
+            hi = middle
+        } else {
+            lo = middle + 1
+        }
+    }
+    lo
+}
+
 // Two point reads, one of a BLOB row, a four-row range and one put.
 fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Result[Bytes, Bytes] {
     let mut reply: Bytes = list.new()
@@ -50,10 +73,23 @@ fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Re
     list.push(mut reply, int.truncate(counted))
     let overlay_count = result.unwrap(count(tx, t, Included(43u64), Included(43u64)))
     list.push(mut reply, int.truncate(overlay_count))
+    // Borrowing this body needs room for the lookup, not a second copy of
+    // the 5,000-byte value. Capture must preserve the nested bound's answer.
+    let borrowed = bound bytes 4096 {
+        let Some(wire) = result.unwrap(fetch_bytes(tx, t, 900u64)) else {
+            fail("witness law: bounded BLOB lookup")
+        }
+        wire[4999u64]
+    }
+    match borrowed {
+        Ok(byte) => list.push(mut reply, byte),
+        Error(_) => list.push(mut reply, 0u8),
+    }
     let Some(wide) = result.unwrap(fetch(tx, t, 900u64)) else {
         fail("witness law: row 900")
     }
     list.push(mut reply, wide[4999u64])
+    list.put_word_le(mut reply, witness_cursor_steps(tx, t))
     {
         let mut rows = result.unwrap(range(tx, t, Included(2000u64), Excluded(2004u64)))
         while let Some((_, v)) = result.unwrap(next_in(tx, mut rows)) {
@@ -71,7 +107,7 @@ fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Re
 
 fn witness_law_serve(mut db: Db, t: Table[u64, Bytes]) -> Result[u64, Error] waits {
     let key = claim_law_key(b"one")
-    let record = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    let record = KeyedCallRecord(entry: b"charge", args: b"args", revision: Some(b"0123456789abcdef0123456789abcdef"), code: b"0123456789abcdef0123456789abcdef0123456789abcdef")
     let no_stream_record: Option[CallRecord] = None
     let Accepted(claimed) = admit_claim(mut db, key, request_digest(b"charge", b"args"), b"args", Some(claim_law_policy()))? else {
         return Error(Missing("witness law: admit"))
@@ -163,6 +199,7 @@ fn witness_law_outside(got: SliceVerdict) -> bool {
     match got {
         Outside => true,
         Within(_) => false,
+        UnresolvedUpload => false,
     }
 }
 
@@ -186,7 +223,7 @@ fn witness_replays_resident_call_from_its_pages(d: Dir, c: Clock, r: Random, tas
     let quiet = rerun_attempt(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, indexes.index_registry(db.indexes), source.base, ci, witness_law_plan(), call, attempt, no_pins, mut off, scoped fn(_recorded: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
         witness_law_entry(mut tx, rows, None)
     })
-    let RanTo(_, _) = quiet else {
+    let RanTo(original, _) = take quiet else {
         return Error(Missing("witness law: the plain re-run"))
     }
     if let Some(_) = off {
@@ -207,6 +244,22 @@ fn witness_replays_resident_call_from_its_pages(d: Dir, c: Clock, r: Random, tas
     })? else {
         return Error(Missing("witness law: no witness"))
     }
+    // Exercise the capture observer on the intact base before testing the
+    // projected pages. A different reply here isolates a metering change.
+    let intact = rerun_capture(db, indexes.index_registry(db.indexes), tx_start(db), source.base, pages.holder_bases(db.holders), ci, witness_law_plan(), call, scoped fn(_recorded: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, rows, None)
+    })?
+    let Captured(reran: take traced, ..) = take intact
+    let RanTo(observed, _) = take traced else {
+        return Error(Missing("witness law: full-base cursor probe stopped"))
+    }
+    if original != observed {
+        let mut message = string.from("witness law: intact cursor step threshold live=")
+        string.push_u64(mut message, list.word_le(original, 5))
+        string.push(mut message, " capture=")
+        string.push_u64(mut message, list.word_le(observed, 5))
+        return Error(Missing(take message))
+    }
     let stamps = witness_resident(w)
     let mut kept: Map[u64, ()] = map.new()
     witness_law_kept(source.base.collections.root, mut kept)
@@ -218,7 +271,17 @@ fn witness_replays_resident_call_from_its_pages(d: Dir, c: Clock, r: Random, tas
         return Error(Missing("witness law: the closure is not a strict part of the table"))
     }
     close(take db)?
-    if !witness_law_same(witness_law_replay(w, None)?) {
+    let portable = encode_witness(w)?
+    // The selected leaf also contains count-only row 42. Its key is needed
+    // for the count, while its 200-byte payload has no place in the file.
+    let counted_only = witness_law_value(42)
+    for offset in 0u64 .. list.len(portable) {
+        if list.starts_with_at(portable, offset, counted_only) || list.starts_with_at(portable, offset, b"overlay-count-only-value-canary") {
+            return Error(Missing("file retained an unobserved sibling payload"))
+        }
+    }
+    let loaded = decode_witness(portable)?
+    if !witness_law_same(witness_law_replay(loaded, None)?) {
         return Error(Missing("witness law: the slice did not replay the call"))
     }
     if !witness_law_outside(witness_law_replay(w, Some(41u64))?) {
@@ -307,7 +370,17 @@ fn witness_replays_tiered_call_from_its_frames(d: Dir, c: Clock, r: Random, task
         return Error(Missing("witness law: the Tiered closure"))
     }
     close(take db)?
-    if !witness_law_same(witness_law_replay(w, None)?) {
+    let portable = encode_witness(w)?
+    // The selected leaf also contains count-only row 42. Its key is needed
+    // for the count, while its 200-byte payload has no place in the file.
+    let counted_only = witness_law_value(42)
+    for offset in 0u64 .. list.len(portable) {
+        if list.starts_with_at(portable, offset, counted_only) || list.starts_with_at(portable, offset, b"overlay-count-only-value-canary") {
+            return Error(Missing("file retained an unobserved sibling payload"))
+        }
+    }
+    let loaded = decode_witness(portable)?
+    if !witness_law_same(witness_law_replay(loaded, None)?) {
         return Error(Missing("witness law: the frames did not replay the call"))
     }
     if !witness_law_outside(witness_law_replay(w, Some(42u64))?) {
@@ -324,6 +397,100 @@ fn witness_replays_tiered_call_from_its_frames(d: Dir, c: Clock, r: Random, task
     }
     if !witness_law_outside(witness_law_replay(w, Some(3000u64))?) {
         return Error(Missing("witness law: a read outside the frames was served"))
+    }
+    Ok(())
+}
+
+// A successful base fetch builds its point event and appends it. Compare
+// the exact step boundary for both constructors, including a stopped append.
+@test
+fn witness_point_preserves_append_steps() -> Result[(), Error] {
+    for budget in 0u64 .. 12u64 {
+        let mut outcomes: List[bool] = list.new()
+        for observing in[false, true] {
+            let reads: core.Log[Read] = log.new()
+            let point = if observing {
+                witness_point_event
+            } else {
+                point_event
+            }
+            let result = bound steps budget {
+                log.append(reads, point(b"key"))
+            }
+            list.push(mut outcomes, match result {
+                Ok(()) => true,
+                Error(_) => false,
+            })
+        }
+        if outcomes[0u64] != outcomes[1u64] {
+            return Error(Missing("witness point changed the step that admits an append"))
+        }
+    }
+    Ok(())
+}
+
+@test
+fn witness_inline_cell_descriptors_keep_only_opened_payloads(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, disk_test_directory(d), clock, random, result.unwrap(sized(Directory, 2147483648u64)))?
+    let mut declaration = declare(db, Migrate)?
+    let opened = declare_cell(mut declaration, "opened", std.codec.of_bytes())?
+    let sibling = declare_cell(mut declaration, "sibling", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaration)?
+    let _ = cell_law_commit(mut db, opened, b"opened-cell")?
+    let _ = cell_law_commit(mut db, sibling, b"sibling-cell-secret")?
+    let key = claim_law_key(b"cell")
+    let Accepted(claim) = admit_claim(mut db, key, request_digest(b"read", b""), b"", Some(claim_law_policy()))? else {
+        return Error(Missing("cell witness claim admission"))
+    }
+    let record = KeyedCallRecord(entry: b"read", args: b"", revision: None, code: b"0123456789abcdef")
+    let none_record: Option[CallRecord] = None
+    let cells: (Cell[Bytes], Cell[Bytes]) = (clone(opened), clone(sibling))
+    let Ok(Committed(done)) = serve(mut db, keyed_completion(take claim, take record), witness_law_plan(), take none_record, cells, fn(mut tx: Tx, pair: (Cell[Bytes], Cell[Bytes])) -> Result[Bytes, Bytes] {
+        result.unwrap(cell_set(mut tx, pair.1, b"sibling-cell-secret"))
+        Ok(option.unwrap(result.unwrap(cell_fetch(tx, pair.0))))
+    }) else {
+        return Error(Missing("cell witness call settlement"))
+    }
+    durable(mut db, done.ticket)?
+    let Ok(source) = prepare_reexecute_claim(db, version(snapshot(db)))? else {
+        return Error(Missing("cell witness source"))
+    }
+    let Some(w) = capture_witness(db, source, witness_law_plan(), cells, fn(_record: Recorded, mut tx: Tx, pair: (Cell[Bytes], Cell[Bytes])) -> Result[Bytes, Bytes] {
+        result.unwrap(cell_set(mut tx, pair.1, b"sibling-cell-secret"))
+        Ok(option.unwrap(result.unwrap(cell_fetch(tx, pair.0))))
+    })? else {
+        return Error(Missing("cell witness unavailable"))
+    }
+    close(take db)?
+    let Some((_, descriptor)) = std.page.collection_slot(w.source.base.collections.root, sibling.key) else {
+        return Error(Missing("cell witness lost sibling descriptor"))
+    }
+    let Some(blank) = pages.inline_cell(descriptor) else {
+        return Error(Missing("cell witness lost sibling layout"))
+    }
+    for byte in blank {
+        if byte != 0 {
+            return Error(Missing("cell witness retained sibling bytes"))
+        }
+    }
+    for candidate in[false, true] {
+        let mut selected = declare_witness(w)?
+        let a = declare_cell(mut selected, "opened", std.codec.of_bytes())?
+        let b = declare_cell(mut selected, "sibling", std.codec.of_bytes())?
+        let verdict = replay_witness(w, take selected, witness_law_plan(), witness_law_failed, (take a, take b, candidate), fn(_record: Recorded, mut tx: Tx, choice: (Cell[Bytes], Cell[Bytes], bool)) -> Result[Bytes, Bytes] {
+            if choice.2 {
+                return Ok(option.unwrap(result.unwrap(cell_fetch(tx, choice.1))))
+            }
+            result.unwrap(cell_set(mut tx, choice.1, b"sibling-cell-secret"))
+            Ok(option.unwrap(result.unwrap(cell_fetch(tx, choice.0))))
+        })?
+        if candidate {
+            if !witness_law_outside(verdict) {
+                return Error(Missing("cell witness returned an unobserved sibling"))
+            }
+        } else if !witness_law_same(verdict) {
+            return Error(Missing("cell witness changed a blind no-op write"))
+        }
     }
     Ok(())
 }

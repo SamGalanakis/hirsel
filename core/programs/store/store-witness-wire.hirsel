@@ -1,0 +1,198 @@
+// The file prefix carries the release selector and the two CALL bounds.
+// Only the certified Runner export may turn a live CALL into a portable file.
+fn witness_magic() -> Bytes {
+    b"HIRSHREP\x01"
+}
+
+type WitnessRoots: codec {
+    collections: WitnessTree,
+    catalog: WitnessTree,
+    stream_inline: u64
+}
+
+type WitnessPayload: codec = FramePage(List[WitnessPage]) | FrameBody(Bytes)
+
+type WitnessWireFrame: codec {
+    pack: u64,
+    offset: u64,
+    stamp: u64,
+    len: u64,
+    checksum: u64,
+    payload: WitnessPayload
+}
+
+type WitnessWire: codec {
+    store: StoreId,
+    // Inputs after binding. The caller is derived from claim on load.
+    entry: Bytes,
+    args: Bytes,
+    claim: Bytes,
+    branch: u32,
+    base: u64,
+    at: u64,
+    seed: u64,
+    settle: u8,
+    stop: Option[StopKind],
+    reply: Bytes,
+    writes: Bytes,
+    ids: u64,
+    resident: u64,
+    retain_old: bool,
+    journaled: bool,
+    limits: types.LimitsRep,
+    tiered_bytes: u64,
+    retry_capable: bool,
+    partition: u64,
+    next_table: u32,
+    ceiling: u64,
+    roots: WitnessRoots,
+    tails: List[(String, u32, u64, WitnessRoots)],
+    observed: List[(Bytes, Bytes)],
+    values: List[Bytes],
+    pages: List[u64],
+    bodies: List[u64],
+    frames: List[WitnessWireFrame]
+}
+
+fn witness_pack_roots(roots: pages.Roots) -> Result[WitnessRoots, Error] {
+    Ok(WitnessRoots(collections: witness_pack_tree(roots.collections)?, catalog: witness_pack_tree(roots.catalog)?, stream_inline: roots.streams.inline))
+}
+
+fn witness_unpack_roots(roots: WitnessRoots) -> Result[pages.Roots, Error] {
+    Ok(pages.PageRoots(collections: witness_unpack_tree(roots.collections, CollectionMap)?, streams: pages.new_page_tree(Unprefixed, roots.stream_inline), catalog: witness_unpack_tree(roots.catalog, Unprefixed)?, keyed: list.new()))
+}
+
+fn witness_digest(raw: Bytes) -> Result[Inline[u8, 32], Error] {
+    if list.len(raw) != 32 {
+        return Error(bad_witness())
+    }
+    let mut digest: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32u64 {
+        digest[i] = raw[i]
+    }
+    Ok(digest)
+}
+
+fn witness_digest_bytes(digest: Inline[u8, 32]) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(32)
+    for byte in digest {
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+fn witness_pack_frames(w: Witness) -> Result[List[WitnessWireFrame], Error] {
+    let mut frames: List[WitnessWireFrame] = list.new()
+    for loc in witness_frames(w) {
+        let frame = option.unwrap(map.get(w.touches.frames, (loc.pack, loc.offset)))
+        let payload: WitnessPayload = match frame.payload {
+            TieredImage(page) => {
+                let mut nodes: List[WitnessPage] = list.new()
+                let _ = witness_pack_page(page, mut nodes)?
+                FramePage(take nodes)
+            },
+            TieredValue(raw) => FrameBody(failure_result_from_rep(types.copied(raw))?),
+        }
+        list.push(mut frames, WitnessWireFrame(pack: loc.pack, offset: loc.offset, stamp: loc.stamp, len: loc.len, checksum: frame.identity.checksum, payload: take payload))
+    }
+    Ok(take frames)
+}
+
+fn encode_witness(w: Witness) -> Result[Bytes, Error] {
+    let call = view w.source.call
+    let Some(claim) = view call.claim else {
+        return Error(bad_witness())
+    }
+    let Some(revision) = view call.record.revision else {
+        return Error(bad_witness())
+    }
+    if list.len(revision) != 32 || list.len(call.record.code) != 48 {
+        return Error(bad_witness())
+    }
+    let mut tails: List[(String, u32, u64, WitnessRoots)] = list.new()
+    if let Some(bases) = view w.bases {
+        for i in 0u64 .. list.len(bases) {
+            let tail = view bases[i]
+            list.push(mut tails, (string.from(tail.name), tail.branch, tail.version, witness_pack_roots(tail.roots)?))
+        }
+    }
+    let mut values: List[Bytes] = list.new()
+    for (key, _) in w.touches.value_keys {
+        list.push(mut values, clone(key))
+    }
+    std.list.sort(mut values, list.compare_bytes)
+    let start = view w.start
+    let wire = WitnessWire(store: w.source.store, entry: clone(call.record.key), args: clone(call.record.args), claim: clone(claim), branch: call.branch.id, base: call.base, at: call.at, seed: call.seed, settle: call.settle, stop: clone(call.stop), reply: witness_digest_bytes(w.source.reply), writes: witness_digest_bytes(w.source.writes), ids: start.ids, resident: start.resident, retain_old: start.retain_old, journaled: start.journaled, limits: start.limits, tiered_bytes: w.tiered_bytes, retry_capable: w.retry_capable, partition: w.partition, next_table: w.next_table, ceiling: w.ceiling, roots: witness_pack_roots(w.source.base)?, tails: take tails, observed: clone(w.touches.observed), values: take values, pages: witness_resident(w), bodies: witness_bodies(w), frames: witness_pack_frames(w)?)
+    let codec: std.codec.Codec[WitnessWire] = std.codec.of()
+    let mut raw: Bytes = witness_magic()
+    list.append(mut raw, revision)
+    list.append(mut raw, call.record.code)
+    std.codec.encode(codec, wire, mut raw) ?=> |_| Limit(Value)
+    Ok(take raw)
+}
+
+pub fn decode_witness(raw: Bytes) -> Result[Witness, Error] {
+    let prefix = list.len(witness_magic())
+    let data = prefix + 80
+    if list.len(raw) <= data || !list.starts_with_at(raw, 0, witness_magic()) {
+        return Error(bad_witness())
+    }
+    let codec: std.codec.Codec[WitnessWire] = std.codec.of()
+    let wire = std.codec.decode(codec, list.slice(raw, data, list.len(raw))) ?=> Decode
+    let parts = claim_key_parts(wire.claim)?
+    let record = CallRecord(key: clone(wire.entry), args: clone(wire.args), stream: StreamKey(caller: clone(parts.caller), id: StreamId(t: 0, n: 0)), revision: Some(clone(list.slice(raw, prefix, prefix + 32))), code: clone(list.slice(raw, prefix + 32, data)))
+    let stopped = match wire.stop {
+        Some(_) => true,
+        None => false
+    }
+    if wire.settle > 1 || (wire.settle == 1) != stopped {
+        return Error(bad_witness())
+    }
+    let call = Recorded(record: take record, claim: Some(clone(wire.claim)), settle: wire.settle, branch: Branch(store: wire.store, id: wire.branch), base: wire.base, at: wire.at, seed: wire.seed, stop: clone(wire.stop))
+    let source = ReplaySource(store: wire.store, open: 0, reply: witness_digest(wire.reply)?, writes: witness_digest(wire.writes)?, call: take call, base: witness_unpack_roots(wire.roots)?)
+    let start = txn.TxStart(store: types.StoreKey(hi: wire.store.hi, lo: wire.store.lo), ids: wire.ids, resident: wire.resident, retain_old: wire.retain_old, journaled: wire.journaled, limits: wire.limits)
+    let mut tails: List[pages.TailBase] = list.new()
+    for (name, branch_id, version_id, roots) in wire.tails {
+        list.push(mut tails, pages.TailBase(name: string.from(name), branch: branch_id, version: version_id, roots: witness_unpack_roots(roots)?))
+    }
+    let bases: pages.TailBases = if list.len(tails) > 0 {
+        Some(arc.new(take tails))
+    } else {
+        None
+    }
+    let mut touches = WitnessTouches(observed: clone(wire.observed), value_keys: map.new(), inline_slots: map.new(), resident: map.new(), bodies: map.new(), tiered: map.new(), frames: map.new())
+    for key in wire.values {
+        map.insert(mut touches.value_keys, clone(key), ())
+    }
+    for stamp in wire.pages {
+        map.insert(mut touches.resident, stamp, ())
+    }
+    for stamp in wire.bodies {
+        map.insert(mut touches.bodies, stamp, ())
+    }
+    for frame in wire.frames {
+        let (kind, take payload): (u16, format.TieredPayload) = match frame.payload {
+            FramePage(nodes) => {
+                let tree = witness_unpack_tree(WitnessTree(inline: 0, inventory: None, nodes: clone(nodes)), Collection)?
+                if pages.tree_stamp(tree) != frame.stamp {
+                    return Error(bad_witness())
+                }
+                (0x0021u16, TieredImage(arc.share(tree.root)))
+            },
+            FrameBody(bytes_in) => {
+                if list.len(bytes_in) + 8 != frame.len || std.check.xxh3(bytes_in, 0, list.len(bytes_in)) != frame.checksum {
+                    return Error(bad_witness())
+                }
+                (0x0022u16, TieredValue(arc.new(clone(bytes_in))))
+            },
+        }
+        let facts = format.TieredFrameId(pack: frame.pack, offset: frame.offset, kind, len: frame.len, checksum: frame.checksum, stamp: frame.stamp)
+        let key = pager.tiered_cache_key(facts)
+        if map.contains(touches.frames, key) {
+            return Error(bad_witness())
+        }
+        map.insert(mut touches.frames, key, arc.new(format.TieredFrame(identity: facts, payload: take payload)))
+        map.insert(mut touches.tiered, facts.stamp, ())
+    }
+    Ok(Witness(source: take source, start, bases: take bases, tiered_bytes: wire.tiered_bytes, retry_capable: wire.retry_capable, partition: wire.partition, next_table: wire.next_table, ceiling: wire.ceiling, touches: take touches))
+}

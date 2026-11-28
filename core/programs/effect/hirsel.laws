@@ -1,4 +1,4 @@
 hirsel.laws 1
 effect@1/laws/preview_command_without_grant src=1405bb3115844a9e sig=79e647e1a3aab518 run=ad14684581476a83 bug=- oracle=- rows=pending
 effect@1/laws/restored_op_is_inert src=855257f7e2ef3513 sig=8fdb2ca13542ad07 run=ba799caff9b50348 bug=- oracle=- rows=pending
-effect@1/laws/sequenced_push src=b5aa5d9b54c2a9f1 sig=c239a7edd91bdb41 run=7338608ae6c89dee bug=- oracle=- rows=pending
+effect@1/laws/sequenced_push src=b5aa5d9b54c2a9f1 sig=3c78056351b558c4 run=7338608ae6c89dee bug=- oracle=- rows=pending

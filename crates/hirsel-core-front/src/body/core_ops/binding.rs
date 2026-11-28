@@ -134,6 +134,7 @@ operations! {
     ("indexed", "get", Lane::Language, "A", "core-check-895", false),
     ("int", "work_steps", Lane::Value, "A", "brownout-mem30-metering-3197", true),
     ("string", "work_steps", Lane::Value, "A", "brownout-mem30-metering-3197", true),
+    ("log", "work_steps", Lane::Value, "A", "replay-witness-preview-cli-3476", true),
     ("list", "work_steps", Lane::Value, "A", "brownout-mem30-metering-3197", true),
     ("deque", "work_steps", Lane::Value, "A", "brownout-mem30-metering-3197", true),
     ("compiler", "work_steps", Lane::Value, "A", "wf-structural-metering-s2-3451", true),

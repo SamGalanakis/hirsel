@@ -57,7 +57,7 @@ pub(crate) unsafe fn replace(
     let old = unsafe { NonNull::new_unchecked(carrier.cast::<*mut u8>().read()) };
     let payer = context.payer();
     block::admit_storage(payer, (!overflow).then_some(charge))?;
-    let frame_payer = context.frame_lists.remove(old);
+    let frame_payer = context.frame_lists.remove(old).map(|(payer, _)| payer);
     // Memcheck tracks requested extents and lacks per-slot resize metadata.
     #[cfg(not(feature = "memcheck"))]
     if kind == block::PLAIN

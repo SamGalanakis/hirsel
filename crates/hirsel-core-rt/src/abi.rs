@@ -881,7 +881,14 @@ pub unsafe extern "C" fn hirsel_core_admit_lent_frame(
     let payer = task.payer();
     match crate::block::admit_storage(payer, (!overflow).then_some(charge)) {
         Ok(()) => {
-            unsafe { task.frame_lists.insert(frame, bytes, payer) };
+            unsafe {
+                task.frame_lists.insert(
+                    frame,
+                    bytes,
+                    payer,
+                    (task.allocation_custody != 0).then_some(charge),
+                )
+            };
             Allocation {
                 pointer: frame.as_ptr(),
                 capacity: Capacity {
@@ -897,37 +904,7 @@ pub unsafe extern "C" fn hirsel_core_admit_lent_frame(
     }
 }
 
-/// Keep the original charge while moving a frame-backed buffer to the heap.
-/// # Safety
-/// Storage, size and moved prefix come from a live sequence carrier's layout.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_promote_frame_list(
-    context: *const Context,
-    data: *mut u8,
-    capacity: u64,
-    len: u64,
-    stride: usize,
-) -> *mut u8 {
-    let Some(old) = NonNull::new(data) else {
-        return data;
-    };
-    // SAFETY: the caller owns the live context and carrier.
-    let task = unsafe { &*context };
-    let Some(payer) = task.frame_lists.remove(old) else {
-        return data;
-    };
-    // A matching record proves both sizes fit the frame slot.
-    let replacement = crate::task_heap::Heap::allocate(
-        task,
-        payer,
-        capacity as usize * stride,
-        8,
-        crate::block::PLAIN,
-        true,
-    );
-    unsafe { ptr::copy_nonoverlapping(data, replacement.as_ptr(), len as usize * stride) };
-    replacement.as_ptr()
-}
+pub use crate::frame_list::hirsel_core_promote_frame_list;
 
 /// Refund through an original payer after emitted physical deallocation. Remote
 /// payers use the event mailbox. Admits/allocates nothing, no failure status.
@@ -1042,7 +1019,7 @@ pub unsafe extern "C" fn hirsel_core_free_value(
     // SAFETY: the emitter supplies the live block with the contract above.
     unsafe {
         let context = &*context;
-        if let Some(payer) = context.frame_lists.remove(pointer) {
+        if let Some((payer, _)) = context.frame_lists.remove(pointer) {
             payer.settle_in(context, charge);
         } else {
             causes::free_value(context, pointer, charge);

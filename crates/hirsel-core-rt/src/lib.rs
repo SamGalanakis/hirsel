@@ -404,6 +404,7 @@ impl Drop for Context {
         data_decode::discard(self);
         // Release all context-owned heap blocks and limit charges while both
         // `self.current` and `self.heap` are still live and open.
+        self.frame_lists = Default::default();
         self.isolates.clear();
         self.causes = causes::Causes::default();
         self.primary = None;

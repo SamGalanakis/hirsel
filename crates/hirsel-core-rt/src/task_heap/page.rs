@@ -48,56 +48,64 @@ impl Page {
             page
         }
     }
-}
-
-impl Page {
-    pub(super) unsafe fn destroy(page: PagePointer) {
-        // SAFETY: the caller owns the unreachable page.
-        unsafe { Self::destroy_with(page, false) };
-    }
-
-    pub(super) unsafe fn dispose(page: PagePointer) {
-        // SAFETY: the caller owns the unreachable page.
-        unsafe { Self::destroy_with(page, true) };
-    }
-
-    unsafe fn destroy_with(page: PagePointer, dispose: bool) {
-        // SAFETY: no live slots or queues reference this page. Move its fields
-        // out before dropping the owner and unmapping the payload.
-        let page = unsafe {
-            let first = (*page.as_ref().slots.get()).first;
-            if first.addr().get() & (SLAB - 1) == 0 {
-                dedicated_index(first)
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .and_then(|index| index.remove(&first.addr().get()));
-                *Box::from_raw(page.as_ptr())
-            } else {
-                page.as_ptr().read()
-            }
-        };
-        if dispose {
-            match page.backing {
-                Backing::Slab(slab) => {
-                    if let Some(memory) = crate::units::memory() {
-                        memory.dispose_slab(slab);
-                    } else {
-                        slab.dispose();
-                    }
-                }
-                _ => unreachable!("only slabs are disposed here"),
-            }
-        } else if let Some(memory) = crate::units::memory() {
-            match page.backing {
-                Backing::Slab(slab) => memory.put_slab(slab),
-                Backing::Dedicated(mapping) => memory.put_page(mapping),
-                #[cfg(target_os = "linux")]
-                Backing::File(_) => (),
-            }
+    pub(super) fn slots(start: NonNull<u8>, class: Class) -> Slots {
+        let (first, limit) = if class.fits_slab() {
+            let offset = (size_of::<Self>() + class.offset()).next_multiple_of(class.align);
+            // SAFETY: size class guarantees at least one slot in the mapping.
+            (
+                unsafe { start.add(offset) },
+                (SLAB - offset + class.offset()) / class.stride,
+            )
         } else {
-            drop(page.backing);
+            (start, 1)
+        };
+        Slots {
+            first,
+            limit,
+            bump: 0,
+            live: 0,
+            free: ptr::null_mut(),
+            discarded: 0,
+            watch: 1,
+            #[cfg(feature = "memcheck")]
+            checked_bytes: 0,
+            head: false,
+            previous: None,
+            next: None,
         }
-        drop(page.heap);
+    }
+
+    #[inline(never)]
+    pub(super) unsafe fn reuse(page: PagePointer, class: Class, dedicated_payer: Option<Payer>) {
+        // SAFETY: the caller owns the empty page and verified it fits.
+        unsafe {
+            let header = page.as_ref();
+            if let Some(payer) = dedicated_payer {
+                header.dedicated_payer.get().write(MaybeUninit::new(payer));
+            } else {
+                header.payer_delta.get().write(class.payer_offset as usize);
+            }
+            header.class.get().write(class);
+            let slots = page.as_ref().slots.get();
+            let start = if class.slab {
+                page.cast()
+            } else {
+                (*slots).first
+            };
+            slots.write(Self::slots(start, class));
+        }
+    }
+    /// # Safety
+    /// The custodian owns the page's list state.
+    pub(super) unsafe fn set_head(page: PagePointer, head: bool) {
+        // SAFETY: only the custodian accesses these fields while open.
+        unsafe {
+            let slots = &mut *page.as_ref().slots.get();
+            slots.head = head;
+            if !(*page.as_ref().spread.get()).spread {
+                // An unspread head can become its own empty spare.
+                slots.watch = usize::from(!head);
+            }
+        }
     }
 }

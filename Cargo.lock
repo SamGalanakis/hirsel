@@ -1146,6 +1146,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-object",
  "gimli",
+ "hirsel-config-schema",
  "hirsel-core-driver",
  "hirsel-core-eval",
  "hirsel-core-front",
@@ -1165,7 +1166,6 @@ dependencies = [
  "object 0.40.0",
  "serde_json",
  "tempfile",
- "toml",
 ]
 
 [[package]]

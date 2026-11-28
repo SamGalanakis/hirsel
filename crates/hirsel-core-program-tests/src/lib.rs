@@ -24,31 +24,20 @@ fn std_manifest() -> PackageManifest {
 
 fn library_manifest(name: &str) -> PackageManifest {
     let root = repo().join("core/programs").join(name);
-    let text = std::fs::read_to_string(root.join("hirsel.hcfg")).unwrap();
-    let manifest: toml::Table = text.parse().unwrap();
+    let path = root.join("hirsel.hcfg");
+    let manifest = hirsel_config_schema::read_file::<hirsel_config_schema::pkg_v1::Package>(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     let dependencies = std::iter::once(package("core"))
-        .chain(
-            manifest["dependencies"]
-                .as_table()
-                .unwrap()
-                .keys()
-                .map(|name| package(name)),
-        )
+        .chain(manifest.dependencies.iter().map(|(name, _)| package(name)))
         .collect();
-    let sources = manifest["sources"]
-        .as_table()
-        .unwrap()
-        .iter()
+    let sources = manifest
+        .sources
+        .into_iter()
         .map(|(file, module)| ModuleSource {
             foreign: None,
             captured: None,
             file: root.join(file),
-            modules: module
-                .as_str()
-                .unwrap()
-                .split('/')
-                .map(str::to_owned)
-                .collect(),
+            modules: module.split('/').map(str::to_owned).collect(),
             signatures: false,
         })
         .collect();

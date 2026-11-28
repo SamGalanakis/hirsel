@@ -2113,48 +2113,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    /// Blob, offset and W of element `index` of the packed sequence `header`
-    /// (MEM-4): an `IndexedSpan` reads its offset table, a `SeqSpan` walks from the
-    /// first element. `index` is below the count.
-    pub(super) fn packed_element_offset(
-        &mut self,
-        header: ValueId,
-        elem: TyId,
-        index: ValueId,
-        indexed: bool,
-        n: NodeId,
-    ) -> Option<(ValueId, ValueId, ValueId)> {
-        let u64t = Ty::Scalar(Scalar::U64);
-        let elem = self.bare(elem);
-        let (blob, at, w) = self.locator(header, n)?;
-        let second = self.packed_add(at, w, n);
-        let data = self.packed_add(second, w, n);
-        let found = if indexed {
-            let len = self.word_in(blob, second, w, n)?;
-            let table = self.packed_add(data, len, n);
-            let iw = self.packed_mul(index, w, n);
-            let slot = self.packed_add(table, iw, n);
-            let off = self.word_in(blob, slot, w, n)?;
-            self.packed_add(data, off, n)
-        } else {
-            let zero = self.u64k(0, n)?;
-            let lp = self.new_block(&[u64t, u64t]);
-            self.jump(lp, &[zero, data], n);
-            self.start(lp);
-            let p = self.block_params(lp);
-            let (i, el) = (p[0], p[1]);
-            let more = self.test(CompareOp::Lt, i, index, n);
-            let (body, after) = (self.new_block(&[]), self.new_block(&[]));
-            self.branch(more, body, after, n);
-            self.start(body);
-            let next = self.skip(blob, el, w, elem, n)?;
-            let i1 = self.packed_add_k(i, 1, n)?;
-            self.jump(lp, &[i1, next], n);
-            self.start(after);
-            el
-        };
-        Some((blob, found, w))
-    }
     /// `seq.nth` and `indexed.get` of a locator element: `Some` of its locator below
     /// the count, else `None`.
     pub(super) fn packed_get(

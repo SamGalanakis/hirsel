@@ -596,7 +596,7 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
             hirsel_core_ids::hex::encode(&expected),
         )]
     );
-    std::fs::write(&profile, format!("# comment\n{policy}")).unwrap();
+    std::fs::write(&profile, format!("// comment\n{policy}")).unwrap();
     let loaded = request.load().unwrap();
     assert_eq!(loaded.digest, expected);
 

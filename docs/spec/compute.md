@@ -1,13 +1,9 @@
 # Compute
 
-*Specified 2026-11-26 (Fleet Hyperscale Summit verdict, spec-only cutover, plus lane 3087
-placement simulation gate `GATE=desk`; re-scoped 2026-11-26 as a reusable core scheduler;
-amended 2026-11-26 by lane 3123 to close astra attack 3119). Rules
-COMP-1 to COMP-9. The Hirsel fences check standalone protocol type declarations.
 Archetype C compute placement lives exclusively in this
 specification and never inside `fleet@1`
 ([FLT-1](fleet.md#flt-1-three-workload-archetypes),
-[FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)).*
+[FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)).
 
 Hirsel Compute (`compute@1`) is the core scheduler for Archetype C elastic remote workloads:
 native units and contained Wasm tasks, run inside the existing single-binary `hirsel` launcher
@@ -172,38 +168,23 @@ predecessor, and two plans built from the same predecessor can never both be sig
   before any host process runs again). A retired host identifier is never re-enrolled (COMP-6), and a worker whose
   current signed roster does not list its host never opens (COMP-5). The retirement acts as the
   donor's acknowledgement for every right that worker held, charged rights included, since none
-  of its executions can still run. (As with Kubernetes' out-of-service node taint, the operator
-  asserts a shutdown; it is not inferred from silence.)
+  of its executions can still run.
 
 `NoOverLimit`: for every principal `p` and cell `c`, the number of live admitted executions of
 `p` in `c` never exceeds the effective `allocation[p][c]` (COMP-8). It follows from `EscrowBalance` and
 `EscrowConservation`.
 
-## COMP-3: Placement (credit desk — decided)
-
-*Status: **decided (`GATE=desk`)** by the lane 3087 placement simulation gate (52 paired runs at
-1k, 10k, and 100k logical workers extending lane 3056's simulator: worst credit-desk false
-`Overloaded` `0.0065%` vs. broadcast `4.155%` through `rho = 0.5`; asymmetric-partition re-offer
-`6.150 ms` vs. `13.100 ms`; `0` double redemptions).*
+## COMP-3: Placement (credit desk)
 
 Placement matches exact worker-funded capacity to demand at **one exclusive rendezvous per
 shard** — the **credit desk** (equivalently, an exclusive ordinal pop at the shard relay, with
 one active owner per worker-shard offer). All placement-specific roles, types, roster fields,
 and safety invariants are encapsulated in this section.
 
-### Deleted mechanisms
-
-The following mechanisms are explicitly absent from `compute@1` and must not be built:
-
 - the Archetype C capacity-report picker in `fleet@1` or ingress;
 - any broadcast two-choice placement path or stale-view fallback beside credits;
 - epsilon overcommit on offers;
 - any second placement route for in-fleet callers (every create takes the same placement path).
-
-### Placement latency cost
-
-Each create adds one dispatcher-to-desk round trip. The 3087 gate measured `+100 us` p50 at
-`100 us` desk RTT.
 
 ### Roles and exclusive credit protocol
 
@@ -499,46 +480,11 @@ dies with its ledger or is accounted for before its slot is reused. The rights a
 COMP-2 is a limit-right ledger and keeps K11's durable rule; it is written only when an escrow
 table is installed.
 
-Because compute children are spawned by the launcher as siblings of the `platform` host process,
-a host-process crash can leave compute children running while the volatile admission ledger is
-lost. Compute therefore enforces **`AccountBeforeMint`**: a host advertises no capacity until
-every surviving compute child has been accounted for. It meets that invariant by
-**`ReapBeforeMint`**: every surviving child is killed, never re-adopted.
-
-1. **Draw fresh `run` and start closed.** After any host-process restart, the worker draws a
-   fresh, non-reusable `run` identifier (COMP-6), starts closed, and advertises or mints **zero**
-   capacity. All placement credits and volatile dedup sessions from prior runs are irrevocably
-   invalidated by the `run` mismatch (COMP-3, COMP-4), and pre-restart sessions stay closed
-   (`LateUnknownId`). A worker whose current signed roster does not list its host stays closed.
-2. **Fence every predecessor.** The host opens a new launcher control session (`Hello`, RUNNER-SPEC
-   §14.5 "The control session"). Opening it ends every earlier session, and every launch request
-   of an earlier session that the launcher had not acted on is discarded and never runs. This
-   covers every predecessor `run`, not only the previous one. The worker then cancels each
-   compute launch that the session's inventory lists as accepted and not yet started, and waits
-   for the launcher to confirm each cancellation.
-3. **Reap every survivor.** Inspect the launcher's **compute custody class** only (never
-   Archetype A Place runners or Archetype B serving children). Kill every surviving compute
-   child and wait until its descendants are gone and the launcher acknowledges, **in the session
-   opened at step 2**, that compute custody is empty with no accepted launch. An acknowledgement
-   from any other session is ignored. Only then does the worker rebuild its spending ledger from
-   its durable assignment (`free[p] = assigned[p]`, `charged[p] = {}`, `frozen[p] = 0`, all
-   holds returned) and advertise capacity. If the recovery is interrupted, the next `run`
-   repeats steps 1 to 3 with its own session. If cleanup cannot be established, the successor
-   remains closed.
-
-The compute custody class makes these launcher answers definitive:
-
-- Compute children run in delegated cgroups named by child identity, so a launcher-loss successor
-  empties them before it answers `Hello` (RUNNER-SPEC §14.5 "A launcher loss"). A host whose
-  launcher runs without cgroup delegation cannot establish custody after a launcher loss and
-  stays closed.
-- Every compute launch the launcher accepts ends with exactly one of: a start report, then an end
-  acknowledgement (COMP-3 **Started**, **Retire**); or a **no-child** answer stating that the
-  launch was refused or cancelled before any child existed and will never start (COMP-3
-  **StartFailed**).
-
-An in-flight `effectful` attempt on the old `run` resolves to `Undecided` (COMP-4); the reap
-guarantees it is no longer running once the successor opens.
+The worker starts closed with a fresh `run`. It issues no credits until it receives an
+empty-custody acknowledgement for the launcher session that fenced earlier requests. It
+then rebuilds its spending ledger from its current assignments. An acknowledgement for
+any other session leaves admission closed. Prior credits and sessions remain fenced by
+the run identity (COMP-3, COMP-4).
 
 ## COMP-6: Opaque, versioned handles
 
@@ -575,212 +521,21 @@ pub type ComputeHandle: codec + key + send {
   a known retired slot, `run`, or host returns `Gone`, while an unreachable owner returns
   `Undecided` (neither settles prior external effects).
 
-## COMP-7: Contained Wasm pricing and slot rules
+## COMP-7: Contained foreign modules
 
-Contained Wasm compute tasks obey
-[FFI-10 through FFI-16](foreign.md#ffi-10-contained-modules-and-their-build) with zero divergence
-in observable results, step counts, failure order, or replay tapes:
-
-- **Copy-on-write is off.** Contained Wasm runs with copy-on-write initialization disabled on the
-  pinned Wasmtime engine.
-- **Fresh `Store` per task.** Every task receives a fresh `Store` and fresh handles as its
-  isolation boundary; globals, tables, handles, and fuel never survive across tasks.
-- **Slot reuse.** A discarded instance's linear-memory slot and fiber stack are reused by the
-  next instance, because laws FW30 and FW31 hold
-  ([FFI-13 Slot reuse](foreign.md#ffi-13-instances-bounds-and-steps)). A slot keeps the full
-  reservation (4 GiB of address space plus a 32 MiB guard on each side on the pinned engine) and
-  is reset before reuse by mapping fresh anonymous `PROT_NONE` pages over every page it opened,
-  so the next instance starts with zero bytes at its own initial size and is charged from its own
-  grant. If those laws stop holding, every instance gets fresh backing.
-- **Reference-entry `inst_steps` pricing (no closed-form price).** Instantiation and optional
-  guest `_initialize` are priced strictly by the **pinned reference entry point** (CoW off),
-  preserving exact first-call failure and slice order:
-  1. initial memory admission against the caller's current [MEM-19](budgets.md#mem-19-limits)
-     bytes limit before any fuel is consumed;
-  2. active segment out-of-range traps;
-  3. metered fuel granules and [MEM-30](budgets.md#mem-30-step-bounds) slice-end positions;
-  4. live metered guest `_initialize` (including any `memory.grow` against current bytes limits)
-     and exact trap-versus-`OutOfTime` ordering.
-
-  **No closed-form tariff** (such as data-segment byte length) is used, and no automatic fallback
-  between meters is permitted.
-- **Capacity accounting.** Virtual address space, MEM-19 resident bytes, and concurrently
-  mounted async stacks are each dimensions of the COMP-2 residual vector, demanded by each
-  contained Wasm class; hosts shard execution processes under the single physical host ledger
-  when needed.
+[FFI-10 through FFI-16](foreign.md#ffi-10-contained-modules-and-their-build) define the
+contained foreign module boundary. The worker accounts for a class's declared capacity
+vector under COMP-2.
 
 ## COMP-8: Multi-cell federation and one-hop spill
 
-A fleet scales horizontally across independent **cells**. Each cell owns its own `fleet@1`
-control Place, enrolled roster, placement tier (COMP-3), cleared releases, revocation sequence,
-and local `compute_pool`. A cell failure is contained to that cell.
-
-- **Signed manifest of disjoint per-cell allocations.** There is no federation root Place.
-  Federation state is a root-signed, epoch-versioned **federation
-  manifest** listing cells, their SPKI pins, residency tags, principal limits `limit[p]`, and
-  disjoint per-cell principal allocations satisfying `sum_c allocation[p][c] <= limit[p]`. Each
-  cell installs the manifest through its existing `fleet@1` root-signed keyset and durable
-  anti-rollback path
-  ([FLT-6](fleet.md#flt-6-code-trust-revocation-clearance-transport-and-bucket-boundaries)),
-  making manifest installation durable and K11-covered per cell. The manifest signer keeps its
-  chain as the rights authority does (COMP-2): exactly one successor per manifest, recorded
-  durably before release. Inside a cell, the allocation is enforced by the escrow table and
-  worker escrow (COMP-2).
-- **Decrease before increase, one level up.** The manifest follows COMP-2's rule: each manifest
-  only lowers or only raises, and a manifest that raises a cell's allocation (or a principal's
-  limit) is signed only after every lowering before it has been acknowledged. Cell `X`
-  acknowledges a lowering of `allocation[p][X]` only after its rights authority has signed an
-  escrow table whose `sum_w assigned[p][w]` fits the new allocation and every worker that table
-  lowered has acknowledged it (COMP-2 donor surrender). The acknowledgement names the manifest
-  epoch and backs exactly one raising manifest, which is replayed, never re-decided. Lowering
-  `limit[p]` first lowers allocations, acknowledged, and then signs the lower limit.
-  A cell's **effective allocation** `allocation[p][c]` is the value its installed manifest gives,
-  except that a lowering takes effect only at the cell's acknowledgement (until then the
-  effective value is the previous, higher one) and a raise takes effect when the cell installs
-  it. COMP-2 and COMP-9 state `EscrowConservation` and `NoOverLimit` against the effective
-  allocation, and `sum_c allocation[p][c] <= limit[p]` holds over effective allocations at every
-  intermediate state (`AllocationConservation`). Rebalancing is an external operator or program
-  tool emitting signed manifests.
 - **One-hop spill (`SpillDepth <= 1`).** When local placement in the home cell cannot satisfy a
   create, the coordinator may spill **at most once** to one compatible remote cell. A spill is
   permitted only after the home placement tier answered `PlaceNoCredit` or `PlaceNoRight` for that
   create. The spilled request carries a `spilled` mark and its source cell, and a receiving cell
   never forwards a marked request again.
-- **Summary picks the cell; remote placement decides.** Cells exchange fresh, quantized
-  per-cell/class headroom summaries. The home coordinator uses those summaries (filtered by
-  residency, principal limit, release clearance, and grant policy) to pick one target cell,
-  then sends an exact placement request to that cell's placement tier (COMP-3) and, on a grant,
-  sends the create to the granted remote worker from its own budget (COMP-4). A stale summary
-  costs at most an exact placement refusal, never a broadcast launch storm.
-- **Destination protection.** Receiving cells serve local cell demand before spilled demand and
-  enforce inbound per-source, per-class, per-principal, and aggregate spill caps at their
-  placement tier, which sees every spilled `Ask` with its source cell. Sending cells cap
-  outbound spill requests and bytes and suppress spill when fresh remote headroom is absent or
-  local observer health is suspect.
-- **Cross-cell handle resolution.** Handles carry `(cell, host)` resolved via the manifest and
-  target cell roster; no limit right crosses a cell boundary at run time.
+## COMP-9: Verification
 
-## COMP-9: Verification and proof split
-
-Compute follows [FLT-7](fleet.md#flt-7-proof-ready-protocol-kernel-contract-k1k13) pure reducer
-kernels (`step(state, ev)` and bounded `keys(ev)`, K1–K13 with K11-V) and
-[FLT-8](fleet.md#flt-8-verification-tiers-t0t3-and-sm1-traces) verification tiers T0–T3, split
-strictly between deterministic safety proofs and statistical placement laws:
-
-### Deterministic safety proofs (Veil for unbounded requests; TLC and Quint over SM1)
-
-Worker invariants mention one worker with unbounded requests and placement grants, and are proved
-inductively in **Veil** for any number of requests (cross-checked by bounded TLC and Quint
-model-based testing on `SM1` traces). Each invariant names the rule it follows from:
-
-| Component | Invariant | Statement | Follows from |
-|---|---|---|---|
-| Worker admission | `NoOverAdmit` | `residual[d] >= 0` for every dimension; every hold, occupancy, and start term is charged until its single return | COMP-2 physical ledger; COMP-3 slot machine |
-| Worker admission | `EscrowBalance` | `free[p] + count(charged[p]) + frozen[p] = assigned[p]` at every stable state of a run | COMP-2 spending ledger, donor surrender |
-| Worker admission | `NoOverLimit` | live executions of `p` in cell `c` `<=` effective `allocation[p][c]` | `EscrowBalance` and `EscrowConservation` |
-| Worker custody | `RetireOnce` | each Redeem charge and each Mint hold is returned exactly once, by the event matching `(host, run, slot, generation, principal)` | COMP-3 retirement table |
-| Worker custody | `ActivateOnce` | user code holding grants starts at most once per `(run, slot, generation)` | COMP-3 **Activate**; COMP-4 inert create |
-| Worker custody | `AccountBeforeMint` (by `ReapBeforeMint`) | no Mint in a `run` before the empty-custody acknowledgement of that run's own launcher session | COMP-5 |
-| Worker custody | `HandleFresh` | every handle operation acts only on the live `(run, slot, generation)` with a valid secret | COMP-6 |
-| Attempts | attempt deduplication, `LateUnknownId` | a repeated attempt replays its outcome; one below the retirement floor never runs | COMP-4 attempt identity |
-| Attempts | `RunFence` | no attempt, credit, or handle of an earlier `run` acts in a later one | COMP-4 restart fence; COMP-5 step 1 |
-| Placement | `OneLiveCredit`, `SingleUse`, `OrdinalFresh`, `GrantExclusive`, `WithdrawIsFinal` | as stated in COMP-3 | COMP-3 credit protocol, desk sessions |
-| Dispatcher | `TotalOutcome` | every living invocation ends in exactly one outcome within 3 worker exchanges, 5 placement asks, 1 spill, and `5 * t_place + 3 * t_ex` | COMP-4 budget and finite local resolution |
-| Dispatcher | `OutcomeSoundness` | `Refused(*)` only if no exchange may have had an effect; ambiguity is never downgraded | COMP-4 ambiguity is sticky |
-| Dispatcher | `EffectfulNeverRedispatched` | after an ambiguous send of an `effectful` attempt, no create for it is sent to any other worker; only its original worker is queried or replayed, and only by the coordinator instance holding its session | COMP-4 effectful class, sessions bound to one coordinator |
-| Federation and escrow | `EscrowConservation` | `sum_w assigned[p][w]` at each worker's installed epoch `<=` effective `allocation[p][c]` | COMP-2 decrease then increase, one acknowledgement per increase |
-| Federation and escrow | `TransferOnce` | each transfer's rights are applied by its recipient at most once and never restored to its donor | COMP-2 in transit until applied |
-| Federation and escrow | `AllocationConservation` | `sum_c` effective `allocation[p][c]` `<= limit[p]` | COMP-8 decrease before increase |
-| Federation and escrow | `SpillDepth <= 1` | no create is placed by more than two placement tiers | COMP-8 one-hop spill |
-| Non-interference | boundary check | compute modules import neither `OutboxCmd` nor `Key` from `core/programs/fleet/types.hirsel` (build-time) | COMP-1 |
-| Contained Wasm | reference-entry equivalence | results, step counts, failure order, and replay tapes equal the pinned reference entry with CoW off | COMP-7 |
-
-Timed assume/guarantee liveness properties are proved separately from clock-free safety kernels
-([FLT-7 K7](fleet.md#flt-7-proof-ready-protocol-kernel-contract-k1k13)), under the COMP-3
-liveness assumptions (`delta`, `sigma`, `phi`, `h`):
-
-| Property | Start event | End event | Extra assumptions | Bound |
-|---|---|---|---|---|
-| `MintLatency` | a slot becomes `SlotFree` (or a class's incremental vector starts to fit) | its `Offer` is ready at the active desk owner | worker not cordoned, overloaded, or closed; fewer than `W` in-flight offers and starts | `sigma + delta + sigma` |
-| `StrandBound` | an offer at a desk becomes unredeemable (its desk or the dispatcher it was granted to is lost) | the slot is `SlotFree` again | the worker stays up | `h + sigma` |
-| `ReOffer` | competing demand for `W`'s class appears at reachable member `B` while `W`'s offers sit at unreachable `A` | a fresh offer from `W` is ready at `B` | (i)–(vii) of COMP-3 | `phi + h + 2 * (sigma + delta)` |
-| `OrphanReclaim` | an `effectful` slot becomes `SlotInert` and its handle is never delivered | the slot's charge and occupancy are returned (**Retire**) | the launcher acknowledges a child's end within `k_end` of its kill | `a + sigma + k_end`, with `a` the activation hold |
-
-### Statistical placement laws (1k, 10k, and 100k logical workers)
-
-Placement quality is checked statistically across paired seeds and open-loop arrivals in one
-logical-worker driver extending lane 3056's Fleet simulator (no second simulator), against exact
-independent oracles. Fault-free closed-form oracles require their stated preconditions; crash,
-message-delay, and partition schedules are verified as separate fault/liveness cases:
-
-- **Burst bound (deterministic oracle).** *Preconditions:* a homogeneous eligible class with
-  reachable workers and shard primary, dispatcher pending caps `>= N`, per-connection and
-  per-principal outstanding-grant allowances `>= N`, start concurrency per worker `>= W`, all
-  `f_i` free slots already funded and offered (or bounded mint/grant/delivery RTT `<= r`),
-  per-slot start service time `<= s`, window `W`, caller deadlines `>= t`, no binding principal
-  limit, fair service, no failures, and no slot releases within `[0, t]`. *Oracle:* creates
-  started by time `t` are at least `min(N, sum_i min(f_i, W * floor(t / (s + r))))`. Includes
-  **zero-slack conservation**: `N = sum f_i`, `W = 1`, `deadline = max_i f_i * (s + r)` with zero
-  creates left unstarted.
-- **Immediate creates (deterministic oracle).** *Preconditions:* `N` no-deadline creates for one
-  eligible class all arrive at a reachable placement tier holding `q` ready matching-class offers
-  with rights for their principals, within an observation interval in which no offer is minted,
-  withdrawn, or expires, no other create arrives, and per-connection and per-principal
-  outstanding-grant allowances are `>= N`; no binding principal limit, fair service, and no
-  failures. *Oracle:* exactly `min(N, q)` are granted and the remaining `max(0, N - q)` terminate
-  as `PlacementMiss` (`Refused(Capacity)`).
-- **Steady-state blocking (Erlang-B statistical oracle).** *Preconditions:* a homogeneous
-  single-class pooled loss system with `C` total funded slots, open-loop Poisson arrival rate
-  `lambda`, mean occupancy `1 / mu` (offered load `A = lambda / mu` Erlangs), no waiting
-  (no-deadline arrivals), no binding principal limit, no failures, and a maximum gap `d` from a
-  slot's release to its next redeemable offer plus grant delivery (`d <= MintLatency + delta +
-  sigma`), which the driver holds fixed and independent of system state. *Oracle:* a slot is unavailable for its occupancy plus at most `d`, and Erlang-B is
-  insensitive to the holding-time distribution, so the refusal probability lies in
-  `[B(C, A), B(C, lambda * (1 / mu + d))]`. The simulated refusal rate must fall inside that
-  interval widened by its 99% binomial confidence interval over the paired seeds. False
-  `Overloaded` is tracked separately (COMP-3).
-- **Weighted fairness (deterministic oracle).** *Preconditions:* principals `p` and `q`
-  continuously waiting and eligible at one shard over an interval, unit of service one grant.
-  *Oracle:* `|g_p / allocation[p] - g_q / allocation[q]| <= 1 / allocation[p] + 1 /
-  allocation[q]`, where `g` counts grants in the interval (the self-clocked fair queueing bound
-  of COMP-3's desk choice). With allocations 10 and 30, four contested grants split 1:3.
-- **Zero spill while home capacity is available.** *Oracle:* no spill follows a home placement
-  decision at whose instant the home desk held a ready matching offer with a right for the
-  principal. Offers in flight to the desk are not ready.
-- **`ControlLiveness`.** *Preconditions:* control deadlines carry at least `d_ctl` of slack
-  (COMP-1). *Oracle:* zero missed A/B heartbeat or `Directory[K]` renewal deadlines under
-  saturating compute bursts.
-- **Separate fault, overload, and recovery cases.** Asymmetric-partition re-offer within
-  `ReOffer`, stranded offers within `StrandBound`, unclaimed inert checkouts within
-  `OrphanReclaim`, and metastability recovery after excess load ends.
-
-## Dependencies
-
-Live `compute@1` implementation depends on:
-
-- **`platform-fleet-seams-3081`:** enrolled node identity and the signed, epoch-versioned cell
-  roster carrying `place_reserve` / `compute_pool` budgets and shard placement membership
-  (COMP-3).
-- **Pinned QUIC links:** Fleet Phase 3b's join, roster, and SPKI-pinned QUIC link layer, split
-  from Phase 3b's Archetype A move verbs.
-- **Launcher compute custody class:** delegated cgroups for compute children, cancellation of an
-  accepted launch with a confirmation, the definitive no-child answer, and the empty-custody
-  acknowledgement bound to the current control session (COMP-5). `launch.md` and RUNNER-SPEC
-  §14.5 supply the session fence these build on, not the class itself.
-
-**Not a dependency:** lane **3048** (`ClaimAuth` + `ORIGIN` Store move fencing). Compute
-performs no Place claim and consumes neither `ClaimAuth` nor `ORIGIN`.
-
-*Related routed prerequisites (tracked outside this spec):* indexed QUIC endpoint free-slot
-stack, generation handles, deadline heap, and ready queue (lane 3060, landed); fixed-roster
-pointwise K10 advisory merge (lane 3056, landed); and the placement simulation gate extending
-lane 3056's simulator (lane `fleet-placement-sim-gate-3087`, decided `GATE=desk`).
-
-## Rulings
-
-Rulings of 2026-11-26 (Sam re-scoped compute to a reusable core scheduler; both reversible):
-
-1. **Host-process restart reaps.** In-flight compute is killed and accounted for before capacity
-   is re-advertised (`ReapBeforeMint`, COMP-5).
-2. **Principal limits are hard.** Escrowed rights at workers, zero overshoot, stranded during a
-   partition, and returned only by the retirement that matches their charge (COMP-2, COMP-3).
+The [Fleet placement simulator](../../core/programs/fleet/placement_sim.hirsel) exercises
+the reducers. [Compute verification](../../core/programs/fleet/COMPUTE-VERIFICATION.md)
+lists the safety obligations and placement oracles.

@@ -956,36 +956,17 @@ pub struct Event {
 /// Polls a task may perform before a peer that is ready gets a turn (CONC-10's
 /// fairness; native `POLLS_PER_TURN`).
 const POLLS_PER_TURN: u32 = 64;
-/// Keep the root's existing stack. Spawned tasks need a bounded reservation:
-/// the checked evaluator's deepest existing recursive corpus path is 27
-/// activations / 27,520 bytes. Round twice that demand up to 64 KiB, and keep
-/// another 64 KiB for helper calls, thread entry and run-stop unwinding.
-const ROOT_STACK: usize = 128 << 20;
-const TASK_STACK: usize = 128 << 10;
+const PURE_STACK: usize = 128 << 20;
+const TASK_STACK: usize = hirsel_core_layout::stack::RESERVATION as usize;
 const STACK_HEADROOM: usize = 64 << 10;
 thread_local! {
-    static TASK_STACK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(TASK_STACK) };
     static TASK_STACK_ROOM: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
+    /// FAIL-17: the host stack position at the first guest activation.
+    static TASK_STACK_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// FAIL-17: the frame slot bytes of the thread's running activations.
     static TASK_FRAME_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// FAIL-17: whether a `Stack` refusal has released the cleanup margin.
     static TASK_STACK_RELEASED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-/// Run a harness control with a smaller spawned-task stack. The root keeps
-/// its existing stack, and a control cannot exceed the ordinary reservation.
-pub fn with_task_stack<R>(bytes: usize, run: impl FnOnce() -> R) -> R {
-    assert!(
-        (STACK_HEADROOM..=TASK_STACK).contains(&bytes),
-        "invalid evaluator task stack"
-    );
-    struct Restore(usize);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TASK_STACK_BYTES.with(|size| size.set(self.0));
-        }
-    }
-    let _restore = Restore(TASK_STACK_BYTES.with(|size| size.replace(bytes)));
-    run()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1566,17 +1547,21 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
                     resume: rx,
                     reply: reply_tx.clone(),
                 };
-                let stack = if k == 0 {
-                    ROOT_STACK
-                } else {
-                    TASK_STACK_BYTES.with(std::cell::Cell::get)
-                };
-                std::thread::Builder::new()
-                    .stack_size(stack)
+                if std::thread::Builder::new()
+                    .stack_size(TASK_STACK)
                     .spawn_scoped(scope, move || {
-                        task_thread(task, f, args, link, stack, process_entry)
+                        task_thread(task, f, args, link, process_entry)
                     })
-                    .expect("a task thread");
+                    .is_err()
+                {
+                    baton
+                        .host
+                        .world
+                        .stderr
+                        .extend_from_slice(b"run stop: HostMemory\n");
+                    teardown(&mut resumes, &baton);
+                    return (baton, Outcome::Stopped("HostMemory"), Vec::new());
+                }
             }
             let resume = resumes[k].as_ref().expect("a started task");
             resume.send(Resume::Run(baton)).expect("the task thread");
@@ -1622,20 +1607,10 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
 
 /// A task thread: wait for the baton, run the task's body, hand the baton back.
 /// The thread's link sits in the baton while the task runs (`Machine::park`).
-fn task_thread<'m>(
-    mut t: Task,
-    f: FuncId,
-    args: Vec<u64>,
-    link: Link<'m>,
-    stack: usize,
-    process_entry: bool,
-) {
+fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>, process_entry: bool) {
     let origin = 0u8;
     TASK_STACK_ROOM.with(|room| {
-        room.set((
-            &origin as *const u8 as usize,
-            stack.saturating_sub(STACK_HEADROOM),
-        ))
+        room.set((&origin as *const u8 as usize, TASK_STACK - STACK_HEADROOM));
     });
     let Ok(Resume::Run(mut mach)) = link.resume.recv() else {
         return;

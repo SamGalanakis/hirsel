@@ -3443,10 +3443,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         let (asan, tsan) = (*task).sanitizer.entered();
         crate::run_stop::set_idle_sanitizer(asan, tsan);
         // FAIL-17: the limit is committed before the body first runs on this stack.
-        crate::stack::commit(
-            &mut *(*task).context,
-            (*task).stack.as_ref().unwrap().bounds(),
-        );
+        crate::stack::commit(&mut *(*task).context, (*task).stack.as_ref().unwrap().top());
         loop {
             let input = match &mut (*task).moved {
                 Moved::Spawned => (*task).input,

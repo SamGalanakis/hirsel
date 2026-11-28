@@ -9,6 +9,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// Run one activation of `f`. Its slots are frame memory: they end when the
     /// activation does, by return or by failure, so a later use of an address into
     /// them is a stop (crate docs, "Values, slots and addresses").
+    #[inline(never)]
     pub(super) fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<()> {
         let Some(b) = self.m.functions[f.index()].body.as_ref() else {
             // A bodiless function reached through a value: a closed-list function
@@ -24,6 +25,12 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
             unreachable!("external functions do not run here");
         };
+        // Measure from inside this shared entry so the root and child dispatch
+        // frames below it do not affect the guest allowance.
+        if t.at.is_empty() {
+            let base = 0u8;
+            TASK_STACK_BASE.with(|stack| stack.set(&base as *const u8 as usize));
+        }
         let l = self.lowered(f, b);
         let mut slots = self.take_words();
         let frame_bytes = match &l {
@@ -54,23 +61,22 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     }
 
     /// FAIL-17: refuse the entered activation with a `Stack` cause when the
-    /// task's frame slots pass the stack allowance, or the evaluator's own
-    /// stack passes its room less the cleanup margin. The first refusal
-    /// releases the margin for the failure's cleanup; an `isolate` restores it.
-    /// `enter`'s run stop stays the backstop when cleanup exhausts the margin.
+    /// frame slots or the evaluator's activation stack pass the build's
+    /// allowance. The first refusal releases the margin for cleanup, and
+    /// an `isolate` restores it. `enter` checks the engine reserve separately.
     pub(super) fn stack_check(&mut self, t: &mut Task) -> X<()> {
         use hirsel_core_layout::stack::{ALLOWANCE, MARGIN};
         let frame = 0u8;
         let released = TASK_STACK_RELEASED.with(std::cell::Cell::get);
-        let (base, available) = TASK_STACK_ROOM.with(std::cell::Cell::get);
+        let base = TASK_STACK_BASE.with(std::cell::Cell::get);
         let used = base.abs_diff(&frame as *const u8 as usize);
-        let (slot_room, host_room) = if released {
-            (ALLOWANCE + MARGIN, available)
+        let allowance = if released {
+            ALLOWANCE + MARGIN
         } else {
-            (ALLOWANCE, available - available / 8)
+            ALLOWANCE
         };
         let slots = TASK_FRAME_BYTES.with(std::cell::Cell::get);
-        if slots <= slot_room as u64 && used <= host_room {
+        if slots <= allowance && used <= allowance as usize {
             return Ok(());
         }
         TASK_STACK_RELEASED.with(|r| r.set(true));

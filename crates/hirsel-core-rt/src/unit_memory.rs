@@ -589,11 +589,7 @@ impl Memory {
                 n
             }
         };
-        let fresh = StackPair::new_batch(
-            count,
-            self.plan.unit_stack_bytes,
-            self.plan.task_stack_reserve,
-        );
+        let fresh = StackPair::new_batch(count, self.plan.unit_stack_bytes);
         let (more_waiters, post_bg) = self.deliver_batch(p, ix, fresh, urgent);
         if urgent && more_waiters {
             self.post_refill(p, ix);
@@ -900,9 +896,8 @@ impl SharedMemory for Memory {
     }
 
     fn take_task_stack(&self) -> Stack {
-        let reserve = self.plan.task_stack_reserve;
         self.take(|stock| &mut stock.task_stacks, |_| true)
-            .unwrap_or_else(|| self.map(move || Stack::new_with_reserve(reserve)))
+            .unwrap_or_else(|| self.map(Stack::new))
     }
 
     fn put_task_stack(&self, stack: Stack) {

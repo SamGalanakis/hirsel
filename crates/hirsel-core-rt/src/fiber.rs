@@ -259,10 +259,6 @@ impl Stack {
         Self::try_new_with_reserve(RESERVE)
     }
 
-    pub(crate) fn new_with_reserve(reserve: usize) -> Self {
-        Self::try_new_with_reserve(reserve).unwrap_or_else(|stop| crate::run_stop::raise(stop))
-    }
-
     pub(crate) fn try_new_with_reserve(reserve: usize) -> Result<Self, Stop> {
         let page_bytes = try_page()?;
         let commit = commit_for_page(page_bytes);
@@ -305,24 +301,21 @@ impl Stack {
         }
     }
 
-    pub(crate) fn try_new_batch_with_reserve(
-        count: usize,
-        reserve: usize,
-    ) -> Result<Vec<Self>, Stop> {
+    fn try_new_batch(count: usize) -> Result<Vec<Self>, Stop> {
         if count <= 1 {
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
-                out.push(Self::try_new_with_reserve(reserve)?);
+                out.push(Self::try_new()?);
             }
             return Ok(out);
         }
         let page_bytes = try_page()?;
         let commit = commit_for_page(page_bytes);
-        let len = page_bytes + reserve;
+        let len = page_bytes + RESERVE;
         let Some(total) = len.checked_mul(count) else {
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
-                out.push(Self::try_new_with_reserve(reserve)?);
+                out.push(Self::try_new()?);
             }
             return Ok(out);
         };
@@ -341,7 +334,7 @@ impl Stack {
             if raw == libc::MAP_FAILED {
                 let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
-                    out.push(Self::try_new_with_reserve(reserve)?);
+                    out.push(Self::try_new()?);
                 }
                 return Ok(out);
             }
@@ -373,9 +366,8 @@ impl Stack {
         }
     }
 
-    pub(crate) fn new_batch_with_reserve(count: usize, reserve: usize) -> Vec<Self> {
-        Self::try_new_batch_with_reserve(count, reserve)
-            .unwrap_or_else(|stop| crate::run_stop::raise(stop))
+    pub(crate) fn new_batch(count: usize) -> Vec<Self> {
+        Self::try_new_batch(count).unwrap_or_else(|stop| crate::run_stop::raise(stop))
     }
 
     pub(crate) fn bounds(&self) -> (usize, usize, usize) {
@@ -509,7 +501,7 @@ impl Stack {
     }
 
     /// The end of the reservation, where the low-water word sits.
-    fn top(&self) -> usize {
+    pub(crate) fn top(&self) -> usize {
         self.base.as_ptr().addr() + self.len
     }
 

@@ -222,34 +222,27 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 }
             })
             .transpose()?;
-        let run = || {
-            evaluate(
-                driver,
-                store,
-                Path::new(manifest),
-                entry,
-                input["program_entry"].as_bool().unwrap_or(false),
-                Setting {
-                    compiler_worker: input["compiler_worker"].as_str().map(Into::into),
-                    instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
-                    root_limit: input["root_limit"].as_u64().unwrap_or(u64::MAX),
-                    launch,
-                    // CONC-10 events only for a law that reads them: a flood makes millions.
-                    events: input["events"].as_bool().unwrap_or(false),
-                    meter: input["meter"]
-                        .as_bool()
-                        .filter(|&enabled| enabled)
-                        .map(|_| eval::StepMeter {
-                            allowance: input["meter_limit"].as_u64(),
-                        }),
-                },
-            )
-        };
-        let report = if let Some(bytes) = input["task_stack_bytes"].as_u64() {
-            eval::with_task_stack(usize::try_from(bytes).map_err(|e| e.to_string())?, run)
-        } else {
-            run()
-        }?;
+        let report = evaluate(
+            driver,
+            store,
+            Path::new(manifest),
+            entry,
+            input["program_entry"].as_bool().unwrap_or(false),
+            Setting {
+                compiler_worker: input["compiler_worker"].as_str().map(Into::into),
+                instructions: input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
+                root_limit: input["root_limit"].as_u64().unwrap_or(u64::MAX),
+                launch,
+                // CONC-10 events only for a law that reads them: a flood makes millions.
+                events: input["events"].as_bool().unwrap_or(false),
+                meter: input["meter"]
+                    .as_bool()
+                    .filter(|&enabled| enabled)
+                    .map(|_| eval::StepMeter {
+                        allowance: input["meter_limit"].as_u64(),
+                    }),
+            },
+        )?;
         if let Some(out) = input["sdk_out"].as_str() {
             if report["outcome"] != json!({"kind":"returned","values":[1]}) {
                 return Err(format!("Frame schema export failed: {report}"));

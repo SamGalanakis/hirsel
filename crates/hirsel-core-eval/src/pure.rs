@@ -129,7 +129,7 @@ pub fn run_pure(m: &PureModule<'_>, f: FuncId, args: &[u64], input: PureInput) -
     };
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(ROOT_STACK)
+            .stack_size(PURE_STACK)
             .spawn_scoped(scope, || pure_root(m, f, args, &input, &core))
             .expect("a pure run's thread")
             .join()
@@ -174,7 +174,7 @@ fn pure_root(
     // FAIL-15 stops the run before its thread's stack runs out.
     let origin = 0u8;
     TASK_STACK_ROOM.with(|room| {
-        room.set((&origin as *const u8 as usize, ROOT_STACK - STACK_HEADROOM));
+        room.set((&origin as *const u8 as usize, PURE_STACK - STACK_HEADROOM));
     });
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // MEM-34: entering a constant's initialiser takes a step, as a call does.

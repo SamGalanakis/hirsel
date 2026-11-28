@@ -219,7 +219,7 @@ pub(super) fn create_unit(id: u32, execution: &crate::run_stop::Execution) {
 pub(super) fn create_initial_unit(id: u32, execution: &crate::run_stop::Execution) {
     let unit = Box::leak(new_unit(id, execution));
     let p = pool();
-    let pair = StackPair::new(p.plan.unit_stack_bytes, p.plan.task_stack_reserve);
+    let pair = StackPair::new(p.plan.unit_stack_bytes);
     // SAFETY: `unit` has not been published yet; nobody else holds it.
     unsafe { p.memory.admit_pair_to_unit(unit, pair, true) };
     p.units.install(unit);

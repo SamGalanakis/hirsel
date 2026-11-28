@@ -8,17 +8,9 @@
 use crate::{Context, causes};
 use hirsel_core_layout::stack::{ALLOWANCE, MARGIN};
 
-/// The allowance of a stack whose writable part spans `bytes`: FAIL-17's
-/// allowance, or less on a smaller stack (a unit's), so that the margin and a
-/// frame as large as the allowance still fit above its guard.
-fn allowance(bytes: usize) -> usize {
-    (ALLOWANCE as usize).min(bytes.saturating_sub(MARGIN as usize) / 2)
-}
-
-/// Commit the limit of the task stack `(base, guard_end, top)` to `context`
-/// before the task's body first runs on it (on every mount of a fresh stack).
-pub(crate) fn commit(context: &mut Context, (_, guard_end, top): (usize, usize, usize)) {
-    let limit = top - allowance(top - guard_end);
+/// Install the build's allowance before a task runs on a newly mounted stack.
+pub(crate) fn commit(context: &mut Context, top: usize) {
+    let limit = top - ALLOWANCE as usize;
     context.stack_limit = limit;
     context.stack_floor = limit;
 }

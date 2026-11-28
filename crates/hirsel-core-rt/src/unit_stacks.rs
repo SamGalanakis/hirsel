@@ -126,23 +126,19 @@ pub(crate) struct StackPair {
 }
 
 impl StackPair {
-    pub(crate) fn new(unit_stack_bytes: usize, task_stack_reserve: usize) -> Self {
+    pub(crate) fn new(unit_stack_bytes: usize) -> Self {
         Self {
             unit: UnitStack::new(unit_stack_bytes),
-            root: Stack::new_with_reserve(task_stack_reserve),
+            root: Stack::new(),
         }
     }
 
-    pub(super) fn new_batch(
-        count: usize,
-        unit_stack_bytes: usize,
-        task_stack_reserve: usize,
-    ) -> Vec<Self> {
+    pub(super) fn new_batch(count: usize, unit_stack_bytes: usize) -> Vec<Self> {
         if count == 0 {
             return Vec::new();
         }
         let units = UnitStack::new_batch(count, unit_stack_bytes);
-        let roots = Stack::new_batch_with_reserve(count, task_stack_reserve);
+        let roots = Stack::new_batch(count);
         units
             .into_iter()
             .zip(roots)

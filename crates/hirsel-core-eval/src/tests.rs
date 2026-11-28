@@ -784,10 +784,9 @@ fn scrambled_nans_reach_a_pun_but_not_reinterpret() {
     assert_eq!(observed, CANONICAL);
 }
 
-/// A spawned task stops the run before exhausting its small host stack. The
-/// same recursive body still fits the root's unchanged stack.
+/// Unchecked IR can exhaust the evaluator's engine reserve on either task.
 #[test]
-fn spawned_evaluator_stack_stops_without_cleanup() {
+fn evaluator_stack_reserve_stops_without_cleanup() {
     let module = load(
         "task stack",
         r#"
@@ -861,14 +860,12 @@ b2:
         eval::run(&module, FuncId(0), &[6], 1 << 20).outcome,
         eval::Outcome::Returned(vec![6])
     );
-    let stopped = eval::run(&module, FuncId(0), &[4096], 1 << 20);
-    assert_eq!(stopped.outcome, eval::Outcome::Stopped("Stack"));
-    assert_eq!(stopped.stderr, b"run stop: Stack\n");
-    assert!(stopped.trace.is_empty());
-    assert_eq!(
-        eval::run(&module, FuncId(2), &[4096], 1 << 20).outcome,
-        eval::Outcome::Returned(vec![4096])
-    );
+    for entry in [FuncId(0), FuncId(2)] {
+        let stopped = eval::run(&module, entry, &[1_000_000], 1 << 20);
+        assert_eq!(stopped.outcome, eval::Outcome::Stopped("Stack"));
+        assert_eq!(stopped.stderr, b"run stop: Stack\n");
+        assert!(stopped.trace.is_empty());
+    }
 }
 
 /// Moved from the body-encoding tests (D7): a cleanup-only edit that calls an

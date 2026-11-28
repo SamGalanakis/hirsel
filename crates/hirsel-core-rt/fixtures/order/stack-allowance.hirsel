@@ -1,0 +1,52 @@
+// expect: returned
+// The first depth that raises Stack must agree for identical calls on both tasks.
+fn recurse(n: u64) -> u64 {
+    let mut pad: Inline[u64, 8192] = [0u64; 8192]
+    let i = n % 8192u64
+    pad[i] = n
+    if n == 0u64 {
+        pad[i]
+    } else {
+        recurse(n - 1u64) + pad[i] - n + 1u64
+    }
+}
+
+// 256 frames of 64 KiB exceed the allowance. An unexpected result or cause
+// yields zero so that a pair of incorrect runs cannot satisfy the oracle.
+fn first_stack(take ceiling: u64) -> u64 {
+    let mut low = 0u64
+    let mut high = ceiling
+    while low <= high {
+        let mid = low + (high - low) / 2u64
+        match isolate(fn() -> u64 { recurse(mid) }) {
+            Ok(Ok(n)) => {
+                if n != mid { return 0u64 }
+                low = mid + 1u64
+            },
+            Ok(Error(causes)) => {
+                let mut count = 0u64
+                for cause in causes {
+                    match cause.kind {
+                        Stack => { count += 1u64 },
+                        _ => { return 0u64 },
+                    }
+                }
+                if count != 1u64 || mid == 0u64 { return 0u64 }
+                high = mid - 1u64
+            },
+            Error(_) => { return 0u64 },
+        }
+    }
+    if low <= ceiling { low } else { 0u64 }
+}
+
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let root = first_stack(256u64)
+    let child = task.spawn(tasks, bytes 65536, 256u64, first_stack)
+    match task.join(take child) {
+        Ok(depth) => {
+            if root != 0u64 && depth == root { Ok(()) } else { Error(Exit(status: 1)) }
+        },
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

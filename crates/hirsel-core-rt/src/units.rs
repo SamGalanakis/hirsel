@@ -418,7 +418,7 @@ unsafe fn start_stack(p: &'static Pool, ix: usize, u: &Unit) -> bool {
     }
     #[cfg(test)]
     if check::modelled() {
-        let pair = StackPair::new(p.plan.unit_stack_bytes, p.plan.task_stack_reserve);
+        let pair = StackPair::new(p.plan.unit_stack_bytes);
         // SAFETY: by the contract.
         unsafe { p.memory.admit_pair_to_unit(u, pair, true) };
         return true;

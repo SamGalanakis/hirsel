@@ -2,6 +2,7 @@
 use super::Unit;
 pub(super) use crate::host::envelope::HostEnvelope;
 use crate::host::envelope::{HAS_IO_URING, min_limit};
+use hirsel_core_layout::stack::RESERVATION;
 use hirsel_core_net::{REACTOR_ENV, RESERVED_UNIT, ReactorPlan, ready::Event};
 
 const KIB: usize = 1024;
@@ -35,7 +36,6 @@ pub(super) struct UntiedPlan {
     pub(super) host_stack_bytes: usize,
     pub(super) memory_stack_bytes: usize,
     pub(super) unit_stack_bytes: usize,
-    pub(super) task_stack_reserve: usize,
     pub(super) logical_units_hint: u64,
     pub(super) max_units: u32,
     pub(super) physical_unit_limit: bool,
@@ -130,14 +130,7 @@ impl UntiedPlan {
         let memory_stack = 256 * KIB;
         let unit_stack = MIB;
         let commit = crate::fiber::commit_for_page(page);
-        // FAIL-17: a task stack is the build's reservation. Only an address
-        // space limit narrows it, and never below 1 MiB, so the allowance the
-        // limit commits (stack::commit) keeps a cleanup margin above the guard.
-        let reservation = hirsel_core_layout::stack::RESERVATION as usize;
-        let task_reserve = host.address_space_limit.map_or(reservation, |limit| {
-            let share = (limit / (16 * w as u64)).min(reservation as u64) as usize;
-            (share / page * page).max(MIB)
-        });
+        let pair_va = unit_stack + RESERVATION as usize + 2 * page;
         let (reactor, pinned, io_workers) = reactor_plan(w, host, choice)?;
         let fixed_threads = w + 1 + io_workers;
         let occupied = fixed_threads + THREAD_HEADROOM;
@@ -183,7 +176,7 @@ impl UntiedPlan {
             .max(1);
         let physical_units = min_limit(
             memory_left.map(|m| m / (page + commit + size_of::<Unit>())),
-            address_left.map(|a| a / (unit_stack + task_reserve + 2 * page)),
+            address_left.map(|a| a / pair_va),
         )
         .unwrap_or(usize::MAX);
         if physical_units < k {
@@ -207,7 +200,6 @@ impl UntiedPlan {
             .min(host_retention);
         let retained = retained / page * page;
         let pair_retained = (unit_stack + page) + (commit + page);
-        let pair_va = unit_stack + task_reserve + 2 * page;
         let va_stock_total = address_left.map_or(usize::MAX, |a| (a / 4) / pair_va);
         let mem_stock_total = retained / pair_retained;
         let worker_pair_stock = (mem_stock_total.min(va_stock_total) / w).min(8);
@@ -234,7 +226,6 @@ impl UntiedPlan {
             host_stack_bytes: host_stack,
             memory_stack_bytes: memory_stack,
             unit_stack_bytes: unit_stack,
-            task_stack_reserve: task_reserve,
             logical_units_hint,
             max_units,
             physical_unit_limit,

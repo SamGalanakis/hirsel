@@ -499,8 +499,12 @@ objects it lacks.
    passes FFI-3's format and symbol checks for the leaves that select it.
 8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at
    exactly that number (`Unsupported`).
+9. Every decoded CoreIR body passes the well-formedness and ownership verifier (`wf::module`)
+   under the attempt's decode-memory and deadline budget before admission succeeds (`InvalidCoreIr`
+   or `Limit`). Native object and release-image emission verify every final CoreIR module before
+   handing it to Cranelift or LLVM.
 
-Admission does not check types or ownership again. A refusal, a disconnect or a host restart
+A refusal, a disconnect or a host restart
 releases the attempt's reservations and discards its staging. Publication of outside source and
 assembly run under the same kind of limits on time, memory and output. How an optimised build keeps its peak memory
 bounded by its largest release partition is an implementation matter
@@ -1119,7 +1123,8 @@ store. Grants are approved per group at each deploy.
   publisher submits source only. The platform publishes that source itself with the normal
   checker, under its own compiler caches and package images and the limits of "Authority"
   above (the launcher's `Source` input, "Publish and assemble" below). It never accepts a raw R, a code object or an image from such an author, because
-  admission does not check types or ownership again (step 8 above). Foreign code, an
+  the source checker enforces language-level capabilities, grants and module visibility beyond
+  CoreIR well-formedness (step 9 above). Foreign code, an
   `Exec` grant and a recording build are refused for a group whose author is untrusted
   (FFI-1, EXEC-1).
 

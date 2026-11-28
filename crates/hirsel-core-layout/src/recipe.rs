@@ -377,20 +377,20 @@ fn align_up(n: u64, a: u64) -> u64 {
     n.div_ceil(a) * a
 }
 
+mod budget;
+pub use budget::{ComputeError, compute_budgeted};
 /// Recipes for every shape of a module, indexed like `shapes`.
 pub fn compute(shapes: &[Row]) -> Result<Vec<RecipeRow>, LayoutError> {
     let mut recipes = vec![];
     extend(shapes, &mut recipes)?;
     Ok(recipes)
 }
-
 /// Compute only the appended shapes. `recipes` describes an unchanged prefix of
 /// `shapes`; neither that prefix nor its references may change between extensions.
 /// A refused suffix leaves the existing recipes intact.
 pub fn extend(shapes: &[Row], recipes: &mut Vec<RecipeRow>) -> Result<(), LayoutError> {
     RecipeScratch::default().extend(shapes, recipes)
 }
-
 /// Reusable traversal storage for appending recipes to an unchanged prefix.
 #[derive(Default)]
 pub struct RecipeScratch {

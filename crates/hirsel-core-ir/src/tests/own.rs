@@ -250,3 +250,304 @@ fn f1 = n1 g1 extern
         "{err}"
     );
 }
+
+/// Soundness regressions surfaced by the Lean 4 formalization of `wf::own` (lane 3390):
+/// 1. Back-edges into entry block `b0` must merge may-drop state into `b0`.
+/// 2. A drop-flag read invalidated by a later write before `branch` must not refine edges.
+/// 3. Non-`store` writes (`copy`, `move`, etc.) to a drop-flag slot must invalidate it.
+/// 4. A partial field write must not re-begin a dropped parent place.
+#[test]
+fn ownership_rejects_entry_backedge_stale_flag_nonstore_flag_and_partial_write() {
+    let head = r#"core v1
+type t0 = resource "p@0/m/R" drop f1 { id: u64 }
+type t1 = own "p@0/m/P" { a: t0, b: t0 }
+sig g0 = (u64, ptr) -> (u64)
+sig g1 = (ptr) -> ()
+inst n0 = p@0/m/f [] []
+inst n1 = p@0/m/R [] []
+"#;
+    let tail = "fn f1 = n1 g1 extern\n";
+    let check = |name: &str, body: &str| {
+        let text = format!("{head}fn f0 = n0 g0 {{\n{body}}}\n{tail}");
+        wf::module(&load(name, &text))
+    };
+
+    // 1. Entry-block back-edge double-drop.
+    let err = check(
+        "entry_edge",
+        r#"  addr a0 = v1 : t0
+b0(v0: u64, v1: ptr):
+  v2: u64 = const 0
+  v3: bool = eq v0, v2
+  address a0
+  drop a0 t0
+  branch v3, b1, b2
+b1:
+  jump b0(v0, v1)
+b2:
+  return v0
+"#,
+    )
+    .unwrap_err();
+    assert!(err.contains("may be dropped already"), "{err}");
+
+    let flag = |mid: &str, yes: &str, no: &str| {
+        format!(
+            r#"  slot s0 = t0
+  slot s1 = bool
+  slot s2 = bool
+  addr a0 = s0 : t0
+  addr a1 = v1 : t0
+  addr a2 = s1 : bool
+  addr a3 = s2 : bool
+b0(v0: u64, v1: ptr):
+  v2: u64 = held_size t0
+  v3: bool = const true
+  v4: bool = const false
+  v5: u64 = const 1
+  live s0
+  address a0
+  address a1
+  copy a0, a1, v2
+  live s1
+  address a2
+  live s2
+  address a3
+{mid}  branch v6, b1, b2
+b1:
+{yes}  jump b3
+b2:
+{no}  jump b3
+b3:
+  return v0
+"#
+        )
+    };
+    let drop_s0 = "  address a0\n  drop a0 t0\n";
+
+    // 2. Stale flag read across a write must be refused; fresh read stays accepted.
+    let err = check(
+        "stale_flag_read",
+        &flag(
+            &format!("  store a2, v3\n  v6: bool = read a2\n{drop_s0}  store a2, v4\n"),
+            drop_s0,
+            "",
+        ),
+    )
+    .unwrap_err();
+    assert!(err.contains("may be dropped already"), "{err}");
+    check(
+        "fresh_flag_read",
+        &flag(
+            &format!("  store a2, v3\n{drop_s0}  store a2, v4\n  v6: bool = read a2\n"),
+            drop_s0,
+            "",
+        ),
+    )
+    .expect("fresh cleared flag guards the second drop");
+
+    // 3. Non-store write (`copy`) into a flag slot must invalidate its known value.
+    let err = check(
+        "copy_into_flag",
+        &flag(
+            &format!(
+                "  store a2, v4\n  store a3, v3\n  copy a2, a3, v5\n{drop_s0}  v6: bool = read a2\n"
+            ),
+            drop_s0,
+            "",
+        ),
+    )
+    .unwrap_err();
+    assert!(err.contains("may be dropped already"), "{err}");
+
+    // 4. Partial write to `s0.0` must not re-begin the dropped parent `s0`.
+    let err = check(
+        "partial_write",
+        r#"  slot s0 = t1
+  addr a0 = s0 : t1
+  addr a1 = v1 : t1
+  addr a2 = s0 field 0 : t0
+  addr a3 = s0 field 1 : t0
+  addr a4 = a1 field 0 : t0
+b0(v0: u64, v1: ptr):
+  v2: u64 = held_size t1
+  v3: u64 = held_size t0
+  live s0
+  address a0
+  address a1
+  copy a0, a1, v2
+  drop a0 t1
+  address a2
+  address a4
+  copy a2, a4, v3
+  address a3
+  drop a3 t0
+  return v0
+"#,
+    )
+    .unwrap_err();
+    assert!(err.contains("may be dropped already"), "{err}");
+}
+
+/// Ending a local anchor's storage (`dead s0`) invalidates views anchored on it,
+/// and returning either a local slot pointer or a dest view anchored on a local slot
+/// is refused.
+#[test]
+fn ownership_rejects_dead_anchor_and_escaping_local_returns() {
+    let dead_anchor = r#"core v1
+item i0 = app@1/main/g
+type t0 = resource "app@1/main/Mark" drop f4 { id: u64 }
+sig g0 = () -> (u64)
+sig g1 = (ptr) -> ()
+sig g2 = (u64) -> () dest t0
+sig g3 = (&view t0) -> () dest view t0 in (0)
+sig g4 = (&view t0) -> (u64)
+inst n0 = app@1/main/g [] []
+inst n1 = app@1/main/Mark [] []
+inst n2 = app@1/main/mk [] []
+inst n3 = app@1/main/me [] []
+inst n4 = app@1/main/id_of [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  slot s1 = t0
+  addr a0 = s0 : t0
+  addr a1 = s1 : t0
+  addr a2 = v1 : t0
+  addr a3 = v3 : t0
+b0:
+  v0: u64 = const 3
+  live s0
+  address a0
+  call f1 g2 (&a0, v0)
+  v1: ptr = pointer a0
+  live s1
+  address a1
+  address a2
+  call f2 g3 (&a1, &a2)
+  v2: ptr = pointer a1
+  dead s0
+  jump b1(v2)
+b1(v3: ptr):
+  address a3
+  v4: u64 = call f3 g4 (&a3)
+  return v4
+}
+fn f1 = n2 g2 extern
+fn f2 = n3 g3 extern
+fn f3 = n4 g4 extern
+fn f4 = n1 g1 extern
+"#;
+    let err = wf::module(&load("dead_anchor", dead_anchor)).unwrap_err();
+    assert!(err.contains("s1 is used where it may be dropped"), "{err}");
+
+    let escape_ptr = r#"core v1
+sig g0 = () -> (ptr)
+inst n0 = p@0/m/leak [] []
+fn f0 = n0 g0 {
+  slot s0 = u64
+  addr a0 = s0 : u64
+b0:
+  live s0
+  address a0
+  v0: u64 = const 1
+  store a0, v0
+  v1: ptr = pointer a0
+  return v1
+}
+"#;
+    let err = wf::module(&load("escape_ptr", escape_ptr)).unwrap_err();
+    assert!(err.contains("returns a pointer into local slot"), "{err}");
+
+    let escape_dest_view = r#"core v1
+type t0 = resource "p@0/m/R" drop f3 { id: u64 }
+sig g0 = () -> () dest t0
+sig g1 = (u64) -> () dest t0
+sig g2 = (&view t0) -> () dest view t0 in (0)
+sig g3 = (ptr) -> ()
+inst n0 = p@0/m/leak [] []
+inst n1 = p@0/m/mk [] []
+inst n2 = p@0/m/me [] []
+inst n3 = p@0/m/R [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = v0 : t0
+  addr a1 = s0 : t0
+b0(v0: ptr):
+  v1: u64 = const 1
+  live s0
+  address a1
+  call f1 g1 (&a1, v1)
+  address a0
+  call f2 g2 (&a0, &a1)
+  return
+}
+fn f1 = n1 g1 extern
+fn f2 = n2 g2 extern
+fn f3 = n3 g3 extern
+"#;
+    let err = wf::module(&load("escape_dest_view", escape_dest_view)).unwrap_err();
+    assert!(
+        err.contains("returns a view anchored on a local slot"),
+        "{err}"
+    );
+}
+
+#[test]
+fn wf_module_with_budget_bounds_scratch_and_deadline() {
+    use crate::decode::{DecodeBudget, DecodeLimit, DecodeLimits};
+    use std::time::Instant;
+
+    let module = load(
+        "budgeted",
+        r#"core v1
+type t0 = resource "p@0/m/R" drop f1 { id: u64 }
+sig g0 = (u64, ptr) -> (u64)
+sig g1 = (ptr) -> ()
+inst n0 = p@0/m/f [] []
+inst n1 = p@0/m/R [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = v1 : t0
+b0(v0: u64, v1: ptr):
+  v2: u64 = held_size t0
+  live s0
+  address a0
+  address a1
+  copy a0, a1, v2
+  drop a0 t0
+  dead s0
+  return v0
+}
+fn f1 = n1 g1 extern
+"#,
+    );
+    let limits = DecodeLimits {
+        bytes: 65536,
+        members: 16,
+        slots: 16,
+        depth: 16,
+        deadline: None,
+    };
+    let tiny = DecodeBudget::new(DecodeLimits {
+        bytes: 16,
+        ..limits
+    });
+    assert_eq!(
+        wf::module_with_budget(&module, &tiny.debit()),
+        Err(wf::Error::Limit(DecodeLimit::Bytes))
+    );
+    let expired = DecodeBudget::new(DecodeLimits {
+        deadline: Some(Instant::now()),
+        ..limits
+    });
+    assert_eq!(
+        wf::module_with_budget(&module, &expired.debit()),
+        Err(wf::Error::Limit(DecodeLimit::Deadline))
+    );
+    let ok = DecodeBudget::new(limits);
+    wf::module_with_budget(&module, &ok.debit()).unwrap();
+    ok.debit()
+        .charge_bytes(limits.bytes)
+        .expect("all wf scratch is released");
+}

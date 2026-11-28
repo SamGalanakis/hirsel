@@ -38,58 +38,72 @@ pub(super) struct Plan {
 impl Plan {
     pub(super) fn signature(module: &Module, sig: &mut Signature, abi: &SignatureAbi) -> Self {
         let mut params = Vec::with_capacity(sig.params.len());
-        sig.params = sig
-            .params
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &param)| {
-                let change = match param {
-                    Param::Address {
-                        place: PlaceTy::Declared(id),
-                        ..
-                    } if abi.params.get(i) == Some(&true) => {
-                        match module.types[id.index()].carried {
-                            Carried::Value(t) => Change::Value(t, id),
-                            Carried::Nothing => Change::Nothing,
-                            Carried::Address => Change::Keep,
-                        }
-                    }
-                    Param::Address {
-                        place: PlaceTy::Declared(id),
-                        loan: Loan::Mut,
-                    } => match mut_place(&module.types, id) {
-                        PlaceTy::Value(t) => Change::Place(t),
-                        PlaceTy::Declared(_) => Change::Keep,
-                    },
-                    _ => Change::Keep,
-                };
-                params.push(change);
-                match change {
-                    Change::Keep => Some(param),
-                    Change::Value(t, _) => Some(Param::Value(t)),
-                    Change::Place(t) => Some(Param::Address {
-                        place: PlaceTy::Value(t),
-                        loan: Loan::Mut,
-                    }),
-                    Change::Nothing => None,
-                }
-            })
-            .collect();
+        let mut remap = Vec::with_capacity(sig.params.len());
+        let mut new_params = Vec::with_capacity(sig.params.len());
+        for (i, &param) in sig.params.iter().enumerate() {
+            let change = match param {
+                Param::Address {
+                    place: PlaceTy::Declared(id),
+                    ..
+                } if abi.params.get(i) == Some(&true) => match module.types[id.index()].carried {
+                    Carried::Value(t) => Change::Value(t, id),
+                    Carried::Nothing => Change::Nothing,
+                    Carried::Address => Change::Keep,
+                },
+                Param::Address {
+                    place: PlaceTy::Declared(id),
+                    loan: Loan::Mut,
+                } => match mut_place(&module.types, id) {
+                    PlaceTy::Value(t) => Change::Place(t),
+                    PlaceTy::Declared(_) => Change::Keep,
+                },
+                _ => Change::Keep,
+            };
+            params.push(change);
+            let mapped = match change {
+                Change::Keep => Some(param),
+                Change::Value(t, _) => Some(Param::Value(t)),
+                Change::Place(t) => Some(Param::Address {
+                    place: PlaceTy::Value(t),
+                    loan: Loan::Mut,
+                }),
+                Change::Nothing => None,
+            };
+            if let Some(p) = mapped {
+                let idx = new_params.len() as u32;
+                new_params.push(p);
+                remap.push(matches!(p, Param::Address { .. }).then_some(idx));
+            } else {
+                remap.push(None);
+            }
+        }
+        sig.params = new_params;
         let result = match sig.dest.filter(|_| abi.result) {
             Some(id) => match module.types[id.index()].carried {
                 Carried::Value(t) => {
                     sig.dest = None;
                     sig.results = vec![t];
+                    sig.anchors.clear();
                     Change::Value(t, id)
                 }
                 Carried::Nothing => {
                     sig.dest = None;
+                    sig.anchors.clear();
                     Change::Nothing
                 }
                 Carried::Address => Change::Keep,
             },
             None => Change::Keep,
         };
+        if sig.dest.is_some() && !sig.anchors.is_empty() {
+            sig.anchors = sig
+                .anchors
+                .iter()
+                .filter_map(|&k| remap.get(k as usize).copied().flatten())
+                .collect();
+            sig.anchors.sort_unstable();
+            sig.anchors.dedup();
+        }
         Self { params, result }
     }
 }

@@ -6,13 +6,35 @@
 //! slot's contents follows a write on every path (a drop flag counting as one). It
 //! does not check limit-scope balance.
 
+use crate::decode::{Debit, DecodeLimit};
 use crate::*;
 
+mod available;
 mod descriptor;
 mod frame;
 mod own;
+mod own_flow;
+mod own_names;
 mod places;
 mod simd;
+mod written;
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Error {
+    Invalid(String),
+    Limit(DecodeLimit),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => f.write_str(reason),
+            Self::Limit(limit) => write!(f, "verification limit: {limit:?}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 type R = Result<(), String>;
 
@@ -35,6 +57,14 @@ fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
 }
 
 pub fn module(m: &Module) -> R {
+    module_with_budget(m, &Debit::unlimited()).map_err(|e| e.to_string())
+}
+
+/// Verify structural well-formedness and ownership of `m` under `budget`.
+pub fn module_with_budget(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
+    let scratch = budget.scratch();
+    scratch.check()?;
+    scratch.allocation::<(&String, usize)>(m.types.len().saturating_mul(2))?;
     let mut closed = std::collections::HashMap::new();
     let mut duplicates = Vec::new();
     for (row, shape) in m
@@ -43,22 +73,27 @@ pub fn module(m: &Module) -> R {
         .enumerate()
         .filter(|(_, s)| !s.name.contains('$'))
     {
+        scratch.check()?;
         if let Some(first) = closed.insert(&shape.name, row) {
+            scratch.reserve(&mut duplicates, 1)?;
             duplicates.push(format!("t{first}/t{row} {}", shape.name));
         }
     }
     need(duplicates.is_empty(), || {
         format!("duplicate closed type rows: {}", duplicates.join("; "))
-    })?;
+    })
+    .map_err(Error::Invalid)?;
     let mut failures = None;
     for (i, t) in m.types.iter().enumerate() {
+        scratch.check()?;
         let fields = match &t.body {
             hirsel_core_layout::Body::Record(f) => f.iter().collect::<Vec<_>>(),
             hirsel_core_layout::Body::Variant(c) => c.iter().flat_map(|c| &c.fields).collect(),
         };
         need(fields.iter().all(|f| refs_ok(&f.ty, m.types.len())), || {
             format!("t{i}: unknown type")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         if let Some(f) = t.finalizer {
             // A finalizer receives the resource block's pointer (FAIL-11).
             let sig = m
@@ -68,22 +103,36 @@ pub fn module(m: &Module) -> R {
             let want = Signature::new(vec![Param::Value(Ty::Ptr)], vec![], None);
             need(sig == Some(&want), || {
                 format!("t{i}: finalizer is not (ptr) -> ()")
-            })?;
+            })
+            .map_err(Error::Invalid)?;
             // An own row's finalizer is a core slot kernel's (crate docs, "Slot kernels").
             need(
                 t.repr == hirsel_core_layout::Repr::Resource || core_fn(m, f.0),
                 || format!("t{i}: only core declares a finalizer on a row that is not a resource"),
-            )?;
+            )
+            .map_err(Error::Invalid)?;
             // It only moves slots, so nothing in it, or in what it calls, can fail. A
             // module that only names the row checks nothing here: the module holding the
             // finalizer's body does.
             if t.repr != hirsel_core_layout::Repr::Resource
                 && m.functions[f.0 as usize].body.is_some()
             {
-                let failures = failures.get_or_insert_with(|| crate::failure::Failures::new(m));
+                if failures.is_none() {
+                    let values: usize = m
+                        .functions
+                        .iter()
+                        .filter_map(|f| f.body.as_ref().map(|b| b.values.len()))
+                        .sum();
+                    scratch.allocation::<Option<u64>>(values)?;
+                    scratch.allocation::<bool>(m.functions.len())?;
+                    scratch.allocation::<usize>(m.functions.len().saturating_mul(4))?;
+                    failures = Some(crate::failure::Failures::new(m));
+                }
+                let failures = failures.as_ref().unwrap();
                 need(!failures.may_fail[f.0 as usize], || {
                     format!("t{i}: an own row's finalizer may fail; it must only move slots")
-                })?;
+                })
+                .map_err(Error::Invalid)?;
             }
         }
         if let Some(f) = t.clone {
@@ -99,11 +148,13 @@ pub fn module(m: &Module) -> R {
             );
             need(sig == Some(&want), || {
                 format!("t{i}: clone body is not (ptr, ptr) -> ()")
-            })?;
+            })
+            .map_err(Error::Invalid)?;
             need(
                 t.repr == hirsel_core_layout::Repr::Own && core_fn(m, f.0),
                 || format!("t{i}: only core declares a clone body, on an own row"),
-            )?;
+            )
+            .map_err(Error::Invalid)?;
         }
         for f in [t.codec, t.key_codec].into_iter().flatten() {
             // A codec type's maker (SEM-10): `() -> Codec[T]`, its result a declared row.
@@ -116,11 +167,22 @@ pub fn module(m: &Module) -> R {
                     s.params.is_empty() && s.results.is_empty() && s.dest.is_some()
                 }),
                 || format!("t{i}: codec maker must return its codec and take no arguments"),
-            )?;
+            )
+            .map_err(Error::Invalid)?;
         }
     }
-    hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
+    {
+        let layout_scratch = scratch.scratch();
+        hirsel_core_layout::compute_budgeted(&m.types, |bytes| layout_scratch.charge_bytes(bytes))
+            .map_err(|err| match err {
+                hirsel_core_layout::ComputeError::Budget(e) => Error::from(e),
+                hirsel_core_layout::ComputeError::Layout(e) => {
+                    Error::Invalid(format!("layout: {e:?}"))
+                }
+            })?;
+    }
     for (i, s) in m.signatures.iter().enumerate() {
+        scratch.check()?;
         let types_ok = s.params.iter().all(|p| match p {
             Param::Address {
                 place: PlaceTy::Declared(ty),
@@ -128,20 +190,24 @@ pub fn module(m: &Module) -> R {
             } => ty.index() < m.types.len(),
             Param::Address { .. } | Param::Value(_) => true,
         }) && s.dest.is_none_or(|t| t.index() < m.types.len());
-        need(types_ok, || format!("g{i}: unknown type"))?;
+        need(types_ok, || format!("g{i}: unknown type")).map_err(Error::Invalid)?;
         need(
             !s.never || (s.results.is_empty() && s.dest.is_none()),
             || format!("g{i}: a never signature has results"),
-        )?;
-        own::anchors(s).map_err(|e| format!("g{i}: {e}"))?;
+        )
+        .map_err(Error::Invalid)?;
+        own::anchors(s).map_err(|e| Error::Invalid(format!("g{i}: {e}")))?;
     }
     for (i, f) in m.functions.iter().enumerate() {
+        scratch.check()?;
         need(f.instance.index() < m.instances.len(), || {
             format!("f{i}: unknown instance")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         need(f.signature.index() < m.signatures.len(), || {
             format!("f{i}: unknown signature")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         // `std.codec.of` is resolved by its type argument to that type's codec maker
         // before any instance is built: only a template's rows name it, at a rigid
         // argument (`$i`) or as its own body's call (crate docs, "Instances").
@@ -157,9 +223,15 @@ pub fn module(m: &Module) -> R {
             && k.definition.0.name == "of";
         need(!(of && closed), || {
             format!("f{i}: `std.codec.of` is never an instance")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         if let Some(b) = &f.body {
-            body(m, &m.signatures[f.signature.index()], b).map_err(|e| format!("f{i}: {e}"))?;
+            body_with_budget(m, &m.signatures[f.signature.index()], b, &scratch).map_err(|e| {
+                match e {
+                    Error::Invalid(msg) => Error::Invalid(format!("f{i}: {msg}")),
+                    Error::Limit(limit) => Error::Limit(limit),
+                }
+            })?;
             need(
                 core_fn(m, i as u32)
                     || !b
@@ -167,7 +239,8 @@ pub fn module(m: &Module) -> R {
                         .iter()
                         .any(|x| matches!(x, Inst::Mark { .. } | Inst::Unmark { .. })),
                 || format!("f{i}: only core's slot kernels emit `mark` and `unmark`"),
-            )?;
+            )
+            .map_err(Error::Invalid)?;
             // SITES.md 6(b): a body that does not inherit its caller's site gets none,
             // so a failure point it anchors in core would report no site where the
             // evaluator's walk found one. Producers anchor such a point in the body's
@@ -189,7 +262,8 @@ pub fn module(m: &Module) -> R {
                              inherit its caller's site (SITES 6(b))"
                         )
                     },
-                )?;
+                )
+                .map_err(Error::Invalid)?;
             }
         }
     }
@@ -378,12 +452,24 @@ impl Ctx<'_> {
 }
 
 pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
+    body_with_budget(m, sig, b, &Debit::unlimited()).map_err(|e| e.to_string())
+}
+
+pub fn body_with_budget(
+    m: &Module,
+    sig: &Signature,
+    b: &Body,
+    budget: &Debit<'_>,
+) -> Result<(), Error> {
+    let scratch = budget.scratch();
+    scratch.check()?;
     let entry_values = b
         .blocks
         .first()
         .and_then(|k| k.params.get(&b.pools.values))
         .unwrap_or_default();
     let skip = usize::from(sig.dest.is_some());
+    scratch.allocation::<(ValueId, Loan)>(sig.params.len())?;
     let views = sig
         .params
         .iter()
@@ -396,28 +482,32 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             _ => None,
         })
         .collect();
-    let pointers = b
-        .insts
-        .iter()
-        .filter_map(|i| match *i {
-            Inst::Pointer { result, address } => Some((result, address)),
-            _ => None,
-        })
-        .collect();
+    let mut pointers = std::collections::HashMap::new();
+    for i in &b.insts {
+        if let Inst::Pointer { result, address } = *i {
+            scratch.allocation::<(ValueId, AddressId)>(2)?;
+            pointers.insert(result, address);
+        }
+    }
+    let mut defined = Vec::new();
+    scratch.reserve(&mut defined, b.values.len())?;
+    defined.resize(b.values.len(), 0);
     let mut c = Ctx {
         m,
         b,
-        defined: vec![0; b.values.len()],
+        defined,
         views,
         pointers,
     };
-    need(!b.blocks.is_empty(), || "no entry block".into())?;
+    need(!b.blocks.is_empty(), || "no entry block".into()).map_err(Error::Invalid)?;
     need(b.terminators.len() == b.blocks.len(), || {
         "terminators not parallel to blocks".into()
-    })?;
+    })
+    .map_err(Error::Invalid)?;
     need(b.inst_anchors.len() == b.insts.len(), || {
         "anchors not parallel to instructions".into()
-    })?;
+    })
+    .map_err(Error::Invalid)?;
     let anchors = b
         .inst_anchors
         .iter()
@@ -426,7 +516,8 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     for a in anchors {
         need(a.item.index() < m.items.len() && a.start <= a.end, || {
             "bad anchor".into()
-        })?;
+        })
+        .map_err(Error::Invalid)?;
     }
     for (i, (k, t)) in b.blocks.iter().zip(&b.terminators).enumerate() {
         need(
@@ -434,52 +525,64 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                 || (k.anchor.is_some()
                     && matches!(t, Terminator::Branch { .. } | Terminator::Switch { .. })),
             || format!("b{i}: a decision without an anchored branch or switch"),
-        )?;
+        )
+        .map_err(Error::Invalid)?;
     }
     for t in &b.slots {
         if let PlaceTy::Declared(t) = t {
-            need(t.index() < m.types.len(), || "slot of unknown type".into())?;
+            need(t.index() < m.types.len(), || "slot of unknown type".into())
+                .map_err(Error::Invalid)?;
         }
     }
-    let mut ats = Vec::with_capacity(b.addresses.len());
+    let mut ats = Vec::new();
+    scratch.reserve(&mut ats, b.addresses.len())?;
     for (i, a) in b.addresses.iter().enumerate() {
+        scratch.check()?;
         match a.base {
             AddressBase::Slot(s) => {
-                need(s.index() < b.slots.len(), || format!("a{i}: unknown slot"))?
+                need(s.index() < b.slots.len(), || format!("a{i}: unknown slot"))
+                    .map_err(Error::Invalid)?
             }
-            AddressBase::Value(v) => need(c.ty(v)? == Ty::Ptr, || {
+            AddressBase::Value(v) => need(c.ty(v).map_err(Error::Invalid)? == Ty::Ptr, || {
                 format!("a{i}: base is not a pointer")
-            })?,
+            })
+            .map_err(Error::Invalid)?,
             AddressBase::Address(x) => need(x.index() < i, || {
                 format!("a{i}: base address must come first")
-            })?,
+            })
+            .map_err(Error::Invalid)?,
         }
-        places::address(&c, &mut ats, i, a)?;
+        places::address(&c, &mut ats, i, a).map_err(Error::Invalid)?;
     }
     // Entry parameters follow the signature.
     let entry: Vec<Ty> = c
-        .vals(b.blocks[0].params)?
+        .vals(b.blocks[0].params)
+        .map_err(Error::Invalid)?
         .iter()
         .map(|v| c.ty(*v))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(Error::Invalid)?;
     need(entry == entry_params(m, sig), || {
         "entry parameters differ from the signature".into()
-    })?;
+    })
+    .map_err(Error::Invalid)?;
     let mut next = 0u32;
     for (bi, block) in b.blocks.iter().enumerate() {
+        scratch.check()?;
         need(block.insts.start == next, || {
             format!("b{bi}: instructions not contiguous")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         next += block.insts.len;
-        for v in c.vals(block.params)?.to_vec() {
-            c.def(v)?;
+        for v in c.vals(block.params).map_err(Error::Invalid)?.to_vec() {
+            c.def(v).map_err(Error::Invalid)?;
         }
         for inst in block
             .insts
             .get(&b.insts)
-            .ok_or("instructions out of range")?
+            .ok_or_else(|| Error::Invalid("instructions out of range".into()))?
         {
-            inst_wf(&mut c, inst).map_err(|e| format!("b{bi}: {e}"))?;
+            inst_wf(&mut c, inst).map_err(|e| Error::Invalid(format!("b{bi}: {e}")))?;
         }
         // A call of a `never` signature is its block's last instruction, and only
         // `unreachable` follows it. `unreachable` also ends a block the front proves
@@ -497,223 +600,107 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
         need(
             never_at.is_none_or(|i| i + 1 == insts.len() && unreachable),
             || format!("b{bi}: a never call must end its block, before unreachable"),
-        )?;
+        )
+        .map_err(Error::Invalid)?;
         match &b.terminators[bi] {
-            Terminator::Jump(e) => c.edge(*e)?,
+            Terminator::Jump(e) => c.edge(*e).map_err(Error::Invalid)?,
             Terminator::Branch { condition, yes, no } => {
-                need(c.ty(*condition)? == Ty::Scalar(Scalar::Bool), || {
-                    format!("b{bi}: branch on a non-bool")
-                })?;
-                c.edge(*yes)?;
-                c.edge(*no)?;
+                need(
+                    c.ty(*condition).map_err(Error::Invalid)? == Ty::Scalar(Scalar::Bool),
+                    || format!("b{bi}: branch on a non-bool"),
+                )
+                .map_err(Error::Invalid)?;
+                c.edge(*yes).map_err(Error::Invalid)?;
+                c.edge(*no).map_err(Error::Invalid)?;
             }
             Terminator::Switch {
                 value,
                 arms,
                 otherwise,
             } => {
-                need(c.ty(*value)?.int().is_some(), || {
-                    format!("b{bi}: switch on a non-integer")
-                })?;
-                let arms = arms.get(&b.pools.arms).ok_or("arms out of pool")?;
+                need(
+                    c.ty(*value).map_err(Error::Invalid)?.int().is_some(),
+                    || format!("b{bi}: switch on a non-integer"),
+                )
+                .map_err(Error::Invalid)?;
+                let arms = arms
+                    .get(&b.pools.arms)
+                    .ok_or_else(|| Error::Invalid("arms out of pool".into()))?;
                 for (k, a) in arms.iter().enumerate() {
                     need(arms[..k].iter().all(|x| x.value != a.value), || {
                         format!("b{bi}: duplicate arm")
-                    })?;
-                    c.edge(a.edge)?;
+                    })
+                    .map_err(Error::Invalid)?;
+                    c.edge(a.edge).map_err(Error::Invalid)?;
                 }
-                c.edge(*otherwise)?;
+                c.edge(*otherwise).map_err(Error::Invalid)?;
             }
             Terminator::Raise { cause, cleanup } => {
-                c.fail(*cleanup, true)?;
+                c.fail(*cleanup, true).map_err(Error::Invalid)?;
                 match cause {
                     RaiseCause::Fail(a) => {
-                        c.place(*a)?;
+                        c.place(*a).map_err(Error::Invalid)?;
                     }
                     RaiseCause::Capacity {
                         requested,
                         available,
                     } => {
-                        c.is(*requested, Ty::Scalar(Scalar::U64))?;
-                        c.is(*available, Ty::Scalar(Scalar::U64))?;
+                        c.is(*requested, Ty::Scalar(Scalar::U64))
+                            .map_err(Error::Invalid)?;
+                        c.is(*available, Ty::Scalar(Scalar::U64))
+                            .map_err(Error::Invalid)?;
                     }
                     RaiseCause::Unwrap | RaiseCause::Bounds => {}
                 }
             }
             Terminator::Propagate | Terminator::Unreachable => {}
             Terminator::Return(r) => {
-                need(!sig.never, || format!("b{bi}: a never function returns"))?;
+                need(!sig.never, || format!("b{bi}: a never function returns"))
+                    .map_err(Error::Invalid)?;
                 let types: Vec<Ty> = c
-                    .vals(*r)?
+                    .vals(*r)
+                    .map_err(Error::Invalid)?
                     .iter()
                     .map(|v| c.ty(*v))
-                    .collect::<Result<_, _>>()?;
+                    .collect::<Result<_, _>>()
+                    .map_err(Error::Invalid)?;
                 need(types == sig.results, || {
                     format!("b{bi}: return differs from the signature")
-                })?;
+                })
+                .map_err(Error::Invalid)?;
             }
         }
     }
     need(next as usize == b.insts.len(), || {
         "instructions outside every block".into()
-    })?;
+    })
+    .map_err(Error::Invalid)?;
     if let Some(v) = c.defined.iter().position(|n| *n != 1) {
-        return Err(format!("v{v} defined {} times", c.defined[v]));
+        return Err(Error::Invalid(format!(
+            "v{v} defined {} times",
+            c.defined[v]
+        )));
     }
-    no_catch(b)?;
-    available(b)?;
-    frame::obligations(m, b)?;
-    written(m, b)?;
-    own::check(m, sig, b)?;
-    ended(b)
+    drop((c, ats, scratch));
+    no_catch(b, budget)?;
+    available::check(b, budget)?;
+    frame::obligations(m, b, budget)?;
+    written::check(m, b, budget)?;
+    own::check(m, sig, b, budget)?;
+    ended(b, budget)
 }
 
 /// No slot is used where it may have ended: on every path to a use of a slot (an
 /// address based on it, or a pointer this body made from one), its last
 /// `StorageLive` or `StorageDead` is not a `StorageDead` (crate docs, "Values,
 /// slots and addresses").
-fn ended(b: &Body) -> R {
-    match crate::extent::use_after_end(b) {
-        Some(((bi, _), s)) => Err(format!("b{bi}: s{s} is used after its storage ends")),
+fn ended(b: &Body, budget: &Debit<'_>) -> Result<(), Error> {
+    match crate::extent::use_after_end_with_budget(b, budget)? {
+        Some(((bi, _), s)) => Err(Error::Invalid(format!(
+            "b{bi}: s{s} is used after its storage ends"
+        ))),
         None => Ok(()),
     }
-}
-
-/// Every value and address is defined on every path to each of its uses: an
-/// instruction result or block parameter before a value is read, an `address`
-/// instruction before its address is (crate docs, "Values, slots and addresses").
-/// A failure edge leaves before its instruction, so nothing that instruction
-/// defines reaches its failure block. A block the entry does not reach is never
-/// run, and is not checked.
-fn available(b: &Body) -> R {
-    let names = b.values.len() + b.addresses.len();
-    let words = names.div_ceil(64);
-    let blocks = b.blocks.len();
-    type Set = Vec<u64>;
-    let set = |s: &mut Set, k: usize| s[k / 64] |= 1 << (k % 64);
-    let has = |s: &Set, k: usize| s[k / 64] >> (k % 64) & 1 == 1;
-    let operands: Vec<Vec<(Vec<usize>, Vec<usize>)>> = b
-        .blocks
-        .iter()
-        .map(|k| {
-            k.insts
-                .get(&b.insts)
-                .unwrap_or_default()
-                .iter()
-                .map(|i| crate::extent::operands(b, i))
-                .collect()
-        })
-        .collect();
-    let params = |bi: usize| -> Vec<usize> {
-        b.blocks[bi]
-            .params
-            .get(&b.pools.values)
-            .unwrap_or_default()
-            .iter()
-            .map(|v| v.index())
-            .collect()
-    };
-    // The edges out of `bi` from the state at its start: each target with the
-    // names defined on that edge.
-    let out = |bi: usize, start: &Set| -> Vec<(usize, Set)> {
-        let mut now = start.clone();
-        for p in params(bi) {
-            set(&mut now, p);
-        }
-        let mut edges = vec![];
-        let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
-        for (k, i) in insts.iter().enumerate() {
-            if let Some(f) = i.fail(b) {
-                edges.push((f.index(), now.clone()));
-            }
-            for &d in &operands[bi][k].1 {
-                set(&mut now, d);
-            }
-        }
-        let edge = |e: &EdgeId| b.edges[e.index()].target.index();
-        let mut tail = |t: usize| edges.push((t, now.clone()));
-        match &b.terminators[bi] {
-            Terminator::Jump(e) => tail(edge(e)),
-            Terminator::Branch { yes, no, .. } => {
-                tail(edge(yes));
-                tail(edge(no));
-            }
-            Terminator::Switch {
-                arms, otherwise, ..
-            } => {
-                for arm in arms.get(&b.pools.arms).unwrap_or_default() {
-                    tail(edge(&arm.edge));
-                }
-                tail(edge(otherwise));
-            }
-            Terminator::Raise { cleanup, .. } => {
-                if let Some(c) = cleanup {
-                    tail(c.index());
-                }
-            }
-            Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
-        }
-        edges
-    };
-    // Must-availability: a block starts with what every edge into it carries.
-    let mut start: Vec<Option<Set>> = vec![None; blocks];
-    if blocks > 0 {
-        start[0] = Some(vec![0; words]);
-    }
-    let mut work = vec![0usize];
-    while let Some(bi) = work.pop() {
-        let Some(s) = start[bi].clone() else { continue };
-        for (t, carried) in out(bi, &s) {
-            let next = match &start[t] {
-                None => carried,
-                Some(old) => old.iter().zip(&carried).map(|(x, y)| x & y).collect(),
-            };
-            if t == 0 {
-                // The entry is entered once, with nothing defined.
-                continue;
-            }
-            if start[t].as_ref() != Some(&next) {
-                start[t] = Some(next);
-                work.push(t);
-            }
-        }
-    }
-    let name = |k: usize| {
-        if k < b.values.len() {
-            format!("v{k}")
-        } else {
-            format!("a{}", k - b.values.len())
-        }
-    };
-    for bi in 0..blocks {
-        let Some(mut now) = start[bi].clone() else {
-            continue;
-        };
-        for p in params(bi) {
-            set(&mut now, p);
-        }
-        let check = |now: &Set, k: usize| {
-            need(has(now, k), || {
-                format!(
-                    "b{bi}: {} is used on a path that does not define it",
-                    name(k)
-                )
-            })
-        };
-        for (uses, defs) in &operands[bi] {
-            for &u in uses {
-                check(&now, u)?;
-            }
-            for &d in defs {
-                set(&mut now, d);
-            }
-        }
-        let tail = crate::extent::terminator_uses(b, bi);
-        for u in tail {
-            check(&now, u)?;
-        }
-    }
-    Ok(())
 }
 
 /// Whether block `bi` opens with `rt.isolate_catch`: a handler (crate docs,
@@ -744,72 +731,91 @@ fn step_catch(b: &Body, bi: usize) -> Option<ValueId> {
 /// FAIL-14, FAIL-16: no block reachable from a failure block returns normally,
 /// except past a handler, whose catch ends the failure. A catch opens its block,
 /// and only failure edges enter that block.
-fn no_catch(b: &Body) -> R {
+fn no_catch(b: &Body, budget: &Debit<'_>) -> Result<(), Error> {
+    let scratch = budget.scratch();
+    scratch.check()?;
     for bi in 0..b.blocks.len() {
         let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
         need(insts.iter().skip(1).all(|i| !catch(b, i)), || {
             format!("b{bi}: rt.isolate_catch is not the block's first instruction")
-        })?;
+        })
+        .map_err(Error::Invalid)?;
     }
     for e in &b.edges {
         need(!handler(b, e.target.index()), || {
             format!("b{}: a handler entered by an edge", e.target.0)
-        })?;
+        })
+        .map_err(Error::Invalid)?;
     }
     need(b.blocks.is_empty() || !handler(b, 0), || {
         "the entry block is a handler".into()
-    })?;
-    let mut normal = vec![false; b.blocks.len()];
-    let mut ordinary = vec![BlockId(0)];
+    })
+    .map_err(Error::Invalid)?;
+    let mut normal = Vec::new();
+    scratch.reserve(&mut normal, b.blocks.len())?;
+    normal.resize(b.blocks.len(), false);
+    let mut ordinary = Vec::new();
+    scratch.reserve(&mut ordinary, b.blocks.len())?;
+    ordinary.push(BlockId(0));
     while let Some(block) = ordinary.pop() {
+        scratch.check()?;
         if b.blocks.is_empty() || std::mem::replace(&mut normal[block.index()], true) {
             continue;
         }
         need(step_catch(b, block.index()).is_none(), || {
             format!("b{}: a step handler entered normally", block.0)
-        })?;
+        })
+        .map_err(Error::Invalid)?;
         if !matches!(b.terminators[block.index()], Terminator::Raise { .. }) {
-            ordinary.extend(
-                successors_of_terminator(b, block.index())
-                    .into_iter()
-                    .map(|i| BlockId(i as u32)),
-            );
+            let next = successors_of_terminator(b, block.index());
+            scratch.reserve(&mut ordinary, next.len())?;
+            ordinary.extend(next.into_iter().map(|i| BlockId(i as u32)));
         }
     }
-    let mut seen = vec![false; b.blocks.len()];
-    let mut work: Vec<BlockId> = (0..b.blocks.len())
-        .flat_map(|bi| {
-            let raise = match b.terminators[bi] {
-                Terminator::Raise { cleanup, .. } => cleanup,
-                _ => None,
-            };
-            let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
-            insts
-                .iter()
-                .filter_map(|i| i.fail(b))
-                .chain(raise)
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let mut seen = Vec::new();
+    scratch.reserve(&mut seen, b.blocks.len())?;
+    seen.resize(b.blocks.len(), false);
+    let mut work: Vec<BlockId> = Vec::new();
+    for bi in 0..b.blocks.len() {
+        scratch.check()?;
+        let raise = match b.terminators[bi] {
+            Terminator::Raise { cleanup, .. } => cleanup,
+            _ => None,
+        };
+        let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+        for f in insts.iter().filter_map(|i| i.fail(b)).chain(raise) {
+            scratch.reserve(&mut work, 1)?;
+            work.push(f);
+        }
+    }
     while let Some(k) = work.pop() {
+        scratch.check()?;
         if std::mem::replace(&mut seen[k.index()], true) || handler(b, k.index()) {
             continue;
         }
         if let Some(result) = step_catch(b, k.index()) {
             let Terminator::Branch { condition, no, .. } = b.terminators[k.index()] else {
-                return Err(format!("b{}: step catch must branch on its result", k.0));
+                return Err(Error::Invalid(format!(
+                    "b{}: step catch must branch on its result",
+                    k.0
+                )));
             };
             need(condition == result, || {
                 format!("b{}: step catch branches on another value", k.0)
-            })?;
+            })
+            .map_err(Error::Invalid)?;
+            scratch.reserve(&mut work, 1)?;
             work.push(b.edges[no.index()].target);
             continue;
         }
         need(
             !matches!(b.terminators[k.index()], Terminator::Return(_)),
             || format!("failure path reaches the return of b{}", k.0),
-        )?;
-        work.extend(successors(b, k.index()));
+        )
+        .map_err(Error::Invalid)?;
+        let next = successors(b, k.index());
+        scratch.reserve(&mut work, next.len())?;
+        work.extend(next);
     }
     Ok(())
 }
@@ -1437,389 +1443,6 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
 }
 
 pub use crate::without_marks;
-
-/// A place in one of the body's slots, as far as its address names it statically:
-/// the slot and its field, case-field and carrier-word steps, cut at the first
-/// step whose offset is a run-time value (`index`, `element`, `byte`), which then
-/// stands for some part of the place before it.
-type Place = (usize, Vec<(u8, u32, u32)>);
-
-/// What one instruction or terminator does to slot contents, as [`written`]
-/// reads it: the places it reads, the places it writes (on its normal edge
-/// only), the slots whose contents end or begin unwritten, and the slots it
-/// lets escape behind a pointer.
-#[derive(Default)]
-struct Touch {
-    reads: Vec<Place>,
-    writes: Vec<Place>,
-    resets: Vec<usize>,
-}
-
-/// Resolve address `a` to the slot place it names, with the places its
-/// evaluation reads (each `deref` step reads the pointer stored before it).
-fn place_of(b: &Body, a: AddressId, reads: &mut Vec<Place>) -> Option<Place> {
-    let info = b.addresses.get(a.index())?;
-    let mut at = match info.base {
-        AddressBase::Slot(s) => Some((s.index(), vec![])),
-        AddressBase::Value(_) => None,
-        AddressBase::Address(x) => place_of(b, x, reads),
-    };
-    let mut cut = false;
-    for s in info.steps.get(&b.pools.steps).unwrap_or_default() {
-        let Some(p) = at.as_mut() else { break };
-        match *s {
-            Step::Deref => {
-                reads.push(p.clone());
-                at = None;
-            }
-            _ if cut => {}
-            Step::Field(f) => p.1.push((0, f, 0)),
-            Step::CaseField { case, field } => p.1.push((1, case, field)),
-            Step::Seq(w) => p.1.push((2, w as u32, 0)),
-            Step::Index(_) | Step::Element(_) | Step::Byte(_) => cut = true,
-        }
-    }
-    at
-}
-/// Whether a place of this type has no bytes (`()`, a record of such fields): a
-/// read of it reads nothing, so it needs no write.
-fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
-    fn field(m: &Module, f: &hirsel_core_layout::FieldTy) -> bool {
-        use hirsel_core_layout::FieldTy as F;
-        match f {
-            F::Inline(r) => record(m, r.index()),
-            F::Array(x, n) => *n == 0 || field(m, x),
-            _ => false,
-        }
-    }
-    fn record(m: &Module, t: usize) -> bool {
-        m.types.get(t).is_some_and(|t| match &t.body {
-            hirsel_core_layout::Body::Record(f) => f.iter().all(|f| field(m, &f.ty)),
-            hirsel_core_layout::Body::Variant(_) => false,
-        })
-    }
-    match ty {
-        PlaceTy::Declared(t) => record(m, t.index()),
-        PlaceTy::Value(_) => false,
-    }
-}
-fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
-    let mut t = Touch::default();
-    let read = |t: &mut Touch, a: AddressId| {
-        let mut r = vec![];
-        let p = place_of(b, a, &mut r);
-        t.reads.extend(r);
-        p
-    };
-    // The place `a` names, as something read: none when it has no bytes.
-    let bytes = |a: AddressId, p: Option<Place>| {
-        p.filter(|_| {
-            !b.addresses
-                .get(a.index())
-                .is_some_and(|i| no_bytes(m, i.ty))
-        })
-    };
-    match *i {
-        Inst::Address { address, .. } => {
-            read(&mut t, address);
-        }
-        Inst::Read { address, .. } | Inst::Case { address, .. } | Inst::Drop { address, .. } => {
-            let p = read(&mut t, address);
-            t.reads.extend(bytes(address, p));
-        }
-        Inst::Store { address, .. }
-        | Inst::SetCase { address, .. }
-        | Inst::PutLanes { to: address, .. } => {
-            let p = read(&mut t, address);
-            t.writes.extend(p);
-        }
-        Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
-            let p = read(&mut t, from);
-            t.reads.extend(bytes(from, p));
-            let p = read(&mut t, to);
-            t.writes.extend(p);
-        }
-        Inst::Grow { carrier, .. } => {
-            let p = read(&mut t, carrier);
-            t.reads.extend(p.clone());
-            t.writes.extend(p);
-        }
-        // Whatever reads or writes the place through the pointer is out of
-        // sight: the whole slot counts as written from here on.
-        Inst::Pointer { address, .. } => {
-            if let Some((s, _)) = read(&mut t, address) {
-                t.writes.push((s, vec![]));
-            }
-        }
-        Inst::StorageLive { slot } | Inst::StorageDead { slot } => t.resets.push(slot.index()),
-        Inst::Call { call } => {
-            let Some(site) = b.calls.get(call.index()) else {
-                return t;
-            };
-            let Some(sig) = m.signatures.get(site.signature.index()) else {
-                return t;
-            };
-            let args = site.args.get(&b.pools.args).unwrap_or_default();
-            let dest = usize::from(sig.dest.is_some());
-            for (k, arg) in args.iter().enumerate() {
-                let Arg::Address(a) = *arg else { continue };
-                let p = read(&mut t, a);
-                if k < dest {
-                    t.writes.extend(p);
-                    continue;
-                }
-                match sig.params.get(k - dest) {
-                    // A `mut` place may be an out-place the callee fills
-                    // (`rt.join`'s result, a receive's item).
-                    Some(Param::Address {
-                        loan: Loan::Mut, ..
-                    }) => t.writes.extend(p),
-                    _ => t.reads.extend(bytes(a, p)),
-                }
-            }
-        }
-        _ => {}
-    }
-    t
-}
-/// Every reachable read of a slot's contents follows, on every path to it from the
-/// entry, a write that overlaps the place read (crate docs, "Values, slots and
-/// addresses"). Writes are a store, copy, `set_case`, `grow`, a call's destination
-/// or `mut` argument (which may be an out-place the callee fills, so it is not a
-/// read), and a `pointer` to the slot (after which writes are out of sight).
-/// Reads are `read`, `case`, `drop`, a copy's source, a `grow`'s carrier, a `view`
-/// or `take` argument, a `deref` step and a `raise fail` cause; a place with no
-/// bytes is never read. A `storage_live` or `storage_dead` leaves the slot
-/// unwritten. Places are compared by their static steps: a write overlaps a read
-/// when one's steps are a prefix of the other's.
-///
-/// A drop flag is how the IR says a place is written on some paths only: a `bool`
-/// slot that is stored `true` only where a place is written on every path to the
-/// store guards that place, and the `yes` edge of a branch on a read of the flag
-/// carries the place as written.
-fn written(m: &Module, b: &Body) -> R {
-    let blocks = b.blocks.len();
-    let insts = |bi: usize| b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
-    let touches: Vec<Vec<Touch>> = (0..blocks)
-        .map(|bi| insts(bi).iter().map(|i| touch(m, b, i)).collect())
-        .collect();
-    // Places are interned per body; a state is the set of places written on every path.
-    let mut ids: std::collections::HashMap<Place, usize> = Default::default();
-    let mut all: Vec<Place> = vec![];
-    for t in touches.iter().flatten() {
-        for p in t.reads.iter().chain(&t.writes) {
-            ids.entry(p.clone()).or_insert_with(|| {
-                all.push(p.clone());
-                all.len() - 1
-            });
-        }
-    }
-    let mut by_slot: Vec<Vec<usize>> = vec![vec![]; b.slots.len()];
-    for (k, p) in all.iter().enumerate() {
-        if let Some(v) = by_slot.get_mut(p.0) {
-            v.push(k);
-        }
-    }
-    let words = all.len().div_ceil(64).max(1);
-    type Set = Vec<u64>;
-    let has = |s: &Set, k: usize| s[k / 64] >> (k % 64) & 1 == 1;
-    let apply = |now: &mut Set, t: &Touch| {
-        for &s in &t.resets {
-            for &k in by_slot.get(s).map_or(&[][..], |v| v) {
-                now[k / 64] &= !(1 << (k % 64));
-            }
-        }
-        for p in &t.writes {
-            let k = ids[p];
-            now[k / 64] |= 1 << (k % 64);
-        }
-    };
-    let covered = |now: &Set, p: &Place| {
-        by_slot.get(p.0).is_some_and(|ks| {
-            ks.iter()
-                .any(|&k| has(now, k) && (all[k].1.starts_with(&p.1) || p.1.starts_with(&all[k].1)))
-        })
-    };
-    // Drop flags: whole `bool` slots, the reads of them, and the constants stored.
-    let is_flag = |a: AddressId| {
-        b.addresses
-            .get(a.index())
-            .is_some_and(|i| i.ty == PlaceTy::Value(Ty::Scalar(hirsel_core_layout::Scalar::Bool)))
-    };
-    let whole = |a: AddressId| {
-        place_of(b, a, &mut vec![])
-            .filter(|p| p.1.is_empty() && is_flag(a))
-            .map(|p| p.0)
-    };
-    let mut flag_of: std::collections::HashMap<usize, usize> = Default::default();
-    let mut consts: std::collections::HashMap<usize, u64> = Default::default();
-    for i in b.insts.iter() {
-        match *i {
-            Inst::Read {
-                result, address, ..
-            } => {
-                if let Some(f) = whole(address) {
-                    flag_of.insert(result.index(), f);
-                }
-            }
-            Inst::Const { result, bits } => {
-                consts.insert(result.index(), bits);
-            }
-            _ => {}
-        }
-    }
-    // A guard per flag slot: None is "every place" (not yet narrowed), the start of
-    // the greatest fixpoint.
-    let mut guards: Vec<Option<Set>> = vec![None; b.slots.len()];
-    let solve = |guards: &Vec<Option<Set>>| -> Vec<Option<Set>> {
-        let out = |bi: usize, start: &Set| -> Vec<(usize, Set)> {
-            let mut now = start.clone();
-            let mut edges = vec![];
-            for (k, i) in insts(bi).iter().enumerate() {
-                if let Some(f) = i.fail(b) {
-                    edges.push((f.index(), now.clone()));
-                }
-                apply(&mut now, &touches[bi][k]);
-            }
-            let edge = |e: &EdgeId| b.edges[e.index()].target.index();
-            if let Terminator::Branch { condition, yes, no } = &b.terminators[bi] {
-                let mut taken = now.clone();
-                if let Some(&f) = flag_of.get(&condition.index()) {
-                    match &guards[f] {
-                        None => taken.iter_mut().for_each(|w| *w = !0),
-                        Some(g) => taken.iter_mut().zip(g).for_each(|(w, g)| *w |= g),
-                    }
-                }
-                edges.push((edge(yes), taken));
-                edges.push((edge(no), now));
-            } else {
-                for t in successors_of_terminator(b, bi) {
-                    edges.push((t, now.clone()));
-                }
-            }
-            edges
-        };
-        let mut start: Vec<Option<Set>> = vec![None; blocks];
-        if blocks > 0 {
-            start[0] = Some(vec![0; words]);
-        }
-        let mut work = vec![0usize];
-        while let Some(bi) = work.pop() {
-            let Some(s) = start[bi].clone() else { continue };
-            for (t, carried) in out(bi, &s) {
-                if t == 0 {
-                    continue;
-                }
-                let next = match &start[t] {
-                    None => carried,
-                    Some(old) => old.iter().zip(&carried).map(|(x, y)| x & y).collect(),
-                };
-                if start[t].as_ref() != Some(&next) {
-                    start[t] = Some(next);
-                    work.push(t);
-                }
-            }
-        }
-        start
-    };
-    let branches_on_flags = b.terminators.iter().any(|t| {
-        matches!(t, Terminator::Branch { condition, .. } if flag_of.contains_key(&condition.index()))
-    });
-    let start = loop {
-        let start = solve(&guards);
-        if !branches_on_flags {
-            break start;
-        }
-        // Narrow each flag's guard to what is written wherever it is set.
-        let mut next: Vec<Option<Set>> = vec![None; b.slots.len()];
-        let mut meet = |f: usize, s: Set| {
-            next[f] = Some(match next[f].take() {
-                None => s,
-                Some(o) => o.iter().zip(&s).map(|(x, y)| x & y).collect(),
-            })
-        };
-        for bi in 0..blocks {
-            let Some(mut now) = start[bi].clone() else {
-                continue;
-            };
-            for (k, i) in insts(bi).iter().enumerate() {
-                match *i {
-                    Inst::Store { address, value } => {
-                        if let Some(f) = whole(address) {
-                            match consts.get(&value.index()) {
-                                Some(0) => {}
-                                Some(_) => meet(f, now.clone()),
-                                None => meet(f, vec![0; words]),
-                            }
-                        }
-                    }
-                    _ => {
-                        for p in &touches[bi][k].writes {
-                            if p.1.is_empty()
-                                && guards.get(p.0).is_some()
-                                && own::is_flag_slot(b, p.0)
-                            {
-                                meet(p.0, vec![0; words]);
-                            }
-                        }
-                    }
-                }
-                apply(&mut now, &touches[bi][k]);
-            }
-        }
-        // A flag never set true guards nothing it could need.
-        let next: Vec<Option<Set>> = next
-            .into_iter()
-            .map(|g| Some(g.unwrap_or_else(|| vec![0; words])))
-            .collect();
-        if next == guards {
-            break start;
-        }
-        guards = next;
-    };
-    let show = |p: &Place| {
-        let mut s = format!("s{}", p.0);
-        for &(k, x, y) in &p.1 {
-            match k {
-                0 => s += &format!(".{x}"),
-                1 => s += &format!(".case{x}.{y}"),
-                _ => s += &format!(".seq{x}"),
-            }
-        }
-        s
-    };
-    for bi in 0..blocks {
-        let Some(mut now) = start[bi].clone() else {
-            continue;
-        };
-        let check = |now: &Set, p: &Place| {
-            need(covered(now, p), || {
-                format!(
-                    "b{bi}: {} is read on a path that does not write it",
-                    show(p)
-                )
-            })
-        };
-        for t in &touches[bi] {
-            for p in &t.reads {
-                check(&now, p)?;
-            }
-            apply(&mut now, t);
-        }
-        if let Terminator::Raise {
-            cause: RaiseCause::Fail(a),
-            ..
-        } = b.terminators[bi]
-        {
-            let mut r = vec![];
-            let p = place_of(b, a, &mut r);
-            for p in r.iter().chain(&p) {
-                check(&now, p)?;
-            }
-        }
-    }
-    Ok(())
-}
 
 /// The blocks `bi`'s terminator continues to.
 fn successors_of_terminator(b: &Body, bi: usize) -> Vec<usize> {

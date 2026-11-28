@@ -41,185 +41,19 @@
 //! A drop or use of a place overlapping (one's steps a prefix of the other's) a
 //! place that may be dropped is an error naming both.
 
+use super::own_names::{Names, Pl, covers, local_owned_slots, names, overlap, ptr_args};
+pub(super) use super::own_names::{anchors, is_flag_slot};
 use super::*;
-
-type Steps = Vec<(u8, u32, u32)>;
-
-/// A root and its static steps; `cut` when a run-time offset stands for some part
-/// of the place before it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Pl {
-    root: usize,
-    steps: Steps,
-    cut: bool,
-}
-
-/// No loop of `pointer` and block parameters grows a place's steps past this.
-const DEEP: usize = 16;
-
-fn step(p: &mut Pl, s: &Step) -> bool {
-    match *s {
-        Step::Deref => return false,
-        _ if p.cut => {}
-        _ if p.steps.len() >= DEEP => p.cut = true,
-        Step::Field(f) => p.steps.push((0, f, 0)),
-        Step::CaseField { case, field } => p.steps.push((1, case, field)),
-        Step::Seq(w) => p.steps.push((2, w as u32, 0)),
-        Step::Index(_) | Step::Element(_) | Step::Byte(_) => p.cut = true,
-    }
-    true
-}
-
-fn overlap(a: &Pl, b: &Pl) -> bool {
-    a.root == b.root && (a.steps.starts_with(&b.steps) || b.steps.starts_with(&a.steps))
-}
-
-/// What each address and value names, and the places an address's `deref` steps
-/// read.
-struct Names {
-    addrs: Vec<Vec<Pl>>,
-    derefs: Vec<Vec<Pl>>,
-    vals: Vec<Vec<Pl>>,
-}
-
-/// Spread `vals` (and, when `slots`, the slots) through `pointer`s, addresses and,
-/// along `edges` (argument, parameter), block parameters, to a fixpoint.
-fn spread(b: &Body, mut vals: Vec<Vec<Pl>>, slots: bool, edges: &[(usize, usize)]) -> Names {
-    let mut addrs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
-    let mut derefs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
-    let pointers: Vec<(usize, usize)> = b
-        .insts
-        .iter()
-        .filter_map(|i| match *i {
-            Inst::Pointer { result, address } => Some((result.index(), address.index())),
-            _ => None,
-        })
-        .collect();
-    let union = |to: &mut Vec<Pl>, from: &[Pl]| {
-        let mut grew = false;
-        for p in from {
-            if !to.contains(p) {
-                to.push(p.clone());
-                grew = true;
-            }
-        }
-        grew
-    };
-    loop {
-        let mut grew = false;
-        for (i, info) in b.addresses.iter().enumerate() {
-            let base = match info.base {
-                AddressBase::Slot(s) if slots => vec![Pl {
-                    root: s.index(),
-                    steps: vec![],
-                    cut: false,
-                }],
-                AddressBase::Slot(_) => vec![],
-                AddressBase::Address(x) => addrs[x.index()].clone(),
-                AddressBase::Value(v) => vals[v.index()].clone(),
-            };
-            let steps = info.steps.get(&b.pools.steps).unwrap_or_default();
-            let mut out = vec![];
-            let mut read = vec![];
-            for mut p in base {
-                let mut whole = true;
-                for s in steps {
-                    if !step(&mut p, s) {
-                        read.push(p.clone());
-                        whole = false;
-                        break;
-                    }
-                }
-                if whole {
-                    out.push(p);
-                }
-            }
-            grew |= union(&mut addrs[i], &out);
-            union(&mut derefs[i], &read);
-        }
-        for &(v, a) in &pointers {
-            let from = addrs[a].clone();
-            grew |= union(&mut vals[v], &from);
-        }
-        for &(a, p) in edges {
-            let from = vals[a].clone();
-            grew |= union(&mut vals[p], &from);
-        }
-        if !grew {
-            return Names {
-                addrs,
-                derefs,
-                vals,
-            };
-        }
-    }
-}
-
-/// The places of `entry`'s values and of the body's slots, and the joins: each
-/// pointer block parameter whose edges carry more than one place gets a root of
-/// its own (after the slots and entry values), what it points at on the path
-/// taken, so that a drop through it is strong and its state follows its edge.
-fn names(b: &Body, entry: &[ValueId]) -> (Names, Names, Vec<usize>) {
-    let slots = b.slots.len();
-    let mut vals: Vec<Vec<Pl>> = vec![vec![]; b.values.len()];
-    for (k, v) in entry.iter().enumerate() {
-        vals[v.index()].push(Pl {
-            root: slots + k,
-            steps: vec![],
-            cut: false,
-        });
-    }
-    let edges: Vec<(usize, usize)> = b
-        .edges
-        .iter()
-        .flat_map(|e| ptr_args(b, e))
-        .map(|(a, p)| (a.index(), p.index()))
-        .collect();
-    let under = spread(b, vals, true, &edges);
-    let joins: Vec<usize> = b
-        .blocks
-        .iter()
-        .skip(1)
-        .flat_map(|k| k.params.get(&b.pools.values).unwrap_or_default())
-        .map(|p| p.index())
-        .filter(|&p| b.values[p] == Ty::Ptr && under.vals[p].len() > 1)
-        .collect();
-    let mut seed: Vec<Vec<Pl>> = vec![vec![]; b.values.len()];
-    for (k, &p) in joins.iter().enumerate() {
-        seed[p].push(Pl {
-            root: slots + entry.len() + k,
-            steps: vec![],
-            cut: false,
-        });
-    }
-    // An edge into a join's parameter carries no join: every parameter an edge
-    // gives a join's pointer to is itself a join, seeded above.
-    let joined = spread(b, seed, false, &[]);
-    (under, joined, joins)
-}
-
-/// An edge's pointer arguments and the target's parameters they bind.
-fn ptr_args(b: &Body, e: &Edge) -> Vec<(ValueId, ValueId)> {
-    let params = b.blocks[e.target.index()]
-        .params
-        .get(&b.pools.values)
-        .unwrap_or_default();
-    let args = e.args.get(&b.pools.values).unwrap_or_default();
-    args.iter()
-        .zip(params)
-        .filter(|(_, p)| b.values[p.index()] == Ty::Ptr)
-        .map(|(a, p)| (*a, *p))
-        .collect()
-}
+use crate::decode::Debit;
 
 const ZT: u8 = 1;
 const ZF: u8 = 2;
 const DT: u8 = 4;
 const DF: u8 = 8;
-const T: u8 = ZT | DT;
-const F: u8 = ZF | DF;
+pub(super) const T: u8 = ZT | DT;
+pub(super) const F: u8 = ZF | DF;
 const D: u8 = DT | DF;
-const Z: u8 = ZT | ZF;
+pub(super) const Z: u8 = ZT | ZF;
 
 fn halves(s: u8) -> (bool, bool) {
     (s & T != 0, s & F != 0)
@@ -244,26 +78,33 @@ fn flag(s: u8, value: Option<bool>) -> u8 {
 }
 
 /// What an instruction does to the tracked places, by address.
-enum Act {
+pub(super) enum Act {
     Use(AddressId),
     Drop(AddressId),
     Write(AddressId),
+    /// A copy/move into `dest` from `from`: propagates an active local borrow.
+    CopyToDest(AddressId),
     Begin(usize),
+    Dead(usize),
     Flag(usize, Option<bool>),
+    /// A branch-used read of a drop flag is fresh right after this `Read`.
+    Fresh(usize),
     /// A call has begun borrow `k`: its dest now views its anchors.
     Lend(usize),
 }
 
-struct Own<'a> {
-    b: &'a Body,
-    n: Names,
+pub(super) struct Own<'a> {
+    pub(super) b: &'a Body,
+    pub(super) n: Names,
     /// What addresses reached through a join name, by the join's root.
     j: Names,
     /// Per address: whether it reaches its places through a join.
     routed: Vec<bool>,
-    slots: usize,
+    pub(super) slots: usize,
     /// The first join root: the slots, then the entry values.
     roots: usize,
+    /// Whether this function's signature has a `dest` (entry parameter 0, root `slots`).
+    pub(super) has_dest: bool,
     /// Per join: its parameter's value index.
     joins: Vec<usize>,
     /// Entry values that are `view` parameters' pointers, by entry index.
@@ -283,17 +124,30 @@ struct Own<'a> {
     binds: Vec<Vec<(usize, usize, usize)>>,
     /// Per borrow (a call with a dest view): its dest's tracked places.
     borrows: Vec<Vec<usize>>,
+    /// Per borrow: whether its anchors include a local slot, and whether its dest includes `dest`.
+    borrow_from_local: Vec<bool>,
+    borrow_to_dest: Vec<bool>,
+    /// Per local slot: borrows anchored on it (invalidated on `StorageLive` / `StorageDead`).
+    anchor_slots: Vec<Vec<usize>>,
     /// Per call: its borrow.
     lends: std::collections::HashMap<usize, usize>,
     /// Per tracked place: the borrows anchored on it, and those whose dest it is.
     lent: Vec<Vec<usize>>,
     held: Vec<Vec<usize>>,
     /// The state index of borrow 0's bit: whether it may be in force.
-    base: usize,
+    pub(super) base: usize,
+    /// The state index of flag-read 0's stale bit (`0` = fresh, `1` = may be stale).
+    pub(super) stale_base: usize,
+    /// The state index of the `dest` local-borrow escape bit.
+    pub(super) dest_escaped: usize,
     /// Per flag slot: the pairings it guards.
-    guards: std::collections::HashMap<usize, Vec<usize>>,
-    /// Read results of whole flag slots.
-    flag_of: std::collections::HashMap<usize, usize>,
+    pub(super) guards: std::collections::HashMap<usize, Vec<usize>>,
+    /// Branch-used read results of whole unescaped flag slots.
+    pub(super) flag_of: std::collections::HashMap<usize, usize>,
+    /// Branch-used flag read value index -> index in `0..flag_reads`.
+    pub(super) read_idx: std::collections::HashMap<usize, usize>,
+    /// Per flag slot: indices in `0..flag_reads` that read it.
+    reads_of_flag: std::collections::HashMap<usize, Vec<usize>>,
     consts: std::collections::HashMap<usize, u64>,
 }
 
@@ -326,7 +180,7 @@ impl Own<'_> {
             _ => None,
         }
     }
-    fn acts(&self, m: &Module, i: &Inst, out: &mut Vec<Act>) {
+    pub(super) fn acts(&self, m: &Module, i: &Inst, out: &mut Vec<Act>) {
         out.clear();
         match *i {
             Inst::Address { address, .. } => {
@@ -334,7 +188,15 @@ impl Own<'_> {
                     out.push(Act::Use(address));
                 }
             }
-            Inst::Read { address, .. } | Inst::Case { address, .. } => out.push(Act::Use(address)),
+            Inst::Read {
+                result, address, ..
+            } => {
+                out.push(Act::Use(address));
+                if let Some(&ri) = self.read_idx.get(&result.index()) {
+                    out.push(Act::Fresh(ri));
+                }
+            }
+            Inst::Case { address, .. } => out.push(Act::Use(address)),
             Inst::Drop { address, .. } => out.push(Act::Drop(address)),
             Inst::Store { address, value } => match self.whole_flag(address) {
                 Some(f) => out.push(Act::Flag(
@@ -349,11 +211,28 @@ impl Own<'_> {
             Inst::Copy { to, from, .. } | Inst::Move { to, from, .. } => {
                 out.push(Act::Use(from));
                 out.push(Act::Write(to));
+                if self.has_dest
+                    && self.n.addrs[to.index()]
+                        .iter()
+                        .any(|p| p.root == self.slots)
+                {
+                    out.push(Act::CopyToDest(from));
+                }
             }
             Inst::Grow { carrier, .. } => out.push(Act::Use(carrier)),
-            Inst::StorageLive { slot } | Inst::StorageDead { slot } => {
+            Inst::StorageLive { slot } => {
                 out.push(Act::Begin(slot.index()));
-                if self.guards.contains_key(&slot.index()) {
+                if self.guards.contains_key(&slot.index())
+                    || self.reads_of_flag.contains_key(&slot.index())
+                {
+                    out.push(Act::Flag(slot.index(), None));
+                }
+            }
+            Inst::StorageDead { slot } => {
+                out.push(Act::Dead(slot.index()));
+                if self.guards.contains_key(&slot.index())
+                    || self.reads_of_flag.contains_key(&slot.index())
+                {
                     out.push(Act::Flag(slot.index(), None));
                 }
             }
@@ -382,8 +261,14 @@ impl Own<'_> {
     fn may_drop(&self, now: &[u8], q: usize) -> bool {
         self.pairs[q].iter().all(|&p| now[p] & D != 0)
     }
+    pub(super) fn dest_may_be_dropped(&self, now: &[u8]) -> bool {
+        self.tracked
+            .iter()
+            .enumerate()
+            .any(|(q, t)| t.root == self.slots && self.may_drop(now, q))
+    }
     /// Apply `act`, checking it first when `check`.
-    fn apply(&self, now: &mut [u8], act: &Act, check: bool) -> R {
+    pub(super) fn apply(&self, m: &Module, now: &mut [u8], act: &Act, check: bool) -> R {
         match *act {
             Act::Use(a) => {
                 if check {
@@ -452,6 +337,22 @@ impl Own<'_> {
                 }
             }
             Act::Write(a) => {
+                // Any non-`store` write (copy/move/set_case/mut-arg/partial store) that may
+                // touch a drop-flag slot invalidates its tracked value and marks its reads stale.
+                for r in &self.n.addrs[a.index()] {
+                    if r.root < self.slots {
+                        if let Some(ps) = self.guards.get(&r.root) {
+                            for &p in ps {
+                                now[p] = flag(now[p], None);
+                            }
+                        }
+                        if let Some(ris) = self.reads_of_flag.get(&r.root) {
+                            for &ri in ris {
+                                now[self.stale_base + ri] = 1;
+                            }
+                        }
+                    }
+                }
                 let places = if self.routed[a.index()] {
                     &self.j.addrs[a.index()]
                 } else {
@@ -460,16 +361,33 @@ impl Own<'_> {
                 if let [r] = places.as_slice()
                     && !r.cut
                 {
+                    if self.has_dest && r.root == self.slots && r.steps.is_empty() {
+                        now[self.dest_escaped] = 0;
+                    }
                     for &q in &self.hits[a.index()] {
-                        self.end(now, q);
-                        self.mark(now, q, begun, true);
-                        for &t in &self.shadow[q] {
-                            self.mark(now, t, begun, false);
+                        if covers(m, self.b, r, &self.tracked[q]) {
+                            self.end(now, q);
+                            self.mark(now, q, begun, true);
+                            for &t in &self.shadow[q] {
+                                self.mark(now, t, begun, false);
+                            }
                         }
                     }
                 }
             }
+            Act::CopyToDest(from) => {
+                for &q in &self.hits[from.index()] {
+                    if self.held[q]
+                        .iter()
+                        .any(|&k| self.borrow_from_local[k] && now[self.base + k] != 0)
+                    {
+                        now[self.dest_escaped] = 1;
+                        break;
+                    }
+                }
+            }
             Act::Begin(s) => {
+                self.invalidate_slot_borrows(now, s);
                 for (q, t) in self.tracked.iter().enumerate() {
                     if t.root == s {
                         self.end(now, q);
@@ -480,14 +398,49 @@ impl Own<'_> {
                     }
                 }
             }
-            Act::Lend(k) => now[self.base + k] = 1,
+            Act::Dead(s) => {
+                self.invalidate_slot_borrows(now, s);
+                for (q, t) in self.tracked.iter().enumerate() {
+                    if t.root == s {
+                        self.end(now, q);
+                        self.mark(now, q, begun, true);
+                        for &t in &self.shadow[q] {
+                            self.mark(now, t, begun, false);
+                        }
+                    }
+                }
+            }
+            Act::Lend(k) => {
+                now[self.base + k] = 1;
+                if self.borrow_to_dest[k] && self.borrow_from_local[k] {
+                    now[self.dest_escaped] = 1;
+                }
+            }
             Act::Flag(f, value) => {
                 for &p in self.guards.get(&f).map_or(&[][..], |v| v) {
                     now[p] = flag(now[p], value);
                 }
+                if let Some(ris) = self.reads_of_flag.get(&f) {
+                    for &ri in ris {
+                        now[self.stale_base + ri] = 1;
+                    }
+                }
+            }
+            Act::Fresh(ri) => {
+                now[self.stale_base + ri] = 0;
             }
         }
         Ok(())
+    }
+    /// Any view anchored on local slot `s` dangles once `s`'s storage ends or restarts.
+    fn invalidate_slot_borrows(&self, now: &mut [u8], s: usize) {
+        for &k in &self.anchor_slots[s] {
+            if now[self.base + k] != 0 {
+                for &d in &self.borrows[k] {
+                    self.drop(now, d, false, &mut vec![]);
+                }
+            }
+        }
     }
     /// Drop place `q`, and so the dest of every borrow of it in force (OWN-20): a
     /// view dangles once its anchor is dropped.
@@ -548,7 +501,7 @@ impl Own<'_> {
     }
     /// Edge `e` binds each join parameter's places to what its argument names on
     /// this path: each tracked join place takes the state of the places it is now.
-    fn transfer(&self, now: &mut [u8], e: EdgeId) {
+    pub(super) fn transfer(&self, now: &mut [u8], e: EdgeId) {
         let mut set = vec![];
         let mut bind = vec![];
         for (a, p) in ptr_args(self.b, &self.b.edges[e.index()]) {
@@ -629,14 +582,24 @@ impl Own<'_> {
     }
 }
 
-pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
+pub(super) fn check(
+    m: &Module,
+    sig: &Signature,
+    b: &Body,
+    budget: &Debit<'_>,
+) -> Result<(), Error> {
+    let scratch = budget.scratch();
+    scratch.check()?;
     let entry = b
         .blocks
         .first()
         .and_then(|k| k.params.get(&b.pools.values))
         .unwrap_or_default();
-    let skip = usize::from(sig.dest.is_some());
-    let mut views = vec![false; entry.len()];
+    let has_dest = sig.dest.is_some();
+    let skip = usize::from(has_dest);
+    let mut views = Vec::new();
+    scratch.reserve(&mut views, entry.len())?;
+    views.resize(entry.len(), false);
     for (k, p) in sig.params.iter().enumerate() {
         if let (
             Param::Address {
@@ -648,12 +611,14 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             *v = true;
         }
     }
-    let (n, j, joins) = names(b, entry);
-    let routed: Vec<bool> = (0..b.addresses.len())
-        .map(|a| !j.addrs[a].is_empty() || !j.derefs[a].is_empty())
-        .collect();
+    let (n, j, joins) = names(b, entry, &scratch)?;
+    let mut routed = Vec::new();
+    scratch.reserve(&mut routed, b.addresses.len())?;
+    for a in 0..b.addresses.len() {
+        routed.push(!j.addrs[a].is_empty() || !j.derefs[a].is_empty());
+    }
     // The places some drop may reach, and those a view parameter's drop would.
-    let mut tracked: Vec<Pl> = vec![];
+    let mut tracked: Vec<Pl> = Vec::new();
     let mut any_view_drop = false;
     for i in &b.insts {
         if let Inst::Drop { address, .. } = *i {
@@ -665,6 +630,7 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
                 .chain(&j.addrs[address.index()])
             {
                 if !r.cut && !tracked.contains(r) {
+                    scratch.reserve(&mut tracked, 1)?;
                     tracked.push(r.clone());
                 }
             }
@@ -681,17 +647,17 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             &n.addrs[a]
         }
     };
-    let mut borrows: Vec<(usize, Vec<Pl>, Vec<Pl>)> = vec![];
+    let mut borrows: Vec<(usize, Vec<Pl>, Vec<Pl>)> = Vec::new();
     for i in &b.insts {
         let Inst::Call { call } = *i else { continue };
         let site = &b.calls[call.index()];
-        let sig = &m.signatures[site.signature.index()];
+        let csig = &m.signatures[site.signature.index()];
         let args = site.args.get(&b.pools.args).unwrap_or_default();
-        let (Some(_), Some(Arg::Address(d))) = (sig.dest, args.first()) else {
+        let (Some(_), Some(Arg::Address(d))) = (csig.dest, args.first()) else {
             continue;
         };
         let mut from = vec![];
-        for &k in &sig.anchors {
+        for &k in &csig.anchors {
             if let Some(&Arg::Address(a)) = args.get(1 + k as usize) {
                 from.extend(places(a).iter().cloned());
             }
@@ -702,9 +668,11 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
         let to: Vec<Pl> = places(*d).iter().filter(|p| !p.cut).cloned().collect();
         for p in &to {
             if !tracked.contains(p) {
+                scratch.reserve(&mut tracked, 1)?;
                 tracked.push(p.clone());
             }
         }
+        scratch.reserve(&mut borrows, 1)?;
         borrows.push((call.index(), to, from));
     }
     // A join place stands for each place its parameter's edges carry; one that an
@@ -722,6 +690,7 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             .collect()
     };
     for a in (0..b.addresses.len()).filter(|&a| routed[a]) {
+        scratch.check()?;
         for r in j.addrs[a].iter().chain(&j.derefs[a]) {
             let r = Pl {
                 cut: false,
@@ -729,28 +698,47 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             };
             let under = |x: &Pl| tracked.iter().any(|t| t.root < roots && overlap(x, t));
             if !tracked.contains(&r) && expand(&r).iter().any(under) {
+                scratch.reserve(&mut tracked, 1)?;
                 tracked.push(r);
             }
         }
     }
-    if !dropping && !any_view_drop {
+    let has_slot_return = b.terminators.iter().any(|t| {
+        matches!(t, Terminator::Return(r) if r.get(&b.pools.values).unwrap_or_default().iter().any(|v| {
+            n.vals[v.index()].iter().any(|p| p.root < b.slots.len())
+        }))
+    });
+    if !dropping && !any_view_drop && borrows.is_empty() && !has_slot_return {
         return Ok(());
     }
-    let hits_of = |ps: &[Pl]| -> Vec<usize> {
-        let mut v: Vec<usize> = (0..tracked.len())
+    let mut hits: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut hits, b.addresses.len())?;
+    let mut deref_hits: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut deref_hits, b.addresses.len())?;
+    for a in 0..b.addresses.len() {
+        scratch.check()?;
+        let ps = if routed[a] { &j.addrs[a] } else { &n.addrs[a] };
+        let mut h: Vec<usize> = (0..tracked.len())
             .filter(|&q| ps.iter().any(|p| overlap(p, &tracked[q])))
             .collect();
-        v.dedup();
-        v
-    };
-    let by_route = |under: &[Vec<Pl>], joined: &[Vec<Pl>]| -> Vec<Vec<usize>> {
-        (0..b.addresses.len())
-            .map(|a| hits_of(if routed[a] { &joined[a] } else { &under[a] }))
-            .collect()
-    };
-    let hits = by_route(&n.addrs, &j.addrs);
-    let deref_hits = by_route(&n.derefs, &j.derefs);
-    let mut shadow: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
+        h.dedup();
+        scratch.allocation::<usize>(h.len())?;
+        hits.push(h);
+        let dps = if routed[a] {
+            &j.derefs[a]
+        } else {
+            &n.derefs[a]
+        };
+        let mut dh: Vec<usize> = (0..tracked.len())
+            .filter(|&q| dps.iter().any(|p| overlap(p, &tracked[q])))
+            .collect();
+        dh.dedup();
+        scratch.allocation::<usize>(dh.len())?;
+        deref_hits.push(dh);
+    }
+    let mut shadow: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut shadow, tracked.len())?;
+    shadow.resize_with(tracked.len(), Vec::new);
     for (t, tp) in tracked
         .iter()
         .enumerate()
@@ -759,74 +747,185 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
         for x in expand(tp) {
             for (q, tq) in tracked.iter().enumerate() {
                 if overlap(&x, tq) && !shadow[q].contains(&t) {
+                    scratch.reserve(&mut shadow[q], 1)?;
                     shadow[q].push(t);
                 }
             }
         }
     }
-    let mut lent: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
-    let mut held: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
+    let local_owned = local_owned_slots(m, sig, b, &n, &scratch)?;
+    let mut lent: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut lent, tracked.len())?;
+    lent.resize_with(tracked.len(), Vec::new);
+    let mut held: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut held, tracked.len())?;
+    held.resize_with(tracked.len(), Vec::new);
+    let mut anchor_slots: Vec<Vec<usize>> = Vec::new();
+    scratch.reserve(&mut anchor_slots, b.slots.len())?;
+    anchor_slots.resize_with(b.slots.len(), Vec::new);
+    let mut borrow_from_local = Vec::new();
+    scratch.reserve(&mut borrow_from_local, borrows.len())?;
+    let mut borrow_to_dest = Vec::new();
+    scratch.reserve(&mut borrow_to_dest, borrows.len())?;
     let mut lends = std::collections::HashMap::new();
-    let mut dests = vec![];
+    let mut dests = Vec::new();
+    scratch.reserve(&mut dests, borrows.len())?;
     for (k, (call, to, from)) in borrows.iter().enumerate() {
-        let to: Vec<usize> = to
+        let to_ids: Vec<usize> = to
             .iter()
             .filter_map(|d| tracked.iter().position(|t| t == d))
             .collect();
+        let mut from_local = false;
+        for f in from {
+            if f.root < b.slots.len() {
+                from_local |= local_owned[f.root];
+                if !anchor_slots[f.root].contains(&k) {
+                    scratch.reserve(&mut anchor_slots[f.root], 1)?;
+                    anchor_slots[f.root].push(k);
+                }
+            } else if f.root >= roots {
+                for x in expand(f) {
+                    if x.root < b.slots.len() {
+                        from_local |= local_owned[x.root];
+                        if !anchor_slots[x.root].contains(&k) {
+                            scratch.reserve(&mut anchor_slots[x.root], 1)?;
+                            anchor_slots[x.root].push(k);
+                        }
+                    }
+                }
+            }
+        }
+        let to_dest = has_dest && to.iter().any(|p| p.root == b.slots.len());
+        borrow_from_local.push(from_local);
+        borrow_to_dest.push(to_dest);
         for (q, tq) in tracked.iter().enumerate() {
-            if from.iter().any(|f| overlap(f, tq)) && !to.contains(&q) {
+            if from.iter().any(|f| overlap(f, tq)) && !to_ids.contains(&q) {
+                scratch.reserve(&mut lent[q], 1)?;
                 lent[q].push(k);
             }
         }
-        for &d in &to {
+        for &d in &to_ids {
+            scratch.reserve(&mut held[d], 1)?;
             held[d].push(k);
         }
         lends.insert(*call, k);
-        dests.push(to);
+        scratch.allocation::<usize>(to_ids.len())?;
+        dests.push(to_ids);
     }
+    // A flag slot whose pointer escapes into memory or an untyped call argument
+    // cannot be trusted to guard drops.
+    let mut escaped_flag = Vec::new();
+    scratch.reserve(&mut escaped_flag, b.slots.len())?;
+    escaped_flag.resize(b.slots.len(), false);
+    for i in &b.insts {
+        match *i {
+            Inst::Store { value, .. } => {
+                for p in &n.vals[value.index()] {
+                    if p.root < b.slots.len() {
+                        escaped_flag[p.root] = true;
+                    }
+                }
+            }
+            Inst::Call { call } => {
+                let args = b.calls[call.index()]
+                    .args
+                    .get(&b.pools.args)
+                    .unwrap_or_default();
+                for arg in args {
+                    if let Arg::Value(v) = *arg {
+                        for p in &n.vals[v.index()] {
+                            if p.root < b.slots.len() {
+                                escaped_flag[p.root] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut pairs = Vec::new();
+    scratch.reserve(&mut pairs, tracked.len())?;
+    for q in 0..tracked.len() {
+        pairs.push(vec![q]);
+    }
+    let mut binds = Vec::new();
+    scratch.reserve(&mut binds, shadow.len())?;
+    binds.resize_with(shadow.len(), Vec::new);
     let mut own = Own {
         b,
         j,
         borrows: dests,
+        borrow_from_local,
+        borrow_to_dest,
+        anchor_slots,
         lends,
         lent,
         held,
         base: 0,
+        stale_base: 0,
+        dest_escaped: 0,
         routed,
         roots,
+        has_dest,
         joins,
-        binds: vec![vec![]; shadow.len()],
+        binds,
         shadow,
         slots: b.slots.len(),
         views,
         hits,
         deref_hits,
-        pairs: (0..tracked.len()).map(|q| vec![q]).collect(),
+        pairs,
         tracked,
         n,
         guards: Default::default(),
         flag_of: Default::default(),
+        read_idx: Default::default(),
+        reads_of_flag: Default::default(),
         consts: Default::default(),
     };
+    let mut candidate_reads: std::collections::HashMap<usize, usize> = Default::default();
     for i in &b.insts {
         match *i {
             Inst::Read {
                 result, address, ..
             } => {
-                if let Some(f) = own.whole_flag(address) {
-                    own.flag_of.insert(result.index(), f);
+                if let Some(f) = own.whole_flag(address)
+                    && !escaped_flag[f]
+                {
+                    scratch.allocation::<(usize, usize)>(2)?;
+                    candidate_reads.insert(result.index(), f);
                 }
             }
             Inst::Const { result, bits } => {
+                scratch.allocation::<(usize, u64)>(2)?;
                 own.consts.insert(result.index(), bits);
             }
             _ => {}
+        }
+    }
+    let mut flag_reads_count = 0usize;
+    for t in &b.terminators {
+        if let Terminator::Branch { condition, .. } = *t
+            && let Some(&f) = candidate_reads.get(&condition.index())
+        {
+            if !own.read_idx.contains_key(&condition.index()) {
+                scratch.allocation::<(usize, usize)>(2)?;
+                let ri = flag_reads_count;
+                flag_reads_count += 1;
+                own.read_idx.insert(condition.index(), ri);
+                own.flag_of.insert(condition.index(), f);
+                let list = own.reads_of_flag.entry(f).or_default();
+                scratch.reserve(list, 1)?;
+                list.push(ri);
+            }
         }
     }
     // Pair each place with every flag a branch to one of its drops reads.
     let mut width = own.tracked.len();
     let insts = |bi: usize| b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
     for bi in 0..b.blocks.len() {
+        scratch.check()?;
         let Terminator::Branch { condition, yes, .. } = b.terminators[bi] else {
             continue;
         };
@@ -845,8 +944,11 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
                         .get(&f)
                         .is_some_and(|g| g.iter().any(|p| own.pairs[q].contains(p)));
                     if !paired {
+                        scratch.reserve(&mut own.pairs[q], 1)?;
                         own.pairs[q].push(width);
-                        own.guards.entry(f).or_default().push(width);
+                        let g = own.guards.entry(f).or_default();
+                        scratch.reserve(g, 1)?;
+                        g.push(width);
                         width += 1;
                     }
                 }
@@ -860,11 +962,14 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
     // Pair each pairing of a place with each join that may be it: where the join
     // may be bound to it, under that pairing's flag.
     for q in 0..own.tracked.len() {
+        scratch.check()?;
         for t in own.shadow[q].clone() {
             for p in own.pairs[q].clone() {
                 if let Some(g) = own.guards.values_mut().find(|g| g.contains(&p)) {
+                    scratch.reserve(g, 1)?;
                     g.push(width);
                 }
+                scratch.reserve(&mut own.binds[q], 1)?;
                 own.binds[q].push((t, p, width));
                 width += 1;
             }
@@ -872,128 +977,9 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
     }
     own.base = width;
     width += own.borrows.len();
-    // Forward may-analysis: a block starts with the union of what its edges carry.
-    let blocks = b.blocks.len();
-    let mut start: Vec<Option<Vec<u8>>> = vec![None; blocks];
-    start[0] = Some(vec![Z; width]);
-    let mut work = vec![0usize];
-    let mut acts = vec![];
-    let send = |start: &mut Vec<Option<Vec<u8>>>, work: &mut Vec<usize>, t: usize, s: &[u8]| {
-        let next = match &start[t] {
-            None => s.to_vec(),
-            Some(old) => old.iter().zip(s).map(|(x, y)| x | y).collect(),
-        };
-        if start[t].as_deref() != Some(&next[..]) {
-            start[t] = Some(next);
-            work.push(t);
-        }
-    };
-    let mut flow = |start: &mut Vec<Option<Vec<u8>>>,
-                    check: bool,
-                    bi: usize|
-     -> Result<Vec<(usize, Vec<u8>)>, String> {
-        let mut now = start[bi].clone().unwrap();
-        let mut out = vec![];
-        for i in insts(bi) {
-            own.acts(m, i, &mut acts);
-            let fail = i.fail(b);
-            if let (Some(f), false) = (fail, matches!(i, Inst::Drop { .. })) {
-                out.push((f.index(), now.clone()));
-            }
-            for a in &acts {
-                own.apply(&mut now, a, check)
-                    .map_err(|e| format!("b{bi}: {e}"))?;
-            }
-            if let (Some(f), true) = (fail, matches!(i, Inst::Drop { .. })) {
-                out.push((f.index(), now.clone()));
-            }
-        }
-        let edge = |e: &EdgeId| b.edges[e.index()].target.index();
-        if let Terminator::Branch { condition, yes, no } = &b.terminators[bi]
-            && let Some(f) = own.flag_of.get(&condition.index())
-        {
-            let (mut y, mut n) = (now.clone(), now);
-            for &p in own.guards.get(f).map_or(&[][..], |v| v) {
-                y[p] &= T;
-                n[p] &= F;
-            }
-            own.transfer(&mut y, *yes);
-            own.transfer(&mut n, *no);
-            out.push((edge(yes), y));
-            out.push((edge(no), n));
-        } else {
-            let edges: Vec<EdgeId> = match &b.terminators[bi] {
-                Terminator::Jump(e) => vec![*e],
-                Terminator::Branch { yes, no, .. } => vec![*yes, *no],
-                Terminator::Switch {
-                    arms, otherwise, ..
-                } => arms
-                    .get(&b.pools.arms)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.edge)
-                    .chain([*otherwise])
-                    .collect(),
-                _ => vec![],
-            };
-            if let Terminator::Raise {
-                cause: RaiseCause::Fail(a),
-                ..
-            } = b.terminators[bi]
-            {
-                own.apply(&mut now, &Act::Use(a), check)
-                    .map_err(|e| format!("b{bi}: {e}"))?;
-            }
-            if edges.is_empty() {
-                for t in successors_of_terminator(b, bi) {
-                    out.push((t, now.clone()));
-                }
-            }
-            for e in edges {
-                let mut s = now.clone();
-                own.transfer(&mut s, e);
-                out.push((edge(&e), s));
-            }
-        }
-        Ok(out)
-    };
-    while let Some(bi) = work.pop() {
-        for (t, s) in flow(&mut start, false, bi)? {
-            if t != 0 {
-                send(&mut start, &mut work, t, &s);
-            }
-        }
-    }
-    for bi in 0..blocks {
-        if start[bi].is_some() {
-            flow(&mut start, true, bi)?;
-        }
-    }
-    Ok(())
-}
-
-/// A dest view's anchors (OWN-20) name, ascending, address parameters of a
-/// signature with a `dest`.
-pub(super) fn anchors(s: &Signature) -> R {
-    need(s.anchors.is_empty() || s.dest.is_some(), || {
-        "anchors a result with no dest".into()
-    })?;
-    need(s.anchors.windows(2).all(|w| w[0] < w[1]), || {
-        "anchors are not ascending".into()
-    })?;
-    for &k in &s.anchors {
-        need(
-            matches!(s.params.get(k as usize), Some(Param::Address { .. })),
-            || format!("anchor {k} is not an address parameter"),
-        )?;
-    }
-    Ok(())
-}
-
-/// Whether slot `s` is a `bool` value place (a drop flag's shape).
-pub(super) fn is_flag_slot(b: &Body, s: usize) -> bool {
-    b.slots.get(s)
-        == Some(&PlaceTy::Value(Ty::Scalar(
-            hirsel_core_layout::Scalar::Bool,
-        )))
+    own.stale_base = width;
+    width += flag_reads_count;
+    own.dest_escaped = width;
+    width += usize::from(has_dest);
+    own.solve(m, width, &scratch)
 }

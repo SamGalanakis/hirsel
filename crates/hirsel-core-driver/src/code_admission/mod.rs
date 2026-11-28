@@ -7,6 +7,8 @@ mod exchange;
 #[cfg(test)]
 mod operation_tags;
 mod reservation;
+#[cfg(test)]
+mod wf_laws;
 
 pub use crate::code_store::ObjectKind;
 use crate::code_store::{CodeStore, Object};
@@ -78,6 +80,7 @@ pub enum AdmissionError {
     Limit(Limit),
     MissingRootLimit,
     Disconnected,
+    InvalidCoreIr(String),
     Refused(String),
     RecordingForeign(String),
     Io(io::Error),
@@ -101,6 +104,7 @@ impl fmt::Display for AdmissionError {
                 out.write_str("release requires a root limit (`[program].limit` or `--limit`)")
             }
             Self::Disconnected => out.write_str("admission peer disconnected"),
+            Self::InvalidCoreIr(reason) => write!(out, "InvalidCoreIr({reason})"),
             Self::Refused(reason) | Self::RecordingForeign(reason) => out.write_str(reason),
             Self::Io(error) => error.fmt(out),
         }
@@ -128,6 +132,15 @@ impl From<DecodeError> for AdmissionError {
                 DecodeLimit::Depth => Limit::Nesting,
                 DecodeLimit::Deadline => Limit::Deadline,
             }),
+        }
+    }
+}
+
+impl From<hirsel_core_ir::wf::Error> for AdmissionError {
+    fn from(error: hirsel_core_ir::wf::Error) -> Self {
+        match error {
+            hirsel_core_ir::wf::Error::Invalid(reason) => Self::InvalidCoreIr(reason),
+            hirsel_core_ir::wf::Error::Limit(limit) => Self::from(DecodeError::Limit(limit)),
         }
     }
 }
@@ -464,6 +477,9 @@ fn verify_release(
     })?;
     let mut bodies = bodies;
     bind_constant_slots(&recipe, &groups, &mut bodies, values, budget)?;
+    for body in &bodies {
+        hirsel_core_ir::wf::module_with_budget(&body.decoded.module, &budget.scratch())?;
+    }
     let mut link_archives = crate::foreign_archive::LinkArchives::default();
     if recipe.has_foreign() {
         charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(

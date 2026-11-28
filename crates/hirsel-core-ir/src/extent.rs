@@ -14,8 +14,11 @@
 use crate::*;
 use std::collections::{HashMap, HashSet};
 
+mod budget;
+pub(crate) use budget::use_after_end_with_budget;
 mod operands;
 pub use operands::{operands, terminator_uses};
+pub(crate) use operands::{visit_operands, visit_terminator_uses};
 mod needed;
 pub(crate) use needed::slot_conflicts;
 use needed::{anchored_views, needed_ranges};
@@ -198,14 +201,8 @@ fn predecessors(b: &Body) -> Vec<Vec<Point>> {
 /// The first use of a slot on a path where its last `StorageLive` or
 /// `StorageDead` is a `StorageDead`, as (use point, slot).
 pub(crate) fn use_after_end(b: &Body) -> Option<(Point, usize)> {
-    if !b
-        .insts
-        .iter()
-        .any(|i| matches!(i, Inst::StorageDead { .. }))
-    {
-        return None;
-    }
-    uses_after_end(b, &slots(b), true).into_iter().next()
+    use_after_end_with_budget(b, &crate::decode::Debit::unlimited())
+        .expect("unlimited budget never fails")
 }
 
 /// For each slot used on a path where its last `StorageLive` or `StorageDead` is a

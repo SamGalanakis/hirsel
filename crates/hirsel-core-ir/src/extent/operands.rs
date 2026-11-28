@@ -4,11 +4,34 @@ use super::*;
 /// `values + a`. An `address` instruction defines its address and uses its base and
 /// step operands.
 pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
+    let mut uses = Vec::new();
+    let mut defs = Vec::new();
+    visit_operands(b, i, |u| uses.push(u), |d| defs.push(d));
+    (uses, defs)
+}
+
+struct OperandVisitor<F>(F);
+
+impl<F: FnMut(usize)> OperandVisitor<F> {
+    fn push(&mut self, value: usize) {
+        (self.0)(value);
+    }
+    fn extend(&mut self, values: impl IntoIterator<Item = usize>) {
+        values.into_iter().for_each(&mut self.0);
+    }
+}
+
+pub(crate) fn visit_operands(
+    b: &Body,
+    i: &Inst,
+    used: impl FnMut(usize),
+    defined: impl FnMut(usize),
+) {
     let n = b.values.len();
     let v = |v: ValueId| v.index();
     let a = |a: AddressId| n + a.index();
-    let mut uses = vec![];
-    let mut defs = vec![];
+    let mut uses = OperandVisitor(used);
+    let mut defs = OperandVisitor(defined);
     match *i {
         Inst::Const { result, .. }
         | Inst::LayoutConst { result, .. }
@@ -229,50 +252,60 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             uses.extend([a(address), v(count)])
         }
     }
-    (uses, defs)
 }
 
 /// The names block `bi`'s terminator uses: its condition or scrutinee, its edges'
 /// arguments, its results, a `raise fail` cause's address.
 pub fn terminator_uses(b: &Body, bi: usize) -> Vec<usize> {
-    let vals = |r: PoolRange<ValueId>| -> Vec<usize> {
-        r.get(&b.pools.values)
+    let mut result = Vec::new();
+    visit_terminator_uses(b, bi, |value| result.push(value));
+    result
+}
+
+pub(crate) fn visit_terminator_uses(b: &Body, bi: usize, mut visit: impl FnMut(usize)) {
+    let values = |range: PoolRange<ValueId>| {
+        range
+            .get(&b.pools.values)
             .unwrap_or_default()
             .iter()
             .map(|v| v.index())
-            .collect()
     };
-    let edge_args = |e: &EdgeId| vals(b.edges[e.index()].args);
-    match &b.terminators[bi] {
-        Terminator::Jump(e) => edge_args(e),
-        Terminator::Branch { condition, yes, no } => [condition.index()]
-            .into_iter()
-            .chain(edge_args(yes))
-            .chain(edge_args(no))
-            .collect(),
+    let args = |edge: EdgeId| values(b.edges[edge.index()].args);
+    match b.terminators[bi] {
+        Terminator::Jump(edge) => args(edge).for_each(visit),
+        Terminator::Branch { condition, yes, no } => {
+            visit(condition.index());
+            args(yes).chain(args(no)).for_each(visit);
+        }
         Terminator::Switch {
             value,
             arms,
             otherwise,
-        } => [value.index()]
-            .into_iter()
-            .chain(
-                arms.get(&b.pools.arms)
-                    .unwrap_or_default()
-                    .iter()
-                    .flat_map(|arm| edge_args(&arm.edge)),
-            )
-            .chain(edge_args(otherwise))
-            .collect(),
-        Terminator::Raise { cause, .. } => match cause {
-            RaiseCause::Fail(a) => vec![b.values.len() + a.index()],
-            RaiseCause::Capacity {
-                requested,
-                available,
-            } => vec![requested.index(), available.index()],
-            _ => vec![],
-        },
-        Terminator::Return(r) => vals(*r),
-        Terminator::Propagate | Terminator::Unreachable => vec![],
+        } => {
+            visit(value.index());
+            arms.get(&b.pools.arms)
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|a| args(a.edge))
+                .chain(args(otherwise))
+                .for_each(visit);
+        }
+        Terminator::Raise {
+            cause: RaiseCause::Fail(a),
+            ..
+        } => visit(b.values.len() + a.index()),
+        Terminator::Raise {
+            cause:
+                RaiseCause::Capacity {
+                    requested,
+                    available,
+                },
+            ..
+        } => {
+            visit(requested.index());
+            visit(available.index());
+        }
+        Terminator::Return(range) => values(range).for_each(visit),
+        _ => {}
     }
 }

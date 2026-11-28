@@ -34,6 +34,19 @@ EXTENDS StoreRetention
  * rev 1, no holds, a new incarnation. PUTs issued before it stay in flight.
  * It is one step: the request that creates a head is never in flight, which
  * is the spec's assumption that no copy of it arrives after the head is erased.
+ * The step also folds the write that creates the empty head into the first
+ * publications that follow it.
+ *
+ * An eraser outlives the head it wrote. Recreate moves every applied floor to
+ * stale, tagged with the incarnation of the head that carried it, and
+ * OldErase lets that eraser name any key by the ordinal rule and the survivor
+ * set it computed (history is constant here, so the set is the same). Keys
+ * live in a directory named by the incarnation. An eraser lists and deletes
+ * only in the directory of the head its floor write installed, so an old one
+ * names nothing the current head stores. The sink is the current
+ * incarnation's directory. Older directories hold only garbage and are not
+ * modelled. The model has no index key: a unit whose cursor starts again
+ * stands for an index page whose ordinal starts again.
  *
  * The operator reads the head and samples its clock in separate steps, in
  * either order, and its clock may run ahead of true time by Skew. A PUT
@@ -50,10 +63,13 @@ EXTENDS StoreRetention
  *   "preview_no_incarnation" a head carries no incarnation, so a recreated
  *                            head repeats the bytes, the tag and the stamps
  *                            of the one it replaced.
+ *   "preview_flat_keys"      every incarnation stores its keys in one
+ *                            namespace, so an old eraser deletes by ordinal
+ *                            what a later head lists (lane 3450b's law).
  * Watch names one behaviour whose first occurrence sets hit.
  *)
 CONSTANTS LastTime, MaxPut, MaxWipe, Skew, Grace, Watch
-VARIABLES holds, now, rev, inc, puts, flight, ever, mounted, expired, hit
+VARIABLES holds, now, rev, inc, puts, flight, ever, mounted, expired, stale, hit
 
 Children == 1..2
 NoHold == [q |-> 0, until |-> 0, stamp |-> 0]
@@ -91,24 +107,25 @@ Initial ==
     /\ ever = [c \in Children |-> {}]
     /\ mounted = [c \in Children |-> NoMount]
     /\ expired = [c \in Children |-> FALSE]
+    /\ stale = {}
     /\ hit = FALSE
 
 Tick == /\ now < LastTime /\ now' = now + 1
-        /\ UNCHANGED <<archive, holds, rev, inc, puts, flight, ever, mounted, expired, hit>>
+        /\ UNCHANGED <<archive, holds, rev, inc, puts, flight, ever, mounted, expired, stale, hit>>
 
 \* ---- the hold authority: issue against the head just read ----
 IssueAdmit(c, q, t) ==
     /\ holds[c] = NoHold /\ q \in Named(archive)
     /\ flight' = [flight EXCEPT !.auth =
                      [kind |-> "admit", tag |-> Tag, c |-> c, q |-> q, t |-> t]]
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, hit>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, stale, hit>>
 
 IssueExtend(c, t) ==
     /\ holds[c] # NoHold /\ t > holds[c].until
     /\ Mutant = "preview_naive_renewal" => now < holds[c].until
     /\ flight' = [flight EXCEPT !.auth =
                      [kind |-> "extend", tag |-> Tag, c |-> c, q |-> 0, t |-> t]]
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, hit>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, stale, hit>>
 
 \* The service applies a PUT whose tag still matches. Every other PUT in
 \* flight then names a replaced tag and can never apply.
@@ -127,7 +144,7 @@ ApplyAuth ==
        /\ hit' = \/ Seeing("readmit", m.kind = "admit" /\ mounted[c] # NoMount)
                  \/ Seeing("lapsedExtend", m.kind = "extend" /\ now >= holds[c].until)
                  \/ Seeing("extendOverRetire", m.kind = "extend" /\ retiring)
-       /\ UNCHANGED <<archive, now, mounted, expired>>
+       /\ UNCHANGED <<archive, now, mounted, expired, stale>>
 
 \* The authority publishes the child's genesis once, with an incarnation and a
 \* stamp it read in the head. The hold may have left since.
@@ -135,21 +152,21 @@ Mount(c, s) ==
     /\ mounted[c] = NoMount /\ s \in ever[c]
     /\ mounted' = [mounted EXCEPT ![c] = s]
     /\ hit' = Seeing("staleMount", holds[c].stamp # s.stamp \/ inc # s.inc)
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, flight, ever, expired>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, flight, ever, expired, stale>>
 
 \* ---- the archiver: an ordinary head write that carries the holds ----
 IssuePublish(q) ==
     /\ TargetUnit(archive, q) /\ Closure(archive.history, q) \subseteq archive.sink
     /\ flight' = [flight EXCEPT !.arch =
                      [kind |-> "publish", tag |-> Tag, c |-> 0, q |-> q, t |-> 0]]
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, hit>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, stale, hit>>
 
 ApplyPublish ==
     /\ InFlight(flight.arch) /\ Put
     /\ ArchivePublish(flight.arch.q)
     /\ flight' = Idle
     /\ hit' = Seeing("bumpOverFlight", InFlight(flight.op) \/ InFlight(flight.auth))
-    /\ UNCHANGED <<holds, now, ever, mounted, expired>>
+    /\ UNCHANGED <<holds, now, ever, mounted, expired, stale>>
 
 \* ---- the expiry operator ----
 \* One PUT retires every hold the sample s puts past its deadline and may move
@@ -159,7 +176,7 @@ IssueExpire(f, s) ==
     /\ f = archive.floor \/ (f \in Named(archive) /\ Base(f) /\ f > archive.floor)
     /\ flight' = [flight EXCEPT !.op =
                      [kind |-> "expire", tag |-> Tag, c |-> 0, q |-> f, t |-> s]]
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, hit>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, ever, mounted, expired, stale, hit>>
 
 ApplyExpire ==
     LET m == flight.op
@@ -175,12 +192,26 @@ ApplyExpire ==
        /\ holds' = kept /\ flight' = Idle
        /\ hit' = Seeing("retireOverExtend", InFlight(flight.auth)
                             /\ flight.auth.kind = "extend" /\ flight.auth.c \in lapsed)
-       /\ UNCHANGED <<now, ever, mounted, expired>>
+       /\ UNCHANGED <<now, ever, mounted, expired, stale>>
 
 Erase ==
     /\ \E f \in 1..Current(archive), k \in archive.sink : ArchiveErase(f, k)
     /\ hit' = Seeing("eraseBesideHold", \E c, d \in Children : Serves(c) /\ expired[d])
-    /\ UNCHANGED <<holds, now, rev, inc, puts, flight, ever, mounted, expired>>
+    /\ UNCHANGED <<holds, now, rev, inc, puts, flight, ever, mounted, expired, stale>>
+
+\* The directory an eraser lists and deletes in.
+Dir(e) == IF Mutant = "preview_flat_keys" THEN inc ELSE e.inc
+
+\* An eraser whose floor write applied to an erased head. It still holds the
+\* floor and the survivors it verified, and it reads no head again.
+OldErase ==
+    \E e \in stale, k \in archive.sink :
+        /\ k \notin Closure(archive.history, e.floor)
+        /\ IF k[1] = "pack" THEN k[2] < (e.floor+1) \div 2 + 1 ELSE k[2] < e.floor
+        /\ archive' = IF Dir(e) = inc THEN [archive EXCEPT !.sink = @ \ {k}] ELSE archive
+        /\ hit' = Seeing("oldEraser", \E c \in Children :
+                             holds[c] # NoHold /\ k \in PreviewClosure(holds[c].q))
+        /\ UNCHANGED <<holds, now, rev, inc, puts, flight, ever, mounted, expired, stale>>
 
 \* ---- physical deletion and recreation ----
 \* A PUT issued against rev 1 of the erased head meets rev 1 of the new one.
@@ -188,6 +219,7 @@ Recreate ==
     /\ inc <= MaxWipe /\ puts < MaxPut
     /\ archive' = First /\ holds' = [c \in Children |-> NoHold]
     /\ rev' = 1 /\ inc' = inc + 1 /\ puts' = puts + 1
+    /\ stale' = stale \cup {[inc |-> inc, floor |-> f] : f \in archive.expiredFloors}
     /\ hit' = Seeing("twinRefused", \E r \in DOMAIN flight :
                          flight[r].kind # "none" /\ flight[r].tag[2] = 1)
     /\ UNCHANGED <<now, flight, ever, mounted, expired>>
@@ -199,10 +231,10 @@ ReadHead(c) ==
     /\ expired' = [expired EXCEPT ![c] = TRUE]
     /\ hit' = \/ Seeing("expiredSeen", TRUE)
               \/ Seeing("stampRepeated", holds[c].stamp = mounted[c].stamp)
-    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, flight, ever, mounted>>
+    /\ UNCHANGED <<archive, holds, now, rev, inc, puts, flight, ever, mounted, stale>>
 
 NextStep ==
-    \/ Tick \/ ApplyAuth \/ ApplyPublish \/ ApplyExpire \/ Erase \/ Recreate
+    \/ Tick \/ ApplyAuth \/ ApplyPublish \/ ApplyExpire \/ Erase \/ OldErase \/ Recreate
     \/ \E c \in Children, q \in 2..3, t \in 1..LastTime : IssueAdmit(c, q, t)
     \/ \E c \in Children, t \in 1..LastTime : IssueExtend(c, t)
     \/ \E c \in Children : \E s \in ever[c] : Mount(c, s)
@@ -210,7 +242,7 @@ NextStep ==
     \/ \E q \in 1..3 : IssuePublish(q)
     \/ \E f \in 1..3, s \in 0..(LastTime + Skew) : IssueExpire(f, s)
 
-state == <<vars, archive, holds, now, rev, inc, puts, flight, ever, mounted, expired, hit>>
+state == <<vars, archive, holds, now, rev, inc, puts, flight, ever, mounted, expired, stale, hit>>
 PreviewSpec == (Init /\ Initial) /\ [][NextStep /\ UNCHANGED vars]_state
 
 \* A listed hold's boundary is restorable. No clock appears.

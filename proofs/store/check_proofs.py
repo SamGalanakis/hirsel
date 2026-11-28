@@ -113,7 +113,7 @@ PROPERTIES = {"StorePreviewHold": ["PromiseKept", "HoldStable", "HeadNeverRepeat
 # a PUT issued against the same rev of the erased one.
 PREVIEW_WATCH = ["retireOverExtend", "extendOverRetire", "lapsedExtend", "bumpOverFlight",
                  "expiredSeen", "eraseBesideHold", "readmit", "staleMount",
-                 "stampRepeated", "twinRefused"]
+                 "stampRepeated", "twinRefused", "oldEraser"]
 
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.

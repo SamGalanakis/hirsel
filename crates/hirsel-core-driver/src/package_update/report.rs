@@ -20,7 +20,7 @@ struct Change {
 }
 
 #[derive(Default, Serialize)]
-struct Diff {
+pub(super) struct Diff {
     before: Option<Verdict>,
     after: Option<Verdict>,
     exports: BTreeMap<String, ExportDiff>,
@@ -60,7 +60,7 @@ impl Delta {
 }
 
 impl Diff {
-    fn between(before: Option<&Card>, after: &Card) -> Self {
+    pub(super) fn between(before: Option<&Card>, after: &Card) -> Self {
         let mut diff = Self {
             before: before.map(Card::verdict),
             after: Some(after.verdict()),
@@ -76,7 +76,7 @@ impl Diff {
                 continue;
             }
             let change = match (left, right) {
-                (None, Some(_)) if before.is_some() => Some("added"),
+                (None, Some(_)) => Some("added"),
                 (Some(_), None) => Some("removed"),
                 _ => None,
             };
@@ -266,10 +266,6 @@ impl Report {
         }
     }
 
-    pub(super) fn has_changes(&self) -> bool {
-        !self.changes.is_empty()
-    }
-
     pub(super) fn matches_previous(&self, resolved: &Resolution) -> bool {
         self.changes.iter().all(|(id, change)| {
             change.before.as_ref().is_none_or(|before| {
@@ -290,17 +286,17 @@ impl Report {
         }
     }
 
-    pub(super) fn print(&self, json: bool, dry_run: bool, result: &str) {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({"result":result, "dry_run":dry_run,
-                "rebound":self.rebound, "selections":{"written":self.written, "removed":self.removed},
-                "registry": self.registry, "changed": self.changes.values().collect::<Vec<_>>(),
-                "tested": self.tested, "fetched":self.fetched})
-            );
-            return;
-        }
+    pub(super) fn evidence(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rebound": self.rebound,
+            "selections": {"written": self.written, "removed": self.removed},
+            "registry": self.registry,
+            "changed": self.changes.values().collect::<Vec<_>>(),
+            "tested": self.tested, "fetched": self.fetched,
+        })
+    }
+
+    pub(super) fn print(&self, result: &str) {
         for (id, finding) in &self.registry {
             finding.report(id);
         }

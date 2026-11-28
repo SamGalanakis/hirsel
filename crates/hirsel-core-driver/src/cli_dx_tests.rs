@@ -252,3 +252,151 @@ fn slice3_rejects_retired_commands_and_declares_their_replacements() {
         assert!(parse(args).is_ok(), "refused replacement {args:?}");
     }
 }
+
+#[test]
+fn released_command_schema_covers_parser() {
+    use crate::cli::{Action, COMMANDS, describe};
+    use std::collections::BTreeSet;
+
+    let mut paths = BTreeSet::new();
+    for command in COMMANDS {
+        assert!(
+            paths.insert(command.name),
+            "duplicate command {}",
+            command.name
+        );
+        let schema = describe(command);
+        assert!(
+            matches!(
+                schema["result"]["type"].as_str(),
+                Some("help" | "finite" | "stream" | "ndjson")
+            ),
+            "{}",
+            command.name
+        );
+        let words: Vec<_> = command.name.split_ascii_whitespace().collect();
+        let parse_command = |extra: &[&str]| {
+            crate::cli::parse(
+                words
+                    .iter()
+                    .copied()
+                    .chain(extra.iter().copied())
+                    .map(str::to_owned),
+            )
+        };
+        for flag in ["--help", "-h"] {
+            let Action::Help(Some(selected)) = parse_command(&[flag, "--json"]).unwrap() else {
+                panic!("{} {flag} did not select help", command.name);
+            };
+            assert_eq!(selected.name, schema["name"]);
+        }
+        assert!(
+            parse_command(&["--unregistered-option"]).is_err(),
+            "{}",
+            command.name
+        );
+        let mut aliases = BTreeSet::new();
+        for option in schema["options"].as_array().unwrap() {
+            for name in option["names"].as_array().unwrap() {
+                let name = name.as_str().unwrap();
+                assert!(aliases.insert(name), "duplicate {name} in {}", command.name);
+                if ["-h", "--help"].contains(&name) {
+                    continue;
+                }
+                let mut args = Vec::new();
+                if schema["operands"].as_str().unwrap().starts_with("host/") {
+                    args.push(
+                        "host/00000000000000000000000000000000/00000000000000000000000000000000",
+                    );
+                }
+                args.push(name);
+                match option["syntax"].as_str().unwrap() {
+                    "value" => {
+                        assert!(
+                            parse_command(&args).is_err(),
+                            "{} {name} takes a value",
+                            command.name
+                        );
+                        args.push("example");
+                    }
+                    "optional_equals" => {
+                        assert!(matches!(parse_command(&args), Ok(Action::Invoke(_))));
+                        let assigned = format!("{name}=1s");
+                        *args.last_mut().unwrap() = &assigned;
+                        assert!(matches!(parse_command(&args), Ok(Action::Invoke(_))));
+                        continue;
+                    }
+                    "optional_value" => args.push("sampled"),
+                    "switch" => {}
+                    other => panic!("unknown flag syntax {other}"),
+                }
+                assert!(
+                    matches!(parse_command(&args), Ok(Action::Invoke(_))),
+                    "{} {args:?}",
+                    command.name
+                );
+            }
+        }
+        let children = schema["subcommands"].as_array().unwrap();
+        let prefix = format!("{} ", command.name);
+        let expected: BTreeSet<_> = COMMANDS
+            .iter()
+            .filter_map(|child| child.name.strip_prefix(&prefix))
+            .filter(|rest| !rest.contains(' '))
+            .collect();
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.as_str().unwrap())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        let operand_counts = match schema["operands"].as_str().unwrap() {
+            "namespace" => {
+                assert!(matches!(parse_command(&[]), Ok(Action::Help(Some(_)))));
+                assert!(parse_command(&["unregistered-subcommand"]).is_err());
+                continue;
+            }
+            form if form.starts_with("host/") => {
+                assert!(parse_command(&[]).is_err());
+                assert!(parse_command(&["fail"]).is_err());
+                assert_eq!(
+                    parse_command(&["@file.json"]).is_ok(),
+                    form.contains("@RECEIPT")
+                );
+                continue;
+            }
+            "none" => [true, false, false, false],
+            "one" | "guest_tail" => [true, true, false, false],
+            "pair" | "sql" => [true, true, true, false],
+            "many" => [true; 4],
+            other => panic!("unknown operand form {other}"),
+        };
+        for (n, accepted) in operand_counts.into_iter().enumerate() {
+            let operands = ["p", "q", "r"];
+            assert_eq!(
+                parse_command(&operands[..n]).is_ok(),
+                accepted,
+                "{} {n} operands",
+                command.name
+            );
+        }
+        let tail = parse_command(&["--", "--unregistered-option"]);
+        assert_eq!(
+            tail.is_ok(),
+            schema["operands"] == "guest_tail",
+            "{} guest delimiter",
+            command.name
+        );
+    }
+    for command in ["add", "update"] {
+        assert!(crate::cli::parse([command, "input", "--dry-run"].map(str::to_owned)).is_err());
+        let schema = describe(crate::cli::named(command).unwrap());
+        assert_eq!(schema["result"]["type"], "finite");
+        assert_eq!(
+            schema["result"]["exit_codes"],
+            serde_json::json!([0, 1, 2, 75])
+        );
+        assert_eq!(schema["result"]["--plan"]["contract"], "plan");
+    }
+}

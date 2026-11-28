@@ -28,7 +28,7 @@ pub enum RegistryPublishOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddOption {
-    AddDryRun,
+    PackagePlan,
     AddRoot(String),
     AddAs(String),
     AddWorkspace,
@@ -40,7 +40,7 @@ pub enum AddOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateOption {
-    AddDryRun,
+    PackagePlan,
     Frozen,
     Json,
     Locked,

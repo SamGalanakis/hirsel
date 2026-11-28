@@ -64,6 +64,12 @@ impl<'a> Staged<'a> {
     }
 }
 
+pub(crate) struct Partial {
+    pub(crate) detail: String,
+    pub(crate) committed: Vec<PathBuf>,
+    pub(crate) pending: Vec<PathBuf>,
+}
+
 pub(crate) fn commit<'a>(
     command: &str,
     cwd: &Path,
@@ -72,7 +78,7 @@ pub(crate) fn commit<'a>(
     edits: impl IntoIterator<Item = (&'a File, &'a Captured, &'a Captured)>,
     before_lock: Option<&Captured>,
     lock: &Lock,
-) -> Result<Option<String>, Failure> {
+) -> Result<Option<Partial>, Failure> {
     let mut staged = Vec::new();
     for (dir, before, after) in edits {
         staged.push(Staged::new(dir, MANIFEST, Some(before), &after.bytes)?);
@@ -87,6 +93,12 @@ pub(crate) fn commit<'a>(
         )
         .into());
     }
+    let relative = |path: &Path| {
+        path.strip_prefix(&workspace.directory)
+            .unwrap_or(path)
+            .to_path_buf()
+    };
+    let paths: Vec<_> = staged.iter().map(|edit| relative(&edit.path)).collect();
     let mut published = Vec::new();
     for Staged {
         dir,
@@ -105,23 +117,38 @@ pub(crate) fn commit<'a>(
         };
         if let Err(error) = result {
             let mut failed = Vec::new();
+            let mut committed = Vec::new();
             for (dir, name, before, path) in published.into_iter().rev() {
                 let restored = match before {
                     Some(before) => before.persist(&path).map(|_| ()).map_err(|e| e.error),
                     None => std::fs::remove_file(&path),
+                };
+                if restored.is_err() {
+                    committed.push(relative(&path));
                 }
-                .and_then(|()| dir.sync_all());
-                if let Err(rollback) = restored {
+                if let Err(rollback) = restored.and_then(|()| dir.sync_all()) {
                     failed.push(format!("{name}: {rollback}"));
                 }
             }
             return if failed.is_empty() {
-                Err(format!("{command} rolled back: {error}").into())
+                Err(EditFailure::negative(
+                    "PublicationRolledBack",
+                    &format!("{command} rolled back: {error}"),
+                )
+                .into())
             } else {
-                Ok(Some(format!(
-                    "{command} publication failed: {error}\n  rollback failed: {}",
-                    failed.join(", ")
-                )))
+                let pending = paths
+                    .into_iter()
+                    .filter(|path| !committed.contains(path))
+                    .collect();
+                Ok(Some(Partial {
+                    detail: format!(
+                        "{command} publication failed: {error}\n  rollback failed: {}",
+                        failed.join(", ")
+                    ),
+                    committed,
+                    pending,
+                }))
             };
         }
     }

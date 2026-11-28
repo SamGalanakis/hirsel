@@ -36,6 +36,7 @@ mod conversation;
 pub(crate) mod finite;
 #[path = "operator_cli/observe.rs"]
 pub(crate) mod observe;
+pub(crate) mod package;
 pub(crate) use context::operation_id;
 #[cfg(test)]
 mod grants_law;

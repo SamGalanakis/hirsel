@@ -1579,7 +1579,7 @@ library can be packed offline or published to its scope registry.
 directories and Phase 1 scoped registry names, in a member's own table or, with `--workspace`, in the workspace's. `github:`
 names a repository commit, never a release asset (below).
 
-`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
 | `SOURCE` | Fetches | Writes |
 |---|---|---|
@@ -1600,7 +1600,7 @@ are bound side by side by giving one of them `--as`<!-- doc-ref: planned -->. A 
 (`add, local`). `--root`<!-- doc-ref: planned --> names the head
 root the archive must have (`Root::of` its head bytes, section 1), or the root the commit
 must pack to, and applies only to the URL, archive, `git+https://` and `github:` forms: it is
-a second witness for first use. `--dry-run`<!-- doc-ref: planned --> does
+a second witness for first use. `--plan`<!-- doc-ref: planned --> does
 everything before publication; verified archives may still enter the store. `--json` prints one
 object. `--locked` and `--frozen` refuse.
 
@@ -1668,7 +1668,7 @@ a member never drifts from the shared binding by accident.
    contact (GIT-6). A displaced exact edge or a floor the new root does not meet refuses
    here as the build would (section 9); `add` never writes `selections`. If every target
    manifest already has the same alias, package, root and source, the result is `unchanged`: derive and commit the lock if it is missing or stale, and
-   exit 0. `--dry-run`<!-- doc-ref: planned --> prints and exits 0 here.
+   exit 0. `--plan`<!-- doc-ref: planned --> prints and exits 0 here.
 8. Capture each target manifest again; bytes or file identity that differ from step 2 refuse
    (`changed while hirsel add ran`<!-- doc-ref: planned -->), never merge.
 9. **Publish one manifest:** write it to a temporary file beside it, fsync, rename over it,
@@ -1715,34 +1715,27 @@ while an asset carries only what its publisher chose to upload.
 
 **Output.**
 
-```text
-hirsel: added json = acme.dev/json@1 1.4.0 sha256:cf1e…9a02 to hirsel.hcfg
-        from https://example.org/json-1.hpkg (3 packages, 41 KiB, 2 new in the store)
-hirsel: updated hirsel.lock:
-        + acme.dev/json@1 1.4.0 sha256:cf1e…9a02 url:https://example.org/json-1.hpkg
-        + acme.dev/text@2 2.0.3 sha256:77ab…10fe via:acme.dev/json@1
-```
 
-A replaced binding prints `hirsel: updated json = acme.dev/json@1 sha256:OLD… -> sha256:NEW…`; `--dry-run`<!-- doc-ref: planned --> prints `would
-add` and `would update`; a partial completion prints the committed manifest, the pending one,
-and `run the same hirsel add again to finish`<!-- doc-ref: planned -->. With `--json`, one object:
+The v1 operator receipt names the requested contract (`plan` or `submit`) and the outcome's
+effect. Its `result.plan` includes the added or replaced bindings, authority ceilings, exact
+selected roots and versions, lock rows, export differences, and SHA-256 hashes of the files
+the edit would write. The receipt also records any fetched input and applicable registry
+evidence. Preview and apply use the same plan. The preview has effect `none`, even if the
+package store admitted verified content. A partial publication names committed and pending
+files.
 
-```json
-{"result":"added","alias":"json","id":"acme.dev/json@1","version":"1.4.0","root":"sha256:cf1e…",
- "source":"url:https://example.org/json-1.hpkg",
- "committed":["hirsel.hcfg","hirsel.lock"],"pending":[],"previous_root":null,"dry_run":false,
- "cache":"complete","fetched":[],
- "closure":[{"id":"acme.dev/json@1","version":"1.4.0","root":"sha256:cf1e…","new":true},
-            {"id":"acme.dev/text@2","version":"2.0.3","root":"sha256:77ab…","new":true}]}
-```
-
-`result` is `added`, `updated`, `unchanged` or `partial`, and `cache` is `complete` or
-`partial`. Exit statuses: 0 for `added`, `updated`, `unchanged` or a dry run; 2 for a refusal
-before any manifest rename (section 9); 1 for a failure after one, including `partial`.
+Exit 0 means the requested plan or edit succeeded. Exit 1 means a definitive refusal or
+publication failure. Exit 2 means invalid or stale input. Exit 75 means a blocked edit.
+A proposed authority expansion within the declared ceiling holds an ordinary edit before
+publication. Save its JSON receipt and pass it to
+`hirsel op decide @RECEIPT.json --decision FILE`<!-- doc-ref: planned -->. The
+`host_v1.Decision` supplies the exact `plan_digest` and an `Approve` or `Refuse` verdict
+with `entries: []` and no `all` field. The publisher resolves the edit again and checks the digest before
+writing. A ceiling violation is a refusal.
 
 ### Updating dependencies
 
-`hirsel update [ALIAS|ID[@VERSION]] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel update [ALIAS|ID[@VERSION]] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
 `hirsel update`<!-- doc-ref: planned --> is the only command, with `add`, that moves a published root, and the only one
 that writes `selections` (section 4). A build never solves: it reads the manifests' roots and
@@ -1775,13 +1768,11 @@ rename at a time, the lock derived from committed manifests).
    identity, the old and new version and root, and the per-export authority diff (section 11);
    for each package now built against a dependency other than the one its publisher tested,
    one line such as `acme.dev/reader@1: published against acme.dev/json 1.4.0, built with
-   1.4.2`. `--dry-run` stops here. Otherwise the manifests and then the lock are committed.
+   1.4.2`. `--plan` stops here. Otherwise the manifests and then the lock are committed.
 
 `update` never edits an `authority` list, never adds or removes a dependency row, and never
 crosses a major: a new major is a new identity, which `add` binds. `--locked` and `--frozen`
-refuse. With `--json` it prints one object with `result` (`updated`, `unchanged` or
-`partial`), the rebound rows, the selections written and removed, and each changed package's
-diff. Exit statuses are `add`'s.
+refuse. Update uses the same operator receipt and exit codes as add.
 
 ### Auditing dependencies
 

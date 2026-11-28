@@ -7,6 +7,7 @@ pub(crate) enum ReadContract {
     Expiry,
     Restore,
     Help,
+    PackageEdit,
     Deploy,
     Decision,
     Operation,
@@ -123,11 +124,13 @@ pub(super) enum Kind<T> {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Positionals {
+    Namespace,
     None,
     One,
     Pair,
     Many,
     Operation,
+    DecisionOperation,
     Tail,
     Sql,
 }
@@ -138,6 +141,8 @@ pub(super) trait CommandSchema: std::fmt::Debug + Sync {
         command: &'static CommandSpec,
         arguments: &mut dyn Iterator<Item = String>,
     ) -> Result<Action, String>;
+
+    fn positionals(&self) -> Positionals;
 
     fn describe(&self) -> serde_json::Value;
 

@@ -1,4 +1,5 @@
 use crate::cli::{Request, UpdateOption};
+use crate::operator_cli::{finite::Failure as EditFailure, package::EditReceipt};
 use crate::package_add::registry_select::YoungTrials;
 use crate::package_add::{acquire_any, current_scope, edit, git, lock_scope, options::Source};
 use crate::package_content::{Id, Root};
@@ -14,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod plan;
 mod report;
 pub(crate) mod transaction;
 use report::Report;
@@ -257,36 +259,42 @@ fn overlay(workspace: &Workspace, cwd: &Path, edits: &[Edit]) -> Result<Workspac
 }
 
 pub(crate) fn run(request: Request<UpdateOption>) -> Result<i32, Failure> {
+    let plan = request.options.contains(&UpdateOption::PackagePlan);
+    let mut receipt = EditReceipt::new(
+        "update",
+        plan,
+        request.options.contains(&UpdateOption::Json),
+    );
+    let outcome = std::env::current_dir()
+        .map_err(Failure::from)
+        .and_then(|cwd| execute(request, &cwd, &mut receipt));
+    Ok(receipt.finish(outcome))
+}
+
+pub(crate) fn execute(
+    request: Request<UpdateOption>,
+    cwd: &Path,
+    receipt: &mut EditReceipt,
+) -> Result<(), Failure> {
+    receipt.update_intent(cwd, &request);
+    let plan_only = request.options.contains(&UpdateOption::PackagePlan);
     let mut path = None;
-    let mut dry_run = false;
-    let mut json = false;
     for option in request.options {
         match option {
             UpdateOption::Locked => return Err("hirsel update refuses --locked".into()),
             UpdateOption::Frozen => return Err("hirsel update refuses --frozen".into()),
-            UpdateOption::AddDryRun => dry_run = true,
-            UpdateOption::Json => json = true,
+            UpdateOption::PackagePlan | UpdateOption::Json => {}
             UpdateOption::PackageStore(store) => path = Some(PathBuf::from(store)),
         }
     }
-    run_at(
-        Target::parse(request.positional.as_deref())?,
-        PackageStore::new(path),
-        &std::env::current_dir()?,
-        dry_run,
-        json,
-    )
-}
-
-fn run_at(
-    target: Target<'_>,
-    store: PackageStore,
-    cwd: &Path,
-    dry_run: bool,
-    json: bool,
-) -> Result<i32, Failure> {
+    let target = Target::parse(request.positional.as_deref())?;
+    let store = PackageStore::new(path);
     let scope = lock_scope(cwd)?;
     let workspace = current_scope(cwd, &scope, "update")?;
+    receipt.target(
+        &workspace.directory,
+        workspace.member.as_ref().map(ToString::to_string),
+    )?;
     let before_lock = Lock::capture(&workspace)?;
     let config = Manifest::parse(
         &workspace
@@ -529,59 +537,74 @@ fn run_at(
         .into_iter()
         .map(|(id, f)| (id.to_string(), f))
         .collect();
-    if report.has_changes() {
-        let prior = old
+    let prior = old
+        .as_ref()
+        .filter(|old| report.matches_previous(old))
+        .and_then(|old| crate::package_audit::check(old, None).ok());
+    report.set_diffs(
+        &prior
             .as_ref()
-            .filter(|old| report.matches_previous(old))
-            .and_then(|old| crate::package_audit::check(old, None).ok());
-        report.set_diffs(
-            &prior.map_or_else(Default::default, |old| old.cards),
-            &checked.cards,
-        );
+            .map(|old| old.cards.clone())
+            .unwrap_or_default(),
+        &checked.cards,
+    );
+    let lock = Lock::compare_captured(&trial, Mode::Update, before_lock.as_ref())?;
+    let mut plan = plan::Plan::new(
+        &workspace,
+        &trial,
+        edits
+            .iter()
+            .map(|edit| (edit.relative.join(MANIFEST), &edit.before, &edit.after)),
+        before_lock.as_ref(),
+        &lock,
+        old.as_ref(),
+    )?;
+    plan.registry = refresh.registry.plan_heads();
+    let expansion = plan.authority(prior.as_ref().map(|old| &old.cards), &checked.cards);
+    let change = if plan.files.is_empty() {
+        "unchanged"
+    } else {
+        "updated"
+    };
+    receipt.describe(change, &plan, report.evidence())?;
+    if !receipt.machine() {
+        report.print(change);
     }
     if !checked.authority.is_empty() {
-        report.print(json, dry_run, "refused");
-        return Err(checked.authority.join("\nhirsel: ").into());
+        return Err(EditFailure::negative(
+            "AuthorityDenied",
+            &checked.authority.join("\nhirsel: "),
+        )
+        .into());
     }
     if let Some(hint) = young.reason() {
-        return Err(hint.into());
+        return Err(EditFailure::blocked("RegistryCooldown", &hint).into());
     }
-    let result = if edits.iter().any(Edit::changed) {
-        "updated"
-    } else {
-        "unchanged"
-    };
-    if dry_run {
-        report.print(json, true, result);
-    } else {
-        if !json {
-            report.print(false, false, result);
-        }
-        let lock = Lock::compare_captured(&trial, Mode::Update, before_lock.as_ref())?;
-        if let Some(error) = transaction::commit(
-            "update",
-            cwd,
-            &scope,
-            &workspace,
-            edits
-                .iter()
-                .filter(|e| e.changed())
-                .map(|e| (&e.dir, &e.before, &e.after)),
-            before_lock.as_ref(),
-            &lock,
-        )? {
-            eprintln!("hirsel: {error}");
-            if json {
-                report.print(true, false, "partial");
-            }
-            return Ok(1);
-        }
-        if let Some((_, message)) = lock.pending() {
-            eprintln!("hirsel: {message}");
-        }
-        if json {
-            report.print(true, false, result);
-        }
+    if plan_only {
+        receipt.review(expansion);
+        return Ok(());
     }
-    Ok(0)
+    if !receipt.authorize(expansion)? {
+        return Ok(());
+    }
+    if let Some(error) = transaction::commit(
+        "update",
+        cwd,
+        &scope,
+        &workspace,
+        edits
+            .iter()
+            .filter(|e| e.changed())
+            .map(|e| (&e.dir, &e.before, &e.after)),
+        before_lock.as_ref(),
+        &lock,
+    )? {
+        receipt.apply(&error.committed, &error.pending);
+        return Err(EditFailure::negative("PartialPublication", &error.detail).into());
+    }
+    receipt.apply(
+        &plan.paths().map(Path::to_path_buf).collect::<Vec<_>>(),
+        &[],
+    );
+    Ok(())
 }

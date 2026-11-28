@@ -1,4 +1,4 @@
-use super::help_text::{is_help, named};
+use super::help_text::{children, is_help, named};
 use super::{Argument, CommandSchema, CommandSpec, Invocation, Kind, Positionals, Request, Schema};
 use std::fmt::Write;
 
@@ -54,11 +54,9 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                         arguments
                             .next()
                             .filter(|value| {
-                                command.contract.is_none()
-                                    || !value.starts_with('-')
-                                    || (command.name == "op decide"
-                                        && argument == "--decision"
-                                        && value == "-")
+                                !value.starts_with('-')
+                                    || value == "-"
+                                    || value.parse::<f64>().is_ok()
                             })
                             .ok_or_else(|| format!("{argument} requires {metavar}"))?,
                     ),
@@ -95,7 +93,8 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                     }
                 };
                 request.options.push(value);
-            } else if request.positional.is_none() && !matches!(self.positionals, Positionals::None)
+            } else if request.positional.is_none()
+                && !matches!(self.positionals, Positionals::None | Positionals::Namespace)
             {
                 request.positional = Some(argument);
             } else if matches!(self.positionals, Positionals::Many)
@@ -107,7 +106,18 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                 return Err(format!("unexpected argument `{argument}` for {name}"));
             }
         }
-        if matches!(self.positionals, Positionals::Operation) {
+        if matches!(
+            self.positionals,
+            Positionals::Operation | Positionals::DecisionOperation
+        ) {
+            if matches!(self.positionals, Positionals::DecisionOperation)
+                && request
+                    .positional
+                    .as_deref()
+                    .is_some_and(|op| op.starts_with('@') && op.len() > 1)
+            {
+                return Ok(Action::Invoke((self.wrap)(request)));
+            }
             if let Some(op) = request
                 .positional
                 .as_deref()
@@ -121,23 +131,32 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
         Ok(Action::Invoke((self.wrap)(request)))
     }
 
+    fn positionals(&self) -> Positionals {
+        self.positionals
+    }
+
     fn describe(&self) -> serde_json::Value {
         use serde_json::json;
         let flags: Vec<_> = self
             .options
             .iter()
             .filter_map(|a| {
-                let value = match a.kind {
-                    Kind::OptionalWait(_) => Some("[=DURATION]"),
+                let (value, syntax) = match a.kind {
+                    Kind::OptionalWait(_) => (Some("[=DURATION]"), "optional_equals"),
                     Kind::RefuseMem => return None,
-                    Kind::Value(m, _) | Kind::OptionalMem(m, _) => Some(m),
-                    _ => None,
+                    Kind::OptionalMem(m, _) => (Some(m), "optional_value"),
+                    Kind::Value(m, _) => (Some(m), "value"),
+                    _ => (None, "switch"),
                 };
-                Some(json!({"names":a.flag.names,"value":value,"description":a.flag.description}))
+                Some(json!({"names":a.flag.names,"value":value,"syntax":syntax,"description":a.flag.description}))
             })
             .collect();
         let operands = match self.positionals {
+            Positionals::Namespace => "namespace",
             Positionals::Operation => "host/CATALOG/REQUEST or store/ATTEMPT",
+            Positionals::DecisionOperation => {
+                "host/CATALOG/REQUEST, store/ATTEMPT or @RECEIPT.json"
+            }
             Positionals::None => "none",
             Positionals::One => "one",
             Positionals::Pair => "pair",
@@ -163,7 +182,7 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
 }
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter().peekable();
-    let Some(mut name) = arguments.next() else {
+    let Some(name) = arguments.next() else {
         return Ok(Action::Help(None));
     };
     if is_help(&name) {
@@ -176,52 +195,36 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
-    if matches!(
-        name.as_str(),
-        "op" | "registry"
-            | "config"
-            | "prof"
-            | "laws"
-            | "lean"
-            | "sdk"
-            | "store"
-            | "coverage"
-            | "tape"
-            | "fleet"
-    ) {
-        match arguments.next() {
-            None => return Ok(Action::Help(Some(named(&name)?))),
-            Some(subcommand) if is_help(&subcommand) => {
-                return Ok(Action::Help(Some(named(&name)?)));
-            }
-            Some(subcommand) => name.push_str(&format!(" {subcommand}")),
-        }
-    }
-    if name == "dev"
-        && let Some(verb) = arguments.next_if(|word| matches!(word.as_str(), "wait" | "stop"))
+    let command = select(named(&name)?, &mut arguments);
+    if matches!(command.schema.positionals(), Positionals::Namespace)
+        && arguments.peek().is_none_or(|word| is_help(word))
     {
-        name.push(' ');
-        name.push_str(&verb);
-    }
-    if name == "host"
-        && let Some(verb) = arguments.next_if(|word| matches!(word.as_str(), "adopt" | "retire"))
-    {
-        name.push(' ');
-        name.push_str(&verb);
-    }
-    if name == "store archive" {
-        match arguments.next() {
-            Some(sub) if !is_help(&sub) => name.push_str(&format!(" {sub}")),
-            _ => return Ok(Action::Help(Some(named(&name)?))),
-        }
-    }
-    let command = named(&name)?;
-    if name == "manifest" {
-        match arguments.next().as_deref() {
-            Some("show") => {}
-            Some("--help" | "-h") => return Ok(Action::Help(Some(command))),
-            _ => return Err(format!("expected: hirsel {}", command.usage)),
-        }
+        return Ok(Action::Help(Some(command)));
     }
     command.schema.parse(command, &mut arguments)
+}
+
+/// Consume only registered child names. A mixed command such as host or dev
+/// can still parse the next word as one of its own operands.
+fn select(
+    mut command: &'static CommandSpec,
+    arguments: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+) -> &'static CommandSpec {
+    while let Some(word) = arguments.peek() {
+        let Some((_, child)) = children(command).find(|(name, _)| word == name) else {
+            break;
+        };
+        arguments.next();
+        command = child;
+    }
+    command
+}
+
+pub(crate) fn command_path(args: &[String]) -> &str {
+    match args.split_first() {
+        Some((name, rest)) => named(name)
+            .map(|command| select(command, &mut rest.iter().cloned().peekable()).name)
+            .unwrap_or(name),
+        None => "help",
+    }
 }

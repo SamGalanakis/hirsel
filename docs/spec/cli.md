@@ -388,7 +388,7 @@ its executable recipe meaning. [Registry protocol and client](registry.md)
 
 ## Adding a dependency
 
-`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 binds one dependency in the nearest package manifest and updates `hirsel.lock`. The row's key
 is the alias, the last component of the package name unless `--as`<!-- doc-ref: planned --> gives another; the row
 holds the package's scoped name, major, root and source. `SOURCE` is an
@@ -397,14 +397,16 @@ shorthand `github:OWNER/REPO[/DIR][@REF]` (a commit, bound by `git` and `rev`; u
 default branch's tip), a `.hpkg` path, a `sha256:` root already in the package store, a toolchain
 `NAME@MAJOR` (a bare name), a listed member's directory, or a scoped registry name with optional major or exact version. `add` never moves a root already
 bound to the same source; that is `hirsel update`<!-- doc-ref: planned -->. `--workspace` declares it in the root's
-`[workspace.dependencies]` and binds the member with `{ workspace = true }`, one manifest at a
-time. It verifies any archive and resolves the workspace before publishing the manifest. It
-exits 0 for added, updated, unchanged or a dry run, 2 for a refusal before publication, and 1
-for a failure after publication begins. [Packages](packages.md#adding-a-dependency)
+workspace's dependency table and binds the member with `Inherit`. It verifies any archive and
+resolves the workspace before publishing the manifest. `--plan` reports the proposed bindings,
+file hashes, root and version changes, and export differences. Add and update return a v1
+operator receipt under `--json`. Exit 0 means the requested plan or edit succeeded, 1 means a
+definitive refusal or failed publication, 2 means invalid or stale input, and 75 means the
+edit is blocked. [Packages](packages.md#adding-a-dependency)
 
 ## Updating dependencies
 
-`hirsel update [ALIAS|ID[@VERSION]] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel update [ALIAS|ID[@VERSION]] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 re-reads the named dependency rows' sources (a git row's `ref`, a URL or archive's bytes),
 rebinds rows whose source now yields another root, and, for every identity whose edges do not
 agree on one root, selects the highest root every edge accepts and writes it to the root
@@ -413,8 +415,10 @@ nothing when the check fails. It prints each changed package's versions and root
 library now built against another version than it was published with, and each package's
 per-export authority diff. Named registry selection verifies inclusion and replays the status
 log under the configured trust policy. Unqualified add and update wait 72 hours. An exact
-version bypasses age only. A retired pin whose sole fix is younger makes update refuse and
-print the exact upgrade command.
+version bypasses age only. A retired pin whose sole fix is younger blocks update and reports the
+exact upgrade command. An edit that expands reachable authority within the declared ceiling
+requires a decision. Save its JSON receipt to pass it to
+`hirsel op decide @RECEIPT.json --decision FILE`<!-- doc-ref: planned -->.
 Update refuses `--locked` and `--frozen`, and its exit statuses are
 `add`'s. [Packages](packages.md#updating-dependencies)
 

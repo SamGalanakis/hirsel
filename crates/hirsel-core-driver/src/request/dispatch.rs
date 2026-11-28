@@ -39,26 +39,22 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
     let action = match parsed {
         Ok(action) => action,
         Err(detail) => {
-            let name = args
-                .iter()
-                .take_while(|arg| !arg.starts_with('-'))
-                .take(
-                    if args.first().is_some_and(|arg| {
-                        matches!(arg.as_str(), "op" | "registry" | "prof" | "store" | "tape")
-                    }) {
-                        2
-                    } else {
-                        1
-                    },
-                )
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let name = crate::cli::command_path(&args);
+            if matches!(name, "add" | "update") {
+                let plan = args
+                    .iter()
+                    .skip(1)
+                    .take_while(|arg| *arg != "--")
+                    .any(|arg| arg == "--plan");
+                return conclude(Outcome::Exit(operator_cli::package::invalid(
+                    name, plan, json, detail,
+                )));
+            }
             if name == "logs" {
                 return conclude(Outcome::Exit(operator_cli::observe::invalid_logs()));
             }
             return conclude(Outcome::Exit(operator_cli::finite::invalid(
-                &name, detail, json,
+                name, detail, json,
             )));
         }
     };
@@ -145,7 +141,7 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
         Invocation::Tape(request) => {
             conclude(Outcome::Exit(operator_cli::finite::tape_export(request)))
         }
-        Invocation::Simple(request) if request.command.name == "manifest" => {
+        Invocation::Simple(request) if request.command.name == "manifest show" => {
             crate::release_manifest::show(Path::new(
                 request
                     .positional

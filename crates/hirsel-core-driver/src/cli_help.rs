@@ -1,10 +1,19 @@
-use super::{COMMANDS, CommandSpec, HELP};
+use super::{COMMANDS, CommandSpec, HELP, Positionals};
 
 pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
     COMMANDS
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("unknown command `{name}`; use help"))
+}
+
+pub(super) fn children(
+    command: &CommandSpec,
+) -> impl Iterator<Item = (&'static str, &'static CommandSpec)> {
+    COMMANDS.iter().filter_map(move |child| {
+        let suffix = child.name.strip_prefix(command.name)?.strip_prefix(' ')?;
+        (!suffix.contains(' ')).then_some((suffix, child))
+    })
 }
 
 pub(super) fn is_help(name: &str) -> bool {
@@ -17,23 +26,10 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if matches!(
-            command.name,
-            "config" | "op" | "prof" | "lean" | "sdk" | "fleet" | "store" | "tape"
-        ) {
-            let prefix = format!("{} ", command.name);
-            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
-                result.push_str(&format!(
-                    "  {}\n    {}\n",
-                    subcommand.usage, subcommand.description
-                ));
-            }
-            return result;
-        }
         command.schema.write_help(&mut result);
-        if command.name == "host" {
-            result.push_str("\nGroup recovery commands:\n");
-            for child in COMMANDS.iter().filter(|c| c.name.starts_with("host ")) {
+        if children(command).next().is_some() {
+            result.push_str("\nSubcommands:\n");
+            for (_, child) in children(command) {
                 result.push_str(&format!("  {}\n    {}\n", child.usage, child.description));
             }
         }
@@ -56,6 +52,20 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
     spec["name"] = json!(command.name);
     spec["usage"] = json!(command.usage);
     spec["description"] = json!(command.description);
+    spec["subcommands"] = json!(children(command).map(|(name, _)| name).collect::<Vec<_>>());
+    let json_option = spec["options"].as_array().unwrap().iter().any(|option| {
+        option["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "--json")
+    });
+    spec["formats"] = match command.name {
+        "lsp" => json!(["lsp"]),
+        "config export" => json!(["json"]),
+        _ if json_option => json!(["text", "json"]),
+        _ => json!(["text"]),
+    };
     if let Some(contract) = command.contract {
         let (target, authority, predicate, receipt) = match contract {
             ReadContract::Deploy | ReadContract::Decision => (
@@ -86,6 +96,12 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
                 "store",
                 "directory grants",
                 "exact restore boundary selected",
+                true,
+            ),
+            ReadContract::PackageEdit => (
+                "workspace",
+                "local",
+                "package edit planned, applied, refused or held",
                 true,
             ),
             ReadContract::Help => ("none", "local", "command schema read", false),
@@ -119,7 +135,10 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
             ReadContract::Operation => ("host", "operator_uid", "catalog row read", true),
         };
         let mode = match contract {
-            ReadContract::Deploy | ReadContract::Decision | ReadContract::Restore => "submit",
+            ReadContract::Deploy
+            | ReadContract::Decision
+            | ReadContract::Restore
+            | ReadContract::PackageEdit => "submit",
             ReadContract::TapeExport
             | ReadContract::DevStream
             | ReadContract::Execute
@@ -158,6 +177,33 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
             spec["result"]["--plan"] =
                 json!({"contract":"plan","completion":"held plan","effect":"none"});
         }
+        if matches!(contract, ReadContract::Decision) {
+            spec["result"]["package_receipt"] = json!({"target_kind":"workspace", "authority":"local",
+                "required":["@RECEIPT.json"],"options":["--decision","--json"],"contract":"submit"});
+        }
+        if matches!(contract, ReadContract::PackageEdit) {
+            spec["result"]["--plan"] = json!({"contract":"plan","completion":"exact manifest and lock changes resolved","effect":"none"});
+            spec["result"]["exit_codes"] = json!([0, 1, 2, 75]);
+            spec["result"]["payload"] = json!({"variants":["Planned", "Applied", "Unchanged", "AwaitDecision", "Declined", "Refused", "Invalid", "Blocked"],
+                "fields":["change", "plan", "plan_digest", "action", "intent", "committed", "pending", "evidence"]});
+        }
+    } else {
+        spec["result"] = match command.name {
+            "lsp" => json!({"type":"stream","protocol":"lsp","transport":"stdio"}),
+            "host" | "launcher" => json!({"type":"stream","protocol":"process"}),
+            "serve" => json!({"type":"stream","protocol":"process", "--stop":{"type":"finite"}}),
+            "config export" => {
+                json!({"type":"finite","contract":"read","required":["FILE","--json"],"wire":"config"})
+            }
+            "registry publish" => json!({"type":"finite","contract":"submit"}),
+            "build" => {
+                json!({"type":"finite","wire":"compiler","--emit recipe":{"type":"finite","v":1,"contract":"execute"}})
+            }
+            _ if matches!(command.schema.positionals(), Positionals::Namespace) => {
+                json!({"type":"help","v":1})
+            }
+            _ => json!({"type":"finite"}),
+        };
     }
     spec
 }

@@ -61,8 +61,7 @@ pub(super) struct Options {
     pub(super) store: PackageStore,
     pub(super) alias: Option<String>,
     pub(super) workspace: bool,
-    pub(super) dry_run: bool,
-    pub(super) json: bool,
+    pub(super) plan: bool,
 }
 
 impl Options {
@@ -71,8 +70,7 @@ impl Options {
         let mut store = None;
         let mut alias = None;
         let mut workspace = false;
-        let mut dry_run = false;
-        let mut json = false;
+        let mut plan = false;
         for option in invocation.options {
             match option {
                 Opt::Locked | Opt::Frozen => {
@@ -98,8 +96,8 @@ impl Options {
                     alias = Some(value);
                 }
                 Opt::AddWorkspace => workspace = true,
-                Opt::AddDryRun => dry_run = true,
-                Opt::Json => json = true,
+                Opt::PackagePlan => plan = true,
+                Opt::Json => {}
                 Opt::PackageStore(value) => store = Some(PathBuf::from(value)),
             }
         }
@@ -121,8 +119,7 @@ impl Options {
             ),
             alias,
             workspace,
-            dry_run,
-            json,
+            plan,
         })
     }
 }

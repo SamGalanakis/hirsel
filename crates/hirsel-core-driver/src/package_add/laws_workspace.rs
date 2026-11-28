@@ -77,12 +77,12 @@ fn members_share_one_binding() {
         &["../../vendor/pkg.hpkg", "--workspace", "--json"],
     ));
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(json["result"], "added");
+    assert_eq!(json["result"]["change"], "added");
     assert_eq!(
-        json["committed"],
+        json["result"]["committed"],
         serde_json::json!(["hirsel.hcfg", "hirsel.lock", "apps/ui/hirsel.hcfg"])
     );
-    assert_eq!(json["pending"], serde_json::json!([]));
+    assert_eq!(json["result"]["pending"], serde_json::json!([]));
     assert_eq!(
         text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_X, "vendor/pkg.hpkg")
@@ -95,9 +95,9 @@ fn members_share_one_binding() {
         &["../../vendor/pkg.hpkg", "--workspace", "--json"],
     ));
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(json["result"], "added");
+    assert_eq!(json["result"]["change"], "added");
     assert_eq!(
-        json["committed"],
+        json["result"]["committed"],
         serde_json::json!(["apps/api/hirsel.hcfg", "hirsel.lock"])
     );
     assert_eq!(
@@ -119,7 +119,7 @@ fn members_share_one_binding() {
         "work/apps/ui",
         &["../../vendor/pkg.hpkg", "--json"],
     ));
-    assert!(json.contains("\"result\":\"unchanged\""), "{json}");
+    assert!(json.contains("\"change\":\"unchanged\""), "{json}");
     assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
     let (status, _, stderr) = invoke(&law, "work/apps/ui", &["../../vendor/jy.hpkg"]);
     assert_eq!(status, Some(2), "{stderr}");
@@ -238,13 +238,10 @@ fn partial_completion() {
     ));
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
-        json["committed"],
+        json["result"]["committed"],
         serde_json::json!(["apps/api/hirsel.hcfg", "hirsel.lock"])
     );
-    assert_eq!(
-        text(&law, "work/apps/api/hirsel.hcfg"),
-        inherits(&edited)
-    );
+    assert_eq!(text(&law, "work/apps/api/hirsel.hcfg"), inherits(&edited));
 
     let law = PackageLaw::new();
     two_members(&law);
@@ -275,13 +272,10 @@ fn partial_completion() {
     ));
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
-        json["committed"],
+        json["result"]["committed"],
         serde_json::json!(["apps/ui/hirsel.hcfg", "hirsel.lock"])
     );
-    assert_eq!(
-        text(&law, "work/apps/ui/hirsel.hcfg"),
-        inherits(&ui)
-    );
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
 
     let law = PackageLaw::new();

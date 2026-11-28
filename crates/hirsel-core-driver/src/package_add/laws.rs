@@ -154,7 +154,10 @@ fn refusal_keeps_workspace_and_checks_full_closure() {
 fn archive_capture_and_offline_build() {
     let law = PackageLaw::new();
     law.fixture_json();
-    law.write("work/hirsel.hcfg", "pkg_v1.Workspace(members: [\"apps/ui\"])\n");
+    law.write(
+        "work/hirsel.hcfg",
+        "pkg_v1.Workspace(members: [\"apps/ui\"])\n",
+    );
     law.app(
         "work/apps/ui",
         "// Dependencies\ndependencies: [\n    // Standard library\n    (\"std\", Toolchain(package: \"std\", major: 1, authority: [])), // keep\n],",
@@ -178,13 +181,13 @@ fn archive_capture_and_offline_build() {
     let json = PackageLaw::pass(invoke(
         &law,
         "work/apps/ui",
-        &["../../vendor/pkg.hpkg", "--dry-run", "--json"],
+        &["../../vendor/pkg.hpkg", "--plan", "--json"],
     ));
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(json["result"], "added");
-    assert_eq!(json["root"], PACKAGE_X);
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["committed"], serde_json::json!([]));
+    assert_eq!(json["result"]["change"], "added");
+    assert_eq!(json["result"]["evidence"]["root"], PACKAGE_X);
+    assert_eq!(json["contract"], "plan");
+    assert_eq!(json["result"]["committed"], serde_json::json!([]));
     validate_unchanged();
     fs::remove_file(law.path(&package_entry("packages", PACKAGE_X))).unwrap();
 
@@ -392,28 +395,28 @@ fn url_capture_pins_and_caps() {
                 result(command(&add).output().unwrap())
             };
             let update = || result(command(&["update", "json", "--json"]).output().unwrap());
-            let (status, _, stderr) = call(&["--root", PACKAGE_X]);
+            let (status, output, stderr) = call(&["--root", PACKAGE_X]);
             assert_eq!(status, Some(2), "{stderr}");
             assert!(
-                stderr.contains("fetched root differs from --root"),
-                "{stderr}"
+                output.contains("fetched root differs from --root"),
+                "{output}"
             );
             assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), manifest);
             law.empty_store();
 
             let output = PackageLaw::pass(call(&["--root", PACKAGE_X]));
             let json: serde_json::Value = serde_json::from_str(&output).unwrap();
-            assert_eq!(json["source"], format!("url:{url}"));
+            assert_eq!(json["result"]["evidence"]["source"], format!("url:{url}"));
             assert_eq!(
-                json["closure"][0],
+                json["result"]["evidence"]["closure"][0],
                 serde_json::json!({"id":"fixture.test/json@1","root":PACKAGE_X,"new":true})
             );
             let before = fs::read(law.path("app/hirsel.hcfg")).unwrap();
             let lock = fs::read(law.path("app/hirsel.lock")).unwrap();
             for _ in 0..2 {
-                let (status, _, stderr) = call(&[]);
+                let (status, output, stderr) = call(&[]);
                 assert_eq!(status, Some(2), "{stderr}");
-                assert!(stderr.contains("already bound to another root"), "{stderr}");
+                assert!(output.contains("already bound to another root"), "{output}");
                 assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), before);
                 assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
                 assert_eq!(fs::read_dir(law.path("packages")).unwrap().count(), 1);
@@ -422,9 +425,9 @@ fn url_capture_pins_and_caps() {
             let after = fs::read(law.path("app/hirsel.hcfg")).unwrap();
             assert!(String::from_utf8_lossy(&after).contains(PACKAGE_Y));
             let entries = fs::read_dir(law.path("packages")).unwrap().count();
-            let (status, _, stderr) = update();
+            let (status, output, stderr) = update();
             assert_eq!(status, Some(2), "{stderr}");
-            assert!(stderr.contains("over the limit"), "{stderr}");
+            assert!(output.contains("over the limit"), "{output}");
             assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), after);
             assert_eq!(fs::read_dir(law.path("packages")).unwrap().count(), entries);
         },
@@ -469,14 +472,7 @@ fn s6_add_memory_child() {
         return;
     };
     let cwd = std::env::current_dir().unwrap();
-    let args = [
-        "add",
-        &source,
-        "--package-store",
-        "../packages",
-        "--dry-run",
-    ]
-    .map(str::to_owned);
+    let args = ["add", &source, "--package-store", "../packages", "--plan"].map(str::to_owned);
     let crate::cli::Action::Invoke(crate::cli::Invocation::Add(invocation)) =
         crate::cli::parse(args.into_iter()).unwrap()
     else {
@@ -637,8 +633,11 @@ fn crash_repair_and_concurrent_adds() {
     assert!(stale.2.contains("stale under --locked"));
     let repair = PackageLaw::pass(invoke(&law, "app", &["jx.hpkg", "--json"]));
     let repair: serde_json::Value = serde_json::from_str(&repair).unwrap();
-    assert_eq!(repair["result"], "unchanged");
-    assert_eq!(repair["committed"], serde_json::json!(["hirsel.lock"]));
+    assert_eq!(repair["result"]["change"], "unchanged");
+    assert_eq!(
+        repair["result"]["committed"],
+        serde_json::json!(["hirsel.lock"])
+    );
     PackageLaw::pass(law.run(&["lock", "app", "--locked"]));
 
     law.app("app", "");
@@ -699,8 +698,8 @@ fn store_source_and_post_commit_failure() {
     fs::remove_dir(law.path("app/hirsel.lock")).unwrap();
     let repair = PackageLaw::pass(invoke(&law, "app", &[PACKAGE_X, "--json"]));
     let repair: serde_json::Value = serde_json::from_str(&repair).unwrap();
-    assert_eq!(repair["source"], "store");
-    assert_eq!(repair["result"], "unchanged");
+    assert_eq!(repair["result"]["evidence"]["source"], "store");
+    assert_eq!(repair["result"]["change"], "unchanged");
     PackageLaw::pass(law.run(&["lock", "app", "--locked"]));
 }
 
@@ -761,9 +760,9 @@ fn forms_that_fetch_nothing() {
         &["../../libs/a", "--json"],
     )))
     .unwrap();
-    assert_eq!(again["result"], "unchanged");
-    assert_eq!(again["source"], "member:libs/a");
-    assert_eq!(again["root"], serde_json::Value::Null);
+    assert_eq!(again["result"]["change"], "unchanged");
+    assert_eq!(again["result"]["evidence"]["source"], "member:libs/a");
+    assert_eq!(again["result"]["evidence"]["root"], serde_json::Value::Null);
     PackageLaw::pass(law.run(&["build", "work/apps/ui", "--frozen"]));
 }
 
@@ -888,4 +887,8 @@ fn package_l1b_floor_roots() {
         law.fixture("jz", "jz.hpkg"),
         "fixture.test/json@1 1.0.0 sha256:1ad0b7636d8b0df47998006c9c53324001ceba7c99cbdd1d7658f2adb191107b\n"
     );
+}
+
+mod plans {
+    include!("laws_plans.rs");
 }

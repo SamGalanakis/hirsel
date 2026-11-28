@@ -207,6 +207,25 @@ impl Registry {
         })
     }
 
+    pub(crate) fn plan_heads(&self) -> Vec<serde_json::Value> {
+        let head = |head: &Checkpoint| {
+            serde_json::json!({
+                "root": hirsel_core_ids::hex::encode(&head.root()), "size": head.size().to_string(),
+                "evidence": crate::package_update::plan::digest(head.note()),
+                "policy": if head.is_preview() {"preview"} else {"witnessed"},
+            })
+        };
+        self.logs
+            .iter()
+            .map(|(origin, state)| {
+                serde_json::json!({
+                    "origin": origin.to_string(), "release": head(&state.release),
+                    "status": state.statuses.checkpoint().map(head),
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn open(&mut self, name: &str, pin: Option<&Origin>) -> Result<Origin, Failure> {
         self.open_logs(name, pin, true)
     }
@@ -383,6 +402,13 @@ impl Registry {
         } else {
             None
         };
+        if selected.is_none() && pin.is_none() && !young.is_empty() {
+            return Err(crate::operator_cli::finite::Failure::blocked(
+                "RegistryCooldown",
+                &format!("no eligible registry release for {name} is outside the 72 h wait"),
+            )
+            .into());
+        }
         let candidate = selected.ok_or_else(|| NoEligible(name.clone()))?;
         let root = candidate.leaf.root();
         let library = match self.store.read(root)? {
@@ -457,7 +483,7 @@ impl Registry {
         locator: Option<&SourceLocation>,
         shared: Option<&crate::package_manifest::Workspace>,
         alias: &str,
-    ) -> Result<(BTreeMap<String, Finding>, Vec<String>), Failure> {
+    ) -> Result<(BTreeMap<String, Finding>, crate::package_audit::Checked), Failure> {
         use crate::package_manifest::Dependency;
         let mut findings = self.graph(trial, None)?;
         require_active(&findings)?;
@@ -483,7 +509,7 @@ impl Registry {
             .into_iter()
             .map(|(id, f)| (id.to_string(), f))
             .collect();
-        Ok((report, checked.authority))
+        Ok((report, checked))
     }
 
     pub(crate) fn unbound(

@@ -1,4 +1,5 @@
 use crate::cli::{AddOption, Request};
+use crate::operator_cli::{finite::Failure as EditFailure, package::EditReceipt};
 use crate::package_content::{ARCHIVE_LIMIT, Library, PackageArchive, Root, toolchain_major};
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, open_directory, walk};
@@ -7,6 +8,7 @@ use crate::package_lock::{Lock, Mode, NAME as LOCK};
 use crate::package_manifest::{Dependency, Manifest, SourceLocation};
 use crate::package_resolve::Resolution;
 use crate::package_store::{Entry, PackageStore, fetch_https};
+use crate::package_update::plan::Plan;
 use crate::package_workspace::{Edge, Workspace, archive_path, identity, read_manifest};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +41,7 @@ struct ClosureRow {
 
 #[derive(Serialize)]
 struct Report {
+    #[serde(skip)]
     result: &'static str,
     alias: String,
     id: String,
@@ -47,90 +50,40 @@ struct Report {
     committed: Vec<PathBuf>,
     pending: Vec<PathBuf>,
     previous_root: Option<String>,
-    dry_run: bool,
     cache: &'static str,
     fetched: BTreeSet<String>,
     closure: Vec<ClosureRow>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     registry: BTreeMap<String, registry_select::Finding>,
-    /// The branch and commit taken for a git source given without a reference.
-    #[serde(skip)]
     chose: Option<String>,
 }
 
 impl Report {
-    fn with_fetches(&self, error: Failure) -> Failure {
-        if self.fetched.is_empty() {
-            error
-        } else {
-            let sources = self.fetched.iter().cloned().collect::<Vec<_>>().join(", ");
-            format!("{error}\n  fetched: {sources}").into()
-        }
-    }
-
-    fn print(
-        &self,
-        options: &Options,
-        target: &Path,
-        archive_len: usize,
-        lock_message: Option<&str>,
-    ) {
-        if options.json {
-            println!(
-                "{}",
-                serde_json::to_string(self).expect("add report contains UTF-8 paths")
-            );
-            return;
-        }
-        for (id, finding) in &self.registry {
-            finding.report(id);
-        }
-        let verb = match (self.result, self.dry_run) {
-            ("added", true) => "would add",
-            ("updated", true) => "would update",
-            ("unchanged", _) => "unchanged",
-            (verb, _) => verb,
+    fn summary(&self, options: &Options, manifest: &Path) -> String {
+        let verb = match (options.plan, self.result) {
+            (true, "added") => "would add",
+            (true, "updated") => "would update",
+            (_, result) => result,
         };
-        let bound = self.root.clone().unwrap_or_else(|| self.source.clone());
+        let root = self.root.as_deref().unwrap_or(&self.source);
         let root = match &self.previous_root {
-            Some(old) if self.result == "updated" => format!("{old} -> {bound}"),
-            _ => bound,
+            Some(before) if self.result == "updated" => format!("{before} -> {root}"),
+            _ => root.to_owned(),
         };
         let id = if options.alias.is_some() {
             format!("{} = {}", self.alias, self.id)
         } else {
             self.id.clone()
         };
-        println!("hirsel: {verb} {id} {root} in {}", target.display());
-        if let Some(chose) = &self.chose {
-            println!("hirsel: {chose}");
-        }
-        if archive_len != 0 {
-            let source = self
-                .source
-                .split_once(':')
-                .map_or(self.source.as_str(), |(_, value)| value);
-            let new = self.closure.iter().filter(|row| row.new).count();
-            println!(
-                "        from {source} ({} packages, {} KiB, {new} new in the store)",
-                self.closure.len(),
-                archive_len.div_ceil(1024)
-            );
-        }
-        if let Some(message) = lock_message {
-            if self.dry_run {
-                println!(
-                    "hirsel: would {}",
-                    message
-                        .replacen("updated", "update", 1)
-                        .replacen("created", "create", 1)
-                );
-            } else {
-                println!("hirsel: {message}");
-            }
-        }
-        for source in &self.fetched {
-            println!("hirsel: fetched {source}");
+        format!("hirsel: {verb} {id} {root} in {}", manifest.display())
+    }
+
+    fn with_fetches(&self, error: Failure) -> Failure {
+        if self.fetched.is_empty() {
+            error
+        } else {
+            let sources = self.fetched.iter().cloned().collect::<Vec<_>>().join(", ");
+            format!("{error}\n  fetched: {sources}").into()
         }
     }
 }
@@ -382,7 +335,8 @@ fn settle(
     store: PackageStore,
     libraries: BTreeMap<Root, Library>,
     report: &mut Report,
-) -> Result<(PackageStore, BTreeMap<Root, Library>, Option<String>), Failure> {
+    planned_lock: Option<&[u8]>,
+) -> Result<(PackageStore, BTreeMap<Root, Library>), Failure> {
     let actual = current_scope(cwd, scope, "add")?;
     if let Some((target, published, path)) = published
         && actual.captured_manifest(target)? != Some(published)
@@ -393,21 +347,28 @@ fn settle(
         Resolution::resolve_cached(actual, store, false, libraries, &mut report.fetched)?;
     let prior = Lock::capture(&resolved.workspace)?;
     let lock = Lock::compare_captured(&resolved, Mode::Update, prior.as_ref())?;
-    let message = match lock.pending() {
+    if let Some(planned) = planned_lock
+        && lock
+            .pending()
+            .map(|(bytes, _)| bytes.as_bytes())
+            .or_else(|| prior.as_ref().map(|file| file.bytes.as_ref()))
+            != Some(planned)
+    {
+        return Err("resolved hirsel.lock differs from the planned lock".into());
+    }
+    match lock.pending() {
         None => {
             report.pending.retain(|path| path != Path::new(LOCK));
-            None
         }
-        Some((bytes, message)) => {
+        Some((bytes, _)) => {
             let staged = stage(scope, LOCK, bytes.as_bytes())?;
             if Lock::capture(&resolved.workspace)? != prior {
                 return Err("hirsel.lock changed while hirsel add ran".into());
             }
             publish(staged, scope, LOCK, LOCK.into(), report)?;
-            Some(message.to_owned())
         }
     };
-    Ok((resolved.store, resolved.libraries, message))
+    Ok((resolved.store, resolved.libraries))
 }
 
 /// Publishes each changed manifest in order, deriving the lock after each.
@@ -416,10 +377,23 @@ fn commit(
     scope: &File,
     writes: &[ManifestWrite<'_>],
     trial: Resolution,
+    before: &Workspace,
+    previous_lock: Option<&Captured>,
+    planned_lock: &Lock,
     report: &mut Report,
     checkpoint: &mut dyn FnMut(Checkpoint),
-) -> Result<Vec<String>, Failure> {
+) -> Result<(), Failure> {
     let workspace_path = trial.workspace.directory.clone();
+    let current = current_scope(cwd, scope, "add")?;
+    if !before.same_manifests(&current) || Lock::capture(&current)?.as_ref() != previous_lock {
+        return Err(
+            "a manifest or hirsel.lock changed while hirsel add ran; nothing was written".into(),
+        );
+    }
+    let final_lock = planned_lock
+        .pending()
+        .map(|(bytes, _)| bytes.as_bytes())
+        .or_else(|| previous_lock.map(|file| file.bytes.as_ref()));
     for write in writes {
         if !write.current(&workspace_path) {
             return Err(format!(
@@ -430,12 +404,10 @@ fn commit(
         }
     }
     let (mut store, mut libraries) = (trial.store, trial.libraries);
-    let mut messages = Vec::new();
     let changing: Vec<_> = writes.iter().filter(|write| write.changes()).collect();
     if changing.is_empty() {
-        let (_, _, message) = settle(cwd, scope, None, store, libraries, report)?;
-        messages.extend(message);
-        return Ok(messages);
+        settle(cwd, scope, None, store, libraries, report, final_lock)?;
+        return Ok(());
     }
     for (index, write) in changing.iter().enumerate() {
         let path = write.path();
@@ -457,35 +429,63 @@ fn commit(
             bytes: write.proposed.bytes.clone(),
             identity: identity(&file)?,
         };
-        let message;
-        (store, libraries, message) = settle(
+        let last = index + 1 == changing.len();
+        (store, libraries) = settle(
             cwd,
             scope,
             Some((write.directory, &published, &path)),
             store,
             libraries,
             report,
+            final_lock.filter(|_| last),
         )?;
-        messages.extend(message);
-        if index + 1 < changing.len() && !report.pending.iter().any(|p| p == Path::new(LOCK)) {
+        if !last && !report.pending.iter().any(|p| p == Path::new(LOCK)) {
             report.pending.push(LOCK.into());
         }
     }
-    Ok(messages)
+    Ok(())
 }
 
 pub(crate) fn run(invocation: Request<AddOption>) -> Result<i32, Failure> {
-    run_at(invocation, &std::env::current_dir()?, |_| {})
+    let mut receipt = EditReceipt::new(
+        "add",
+        invocation.options.contains(&AddOption::PackagePlan),
+        invocation.options.contains(&AddOption::Json),
+    );
+    let outcome = std::env::current_dir()
+        .map_err(Failure::from)
+        .and_then(|cwd| execute(invocation, &cwd, &mut |_| {}, &mut receipt));
+    Ok(receipt.finish(outcome))
 }
 
+#[cfg(test)]
 pub(crate) fn run_at(
     invocation: Request<AddOption>,
     cwd: &Path,
     mut checkpoint: impl FnMut(Checkpoint),
 ) -> Result<i32, Failure> {
+    let mut receipt = EditReceipt::new("add", false, false);
+    let outcome = execute(invocation, cwd, &mut checkpoint, &mut receipt);
+    if outcome.is_err() && !receipt.has_publication() {
+        return outcome.map(|()| 0);
+    }
+    Ok(receipt.finish(outcome))
+}
+
+pub(crate) fn execute(
+    invocation: Request<AddOption>,
+    cwd: &Path,
+    checkpoint: &mut dyn FnMut(Checkpoint),
+    receipt: &mut EditReceipt,
+) -> Result<(), Failure> {
+    receipt.add_intent(cwd, &invocation);
     let options = Options::read(invocation)?;
     let scope = lock_scope(cwd)?;
     let workspace = current_scope(cwd, &scope, "add")?;
+    receipt.target(
+        &workspace.directory,
+        workspace.member.as_ref().map(ToString::to_string),
+    )?;
     let mut registry = registry_select::Registry::new(&options.store)?;
     let mut authority_refusal = None;
     loop {
@@ -495,9 +495,10 @@ pub(crate) fn run_at(
             &scope,
             &workspace,
             &mut registry,
-            &mut checkpoint,
+            checkpoint,
+            receipt,
         ) {
-            Ok(Attempt::Complete(code)) => return Ok(code),
+            Ok(Attempt::Complete) => return Ok(()),
             Ok(Attempt::Denied(root, error)) if registry.deny(root) => {
                 authority_refusal = Some(error);
             }
@@ -516,7 +517,7 @@ pub(crate) fn run_at(
 }
 
 enum Attempt {
-    Complete(i32),
+    Complete,
     Denied(Root, Failure),
 }
 
@@ -527,6 +528,7 @@ fn add(
     workspace: &Workspace,
     registry: &mut registry_select::Registry,
     checkpoint: &mut dyn FnMut(Checkpoint),
+    receipt: &mut EditReceipt,
 ) -> Result<Attempt, Failure> {
     let root_manifest = workspace.directory.join(MANIFEST);
     let root_captured = workspace
@@ -567,7 +569,7 @@ fn add(
     let old_lock = Lock::capture(&workspace)?;
 
     let (mut fetched_early, mut chose) = (Vec::new(), None);
-    let (archive, locator, len, local) = match &options.source {
+    let (archive, locator, _len, local) = match &options.source {
         Source::Registry(query) => {
             let chosen = registry.add_candidate(
                 query,
@@ -845,7 +847,6 @@ fn add(
         committed: Vec::new(),
         pending: Vec::new(),
         previous_root: previous_root.map(|root| root.to_string()),
-        dry_run: options.dry_run,
         registry: BTreeMap::new(),
         cache: "complete",
         fetched: fetched_early.into_iter().collect(),
@@ -881,12 +882,14 @@ fn add(
     let trial = registry
         .resolve_add(overlay, entries, named_root, &mut report.fetched)
         .map_err(|error| report.with_fetches(error))?;
+    let mut checked = None;
     if matches!(options.source, Source::Registry(_)) {
-        let (findings, authority) =
+        let (findings, audit) =
             registry.check_add(&trial, &id, root, locator.as_ref(), shared.as_ref(), alias)?;
         report.registry = findings;
-        if !authority.is_empty() {
-            let error = authority.join("\n").into();
+        if !audit.authority.is_empty() {
+            let error =
+                EditFailure::negative("AuthorityDenied", &audit.authority.join("\n")).into();
             if matches!(&options.source, Source::Registry(query) if query.exact.is_none()) {
                 return Ok(Attempt::Denied(
                     root.expect("named registry binding"),
@@ -895,85 +898,100 @@ fn add(
             }
             return Err(error);
         }
+        checked = Some(audit);
     }
-    let manifest_path = writes[0].path();
-    if options.dry_run {
-        let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
-        report.print(
-            options,
-            &manifest_path,
-            len,
-            lock.pending().map(|(_, message)| message),
-        );
-        return Ok(Attempt::Complete(0));
+    let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
+    let baseline = workspace
+        .with_manifests(cwd, &[], false)?
+        .and_then(|before| {
+            Resolution::resolve_cached(
+                before,
+                trial.store.clone(),
+                true,
+                Default::default(),
+                &mut BTreeSet::new(),
+            )
+            .ok()
+        });
+    let mut plan = Plan::new(
+        workspace,
+        &trial,
+        writes
+            .iter()
+            .map(|write| (write.path(), &write.before, &write.proposed)),
+        old_lock.as_ref(),
+        &lock,
+        baseline.as_ref(),
+    )?;
+    if checked.is_none() && plan.checks_authority {
+        checked =
+            Some(crate::package_audit::check(&trial, None).map_err(|error| {
+                EditFailure::negative("PackageCheckFailed", &error.to_string())
+            })?);
     }
-
+    plan.registry = registry.plan_heads();
+    let mut denial = Vec::new();
+    let expansion = if let Some(checked) = checked {
+        denial = checked.authority;
+        let prior = baseline
+            .as_ref()
+            .and_then(|old| crate::package_audit::check(old, None).ok());
+        plan.authority(prior.as_ref().map(|old| &old.cards), &checked.cards)
+    } else {
+        false
+    };
+    receipt.describe(report.result, &plan, serde_json::to_value(&report)?)?;
+    receipt.summary(report.summary(options, &writes[0].path()));
+    if !denial.is_empty() {
+        return Err(EditFailure::negative("AuthorityDenied", &denial.join("\n")).into());
+    }
+    if options.plan {
+        receipt.review(expansion);
+        return Ok(Attempt::Complete);
+    }
+    if !receipt.authorize(expansion)? {
+        return Ok(Attempt::Complete);
+    }
+    let mut pending: Vec<_> = plan.paths().map(Path::to_path_buf).collect();
     if matches!(options.source, Source::Registry(_)) {
-        let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
-        let changes = writes.iter().filter(|w| w.changes());
         if let Some(failure) = crate::package_update::transaction::commit(
             "add",
             cwd,
             scope,
             workspace,
-            changes
-                .clone()
+            writes
+                .iter()
+                .filter(|w| w.changes())
                 .map(|w| (w.directory, &w.before, &w.proposed)),
             old_lock.as_ref(),
             &lock,
         )? {
-            return Err(failure.into());
+            receipt.apply(&failure.committed, &failure.pending);
+            return Err(EditFailure::negative("PartialPublication", &failure.detail).into());
         }
-        report.committed.extend(changes.map(ManifestWrite::path));
-        if lock.pending().is_some() {
-            report.committed.push(LOCK.into());
-        }
-        report.print(
-            options,
-            &manifest_path,
-            len,
-            lock.pending().map(|(_, message)| message),
-        );
-        return Ok(Attempt::Complete(0));
+        receipt.apply(&pending, &[]);
+        return Ok(Attempt::Complete);
     }
-    for write in writes.iter().filter(|write| write.changes()) {
-        report.pending.push(write.path());
-    }
-    report.pending.push(LOCK.into());
-    match commit(cwd, scope, &writes, trial, &mut report, checkpoint) {
-        Ok(messages) => {
-            let message = messages.join("\nhirsel: ");
-            report.print(
-                options,
-                &manifest_path,
-                len,
-                (!messages.is_empty()).then_some(message.as_str()),
-            );
-            Ok(Attempt::Complete(0))
-        }
+    report.pending.append(&mut pending);
+    let result = commit(
+        cwd,
+        scope,
+        &writes,
+        trial,
+        workspace,
+        old_lock.as_ref(),
+        &lock,
+        &mut report,
+        checkpoint,
+    );
+    receipt.apply(&report.committed, &report.pending);
+    match result {
+        Ok(()) => Ok(Attempt::Complete),
         Err(error) if report.committed.is_empty() => Err(report.with_fetches(error)),
-        Err(error) => {
-            report.result = "partial";
-            let paths = |files: &[PathBuf]| {
-                if files.is_empty() {
-                    return "none".into();
-                }
-                files
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            eprintln!(
-                "hirsel: {}\n  committed: {}\n  pending: {}\n  run the same hirsel add again to finish",
-                report.with_fetches(error),
-                paths(&report.committed),
-                paths(&report.pending)
-            );
-            if options.json {
-                report.print(options, &manifest_path, len, None);
-            }
-            Ok(Attempt::Complete(1))
-        }
+        Err(error) => Err(EditFailure::negative(
+            "PartialPublication",
+            &report.with_fetches(error).to_string(),
+        )
+        .into()),
     }
 }

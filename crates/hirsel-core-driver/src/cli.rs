@@ -87,11 +87,11 @@ commands! {
     "help", "help [COMMAND PATH] [--json]", "Show commands or help for one command.";
         [Help] Help(HelpOption), Many: HELP, Json;
     "op", "op <get|decide>", "Inspect an operator request.";
-        Simple(NoOption), None: HELP;
+        Simple(NoOption), Namespace: HELP;
     "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a pinned host or Store operation.";
         [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
     "config", "config <export>", "Read a typed configuration document.";
-        Simple(NoOption), None: HELP;
+        Simple(NoOption), Namespace: HELP;
     "config export", "config export FILE --json", "Export a checked configuration as versioned JSON.";
         ConfigExport(ConfigExportOption), One: HELP, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
@@ -103,7 +103,7 @@ commands! {
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP;
     "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "lean extract", "lean extract MODULE [--coreir] --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions or export a checked CoreIR closure.";
         Lean(LeanOption), Tail: HELP, Target, CoreIr, Output, Store, Inputs;
     "lean status", "lean status MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Report whether a saved extraction is stale.";
@@ -111,21 +111,21 @@ commands! {
     "lean probe", "lean probe DEFINITION --inputs MANIFEST --store DIRECTORY", "Report instructions the Lean extractor excludes.";
         Lean(LeanOption), One: HELP, Store, Inputs;
     "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Libraries, Store;
     "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Libraries, Store;
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP;
-    "add", "add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--dry-run] [--package-store DIR] [--json]", "Bind a verified library in the current package.";
-        Add(AddOption), One: AddAs, AddRoot, AddWorkspace, AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
-    "update", "update [ALIAS|ID[@VERSION]] [--dry-run] [--package-store DIR] [--json]", "Refresh dependency bindings and select compatible roots.";
-        Update(UpdateOption), One: AddDryRun, PackageStore, Locked, Frozen, HELP, Json;
+    "add", "add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--plan] [--package-store DIR] [--json]", "Bind a verified library in the current package.";
+        [PackageEdit] Add(AddOption), One: AddAs, AddRoot, AddWorkspace, PackagePlan, PackageStore, Locked, Frozen, HELP, Json;
+    "update", "update [ALIAS|ID[@VERSION]] [--plan] [--package-store DIR] [--json]", "Refresh dependency bindings and select compatible roots.";
+        [PackageEdit] Update(UpdateOption), One: PackagePlan, PackageStore, Locked, Frozen, HELP, Json;
     "audit", "audit [DIR] [--frozen] [--package-store DIR] [--json]", "Report the authority reached by dependencies.";
         Audit(AuditOption), One: PackageStore, Frozen, HELP, Json;
     "registry", "registry <publish>", "Publish packages to a routed registry.";
-        Simple(NoOption), None: HELP;
+        Simple(NoOption), Namespace: HELP;
     "registry publish", "registry publish [package-dir] [--workspace] [options]", "Check and upload library content to its routed registry.";
         RegistryPublish(RegistryPublishOption), One:
             PublishWorkspace, PublishKey, PublishWorkload, PublishTokenCommand, PublishGeneration, PublishEnroll,
@@ -138,7 +138,9 @@ commands! {
             Recording, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Limit, Output, Entry, Libraries,
             Store, Inputs, Metrics, ProfileFront, Image, Emit;
-    "manifest", "manifest show PATH", "Print a release manifest.";
+    "manifest", "manifest <show>", "Read a release manifest.";
+        Simple(NoOption), Namespace: HELP;
+    "manifest show", "manifest show PATH", "Print a release manifest.";
         Simple(NoOption), One: HELP;
     "host", "host --state DIR --admission FILE --max-places N --lifecycle managed|leader [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
         Host(HostOption), One: HostState, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
@@ -159,8 +161,8 @@ commands! {
         [Workload] Observe(ObserveOption), One: HELP, Context, GroupName, Ready, Json;
     "logs", "logs [--context NAME|/FILE] [--group NAME[@INCARNATION]] [--follow] [--after CURSOR] [--json]", "Read the selected workload's redacted lifecycle events.";
         [Lifecycle] Observe(ObserveOption), None: HELP, Context, GroupName, Follow, After, Json;
-    "op decide", "op decide OP [--decision FILE] [--wait[=DURATION]] [--context NAME|/FILE] [--json]", "Approve or refuse the exact plan held by the host.";
-        [Decision] Decide(DecideOption), Operation: HELP, DecisionFile, Wait, Context, Json;
+    "op decide", "op decide OP|@RECEIPT.json [--decision FILE] [--wait[=DURATION]] [--context NAME|/FILE] [--json]", "Approve or refuse an exact operator plan.";
+        [Decision] Decide(DecideOption), DecisionOperation: HELP, DecisionFile, Wait, Context, Json;
     "dev", "dev [DIR] [--listen ADDR] [--json] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
         [DevStream] Dev(DevOption), Tail:
             NPlace, HELP, SourceCore, SourceStd, Dir, Grant, Backend, Runtime, Limit, Libraries, Fresh,
@@ -172,7 +174,7 @@ commands! {
     "store rehearse", "store rehearse DIR --release EXE [-- arguments...]", "Preview a candidate’s migration against a store.";
         [Rehearsal] Store(StoreOption), Tail: HELP, StoreRelease, Json;
     "store", "store <inspect|stats|verify|repair|backup|restore|rehearse|archive>", "Inspect, verify, repair, back up or restore a store.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "store inspect", "store inspect DIR", "List the store's tables, indexes (kind, state, revision), cells and logs, beside a live writer.";
         Store(StoreOption), One: HELP;
     "store stats", "store stats DIR", "Print each collection's rows and bytes and the store's journal and pack files, beside a live writer.";
@@ -184,7 +186,7 @@ commands! {
     "store backup", "store backup DIR TARGET | store backup --state DIR --group NAME TARGET", "Copy a stopped store at DIR, or a served group's store through its running host, into the empty or new directory TARGET.";
         Store(StoreOption), Pair: HostState, GroupName, HELP;
     "store archive", "store archive <describe|verify|expire>", "Inspect and manage archived Store history.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "store archive describe", "store archive describe ARCHIVE [--json]", "Read the archive binding, retained intervals, gap and floor.";
         [Archive] Store(StoreOption), One: HELP, Json;
     "store archive verify", "store archive verify ARCHIVE [--deep] [--json]", "Read every retained interval and check the referenced storage.";
@@ -194,7 +196,7 @@ commands! {
     "store restore", "store restore --from SOURCE --target SELECTOR --to DEST [--plan] [--json]", "Select an exact boundary for a fresh child. Approve publication with op decide.";
         [Restore] Store(StoreOption), None: RestoreFrom, RestoreTarget, RestoreTo, Plan, Json, HELP;
     "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the hirsel.ai/fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";
         Compiler(CompilerOption), One:
             HELP, Json, SimSeed, FleetHosts, FleetRounds, FleetPlaces, FleetPartitions, FleetPlacement,
@@ -207,7 +209,7 @@ commands! {
     "serve", "serve [--max-memory BYTES] [--stop]", "Serve this toolchain's build, run and test requests from every directory.";
         Serve(ServeOption), One: HELP, MaxMemory, Stop;
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
         [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, ProfTasks, ProfMem, ProfOut, ProfFrequency,
@@ -244,7 +246,7 @@ commands! {
     "prof export", "prof export <FILE.hprof> --format pprof --out <PATH>", "Export a pprof profile.";
         ProfileExport(ProfileExportOption), One: HELP, ProfOut, ProfFormat;
     "coverage", "coverage <merge|diff>", "Merge, report and diff saved coverage profiles without running anything.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "coverage merge", "coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]", "Merge coverage profiles, and raw files read against their site maps, then report.";
         Coverage(CoverageOption), Many: HELP, Json, Output, CoverageMap, MergeBase, MergeTargets;
     "coverage diff", "coverage diff BASE NEW [--json] | coverage diff PROFILE --test DEFINITION [--json]", "Report the sites one coverage profile reached and the other did not, or one test and the rest of its profile.";
@@ -255,7 +257,7 @@ commands! {
             SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
     "tape", "tape <check|export|replay>", "Check, export or replay recordings.";
-        Simple(NoOption), None: HELP;
+        Simple(NoOption), Namespace: HELP;
     "tape export", "tape export TAPE --include-credentials --out FILE [--json]", "Export credential-bearing frames to a new private file.";
         [TapeExport] Tape(TapeOption), One: IncludeCredentials, TapeOut, Json, HELP;
     "tape check", "tape check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";
@@ -292,7 +294,7 @@ commands! {
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
         Explain(ExplainOption), One: ListRules, HELP, Json;
     "sdk", "sdk <ts|json|swift>", "Export bindings or the schema for a place.";
-        Simple(NoOption), One: HELP;
+        Simple(NoOption), Namespace: HELP;
     "sdk ts", "sdk ts <program> -o DIR [options]", "Generate TypeScript bindings and manifest.json.";
         Sdk(SdkOption), One:
             PackageStore, Locked, Frozen, PlaceTimeout, NPlace, HELP, SourceCore, SourceStd, CoreProduct,
@@ -314,6 +316,7 @@ commands! {
 mod help_text;
 pub use help_text::help;
 pub(crate) use help_text::{describe, named};
+pub(crate) use parsing::command_path;
 #[path = "cli_parse.rs"]
 mod parsing;
 pub use parsing::{Action, parse};

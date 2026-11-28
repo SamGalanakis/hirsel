@@ -159,6 +159,14 @@ pub(super) fn frame(
 }
 pub(crate) fn decide(req: Request<O>) -> i32 {
     let json = req.options.contains(&O::Json);
+    if let Some(path) = req
+        .positional
+        .as_deref()
+        .and_then(|op| op.strip_prefix('@'))
+        .map(str::to_owned)
+    {
+        return super::package::decide(req, &path, json);
+    }
     let mut env = Envelope::read("op decide");
     env.contract = "submit";
     if let Err(f) = apply(req, &mut env) {

@@ -170,7 +170,11 @@ fn g6_cli_named_add_update_audit() {
     serve_log(&server, Log::Status, &status, true);
     let run = |args: &[&str], status| invoke(&server, dir, NOW, args, status);
     let pristine = snapshot(dir);
-    assert!(run(&["add", NAME], 2).contains("no eligible"));
+    let blocked = run(&["add", NAME, "--json"], 75);
+    assert!(
+        blocked.contains(r#""code":"RegistryCooldown""#),
+        "{blocked}"
+    );
     assert_eq!(snapshot(dir), pristine);
     let add = invoke(&server, dir, NOW + 1, &["add", NAME, "--as", "j"], 0);
     assert!(add.contains(&old.to_string()), "{add}");
@@ -238,7 +242,7 @@ fn g6_cli_named_add_update_audit() {
     assert_eq!(snapshot(dir), pinned);
     serve_log(&server, Log::Status, &status, true);
     assert!(run(&["audit"], 2).contains("retired (security: incorrect input validation)"));
-    let error = run(&["update"], 2);
+    let error = run(&["update"], 75);
     let fix_hex = hex(&fix.0);
     assert!(
         !dir.join("packages")
@@ -343,7 +347,7 @@ fn g6_cli_named_add_update_audit() {
         NOW,
         BTreeMap::new(),
     );
-    let denied = run(&["update", "j@0.3.4"], 2);
+    let denied = run(&["update", "j@0.3.4"], 1);
     assert!(denied.contains("authority"), "{denied}");
     assert_eq!(snapshot(dir), before);
 
@@ -362,6 +366,10 @@ fn g6_cli_named_add_update_audit() {
         NOW - WAIT,
         BTreeMap::new(),
     );
+    let before = snapshot(dir);
+    let denied = run(&["add", "fixture.test/tools@2.0.1", "--json"], 1);
+    assert!(denied.contains(r#""code":"AuthorityDenied""#), "{denied}");
+    assert_eq!(snapshot(dir), before);
     let add = run(&["add", "fixture.test/tools@2", "--json"], 0);
     assert!(add.contains(&safe.to_string()), "{add}");
     let part = run(&["add", "fixture.test/json@1", "--as", "next"], 2);
@@ -408,7 +416,7 @@ fn g6_cli_named_add_update_audit() {
     status.push(retired_child);
     serve_log(&server, Log::Status, &status, true);
     let before = snapshot(dir);
-    let refusal = run(&["update", child_name], 2);
+    let refusal = run(&["update", child_name], 75);
     assert!(
         refusal.contains("To take it now: hirsel update fixture.test/child@0.3.2"),
         "{refusal}"

@@ -105,8 +105,8 @@ fn l30_git_package_with_sibling_path() {
         server.add(&law, "nested", &["git+https://alpha.test/rn?dir=wrap#v1", "--json"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(json["root"], PACKAGE_W);
-    assert_eq!(json["fetched"], serde_json::json!([format!("git:https://alpha.test/rj#{j}")]));
+    assert_eq!(json["result"]["evidence"]["root"], PACKAGE_W);
+    assert_eq!(json["result"]["evidence"]["fetched"], serde_json::json!([format!("git:https://alpha.test/rj#{j}")]));
     assert_eq!(
         server.log(),
         [

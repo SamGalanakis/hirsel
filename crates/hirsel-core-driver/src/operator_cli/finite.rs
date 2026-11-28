@@ -25,6 +25,20 @@ pub(crate) struct Failure {
     retry: &'static str,
 }
 
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for Failure {}
+
 impl Failure {
     pub(crate) fn input(field: &'static str, detail: impl Display) -> Self {
         Self {
@@ -69,6 +83,20 @@ impl Failure {
             ..Self::disconnected()
         }
     }
+    pub(crate) fn decision_required(detail: &str) -> Self {
+        Self {
+            code: "DecisionInputRequired",
+            detail: detail.into(),
+            exit: Exit::Blocked,
+            field: None,
+            retry: "none",
+        }
+    }
+
+    pub(crate) fn needs_decision(&self) -> bool {
+        self.code == "DecisionInputRequired"
+    }
+
     pub fn disconnected() -> Self {
         Self {
             exit: Exit::Blocked,
@@ -167,6 +195,9 @@ impl<'a> Envelope<'a> {
             }
             if !self.operation.is_null() {
                 eprintln!("operation {}", self.operation);
+            }
+            for action in &self.next {
+                eprintln!("next {action}");
             }
         } else {
             println!("{} (exit {})  {}", self.command, self.exit, self.outcome);

@@ -67,6 +67,7 @@ impl Node {
             | RtOp::ConnTrySend { .. }
             | RtOp::ConnReceive { .. }
             | RtOp::ConnTryReceive { .. }
+            | RtOp::ConnReceiveUntil { .. }
             | RtOp::LatestPublish
             | RtOp::LatestRead
             | RtOp::SharedNew { .. }

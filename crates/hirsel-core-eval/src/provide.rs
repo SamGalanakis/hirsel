@@ -339,7 +339,7 @@ impl Machine<'_> {
             for k in receivers {
                 if matches!(
                     self.host.sched.tasks[k].state,
-                    State::Waiting(Condition::Receive(_))
+                    State::Waiting(c) if c.is_receive()
                 ) {
                     self.host.sched.wake_waiting(k);
                 } else {
@@ -492,7 +492,7 @@ impl Machine<'_> {
                 for (_, k) in due {
                     if matches!(
                         self.host.sched.tasks[k].state,
-                        State::Waiting(Condition::Receive(_))
+                        State::Waiting(c) if c.is_receive()
                     ) {
                         self.host.sched.wake_waiting(k);
                     } else {

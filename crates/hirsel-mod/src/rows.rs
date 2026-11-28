@@ -56,6 +56,7 @@ macro_rules! rows {
             hirsel_core_conn_new Task,
             hirsel_core_conn_receive Task,
             hirsel_core_conn_receive_rec Task,
+            hirsel_core_conn_receive_until Task,
             hirsel_core_conn_send Task,
             hirsel_core_conn_send_rec Task,
             hirsel_core_contain_enter Metered,

@@ -67,6 +67,7 @@ fn runtime_probes() -> Module {
         RtOp::ConnTrySend { item: ITEM },
         RtOp::ConnReceive { item: ITEM },
         RtOp::ConnTryReceive { item: ITEM },
+        RtOp::ConnReceiveUntil { item: ITEM },
         RtOp::SpawnUnit { x: ITEM, r: ITEM },
         RtOp::FrameRecord,
         RtOp::Returnable(Wait::Host(HostOp::RecvBounded)),

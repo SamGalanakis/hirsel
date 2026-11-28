@@ -64,6 +64,10 @@ pub enum RtOp {
     ConnTryReceive {
         item: TypeId,
     },
+    /// `conn.receive_until`: as `ConnTryReceive`, with an optional deadline.
+    ConnReceiveUntil {
+        item: TypeId,
+    },
     /// `task.spawn_unit` (CONC-15): `Spawn`'s operands, and
     /// `(task, requested, available)`; a null task is `Capacity`.
     SpawnUnit {
@@ -379,6 +383,10 @@ impl RtOp {
             RtOp::ConnReceive { item } | RtOp::ConnTryReceive { item } => {
                 (vec![V(p), out(item)], vec![u8_, u64_, u64_])
             }
+            RtOp::ConnReceiveUntil { item } => (
+                vec![V(p), out(item), V(u8_), V(u64_), V(u64_)],
+                vec![u8_, u64_, u64_],
+            ),
             RtOp::SpawnUnit { x, .. } => {
                 (vec![V(u64_), take(x), V(p), V(u64_)], vec![p, u64_, u64_])
             }
@@ -527,6 +535,7 @@ impl RtOp {
             | RtOp::ConnTrySend { item }
             | RtOp::ConnReceive { item }
             | RtOp::ConnTryReceive { item }
+            | RtOp::ConnReceiveUntil { item }
             | RtOp::HeldNew { item }
             | RtOp::HeldTake { item }
             | RtOp::ResourceOrigin { item }
@@ -640,6 +649,7 @@ impl RtOp {
                 | RtOp::ConnSend { .. }
                 | RtOp::ConnTrySend { .. }
                 | RtOp::ConnReceive { .. }
+                | RtOp::ConnReceiveUntil { .. }
                 | RtOp::SpawnUnit { .. }
                 | RtOp::IsolateCatch
                 | RtOp::Flow(_)

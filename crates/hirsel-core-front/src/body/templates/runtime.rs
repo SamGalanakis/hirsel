@@ -27,6 +27,9 @@ impl Substitution<'_> {
             RtOp::ConnTryReceive { item } => RtOp::ConnTryReceive {
                 item: self.ty(item),
             },
+            RtOp::ConnReceiveUntil { item } => RtOp::ConnReceiveUntil {
+                item: self.ty(item),
+            },
             RtOp::DataDecode {
                 witness,
                 bytes,

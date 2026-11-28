@@ -10,3 +10,5 @@ pub fn try_send[T: cross](c: Client[T], take x: T) -> Result[(), SendError[T]]
 pub fn receive[T: cross](i: Inbox[T]) -> Result[T, InboxError] waits
 
 pub fn try_receive[T: cross](i: Inbox[T]) -> Result[T, InboxPoll]
+
+pub fn receive_until[T: cross](i: Inbox[T], until: Until) -> Result[T, InboxPoll] waits

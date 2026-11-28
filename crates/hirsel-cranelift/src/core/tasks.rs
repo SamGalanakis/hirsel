@@ -1,5 +1,6 @@
 //! Closed runtime rows bind the published task and provider C ABI.
 mod argon2;
+mod conn;
 mod glue;
 mod host;
 mod map_placement;
@@ -102,6 +103,7 @@ impl Function<'_, '_, '_> {
             | RtOp::ConnTrySend { .. }
             | RtOp::ConnReceive { .. }
             | RtOp::ConnTryReceive { .. }
+            | RtOp::ConnReceiveUntil { .. }
             | RtOp::Flow(_) => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
@@ -786,22 +788,10 @@ impl Function<'_, '_, '_> {
                 outputs[0] = values[0];
                 1
             }
-            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
-                let wait = matches!(op, RtOp::ConnReceive { .. });
-                let wait = self.b.ins().iconst(types::I8, i64::from(wait));
-                let values = self.c_call(
-                    "hirsel_core_conn_receive",
-                    &[P, P, P, U, B],
-                    &[U, U],
-                    &[self.context, args[0], args[1], site, wait],
-                )?;
-                let packed = values[0];
-                let status = self.b.ins().ushr_imm_s(packed, 8);
-                let status = self.b.ins().ireduce(types::I8, status);
-                self.call_failure(status, call.fail)?;
-                outputs[0] = self.b.ins().ireduce(types::I8, packed);
-                outputs[1] = self.b.ins().ushr_imm_s(packed, 16);
-                outputs[2] = values[1];
+            RtOp::ConnReceive { .. }
+            | RtOp::ConnTryReceive { .. }
+            | RtOp::ConnReceiveUntil { .. } => {
+                outputs[..3].copy_from_slice(&self.conn_receive(op, &args, site, call.fail)?);
                 3
             }
             RtOp::Join { .. } => {

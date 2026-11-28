@@ -616,6 +616,22 @@ a cancellation point: it returns `Empty` where `receive` would wait. This clause
 when an item accepted from another unit, or the cleaning of the last client in another unit,
 is seen by the inbox's unit.
 
+`conn.receive_until(i: Inbox[T], until: Until) -> Result[T, InboxPoll] waits`
+checks unshielded cancellation, the front item, closure, then the deadline.
+Receiving or refusing the front item uses the same admission and room refund
+rules as `receive`, even after the deadline passes. Only success removes the
+front item. An empty closed inbox returns `Closed`. An empty open inbox returns
+`Empty` once the deadline passes. `Never` waits and observes cancellation as
+`receive` does.
+
+If all checks miss, the task parks on the inbox and, for `At(clock, t)`, on the
+clock's monotonic deadline. Either wake runs the checks again. A held clock
+counts this as an inside wait, so `clock.idle` can observe the deadline and
+`clock.advance_to` can reach it. Cancellation, delivery, closure and expiry
+retire both registrations before another poll. The wait uses the task's
+prepaid timer slot, with no further admission. Deadline decisions use the
+timed receive rules in [CONC-10](#conc-10-event-order).
+
 Cleaning the inbox seals the connection: every later send and every waiting send answers
 `Closed(x)`. The cleaning waits for the seal with cancellation shielded, then drops every
 item not received, last accepted first, as [CONC-9](#conc-9-queue-drop) says for a channel.

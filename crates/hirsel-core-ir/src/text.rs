@@ -1752,14 +1752,7 @@ impl BodyParser {
         } else if let Some(v) = t.strip_prefix("export.v") {
             Callee::PackExport(ValueId(v.parse().map_err(|_| format!("bad callee `{t}`"))?))
         } else if let Some(name) = t.strip_prefix("rt.") {
-            let mut tys = |n: usize| -> R<Vec<TypeId>> {
-                let ts = l.seq("[", "]", |l| Ok(TypeId(l.id('t')?)))?;
-                if ts.len() == n {
-                    Ok(ts)
-                } else {
-                    Err(format!("`{t}` takes {n} types"))
-                }
-            };
+            let mut tys = |n| runtime::type_args(l, t, n);
             Callee::Runtime(match name {
                 "spawn" => {
                     let ts = tys(2)?;
@@ -1784,6 +1777,7 @@ impl BodyParser {
                 "conn_try_send" => RtOp::ConnTrySend { item: tys(1)?[0] },
                 "conn_receive" => RtOp::ConnReceive { item: tys(1)?[0] },
                 "conn_try_receive" => RtOp::ConnTryReceive { item: tys(1)?[0] },
+                "conn_receive_until" => RtOp::ConnReceiveUntil { item: tys(1)?[0] },
                 "spawn_unit" => {
                     let ts = tys(2)?;
                     RtOp::SpawnUnit { x: ts[0], r: ts[1] }

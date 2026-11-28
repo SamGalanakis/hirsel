@@ -423,6 +423,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::ConnTrySend { .. }
                 | RtOp::ConnReceive { .. }
                 | RtOp::ConnTryReceive { .. }
+                | RtOp::ConnReceiveUntil { .. }
                 | RtOp::Flow(_)
         ) {
             self.site_word()
@@ -832,8 +833,23 @@ impl FunctionEmitter<'_> {
                     )
                 }
             },
-            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
+            RtOp::ConnReceive { .. }
+            | RtOp::ConnTryReceive { .. }
+            | RtOp::ConnReceiveUntil { .. } => {
                 let returned = match &rec {
+                    None if matches!(op, RtOp::ConnReceiveUntil { .. }) => self.native_call(
+                        "hirsel_core_conn_receive_until",
+                        &[U, U],
+                        &[
+                            ptr(CONTEXT),
+                            p(&args[0]),
+                            p(&args[1]),
+                            zeroext(Type::I8, args[2].clone()),
+                            u(&args[3]),
+                            u(&args[4]),
+                            u(&at),
+                        ],
+                    ),
                     Some(word) => self.native_call(
                         "hirsel_core_conn_receive_rec",
                         &[U, U],

@@ -520,6 +520,7 @@ core@1/conn/send
 core@1/conn/try_send
 core@1/conn/receive
 core@1/conn/try_receive
+core@1/conn/receive_until
 core@1/task/spawn_unit
 # DECISIONS.md 2026-11-27 (main-driver-reds-3308): Store's transaction view
 # cache (c0fb0e90) and Bucket service inbox results (4546352a).

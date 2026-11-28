@@ -355,8 +355,8 @@ impl Machine<'_> {
         }
     }
 
-    /// `conn.receive` (`wait`) and `conn.try_receive`: `(outcome, requested,
-    /// available)`, outcome 0 an item, 1 closed, 2 `Capacity`, 3 empty.
+    /// Receives and polls return `(outcome, requested, available)`: outcome 0
+    /// is an item, 1 closed, 2 `Capacity`, 3 empty.
     pub(super) fn conn_receive(
         &mut self,
         t: &Task,
@@ -364,7 +364,9 @@ impl Machine<'_> {
         wait: bool,
         inbox: u64,
         dest: u64,
+        until: Option<Due>,
     ) -> X<Vec<u64>> {
+        use hirsel_core_layout::event::{CHANNEL_CLOSED, CHANNEL_EMPTY, CHANNEL_PARKED};
         let i = conn(inbox);
         loop {
             if wait {
@@ -387,16 +389,29 @@ impl Machine<'_> {
                 self.host.conns[i].used -= charge;
                 self.host.conns[i].taken -= 1;
                 self.wake(Condition::ConnSend(i));
+                if until.is_some() {
+                    self.event(RECEIVE, 0, 0);
+                }
                 return Ok(vec![0, 0, 0]);
             }
             if self.host.conns[i].closed {
+                if until.is_some() {
+                    self.event(RECEIVE, 0, CHANNEL_CLOSED);
+                }
                 return Ok(vec![1, 0, 0]);
             }
             if !wait {
                 self.event(TRY_RECEIVE, inbox, 1);
                 return Ok(vec![3, 0, 0]);
             }
-            self.park_task(t, Condition::ConnReceive(i));
+            if let Some(due) = until {
+                if self.passed(due) {
+                    self.event(RECEIVE, 0, CHANNEL_EMPTY);
+                    return Ok(vec![3, 0, 0]);
+                }
+                self.event(RECEIVE, 0, CHANNEL_PARKED);
+            }
+            self.park_receive(t, Condition::ConnReceive(i), until);
         }
     }
 

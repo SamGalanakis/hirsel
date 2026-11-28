@@ -2123,7 +2123,7 @@ impl Machine<'_> {
             } = cell
             {
                 timers.retain(|&(_, k)| {
-                    parked(k) || matches!(tasks[k].state, State::Waiting(Condition::Receive(_)))
+                    parked(k) || matches!(tasks[k].state, State::Waiting(c) if c.is_receive())
                 });
                 wall_timers.retain(|&(_, k)| parked(k));
                 for (k, flag) in idle.iter_mut() {
@@ -2841,23 +2841,6 @@ impl Machine<'_> {
         let k = self.host.world.cells[c].settle(id, row);
         k.into_iter().for_each(|k| self.ready_provider(k));
         Ok(ok(0))
-    }
-
-    fn park_task(&mut self, t: &Task, condition: Condition) {
-        self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-        self.park(Some(Wait::Task(condition, None)));
-    }
-
-    fn wake(&mut self, condition: Condition) {
-        if let Some(waiters) = self.host.sched.waiting.remove(&condition) {
-            for k in waiters {
-                if matches!(condition, Condition::Receive(_)) {
-                    self.host.sched.timers.retain(|&(_, j)| j != k);
-                }
-                self.host.sched.tasks[k].state = State::Ready;
-                self.host.sched.ready.push_back(k);
-            }
-        }
     }
 
     /// Record an event of the running task (CONC-10). A poll uses one of the

@@ -42,7 +42,46 @@ impl Sched {
     }
 }
 
+impl Condition {
+    pub(super) fn is_receive(self) -> bool {
+        matches!(self, Self::Receive(_) | Self::ConnReceive(_))
+    }
+}
+
 impl Machine<'_> {
+    pub(super) fn park_receive(&mut self, t: &Task, condition: Condition, until: Option<Due>) {
+        let host = match until {
+            Some(Due::Host(at)) => Some(at),
+            Some(Due::Cell(c, at)) => {
+                self.cell_timer(c, at, t.k);
+                None
+            }
+            None => None,
+        };
+        self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+        self.park(Some(Wait::Task(condition, host)));
+        if let Some(Due::Cell(c, _)) = until {
+            self.remove_cell_timer(c, t.k);
+        }
+    }
+
+    pub(super) fn park_task(&mut self, t: &Task, condition: Condition) {
+        self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+        self.park(Some(Wait::Task(condition, None)));
+    }
+
+    pub(super) fn wake(&mut self, condition: Condition) {
+        if let Some(waiters) = self.host.sched.waiting.remove(&condition) {
+            for k in waiters {
+                if condition.is_receive() {
+                    self.host.sched.timers.retain(|&(_, j)| j != k);
+                }
+                self.host.sched.tasks[k].state = State::Ready;
+                self.host.sched.ready.push_back(k);
+            }
+        }
+    }
+
     pub(super) fn rt_world(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         let cur = t.limits.last().unwrap();
         Ok(match op {
@@ -274,10 +313,15 @@ impl Machine<'_> {
                 let wait = matches!(op, RtOp::ConnSend { .. });
                 self.conn_send(t, wait, a[0], a[1])?
             }
-            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
-                let wait = matches!(op, RtOp::ConnReceive { .. });
+            RtOp::ConnReceive { .. }
+            | RtOp::ConnTryReceive { .. }
+            | RtOp::ConnReceiveUntil { .. } => {
+                let wait = !matches!(op, RtOp::ConnTryReceive { .. });
+                let until = matches!(op, RtOp::ConnReceiveUntil { .. })
+                    .then(|| self.until(a, 2))
+                    .flatten();
                 let cur = cur.clone();
-                self.conn_receive(t, &cur, wait, a[0], a[1])?
+                self.conn_receive(t, &cur, wait, a[0], a[1], until)?
             }
             RtOp::ChannelSender => {
                 let c = &mut self.host.chans[((a[0] - CHAN_BASE) / 2) as usize];
@@ -355,20 +399,7 @@ impl Machine<'_> {
                     if until.is_some() {
                         self.event(RECEIVE, self.chan_id(i), CHANNEL_PARKED);
                     }
-                    let host = match until {
-                        Some(Due::Host(at)) => Some(at),
-                        Some(Due::Cell(c, at)) => {
-                            self.cell_timer(c, at, t.k);
-                            None
-                        }
-                        None => None,
-                    };
-                    self.host.sched.tasks[t.k].cancellable =
-                        t.shield == 0 && t.obligations.len() == 1;
-                    self.park(Some(Wait::Task(Condition::Receive(i), host)));
-                    if let Some(Due::Cell(c, _)) = until {
-                        self.remove_cell_timer(c, t.k);
-                    }
+                    self.park_receive(t, Condition::Receive(i), until);
                 }
             }
             RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {

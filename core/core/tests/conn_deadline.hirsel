@@ -1,0 +1,127 @@
+fn empty_word(r: Result[u64, InboxPoll]) -> bool {
+    match r {
+        Error(Empty) => true,
+        _ => false,
+    }
+}
+
+fn closed_word(r: Result[u64, InboxPoll]) -> bool {
+    match r {
+        Error(Closed) => true,
+        _ => false,
+    }
+}
+
+// The expired deadline loses to the queued item and to closure.
+// expect: run inbox_deadline_poll_order() = true
+fn inbox_deadline_poll_order() -> bool waits {
+    let (mono, hand) = provide.clock(10, 0)
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let due: Until = At(mono, 10)
+    let empty = empty_word(conn.receive_until(i, due))
+    result.unwrap(conn.send(c, 7))
+    let _ = take c
+    let item = result.unwrap(conn.receive_until(i, due))
+    let closed = closed_word(conn.receive_until(i, due))
+    empty && item == 7 && closed
+}
+
+// The item asks for 16 bytes. A refusal wins over expiry and preserves the
+// front item. Taking it also returns the 16 bytes to the connection's room.
+// expect: run inbox_deadline_capacity_keeps_front() = true
+fn inbox_deadline_capacity_keeps_front() -> bool waits {
+    let (mono, hand) = provide.clock(10, 0)
+    let (c, i): (Client[String], Inbox[String]) = result.unwrap(conn.new(1, bytes 16))
+    let due: Until = At(mono, 10)
+    result.unwrap(conn.send(c, string.from("abcdefghijkl")))
+    let refused = bound bytes 8 {
+        match conn.receive_until(i, due) {
+            Error(Capacity(cap)) => cap.requested == 16 && cap.available == 8,
+            _ => false,
+        }
+    }
+    let first = result.unwrap(conn.receive_until(i, due))
+    result.unwrap(conn.send(c, string.from("zyxwvutsrqpo")))
+    let second = result.unwrap(conn.receive_until(i, due))
+    result.unwrap(refused) && first == "abcdefghijkl" && second == "zyxwvutsrqpo"
+}
+
+fn expire_deliver_close(take args: (Inbox[u64], Clock)) -> bool waits {
+    let (i, mono) = take args
+    let expired = empty_word(conn.receive_until(i, At(mono, 10)))
+    let item = result.unwrap(conn.receive_until(i, At(mono, 20)))
+    let closed = closed_word(conn.receive_until(i, At(mono, 30)))
+    expired && item == 42 && closed
+}
+
+// Expiry, delivery and closure each retire the inbox and timer registrations
+// before the same task waits again.
+// expect: run inbox_deadline_held_clock(tasks) = true
+fn inbox_deadline_held_clock(tasks: Tasks) -> bool waits {
+    let (mono, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let t = task.spawn(tasks, bytes 65536, (take i, mono), expire_deliver_close)
+    let first = clock.idle(mut hand) == Some(10)
+    clock.advance_to(mut hand, 10)
+    let second = clock.idle(mut hand) == Some(20)
+    result.unwrap(conn.send(c, 42))
+    let third = clock.idle(mut hand) == Some(30)
+    let _ = take c
+    let received = result.unwrap(task.join(take t))
+    first && second && third && received && clock.idle(mut hand) == None
+}
+
+fn send_after_tick(take args: (Client[u64], Clock)) waits {
+    let (c, mono) = take args
+    host.sleep_until(mono, 10)
+    result.unwrap(conn.send(c, 42))
+}
+
+fn receive_without_deadline(take i: Inbox[u64]) -> bool waits {
+    let item = result.unwrap(conn.receive_until(i, Never))
+    let closed = closed_word(conn.receive_until(i, Never))
+    item == 42 && closed
+}
+
+// The receiver is parked before the helper unit sends and drops the last client.
+// expect: run inbox_deadline_never(tasks) = true
+fn inbox_deadline_never(tasks: Tasks) -> bool waits {
+    let (mono, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let sender = result.unwrap(task.spawn_unit(tasks, bytes 65536, (take c, mono), send_after_tick))
+    let receiver = task.spawn(tasks, bytes 65536, take i, receive_without_deadline)
+    let parked = clock.idle(mut hand) == Some(10)
+    clock.advance_to(mut hand, 10)
+    result.unwrap(task.join(take sender))
+    let received = result.unwrap(task.join(take receiver))
+    parked && received
+}
+
+fn cancel_inbox_wait(take args: (Inbox[u64], Clock)) waits {
+    let (i, mono) = take args
+    let _ = conn.receive_until(i, At(mono, 100))
+    fail("returned from cancelled receive")
+}
+
+// Cancellation wakes without advancing the clock, removes the deadline, and
+// cleans the inbox so a later send gives its item back.
+// expect: run inbox_deadline_cancel(tasks) = true
+fn inbox_deadline_cancel(tasks: Tasks) -> bool waits {
+    let (mono, h) = provide.clock(0, 0)
+    let mut hand = take h
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let mut t = task.spawn(tasks, bytes 65536, (take i, mono), cancel_inbox_wait)
+    let parked = clock.idle(mut hand) == Some(100)
+    task.cancel(mut t)
+    let cancelled = match task.join(take t) {
+        Error(Cancelled(_)) => true,
+        _ => false,
+    }
+    let closed = match conn.send(c, 9) {
+        Error(Closed(x)) => x == 9,
+        _ => false,
+    }
+    parked && cancelled && clock.idle(mut hand) == None && closed
+}

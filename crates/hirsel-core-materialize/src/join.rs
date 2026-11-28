@@ -131,6 +131,7 @@ impl Remap {
                     | RtOp::ConnTrySend { item }
                     | RtOp::ConnReceive { item }
                     | RtOp::ConnTryReceive { item }
+                    | RtOp::ConnReceiveUntil { item }
                     | RtOp::Send { item }
                     | RtOp::TrySend { item }
                     | RtOp::Receive { item }

@@ -414,7 +414,7 @@ pub unsafe extern "C" fn hirsel_core_receive_until(
             };
         }
 
-        let mut token = 0;
+        let mut deadline = ReceiveDeadline::new(clock, at);
         let kind = loop {
             tasks::before_commit();
             if tasks::check_cancel(context, site) != 0 {
@@ -432,8 +432,50 @@ pub unsafe extern "C" fn hirsel_core_receive_until(
                 );
                 break 2;
             }
-            let provider = *crate::entry::hirsel_core_capability_provider(context, clock);
-            let handle = crate::entry::hirsel_core_capability_handle(context, clock);
+            match deadline.park(context, &raw mut (*channel).receive_waiters, id, site) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(status) => return ReceiveUntil { kind: 0, status },
+            }
+            tasks::event(tasks::RECEIVE, id, hirsel_core_layout::event::CHANNEL_EMPTY);
+            break 1;
+        };
+        ReceiveUntil { kind, status: 0 }
+    }
+}
+
+/// One timed receive, shared by channels and inboxes. A provider outside the
+/// runtime can use the same request token on each retry.
+pub(crate) struct ReceiveDeadline {
+    clock: u64,
+    at: u64,
+    token: u64,
+}
+
+impl ReceiveDeadline {
+    pub(crate) fn new(clock: u64, at: u64) -> Self {
+        Self {
+            clock,
+            at,
+            token: 0,
+        }
+    }
+
+    /// False means the deadline has passed. True means a wake retired the
+    /// registrations and the caller must poll again. An error is a host failure.
+    /// # Safety
+    /// The running task pins its context, clock and wait queue across the call.
+    pub(crate) unsafe fn park(
+        &mut self,
+        context: *mut Context,
+        queue: *mut tasks::Waiters,
+        id: u64,
+        site: u64,
+    ) -> Result<bool, u8> {
+        // SAFETY: the clock and wait queue remain live until the call returns.
+        unsafe {
+            let provider = *crate::entry::hirsel_core_capability_provider(context, self.clock);
+            let handle = crate::entry::hirsel_core_capability_handle(context, self.clock);
             #[cfg(feature = "record")]
             let recorded = crate::tape::owns(&provider);
             #[cfg(not(feature = "record"))]
@@ -442,20 +484,16 @@ pub unsafe extern "C" fn hirsel_core_receive_until(
                 let observed = crate::host_ops::hirsel_core_host_clock(
                     context,
                     crate::provider::MONO_NS,
-                    clock,
+                    self.clock,
                     ptr::null_mut(),
                     0,
                     site,
                 );
                 if observed.status != 0 {
-                    return ReceiveUntil {
-                        kind: 0,
-                        status: observed.status,
-                    };
+                    return Err(observed.status);
                 }
-                if observed.value >= at {
-                    tasks::event(tasks::RECEIVE, id, hirsel_core_layout::event::CHANNEL_EMPTY);
-                    break 1;
+                if observed.value >= self.at {
+                    return Ok(false);
                 }
             }
             #[cfg(feature = "record")]
@@ -466,16 +504,9 @@ pub unsafe extern "C" fn hirsel_core_receive_until(
             };
             #[cfg(not(feature = "record"))]
             let source = Some((provider, handle));
-            let deadline = channel_deadline(source, at, recorded, &mut token);
-            if let Some(deadline) = deadline
-                && tasks::park_channel(&raw mut (*channel).receive_waiters, id, deadline, recorded)
-            {
-                continue;
-            }
-            tasks::event(tasks::RECEIVE, id, hirsel_core_layout::event::CHANNEL_EMPTY);
-            break 1;
-        };
-        ReceiveUntil { kind, status: 0 }
+            let deadline = channel_deadline(source, self.at, recorded, &mut self.token);
+            Ok(deadline.is_some_and(|deadline| tasks::park_channel(queue, id, deadline, recorded)))
+        }
     }
 }
 

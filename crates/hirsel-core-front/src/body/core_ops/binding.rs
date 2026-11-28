@@ -78,6 +78,7 @@ operations! {
     ("conn", "try_send", Lane::Runtime(Kernel::ConnTrySend), "B", "mc-units-lang", false),
     ("conn", "receive", Lane::Runtime(Kernel::ConnReceive), "B", "mc-units-lang", false),
     ("conn", "try_receive", Lane::Runtime(Kernel::ConnTryReceive), "B", "mc-units-lang", false),
+    ("conn", "receive_until", Lane::Runtime(Kernel::ConnReceiveUntil), "B", "mc-units-lang", false),
     ("char", "from_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),

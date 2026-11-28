@@ -1,4 +1,14 @@
+use super::{Line, R};
 use crate::{RtOp, TypeId, Wait};
+
+pub(super) fn type_args(l: &mut Line, op: &str, n: usize) -> R<Vec<TypeId>> {
+    let types = l.seq("[", "]", |l| Ok(TypeId(l.id('t')?)))?;
+    if types.len() == n {
+        Ok(types)
+    } else {
+        Err(format!("`{op}` takes {n} types"))
+    }
+}
 
 pub(super) fn parse_pack(
     name: &str,
@@ -75,6 +85,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::ConnTrySend { item } => format!("rt.conn_try_send[t{}]", item.0),
         RtOp::ConnReceive { item } => format!("rt.conn_receive[t{}]", item.0),
         RtOp::ConnTryReceive { item } => format!("rt.conn_try_receive[t{}]", item.0),
+        RtOp::ConnReceiveUntil { item } => format!("rt.conn_receive_until[t{}]", item.0),
         RtOp::SpawnUnit { x, r } => format!("rt.spawn_unit[t{}, t{}]", x.0, r.0),
         RtOp::LatestPublish => "rt.latest_publish".into(),
         RtOp::LatestRead => "rt.latest_read".into(),

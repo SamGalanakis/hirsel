@@ -87,6 +87,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ConnTrySend
             | Kernel::ConnReceive
             | Kernel::ConnTryReceive
+            | Kernel::ConnReceiveUntil
             | Kernel::LatestNew
             | Kernel::LatestHandle
             | Kernel::LatestPublish

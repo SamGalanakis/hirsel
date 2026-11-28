@@ -555,7 +555,7 @@ in the order the unit took them.
 
 A unit takes only at a **take point**: the scheduler's pump, between tasks or at an idle
 wake, and, inside an operation, each pump of `conn.send`, `conn.try_send`, `conn.receive`,
-`conn.try_receive`, an inbox's cleaning and its seal wait, a helper's `join` or cleaning
+`conn.try_receive`, `conn.receive_until`, an inbox's cleaning and its seal wait, a helper's `join` or cleaning
 wait, each drop of a holder counted by a charge released by a run-wide count (above), and
 each drain of the unit's refund mailbox inside an operation.
 
@@ -711,6 +711,8 @@ take.
 `shared.share` are not frames. What they observe is the unit's own state after the takes
 the stream supplies, so replay recomputes them: an `Empty` from `try_receive` follows from
 the takes before it, and a `Capacity` from `receive` from the unit's own limit.
+`conn.receive_until` uses the same takes and limit. A clock at the replay point
+supplies its deadline observations and wakes as it does for `channel.receive_until`.
 
 ### Replay of a run with helpers
 

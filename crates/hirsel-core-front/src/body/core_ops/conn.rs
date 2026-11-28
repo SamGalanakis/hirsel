@@ -112,25 +112,29 @@ impl Cx<'_, '_, '_> {
     }
 
     /// `conn.receive` (`InboxError = Closed | Capacity(Capacity)`) and
-    /// `conn.try_receive` (`InboxPoll = Empty | Closed | Capacity(Capacity)`).
+    /// the polling and deadline forms (`InboxPoll = Empty | Closed | Capacity(Capacity)`).
     pub(super) fn runtime_conn_receive(
         &mut self,
         wait: bool,
         item: TyId,
         inbox: ValueId,
+        until: Option<[ValueId; 3]>,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let inbox = self.runtime_handle(inbox, n);
         let id = self.runtime_type(item, n)?;
         let output = self.new_slot(PlaceTy::Declared(id), n);
-        let op = if wait {
+        let mut args = vec![Arg::Value(inbox), Arg::Address(output)];
+        let op = if let Some(until) = until {
+            args.extend(until.map(Arg::Value));
+            RtOp::ConnReceiveUntil { item: id }
+        } else if wait {
             RtOp::ConnReceive { item: id }
         } else {
             RtOp::ConnTryReceive { item: id }
         };
-        let [outcome, requested, available, ..] =
-            self.runtime_row(op, &[Arg::Value(inbox), Arg::Address(output)], n)?;
+        let [outcome, requested, available, ..] = self.runtime_row(op, &args, n)?;
         let ok = self.runtime_compare(BYTE, outcome, 0, n)?;
         self.runtime_result(
             result,

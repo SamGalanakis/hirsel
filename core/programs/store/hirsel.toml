@@ -200,7 +200,7 @@ std = { major = 1 }
 "store-archive.hirsel" = "store"
 "history-archive.hirsel" = "history"
 "history-archive-ship.hirsel" = "history"
-"store-cold-walk.hirsel" = "store"
+"store-tiered-cold-walk.hirsel" = "pager"
 "store-list-read.hirsel" = "manifest"
 "store-manifest-wire.hirsel" = "manifest"
 "store-page-recovery.hirsel" = "manifest"

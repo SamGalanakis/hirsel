@@ -50,7 +50,7 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
         }
     }
     if walk_cold && settled.below == 0 {
-        check_listed_tiered_present(d, lists.packs)?
+        failure_result_from_rep(pager.check_listed_tiered_present(d, lists.packs))?
     }
     for queued in lists.deferred {
         failure_result_from_rep(manifest.validate_deferred_target(manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered), queued.target))?
@@ -69,7 +69,7 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
     })?
     let mut resolved = take resolved_graph
     if walk_cold {
-        walk_cold_reachable(d, id, lists.packs, page_record.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps)?
+        failure_result_from_rep(pager.walk_cold_reachable(d, store_key_to_rep(id), lists.packs, page_record.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps))?
     }
     let manifest.ListedPages(packs: take inventory, lineage: take lineage, ..) = take lists
     Ok(manifest.ValidatedPageManifest(manifest: take page_record, inventory: take inventory, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))

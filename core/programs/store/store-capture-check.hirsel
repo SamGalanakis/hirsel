@@ -23,7 +23,7 @@ fn check_blob(mut walk: capture.CheckWalk, reference: std.page.BlobRef, class: u
         if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
-        check_cold_pack_index_row(walk.dir, store_key_from_rep(walk.id), path, ptr.pack, 4, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredBlob(reference)))?
+        failure_result_from_rep(pager.check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 4, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredBlob(reference))))?
     }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + 3
     let opened = failure_result_from_rep(capture.check_open_pack(walk.dir, path))?
@@ -53,7 +53,7 @@ fn check_page(mut walk: capture.CheckWalk, ptr: std.page.PagePtr, class: u8, dom
         if ptr.offset >= index_at || 16 + width > index_at - ptr.offset {
             return Error(failure_from_rep(format.disk_fault(path, ptr.offset, Malformed)))
         }
-        check_cold_pack_index_row(walk.dir, store_key_from_rep(walk.id), path, ptr.pack, 3, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredPage(ptr)))?
+        failure_result_from_rep(pager.check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 3, index_at, pack.size, walk.next_stamp, format.tiered_frame_id(TieredPage(ptr))))?
     }
     let tag = match domain {
         Collection => 0u64,

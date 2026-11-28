@@ -143,3 +143,58 @@ fn refused_duplicate_preserves_argument_budget() -> Result[(), u64] {
     let _ = prepare_call(reg, ctx, take key, store.StreamId(t: 0u64, n: 0u64), 0u64, take arg, 1u64) ?=> |_| 5u64
     Ok(())
 }
+
+fn choose_registration_order(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
+    let allowance = bound bytes 1048576u64 {
+        ()
+    }
+    match allowance {
+        Ok(_) => placing_law_pair(mut reg),
+        Error(_) => placing_law_swapped(mut reg),
+    }
+}
+
+@test
+fn one_realization_two_registration_orders() -> Result[(), u64] {
+    let definition = code.describe(choose_registration_order)
+    let small = placed(definition, 262144u64) ?=> |_| 1u64
+    let large = placed(definition, 4194304u64) ?=> |_| 2u64
+    let same = code.identity(code.describe(placing_law_same))
+    let double = code.identity(code.describe(placing_law_double))
+    if list.len(small.t.exported) != 2u64 || list.len(large.t.exported) != 2u64 {
+        return Error(3u64)
+    }
+    if small.t.exported[0u64].described.identity != same || small.t.exported[1u64].described.identity != double {
+        return Error(4u64)
+    }
+    if large.t.exported[0u64].described.identity != double || large.t.exported[1u64].described.identity != same {
+        return Error(5u64)
+    }
+    Ok(())
+}
+
+fn budget_named_slot(mut reg: Registry[(), Qh]) -> Result[(), RegisterError] {
+    let Error(remaining) = (bound bytes 18446744073709551615u64 {}) else {
+        return Error(Bounds)
+    }
+    let mut name = string.from("slot")
+    string.push_u64(mut name, remaining.available)
+    let declared = table_slot(take name, code.describe(law_query_table))?
+    query(mut reg, code.describe(q1), take declared, 65536u64, DEFAULT_STEPS)
+}
+
+@test
+fn one_realization_budget_named_slot_schema() -> Result[(), u64] {
+    let p = code.describe(budget_named_slot)
+    let a = placed(p, 1048576u64) ?=> |_| 1u64
+    let b = placed(p, 2097152u64) ?=> |_| 2u64
+    let x = view a.t.exported[0u64]
+    let y = view b.t.exported[0u64]
+    if x.described.identity != y.described.identity || x.args_fp != y.args_fp {
+        return Error(3u64)
+    }
+    if x.slots[0u64].name == y.slots[0u64].name || x.described.result == y.described.result || x.result_fp == y.result_fp || a.t.rows[0u64].key == b.t.rows[0u64].key {
+        return Error(4u64)
+    }
+    Ok(())
+}

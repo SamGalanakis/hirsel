@@ -25,23 +25,23 @@ type Template[G: send]: shareable + send {
     gone: Map[Bytes, ()],
 }
 
-// A Registry is a shared Template and the adapters one task calls. Adapters are owning
-// closures over an entry's typed body StaticFn and codecs; no owning closure is shareable
-// (OWN-4), so each task that dispatches makes its own by replaying `place` against the
-// Template (`replay`). A replay derives no key or schema: the n-th slot it makes takes the
-// Template's n-th key (`at`), and `seen` counts the exported entries it has passed.
-// One registered slot: its entry key and the code.identity of the StaticFn it was
-// registered from, which a replay must present at the same ordinal to take the key.
 type RegisteredSlot[G: send, H: shareable + inert + send]: send {
     adapter: Slot[G, H],
     argument: Option[CheckedArgument],
 }
 
+// One registered slot: its entry key and the code.identity of the StaticFn it was
+// registered from, which a replay must present at the same ordinal to take the key.
 type SlotRow: shareable + send {
     key: Bytes,
     mark: Bytes,
 }
 
+// A Registry is a shared Template and the adapters one task calls. Adapters are owning
+// closures over an entry's typed body StaticFn and codecs; no owning closure is shareable
+// (OWN-4), so each task that dispatches makes its own by replaying `place` against the
+// Template (`replay`). A replay derives no key or schema: the n-th slot it makes takes the
+// Template's n-th key (`at`), and `seen` counts the exported entries it has passed.
 pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     t: Arc[Template[G]],
     replay: bool,
@@ -118,12 +118,9 @@ fn registered_adapter[G: send, H: shareable + inert + send](r: Registry[G, H], k
     Some(view r.slots[at].adapter)
 }
 
-fn argument_check[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes) -> Option[View[CheckedArgument]] in r {
+fn argument_check[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes) -> Option[CheckedArgument] {
     let at = registered_ordinal(r, key)?
-    match r.slots[at].argument {
-        Some(check) => Some(view check),
-        None => None
-    }
+    r.slots[at].argument
 }
 
 fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, mark: Bytes, take d: Option[Exported], take s: Slot[G, H], take argument: Option[CheckedArgument]) -> Result[(), RegisterError] {

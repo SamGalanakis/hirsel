@@ -477,16 +477,19 @@ pub fn bind_http[G: send](supplied: Option[BindGrant[G]], take credential: Optio
     }
 }
 
-type CheckedArgument: send {
-    validate: own[send] fn(Bytes, u64) -> Option[Refusal],
-    description: own[send] fn() -> Result[std.codec.Schema, std.codec.EncodeError],
+type CheckedArgument: shareable + send {
+    allowance: u64,
+    steps: u64,
+    validate: fn(Bytes, u64, u64) -> Option[Refusal],
+    description: fn() -> Result[std.codec.Schema, std.codec.EncodeError],
 }
 
-fn checked_argument[A](ca: std.codec.Codec[A], n: u64, steps: u64) -> CheckedArgument {
-    let check = fn(arg: Bytes, maximum: u64) -> Option[Refusal] {
-        let seen = bound bytes order.min(n, maximum) {
+fn checked_argument[A: codec](_witness: std.codec.Codec[A], n: u64, steps: u64) -> CheckedArgument {
+    let check = fn(arg: Bytes, allowance: u64, limit: u64) -> Option[Refusal] {
+        let ca: std.codec.Codec[A] = std.codec.of()
+        let seen = bound bytes allowance {
             let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
-                bound steps steps {
+                bound steps limit {
                     match std.codec.validate(ca, arg) {
                         Ok(_) => {
                             let no_refusal: Option[Refusal] = None;
@@ -507,9 +510,14 @@ fn checked_argument[A](ca: std.codec.Codec[A], n: u64, steps: u64) -> CheckedArg
         }
     }
     let description = fn() -> Result[std.codec.Schema, std.codec.EncodeError] {
+        let ca: std.codec.Codec[A] = std.codec.of()
         std.codec.describe(ca)
     }
-    CheckedArgument(validate: take check, description: take description)
+    CheckedArgument(allowance: n, steps: steps, validate: check, description: description)
+}
+
+fn validate_argument(check: CheckedArgument, arg: Bytes, maximum: u64) -> Option[Refusal] {
+    (check.validate)(arg, order.min(check.allowance, maximum), check.steps)
 }
 
 // The composition root supplies previous/current activation keys. A current key
@@ -595,7 +603,7 @@ fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admi
         return Error(Deadline)
     }
     if let Some(check) = argument_check(r, key) {
-        if let Some(take why) = (check.validate)(arg, a.arg_max) {
+        if let Some(take why) = validate_argument(check, arg, a.arg_max) {
             return Error(take why)
         }
     }

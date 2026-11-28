@@ -840,9 +840,13 @@ alive in a cycle. The worker borrows the table and entry under the same generati
 A registration builder may exist during installation. No serving task replays the
 registration function or keeps its own map of owning adapter closures. The installer
 separates a capture into immutable checked image input or a typed instance argument.
-Only release-determined immutable data can enter a shared row. Execution-dependent
-selection, grant mint, store or caller handles, budgets and mutable environments come
-from the bound instance or current invocation. An explicit per-launch registration
+Only release-determined immutable data can enter a shared row. The image owns the
+compiled adapter indices, codec recipes, canonical schemas and route keys. A Place
+borrows its canonical registration order or records its own order as indices into
+that image. When an execution computes a binding value such as a query slot name,
+its bound instance owns the typed schema and key data that depend on that value.
+Grant mint, store or caller handles, budgets and mutable environments come from the
+bound instance or current invocation. An explicit per-launch registration
 budget still receives its existing admission/refusal outcome even on an intern hit.
 Compute, granted, transact, query and fenced-attempt entries retain their registration
 order, identities, schemas, authority checks, store replay and bounds. Local typed

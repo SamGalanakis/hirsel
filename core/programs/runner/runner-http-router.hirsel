@@ -575,7 +575,7 @@ fn http_keyed_handler[G: send, H: shareable + inert + send](req: std.http.Reques
     }
     if let Some(policy) = registered.policy {
         if let Some(check) = argument_check(state.registered, binding.entry) {
-            if let Some(take problem) = (check.validate)(raw, policy.arg_max) {
+            if let Some(take problem) = validate_argument(check, raw, policy.arg_max) {
                 return Ok(Reply(http_refusal(take problem)?))
             }
         }

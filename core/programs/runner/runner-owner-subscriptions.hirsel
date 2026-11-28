@@ -83,7 +83,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
         }
     }
     let refused = match argument_check(r, key) {
-        Some(check) => (check.validate)(arg, 18446744073709551615u64),
+        Some(check) => validate_argument(check, arg, 18446744073709551615u64),
         _ => {
             let no_refusal: Option[Refusal] = None;
             no_refusal

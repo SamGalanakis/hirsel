@@ -33,8 +33,10 @@ class OwnershipSoundnessFuzzTests(unittest.TestCase):
         progs = [gen.generate_program(i) for i in range(200)]
         valid_ratio = sum(1 for p in progs if p.kind == 'valid') / len(progs)
         self.assertGreaterEqual(valid_ratio, 0.72)
-        deep_ratio = sum(1 for p in progs if p.surface in ('interaction', 'unwinding')) / len(progs)
+        deep_ratio = sum(1 for p in progs if p.surface in ('interaction', 'unwinding', *gen.FEATURE_SURFACES)) / len(progs)
         self.assertGreaterEqual(deep_ratio, 0.50)
+        for surface in gen.FEATURE_SURFACES:
+            self.assertGreaterEqual(sum(1 for p in progs if p.surface == surface), 10, f'{surface} under-generated')
 
     def test_batch_rendering_and_record_parsing(self):
         progs = [gen.generate_program(i, forced_kind='valid') for i in range(4)]
@@ -68,16 +70,13 @@ class OwnershipSoundnessFuzzTests(unittest.TestCase):
         reds = fuzz.compare_engine_outcomes(0, 1, 'move', crashed)
         self.assertEqual(reds[0]['key'], 'soundness:crash:move:cranelift-dev')
 
-    def test_seed_parsing_and_unimplemented_surface_refusal(self):
+    def test_seed_parsing_and_missing_runtime_refusal(self):
         self.assertEqual(fuzz.parse_seeds('10..14', 0, 100), [10, 11, 12, 13])
         self.assertEqual(fuzz.parse_seeds('3, 7, 9', 0, 100), [3, 7, 9])
         self.assertEqual(fuzz.parse_seeds(None, 5, 3), [5, 6, 7])
         with tempfile.TemporaryDirectory() as tmp:
             fake_compiler = Path(tmp) / 'hirsel'
             fake_compiler.touch()
-            with self.assertRaises(SystemExit) as ctx:
-                fuzz.main(['controls', '--compiler', str(fake_compiler), '--surface', 'data_decode', '--out', tmp])
-            self.assertNotEqual(ctx.exception.code, 0)
             with self.assertRaises(SystemExit) as ctx2:
                 fuzz.main(['controls', '--compiler', str(fake_compiler),
                            '--sanitized-runtime', str(Path(tmp) / 'missing.a'), '--out', tmp])

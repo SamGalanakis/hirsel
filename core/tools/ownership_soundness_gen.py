@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Curated negative controls and seeded multi-feature generator for Hirsel soundness fuzzing.
+"""Seeded multi-feature generator for Hirsel soundness fuzzing.
 
 Targets ownership, aliasing, move/drop-flag, scoped borrow/region escape, capability
 confinement, multi-feature interactions (closures x regions x isolate x units x
-spawn/channel x Held), and failure-path unwinding through moved-from, maybe-live,
-and lent places.
+spawn/channel x Held), failure-path unwinding through moved-from, maybe-live,
+and lent places, and the six feature families of ownership_soundness_features.py
+(`Code[F]`, `Held`, `std.data.decode`, `bound`, `isolate`, checked arithmetic and indexing).
+The curated negative controls live in ownership_soundness_controls.py.
 """
 from dataclasses import dataclass, field
 
-VERSION = 2
+from ownership_soundness_controls import NEGATIVE_CONTROLS, NegativeControl  # noqa: F401
+from ownership_soundness_features import (
+    DATA_PRELUDE, FEATURE_BUILDERS, FEATURE_MUTATIONS, FEATURE_PRELUDE, FEATURE_SURFACES,
+)
+from ownership_soundness_values import VALUE_BUILDERS
+
+VERSION = 3
 MASK = (1 << 64) - 1
-SURFACES = ('aliasing', 'move', 'escape', 'capability', 'interaction', 'unwinding')
+SURFACES = ('aliasing', 'move', 'escape', 'capability', 'interaction', 'unwinding', *FEATURE_SURFACES)
 CHECKER_SURFACES = ('aliasing', 'move', 'escape', 'capability')
-# Reserved extension point for std.data.decode once landed.
-FUTURE_SURFACES = ('data_decode',)
 
 
 class Stream:
@@ -46,293 +52,6 @@ class Stream:
 
     def pick(self, items):
         return items[self.below(len(items))]
-
-
-@dataclass(frozen=True)
-class NegativeControl:
-    name: str
-    surface: str
-    expected_rules: tuple
-    source: str
-    entry: str | None = None
-
-
-NEGATIVE_CONTROLS: tuple[NegativeControl, ...] = (
-    # (a) Aliasing mut views & disjoint-field splits
-    NegativeControl(
-        'alias_mut_mut_same_list', 'aliasing', ('OWN-9',),
-        'fn two(mut a: List[u64], mut b: List[u64]) { list.push(mut a, 1); list.push(mut b, 2) }\n'
-        'fn bad(mut xs: List[u64]) { two(mut xs, mut xs) }\n',
-    ),
-    NegativeControl(
-        'alias_mut_view_same_list', 'aliasing', ('OWN-9',),
-        'fn mv(mut a: List[u64], b: List[u64]) { list.push(mut a, list.len(b)) }\n'
-        'fn bad(mut xs: List[u64]) { mv(mut xs, xs) }\n',
-    ),
-    NegativeControl(
-        'alias_index_overlap', 'aliasing', ('OWN-9',),
-        'fn bad(mut xs: List[List[u64]], i: u64, j: u64) { list.append(mut xs[i], xs[j]) }\n',
-    ),
-    NegativeControl(
-        'alias_parent_child_field', 'aliasing', ('OWN-9',),
-        'type Pair { left: List[u64], right: List[u64] }\n'
-        'fn both(mut p: Pair, mut l: List[u64]) { list.push(mut p.right, list.len(l)) }\n'
-        'fn bad(mut p: Pair) { both(mut p, mut p.left) }\n',
-    ),
-    NegativeControl(
-        'alias_live_view_then_mut', 'aliasing', ('OWN-10',),
-        'type Pair { left: List[u64], right: List[u64] }\n'
-        'fn bad(mut p: Pair) -> u64 { let v = view p.left; list.push(mut p.left, 1); list.len(v) }\n',
-    ),
-    NegativeControl(
-        'alias_reborrow_result_then_mut', 'aliasing', ('OWN-10',),
-        'fn grow(mut s: String) -> View[String] in s { string.push(mut s, "x"); string.slice(s, 0, 1) }\n'
-        'fn bad(mut s: String) -> u64 { let a = grow(mut s); let b = grow(mut s); string.byte_len(a) + string.byte_len(b) }\n',
-    ),
-    NegativeControl(
-        'alias_match_mut_retag_enum', 'aliasing', ('OWN-9',),
-        'type Choice = Text(String) | Num(u64)\n'
-        'fn bad(mut c: Choice) { match c { Text(mut s) => { string.push(mut s, "x"); c = Num(1) }, Num(_) => {} } }\n',
-    ),
-    NegativeControl(
-        'alias_match_mut_list_push', 'aliasing', ('OWN-9',),
-        'type Choice = Text(String) | Num(u64)\n'
-        'fn bad(mut xs: List[Choice]) { match xs[0] { Text(mut s) => { list.push(mut xs, Num(0)) }, Num(_) => {} } }\n',
-    ),
-    NegativeControl(
-        'alias_map_update_capture_receiver', 'aliasing', ('OWN-9',),
-        'fn bad(mut m: Map[u64, u64]) -> Option[()] { map.update(mut m, 1, fn(mut v: u64) { v = map.len(m) }) }\n',
-    ),
-    NegativeControl(
-        'alias_assign_reserved_index', 'aliasing', ('OWN-12',),
-        'fn bad(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }\n',
-    ),
-    NegativeControl(
-        'alias_box_rc_write', 'aliasing', ('OWN-12',),
-        'type Boxed: shareable { n: u64 }\n'
-        'fn bad(mut b: Box[Rc[Boxed]]) { b.n = 1 }\n',
-    ),
-    # (b) Use-after-move (take)
-    NegativeControl(
-        'move_simple_use_after_let', 'move', ('OWN-5',),
-        'fn bad(take s: String) -> String { let t = s; s }\n',
-    ),
-    NegativeControl(
-        'move_if_branch_maybe', 'move', ('OWN-16',),
-        'fn bad(take s: String, c: bool) -> String { if c { let _ = string.into_bytes(take s) }; s }\n',
-    ),
-    NegativeControl(
-        'move_match_arm_maybe', 'move', ('OWN-16',),
-        'fn bad(take o: Option[String]) -> u64 {\n'
-        '  let _ = match o { Some(take s) => string.byte_len(s), None => 0u64 }\n'
-        '  match o { Some(s) => string.byte_len(s), None => 0u64 }\n}\n',
-    ),
-    NegativeControl(
-        'move_loop_backedge', 'move', ('OWN-17',),
-        'fn bad(take s: String) { loop { let _ = string.into_bytes(take s) } }\n',
-    ),
-    NegativeControl(
-        'move_loop_continue_no_reinit', 'move', ('OWN-17',),
-        'fn bad(take s: String, c: bool) {\n'
-        '  let mut cur = s\n'
-        '  while c { let _ = string.into_bytes(take cur); if c { continue }; cur = string.new() }\n}\n',
-    ),
-    NegativeControl(
-        'move_owning_closure_then_use', 'move', ('OWN-5',),
-        'fn bad(take s: String) -> u64 {\n'
-        '  let f: own fn() -> u64 = fn() -> u64 { string.byte_len(s) }\n'
-        '  f() + string.byte_len(s)\n}\n',
-    ),
-    NegativeControl(
-        'move_before_try_early_return', 'move', ('OWN-5',),
-        'fn bad(take s: String, r: Result[u64, u64]) -> Result[String, u64] {\n'
-        '  let _ = string.into_bytes(take s)\n  let _ = r?\n  Ok(take s)\n}\n',
-    ),
-    NegativeControl(
-        'move_partial_field_take', 'move', ('OWN-14',),
-        'type Person { name: String, age: u64 }\n'
-        'fn bad(take p: Person) -> String { take p.name }\n',
-    ),
-    NegativeControl(
-        'move_take_mut_param', 'move', ('OWN-11',),
-        'fn bad(mut xs: List[u64]) -> List[u64] { take xs }\n',
-    ),
-    NegativeControl(
-        'move_view_param_return', 'move', ('OWN-7',),
-        'fn bad(s: String) -> String { s }\n',
-    ),
-    NegativeControl(
-        'move_generic_duplicate', 'move', ('OWN-5',),
-        'fn bad[T](take x: T) -> (T, T) { (x, x) }\n',
-    ),
-    NegativeControl(
-        'move_held_use_after_take_as', 'move', ('OWN-5',),
-        'fn bad(take s: String) -> u64 {\n'
-        '  let h: Held = code.hold(take s)\n'
-        '  let _: Result[String, (code.TakeError, Held)] = code.take_as(take h)\n'
-        '  let _: Result[u64, (code.TakeError, Held)] = code.take_as(take h)\n  0u64\n}\n',
-    ),
-    # (c) Escaping scoped borrows / handles / non-send / non-cross
-    NegativeControl(
-        'escape_view_block_local', 'escape', ('OWN-10',),
-        'fn bad() -> u64 { string.byte_len({ let s = string.new(); view s }) }\n',
-    ),
-    NegativeControl(
-        'escape_view_match_arm', 'escape', ('OWN-10',),
-        'fn bad(take o: Option[String]) -> u64 {\n'
-        '  let v = match o { Some(take s) => view s, None => return 0 }\n'
-        '  string.byte_len(v)\n}\n',
-    ),
-    NegativeControl(
-        'escape_view_return_missing_anchor', 'escape', ('OWN-20',),
-        'fn bad(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }\n',
-    ),
-    NegativeControl(
-        'escape_view_while_let', 'escape', ('OWN-17',),
-        'fn bad(xs: List[String]) -> u64 {\n'
-        '  let mut last: Option[View[String]] = None\n  let mut i: u64 = 0\n'
-        '  while let Some(s) = list.get(xs, i) { last = Some(s); i += 1 }\n  0\n}\n',
-    ),
-    NegativeControl(
-        'escape_view_in_own_struct', 'escape', ('OWN-19',),
-        'type BadHolder { v: View[String] }\n',
-    ),
-    NegativeControl(
-        'escape_view_in_list', 'escape', ('OWN-19',),
-        'fn bad() -> List[View[String]] { list.new() }\n',
-    ),
-    NegativeControl(
-        'escape_view_in_own_closure', 'escape', ('LANG-14',),
-        'fn bad(s: String) -> own fn() -> u64 { let v = view s; fn() -> u64 { string.byte_len(v) } }\n',
-    ),
-    NegativeControl(
-        'escape_scoped_cb_local_return', 'escape', ('OWN-21',),
-        'fn bad(a: u64) -> (scoped fn() -> u64) in a { scoped fn() -> u64 { a } }\n',
-    ),
-    NegativeControl(
-        'escape_isolate_mut_capture', 'escape', ('FAIL-16',),
-        'fn bad(mut n: u64) -> u64 { let _ = isolate(fn() -> u64 { n = n + 1; n }); n }\n',
-    ),
-    NegativeControl(
-        'escape_isolate_transitive_cb', 'escape', ('FAIL-16',),
-        'fn bad(xs: List[u64]) -> u64 {\n'
-        '  let mut seen: u64 = 0\n  let tick = scoped fn() { seen = seen + 1 }\n'
-        '  let _ = isolate(fn() -> u64 { tick(); list.len(xs) })\n  seen\n}\n',
-    ),
-    NegativeControl(
-        'escape_view_in_channel', 'escape', ('OWN-19',),
-        'fn bad() { let _: (Sender[View[String]], Receiver[View[String]]) = channel.new(4) }\n',
-    ),
-    NegativeControl(
-        'escape_rc_in_spawn', 'escape', ('CONC-2',),
-        'type Node: shareable { n: u64 }\n'
-        'fn bad(tasks: Tasks, take r: Rc[Node]) -> Task[u64] {\n'
-        '  task.spawn(tasks, bytes 4096, take r, fn(take x: Rc[Node]) -> u64 { x.n })\n}\n',
-    ),
-    NegativeControl(
-        'escape_arc_in_spawn_unit', 'escape', ('CONC-15',),
-        'type Node: shareable + send { n: u64 }\n'
-        'fn bad(tasks: Tasks, take a: Arc[Node]) {\n'
-        '  let _ = task.spawn_unit(tasks, bytes 4096, take a, fn(take x: Arc[Node]) -> u64 { x.n })\n}\n',
-    ),
-    NegativeControl(
-        'escape_held_non_send_in_spawn', 'escape', ('CONC-2',),
-        'fn bad(tasks: Tasks, take h: Held) -> Task[u64] {\n'
-        '  task.spawn(tasks, bytes 4096, take h, fn(take x: Held) -> u64 { let _ = take x; 1u64 })\n}\n',
-    ),
-    NegativeControl(
-        'escape_task_handle_in_channel', 'escape', ('CONC-2',),
-        'fn bad(tasks: Tasks) {\n'
-        '  let h = task.spawn(tasks, bytes 4096, 1u64, fn(take x: u64) -> u64 { x })\n'
-        '  let (tx, _rx): (Sender[Task[u64]], Receiver[Task[u64]]) = channel.new(2)\n'
-        '  let _ = channel.try_send(tx, take h)\n}\n',
-    ),
-    NegativeControl(
-        'escape_scoped_send_decl', 'escape', ('OWN-4', 'CONC-2'),
-        'scoped type BadScoped: send { v: View[String] }\n',
-    ),
-    NegativeControl(
-        'escape_region_text_out', 'escape', ('MEM-6',),
-        'fn bad() -> Text { region r { text.copy_in(r, "hi") } }\n',
-    ),
-    # (d) Capability capture & ambient leakage
-    NegativeControl(
-        'cap_missing_clock_arg', 'capability', ('CAP-1',),
-        'fn bad() -> u64 { host.mono_ns() }\n',
-    ),
-    NegativeControl(
-        'cap_forge_opaque_dir', 'capability', ('PROG-2',),
-        'fn bad() -> Dir { Dir(fd: 3) }\n',
-    ),
-    NegativeControl(
-        'cap_const_dir_option', 'capability', ('CAP-1',),
-        'const LEAK: Option[Dir] = None\n',
-    ),
-    NegativeControl(
-        'cap_const_nested_clock_tuple', 'capability', ('CAP-1',),
-        'const LEAK: (u64, Option[Clock]) = (1, None)\n',
-    ),
-    NegativeControl(
-        'cap_const_compiler', 'capability', ('CAP-1',),
-        'const LEAK: Option[Compiler] = None\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_dir', 'capability', ('LANG-14',),
-        'fn bad(d: Dir) -> own fn(String) -> Result[HostFile, IoError] waits {\n'
-        '  fn(p: String) -> Result[HostFile, IoError] waits { host.open(d, p, Read) }\n}\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_net', 'capability', ('LANG-14',),
-        'fn bad(n: Net) -> own fn() -> NetDenials { fn() -> NetDenials { net.denials(n) } }\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_clock', 'capability', ('LANG-14',),
-        'fn bad(c: Clock) -> own fn() -> u64 { fn() -> u64 { host.mono_ns(c) } }\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_random', 'capability', ('LANG-14',),
-        'fn bad(r: Random) -> own fn() -> u64 {\n'
-        '  fn() -> u64 { let mut b: Bytes = list.with_capacity(8); host.random(r, mut b); list.len(b) }\n}\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_exec', 'capability', ('LANG-14',),
-        'fn bad(e: Exec) -> own fn(ExecRule) -> Result[Exec, RuleError] {\n'
-        '  fn(r: ExecRule) -> Result[Exec, RuleError] { exec.narrow(e, r) }\n}\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_compiler', 'capability', ('LANG-14',),
-        'fn bad(c: Compiler) -> own fn(compiler.CheckLibrary) -> Result[compiler.CheckedLibrary, compiler.Refusal] waits {\n'
-        '  fn(req: compiler.CheckLibrary) -> Result[compiler.CheckedLibrary, compiler.Refusal] waits { compiler.check_library(c, req) }\n}\n',
-    ),
-    NegativeControl(
-        'cap_own_closure_wrapped_generic', 'capability', ('LANG-14',),
-        'type Wrap[T: plain] { item: T }\n'
-        'fn bad[T: plain](w: Wrap[T]) -> own fn() -> u64 { fn() -> u64 { let _ = w; 1 } }\n',
-    ),
-    NegativeControl(
-        'cap_codec_holds_dir', 'capability', ('OWN-4',),
-        'type Leak: codec { d: Dir }\n',
-    ),
-    NegativeControl(
-        'cap_spawn_closure_captures_clock', 'capability', ('LANG-14',),
-        'fn bad(tasks: Tasks, c: Clock) -> Task[u64] {\n'
-        '  task.spawn(tasks, bytes 4096, 1u64, fn(take x: u64) -> u64 { x + host.mono_ns(c) })\n}\n',
-    ),
-    NegativeControl(
-        'cap_isolate_mut_clock', 'capability', ('FAIL-16',),
-        'fn bad(mut c: Clock, c2: Clock) -> u64 {\n'
-        '  let _ = isolate(fn() -> u64 { c = c2; host.mono_ns(c) }); host.mono_ns(c)\n}\n',
-    ),
-    NegativeControl(
-        'cap_const_provide_random', 'capability', ('LANG-20',),
-        'const R: u64 = { let r = provide.random(1u64); let mut b: Bytes = list.new(); host.random(r, mut b); list.len(b) }\n',
-    ),
-    NegativeControl(
-        'cap_main_non_cap_param', 'capability', ('PROG-3',),
-        'pub fn main(x: u64) -> Result[(), Exit] { Ok(()) }\n',
-        entry='gen@1/main/main',
-    ),
-)
 
 
 PRELUDE = '''// Generated by core/tools/ownership_soundness_gen.py, version {version}.
@@ -489,6 +208,10 @@ fn emit_result(out: Stdout, idx: u64, val: u64) waits {{
 '''
 
 
+def prelude(std: bool) -> str:
+    return PRELUDE.format(version=VERSION) + FEATURE_PRELUDE + (DATA_PRELUDE if std else '')
+
+
 @dataclass
 class GeneratedProgram:
     seed: int
@@ -499,6 +222,19 @@ class GeneratedProgram:
     stmts: list
     draws: list = field(default_factory=list)
     bounds: list = field(default_factory=list)
+    families: list = field(default_factory=list)  # one per statement; None for the injected mutation
+
+    @property
+    def needs_std(self) -> bool:
+        return any('std.data.' in stmt or 'cfg_' in stmt for stmt in self.stmts)
+
+    def without(self, index: int) -> 'GeneratedProgram':
+        """The same program with one statement deleted (the reducer's second stage)."""
+        return GeneratedProgram(
+            seed=self.seed, surface=self.surface, kind=self.kind, mutation=self.mutation,
+            expected_rules=self.expected_rules, stmts=self.stmts[:index] + self.stmts[index + 1:],
+            draws=self.draws, bounds=self.bounds, families=self.families[:index] + self.families[index + 1:],
+        )
 
     def render_body(self, fn_name: str, emit_idx: int) -> str:
         body_lines = '\n'.join(f'  {line}' for stmt in self.stmts for line in stmt.splitlines())
@@ -524,7 +260,7 @@ class GeneratedProgram:
 
     def render_standalone(self) -> str:
         return (
-            PRELUDE.format(version=VERSION)
+            prelude(self.needs_std)
             + '\n'
             + self.render_body('case_0', 0)
             + '\npub fn main(out: Stdout, tasks: Tasks) -> Result[(), Exit] waits {\n'
@@ -533,7 +269,7 @@ class GeneratedProgram:
 
 
 def render_batch(programs: list[GeneratedProgram]) -> str:
-    parts = [PRELUDE.format(version=VERSION)]
+    parts = [prelude(any(prog.needs_std for prog in programs))]
     for idx, prog in enumerate(programs):
         parts.append(prog.render_body(f'case_{idx}', idx))
     dispatch = '\n'.join(f'  if which == {idx}u64 {{ let _ = case_{idx}(out, tasks) }}' for idx in range(len(programs)))
@@ -903,6 +639,8 @@ VALID_BUILDERS = {
     'capability': valid_capability_stmt,
     'interaction': valid_interaction_stmt,
     'unwinding': valid_unwinding_stmt,
+    **FEATURE_BUILDERS,
+    **VALUE_BUILDERS,
 }
 
 # Provably unsound mutations injected into complex multi-feature bodies.
@@ -944,11 +682,14 @@ UNSOUND_MUTATIONS = {
     ),
 }
 
-# Weighted surface schedule: heavily bias toward multi-feature interactions and failure-path unwinding.
+UNSOUND_MUTATIONS.update(FEATURE_MUTATIONS)
+
+# Weighted surface schedule: each feature family twice, interactions and unwinding twice,
+# each checker surface once.
 SURFACE_WEIGHTS = (
-    'interaction', 'interaction', 'interaction',
-    'unwinding', 'unwinding', 'unwinding',
+    'interaction', 'interaction', 'unwinding', 'unwinding',
     'aliasing', 'move', 'escape', 'capability',
+    *FEATURE_SURFACES, *FEATURE_SURFACES,
 )
 
 
@@ -963,10 +704,12 @@ def generate_program(seed: int, draws=None, forced_surface: str | None = None,
     kind = forced_kind or ('valid' if kind_roll < 16 else 'mutated_unsound')
     stmt_count = 2 + stream.below(4)
     stmts = []
+    families = []
     for k in range(stmt_count):
         secondary = stream.pick(SURFACE_WEIGHTS)
         s = surface if (k == 0 or stream.below(3) != 0) else secondary
         stmts.append(VALID_BUILDERS[s](stream, k))
+        families.append(s)
     mutation = None
     expected_rules = None
     if kind == 'mutated_unsound':
@@ -976,8 +719,9 @@ def generate_program(seed: int, draws=None, forced_surface: str | None = None,
         expected_rules = rules
         pos = stream.below(len(stmts) + 1)
         stmts.insert(pos, mut_stmt)
+        families.insert(pos, None)
     return GeneratedProgram(
         seed=seed, surface=surface, kind=kind, mutation=mutation,
         expected_rules=expected_rules, stmts=stmts,
-        draws=list(stream.drawn), bounds=list(stream.bounds),
+        draws=list(stream.drawn), bounds=list(stream.bounds), families=families,
     )

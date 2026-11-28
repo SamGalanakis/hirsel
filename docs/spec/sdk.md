@@ -265,7 +265,10 @@ Each entry has `module` (an array of decoded module path components) and
 `name` (the decoded function name). Together they give the TypeScript stub
 path from section 4. `identity` retains the full PROG-9 entry identity,
 including the instance and signature. `kind` is `compute`, `transact`,
-`query`, `granted`, or `room`. `args_fp`, `result_fp`, and `revision` come from
+`query`, `granted`, or `room`. A transact entry also has `recovery`,
+`recovered` or `unrecovered` (RUNNER-SPEC §1.2 "Reply recovery"), and it is part
+of the Want, so a release that changes it makes the old Want `Gone`.
+`args_fp`, `result_fp`, and `revision` come from
 Describe. The launch's `n_place` and both fingerprints are decimal strings
 to preserve all 64 bits. `digest`, `identity`, and `revision` are arrays of
 byte integers.
@@ -384,7 +387,7 @@ the calls and bytes the client would run at once. Welcome and each later
 `Credit` carry the cumulative grant and the client's share, fenced by the
 connection's epoch. The client applies a `Credit` only when its epoch matches
 and its totals exceed the ones it holds. An item costs one call and 36 + |arg|
-bytes. The client never sends past its grant, so it never earns a close or a
+bytes, or 20 + |arg| for an unrecovered call's `LocalItem`. The client never sends past its grant, so it never earns a close or a
 refusal by itself. When its demand falls, or a `Credit` lowers its share below
 what it holds unspent, it sends `Window` with a new `want` and raises its spent
 counters to forfeit the excess. Calls past the credit wait in memory in
@@ -426,8 +429,15 @@ together with the next position. A compute or granted call is sent at the
 stream's next position, which only labels its Outcome row, and its outcome
 leaves the position unchanged. Nothing is stored for it, so a re-send runs it
 again, and a granted call whose delivery is uncertain is reported
-LocallyUnknown and never re-sent. The client reads each call's kind from the
-generated `kind`, one per `want`. A lost attempt of a stored or compute call
+LocallyUnknown and never re-sent. The client reads each call's kind and recovery from
+the generated `kind` and `recovery`, one per `want`. An unrecovered transact
+call is sent once as a `LocalItem` with a connection-local id. It has no stream,
+position, lease or durable pending record. Its stub returns the same
+`Outcome` type. Before dispatch, a deadline or abort gives its usual answer.
+After possible dispatch, a lost reply, timeout, abort or `Abandoned` settles it
+`LocallyUnknown`, and its optimistic overlay is dropped. A reconnect or restart
+never resends it, and it never reaches `onRecovered`. A fresh explicit call is a
+new call. A lost attempt of a stored or compute call
 retries the original identity after backoff. A decisive refusal reuses the position only when every attempt received
 a no-commit answer.
 

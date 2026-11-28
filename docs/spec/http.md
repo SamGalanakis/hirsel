@@ -1031,7 +1031,7 @@ pub fn bind[G, H](mut r: Registry[G, H], take b: HttpBinding) -> Result[(), Bind
 1. **The entry exists.**
 2. **The mode fits the entry's kind.**
    - Query entries take `Read` (GET, B-11) or `Subscribe` (GET, `text/event-stream`, B-9).
-   - Transact entries take `Stream` or `Keyed` (POST, PUT, PATCH or DELETE). A keyed binding uses `bind_keyed` and a `KeyedRule[G]` (K-1). A retirement uses `bind_retired` and has no entry (K-9). Checks 3 and 7 and K-1's retirement checks apply. Its argument schema, field mapping and statuses come from the op record at open.
+   - Recovered transact entries take `Stream` or `Keyed` (POST, PUT, PATCH or DELETE). An unrecovered transact entry takes neither, because both promise recovery, and `bind` and `bind_keyed` return a `BindError` naming its `op` (RUNNER-SPEC §1.2 "Reply recovery", v2.94). A keyed binding uses `bind_keyed` and a `KeyedRule[G]` (K-1). A retirement uses `bind_retired` and has no entry (K-9). Checks 3 and 7 and K-1's retirement checks apply. Its argument schema, field mapping and statuses come from the op record at open.
    - Compute entries take `Read` (GET or POST; no identity, because they are pure).
    - Granted entries are refused. An HTTP retry of an outside effect without a durable identity is a duplicate effect.
 3. **Each durable endpoint binds exactly one entry,** and `op` is unique in the registry and matches `[a-z0-9][a-z0-9_.-]{0,63}` (B-12). One entry may have several bindings, and so several `op`s.

@@ -696,7 +696,8 @@ def _dev_fixture_cache_impl(ctx):
         # persistence_and_fencing reopens with --backend llvm.
         'for release in 0 1 2 3; do build $release cranelift; done',
         'build 2 llvm',
-        # Only the object cache is consumed. Workspace and temporary links are sandbox-local.
+        'mv "$dev/compiler" "$cache/compiler"',
+        # The caches travel. Workspace and temporary links are sandbox-local.
         'cd "$work"; rm -rf workspace tmp place',
     ])
     llvm = ctx.attrs._llvm[DefaultInfo].default_outputs[0]

@@ -35,8 +35,8 @@ impl Fixture {
         let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata");
         // The //:dev-fixture-cache action lays out this workspace with the same
         // script and builds it as the dev child does, so the child's first build
-        // finds its objects in the seeded content store instead of compiling
-        // core, std, runner and store inside the startup wait.
+        // reuses checked bodies and native objects instead of compiling core,
+        // std, runner and store inside the startup wait.
         let laid = Command::new("/bin/sh")
             .arg(testdata.join("dev_fixture.sh"))
             .arg(&law.libraries)
@@ -54,12 +54,14 @@ impl Fixture {
             .join(std::env::var_os("HIRSEL_DEV_TEST_CACHE").unwrap());
         let copy = match crate::host::HOST_TARGET.os() {
             hirsel_core_layout::Os::Linux => "cp -R --reflink=auto",
-            hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "cp -R",
+            hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "cp -cR",
         };
         let seeded = Command::new("/bin/sh")
             .args([
                 "-c",
-                &format!("mkdir -p \"$2\" && {copy} \"$1\"/. \"$2\" && chmod -R u+w \"$2\""),
+                &format!(
+                    "mkdir -p \"$2\" && {copy} \"$1\"/. \"$2\" && chmod -R u+w \"$2\" && chmod 700 \"$2/compiler\""
+                ),
                 "seed",
             ])
             .arg(&seed)
@@ -71,6 +73,8 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&seeded.stderr)
         );
+        let dev = crate::launcher::private_dir(law.path("runner/.hirsel-dev")).unwrap();
+        fs::rename(law.path("cache/compiler"), dev.join("compiler")).unwrap();
         fs::create_dir(law.path("run")).unwrap();
         let super::Link::Driver(cc) = options.link else {
             unreachable!()

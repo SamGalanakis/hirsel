@@ -50,6 +50,12 @@ STORE_LAWS_MOVED_TO_MANIFEST = (
     "disk_test_paged_manifest",
     "test_l69_lineage_last_holder_ghost_and_adopt",
 )
+STORE_LAW_RENAMES = (
+    ("expired_cutover_keeps_old_serving", "test_crash_install_expired_cutover"),
+    # dcd220f4 retains the staged-edit, replay and Cold cases in L98's four pairs.
+    ("test_tiered_tx_reads_see_staged_overlay_and_cold_rows",
+     "test_l98_index_residency_pairs_read_the_model"),
+)
 OLD_REPLAY_TEST = "srtp@1/srtp/replay_reference_model"
 REPLAY_TEST = "hirsel.ai/replay_receive_laws@1/laws/replay_reference_model"
 # A full check is about 400 s cold, so a general compiler change does not select
@@ -139,9 +145,10 @@ def renamed_baseline(text, member, package_name):
             old = f"store@1/store/{law}"
             new = f"store@1/manifest/{law}"
             text = re.sub(rf"(?m)^{old}(?= )|(?<=@){old}(?=#)", new, text)
-        old = "store@1/store/expired_cutover_keeps_old_serving"
-        new = "store@1/store/test_crash_install_expired_cutover"
-        text = re.sub(rf"(?m)^{old}(?= )|(?<=@){old}(?=#)", new, text)
+        for old_name, new_name in STORE_LAW_RENAMES:
+            old = f"store@1/store/{old_name}"
+            new = f"store@1/store/{new_name}"
+            text = re.sub(rf"(?m)^{old}(?= )|(?<=@){old}(?=#)", new, text)
     if text == original:
         return text
     header, *rows = text.splitlines()

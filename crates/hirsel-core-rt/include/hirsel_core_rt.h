@@ -283,6 +283,9 @@ bool hirsel_core_release_buffer(HirselCoreContext *, void *buffer, uint64_t char
 bool hirsel_core_resource_release(HirselCoreContext *, void *resource, HirselCoreDropRecipe, uint64_t storage, uint64_t site);
 void hirsel_core_resource_stage(void *resource, HirselCoreDropRecipe, uint64_t storage, HirselCoreWorklist *, uint64_t point);
 void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe, uint64_t point);
+/* Release one static-literal byte carrier count when ptr belongs to a loaded
+   release's independent literal mapping; other pointers are ignored. */
+void hirsel_core_release_static_bytes(const uint8_t *ptr);
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
 #include "hirsel_core_rt_isolate.h"

@@ -86,6 +86,10 @@ HirselCoreHostOutcome hirsel_core_host_file(HirselCoreContext *, HirselCoreHostF
    descriptors). OS calls retain the guarded foreign-call stack rule. */
 void hirsel_core_hostfile_drop(HirselCoreContext *, HirselCoreHostFile);
 typedef struct { const uint8_t *data; size_t len; } HirselCoreView;
+/* Compiler-provider library admission: input is borrowed and output receives
+   the exact-sized owned answer carrier. */
+HirselCoreHostOutcome hirsel_core_check_library(HirselCoreContext *, uint64_t compiler,
+    const HirselCoreView *input, HirselCoreBuffer *output, uint64_t site);
 /* text/text_len: PROG-3's text of a non-Exit error, set by hirsel_core_main_error
    before the result is cleaned; the run prints and frees it. */
 typedef struct { uint8_t kind, exit; uint8_t *text; size_t text_len; } HirselCoreMainResult;

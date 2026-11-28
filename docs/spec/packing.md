@@ -859,6 +859,9 @@ its bound instance owns the typed schema and key data that depend on that value.
 Grant mint, store or caller handles, budgets and mutable environments come from the
 bound instance or current invocation. An explicit per-launch registration
 budget still receives its existing admission/refusal outcome even on an intern hit.
+The activation task runs the registration function once under that budget. An entry
+retains the bounds and bindings selected there for every serving task. A read of
+`runtime.root_limit()` in the entry body observes the task executing that call.
 Compute, granted, transact, query and fenced-attempt entries retain their registration
 order, identities, schemas, authority checks, store replay and bounds. Local typed
 calls use PACK-15 directly. A wire or journal boundary still runs its declared codec.

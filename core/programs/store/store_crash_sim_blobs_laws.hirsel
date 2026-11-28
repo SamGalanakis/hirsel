@@ -83,8 +83,9 @@ fn csim_pack_barrier_refusal(tasks: Tasks, c: Clock, site: u64, op: String) -> R
         let Ok(take receipt) = channel.try_receive(rx) else {
             return Error(Missing("pack barrier injection did not reach the disk"))
         }
-        let Barrier(advanced) = receipt.outcome else {
-            return Error(Missing("fault missed the pack barrier"))
+        let advanced = match receipt.outcome {
+            Barrier(advanced) => advanced,
+            _ => return Error(Missing("fault missed the pack barrier")),
         }
         if receipt.op != op || receipt.site != site || archive_hold_exists(d, "p-17")? || archive_hold_exists(d, "p-17.tmp")? {
             return Error(Missing("failed pack remained eligible for introduction"))

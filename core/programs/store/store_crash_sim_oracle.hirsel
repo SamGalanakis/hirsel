@@ -8,15 +8,34 @@ type CsimEvidence {
     seen: List[std.sim.world.Receipt],
     // Write faults delivered to journal segments since the last cut-level
     // point (a cut, or a cut-made pin, unpin, delete_branch or residency
-    // change), across mounts, each with the number of worlds the history
-    // held when it was drained.
-    journal: List[(u64, std.sim.world.Receipt)],
+    // change), across mounts.
+    journal: List[CsimWrite],
+    // Since the same point: the receipts of replies that made write damage
+    // durable (a damaging write on a Durable or Direct handle, a sync of a
+    // damaged file).
+    persisted: List[std.sim.world.Receipt],
+    // How often the driver dropped the Db without a clean close.
+    crashes: u64,
     // The most commits one journal write takes (Options.group_commits).
     group: u64
 }
 
+// A damaging journal write, with the number of worlds the history held and
+// the driver's crash count when its receipt was drained.
+type CsimWrite {
+    worlds: u64,
+    crashes: u64,
+    receipt: std.sim.world.Receipt
+}
+
 fn csim_evidence(group: u64) -> CsimEvidence {
-    CsimEvidence(seen: list.new(), journal: list.new(), group: group)
+    CsimEvidence(seen: list.new(), journal: list.new(), persisted: list.new(), crashes: 0, group: group)
+}
+
+// A cut-level point: no earlier journal write can explain a rollback.
+fn csim_forget_journal(mut ev: CsimEvidence) {
+    ev.journal = list.new()
+    ev.persisted = list.new()
 }
 
 // The last component of a served path: `/s/j-3` is `j-3`.
@@ -51,20 +70,22 @@ fn csim_note(mut ev: CsimEvidence, take r: std.sim.world.Receipt, worlds: u64) {
     match r.outcome {
         Undelivered => {
             ev.seen = csim_without(ev.seen, r.mount, r.site)
-            let mut kept: List[(u64, std.sim.world.Receipt)] = list.new()
-            for (stamp, w) in ev.journal {
-                if w.mount != r.mount || w.site != r.site {
-                    list.push(mut kept, (stamp, clone(w)))
+            ev.persisted = csim_without(ev.persisted, r.mount, r.site)
+            let mut kept: List[CsimWrite] = list.new()
+            for w in ev.journal {
+                if w.receipt.mount != r.mount || w.receipt.site != r.site {
+                    list.push(mut kept, CsimWrite(worlds: w.worlds, crashes: w.crashes, receipt: clone(w.receipt)))
                 }
             }
             ev.journal = take kept
         },
         Acknowledged => {
             if csim_journal_segment(r.path) {
-                list.push(mut ev.journal, (worlds, clone(r)))
+                list.push(mut ev.journal, CsimWrite(worlds: worlds, crashes: ev.crashes, receipt: clone(r)))
             }
             list.push(mut ev.seen, take r)
         },
+        Persisted => list.push(mut ev.persisted, take r),
         _ => list.push(mut ev.seen, take r),
     }
 }
@@ -115,23 +136,39 @@ fn csim_excused(ev: CsimEvidence, e: Error) -> bool {
     csim_io_excused(ev, e) || csim_damage_excused(ev, e)
 }
 
+// Whether a delivered reply made the damage of journal write `w` durable
+// before any power cut: a Persisted receipt for its file from the same
+// site or a later one, with the same crash count.
+fn csim_synced(ev: CsimEvidence, w: std.sim.world.Receipt) -> bool {
+    for p in ev.persisted {
+        if p.node == w.node && p.crashes == w.crashes && (p.mount > w.mount || (p.mount == w.mount && p.site >= w.site)) {
+            return true
+        }
+    }
+    false
+}
+
 // Whether a recovery may show world `found` when the floor is `floor`
 // (both indexes into the history since the last cut-level point). Below
 // the floor only D6 (STORE-SPEC §3.4) explains it: a write fault delivered
-// to a journal segment since that point, whose damaged bytes this mount's
-// recovery read. D6 drops the damaged frame and every frame after it; a
+// to a journal segment since that point and made durable, then a crash,
+// then this mount's recovery reading the damaged bytes. The crash is a
+// power cut (the read's receipt counts more of them than the write's) or
+// a Db the driver dropped without a clean close after it drained the
+// write. D6 drops the damaged frame and every frame after it; a
 // frame holds at most `group` commits, the newest recorded by the time its
 // receipt was drained, so the recovery goes back at most to just before
 // the oldest of them. A backward misdirect damages an older frame, so only
-// the cut-level point bounds it.
+// the cut-level point bounds it. A Torn receipt explains nothing here: a
+// power cut tears only a write whose success was never delivered.
 fn csim_rollback_allowed(ev: CsimEvidence, found: u64, floor: u64) -> bool {
     if found >= floor {
         return true
     }
-    for (stamp, w) in ev.journal {
-        if w.landed < w.at || found + ev.group + 1 >= stamp {
+    for w in ev.journal {
+        if csim_synced(ev, w.receipt) && (w.receipt.landed < w.receipt.at || found + ev.group + 1 >= w.worlds) {
             for r in ev.seen {
-                if csim_damaged_read(r) && r.node == w.node {
+                if csim_damaged_read(r) && r.node == w.receipt.node && (w.receipt.crashes < r.crashes || w.crashes < ev.crashes) {
                     return true
                 }
             }
@@ -145,9 +182,9 @@ fn csim_rollback_allowed(ev: CsimEvidence, found: u64, floor: u64) -> bool {
 // as Corrupt (below the successor's `prev_end`) and drops nothing; a fault
 // in open's own writes bounds nothing but the recovered world.
 fn csim_recovery_spends(mut ev: CsimEvidence, mark: u64) {
-    let mut kept: List[(u64, std.sim.world.Receipt)] = list.new()
+    let mut kept: List[CsimWrite] = list.new()
     for i in mark .. list.len(ev.journal) {
-        list.push(mut kept, (0, clone(ev.journal[i].1)))
+        list.push(mut kept, CsimWrite(worlds: 0, crashes: ev.journal[i].crashes, receipt: clone(ev.journal[i].receipt)))
     }
     ev.journal = take kept
 }
@@ -166,8 +203,19 @@ fn csim_show_evidence(ev: CsimEvidence, mut text: String) {
             Acknowledged => " damaged-write",
             DamagedRead => " damaged-read",
             Undelivered => " undelivered",
+            Persisted => " persisted",
+            Torn(_) => " torn",
         })
         string.push(mut text, "@")
         string.push_u64(mut text, r.site)
+        if let Torn(t) = r.outcome {
+            string.push(mut text, " kept")
+            for (at, n) in t.kept {
+                string.push(mut text, " ")
+                string.push_u64(mut text, at)
+                string.push(mut text, "+")
+                string.push_u64(mut text, n)
+            }
+        }
     }
 }

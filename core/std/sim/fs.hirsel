@@ -7,21 +7,17 @@ pub opaque type Fs: send {
     // Serves and crashes so far, and receipts a full tap refused.
     mounts: u64,
     crashes: u64,
-    dropped: u64
+    dropped: u64,
+    // Durable writes that are readable and not durable, and what the last
+    // crash kept of each.
+    pending: List[sim.fs_disk.Pending],
+    torn: List[sim.world.Receipt]
 }
 
 type Inode: send {
     directory: bool,
-    history: List[Version],
+    history: List[sim.fs_disk.Version],
     locks: Map[u64, bool]
-}
-
-type Version: send {
-    sequence: u64,
-    modified: i64,
-    data: Bytes,
-    overlay: Option[Bytes],
-    names: Map[String, u64]
 }
 
 type OpenFile {
@@ -51,13 +47,9 @@ type Session {
     reported: Map[u64, u64]
 }
 
-fn empty() -> Version {
-    Version(sequence: 0, modified: 0, data: list.new(), overlay: None, names: map.new())
-}
-
 fn inode(directory: bool) -> Inode {
-    let mut history: List[Version] = list.with_capacity(1)
-    list.push(mut history, empty())
+    let mut history: List[sim.fs_disk.Version] = list.with_capacity(1)
+    list.push(mut history, sim.fs_disk.empty())
     Inode(directory: directory, history: take history, locks: map.new())
 }
 
@@ -65,12 +57,17 @@ fn inode(directory: bool) -> Inode {
 pub fn new() -> Fs {
     let mut nodes: List[Inode] = list.with_capacity(1)
     list.push(mut nodes, inode(true))
-    Fs(nodes: take nodes, sequence: 0, next_file: 1, mounts: 0, crashes: 0, dropped: 0)
+    Fs(nodes: take nodes, sequence: 0, next_file: 1, mounts: 0, crashes: 0, dropped: 0, pending: list.new(), torn: list.new())
 }
 
 /// Receipts a tapped server could not send: its tap was full or closed.
 pub fn receipts_dropped(fs: Fs) -> u64 {
     fs.dropped
+}
+
+/// One `Torn` receipt per pending durable write the last `crash` reached.
+pub fn torn_writes(fs: Fs) -> List[sim.world.Receipt] {
+    clone(fs.torn)
 }
 
 fn node_path(fs: Fs, node: u64) -> String {
@@ -87,8 +84,8 @@ fn node_path(fs: Fs, node: u64) -> String {
     string.new()
 }
 
-fn emit(mut fs: Fs, session: Session, op: String, node: u64, range: (u64, u64, u64), fault: Option[sim.world.Fault], outcome: sim.world.Outcome) {
-    let r = sim.world.Receipt(mount: fs.mounts, site: session.site - 1, op: clone(op), node: node, path: node_path(fs, node), at: range.0, len: range.1, landed: range.2, fault: fault, outcome: outcome, sequence: fs.sequence, crashes: fs.crashes)
+fn emit(mut fs: Fs, session: Session, op: String, node: u64, range: (u64, u64, u64), fault: Option[sim.world.Fault], take outcome: sim.world.Outcome) {
+    let r = sim.world.Receipt(mount: fs.mounts, site: session.site - 1, op: clone(op), node: node, path: node_path(fs, node), at: range.0, len: range.1, landed: range.2, fault: fault, outcome: take outcome, sequence: fs.sequence, crashes: fs.crashes)
     if let Some(tap) = session.tap {
         if let Error(_) = channel.try_send(tap, take r) {
             fs.dropped += 1
@@ -112,41 +109,45 @@ fn undelivered(mut fs: Fs, mut session: Session, node: u64, op: String) {
     emit(mut fs, session, op, node, (0, 0, 0), None, Undelivered)
 }
 
-fn current(node: Inode) -> View[Version] in node {
+fn current(node: Inode) -> View[sim.fs_disk.Version] in node {
     node.history[list.len(node.history) - 1]
 }
 
-fn visible(v: Version) -> View[Bytes] in v {
-    match v.overlay {
-        Some(data) => view data,
-        None => view v.data,
-    }
-}
-
-/// Whether any inode's current version still contains simulated write damage.
-pub fn has_write_damage(fs: Fs) -> bool {
-    for node in fs.nodes {
-        if let Some(_) = current(node).overlay {
-            return true
-        }
-    }
-    false
-}
-
 fn retain(mut node: Inode, at: u64) {
-    let saved = list.set(mut node.history, at, empty())
+    let saved = list.set(mut node.history, at, sim.fs_disk.empty())
     list.clear(mut node.history)
     list.push(mut node.history, take saved)
 }
 
+// Makes a node's newest version durable, its pending writes included.
+fn settle(mut fs: Fs, node: u64) {
+    let latest = list.len(fs.nodes[node].history) - 1
+    retain(mut fs.nodes[node], latest)
+    list.retain(mut fs.pending, scoped fn(p: sim.fs_disk.Pending) -> bool {
+        p.node != node
+    })
+}
+
 /// Keeps every synced version plus the operations at or before one seeded
-/// cut. An unsynced rename's two edits have the same sequence number.
+/// cut. An unsynced rename's two edits have the same sequence number. A
+/// pending durable write is not cut whole: `sim.fs_disk.tear` then draws
+/// the sectors it keeps, in inode order and then in issue order.
 pub fn crash(mut fs: Fs, mut plan: sim.world.Plan) {
     let cut = sim.world.pick(mut plan, fs.sequence + 1)
+    let pending = replace(mut fs.pending, list.new())
+    list.clear(mut fs.torn)
     for i in 0u64 .. list.len(fs.nodes) {
         let mut at = list.len(fs.nodes[i].history) - 1
         while at > 0 && fs.nodes[i].history[at].sequence > cut {
             at -= 1
+        }
+        for p in pending {
+            if p.node == i {
+                if let Some(take t) = sim.fs_disk.tear(mut fs.nodes[i].history, p, mut at, mut plan) {
+                    let r = sim.world.Receipt(mount: p.mount, site: p.site, op: string.from("write"), node: i, path: node_path(fs, i), at: p.at, len: p.len, landed: p.at, fault: None, outcome: Torn(take t), sequence: p.sequence, crashes: fs.crashes)
+                    list.push(mut fs.torn, take r)
+                }
+            }
         }
         retain(mut fs.nodes[i], at)
         fs.nodes[i].locks = map.new()
@@ -232,12 +233,12 @@ fn stat(node: Inode) -> DirReply {
         Directory
     } else {
         File
-    }, size: list.len(visible(v)), modified_ns: v.modified))
+    }, size: list.len(sim.fs_disk.visible(v)), modified_ns: v.modified))
 }
 
 // Answers a stat, reporting a size that differs from the written bytes.
 fn stat_reply(mut fs: Fs, mut session: Session, node: u64, mut s: Served[DirOp], take c: Call[DirOp]) {
-    let damaged = list.len(visible(current(fs.nodes[node]))) != list.len(current(fs.nodes[node]).data)
+    let damaged = list.len(sim.fs_disk.visible(current(fs.nodes[node]))) != list.len(current(fs.nodes[node]).data)
     if damaged {
         damaged_read(mut fs, mut session, node, "stat", 0, 0)
     }
@@ -253,15 +254,11 @@ fn close(mut fs: Fs, mut session: Session, id: u64) {
     }
 }
 
-fn edit(mut fs: Fs, id: u64, take v: Version) {
+fn edit(mut fs: Fs, id: u64, take v: sim.fs_disk.Version) {
     list.push(mut fs.nodes[id].history, take v)
 }
 
-fn revised(v: Version, seq: u64, modified: i64) -> Version {
-    Version(sequence: seq, modified: modified, data: clone(v.data), overlay: clone(v.overlay), names: clone(v.names))
-}
-
-fn insert_node(mut fs: Fs, dir: u64, take v: Version, take node: Inode) {
+fn insert_node(mut fs: Fs, dir: u64, take v: sim.fs_disk.Version, take node: Inode) {
     fs.sequence = v.sequence
     edit(mut fs, dir, take v)
     list.push(mut fs.nodes, take node)
@@ -351,7 +348,7 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
     map.reserve(mut session.files, 1)
     let seq = fs.sequence + 1
     if existing == None {
-        let mut entry = revised(current(fs.nodes[base]), seq, modified)
+        let mut entry = sim.fs_disk.revised(current(fs.nodes[base]), seq, modified)
         map.insert(mut entry.names, string.from(leaf), node)
         let mut created = inode(false)
         created.history[0].modified = modified
@@ -366,7 +363,7 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
         insert_node(mut fs, base, take entry, take created)
     } else if truncate {
         list.reserve(mut fs.nodes[node].history, 1)
-        let v = Version(sequence: seq, modified: modified, data: list.new(), overlay: None, names: map.new())
+        let v = sim.fs_disk.Version(sequence: seq, modified: modified, data: list.new(), overlay: None, names: map.new())
         if !answer(mut s, take c, File(id)) {
             return
         }
@@ -424,7 +421,7 @@ fn read(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u6
     }
     let (count, damaged) = {
         let v = current(fs.nodes[f.node])
-        let data = visible(v)
+        let data = sim.fs_disk.visible(v)
         let n = order.min(room, int.saturating_sub(list.len(data), at))
         let count: u64 = if n == 0 {
             0
@@ -447,115 +444,112 @@ fn read(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u6
     }
 }
 
-fn place_bytes(mut dst: Bytes, at: u64, data: Bytes) {
-    let end = at + list.len(data)
-    list.fill(mut dst, int.saturating_sub(end, list.len(dst)), 0u8)
-    list.copy_from_slice(mut dst, at, data)
-}
-
-// Applies one write and returns where its bytes landed.
-fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.Fault], mut plan: sim.world.Plan) -> u64 {
-    let mut landed = at
-    if let Some(_) = fault {
-        if let None = v.overlay {
-            v.overlay = Some(clone(v.data))
-        }
-    }
-    if let Some(mut disk) = v.overlay {
-        let n = list.len(data)
-        match fault {
-            Some(Corrupt) => {
-                place_bytes(mut disk, at, data)
-                let byte = at + sim.world.pick(mut plan, n)
-                let bit: u8 = int.truncate(sim.world.pick(mut plan, 8))
-                disk[byte] = disk[byte] ^ (1u8 << bit)
-            },
-            Some(Misdirect) => {
-                // One adjacent, disjoint range in the same file. Moving by
-                // exactly the write length preserves direct I/O alignment.
-                let after = int.checked_add(at + n, n)
-                if at >= n && (after == None || sim.world.pick(mut plan, 2) == 0) {
-                    landed = at - n
-                    place_bytes(mut disk, at - n, data)
-                } else if after != None {
-                    landed = at + n
-                    place_bytes(mut disk, at + n, data)
-                }
-            },
-            Some(LostWrite) => (),
-            _ => place_bytes(mut disk, at, data),
-        }
-    }
-    place_bytes(mut v.data, at, data)
-    let repaired = match v.overlay {
-        Some(disk) => disk == v.data,
-        None => false,
-    }
-    if repaired {
-        v.overlay = None
-    }
-    landed
-}
-
-fn write(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, fault: Option[sim.world.Fault], id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
-    let f = file_handle(session, id)
+// The version a write of `n` bytes starts from and its offset, or the reply
+// that refuses it.
+fn stage(fs: Fs, f: OpenFile, offset: Option[u64], n: u64, modified: i64) -> Result[(sim.fs_disk.Version, u64), DirReply] {
     if !f.writable || (f.append && offset != None) {
-        let _ = answer(mut s, take c, written_error(Denied))
-        return
+        return Error(written_error(Denied))
     }
-    let n = list.len(data)
     if f.direct {
         if let Some(at) = offset {
             if at % 4096 != 0 || n % 4096 != 0 {
-                let _ = answer(mut s, take c, written_error(Other(22)))
-                return
+                return Error(written_error(Other(22)))
             }
         }
     }
     if n == 0 {
-        let _ = answer(mut s, take c, Done)
-        return
+        return Error(Done)
     }
-    let seq = fs.sequence + 1
-    let mut v = revised(current(fs.nodes[f.node]), seq, modified)
+    let v = sim.fs_disk.revised(current(fs.nodes[f.node]), fs.sequence + 1, modified)
     let at = if f.append {
-        list.len(visible(v))
+        list.len(sim.fs_disk.visible(v))
     } else {
         match offset {
             Some(at) => at,
             None => f.cursor
         }
     }
-    let end = match int.checked_add(at, n) {
-        Some(end) => end,
-        None => {
-            let _ = answer(mut s, take c, written_error(Other(27)));
+    if int.checked_add(at, n) == None {
+        return Error(written_error(Other(27)))
+    }
+    Ok((take v, at))
+}
+
+// The readable event of a durable write whose success is not delivered. Its
+// bytes are visible; a sync or a later durable write makes them durable, and
+// a power cut before that keeps a subset of its sectors.
+fn pend(mut fs: Fs, session: Session, node: u64, take v: sim.fs_disk.Version, at: u64, len: u64) {
+    if list.len(fs.pending) == sim.fs_disk.LIMIT {
+        fail("sim.fs: too many pending durable writes")
+    }
+    list.push(mut fs.pending, sim.fs_disk.Pending(mount: fs.mounts, site: session.site - 1, node: node, sequence: v.sequence, at: at, len: len))
+    fs.sequence = v.sequence
+    edit(mut fs, node, take v)
+}
+
+// A refused write on a Durable or Direct handle still reached the disk.
+// Returns its range, or an empty one when nothing was written.
+fn refused_write(mut fs: Fs, session: Session, mut plan: sim.world.Plan, c: Call[DirOp], op: DirOp, modified: i64) -> (u64, u64) {
+    let none: Option[u64] = None
+    let (id, offset, field, n) = match op {
+        Write(file: id, len: len) => (id, none, 1u64, len),
+        WriteAt(file: id, at: at, len: len) => (id, Some(at), 2u64, len),
+        _ => return (0, 0)
+    }
+    let f = file_handle(session, id)
+    if f.durable {
+        if let (Ok(data), Ok((take staged, at))) = (payload(c, field, n), stage(fs, f, offset, n, modified)) {
+            let mut v = take staged
+            let _ = sim.fs_disk.write(mut v, at, data, None, mut plan)
+            pend(mut fs, session, f.node, take v, at, n)
+            return (at, n)
+        }
+    }
+    (0, 0)
+}
+
+fn write(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, fault: Option[sim.world.Fault], id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let f = file_handle(session, id)
+    let n = list.len(data)
+    let (take staged, at) = match stage(fs, f, offset, n, modified) {
+        Ok(take ready) => take ready,
+        Error(r) => {
+            let _ = answer(mut s, take c, r)
             return
         }
     }
+    let mut v = take staged
     let effect = match fault {
         Some(scripted) => Some(scripted),
         None => sim.world.write_fault(mut plan),
     }
-    let landed = write_overlay(mut v, at, data, effect, mut plan)
-    if let Some(_) = effect {
+    let landed = sim.fs_disk.write(mut v, at, data, effect, mut plan)
+    let damaging = match effect {
+        Some(_) => true,
+        None => false
+    }
+    if damaging {
         emit(mut fs, session, "write", f.node, (at, n, landed), effect, Acknowledged)
+        if f.durable {
+            emit(mut fs, session, "write", f.node, (at, n, landed), None, Persisted)
+        }
     }
     list.reserve(mut fs.nodes[f.node].history, 1)
     if !answer(mut s, take c, Done) {
-        if let Some(_) = effect {
+        if damaging {
             undelivered(mut fs, mut session, f.node, "write")
+        } else if f.durable {
+            pend(mut fs, session, f.node, take v, at, n)
         }
     } else {
+        fs.sequence = v.sequence
         edit(mut fs, f.node, take v)
         if f.durable {
-            let latest = list.len(fs.nodes[f.node].history) - 1
-            retain(mut fs.nodes[f.node], latest)
+            settle(mut fs, f.node)
         }
-        fs.sequence = seq
         if offset == None {
             let _ = map.update(mut session.files, id, scoped fn(mut file: OpenFile) {
-                file.cursor = end
+                file.cursor = at + n
             })
         }
     }
@@ -573,7 +567,7 @@ fn make_dir(mut fs: Fs, mut session: Session, dir: u64, p: String, suffix: Optio
         return
     }
     let node = list.len(fs.nodes)
-    let mut entry = revised(current(fs.nodes[base]), fs.sequence + 1, modified)
+    let mut entry = sim.fs_disk.revised(current(fs.nodes[base]), fs.sequence + 1, modified)
     map.insert(mut entry.names, string.from(leaf), node)
     let mut created = inode(true)
     created.history[0].modified = modified
@@ -622,7 +616,7 @@ fn remove(mut fs: Fs, dir: u64, p: String, tree: bool, modified: i64, mut s: Ser
         refuse(mut s, take c, Other(39))
         return
     }
-    let mut v = revised(current(fs.nodes[base]), fs.sequence + 1, modified)
+    let mut v = sim.fs_disk.revised(current(fs.nodes[base]), fs.sequence + 1, modified)
     let _ = map.remove(mut v.names, leaf)
     list.reserve(mut fs.nodes[base].history, 1)
     if answer(mut s, take c, Done) {
@@ -661,7 +655,7 @@ fn rename(mut fs: Fs, dir: u64, from: String, to: String, modified: i64, mut s: 
         return
     }
     let seq = fs.sequence + 1
-    let mut source = revised(current(fs.nodes[old_base]), seq, modified)
+    let mut source = sim.fs_disk.revised(current(fs.nodes[old_base]), seq, modified)
     let _ = map.remove(mut source.names, old_name)
     list.reserve(mut fs.nodes[old_base].history, 1)
     if old_base == new_base {
@@ -671,7 +665,7 @@ fn rename(mut fs: Fs, dir: u64, from: String, to: String, modified: i64, mut s: 
             fs.sequence = seq
         }
     } else {
-        let mut dest = revised(current(fs.nodes[new_base]), seq, modified)
+        let mut dest = sim.fs_disk.revised(current(fs.nodes[new_base]), seq, modified)
         map.insert(mut dest.names, string.from(new_name), node)
         list.reserve(mut fs.nodes[new_base].history, 1)
         if answer(mut s, take c, Done) {
@@ -736,8 +730,13 @@ fn next_entries(mut session: Session, id: u64, room: u64, mut s: Served[DirOp], 
 
 fn sync(mut fs: Fs, mut session: Session, node: u64, op: String, fault: Option[sim.world.Fault], advanced: bool, mut s: Served[DirOp], take c: Call[DirOp]) {
     let error = io_fault(fault)
-    if error {
-        emit(mut fs, session, op, node, (0, 0, 0), fault, Barrier(advanced))
+    let noted = error || (advanced && sim.fs_disk.visible(current(fs.nodes[node])) != current(fs.nodes[node]).data)
+    if noted {
+        emit(mut fs, session, op, node, (0, 0, 0), fault, if error {
+            Barrier(advanced)
+        } else {
+            Persisted
+        })
     }
     let r: DirReply = if error {
         Failed(Other(5))
@@ -745,11 +744,10 @@ fn sync(mut fs: Fs, mut session: Session, node: u64, op: String, fault: Option[s
         Done
     }
     let delivered = answer(mut s, take c, r)
-    if !delivered && error {
+    if !delivered && noted {
         undelivered(mut fs, mut session, node, op)
     } else if delivered && advanced {
-        let at = list.len(fs.nodes[node].history) - 1
-        retain(mut fs.nodes[node], at)
+        settle(mut fs, node)
     }
 }
 
@@ -792,7 +790,8 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
             Close(file: id) => file_handle(session, id).node,
             _ => 0
         }
-        emit(mut fs, session, "refused", node, (0, 0, 0), fault, Refused)
+        let (at, n) = refused_write(mut fs, session, mut plan, c, op, modified)
+        emit(mut fs, session, "refused", node, (at, n, at), fault, Refused)
         let r: DirReply = match op {
             Write(..) => written_error(Other(5)),
             WriteAt(..) => written_error(Other(5)),

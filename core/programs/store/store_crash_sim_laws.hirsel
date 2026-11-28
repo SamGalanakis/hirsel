@@ -155,7 +155,7 @@ fn csim_cut_point(mut st: CsimState) {
     list.clear(mut st.history)
     list.push(mut st.history, take newest)
     st.floor = 0
-    st.ev.journal = list.new()
+    csim_forget_journal(mut st.ev)
 }
 
 fn csim_record(mut st: CsimState, take w: CsimWorld) {
@@ -765,6 +765,9 @@ fn csim_run_outcomes(take case: std.prop.Case[CsimPlan], take trace: Option[RtTr
     let mut epoch = 0u64
     let mut done = false
     let mut terminal = false
+    // Whether the Db before the next open was closed with Ok. Any other end
+    // is a crash for D6.
+    let mut tidy = true
     while !done {
         epoch += 1
         if epoch > CSIM_STEPS + 16 {
@@ -772,10 +775,14 @@ fn csim_run_outcomes(take case: std.prop.Case[CsimPlan], take trace: Option[RtTr
         }
         let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(CSIM_TAP)
         st.tap = Some(take rx)
-        st.ev.seen = list.new()
+        st.ev.seen = std.sim.fs.torn_writes(image)
         let (root, server) = sim_disk_mount_tapped(tasks, c, take image, csim_mount_plan(plan, world_seed, epoch), CSIM_ROOM, Some(take tx))
         let mut power = false
         while !power && !done {
+            if !tidy {
+                st.ev.crashes += 1
+            }
+            tidy = false
             csim_drain(mut st)
             let mark = list.len(st.ev.journal)
             let opened = match host.open_dir(root, "s") {
@@ -910,7 +917,10 @@ fn csim_run_outcomes(take case: std.prop.Case[CsimPlan], take trace: Option[RtTr
                     let closed = close(take db)
                     csim_drain(mut st)
                     match closed {
-                        Ok(()) => csim_ack(mut st),
+                        Ok(()) => {
+                            csim_ack(mut st)
+                            tidy = true
+                        },
                         Error(e) if csim_excused(st.ev, e) => (),
                         Error(e) => {
                             let mut text = string.from("close returned ")

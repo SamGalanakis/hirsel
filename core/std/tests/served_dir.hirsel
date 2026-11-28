@@ -180,3 +180,206 @@ fn sim_served_dir_every_op(tasks: Tasks) -> u64 waits {
         Error(_) => 100
     }
 }
+
+// A power cut on a Direct write whose success was never delivered keeps a
+// drawn subset of its 512-byte sectors (core.md, Host files; STORE-SPEC,
+// "Durable and Direct in the sim fs": the readable event without a
+// successful complete). Old file: blocks 0x11 0x22, written and
+// acknowledged. New write, refused at site 3: blocks 0x33 0x22 0x44 0x55.
+// Block 1 is unchanged, so the candidates are the 8 sectors of block 0 and
+// the 16 of blocks 2 and 3.
+type TearMount: send {
+    fs: sim.fs.Fs,
+    port: Served[DirOp],
+    clock: Clock,
+    refused: Option[u64]
+}
+
+fn serve_tear(take mount: TearMount) -> sim.fs.Fs waits {
+    let TearMount(fs: take image, port: take port, clock, refused) = take mount
+    let mut fs = take image
+    let mut plan = sim.world.plan(0)
+    if let Some(site) = refused {
+        sim.world.script(mut plan, site, Eio)
+    }
+    sim.fs.serve(mut fs, mut plan, clock, take port)
+    take fs
+}
+
+// `count` 4096-byte blocks, block i filled with fills[i].
+fn blocks(fills: (u8, u8, u8, u8), count: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity_aligned(count * 4096, 4096)
+    list.fill(mut out, 4096, fills.0)
+    list.fill(mut out, 4096, fills.1)
+    if count == 4 {
+        list.fill(mut out, 4096, fills.2)
+        list.fill(mut out, 4096, fills.3)
+    }
+    take out
+}
+
+// The writes before the cut: the first step that differs from its
+// hand-worked result, or 0.
+fn torn_writes_before(d: Dir, sync: bool) -> u64 waits {
+    let mut f = match host.open(d, "j", Direct) {
+        Ok(take f) => take f,
+        Error(_) => return 1
+    }
+    if !wrote(host.write_at(mut f, 0, blocks((0x11, 0x22, 0, 0), 2))) {
+        return 2
+    }
+    if !done(host.sync_dir(d)) {
+        return 3
+    }
+    let new = blocks((0x33, 0x22, 0x44, 0x55), 4)
+    if wrote(host.write_at(mut f, 0, new)) {
+        return 4
+    }
+    // The refused write is readable, through another handle, before any
+    // crash.
+    let mut reader = match host.open(d, "j", Read) {
+        Ok(take r) => take r,
+        Error(_) => return 5
+    }
+    let mut seen: Bytes = list.with_capacity(20480)
+    match host.read(mut reader, mut seen) {
+        Ok(16384) => (),
+        _ => return 5
+    }
+    let _ = take reader
+    if seen != new {
+        return 6
+    }
+    if sync && !done(host.sync(mut f)) {
+        return 7
+    }
+    0
+}
+
+// The file after the cut, or the step that failed.
+fn torn_read_back(d: Dir) -> Result[Bytes, u64] waits {
+    let mut r = match host.open(d, "j", Read) {
+        Ok(take r) => take r,
+        Error(_) => return Error(13)
+    }
+    let mut got: Bytes = list.with_capacity(20480)
+    match host.read(mut r, mut got) {
+        Ok(_) => Ok(take got),
+        Error(_) => Error(14)
+    }
+}
+
+// The first step that differs from its hand-worked result, or 0. `mode` is
+// the word of the cut's pick(3) and `keep` the candidate sectors, counted
+// from 0 in ascending order, whose pick(2) keeps them.
+fn torn_write(tasks: Tasks, c: Clock, mode: u64, keep: (u64, u64), sync: bool, want: Bytes, kept: List[(u64, u64)]) -> u64 waits {
+    let (d, port) = provide.dir(bytes 65536)
+    let server = task.spawn(tasks, bytes 1048576, TearMount(fs: sim.fs.new(), port: take port, clock: c, refused: Some(3)), serve_tear)
+    let before = torn_writes_before(d, sync)
+    drop(take d)
+    let mut image = match task.join(take server) {
+        Ok(take image) => take image,
+        Error(_) => return 100
+    }
+    if before != 0 {
+        return before
+    }
+    // The cut keeps the whole operation prefix, then decides the write.
+    let mut words: List[u64] = list.new()
+    list.push(mut words, 0xffffffffffffffff)
+    list.push(mut words, mode)
+    for i in 0u64 .. 24 {
+        list.push(mut words, if i == keep.0 || i == keep.1 {
+            0xffffffffffffffffu64
+        } else {
+            0u64
+        })
+    }
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take words)
+    let mut cut = sim.world.plan_from(sim.world.Script(tail_seed: 0, streams: take streams), 0)
+    sim.fs.crash(mut image, mut cut)
+    let torn = sim.fs.torn_writes(image)
+    if sync {
+        if list.len(torn) != 0 {
+            return 8
+        }
+    } else {
+        if list.len(torn) != 1 || torn[0].mount != 1 || torn[0].site != 3 || torn[0].at != 0 || torn[0].len != 16384 || torn[0].crashes != 0 {
+            return 9
+        }
+        match torn[0].outcome {
+            Torn(t) => {
+                if list.len(t.candidates) != 2 || t.candidates[0] != (0u64, 4096u64) || t.candidates[1] != (8192u64, 8192u64) {
+                    return 10
+                }
+                if t.kept != kept {
+                    return 11
+                }
+            },
+            _ => return 12
+        }
+    }
+    let (after, port2) = provide.dir(bytes 65536)
+    let reader = task.spawn(tasks, bytes 1048576, TearMount(fs: take image, port: take port2, clock: c, refused: None), serve_tear)
+    let read = torn_read_back(after)
+    drop(take after)
+    match task.join(take reader) {
+        Ok(_) => (),
+        Error(_) => return 101
+    }
+    let got = match read {
+        Ok(take got) => take got,
+        Error(step) => return step
+    }
+    if got != want {
+        return 15
+    }
+    0
+}
+
+fn runs(a: Option[(u64, u64)], b: Option[(u64, u64)]) -> List[(u64, u64)] {
+    let mut out: List[(u64, u64)] = list.new()
+    if let Some(run) = a {
+        list.push(mut out, run)
+    }
+    if let Some(run) = b {
+        list.push(mut out, run)
+    }
+    take out
+}
+
+// expect: run sim_torn_write_keeps_none(tasks) = 0
+fn sim_torn_write_keeps_none(tasks: Tasks) -> u64 waits {
+    let (c, _hand) = provide.clock(0, 0)
+    torn_write(tasks, c, 0, (99, 99), false, blocks((0x11, 0x22, 0, 0), 2), runs(None, None))
+}
+
+// expect: run sim_torn_write_keeps_all(tasks) = 0
+fn sim_torn_write_keeps_all(tasks: Tasks) -> u64 waits {
+    let (c, _hand) = provide.clock(0, 0)
+    torn_write(tasks, c, 0x8000000000000000, (99, 99), false, blocks((0x33, 0x22, 0x44, 0x55), 4), runs(Some((0, 4096)), Some((8192, 8192))))
+}
+
+// The first and the last candidate sector land: bytes [0, 512) and
+// [15872, 16384). The file grows to four blocks; block 0 keeps its old
+// bytes after the first sector, block 1 is untouched, and the hole before
+// the last sector reads as zeros.
+// expect: run sim_torn_write_keeps_noncontiguous(tasks) = 0
+fn sim_torn_write_keeps_noncontiguous(tasks: Tasks) -> u64 waits {
+    let (c, _hand) = provide.clock(0, 0)
+    let mut want = blocks((0x11, 0x22, 0, 0), 4)
+    for i in 0u64 .. 512 {
+        want[i] = 0x33
+        want[15872 + i] = 0x55
+    }
+    torn_write(tasks, c, 0xffffffffffffffff, (0, 23), false, want, runs(Some((0, 512)), Some((15872, 512))))
+}
+
+// A sync after the refused write makes it durable whole: the same cut that
+// would keep none of it has nothing left to tear.
+// expect: run sim_torn_write_synced_is_whole(tasks) = 0
+fn sim_torn_write_synced_is_whole(tasks: Tasks) -> u64 waits {
+    let (c, _hand) = provide.clock(0, 0)
+    torn_write(tasks, c, 0, (99, 99), true, blocks((0x33, 0x22, 0x44, 0x55), 4), runs(None, None))
+}

@@ -58,7 +58,23 @@ pub type Receipt: send {
 /// effect. `Acknowledged`: a write reported Done but changed other bytes.
 /// `DamagedRead`: a read or stat answered differently from the written bytes.
 /// `Undelivered`: the reply for that site never reached the caller.
-pub type Outcome = Refused | Barrier(bool) | Acknowledged | DamagedRead | Undelivered
+/// `Persisted`: a delivered reply made write damage durable, either a
+/// damaging write on a Durable or Direct handle or a sync of a file holding
+/// damage. `Torn`: a power cut reached a durable write whose success was
+/// never delivered, and kept the sectors the `Tear` names.
+pub type Outcome: send = Refused | Barrier(bool) | Acknowledged | DamagedRead | Undelivered | Persisted | Torn(Tear)
+
+/// What a power cut kept of one pending durable write. `candidates` are the
+/// write's sectors (`sim.fs_disk.SECTOR` bytes, the last one cut short by
+/// the end of the file) whose bytes differed from the old ones or lay past
+/// the old end, and `kept` those that hold the new bytes afterwards. Both
+/// are ascending `(offset, length)` runs of whole sectors; a candidate
+/// outside `kept` holds its old bytes, zeros if a later sector was kept
+/// past the old end, or nothing.
+pub type Tear: send {
+    candidates: List[(u64, u64)],
+    kept: List[(u64, u64)]
+}
 
 /// Mutually exclusive chances per 10,000 nonempty filesystem writes.
 pub type WriteFaults: send {

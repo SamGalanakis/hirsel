@@ -1,0 +1,405 @@
+// Power cuts that tear a journal write (STORE-SPEC §3.3, "Durable and Direct
+// in the sim fs and the crash bridge"; §3.4, the torn tail). One commit's
+// Direct journal write is refused with EIO, so its bytes are readable and
+// not durable, and the store never acknowledges the commit. The power cut
+// then keeps none, all, or every other one of the write's 512-byte sectors.
+//
+// The expected recovery is worked from the spec, not from the store:
+//   - open succeeds, since a frame cut short over old bytes is the torn tail;
+//   - the commit is present iff the cut kept every candidate sector of the
+//     frame's last write (recovery reads past END to the torn tail), and
+//     absent otherwise: a frame missing any sector that differed is not a
+//     frame, and a frame missing a later piece is cut short;
+//   - every commit, pin and fork acknowledged before it is intact;
+//   - a commit after the recovery survives the next open, so sectors left
+//     beyond the torn tail are never read as frames;
+//   - the refusal and the Torn receipt excuse no rollback below an
+//     acknowledged durable point (no D6 exemption).
+const ST_PLAIN: u64 = 0
+
+const ST_PINNED: u64 = 1
+
+const ST_FORKED: u64 = 2
+
+const ST_NONE: u64 = 0
+
+const ST_ALL: u64 = 1
+
+const ST_SUBSET: u64 = 2
+
+// A refused journal write of one commit: its site on the mount and its
+// receipt.
+type StHit {
+    site: u64,
+    receipt: std.sim.world.Receipt
+}
+
+type StTrial = Early | Late | Elsewhere | Hit(std.sim.world.Receipt, std.sim.fs.Fs)
+
+fn st_options(group_bytes: Option[u64]) -> Options {
+    let mut o = derived_sizes()
+    o.group_commits = Some(1)
+    o.group_bytes = group_bytes
+    o.pack_bytes = Some(65536)
+    o.checkpoint_bytes = Some(1048576)
+    o.resident_limit = Some(182375272)
+    o.writer_pin_bytes = Some(34471936)
+    o.cache_bytes = Some(52232192)
+    result.unwrap(sized_with(Directory, 2147483648, o))
+}
+
+// `width` rows of 808 bytes each (csim_value band 2), keys from 0.
+fn st_edits(width: u64, edit: u8) -> List[(u64, Option[u8])] {
+    let mut edits: List[(u64, Option[u8])] = list.new()
+    for k in 0u64 .. width {
+        list.push(mut edits, (k, Some(edit)))
+    }
+    take edits
+}
+
+fn st_apply(mut w: CsimWorld, head: String, edits: List[(u64, Option[u8])]) {
+    let _ = map.update(mut w.heads, head, scoped fn(mut rows: Map[u64, u8]) {
+        for (k, edit) in edits {
+            if let Some(e) = edit {
+                map.insert(mut rows, k, e)
+            }
+        }
+    })
+}
+
+fn st_durable(mut db: Db, head: String, rows: Table[u64, Bytes], edits: List[(u64, Option[u8])]) -> Result[(), Error] waits {
+    let Some(b) = csim_branch(db, head) else {
+        fail("sector tear: the head has no branch")
+    }
+    match csim_commit(mut db, b, rows, edits)? {
+        Some(t) => durable(mut db, t),
+        None => Error(Io(Closed)),
+    }
+}
+
+fn st_text(what: String, e: Error) -> String {
+    let mut text = string.from("sector tear: ")
+    string.push(mut text, what)
+    string.push(mut text, " returned ")
+    string.push(mut text, csim_error_name(e))
+    take text
+}
+
+// The image before the torn commit and the world it holds: two small rows
+// on main, then by shape a pin or a fork of that state and one more row on
+// main, every step acknowledged durable and the Db closed cleanly.
+fn st_prefix(tasks: Tasks, c: Clock, r: Random, options: Options, shape: u64) -> Result[(std.sim.fs.Fs, Table[u64, Bytes], CsimWorld), String] waits {
+    let (d, server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), CSIM_ROOM)
+    host.mkdir(d, "s") ?=> |_| "sector tear: setup mkdir failed"
+    host.sync_dir(d) ?=> |_| "sector tear: setup sync_dir failed"
+    let dir = host.open_dir(d, "s") ?=> |_| "sector tear: setup open_dir failed"
+    let mut db = open(tasks, dir, c, r, clone(options)) ?=> |e| st_text("setup open", e)
+    let rows = csim_schema(mut db) ?=> |e| st_text("setup schema", e)
+    let mut w = csim_empty()
+    let mut first: List[(u64, Option[u8])] = list.new()
+    list.push(mut first, (20u64, Some(4u8)))
+    list.push(mut first, (21u64, Some(8u8)))
+    st_durable(mut db, "", rows, first) ?=> |e| st_text("setup commit", e)
+    st_apply(mut w, "", first)
+    if shape != ST_PLAIN {
+        let s = snapshot_of(db, main_branch(db)) ?=> |e| st_text("setup snapshot_of", e)
+        let captured: Map[u64, u8] = match map.get(w.heads, "") {
+            Some(held) => clone(held),
+            None => fail("sector tear: the reference has main"),
+        }
+        if shape == ST_PINNED {
+            let _ = pin(mut db, "p0", s) ?=> |e| st_text("setup pin", e)
+            map.insert(mut w.pins, string.from("p0"), take captured)
+        } else {
+            let _ = fork(mut db, "f0", s) ?=> |e| st_text("setup fork", e)
+            map.insert(mut w.heads, string.from("f0"), take captured)
+        }
+        let mut second: List[(u64, Option[u8])] = list.new()
+        list.push(mut second, (22u64, Some(12u8)))
+        st_durable(mut db, "", rows, second) ?=> |e| st_text("setup second commit", e)
+        st_apply(mut w, "", second)
+    }
+    close(take db) ?=> |e| st_text("setup close", e)
+    Ok((sim_disk_unmount(take d, take server), take rows, take w))
+}
+
+// The head the torn commit writes: the fork when there is one.
+fn st_head(shape: u64) -> String {
+    if shape == ST_FORKED {
+        string.from("f0")
+    } else {
+        string.new()
+    }
+}
+
+// The acknowledged commit each trial makes first, so the torn commit's
+// first journal block already holds an acknowledged frame.
+fn st_warm() -> List[(u64, Option[u8])] {
+    let mut edits: List[(u64, Option[u8])] = list.new()
+    list.push(mut edits, (19u64, Some(20u8)))
+    take edits
+}
+
+// One mount of `image` with EIO scripted at `site`: open, one small
+// acknowledged commit, then the commit under test.
+fn st_trial(tasks: Tasks, c: Clock, r: Random, options: Options, take image: std.sim.fs.Fs, rows: Table[u64, Bytes], shape: u64, edits: List[(u64, Option[u8])], site: u64) -> StTrial waits {
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(CSIM_TAP)
+    let mut plan = std.sim.world.plan(2)
+    std.sim.world.script(mut plan, site, Eio)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, take plan, CSIM_ROOM, Some(take tx))
+    let opened = match host.open_dir(d, "s") {
+        Ok(dir) => open(tasks, dir, c, r, clone(options)),
+        Error(e) => Error(Io(e)),
+    }
+    let mut db = match opened {
+        Ok(take db) => take db,
+        Error(_) => {
+            let _ = sim_disk_unmount(take d, take server)
+            return Early
+        },
+    }
+    if let Error(_) = st_durable(mut db, st_head(shape), rows, st_warm()) {
+        trust_opt_out("crash-sim/fault", mut db)
+        drop(take db)
+        let _ = sim_disk_unmount(take d, take server)
+        return Elsewhere
+    }
+    let committed = st_durable(mut db, st_head(shape), rows, edits)
+    trust_opt_out("crash-sim/fault", mut db)
+    drop(take db)
+    let after = sim_disk_unmount(take d, take server)
+    if let Ok(()) = committed {
+        return Late
+    }
+    while let Ok(take receipt) = channel.try_receive(rx) {
+        if let Refused = receipt.outcome {
+            if csim_journal_segment(receipt.path) && receipt.len != 0 {
+                return Hit(take receipt, take after)
+            }
+        }
+    }
+    Elsewhere
+}
+
+// Every site at which the commit's journal writes can be refused, in order.
+fn st_search(tasks: Tasks, c: Clock, r: Random, options: Options, image: std.sim.fs.Fs, rows: Table[u64, Bytes], shape: u64, edits: List[(u64, Option[u8])]) -> Result[List[StHit], String] waits {
+    let mut hits: List[StHit] = list.new()
+    for site in 0u64 .. 4096 {
+        match st_trial(tasks, c, r, options, clone(image), rows, shape, edits, site) {
+            Late => return Ok(take hits),
+            Hit(take receipt, _) => list.push(mut hits, StHit(site: site, receipt: take receipt)),
+            _ => (),
+        }
+    }
+    Error("sector tear: no site was past the commit")
+}
+
+// The sectors of ascending runs, by offset.
+fn st_sectors(runs: List[(u64, u64)]) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    for (at, n) in runs {
+        let mut s = at
+        while s < at + n {
+            list.push(mut out, s)
+            s += std.sim.fs_disk.SECTOR
+        }
+    }
+    take out
+}
+
+// The decision words of a cut that keeps the whole prefix and then, of a
+// pending write with up to `sectors` candidates, none, all or every other
+// candidate from the first (sim.fs_disk.tear: pick(3), then one pick(2) per
+// candidate in ascending order when the pick(3) is 2).
+fn st_cut(mode: u64, sectors: u64) -> std.sim.world.Plan {
+    let top = 0xffffffffffffffffu64
+    let mut words: List[u64] = list.new()
+    list.push(mut words, top)
+    list.push(mut words, match mode {
+        0 => 0u64,
+        1 => 0x8000000000000000u64,
+        _ => top,
+    })
+    for i in 0u64 .. sectors {
+        list.push(mut words, if i % 2 == 0 {
+            top
+        } else {
+            0u64
+        })
+    }
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take words)
+    std.sim.world.plan_from(std.sim.world.Script(tail_seed: 0, streams: take streams), 0)
+}
+
+// Checks the Torn receipt of `hit` against the cut's mode. Returns whether
+// the cut kept every candidate sector.
+fn st_check_torn(torn: List[std.sim.world.Receipt], hit: StHit, mode: u64, wide: bool) -> Result[bool, String] {
+    if list.len(torn) != 1 {
+        return Error("sector tear: the cut did not tear exactly the one pending write")
+    }
+    let t = torn[0]
+    if t.mount != hit.receipt.mount || t.site != hit.site || t.node != hit.receipt.node || t.at != hit.receipt.at || t.len != hit.receipt.len {
+        return Error("sector tear: the Torn receipt names another write than the refused one")
+    }
+    let Torn(tear) = t.outcome else {
+        return Error("sector tear: torn_writes held a receipt that is not Torn")
+    }
+    let candidates = st_sectors(tear.candidates)
+    let kept = st_sectors(tear.kept)
+    for s in candidates {
+        if s % std.sim.fs_disk.SECTOR != 0 || s < t.at || s >= t.at + t.len {
+            return Error("sector tear: a candidate sector lies outside the write")
+        }
+    }
+    if wide && list.len(candidates) < 3 {
+        return Error("sector tear: the write has fewer than three candidate sectors, so no subset is noncontiguous")
+    }
+    let mut want: List[u64] = list.new()
+    for i in 0u64 .. list.len(candidates) {
+        if mode == ST_ALL || (mode == ST_SUBSET && i % 2 == 0) {
+            list.push(mut want, candidates[i])
+        }
+    }
+    if kept != want {
+        return Error("sector tear: the kept sectors are not the ones the cut's decisions name")
+    }
+    if wide && mode == ST_SUBSET && list.len(tear.kept) < 2 {
+        return Error("sector tear: the subset cut kept one contiguous run")
+    }
+    Ok(list.len(kept) == list.len(candidates))
+}
+
+fn st_observe(db: Db, rows: Table[u64, Bytes], want: CsimWorld, what: String) -> Result[(), String] waits {
+    let seen = match csim_observe(db, rows) {
+        Ok(take w) => take w,
+        Error(Wrong(k)) => {
+            let mut text = string.from("sector tear: ")
+            string.push(mut text, what)
+            string.push(mut text, " read a value no write stored, key ")
+            string.push_u64(mut text, k)
+            return Error(take text)
+        },
+        Error(Unreadable(e)) => return Error(st_text(what, e)),
+    }
+    if !csim_world_equal(seen, want) {
+        let mut text = string.from("sector tear: ")
+        string.push(mut text, what)
+        string.push(mut text, " shows ")
+        csim_show_world(seen, mut text)
+        string.push(mut text, "; expected ")
+        csim_show_world(want, mut text)
+        return Error(take text)
+    }
+    Ok(())
+}
+
+// Refuses the journal write at `hit`, cuts power with `mode`, and checks
+// the recovery. `final`: the write is the commit's last journal write.
+fn st_cut_case(tasks: Tasks, c: Clock, r: Random, options: Options, image: std.sim.fs.Fs, rows: Table[u64, Bytes], before: CsimWorld, shape: u64, edits: List[(u64, Option[u8])], hit: StHit, final: bool, mode: u64, wide: bool) -> Result[(), String] waits {
+    let Hit(refused, take stopped) = st_trial(tasks, c, r, options, clone(image), rows, shape, edits, hit.site) else {
+        return Error("sector tear: the refused journal write did not repeat")
+    }
+    let mut crashed = take stopped
+    let mut cut = st_cut(mode, hit.receipt.len / std.sim.fs_disk.SECTOR)
+    std.sim.fs.crash(mut crashed, mut cut)
+    let torn = std.sim.fs.torn_writes(crashed)
+    let whole = st_check_torn(torn, hit, mode, wide)?
+    // The oracle's evidence as the crash sim gathers it: the refusal drained
+    // with two worlds recorded, a dropped Db, then the next mount's Torn
+    // receipts. World 1 is acknowledged durable; nothing here excuses
+    // world 0.
+    let mut ev = csim_evidence(1)
+    csim_note(mut ev, clone(refused), 2)
+    ev.crashes += 1
+    ev.seen = clone(torn)
+    if csim_rollback_allowed(ev, 0, 1) {
+        return Error("sector tear: a refused or torn journal write excused a rollback below an acknowledged durable point")
+    }
+    if csim_excused(ev, Io(Other(5))) || csim_excused(ev, Corrupt(Fault(file: csim_leaf(refused.path), offset: 0, why: Checksum))) {
+        return Error("sector tear: a Torn receipt excused an error on the recovering mount")
+    }
+    let mut want: CsimWorld = clone(before)
+    if whole && final {
+        st_apply(mut want, st_head(shape), edits)
+    }
+    let (d, server) = sim_disk_mount(tasks, c, take crashed, std.sim.world.plan(3), CSIM_ROOM)
+    let dir = host.open_dir(d, "s") ?=> |_| "sector tear: the store directory is gone after the cut"
+    let mut db = open(tasks, dir, c, r, clone(options)) ?=> |e| st_text("open after the cut", e)
+    st_observe(db, rows, want, "recovery")?
+    let mut later: List[(u64, Option[u8])] = list.new()
+    list.push(mut later, (23u64, Some(16u8)))
+    st_durable(mut db, st_head(shape), rows, later) ?=> |e| st_text("a commit after the recovery", e)
+    st_apply(mut want, st_head(shape), later)
+    close(take db) ?=> |e| st_text("close after the recovery", e)
+    let dir2 = host.open_dir(d, "s") ?=> |_| "sector tear: the store directory is gone after the recovery"
+    let db2 = open(tasks, dir2, c, r, clone(options)) ?=> |e| st_text("the second open after the cut", e)
+    st_observe(db2, rows, want, "the second open")?
+    close(take db2) ?=> |e| st_text("the second close", e)
+    let _ = sim_disk_unmount(take d, take server)
+    Ok(())
+}
+
+// A commit of `width` 808-byte rows under `group_bytes`, torn at its first
+// and at its last journal write. `pieces`: whether the frame must take more
+// than one write (an oversized frame), or exactly one (a group).
+fn st_law(tasks: Tasks, c: Clock, shape: u64, group_bytes: Option[u64], width: u64, pieces: bool) -> Result[(), String] waits {
+    let r = provide.random(1)
+    let options = st_options(group_bytes)
+    let (image, rows, closed) = st_prefix(tasks, c, r, options, shape)?
+    let mut before: CsimWorld = clone(closed)
+    st_apply(mut before, st_head(shape), st_warm())
+    let edits = st_edits(width, 2u8)
+    let hits = st_search(tasks, c, r, options, image, rows, shape, edits)?
+    let n = list.len(hits)
+    if n == 0 || (n == 1) == pieces || hits[0].receipt.at != 0 {
+        let mut text = string.from("sector tear: the commit took ")
+        string.push_u64(mut text, n)
+        string.push(mut text, " journal writes, not the shape this law drives")
+        return Error(take text)
+    }
+    for mode in 0u64 .. 3 {
+        st_cut_case(tasks, c, r, options, image, rows, before, shape, edits, hits[0], n == 1, mode, true)?
+        if n > 1 {
+            st_cut_case(tasks, c, r, options, image, rows, before, shape, edits, hits[n - 1], true, mode, false)?
+        }
+    }
+    Ok(())
+}
+
+// The terminal tail-block rewrite: one group write whose first block is the
+// segment's partly filled tail block (offset 0: the header and the
+// acknowledged frame before it), so the cut can tear inside the block that
+// already holds an acknowledged frame.
+@test
+fn test_store_sector_tear_tail_block(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_PLAIN, None, 10, false)
+}
+
+@test
+fn test_store_sector_tear_tail_block_pinned(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_PINNED, None, 10, false)
+}
+
+@test
+fn test_store_sector_tear_tail_block_forked(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_FORKED, None, 10, false)
+}
+
+// An oversized frame: with group_bytes 16384 the group buffer holds 8192
+// payload bytes and the worker writes a larger frame in 12288-byte pieces.
+// A cut that keeps all of the first piece still leaves the frame cut short.
+@test
+fn test_store_sector_tear_oversized(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_PLAIN, Some(16384), 24, true)
+}
+
+@test
+fn test_store_sector_tear_oversized_pinned(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_PINNED, Some(16384), 24, true)
+}
+
+@test
+fn test_store_sector_tear_oversized_forked(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    st_law(tasks, c, ST_FORKED, Some(16384), 24, true)
+}

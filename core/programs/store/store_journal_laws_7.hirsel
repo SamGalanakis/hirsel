@@ -550,17 +550,23 @@ fn cadence_failed_write(tasks: Tasks, c: Clock, fail_end: bool) -> Result[(), Er
         fail("L94: a failed write kept the segment fence")
     }
     failure_result_from_rep(manifest.disk_io(host.close(take segment_check)))?
-    if failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7))? != Some(72u64) {
-        fail("L94: a failed write advanced END")
+    // The sim fs leaves every sector of a refused Durable or Direct write
+    // readable (STORE-SPEC §3.3b: a failed complete leaves the readable
+    // subset visible). With no power cut, a refused END write therefore
+    // reads back, naming the COMMIT that was acknowledged before it, and
+    // recovery reads the COMMIT whole even when its own write failed. A
+    // refused COMMIT write is never followed by an END write.
+    let end = if fail_end {
+        114u64
+    } else {
+        72u64
+    }
+    if failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7))? != Some(end) {
+        fail("L94: END after a failed write is not the one the failure left readable")
     }
     let recovered = journal_recover(d, id, 7, c, journal_initial())?
-    let expected = if fail_end {
-        1u64
-    } else {
-        0u64
-    }
-    if recovered.end != 72 + expected * 42 || recovered.replay.state.tips[0].head != expected {
-        fail("L94: recovery disagreed with COMMIT durability after a failed write")
+    if recovered.end != 114 || recovered.replay.state.tips[0].head != 1 {
+        fail("L94: recovery disagreed with the readable COMMIT after a failed write")
     }
     let _ = sim_disk_unmount(take d, take mount)
     Ok(())

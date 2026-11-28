@@ -260,5 +260,11 @@ fn test_csim_oracle_negative_d6_crashless(tasks: Tasks, c: Clock) -> Result[(), 
     if csim_rollback_allowed(ev, 2, 3) {
         return Error("negative control 5: a damaged journal write with no crash before its read was excused as D6")
     }
+    // The same evidence once the driver notes a Db dropped without a clean
+    // close after the write: a process crash, which is D6's crash.
+    ev.crashes += 1
+    if !csim_rollback_allowed(ev, 2, 3) {
+        return Error("negative control 5: a synced damaged journal write, a process crash and a damaged read were not D6")
+    }
     Ok(())
 }

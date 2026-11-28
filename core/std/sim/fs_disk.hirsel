@@ -1,0 +1,178 @@
+/// The unit in which a power cut keeps or drops a pending durable write
+/// (core.md, Host files: `Durable` and `Direct`).
+pub const SECTOR: u64 = 512
+
+/// The most durable writes one image holds pending at a time. sim.fs fails
+/// when one more would be recorded.
+pub const LIMIT: u64 = 64
+
+/// A write on a Durable or Direct handle that became readable and whose
+/// success was never delivered: request `site` of serve `mount` wrote
+/// `[at, at + len)` of inode `node` as the image's operation `sequence`.
+pub type Pending: send {
+    mount: u64,
+    site: u64,
+    node: u64,
+    sequence: u64,
+    at: u64,
+    len: u64
+}
+
+/// One version of a simulated inode: a file's intended bytes and, while it
+/// holds write damage, the bytes the disk presents (`overlay`), or a
+/// directory's names. `sequence` is the image operation that made it.
+pub type Version: send {
+    sequence: u64,
+    modified: i64,
+    data: Bytes,
+    overlay: Option[Bytes],
+    names: Map[String, u64]
+}
+
+pub fn empty() -> Version {
+    Version(sequence: 0, modified: 0, data: list.new(), overlay: None, names: map.new())
+}
+
+/// A copy of `v` made by operation `seq`.
+pub fn revised(v: Version, seq: u64, modified: i64) -> Version {
+    Version(sequence: seq, modified: modified, data: clone(v.data), overlay: clone(v.overlay), names: clone(v.names))
+}
+
+/// The bytes reads and stats see.
+pub fn visible(v: Version) -> View[Bytes] in v {
+    match v.overlay {
+        Some(data) => view data,
+        None => view v.data,
+    }
+}
+
+/// Copies `data` to `dst` at `at`, filling any gap before it with zeros.
+pub fn place(mut dst: Bytes, at: u64, data: Bytes) {
+    let end = at + list.len(data)
+    list.fill(mut dst, int.saturating_sub(end, list.len(dst)), 0u8)
+    list.copy_from_slice(mut dst, at, data)
+}
+
+/// Applies one write to a version's intended bytes and, under a write
+/// fault, to the bytes its disk presents. Returns where the bytes landed.
+pub fn write(mut v: Version, at: u64, input: Bytes, fault: Option[sim.world.Fault], mut plan: sim.world.Plan) -> u64 {
+    let mut landed = at
+    if let Some(_) = fault {
+        if let None = v.overlay {
+            v.overlay = Some(clone(v.data))
+        }
+    }
+    if let Some(mut disk) = v.overlay {
+        let n = list.len(input)
+        match fault {
+            Some(Corrupt) => {
+                place(mut disk, at, input)
+                let byte = at + sim.world.pick(mut plan, n)
+                let bit: u8 = int.truncate(sim.world.pick(mut plan, 8))
+                disk[byte] = disk[byte] ^ (1u8 << bit)
+            },
+            Some(Misdirect) => {
+                // One adjacent, disjoint range in the same file. Moving by
+                // exactly the write length preserves direct I/O alignment.
+                let after = int.checked_add(at + n, n)
+                if at >= n && (after == None || sim.world.pick(mut plan, 2) == 0) {
+                    landed = at - n
+                    place(mut disk, at - n, input)
+                } else if after != None {
+                    landed = at + n
+                    place(mut disk, at + n, input)
+                }
+            },
+            Some(LostWrite) => (),
+            _ => place(mut disk, at, input),
+        }
+    }
+    place(mut v.data, at, input)
+    let repaired = match v.overlay {
+        Some(disk) => disk == v.data,
+        None => false,
+    }
+    if repaired {
+        v.overlay = None
+    }
+    landed
+}
+
+// Appends the sector `[at, at + len)` to ascending runs, joining it to the
+// last run when they touch.
+fn extend(mut runs: List[(u64, u64)], at: u64, len: u64) {
+    let last = list.len(runs)
+    if last != 0 && runs[last - 1].0 + runs[last - 1].1 == at {
+        runs[last - 1] = (runs[last - 1].0, runs[last - 1].1 + len)
+    } else {
+        list.push(mut runs, (at, len))
+    }
+}
+
+// Decides what a power cut keeps of a write of `[at, at + len)` that turned
+// a file's bytes from `old` into `new`.
+fn cut(old: Bytes, new: Bytes, at: u64, len: u64, mut plan: sim.world.Plan) -> sim.world.Tear {
+    let mut candidates: List[(u64, u64)] = list.new()
+    let mut sectors: List[(u64, u64)] = list.new()
+    let mut s = at - at % SECTOR
+    while s < at + len {
+        let stop = order.min(s + SECTOR, list.len(new))
+        if stop > list.len(old) || list.slice(old, s, stop) != list.slice(new, s, stop) {
+            extend(mut candidates, s, stop - s)
+            list.push(mut sectors, (s, stop - s))
+        }
+        s += SECTOR
+    }
+    let mut kept: List[(u64, u64)] = list.new()
+    if list.len(sectors) != 0 {
+        let mode = sim.world.pick(mut plan, 3)
+        for (start, n) in sectors {
+            if mode == 1 || (mode == 2 && sim.world.pick(mut plan, 2) == 1) {
+                extend(mut kept, start, n)
+            }
+        }
+    }
+    sim.world.Tear(candidates: take candidates, kept: take kept)
+}
+
+// Copies the kept runs of `new` onto `image`. A run past the image's end
+// extends it, and a hole before the run reads as zeros.
+fn land(mut image: Bytes, new: Bytes, kept: List[(u64, u64)]) {
+    for (at, n) in kept {
+        place(mut image, at, list.slice(new, at, at + n))
+    }
+}
+
+/// A power cut reaches pending write `p` of the inode with this `history`,
+/// whose cut would keep version `at`. Returns None if the write is already
+/// durable. Otherwise the cut keeps a version from before the write (`at`
+/// moves back to it if needed) plus some of the write's sectors, in both the
+/// intended and the presented bytes.
+///
+/// The candidates are the write's sectors that differ from the bytes before
+/// it or lie past their end. With no candidate the plan is not drawn from.
+/// Otherwise one `pick(3)` chooses no candidate, every candidate or a
+/// subset, and a subset takes one `pick(2)` per candidate in ascending
+/// order, keeping it on 1. A kept sector past the end extends the file and
+/// a hole before it reads as zeros.
+pub fn tear(mut history: List[Version], p: Pending, mut at: u64, mut plan: sim.world.Plan) -> Option[sim.world.Tear] {
+    let mut j = list.len(history) - 1
+    while j > 0 && history[j].sequence != p.sequence {
+        j -= 1
+    }
+    if j == 0 {
+        return None
+    }
+    at = order.min(at, j - 1)
+    let t = cut(history[j - 1].data, history[j].data, p.at, p.len, mut plan)
+    let mut base = replace(mut history[at], empty())
+    if base.overlay == None && history[j].overlay != None {
+        base.overlay = Some(clone(base.data))
+    }
+    land(mut base.data, history[j].data, t.kept)
+    if let Some(mut disk) = base.overlay {
+        land(mut disk, visible(history[j]), t.kept)
+    }
+    history[at] = take base
+    Some(take t)
+}

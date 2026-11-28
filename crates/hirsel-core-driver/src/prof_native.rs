@@ -5,6 +5,7 @@ fn capture_native_profile(
 ) -> hirsel_prof::Profile {
     let status = hirsel_prof::run(
         &hirsel_prof::Launch {
+            stdio: None,
             executable: program,
             arguments: &[],
             record: None,
@@ -27,7 +28,6 @@ fn capture_native_profile(
     assert!(status.success(), "{status}");
     hirsel_prof::Profile::open(out).unwrap()
 }
-
 #[test]
 fn profiler_attach_uses_snapshot_before_sampling_existing_mappings() {
     use std::io::{BufRead, BufReader};
@@ -654,7 +654,7 @@ pub fn main() -> Result[(), Exit] {
     let before = std::fs::read(&tape).unwrap();
     let (code, _, err) = process::tape_request_output(process::tape_request_command(
         &args(
-            &["replay"],
+            &["tape", "replay"],
             &observed,
             &[
                 "--tape",

@@ -76,7 +76,7 @@ impl Inputs {
 }
 pub(crate) fn deploy(req: Request<O>) -> i32 {
     let json = req.options.contains(&O::Json);
-    let mut env = Envelope::read("deploy");
+    let mut env = Envelope::read(req.command.name);
     env.contract = "submit";
     if let Err(e) = submit(req, &mut env) {
         env.fail(e);
@@ -85,8 +85,25 @@ pub(crate) fn deploy(req: Request<O>) -> i32 {
 }
 fn submit(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut context, mut name, mut request, mut wait) = (None, None, None, None);
+    let rollback = if req.command.name == "rollback" {
+        Some(
+            req.positional
+                .as_deref()
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    Failure::input("activation", "select an activation as a decimal u64")
+                })?,
+        )
+    } else {
+        None
+    };
     let mut inputs = Inputs {
-        package: req.positional,
+        package: if rollback.is_none() {
+            req.positional
+        } else {
+            None
+        },
+        rollback,
         source: None,
         create: None,
         recipe: None,
@@ -120,7 +137,7 @@ fn submit(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
             "choose DIR [--source ROOT] or --recipe R [--code-store DIR]",
         ));
     }
-    if inputs.recipe.is_none() && inputs.source.is_none() {
+    if rollback.is_none() && inputs.recipe.is_none() && inputs.source.is_none() {
         inputs.source = Some(
             std::path::absolute(
                 inputs
@@ -146,34 +163,105 @@ fn submit(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         "submit"
     };
     let d = super::request_id(request).map_err(|e| Failure::input("request-id", e))?;
+    if context.as_deref() == Some("dev") {
+        return Err(Failure::input(
+            "context",
+            "the dev session does not admit live deployments",
+        ));
+    }
     let target = Target::resolve(context.as_deref())?;
     let authority = target.authority()?;
     let loc = Location::new(authority, &d)?;
+    let prior = loc.read()?;
+    if prior
+        .as_ref()
+        .is_some_and(|row| row.inputs.rollback != rollback)
+    {
+        return Err(Failure::input(
+            "request-id",
+            "request ID already names another intent",
+        ));
+    }
+    let mut historical_subject = None;
+    if let Some(activation) = rollback {
+        let (selected, incarnation) = super::observe::selection(&target, name.as_deref())?
+            .ok_or_else(|| Failure::input("group", "select a group"))?;
+        if let Some(row) = &prior {
+            inputs.recipe = row.inputs.recipe.clone();
+            inputs.code = row.inputs.code.clone();
+        } else {
+            let (subject, root) = match target.query(
+                authority,
+                &Ask::Historical(selected.into(), incarnation, activation),
+                wait.as_ref(),
+            )? {
+                Answer::Historical(p, root) => (p, root),
+                Answer::Error(crate::operator::Class::UnknownGroup, _) => {
+                    return Err(Failure::negative(
+                        "UnknownGroup",
+                        "no matching group incarnation",
+                    ));
+                }
+                Answer::Error(crate::operator::Class::UnknownActivation, _) => {
+                    return Err(Failure::negative(
+                        "UnknownActivation",
+                        "no supported release at this activation in the selected incarnation",
+                    ));
+                }
+                Answer::Error(c, v) => return Err(Failure::authority(c, v)),
+                _ => return Err(Failure::damaged("expected historical release")),
+            };
+            if subject.name != selected || incarnation.is_some_and(|i| i != subject.generation) {
+                return Err(Failure::damaged("historical release names another group"));
+            }
+            let root = hirsel_core_ids::ContentHash(
+                root.try_into()
+                    .map_err(|_| Failure::damaged("invalid assembly identity"))?,
+            );
+            let state = target.state()?;
+            let records = crate::launcher::objects::Records::read_only(&state.join("objects"))
+                .map_err(Failure::io)?;
+            let record = records.assembly(root).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    Failure::negative("ImageGone", "historical assembly is unavailable")
+                }
+                _ => Failure::io(e),
+            })?;
+            inputs.recipe = Some(record.recipe.to_string());
+            inputs.code = Some(state.join("code"));
+            historical_subject = Some(subject);
+        }
+    }
     let prepared = inputs.open(target.state()?)?;
-    let name = name
+    let selected = name
         .as_deref()
-        .or_else(|| prepared.registration.as_ref().map(|r| r.name.as_str()))
-        .or_else(|| target.name())
+        .or_else(|| prepared.registration.as_ref().map(|r| r.name.as_str()));
+    let (name, incarnation) = super::observe::selection(&target, selected)?
         .ok_or_else(|| Failure::input("group", "select a group"))?;
-    if target.name().is_some_and(|g| g != name)
-        || prepared
-            .registration
-            .as_ref()
-            .is_some_and(|r| r.name != name)
+    if prepared
+        .registration
+        .as_ref()
+        .is_some_and(|r| r.name != name)
     {
         return Err(Failure::input(
             "group",
             "group contradicts the selected target",
         ));
     }
-    let subject = match loc.read()? {
-        Some(r) => r.precondition()?,
-        None => match target.query(authority, &Ask::ObserveGroup(name.into()), wait.as_ref())? {
-            Answer::Precondition(p) => p,
-            Answer::Error(c, v) => return Err(Failure::authority(c, v)),
-            _ => return Err(Failure::damaged("expected group precondition")),
-        },
+    let subject = match (prior, historical_subject) {
+        (Some(r), _) => r.precondition()?,
+        (_, Some(p)) => p,
+        (None, None) => {
+            match target.query(authority, &Ask::ObserveGroup(name.into()), wait.as_ref())? {
+                Answer::Precondition(p) => p,
+                Answer::Error(c, v) => return Err(Failure::authority(c, v)),
+                _ => return Err(Failure::damaged("expected group precondition")),
+            }
+        }
     };
+    if incarnation.is_some_and(|id| id != subject.generation) {
+        return Err(Failure::input("group", "group incarnation changed"));
+    }
     if subject.name != name || subject.predecessor.is_some() == prepared.registration.is_some() {
         return Err(Failure::input(
             "group",

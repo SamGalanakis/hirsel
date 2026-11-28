@@ -302,6 +302,7 @@ type Vol {
     count: u64,
     retry_at: Option[u64],
     failing: bool,
+    failed_before_ready: Option[u64],
     last: String,
     // The probe was answered with the other pair's activation: its end starts the next
     // probe at once, outside backoff.
@@ -330,6 +331,9 @@ pub opaque type Host {
     binds_sent: bool,
     // The wall clock of the input being handled, in Unix seconds: a recording pin's start.
     clock_s: u64,
+    observed_ms: u64,
+    event_sequence: u64,
+    events: List[operator.LifecycleEvent],
     collecting: Collecting,
     // The operator connection that owns each attached request, the phase last sent to it,
     // and the answers not yet written.
@@ -446,7 +450,7 @@ pub fn open_declared(take opened: store.Db, take t: Tables, first: Config) -> Re
         }
         Ok(next_node(mut tx, call_env.1)?)
     })
-    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false, next_backup: 1u64, node: NodeRow(enrolled: None, incarnation: 0u64))
+    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, observed_ms: 0u64, event_sequence: 0u64, events: list.new(), collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false, next_backup: 1u64, node: NodeRow(enrolled: None, incarnation: 0u64))
     let node = decided(mut h, take made)?
     h.node = node
     synced(mut h)?
@@ -921,6 +925,17 @@ fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, 
         None => None
     }
     v.run = None
+    v.failed_before_ready = if is_none(ready_ns) {
+        Some(gen)
+    } else {
+        None
+    }
+    let end_kind: operator.Lifecycle = if is_none(ready_ns) {
+        StartFailedLifecycle
+    } else {
+        StoppedLifecycle
+    }
+    record_event(mut h, g.incarnation, Some(gen), Some(g.activation), None, end_kind)
     if let Some(_) = g.retiring {
         vol_put(mut h, name, take v);
         return
@@ -1102,6 +1117,10 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
     v.cut = None
     let Ok(Some(installed)) = group_row(h, name) else {
         return
+    }
+    record_event(mut h, installed.incarnation, Some(candidate), Some(installed.activation), None, InstalledLifecycle)
+    if cut.opened {
+        record_event(mut h, installed.incarnation, Some(candidate), Some(installed.activation), None, ReadyLifecycle)
     }
     v.run = Some(Run(gen: candidate, phase: phase, selected: launcher.Selection(activation: installed.activation, assembly: clone(installed.assembly))))
     vol_put(mut h, name, take v)
@@ -1649,6 +1668,7 @@ fn bind_failed(mut h: Host, g: launcher.Group, why: String) waits {
 // Applies one launcher event in stream order, and returns the requests it decided.
 pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Request] waits {
     h.clock_s = now.wall_ms / 1000u64
+    h.observed_ms = now.wall_ms
     let mut out: List[launcher.Request] = list.new()
     match take e {
         Inventory(children, readable, held) => reconcile(mut h, children, readable, held, now, mut out),
@@ -1695,6 +1715,7 @@ fn drain_later(mut h: Host, mut out: List[launcher.Request]) {
 // Due times and backoff retries that have come.
 pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
     h.clock_s = now.wall_ms / 1000u64
+    h.observed_ms = now.wall_ms
     let mut out: List[launcher.Request] = list.new()
     let mut retry: List[String] = list.new()
     for (name, v) in h.vol {
@@ -1966,48 +1987,6 @@ fn admission_of(h: Host, name: String, d: Bytes) -> Option[Admitting] {
             _ => None,
         },
         _ => None,
-    }
-}
-
-fn phase_bytes(p: operator.Phase) -> Bytes {
-    let codec: std.codec.Codec[operator.Phase] = std.codec.of()
-    let mut out: Bytes = list.new()
-    let _ = std.codec.encode(codec, p, mut out)
-    out
-}
-
-fn state_answer(d: Bytes, r: RequestRow, p: operator.Phase) -> operator.Answer {
-    StateAnswer(clone(d), clone(r.group), clone(r.input), clone(p))
-}
-
-// Sends each attached request's phase to its owner when it changed, and ends the exchange
-// at a terminal phase.
-fn notify(mut h: Host) waits {
-    let mut owned: List[(Bytes, u64)] = list.new()
-    for (d, conn) in h.owners {
-        list.push(mut owned, (clone(d), conn))
-    }
-    for (d, conn) in owned {
-        let Ok(Some(r)) = request_row(h, d) else {
-            continue
-        }
-        let p = phase_of(h, d, r)
-        let b = phase_bytes(p)
-        let same = match map.get(h.shown, d) {
-            Some(x) => x == b,
-            None => false
-        }
-        if same {
-            continue
-        }
-        let done = operator.terminal(p)
-        say(mut h, conn, state_answer(d, r, p), done)
-        let _ = map.remove(mut h.shown, d)
-        if done {
-            let _ = map.remove(mut h.owners, d)
-        } else {
-            map.insert(mut h.shown, clone(d), take b)
-        }
     }
 }
 
@@ -3155,30 +3134,6 @@ pub fn resolve_offline(d: Dir, c: Clock, id: Bytes, now: u64) -> Result[operator
 }
 
 // Every group the host lists, retiring ones included.
-pub fn group_names(h: Host) -> List[String] waits {
-    let read_handle = result.unwrap(store.reader(h.db, 0u64))
-    let mut names: List[String] = list.new()
-    let Ok(take scanned) = store.scan(read_handle, store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
-        return names
-    }
-    let mut rows = take scanned
-    while let Ok(Some((name, _))) = store.next(read_handle, mut rows) {
-        list.push(mut names, take name)
-    }
-    names
-}
-
-// The serving child the host has accepted as Ready for this group, if any: its gen.
-pub fn serving_ready(h: Host, name: String) -> Option[u64] {
-    match vol_read(h, name).run {
-        Some(r) => match r.phase {
-            Ready(_) => Some(r.gen),
-            _ => None
-        },
-        None => None
-    }
-}
-
 // An operator unload (§14.4 "Unload"): a drain of the group's live serving child. The end
 // it reports is applied as any other end, so a cut run (no clean report) is retried at
 // once and a clean stop writes Clean. A group with no live child is answered `Missing`.

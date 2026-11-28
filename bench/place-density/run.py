@@ -68,7 +68,7 @@ def publish(compiler, scratch):
     for name in ("hirsel.toml", "main.hirsel"):
         shutil.copyfile(HERE / name, source / name)
     return checked([
-        compiler, "publish", source, "--backend", "llvm", "--limit", str(ROOT_LIMIT),
+        compiler, "build", source, "--emit", "recipe", "--backend", "llvm", "--limit", str(ROOT_LIMIT),
         "--n-place", str(1 << 20), "--code-store", scratch / "code", "--store", scratch / "compile",
         "--dir", "live", "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
         "--grant", "Process", "--grant", "Stderr", "--grant", "Net=Listen 127.0.0.1/32 0-65535",

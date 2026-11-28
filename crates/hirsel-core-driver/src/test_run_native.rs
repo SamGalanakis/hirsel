@@ -977,7 +977,7 @@ pub fn free(f: Foreign[main.I], take p: foreign.Ptr[main.Obj]) waits\n");
     ));
     let store = CodeStore::new(law.path("code-store"));
     let publish = || {
-        let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Foreign=local/app@1/main/I"]));
+        let root = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "app", "--grant", "Foreign=local/app@1/main/I"]));
         let root = crate::native::recipe_build::parse_root(root.trim()).unwrap();
         let recipe = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
         let recipe = Recipe::decode(&recipe, &Debit::unlimited()).unwrap();
@@ -1058,13 +1058,13 @@ impl PackageLaw {
     fn command(&self, arguments: &[&str], store: &str) -> std::process::Command {
         let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
-        if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect" | "laws") {
+        if matches!(arguments[0], "check" | "test" | "run" | "build" | "inspect" | "laws") {
             if !arguments.contains(&"--recipe") {
                 args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
             }
             args.extend(["--store".into(), self.path("compiler-store").to_str().unwrap().into()]);
         }
-        if matches!(arguments[0], "build" | "publish") {
+        if matches!(arguments[0], "build") {
             args.extend(["--code-store".into(), self.path("code-store").to_str().unwrap().into()]);
         }
         if matches!(arguments[0], "run" | "test" | "build") {
@@ -2024,8 +2024,8 @@ fn version() -> Result[(), ()] { if json.version() > 0u64 { Ok(()) } else { Erro
     };
     let row = package_test_row(tested(), 0);
     assert_eq!(row["source"], "executed");
-    let first = PackageLaw::pass(law.run(&["publish", "app"]));
-    let alternate = PackageLaw::pass(law.with_store(&["publish", "app"], "alternate"));
+    let first = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "app"]));
+    let alternate = PackageLaw::pass(law.with_store(&["build", "--emit", "recipe", "app"], "alternate"));
     assert_eq!(first, alternate);
     select(PACKAGE_Y, "jy");
     let warm = checked(&law);
@@ -2056,7 +2056,7 @@ fn version() -> Result[(), ()] { if json.version() > 0u64 { Ok(()) } else { Erro
     law.library("work/json", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE, "");
     law.app("work/app", "[dependencies]\njson = { package = \"fixture.test/json\", major = 1, path = \"../json\" }\n");
     law.write("work/app/main.hirsel", app_source);
-    assert_eq!(PackageLaw::pass(law.run(&["publish", "work/app"])), first);
+    assert_eq!(PackageLaw::pass(law.run(&["build", "--emit", "recipe", "work/app"])), first);
 }
 
 #[test]
@@ -2141,17 +2141,17 @@ fn package_l14_a_rename_reaches_images_sites_and_the_recipe() {
     set_up(&law, "old");
     PackageLaw::pass(law.run(&["check", "work/app"]));
     assert_eq!(std::fs::read_dir(law.path("compiler-store/package-images")).unwrap().count(), 1);
-    let old = PackageLaw::pass(law.run(&["publish", "work/app"]));
+    let old = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "work/app"]));
     std::fs::remove_file(law.path("work/json/old.hirsel")).unwrap();
     set_up(&law, "new");
     let (status, stdout, stderr) = law.run(&["run", "work/app"]);
     assert_ne!(status, Some(0), "{stdout}\n{stderr}");
     assert!(stderr.contains("fixture.test/json@1/new.hirsel"), "{stdout}\n{stderr}");
-    let renamed = PackageLaw::pass(law.run(&["publish", "work/app"]));
+    let renamed = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "work/app"]));
     assert_ne!(renamed, old);
     let cold = PackageLaw::new();
     set_up(&cold, "new");
-    assert_eq!(renamed, PackageLaw::pass(cold.run(&["publish", "work/app"])));
+    assert_eq!(renamed, PackageLaw::pass(cold.run(&["build", "--emit", "recipe", "work/app"])));
 }
 
 #[test]
@@ -2331,7 +2331,7 @@ archives = [
     };
     let check = |law: &PackageLaw| law.run(&["check", "work/app", "--json"]);
     let publish = |law: &PackageLaw| PackageLaw::pass(law.run(&[
-        "publish", "work/app", "--grant", "Foreign=fixture.test/math@1/math/Math",
+        "build", "--emit", "recipe", "work/app", "--grant", "Foreign=fixture.test/math@1/math/Math",
     ]));
 
     configure(Some("hm_"), false);

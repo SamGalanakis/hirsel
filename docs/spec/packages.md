@@ -1196,7 +1196,7 @@ does only this, and `hirsel new` writes the first lock with the package.
 `--locked` or `--frozen`, a directory without a manifest, `--inputs`, a `--recipe` build and an
 SDK request for an executable are refused with `hirsel: --locked needs a workspace lock; <what
 was given> has none` (or `--frozen`), and never fall back to the directory convention.
-`hirsel replay PACKAGE` and `hirsel sdk` given a package directory resolve through this chapter
+`hirsel tape replay PACKAGE` and `hirsel sdk` given a package directory resolve through this chapter
 like `check`, honour the flags and the package store, and `sdk` passes them on to the build it
 runs.
 
@@ -1550,7 +1550,7 @@ An archive supplies its head package and verified dependency closure.
 `test`, `inspect`, `replay`, `sdk`, `lock`, `fetch`, `pack` and `audit`, when the command is given a
 package directory; section 8's input modes say what each does without one. `hirsel lock --locked` checks the lock without
 writing it, which is the CI freshness check. `hirsel fetch --locked` followed by a later
-`--frozen` build over the same store is the offline build. `hirsel publish` keeps its meaning:
+`--frozen` build over the same store is the offline build. `hirsel build --emit recipe --code-store DIR` keeps its meaning:
 it prints an executable's R ([launch](launch.md#release-recipe-and-host-assembly)), and a
 library can be packed offline or published to its scope registry.
 
@@ -2077,7 +2077,7 @@ binds X.
 - No body record checked under X is reused under Y. The environment holds the root, so the
   check of `app` under Y reuses no record, `fixture.test/json@1`'s included, even though `json.hirsel`'s
   bytes differ in one body only.
-- `hirsel publish` of a program over X prints the same R from a store at two different paths,
+- `hirsel build --emit recipe --code-store DIR` of a program over X prints the same R from a store at two different paths,
   and the same R again when `json` is instead a workspace member holding `jx`'s files, bound by
   path, so equal content gives equal names whatever supplies it.
 
@@ -2091,9 +2091,9 @@ same command run cold, with an empty cache and an empty code store, on the same 
 - `hirsel check app` passes. Delete `[foreign.native]` from `math/hirsel.toml` and leave every
   `.hirsel` file unchanged: the warm `hirsel check app` is refused, as the cold one is,
   because `native`'s bodyless headers now stand in an ordinary module.
-- Restore the table and change only the prefix to `hn_`: the warm `hirsel publish app` prints
+- Restore the table and change only the prefix to `hn_`: the warm `hirsel build app --emit recipe --code-store DIR` prints
   the cold run's R, which differs from the R printed before the change.
-- Restore the prefix and add an `aarch64-unknown-linux-gnu` row: the warm `hirsel publish app`
+- Restore the prefix and add an `aarch64-unknown-linux-gnu` row: the warm `hirsel build app --emit recipe --code-store DIR`
   for x86_64 prints the cold run's R, which differs from the R before (FFI-9).
 - Replace the x86_64 archive's bytes with other bytes and keep the pin: the warm `hirsel build
   app` is refused with exactly the cold run's `FFI-3: archive … does not match its pin: …`
@@ -2180,7 +2180,7 @@ catches a toolchain image chosen before resolution.
 in module `json`, holding `pub fn half(x: u64) -> u64 { 8u64 / x }` and a line feed, and `app`
 binds it by path; `app`'s entry calls `json.half(0)`. `hirsel check app` builds the closure
 image. Rename the file to `new.hirsel`, module and bytes unchanged. The failure `hirsel run
-app` reports now names its site in `fixture.test/json@1/new.hirsel`, and `hirsel publish app`
+app` reports now names its site in `fixture.test/json@1/new.hirsel`, and `hirsel build app --emit recipe --code-store DIR`
 prints the R of a cold run with no image, on the warm image path as on the cold one. The law
 catches an image keyed without file names and a producer that synthesises names.
 

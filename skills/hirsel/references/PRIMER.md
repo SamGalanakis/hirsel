@@ -413,7 +413,7 @@ hirsel check                       # check program and test sources
 hirsel explain RULE                # explain the rule code a refusal prints, with an example
 hirsel test                        # every @test, each in its own process
 hirsel run --grant Stdout -- a b   # build and run; grants are explicit
-hirsel replay . --tape run.tape    # replay a recording with no host grants
+hirsel tape replay . --tape run.tape    # replay a recording with no host grants
 hirsel build --release --limit 1048576 -o program  # a native executable
 hirsel prof run --release --limit 1048576 .        # sample CPU or replay memory into .hprof
 hirsel prof top FILE.hprof         # hottest functions and source lines; profile before tuning
@@ -425,7 +425,7 @@ hirsel fmt .                       # canonical formatting
 When `check` refuses, read its rule code and site first, and run `hirsel explain` for the
 rule's exact statement. Fix that site, then check
 again. Look up an operation with `hirsel inspect --core --interface` or
-`hirsel inspect --std --interface`. `hirsel primer` (or `hirsel explain primer`) prints this document.
+`hirsel inspect --std --interface`. `hirsel explain primer` prints this document.
 
 ## 11. A command that reads a file
 

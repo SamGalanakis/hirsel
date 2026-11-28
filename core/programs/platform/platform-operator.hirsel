@@ -2,6 +2,7 @@
 // go out through `answers`; a malformed or out-of-phase frame ends only this exchange.
 pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Request] waits {
     h.clock_s = now.wall_ms / 1000u64
+    h.observed_ms = now.wall_ms
     let mut out: List[launcher.Request] = list.new()
     let Some(frame) = operator.decode_ask(body) else {
         refuse(mut h, conn, ProtocolClass, "the frame is not one operator request")
@@ -96,10 +97,284 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
             Ok(None) => refuse(mut h, conn, UnknownRequestClass, "no request has this ID"),
             Error(e) => refuse(mut h, conn, class_of(e), refused_text(e)),
         },
+        WorkloadsAsk(after) => {
+            let observed = workloads(h, after)
+            answer_observation(mut h, conn, take observed)
+        },
+        WorkloadAsk(name, incarnation) => {
+            let observed = workload(h, name, incarnation)
+            answer_observation(mut h, conn, take observed)
+        },
+        EventsAsk(group, after) => {
+            let observed = lifecycle_page(h, group, after)
+            answer_observation(mut h, conn, take observed)
+        },
+        HistoricalAsk(name, incarnation, activation) => {
+            let observed = historical(h, name, incarnation, activation)
+            answer_observation(mut h, conn, take observed)
+        },
         BackupAsk(_) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         BackupAsk(name) => backup_ask(mut h, conn, name, mut out),
     }
     notify(mut h)
     drain_later(mut h, mut out)
     turned(mut h, take out)
+}
+
+const WORKLOAD_PAGE: u64 = 64u64
+
+const EVENT_RETENTION: u64 = 256u64
+
+const EVENT_PAGE: u64 = 64u64
+
+fn answer_observation(mut h: Host, conn: u64, take observed: Result[operator.Answer, Refused]) {
+    match take observed {
+        Ok(take reply) => say(mut h, conn, take reply, true),
+        Error(e) => refuse(mut h, conn, class_of(e), refused_text(e)),
+    }
+}
+
+fn observed_phase(p: operator.Phase) -> operator.OperationPhase {
+    match p {
+        AwaitInput(_) => InputOperationPhase,
+        AdmittingPhase(_) => AdmissionOperationPhase,
+        AwaitConfirm(_) => ConfirmOperationPhase,
+        AssemblingPhase(_) => AssemblyOperationPhase,
+        PreparingPhase(_) => PrepareOperationPhase,
+        PendingPhase(_, _) => PendingOperationPhase,
+        UndecidedPhase(_, _, _) => UndecidedOperationPhase,
+        AwaitDecision(_) => DecisionOperationPhase,
+        InstalledPhase(_, _, _) => InstalledOperationPhase,
+        FailedPhase(_, _, _) => FailedOperationPhase,
+    }
+}
+
+fn workload_row(h: Host, snap: store.Snapshot, name: String, g: GroupRow) -> Result[operator.Workload, Refused] waits {
+    let reader = result.unwrap(store.reader(h.db, 0u64))
+    let v = vol_read(h, name)
+    let observed_wake = st(store.get(reader, snap, h.t.wake, name))?
+    let generation = match v.run {
+        Some(run) => Some(run.gen),
+        None => match observed_wake {
+            Some(w) => Some(w.gen),
+            None => None,
+        },
+    }
+    let health: operator.Health = if !h.binds_sent {
+        UnknownHealth
+    } else {
+        match v.run {
+            Some(run) => match run.phase {
+                Ready(_) if run.selected.activation == g.activation && run.selected.assembly == g.assembly && is_none(g.retiring) => ServingHealth,
+                _ => StartingHealth,
+            },
+            None if v.failing || (!is_none(generation) && v.failed_before_ready == generation) => FailedHealth,
+            None => match observed_wake {
+                Some(w) => match w.wake {
+                    Clean(_) => ColdHealth,
+                    Dirty(_) => UnknownHealth,
+                },
+                None => UnknownHealth,
+            },
+        }
+    }
+    let mut operation: Option[operator.OperationObservation] = None
+    if let Some(d) = st(store.get(reader, snap, h.t.active, name))? {
+        if let Some(row) = st(store.get(reader, snap, h.t.requests, d))? {
+            if row.group.incarnation == g.incarnation {
+                operation = Some(operator.OperationObservation(request: clone(d), phase: observed_phase(phase_of(h, d, row))))
+            }
+        }
+    }
+    let store_id = match g.store_id {
+        Some((hi, lo)) => Some(operator.CatalogStore(hi: hi, lo: lo)),
+        None => None,
+    }
+    Ok(operator.Workload(group: group_of(name, g.incarnation), observed_at: h.observed_ms, activation: g.activation, assembly: clone(g.assembly), generation: generation, store_id: store_id, health: health, operation: take operation))
+}
+
+fn selected_group(h: Host, name: String, incarnation: Option[u64]) -> Result[GroupRow, Refused] waits {
+    let Some(g) = group_row(h, name)? else {
+        return Error(Unknown)
+    }
+    if registering(h, name) {
+        return Error(Unknown)
+    }
+    if let Some(wanted) = incarnation {
+        if g.incarnation != wanted {
+            return Error(Unknown)
+        }
+    }
+    Ok(take g)
+}
+
+fn workload(h: Host, name: String, incarnation: Option[u64]) -> Result[operator.Answer, Refused] waits {
+    let g = selected_group(h, name, incarnation)?
+    Ok(WorkloadAnswer(workload_row(h, store.snapshot(h.db), name, g)?))
+}
+
+fn workloads(h: Host, after: Option[String]) -> Result[operator.Answer, Refused] waits {
+    let snap = store.snapshot(h.db)
+    let reader = result.unwrap(store.reader(h.db, 0u64))
+    let lower: store.Bound[String] = match after {
+        Some(name) => Excluded(string.from(name)),
+        None => Unbounded,
+    }
+    let mut rows = st(store.scan(reader, snap, h.t.groups, take lower, Unbounded))?
+    let mut page: List[operator.Workload] = list.new()
+    let mut last_name: Option[String] = None
+    for _ in 0u64 .. WORKLOAD_PAGE {
+        let Some((name, g)) = st(store.next(reader, mut rows))? else {
+            return Ok(WorkloadsAnswer(take page, None))
+        }
+        last_name = Some(string.from(name))
+        if !registering(h, name) {
+            list.push(mut page, workload_row(h, snap, name, g)?)
+        }
+    }
+    let next_page = match st(store.next(reader, mut rows))? {
+        Some(_) => take last_name,
+        None => None,
+    }
+    Ok(WorkloadsAnswer(take page, take next_page))
+}
+
+fn historical(h: Host, name: String, incarnation: Option[u64], activation: u64) -> Result[operator.Answer, Refused] waits {
+    let g = selected_group(h, name, incarnation)?
+    let reader = result.unwrap(store.reader(h.db, 0u64))
+    let root = match st(store.get(reader, store.snapshot(h.db), h.t.activations, (g.incarnation, activation)))? {
+        Some(root) if roots_release(g, root) => root,
+        _ => return Ok(ErrorAnswer(UnknownActivationClass, "no retained release at this activation")),
+    }
+    Ok(HistoricalAnswer(subject_of(h, name)?, take root))
+}
+
+fn event_request_id(d: Bytes) -> Option[operator.RequestId] {
+    let mut at = 0u64
+    let Ok(first) = std.codec.take_u64(d, mut at) else {
+        return None
+    }
+    let Ok(second) = std.codec.take_u64(d, mut at) else {
+        return None
+    }
+    Some(operator.RequestId(first: first, second: second))
+}
+
+fn record_event(mut h: Host, incarnation: u64, generation: Option[u64], activation: Option[u64], request: Option[operator.RequestId], kind: operator.Lifecycle) {
+    h.event_sequence += 1u64
+    let sequence = h.event_sequence
+    let observed_at = h.observed_ms
+    let entry = operator.LifecycleEvent(sequence: sequence, incarnation: incarnation, observed_at: observed_at, generation: generation, activation: activation, request: request, kind: clone(kind))
+    list.push(mut h.events, take entry)
+    if list.len(h.events) > EVENT_RETENTION {
+        let _ = list.remove(mut h.events, 0u64)
+    }
+}
+
+fn lifecycle_page(h: Host, group: launcher.Group, after: Option[operator.EventPosition]) -> Result[operator.Answer, Refused] waits {
+    let _ = selected_group(h, group.name, Some(group.incarnation))?
+    let stream = h.node.incarnation
+    let latest = h.event_sequence
+    let oldest = latest - list.len(h.events) + 1u64
+    let mut through = oldest - 1u64
+    let mut gap = false
+    if let Some(pos) = after {
+        if pos.stream == stream && pos.sequence > latest {
+            return Error(Missing("event position"))
+        }
+        gap = pos.stream != stream || pos.sequence < through
+        if !gap {
+            through = pos.sequence
+        }
+    }
+    let mut events: List[operator.LifecycleEvent] = list.new()
+    if !gap {
+        for entry in h.events {
+            if entry.sequence > through {
+                through = entry.sequence
+                if entry.incarnation == group.incarnation {
+                    list.push(mut events, clone(entry))
+                    if list.len(events) == EVENT_PAGE {
+                        break
+                    }
+                }
+            }
+        }
+    }
+    Ok(EventsAnswer(operator.EventPage(stream: stream, observed_at: h.observed_ms, oldest: oldest, through: through, latest: latest, gap: gap, events: take events)))
+}
+
+pub fn group_names(h: Host) -> List[String] waits {
+    let read_handle = result.unwrap(store.reader(h.db, 0u64))
+    let mut names: List[String] = list.new()
+    let Ok(take scanned) = store.scan(read_handle, store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
+        return names
+    }
+    let mut rows = take scanned
+    while let Ok(Some((name, _))) = store.next(read_handle, mut rows) {
+        list.push(mut names, take name)
+    }
+    names
+}
+
+// The serving child the host has accepted as Ready for this group, if any: its gen.
+pub fn serving_ready(h: Host, name: String) -> Option[u64] {
+    match vol_read(h, name).run {
+        Some(r) => match r.phase {
+            Ready(_) => Some(r.gen),
+            _ => None
+        },
+        None => None
+    }
+}
+
+fn phase_bytes(p: operator.Phase) -> Bytes {
+    let codec: std.codec.Codec[operator.Phase] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, p, mut out)
+    out
+}
+
+fn state_answer(d: Bytes, r: RequestRow, p: operator.Phase) -> operator.Answer {
+    StateAnswer(clone(d), clone(r.group), clone(r.input), clone(p))
+}
+
+// Sends each attached request's phase to its owner when it changed, and ends the exchange
+// at a terminal phase.
+fn notify(mut h: Host) waits {
+    let mut owned: List[(Bytes, u64)] = list.new()
+    for (d, conn) in h.owners {
+        list.push(mut owned, (clone(d), conn))
+    }
+    for (d, conn) in owned {
+        let Ok(Some(r)) = request_row(h, d) else {
+            continue
+        }
+        let p = phase_of(h, d, r)
+        let b = phase_bytes(p)
+        let same = match map.get(h.shown, d) {
+            Some(x) => x == b,
+            None => false
+        }
+        if same {
+            continue
+        }
+        let done = operator.terminal(p)
+        if let Ok(Some(g)) = group_row(h, r.group.name) {
+            if g.incarnation == r.group.incarnation {
+                let generation = match vol_read(h, r.group.name).run {
+                    Some(run) => Some(run.gen),
+                    None => None,
+                }
+                record_event(mut h, r.group.incarnation, generation, Some(g.activation), event_request_id(d), OperationLifecycle(observed_phase(p)))
+            }
+        }
+        say(mut h, conn, state_answer(d, r, p), done)
+        let _ = map.remove(mut h.shown, d)
+        if done {
+            let _ = map.remove(mut h.owners, d)
+        } else {
+            map.insert(mut h.shown, clone(d), take b)
+        }
+    }
 }

@@ -26,10 +26,9 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
                 .iter()
                 .take_while(|arg| !arg.starts_with('-'))
                 .take(
-                    if args
-                        .first()
-                        .is_some_and(|arg| matches!(arg.as_str(), "op" | "registry"))
-                    {
+                    if args.first().is_some_and(|arg| {
+                        matches!(arg.as_str(), "op" | "registry" | "prof" | "store" | "tape")
+                    }) {
                         2
                     } else {
                         1
@@ -38,6 +37,9 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
+            if name == "logs" {
+                return conclude(Outcome::Exit(operator_cli::observe::invalid_logs()));
+            }
             return conclude(Outcome::Exit(operator_cli::finite::invalid(
                 &name, detail, json,
             )));
@@ -85,12 +87,18 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             conclude(Outcome::Exit(crate::resident::run(serve)?))
         }
         Invocation::Host(request) => match operator_cli::host(request)? {},
+        Invocation::Observe(request) => {
+            conclude(Outcome::Exit(operator_cli::observe::run(request)))
+        }
         Invocation::Deploy(request) => conclude(Outcome::Exit(operator_cli::deploy(request))),
         Invocation::Decide(request) => conclude(Outcome::Exit(operator_cli::decide(request))),
         Invocation::Call(request) => conclude(Outcome::Exit(crate::call::run(
             crate::call::Options::read(request)?,
         )?)),
         Invocation::Dev(request) => conclude(Outcome::Exit(launch::dev::run(request)?)),
+        Invocation::DevControl(request) => {
+            conclude(Outcome::Exit(launch::dev::control::run(request)))
+        }
         Invocation::Store(request) => launch::store_tool(request),
         Invocation::Sdk(mut request) => {
             use crate::cli::SdkOption;
@@ -116,8 +124,7 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             conclude(Outcome::Exit(0))
         }
         Invocation::Tape(request) => {
-            crate::tape_cli::show(request)?;
-            conclude(Outcome::Exit(0))
+            conclude(Outcome::Exit(operator_cli::finite::tape_export(request)))
         }
         Invocation::Simple(request) if request.command.name == "manifest" => {
             crate::release_manifest::show(Path::new(
@@ -128,13 +135,10 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             ))?;
             conclude(Outcome::Exit(0))
         }
-        Invocation::Simple(request) => {
-            if request.positional.is_some() {
-                return Err("primer takes no arguments".into());
-            }
-            print!("{}", crate::cli_tools::PRIMER);
-            conclude(Outcome::Exit(0))
-        }
+        Invocation::Simple(request) => conclude(Outcome::Exit(operator_cli::finite::schema_help(
+            Some(request.command),
+            json,
+        ))),
         Invocation::New(request) => {
             let directory = request
                 .positional
@@ -233,7 +237,10 @@ pub fn main(mut args: Vec<String>) -> ! {
     if args.len() == 1 && args[0] == check_library::WORKER_ARG {
         std::process::exit(check_library::run_worker());
     }
-    if let Some(code) = crate::resident::submit(&args) {
+    let structured = structured_execution(&args);
+    if structured.is_none()
+        && let Some(code) = crate::resident::submit(&args)
+    {
         std::process::exit(code);
     }
     let error = match run(args) {
@@ -243,7 +250,29 @@ pub fn main(mut args: Vec<String>) -> ! {
         },
         Err(e) => e,
     };
+    if let Some(command) = structured {
+        use operator_cli::finite::{Envelope, Failure};
+        let mut env = Envelope::read(command);
+        env.contract = "execute";
+        env.fail(Failure::input("execution", error));
+        std::process::exit(env.render(true));
+    }
     std::process::exit(report_request_error(error.as_ref()))
+}
+
+fn structured_execution(args: &[String]) -> Option<&'static str> {
+    let mut before = args.iter().take_while(|arg| arg.as_str() != "--");
+    if !before.clone().any(|arg| arg == "--json") {
+        return None;
+    }
+    let mut action = before.by_ref().filter(|arg| arg.as_str() != "--json");
+    match action.next().map(String::as_str) {
+        Some("run") => Some("run"),
+        Some("prof") if action.next().is_some_and(|arg| arg == "run") => Some("prof run"),
+        Some("tape") if action.next().is_some_and(|arg| arg == "replay") => Some("tape replay"),
+        Some("build") if args.windows(2).any(|w| w == ["--emit", "recipe"]) => Some("build"),
+        _ => None,
+    }
 }
 
 fn check_registry_member(
@@ -270,6 +299,8 @@ fn check_registry_member(
         invocation,
         check.name,
         OutputKind::Executable,
+        false,
+        None,
         None,
         PackageInput::Captured(app),
         None,
@@ -285,6 +316,25 @@ fn check_registry_member(
 }
 
 fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let structured = matches!(invocation.command.name, "run" | "prof run")
+        && invocation.options.contains(&Opt::Json);
+    let streams = if structured {
+        if invocation.options.contains(&Opt::Resident) {
+            return Err("structured execution requires the caller's guest descriptors and refuses --resident".into());
+        }
+        match launch::guest_streams() {
+            Ok(streams) => Some(streams),
+            Err(error) => {
+                use operator_cli::finite::{Envelope, Failure};
+                let mut env = Envelope::read(invocation.command.name);
+                env.contract = "execute";
+                env.fail(Failure::input("guest_streams", error));
+                return conclude(Outcome::Exit(env.render(true)));
+            }
+        }
+    } else {
+        None
+    };
     let emit = invocation
         .options
         .extract_if(.., |option| matches!(option, Opt::Emit(_)))
@@ -293,12 +343,40 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             _ => None,
         })
         .last();
-    let output_kind = output_kind(invocation.command.name, emit.as_deref())?;
+    let emit_recipe = emit.as_deref() == Some("recipe");
+    if emit_recipe
+        && (invocation.command.name != "build"
+            || !invocation
+                .options
+                .iter()
+                .any(|o| matches!(o, Opt::CodeStore(_)))
+            || invocation.options.iter().any(|o| {
+                matches!(
+                    o,
+                    Opt::Recipe(_)
+                        | Opt::Output(_)
+                        | Opt::Recording
+                        | Opt::ReleaseManifest(_)
+                        | Opt::LogicalChargeReport(_)
+                )
+            }))
+    {
+        return conclude(Outcome::Exit(operator_cli::finite::invalid(
+            invocation.command.name,
+            "--emit recipe requires build --code-store DIR and refuses executable output options"
+                .into(),
+            invocation.options.contains(&Opt::Json),
+        )));
+    }
+    let output_kind = output_kind(
+        invocation.command.name,
+        emit.as_deref().filter(|_| !emit_recipe),
+    )?;
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = launch::fleet_cli::prepare(&mut invocation)?;
-    if command == "replay"
+    if command == "tape replay"
         && invocation
             .options
             .iter()
@@ -317,7 +395,9 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         invocation,
         command,
         output_kind,
+        emit_recipe,
         profile,
+        streams,
         PackageInput::Discover(package_mode, store),
         remote,
     )

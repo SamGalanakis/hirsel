@@ -31,7 +31,8 @@ fn recording_cli_replays() {
         dir.path().join("cache").display().to_string(),
     ];
     let invoke = |command: &str, extra: Vec<String>| {
-        let mut args = vec![command.to_owned(), app.display().to_string()];
+        let mut args = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        args.push(app.display().to_string());
         args.extend(common.clone());
         args.extend(extra);
         process::tape_request(&args, dir.path())
@@ -62,7 +63,7 @@ fn recording_cli_replays() {
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
     std::fs::remove_dir_all(&data).unwrap();
     let replay = vec!["--tape".into(), tape.display().to_string()];
-    let (code, out, err) = invoke("replay", replay.clone());
+    let (code, out, err) = invoke("tape replay", replay.clone());
     assert_eq!(
         (code, out),
         (Some(0), String::new()),
@@ -71,14 +72,14 @@ fn recording_cli_replays() {
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
     profile_fixture_replay(&common, &app, &tape);
 
+    let export_file = dir.path().join("export.txt");
     let shown = vec![
-        "tape".to_owned(),
-        "show".into(),
-        tape.display().to_string(),
-        "--include-credentials".into(),
+        "tape".to_owned(), "export".into(), tape.display().to_string(),
+        "--include-credentials".into(), "--out".into(), export_file.display().to_string(),
     ];
-    let (code, out, err) = process::tape_request(&shown, dir.path());
-    assert_eq!(code, Some(0), "show: {err}");
+    let (code, _, err) = process::tape_request(&shown, dir.path());
+    assert_eq!(code, Some(0), "export: {err}");
+    let out = std::fs::read_to_string(export_file).unwrap();
     assert!(
         out.contains(&format!("format {}", hirsel_tape_format::FORMAT))
             && out.contains("GRANT")
@@ -103,7 +104,7 @@ fn recording_cli_replays() {
     );
     assert_eq!(code, Some(0), "random record: {err}");
     let (code, out, err) = invoke(
-        "replay",
+        "tape replay",
         vec!["--tape".into(), random_tape.display().to_string()],
     );
     assert_eq!(
@@ -117,12 +118,12 @@ fn recording_cli_replays() {
         source.replace("\"input.json\"", "\"other.json\""),
     )
     .unwrap();
-    let (code, _, err) = invoke("replay", replay.clone());
+    let (code, _, err) = invoke("tape replay", replay.clone());
     assert_eq!(code, Some(2), "{err}");
     assert!(err.contains("replay: refused: revision"), "{err}");
     let mut across = replay;
     across.push("--diagnose".into());
-    let (code, _, err) = invoke("replay", across);
+    let (code, _, err) = invoke("tape replay", across);
     assert_eq!(code, Some(1), "{err}");
     assert!(
         err.contains("replay: revision differs")
@@ -172,8 +173,8 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
 
     let invoke = |command: &str, app: &Path, flags: &[&str]| {
         let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-        let mut args = vec![
-            command.to_owned(),
+        let mut args = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        args.extend([
             app.display().to_string(),
             "--cc".into(),
             llvm.join("bin/clang").display().to_string(),
@@ -182,7 +183,7 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
             "--source-core".into(),
             "--store".into(),
             work.join("cache").display().to_string(),
-        ];
+        ]);
         args.extend(flags.iter().map(|s| (*s).to_owned()));
         process::tape_request(&args, work)
     };
@@ -232,28 +233,26 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
     std::fs::remove_file(image).unwrap();
     let tape_bytes = std::fs::read(&tape).unwrap();
     assert!(!tape_bytes.windows(expected.len()).any(|w| w == expected));
-    let mut show = vec![
-        "tape".into(),
-        "show".into(),
-        tape.display().to_string(),
-        "--json".into(),
+    let export_file = work.join("raw-export.txt");
+    let mut arguments = vec![
+        "tape".into(), "export".into(), tape.display().to_string(),
+        "--out".into(), export_file.display().to_string(),
     ];
-    let (code, out, err) = process::tape_request(&show, work);
-    assert_ne!(code, Some(0));
+    let (code, out, err) = process::tape_request(&arguments, work);
+    assert_eq!(code, Some(2));
     assert!(out.is_empty() && err.contains("--include-credentials"));
-    show.push("--include-credentials".into());
-    let (code, out, err) = process::tape_request(&show, work);
+    assert!(!export_file.exists());
+    arguments.push("--include-credentials".into());
+    let (code, _, err) = process::tape_request(&arguments, work);
     assert_eq!(code, Some(0), "{err}");
-    let records: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
-    assert_eq!(records[0]["type"], "HEADER");
-    assert_eq!(records[1]["path"], "root");
-    assert!(
-        records
-            .iter()
-            .any(|r| r["op"] == hirsel_tape_format::op::STDOUT
-                && r["args"]["digest_hex"].is_string())
-    );
-    assert_eq!(records.last().unwrap()["type"], "END");
+    let records = std::fs::read_to_string(&export_file).unwrap();
+    assert!(records.starts_with("format "));
+    assert!(records.contains("root"));
+    assert!(records.contains(&format!("op={}", hirsel_tape_format::op::STDOUT)));
+    assert!(records.contains("END"));
+    assert_eq!(std::fs::metadata(&export_file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_ne!(process::tape_request(&arguments, work).0, Some(0));
+    assert_eq!(std::fs::read_to_string(&export_file).unwrap(), records);
     let replay = |extra: &[&str], path: &Path| {
         let mut flags = vec![
             "--runtime",
@@ -264,7 +263,7 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
             path.to_str().unwrap(),
         ];
         flags.extend_from_slice(extra);
-        invoke("replay", &child, &flags)
+        invoke("tape replay", &child, &flags)
     };
     let (code, out, err) = replay(&[], &export);
     assert_eq!(code, Some(0), "{out}{err}");

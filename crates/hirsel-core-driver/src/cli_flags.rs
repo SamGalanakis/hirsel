@@ -55,7 +55,7 @@ flags! {
     ObservedRecordingRuntime ["--observed-recording-runtime"] "ARCHIVE" => "Install the combined charge observation and recording runtime archive.";
     Record ["--record"] "TAPE" => "Build with recording enabled. Run writes TAPE. Register writes owner-only recordings in TAPE as a directory.";
     Wait ["--wait"] "[=DURATION]" => "Wait for completion, a decision, or an unresolved outcome. Optional duration in ms, s, m or h.";
-    GroupName ["--group"] "NAME" => "The group to register, deploy to, or back up.";
+    GroupName ["--group"] "NAME" => "Select a workload by name or by name and incarnation where supported.";
     RequestId ["--request-id"] "HEX" => "Resend this request instead of starting a new one; for decide, the request to decide.";
     Tape ["--tape"] "TAPE" => "Replay this tape without host grants.";
     ReplayOutputs ["--outputs"] "DIR" => "Export committed standard streams and plaintext socket sends after a sealed replay.";
@@ -65,6 +65,10 @@ flags! {
     Laws ["--laws"] => "Observe settled law verdicts in the recording build.";
     WriteLaws ["--write-laws"] => "Observe laws and update the executed tests' rows in hirsel.laws.";
     LawsBaseline ["--laws-baseline"] "FILE" => "Compare a full observed test run with the law lock at FILE.";
+    TapeOut ["--out"] "FILE" => "Create this private export file exclusively.";
+    After ["--after"] "POSITION" => "Resume after the reported position.";
+    Ready ["--ready"] => "Require fresh positive serving evidence.";
+    Follow ["--follow"] => "Continue until interrupted or the event history has a gap.";
     IncludeCredentials ["--include-credentials"] => "Allow tape output that may contain credentials.";
     Diagnose ["--diagnose"] => "Allow a changed revision and report its first divergence; never resume live.";
     FmtCheck ["--check"] => "Exit 1 on differences without writing. For files, list paths that differ.";
@@ -123,7 +127,7 @@ flags! {
     Runtime ["--runtime"] "ARCHIVE" => "Select the core runtime archive for the requested recording mode.";
     LogicalChargeReport ["--logical-charge-report"] "FILE" => "Instrument root logical reservation; unsuitable for timings.";
     Cc ["--cc"] "PROGRAM" => "Select the C linker driver for this request.";
-    Emit ["--emit"] "exe|staticlib|module" => "Select the native output kind (default exe).";
+    Emit ["--emit"] "exe|staticlib|module|recipe" => "Select the output kind (default exe). Recipe emission requires build and --code-store.";
     Target ["--target"] "TRIPLE" => "Select the full native target triple.";
     CoreIr ["--coreir"] => "Export linked checked CoreIR, layouts and source annexes as JSON.";
     Emulator ["--emulator"] "FILE" => "Run through this explicit QEMU user executable.";
@@ -134,7 +138,6 @@ flags! {
     Libraries ["--libraries"] "ROOT" => "Select a root containing core/ and std/.";
     Fresh ["--fresh"] => "Start a new dev-owned store generation.";
     Store ["--store"] "DIRECTORY" => "Select the database for dry-run, or the request or product store.";
-    DryRunExe ["--exe"] "NEW" => "The built candidate executable.";
     RestoreFrom ["--from"] "SOURCE" => "Restore from this stamped backup or archive.";
     RestoreTarget ["--target"] "SELECTOR" => "Select latest, version:BRANCH,V, at:BRANCH,MS, or boundary:TOKEN.";
     RestoreTo ["--to"] "DEST" => "Publish under a fresh identity at this destination.";

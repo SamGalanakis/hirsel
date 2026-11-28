@@ -43,14 +43,14 @@ def check(compiler, work, different):
     subprocess.run([work / "cranelift", "record-different" if different else "record"], cwd=case, check=True)
     before = {p.name: p.read_bytes() for p in source.iterdir()}
     checked = subprocess.run([
-        compiler, "tapes", "check", source, "--recorded", work / "cranelift",
+        compiler, "tape", "check", source, "--recorded", work / "cranelift",
         "--release", work / "llvm",
     ], cwd=case, capture_output=True, text=True)
     if checked.returncode not in (0, 1) or len(checked.stdout.splitlines()) < 2:
-        raise ValueError(f"tapes check exited {checked.returncode}\n{checked.stdout}{checked.stderr}")
+        raise ValueError(f"tape check exited {checked.returncode}\n{checked.stdout}{checked.stderr}")
     report = checked_report(checked.stdout, checked.returncode)
     if before != {p.name: p.read_bytes() for p in source.iterdir()}:
-        raise ValueError("tapes check changed the source store")
+        raise ValueError("tape check changed the source store")
     return report
 
 
@@ -60,7 +60,7 @@ def checked_report(stdout, exit_status):
         raise ValueError(f"unexpected witness pair: {identity}")
     count = window["different"]
     if len(differences) != count or exit_status != int(count != 0):
-        raise ValueError(f"tapes check exit or differences disagree with its report: {window}")
+        raise ValueError(f"tape check exit or differences disagree with its report: {window}")
     if count:
         status = "different"
     elif not window["same"] or window["same"] + window["not_recorded"] != window["through"] - window["after"]:

@@ -599,7 +599,9 @@ fn publish(
     let source = dir.path().join("tree");
     let path = |name: &str| ad.state.join(name).to_string_lossy().into_owned();
     let mut args: Vec<String> = vec![
-        "publish".into(),
+        "build".into(),
+        "--emit".into(),
+        "recipe".into(),
         tree.package.clone(),
         crate::package_lock::FROZEN_FLAG.into(),
         "--store".into(),

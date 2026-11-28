@@ -104,6 +104,24 @@ impl Target {
         self.pin.group.as_deref()
     }
 
+    pub fn incarnation(&self) -> Result<Option<u64>, Failure> {
+        self.pin
+            .incarnation
+            .as_ref()
+            .map(|raw| {
+                let n = raw
+                    .parse::<u64>()
+                    .map_err(|_| Failure::context("incarnation must be a decimal u64"))?;
+                if self.pin.group.is_none() || n.to_string() != *raw {
+                    return Err(Failure::context(
+                        "incarnation requires a group and a decimal u64",
+                    ));
+                }
+                Ok(n)
+            })
+            .transpose()
+    }
+
     pub fn resolve(selected: Option<&str>) -> Result<Self, Failure> {
         let uid = operator::operator_uid();
         let file = selected.map(Path::new).filter(|p| p.is_absolute());
@@ -205,13 +223,7 @@ impl Target {
                 "operation and context must pin the same authority and effective UID",
             ));
         }
-        if self.pin.incarnation.as_ref().is_some_and(|s| {
-            self.pin.group.is_none() || s.parse::<u64>().map(|v| v.to_string()).as_ref() != Ok(s)
-        }) {
-            return Err(Failure::context(
-                "incarnation requires a group and a decimal u64",
-            ));
-        }
+        self.incarnation()?;
         let state = self.state()?;
         let socket = state.join(crate::product::bundled::OPERATOR_SOCKET);
         let meta = fs::symlink_metadata(&socket).map_err(Failure::io)?;

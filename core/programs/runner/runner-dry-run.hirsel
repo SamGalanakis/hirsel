@@ -1,5 +1,5 @@
 // The launch header that marks a store operator's report on the describe
-// stream: `hirsel dry-run`, `hirsel store verify` or `hirsel store repair`.
+// stream: `hirsel store rehearse`, `hirsel store verify` or `hirsel store repair`.
 fn store_op_header(op: StoreOp) -> Result[(), StartError] {
     let line: Bytes = match op {
         Serving => return Ok(()),
@@ -44,7 +44,7 @@ fn push_operator_refusal(mut line: String, refusal: OperatorRefusal) {
             string.push(mut line, " problems")
         },
         TapeDifferences(count) => {
-            string.push(mut line, "tapes check found ")
+            string.push(mut line, "tape check found ")
             string.push_u64(mut line, count)
             string.push(mut line, " different calls")
         },

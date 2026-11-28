@@ -83,6 +83,7 @@ pub fn run(
     );
     command.env(ObservationOptions::KEYS[3], options.freq.to_string());
     let start = monotonic_ns()?;
+    launch.redirect(&mut command)?;
     let mut child = command.spawn()?;
     let pid = child.id();
     let status = child.wait()?;

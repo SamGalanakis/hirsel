@@ -746,3 +746,46 @@ fn package_dev_takes_grants_from_program() {
     assert_eq!(status["phase"], "ready");
     assert!(dev.stop().contains("activation 1,"));
 }
+
+#[test]
+fn package_dev_wait_reports_failed_edit_and_serving_predecessor() {
+    let fixture = Fixture::new();
+    let mut dev = fixture.dev("dev-edit-receipts", &["--json"]);
+    dev.wait_for("\"Activated\"");
+    let cli = |args: &[&str]| {
+        let answer = Command::new(&fixture.compiler)
+            .args(args)
+            .arg("runner")
+            .arg("--json")
+            .current_dir(fixture.law.dir.path())
+            .env("XDG_RUNTIME_DIR", fixture.law.path("run"))
+            .output()
+            .unwrap();
+        let json = serde_json::from_slice::<serde_json::Value>(&answer.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {answer:?}"));
+        (answer.status.code(), json)
+    };
+    let (code, ready) = cli(&["status", "--context", "dev", "--ready"]);
+    assert_eq!(code, Some(0), "{ready}");
+    let active = &ready["result"]["active"];
+    assert!(!active.is_null(), "{ready}");
+    fixture
+        .law
+        .write("runner/dev_place.hirsel", "pub fn broken(");
+    let (code, rejected) = cli(&["dev", "wait"]);
+    assert_eq!(code, Some(1), "{rejected}");
+    assert!(!rejected["result"]["attempted"]["edit"].is_null());
+    assert_eq!(&rejected["result"]["active"], active);
+    assert!(rejected["result"]["superseded"].is_null());
+    assert_eq!(cli(&["status", "--context", "dev", "--ready"]).0, Some(0));
+    assert_eq!(cli(&["dev", "stop"]).0, Some(0));
+    assert!(dev.status().success(), "{}", dev.log());
+    let output = fs::read_to_string(&dev.output).unwrap();
+    let records = output
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.first().unwrap()["kind"], "snapshot");
+    assert_eq!(records.last().unwrap()["kind"], "end");
+    assert_eq!(records.iter().filter(|r| r["kind"] == "end").count(), 1);
+}

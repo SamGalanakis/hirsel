@@ -185,7 +185,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             | "sdk"
             | "store"
             | "coverage"
-            | "tapes"
+            | "tape"
             | "fleet"
     ) {
         match arguments.next() {
@@ -196,8 +196,14 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Some(subcommand) => name.push_str(&format!(" {subcommand}")),
         }
     }
+    if name == "dev"
+        && let Some(verb) = arguments.next_if(|word| matches!(word.as_str(), "wait" | "stop"))
+    {
+        name.push(' ');
+        name.push_str(&verb);
+    }
     let command = named(&name)?;
-    if matches!(name.as_str(), "tape" | "manifest") {
+    if name == "manifest" {
         match arguments.next().as_deref() {
             Some("show") => {}
             Some("--help" | "-h") => return Ok(Action::Help(Some(command))),

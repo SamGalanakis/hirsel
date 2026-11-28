@@ -70,7 +70,7 @@ def run(compiler, runtime, recording_runtime, evaluator):
         def invoke(command, app, backend, *extra, recording=False):
             archive = recording_runtime if recording else runtime
             return subprocess.run([
-                compiler, command, app, "--libraries", libraries, "--source-core",
+                compiler, *command.split(), app, "--libraries", libraries, "--source-core",
                 "--runtime", archive, "--store", work / "store", "--limit", "207000000000",
                 "--debug-lines", "on", "--backend", backend, *extra,
                 "-o", app / (command + "-" + backend),
@@ -81,7 +81,7 @@ def run(compiler, runtime, recording_runtime, evaluator):
                 tape = work / f"{app.name}-{backend}.tape"
                 live = invoke("run", app, backend, *grants)
                 recorded = invoke("run", app, backend, *grants, "--record", tape, recording=True)
-                replay = invoke("replay", app, other, "--tape", tape, recording=True)
+                replay = invoke("tape replay", app, other, "--tape", tape, recording=True)
                 assert replay.returncode == 0 and not replay.stdout, replay
                 yield live, recorded
 

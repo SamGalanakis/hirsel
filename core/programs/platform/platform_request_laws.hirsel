@@ -452,3 +452,76 @@ fn slice2_abandoned_creation(c: Clock, rnd: Random) -> Result[(), ()] waits {
     unplug(mut r4)
     Ok(())
 }
+
+fn observe_answer(mut r: Rig, ask: operator.Ask) -> operator.Answer waits {
+    r.conns += 1u64
+    let conn = r.conns
+    send(mut r, conn, ask)
+    let replies = got_on(r, conn)
+    expect(list.len(replies) == 1u64, "observation must return one reply")
+    clone(replies[0u64])
+}
+
+@test
+fn slice3_observes_readiness_history_and_event_gaps(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let (r0, old, go) = cut_case(c, rnd)
+    let mut r = take r0
+    pump(mut r, take go)
+    let candidate = last(r, "g")
+    answer(mut r, old, PlaceInstalled(2u64, true))
+    let WorkloadAnswer(installed) = observe_answer(mut r, WorkloadAsk("g", None)) else {
+        fail("expected the new workload snapshot")
+    }
+    expect(installed.activation == 2u64 && installed.assembly == image_two(), "the candidate was not installed")
+    expect(match installed.health {
+        StartingHealth => true,
+        _ => false
+    }, "installed release has no serving proof yet")
+    let secret = "Authorization: Bearer slice3-diagnostic-must-stay-private"
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(clone(candidate), PlaceRefused(secret)))
+    feed(mut r, take events)
+    finish(mut r, candidate, Code(1i32), None)
+    let group: launcher.Group = clone(installed.group)
+    let WorkloadAnswer(stopped) = observe_answer(mut r, WorkloadAsk("g", Some(group.incarnation))) else {
+        fail("expected a stopped workload snapshot")
+    }
+    expect(match stopped.health {
+        FailedHealth => true,
+        _ => false
+    }, "stop before first Ready must be a known failure")
+    let HistoricalAnswer(predecessor, root) = observe_answer(mut r, HistoricalAsk("g", Some(group.incarnation), 1u64)) else {
+        fail("expected the retained assembly from activation 1")
+    }
+    expect(predecessor.predecessor == Some(2u64) && root == image(), "rollback must use the current predecessor and historical code")
+    let foreign = observe_answer(mut r, HistoricalAsk("g", Some(group.incarnation + 1u64), 1u64))
+    let missing = observe_answer(mut r, HistoricalAsk("g", Some(group.incarnation), 99u64))
+    expect(match foreign {
+        ErrorAnswer(UnknownGroupClass, _) => true,
+        _ => false
+    }, "foreign incarnation resolved")
+    expect(match missing {
+        ErrorAnswer(UnknownActivationClass, _) => true,
+        _ => false
+    }, "missing activation resolved")
+    let EventsAnswer(recent) = observe_answer(mut r, EventsAsk(clone(group), None)) else {
+        fail("expected a lifecycle page")
+    }
+    expect(list.len(recent.events) >= 2u64 && !recent.gap, "the lifecycle page lost the install or stop")
+    let position = operator.EventPosition(stream: recent.stream, sequence: recent.through)
+    let encoded = option.unwrap(operator.encode_answer(EventsAnswer(clone(recent))))
+    let token = b"slice3-diagnostic-must-stay-private"
+    let size = list.len(token)
+    for at in 0u64 .. list.len(encoded) - size + 1u64 {
+        expect(list.slice(encoded, at, at + size) != token, "a lifecycle event leaked diagnostic text")
+    }
+    for _ in 0u64 .. 257u64 {
+        record_event(mut r.h, group.incarnation, stopped.generation, Some(stopped.activation), None, StoppedLifecycle)
+    }
+    let EventsAnswer(pruned) = observe_answer(mut r, EventsAsk(clone(group), Some(position))) else {
+        fail("expected a typed lifecycle page after pruning")
+    }
+    expect(pruned.gap && list.len(pruned.events) == 0u64 && pruned.oldest > recent.through, "a cursor across pruned events must report a gap")
+    unplug(mut r)
+    Ok(())
+}

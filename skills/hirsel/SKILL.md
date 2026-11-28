@@ -5,7 +5,7 @@ description: Write, check, test and fix Hirsel programs with the installed hirse
 
 # Hirsel
 
-**Authority rule:** Always run `hirsel primer` from your installed binary as the exact
+**Authority rule:** Always run `hirsel explain primer` from your installed binary as the exact
 authority for your installed version (`references/PRIMER.md` is the repository copy).
 For task-shaped recipes, see [hirsel.ai/cookbook.md](https://hirsel.ai/cookbook.md) or
 the single-file agent bundle at [hirsel.ai/llms-full.txt](https://hirsel.ai/llms-full.txt).
@@ -74,5 +74,5 @@ first key: tuples compare lexicographically.
 - Pass capabilities (`Stdout`, `Dir`, `Clock`, `Net`, `Tasks`, `Env`, `Args`, `Random`)
   as explicit parameters; mark a function other than `main` `waits` exactly when it calls
   a `waits` function.
-- Always trust `hirsel primer`, `hirsel explain`, and `hirsel inspect` from your installed
+- Always trust `hirsel explain primer`, `hirsel explain`, and `hirsel inspect` from your installed
   binary over any web copy.

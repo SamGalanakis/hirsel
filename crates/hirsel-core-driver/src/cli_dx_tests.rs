@@ -179,7 +179,7 @@ fn command_schemas_keep_documented_flag_ownership_and_defaults() {
             &["serve", "--resident"][..],
             "unknown option `--resident` for serve; use help serve",
         ),
-        (&["replay", "--tape"][..], "--tape requires TAPE"),
+        (&["tape", "replay", "--tape"][..], "--tape requires TAPE"),
     ] {
         let error = match parse(args) {
             Err(error) => error,
@@ -208,4 +208,47 @@ fn command_schemas_keep_documented_flag_ownership_and_defaults() {
             CompilerOption::ProfMem(MemMode::Exact),
         ]
     );
+}
+
+#[test]
+fn slice3_rejects_retired_commands_and_declares_their_replacements() {
+    let parse = |args: &[&str]| crate::cli::parse(args.iter().map(|word| (*word).to_owned()));
+    for args in [
+        &["publish", "--help"][..],
+        &["dry-run", "--help"],
+        &["primer"],
+        &["tapes", "check", "--help"],
+        &["tape", "show", "--help"],
+        &["replay", "--help"],
+        &["dev", "--wait"],
+        &["dev", "--stop"],
+        &["dev", "--status"],
+    ] {
+        assert!(parse(args).is_err(), "accepted retired form {args:?}");
+    }
+    for args in [
+        &["build", ".", "--emit", "recipe", "--code-store", "code"][..],
+        &["store", "rehearse", "state", "--release", "program"],
+        &[
+            "tape",
+            "check",
+            "state",
+            "--recorded",
+            "old",
+            "--release",
+            "new",
+        ],
+        &[
+            "tape",
+            "export",
+            "run.htape",
+            "--include-credentials",
+            "--out",
+            "private.json",
+        ],
+        &["tape", "replay", ".", "--tape", "run.htape"],
+        &["explain", "primer"],
+    ] {
+        assert!(parse(args).is_ok(), "refused replacement {args:?}");
+    }
 }

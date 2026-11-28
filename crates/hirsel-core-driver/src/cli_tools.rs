@@ -84,8 +84,8 @@ fn print_format_refusal(
     }
 }
 
-/// docs/PRIMER.md, which `hirsel primer` and `hirsel explain primer` print.
-pub const PRIMER: &str = include_str!("../../../docs/PRIMER.md");
+/// docs/PRIMER.md, which `hirsel explain primer` prints.
+const PRIMER: &str = include_str!("../../../docs/PRIMER.md");
 
 pub fn explain(
     rule: Option<&str>,

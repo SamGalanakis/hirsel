@@ -611,6 +611,11 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                     PlaceOpened(ready) => {
                         report_recovery(mut h, name, gen, ready.version, run.selected, ready.read, true)
                         set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns), selected: clone(run.selected))))
+                        if let Ready(_) = run.phase {
+                            ()
+                        } else {
+                            record_event(mut h, c.group.incarnation, Some(gen), Some(ready.version), None, ReadyLifecycle)
+                        }
                     },
                     PlaceStoreMismatch(ehi, elo, ahi, alo) => unsuccessful(mut h, name, runner.store_mismatch((ehi, elo), (ahi, alo)), false, now, mut out),
                     PlaceCurrent(version, read) => {

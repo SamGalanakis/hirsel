@@ -117,7 +117,11 @@ impl<'a> Schema<'a> {
                 (field, ty)
             })
             .collect();
-        let default = if name == "Preview" { ", Default" } else { "" };
+        let default = match name {
+            "Preview" => ", Default",
+            "EventPosition" => ", Copy",
+            _ => "",
+        };
         writeln!(out, "#[derive(Clone, Debug{default}, PartialEq, Eq)]").unwrap();
         writeln!(out, "pub(crate) struct {name} {{").unwrap();
         for (field, ty) in &fields {
@@ -171,7 +175,10 @@ impl<'a> Schema<'a> {
                 (variant_name, fields)
             })
             .collect();
-        let copy = if matches!(name, "Forward" | "EntryChange" | "Class" | "DecisionStage") {
+        let copy = if matches!(
+            name,
+            "Forward" | "EntryChange" | "Class" | "DecisionStage" | "Health" | "OperationPhase"
+        ) {
             ", Copy"
         } else {
             ""

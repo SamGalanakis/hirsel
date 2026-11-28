@@ -136,6 +136,16 @@ pub enum DeployOption {
     Json,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ObserveOption {
+    Context(String),
+    GroupName(String),
+    After(String),
+    Ready,
+    Follow,
+    Json,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecideOption {
     DecisionFile(String),
@@ -155,6 +165,7 @@ pub enum CallOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DevOption {
+    Json,
     Backend(String),
     Dir(String),
     Fresh,
@@ -169,6 +180,11 @@ pub enum DevOption {
     Store(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum DevControlOption {
+    Json,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreOption {
     RestoreFrom(String),
@@ -176,11 +192,9 @@ pub enum StoreOption {
     RestoreTo(String),
     Plan,
     Json,
-    DryRunExe(String),
     GroupName(String),
     HostState(String),
     RecordedExecutable(String),
-    Store(String),
     StoreRelease(String),
 }
 
@@ -217,6 +231,7 @@ pub enum SdkOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TapeOption {
+    TapeOut(String),
     IncludeCredentials,
     Json,
 }

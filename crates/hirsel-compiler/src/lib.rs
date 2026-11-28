@@ -94,6 +94,8 @@ pub enum Refusal {
     Limit(Limit),
     /// The service's queue is full.
     Busy,
+    /// The worker completed with an explicit tool refusal.
+    ToolRefusal(String),
     /// The worker or the service ended for any other reason.
     Unavailable(String),
 }
@@ -326,6 +328,7 @@ impl Service {
         }
         match (status.success(), serde_json::from_reader(reply)) {
             (true, Ok(ModuleBuild::Built)) => {}
+            (false, Ok(ModuleBuild::ToolRefusal)) => return Err(Refusal::ToolRefusal(said)),
             (false, Ok(ModuleBuild::Rejected)) => return Err(Refusal::Rejected(said)),
             (false, Ok(ModuleBuild::Unsupported(reason))) => {
                 return Err(Refusal::Unsupported(reason));

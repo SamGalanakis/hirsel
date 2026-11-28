@@ -29,7 +29,7 @@ the recording runtime. These commands make one:
 | --- | --- |
 | `hirsel build app --recording -o OUT` | builds a recording executable; it records only when started with `HIRSEL_RECORD` |
 | `hirsel run app --record PATH [grants] [-- arguments...]` | builds the recording build and runs it with recording on, into PATH |
-| `hirsel replay app --tape PATH` | builds the recording build and replays PATH with it |
+| `hirsel tape replay app --tape PATH` | builds the recording build and replays PATH with it |
 | `hirsel test app --limit N --replay` | runs each selected test in the recording build, recording on, then replays it ([Testing with recordings](#testing-with-recordings)) |
 | `hirsel test app --limit N --laws` | observes law outcomes in selected tests ([law table](laws.md#observation)) |
 
@@ -44,7 +44,7 @@ rule below. A build without recording contains none of it.
 A program whose entry reaches a foreign function has no recording build
 ([foreign code cannot be recorded](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
 Recording and replay commands refuse it before building, reading a tape or running native
-code: `hirsel replay` exits 2 with a refusal message, `hirsel test --replay` fails each
+code: `hirsel tape replay` exits 2 with a refusal message, `hirsel test --replay` fails each
 foreign-reaching test alone, and `hirsel test --laws` runs those tests in the ordinary
 build and reports them as unobserved.
 
@@ -235,7 +235,7 @@ at the first missing position.
 
 ## Replay
 
-`hirsel replay app --tape PATH` builds the recording build of `app` and runs it against
+`hirsel tape replay app --tape PATH` builds the recording build of `app` and runs it against
 PATH with no host provider. It takes the arguments, the root limit and the grant snapshot
 from the recording and accepts no grants. It checks each issue against the recording before
 any effect, supplies each delivery from the recording, and never repeats a recorded host
@@ -271,7 +271,7 @@ in that policy, has the recording's build digest. When the replaying build's dig
 from the recorded one, the replay writes `replay: build differs` first, so such a divergence
 is attributed to the build and not read as a bug in the program.
 
-**Across revisions.** `hirsel replay app --tape PATH --diagnose` admits a recording of
+**Across revisions.** `hirsel tape replay app --tape PATH --diagnose` admits a recording of
 another code revision and still refuses the other differences. It writes
 `replay: revision differs` first, and reports the first divergent issue at its source
 position. It always replays and never continues with live effects.
@@ -303,7 +303,7 @@ line also includes the source position when one is available. Replay then exits 
 
 ### Export replayed output
 
-`hirsel replay PACKAGE --tape TAPE --outputs DIR` writes the bytes the
+`hirsel tape replay PACKAGE --tape TAPE --outputs DIR` writes the bytes the
 program recomputed and committed. The operator can also request this on
 `replay --state STATE`, including with `--unit`, if the pinned image supports
 output export. DIR must be new. Hirsel publishes it with owner-only access
@@ -325,15 +325,10 @@ tokens, `Authorization` headers, `Random` bytes or environment values holds cred
 treated as **credential-bearing**:
 
 - its file is created readable only by its owner, at a path that does not exist yet;
-- `hirsel tape show PATH --include-credentials` writes its header and stored frames to
-  standard output. Add `--json` to read a JSON array in spawn-path order, with physical
-  frames in order within each stream. Its schema-1 `HEADER` is followed by
-  `STREAM` records and their entries and frames. Frame positions start at one in each stream. A
-  `REPEAT` occupies the positions of its expanded choices. Binary fields
-  ending in `_hex` are hexadecimal strings. Use a JSON reader that preserves
-  64-bit integers for exact clock values and counters. A `TRUNCATED` record marks an
-  incomplete stream. Check the command's exit status before consuming the
-  document. Every export of a recording requires `--include-credentials`;
+- `hirsel tape export PATH --include-credentials --out FILE` writes the header and
+  stored frames to a new owner-only file. Frame positions start at one in each stream.
+  A `REPEAT` occupies the positions of its expanded choices. A `TRUNCATED` record marks
+  an incomplete stream. In JSON mode the result document names the destination file.
 - it is never redacted in place, since a replay needs its bytes exactly.
 
 Where cleartext can be in a recording:
@@ -741,7 +736,7 @@ same observations in every unit. A program that can spawn helper units uses the
 worker count in `HIRSEL_UNTIED` in ordinary runs, recording and replay. With the
 variable unset it uses the tied scheduler. An invalid or zero count exits with
 status 2 and names `HIRSEL_UNTIED`. Each unit waits for the others' verdicts
-off its worker. `hirsel replay app --tape PATH --unit NAME` replays one
+off its worker. `hirsel tape replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
 
 **What this build replays.** Every stream replays as above, each helper as a unit of its
@@ -769,7 +764,7 @@ replay: `CONN_SEND` and `CONN_TRY_SEND` are checked with the item at issue and d
 nothing, the item reaches the inbox at its `TAKE`, and the drops of clients and inboxes are
 checked as `CLOSE`s whose close, seal answer and last release are taken at their `TAKE`s. A
 take naming no connection of the unit ends the replay `Diverged(Take)` at the `TAKE`. A package replay
-(`hirsel replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
+(`hirsel tape replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
 replays one unit. These limits close as the helper streams' replay lands.
 
 A **unit name** is fixed by the program and its inputs, never by a pool id: the root is
@@ -1110,7 +1105,7 @@ its one file line and exits 1, whatever the stream verdicts. A `TRUNCATED` block
 empty payload, ends its own stream `Truncated` and no other. Each stream is decoded with its
 own state: its previous task, its outstanding issues and its open carrier.
 
-`tape show` prints the header, then each stream under its unit name, ordered by
+`tape export` prints the header, then each stream under its unit name, ordered by
 spawn-index path, compared numerically.
 
 **Example.** A root-only tape with one `TAKE`: a refund of 48 bytes to limit
@@ -1233,7 +1228,7 @@ prefix through the launch arguments to find and verify the pin.
 - An `Env` grant record holds the pattern list and the sorted name and value pairs. Values
   retain their OS bytes, including when they are not UTF-8.
 - REPEAT stores periodic CHOOSE frames, and a replay expands them to their original
-  positions. `tape show` prints REPEAT once, at the position of the first CHOOSE it
+  positions. `tape export` prints REPEAT once, at the position of the first CHOOSE it
   represents.
 
 ## Testing with recordings

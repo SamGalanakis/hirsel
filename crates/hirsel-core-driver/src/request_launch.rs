@@ -1,5 +1,21 @@
-use super::{Meter, Outcome, Output, PathBuf};
+use super::{Meter, Output, PathBuf};
+use std::fs::File;
 use std::io::{self, Write};
+use std::os::{
+    fd::{AsFd, FromRawFd},
+    unix::{fs::MetadataExt, process::ExitStatusExt},
+};
+
+/// What a request leaves for its caller: an exit status, the program it
+/// built for `run` or `replay`, which the caller runs and whose status is the
+/// request's, or a `test` request's session, whose launches the caller runs.
+/// A resident compiler's client runs the program and the tests itself, so
+/// they have the client's terminal, signals, directory and environment.
+pub enum Outcome {
+    Exit(i32),
+    Launch(Launch),
+    Test(Box<crate::TestSession>),
+}
 
 /// The program a `run` or `replay` request built: its argument vector (the
 /// runner's, then the executable's, then the request's), the variables it runs
@@ -40,12 +56,15 @@ impl Launch {
         if !status.success() {
             eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
         }
-        Ok(status.code().unwrap_or(102))
+        Ok(match mode {
+            crate::tape_cli::outputs::Mode::Run => i32::from(!status.success()),
+            crate::tape_cli::outputs::Mode::Replay(_) => status.code().unwrap_or(1),
+        })
     }
 }
 
 #[path = "dev.rs"]
-pub(super) mod dev;
+pub(crate) mod dev;
 #[path = "dry_run.rs"]
 pub(super) mod dry_run;
 #[path = "fleet_cli.rs"]
@@ -71,7 +90,7 @@ pub(crate) fn report_request_error(error: &(dyn std::error::Error + 'static)) ->
 /// program first for a launch: the in-memory graphs are the OS's to reclaim,
 /// with no teardown. A resident compiler answers its client here, before the
 /// request's frames unwind, and the request returns its outcome to the server.
-/// `hirsel dry-run` and `hirsel store backup|restore`: the commands that run a tool on a
+/// `hirsel store rehearse` and `hirsel store backup|restore`: the commands that run a tool on a
 /// store directory and exit with its status.
 pub(super) fn store_tool(
     invocation: crate::cli::Request<crate::cli::StoreOption>,
@@ -82,7 +101,7 @@ pub(super) fn store_tool(
             .iter()
             .any(|option| matches!(option, crate::cli::StoreOption::StoreRelease(_)));
     conclude(Outcome::Exit(
-        if matches!(invocation.command.name, "dry-run" | "tapes check") || releases {
+        if matches!(invocation.command.name, "store rehearse" | "tape check") || releases {
             dry_run::run(invocation)?
         } else {
             store_cli::run(invocation)?
@@ -170,11 +189,83 @@ pub(super) fn finish(
     record_path: Option<&str>,
     replay_outputs: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
+    streams: Option<&[File; 2]>,
     mut run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
     remote: Option<&crate::store::remote::Remote>,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
+    if let Some(streams) = streams {
+        let result = structured_run(
+            output,
+            runner,
+            compiler_worker,
+            &mut run_args,
+            record_path,
+            profile,
+            streams,
+        );
+        meter.finish("output/render");
+        if let Some(path) = metrics {
+            meter.write_metrics(path)?;
+        }
+        if let Some(profile) = profile {
+            profile.cleanup();
+        }
+        use crate::operator_cli::finite::{Envelope, Failure};
+        use serde_json::json;
+        let mut env = Envelope::read(if profile.is_some() { "prof run" } else { "run" });
+        env.contract = "execute";
+        env.result = json!({"build":output,"guest":null});
+        match result {
+            Ok(Some(status)) => {
+                env.result["guest"] = json!({"exit":status.code(),"signal":status.signal()});
+                env.outcome = json!({"kind":if status.success() {"Exited"} else {"GuestFailed"},"effect":"committed"});
+                env.exit = i32::from(!status.success());
+            }
+            Ok(None) => env.fail(Failure::negative(
+                "BuildRefused",
+                "the compiler did not produce an executable",
+            )),
+            Err(error) => env.fail(Failure::negative("LaunchFailed", &error.to_string())),
+        }
+        return conclude_with_remote(Outcome::Exit(env.render(true)), remote);
+    }
+    if json && command == "tape replay" && profile.is_none() {
+        use crate::operator_cli::finite::{Envelope, Failure};
+        use serde_json::json;
+        let mut env = Envelope::read(command);
+        env.contract = "execute";
+        env.result = json!({"build":output,"guest":null});
+        if let Some(native) = &output.native {
+            let path = std::fs::canonicalize(&native.executable)?;
+            let mut guest = runner.command(&path);
+            guest.args(run_args).stdout(std::process::Stdio::null());
+            let status = crate::tape_cli::outputs::execute(
+                &mut guest,
+                replay_outputs.map(std::path::Path::new),
+            )?;
+            env.result["guest"] = json!({"exit":status.code(),"signal":status.signal()});
+            if status.success() {
+                env.outcome = json!({"kind":"Sealed","effect":"none"});
+            } else {
+                env.fail(Failure::negative(
+                    "ReplayRefused",
+                    "the guest did not seal the replay",
+                ));
+            }
+        } else {
+            env.fail(Failure::negative(
+                "BuildRefused",
+                "the compiler did not produce a replay executable",
+            ));
+        }
+        meter.finish("output/render");
+        if let Some(path) = metrics {
+            meter.write_metrics(path)?;
+        }
+        return conclude_with_remote(Outcome::Exit(env.render(true)), remote);
+    }
     if command == "build"
         && std::env::args_os().nth(1).as_deref()
             == Some(std::ffi::OsStr::new(hirsel_core_ids::module_build::WORKER))
@@ -217,7 +308,9 @@ pub(super) fn finish(
         {
             eprintln!("{stop}");
         }
-        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
+        if command != "run"
+            && command != "tape replay"
+            && (!output.accepted || output.stopped.is_none())
         {
             println!(
                 "{}: {} files, {} checked definitions",
@@ -232,18 +325,22 @@ pub(super) fn finish(
         }
     }
     let mut launch = None;
-    let run_exit = if command == "run" || command == "replay" {
+    let run_exit = if command == "run" || command == "tape replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
             if let Some(worker) = compiler_worker {
                 run_args.insert(0, format!("--hirsel-compiler-worker={}", worker.display()));
             }
             if let Some(profile) = profile {
-                let status = profile.capture(&path, &run_args, record_path)?;
+                let status = profile.capture(&path, &run_args, record_path, None)?;
                 if !status.success() {
                     eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
                 }
-                Some(status.code().unwrap_or(102))
+                Some(if command == "run" {
+                    i32::from(!status.success())
+                } else {
+                    status.code().unwrap_or(1)
+                })
             } else {
                 let program = runner.command(&path);
                 let mut argv = vec![program.get_program().to_owned()];
@@ -255,7 +352,7 @@ pub(super) fn finish(
                     .map(|record| ("HIRSEL_RECORD".into(), record.into()))
                     .into_iter()
                     .collect();
-                let mode = if command == "replay" {
+                let mode = if command == "tape replay" {
                     crate::tape_cli::outputs::Mode::Replay(replay_outputs.map(PathBuf::from))
                 } else {
                     crate::tape_cli::outputs::Mode::Run
@@ -305,4 +402,68 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
             outcome
         }
     }
+}
+
+pub(super) fn guest_streams() -> io::Result<[File; 2]> {
+    let control = File::from(io::stdout().as_fd().try_clone_to_owned()?).metadata()?;
+    let output = |fd| {
+        // SAFETY: fcntl checks the inherited descriptor and returns a new descriptor.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("redirect writable fd {fd} before structured execution"),
+            ));
+        }
+        // SAFETY: fcntl checks fd again and returns a unique close-on-exec descriptor.
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 5) };
+        if copy < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: copy is owned by this call.
+        let file = unsafe { File::from_raw_fd(copy) };
+        let guest = file.metadata()?;
+        if (guest.dev(), guest.ino()) == (control.dev(), control.ino()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("fd {fd} shares the JSON output destination"),
+            ));
+        }
+        Ok(file)
+    };
+    Ok([output(3)?, output(4)?])
+}
+
+fn structured_run(
+    output: &Output<'_>,
+    runner: &crate::Runner,
+    compiler_worker: Option<PathBuf>,
+    args: &mut Vec<String>,
+    record_path: Option<&str>,
+    profile: Option<&crate::prof_command::Run>,
+    streams: &[File; 2],
+) -> Result<Option<std::process::ExitStatus>, Box<dyn std::error::Error>> {
+    let Some(native) = &output.native else {
+        return Ok(None);
+    };
+    let launch = || -> Result<_, Box<dyn std::error::Error>> {
+        let path = std::fs::canonicalize(&native.executable)?;
+        if let Some(worker) = compiler_worker {
+            args.insert(0, format!("--hirsel-compiler-worker={}", worker.display()));
+        }
+        if let Some(profile) = profile {
+            return profile.capture(&path, args, record_path, Some(streams));
+        }
+        let [stdout, stderr] = streams;
+        let mut program = runner.command(&path);
+        program
+            .args(args)
+            .stdout(stdout.try_clone()?)
+            .stderr(stderr.try_clone()?);
+        if let Some(path) = record_path {
+            program.env("HIRSEL_RECORD", path);
+        }
+        Ok(program.status()?)
+    };
+    launch().map(Some)
 }

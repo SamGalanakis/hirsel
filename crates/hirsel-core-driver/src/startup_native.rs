@@ -386,11 +386,7 @@ fn dry_run_refuses_a_plain_program_without_running_it() {
 
     let (status, stdout, stderr) = process::tape_request(
         &[
-            "dry-run".into(),
-            "--exe".into(),
-            built.executable.display().to_string(),
-            "--store".into(),
-            store.display().to_string(),
+            "store".into(), "rehearse".into(), store.display().to_string(), "--release".into(), built.executable.display().to_string(),
         ],
         dir.path(),
     );
@@ -476,11 +472,7 @@ fn a_user_package_named_runner_is_not_a_place() {
             }
             let (status, stdout, stderr) = process::tape_request(
                 &[
-                    "dry-run".into(),
-                    "--exe".into(),
-                    executable.display().to_string(),
-                    "--store".into(),
-                    store.display().to_string(),
+                    "store".into(), "rehearse".into(), store.display().to_string(), "--release".into(), executable.display().to_string(),
                 ],
                 dir.path(),
             );

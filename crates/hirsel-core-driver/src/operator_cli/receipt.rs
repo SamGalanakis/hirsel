@@ -17,6 +17,8 @@ pub(super) struct Inputs {
     pub package: Option<String>,
     pub source: Option<PathBuf>,
     pub recipe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<u64>,
     pub code: Option<PathBuf>,
     pub create: Option<PathBuf>,
 }
@@ -86,10 +88,10 @@ impl Location {
         match persist(&self.path, receipt) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                if self
-                    .read()?
-                    .is_some_and(|r| r.intent_digest == receipt.intent_digest)
-                {
+                if self.read()?.is_some_and(|r| {
+                    r.intent_digest == receipt.intent_digest
+                        && r.inputs.rollback == receipt.inputs.rollback
+                }) {
                     Ok(())
                 } else {
                     Err(Failure::input(

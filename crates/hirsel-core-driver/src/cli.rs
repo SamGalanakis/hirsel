@@ -128,16 +128,12 @@ commands! {
             PublishDescription, PublishSourceCommit, PackageStore, Libraries, HELP;
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
         Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Output;
-    "build", "build [package-dir | --recipe HASH] [options]", "Build a native executable or static library from a release recipe.";
+    "build", "build [package-dir | --recipe HASH] [options]", "Build native output or publish a release recipe.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Recipe, CodeStore, ReleaseManifest, PlaceTimeout, NPlace,
             Recording, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Limit, Output, Entry, Libraries,
             Store, Inputs, Metrics, ProfileFront, Image, Emit;
-    "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
-        Compiler(CompilerOption), One:
-            PackageStore, Locked, Frozen, CodeStore, NPlace, HELP, SourceCore, SourceStd, Dir, Grant,
-            Release, Backend, Target, Limit, Entry, Libraries, Store, Inputs, Metrics, ProfileFront, Image;
     "manifest", "manifest show PATH", "Print a release manifest.";
         Simple(NoOption), One: HELP;
     "host", "host --state DIR --admission FILE --max-places N --lifecycle managed|leader [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
@@ -147,15 +143,27 @@ commands! {
             Control, HostState, OperatorListen, PlatformHost, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
     "deploy", "deploy [DIR [--source ROOT] | --recipe R] [--create SPEC] [--plan] [--wait[=DURATION]] [--request-id D]", "Submit a release to a pinned group, or propose its creation.";
         [Deploy] Deploy(DeployOption), One: HELP, Recipe, SourceDir, CodeStore, Create, Plan, Wait, RequestId, Context, GroupName, Json;
+    "rollback", "rollback ACTIVATION --group NAME[@INCARNATION] [--context NAME|/FILE] [--plan] [--wait[=DURATION]] [--request-id D] [--json]", "Deploy a retained release to its current group.";
+        [Deploy] Deploy(DeployOption), One: HELP, Plan, Wait, RequestId, Context, GroupName, Json;
+    "ps", "ps [--context NAME|/FILE] [--group NAME[@INCARNATION]] [--after NAME] [--json]", "List observed workloads without starting them.";
+        [Workloads] Observe(ObserveOption), None: HELP, Context, GroupName, After, Json;
+    "status", "status [DIR] [--context NAME|/FILE|dev] [--group NAME[@INCARNATION]] [--ready] [--json]", "Read the selected workload's serving evidence.";
+        [Workload] Observe(ObserveOption), One: HELP, Context, GroupName, Ready, Json;
+    "logs", "logs [--context NAME|/FILE] [--group NAME[@INCARNATION]] [--follow] [--after CURSOR] [--json]", "Read the selected workload's redacted lifecycle events.";
+        [Lifecycle] Observe(ObserveOption), None: HELP, Context, GroupName, Follow, After, Json;
     "op decide", "op decide OP [--decision FILE] [--wait[=DURATION]] [--context NAME|/FILE] [--json]", "Approve or refuse the exact plan held by the host.";
         [Decision] Decide(DecideOption), Operation: HELP, DecisionFile, Wait, Context, Json;
-    "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
-        Dev(DevOption), Tail:
+    "dev", "dev [DIR] [--listen ADDR] [--json] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
+        [DevStream] Dev(DevOption), Tail:
             NPlace, HELP, SourceCore, SourceStd, Dir, Grant, Backend, Runtime, Limit, Libraries, Fresh,
-            Store, Listen;
-    "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
-        Store(StoreOption), Tail: HELP, Store, DryRunExe;
-    "store", "store <inspect|stats|verify|repair|backup|restore>", "Inspect, verify, repair, back up or restore a store.";
+            Store, Listen, Json;
+    "dev wait", "dev wait [DIR] [--json]", "Wait for the edit present at invocation to finish.";
+        [DevWait] DevControl(DevControlOption), One: HELP, Json;
+    "dev stop", "dev stop [DIR] [--json]", "Stop this package's running dev session.";
+        [DevStop] DevControl(DevControlOption), One: HELP, Json;
+    "store rehearse", "store rehearse DIR --release EXE [-- arguments...]", "Preview a candidate’s migration against a store.";
+        [Rehearsal] Store(StoreOption), Tail: HELP, StoreRelease, Json;
+    "store", "store <inspect|stats|verify|repair|backup|restore|rehearse>", "Inspect, verify, repair, back up or restore a store.";
         Simple(NoOption), One: HELP;
     "store inspect", "store inspect DIR", "List the store's tables, indexes (kind, state, revision), cells and logs, beside a live writer.";
         Store(StoreOption), One: HELP;
@@ -176,7 +184,7 @@ commands! {
             HELP, Json, SimSeed, FleetHosts, FleetRounds, FleetPlaces, FleetPartitions, FleetPlacement,
             Release, Backend, Runtime, Limit, Libraries, Store;
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
-        Compiler(CompilerOption), Tail:
+        [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct,
             Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator,
             Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
@@ -185,7 +193,7 @@ commands! {
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
         Simple(NoOption), One: HELP;
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
-        Compiler(CompilerOption), Tail:
+        [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, ProfTasks, ProfMem, ProfOut, ProfFrequency,
             ProfPmu, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Entry,
@@ -225,17 +233,17 @@ commands! {
         Coverage(CoverageOption), Many: HELP, Json, Output, CoverageMap, MergeBase, MergeTargets;
     "coverage diff", "coverage diff BASE NEW [--json] | coverage diff PROFILE --test DEFINITION [--json]", "Report the sites one coverage profile reached and the other did not, or one test and the rest of its profile.";
         Coverage(CoverageOption), Pair: HELP, Json, CoverageTest;
-    "replay", "replay PACKAGE --tape TAPE [--diagnose] [--outputs DIR] [options]", "Replay a recorded program with no host grants.";
-        Compiler(CompilerOption), One:
+    "tape replay", "tape replay PACKAGE --tape TAPE [--diagnose] [--outputs DIR] [options]", "Replay a recorded program with no host grants.";
+        [Execute] Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HostState, Tape, ReplayUnit, ReplayOutputs, Diagnose, HELP, Json, SourceCore,
             SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
-    "tape", "tape show TAPE --include-credentials [--json]", "Export the header and frames stored in a credential-bearing tape.";
-        Tape(TapeOption), One: IncludeCredentials, Json, HELP;
-    "tapes", "tapes <check>", "Check recorded calls in an offline Place store.";
-        Simple(NoOption), One: HELP;
-    "tapes check", "tapes check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";
-        Store(StoreOption), One: HELP, StoreRelease, RecordedExecutable;
+    "tape", "tape <check|export|replay>", "Check, export or replay recordings.";
+        Simple(NoOption), None: HELP;
+    "tape export", "tape export TAPE --include-credentials --out FILE [--json]", "Export credential-bearing frames to a new private file.";
+        [TapeExport] Tape(TapeOption), One: IncludeCredentials, TapeOut, Json, HELP;
+    "tape check", "tape check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";
+        [TapeCheck] Store(StoreOption), One: HELP, StoreRelease, RecordedExecutable, Json;
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Replay, ExpectVerdict, Laws, WriteLaws, LawsBaseline, HELP,
@@ -267,8 +275,6 @@ commands! {
         Fmt(FmtOption), One: FmtCheck, FmtStdin, FmtData, Signatures, HELP;
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
         Explain(ExplainOption), One: ListRules, HELP, Json;
-    "primer", "primer", "Print the Hirsel primer: the language in one page.";
-        Simple(NoOption), One: HELP;
     "sdk", "sdk <ts|json|swift>", "Export bindings or the schema for a place.";
         Simple(NoOption), One: HELP;
     "sdk ts", "sdk ts <program> -o DIR [options]", "Generate TypeScript bindings and manifest.json.";

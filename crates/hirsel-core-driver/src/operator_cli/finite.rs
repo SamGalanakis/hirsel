@@ -8,14 +8,14 @@ use serde_json::{Value, json};
 use std::fmt::Display;
 
 #[derive(Clone, Copy)]
-pub(super) enum Exit {
+pub(crate) enum Exit {
     Negative = 1,
     Invalid = 2,
     Blocked = 75,
 }
 
 #[derive(Serialize)]
-pub(super) struct Failure {
+pub(crate) struct Failure {
     #[serde(skip)]
     exit: Exit,
     code: &'static str,
@@ -26,7 +26,7 @@ pub(super) struct Failure {
 }
 
 impl Failure {
-    pub(super) fn input(field: &'static str, detail: impl Display) -> Self {
+    pub(crate) fn input(field: &'static str, detail: impl Display) -> Self {
         Self {
             exit: Exit::Invalid,
             code: "InvalidInput",
@@ -35,6 +35,11 @@ impl Failure {
             retry: "none",
         }
     }
+    pub(crate) fn without_detail(mut self) -> Self {
+        self.detail = String::from("lifecycle observation did not complete");
+        self
+    }
+
     pub fn context(detail: impl Display) -> Self {
         Self::input("context", detail)
     }
@@ -47,7 +52,17 @@ impl Failure {
             retry: "none",
         }
     }
-    pub(super) fn blocked(code: &'static str, detail: &str) -> Self {
+    pub(crate) fn negative(code: &'static str, detail: &str) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+            exit: Exit::Negative,
+            field: None,
+            retry: "none",
+        }
+    }
+
+    pub(crate) fn blocked(code: &'static str, detail: &str) -> Self {
         Self {
             code,
             detail: detail.into(),
@@ -97,21 +112,21 @@ impl Failure {
 }
 
 #[derive(Serialize)]
-pub(super) struct Envelope<'a> {
-    pub(super) v: u8,
-    pub(super) command: &'a str,
-    pub(super) contract: &'static str,
-    pub(super) exit: i32,
-    pub(super) target: Value,
-    pub(super) operation: Value,
-    pub(super) outcome: Value,
-    pub(super) result: Value,
-    pub(super) error: Option<Failure>,
-    pub(super) next: Vec<Value>,
+pub(crate) struct Envelope<'a> {
+    pub(crate) v: u8,
+    pub(crate) command: &'a str,
+    pub(crate) contract: &'static str,
+    pub(crate) exit: i32,
+    pub(crate) target: Value,
+    pub(crate) operation: Value,
+    pub(crate) outcome: Value,
+    pub(crate) result: Value,
+    pub(crate) error: Option<Failure>,
+    pub(crate) next: Vec<Value>,
 }
 
 impl<'a> Envelope<'a> {
-    pub(super) fn read(command: &'a str) -> Self {
+    pub(crate) fn read(command: &'a str) -> Self {
         Self {
             v: 1,
             command,
@@ -125,14 +140,14 @@ impl<'a> Envelope<'a> {
             next: vec![],
         }
     }
-    pub(super) fn fail(&mut self, failure: Failure) {
+    pub(crate) fn fail(&mut self, failure: Failure) {
         self.exit = failure.exit as i32;
         self.outcome = json!({"kind":match failure.exit {
             Exit::Blocked=>"Blocked",Exit::Negative=>"Refused",Exit::Invalid=>"Invalid"
         }, "effect":self.outcome["effect"]});
         self.error = Some(failure);
     }
-    pub(super) fn render(&self, machine: bool) -> i32 {
+    pub(crate) fn render(&self, machine: bool) -> i32 {
         if machine {
             println!("{}", serde_json::to_string(self).unwrap());
         } else if let Some(error) = &self.error {
@@ -316,11 +331,49 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
 }
 
 // The legacy Status projection contains only unsigned counters as JSON numbers.
-pub(super) fn decimal_counters(value: &mut Value) {
+pub(crate) fn decimal_counters(value: &mut Value) {
     match value {
         Value::Number(n) => *value = json!(n.to_string()),
         Value::Array(items) => items.iter_mut().for_each(decimal_counters),
         Value::Object(fields) => fields.values_mut().for_each(decimal_counters),
         _ => {}
     }
+}
+
+pub(crate) fn tape_export(req: Request<cli::TapeOption>) -> i32 {
+    use cli::TapeOption as O;
+    let json = req.options.contains(&O::Json);
+    let mut env = Envelope::read(req.command.name);
+    env.contract = "execute";
+    let result = (|| {
+        let source = req
+            .positional
+            .ok_or_else(|| Failure::input("tape", "select a tape file"))?;
+        let outputs = req
+            .options
+            .iter()
+            .filter_map(|o| match o {
+                O::TapeOut(path) => Some(path),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [out] = outputs.as_slice() else {
+            return Err(Failure::input("out", "supply exactly one --out FILE"));
+        };
+        if !req.options.contains(&O::IncludeCredentials) {
+            return Err(Failure::input(
+                "include-credentials",
+                "tape export requires --include-credentials",
+            ));
+        }
+        crate::tape_cli::export(source.as_ref(), out.as_ref())
+            .map_err(|error| Failure::authority(Class::Invalid, error.to_string()))?;
+        env.result = json!({"file":out});
+        env.outcome = json!({"kind":"Exported","effect":"committed"});
+        Ok(())
+    })();
+    if let Err(error) = result {
+        env.fail(error);
+    }
+    env.render(json)
 }

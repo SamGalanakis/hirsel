@@ -670,7 +670,7 @@ impl PackageDir {
         let Some(program) = self.program.take() else {
             return Ok(());
         };
-        if !matches!(command, "build" | "publish" | "run") {
+        if !matches!(command, "build" | "run") {
             return Ok(());
         }
         let mut configured = grants.clone();

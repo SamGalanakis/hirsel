@@ -188,6 +188,7 @@ impl CodeStore {
 
     pub(crate) fn for_request(
         command: &str,
+        emit_recipe: bool,
         path: Option<PathBuf>,
         compiler: &Path,
     ) -> io::Result<Self> {
@@ -198,7 +199,7 @@ impl CodeStore {
             }
             None => Self::new(compiler.join("code-store")),
         };
-        if command == "publish" {
+        if emit_recipe {
             code.recipe_stage = std::env::var_os(PUBLISH_RECIPE_STAGE).map(PathBuf::from);
         }
         Ok(code)

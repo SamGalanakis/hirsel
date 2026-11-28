@@ -91,12 +91,12 @@ installed-toolchain details.
 
 ## For Coding Agents
 
-> **Authority rule:** Always run `hirsel primer` from your installed binary as the exact
+> **Authority rule:** Always run `hirsel explain primer` from your installed binary as the exact
 > authority for your installed version.
 
 Hirsel's CLI is a self-contained feedback loop for agents:
 
-- `hirsel primer` — prints the exact language primer matching your installed compiler.
+- `hirsel explain primer` — prints the exact language primer matching your installed compiler.
 - `hirsel explain RULE` (`--list`, `--json`) — prints a rule such as `OWN-7` and its examples when available.
 - `hirsel inspect --core --interface` / `hirsel inspect --std --interface` — lists every public `core` and `std` declaration with exact parameter modes (`mut`, `take`).
 - `hirsel check --json` — machine-readable diagnostics with rule IDs, spans, and causal sites.

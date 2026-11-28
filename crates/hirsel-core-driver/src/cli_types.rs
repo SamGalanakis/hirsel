@@ -7,6 +7,16 @@ pub(crate) enum ReadContract {
     Deploy,
     Decision,
     Operation,
+    TapeExport,
+    Workloads,
+    Workload,
+    Lifecycle,
+    DevStream,
+    DevWait,
+    DevStop,
+    Rehearsal,
+    TapeCheck,
+    Execute,
 }
 
 #[derive(Debug)]
@@ -48,9 +58,11 @@ pub enum Invocation {
     Host(Request<HostOption>),
     Launcher(Request<LauncherOption>),
     Deploy(Request<DeployOption>),
+    Observe(Request<ObserveOption>),
     Decide(Request<DecideOption>),
     Call(Request<CallOption>),
     Dev(Request<DevOption>),
+    DevControl(Request<DevControlOption>),
     Store(Request<StoreOption>),
     Serve(Request<ServeOption>),
     Sdk(Request<SdkOption>),

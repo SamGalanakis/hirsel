@@ -1,5 +1,5 @@
 //! Value codec field types used by the generated operator bindings.
-use super::EntryLine;
+use super::{EntryLine, LifecycleEvent, Workload};
 use crate::launcher::session::{Reader, Wire, Writer, get_roots, put_roots};
 use std::io;
 
@@ -65,6 +65,32 @@ impl Wire for Vec<EntryLine> {
         (0..r.u32()?).map(|_| EntryLine::get(r)).collect()
     }
 }
+
+macro_rules! bounded_list {
+    ($element:ty, $limit:expr) => {
+        impl Wire for Vec<$element> {
+            fn put(&self, w: &mut Writer) {
+                w.len(self.len());
+                for entry in self {
+                    entry.put(w);
+                }
+            }
+
+            fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+                let len = r.u32()?;
+                if len > $limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "oversized observation page",
+                    ));
+                }
+                (0..len).map(|_| <$element>::get(r)).collect()
+            }
+        }
+    };
+}
+bounded_list!(LifecycleEvent, 64);
+bounded_list!(Workload, 64);
 
 impl Wire for Vec<[u8; 32]> {
     fn put(&self, w: &mut Writer) {

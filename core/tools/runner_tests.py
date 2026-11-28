@@ -368,7 +368,7 @@ def host_law(args, root, work, engine, name):
     entry = {'cutover_survives_host_loss': 'identity_main', 'cold_wake_trigger': 'cold_wake_main'}.get(name, 'host_main')
 
     def publish(n_place, root_limit=268435456):
-        command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
+        command = [compiler, 'build', '--emit', 'recipe', '--inputs', str(manifest_path), '--source-core', '--source-std',
                    '--entry', f'hirsel.ai/store_crash@1/runner_crash/{entry}',
                    '--backend', engine,
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
@@ -553,12 +553,12 @@ def host_law(args, root, work, engine, name):
             shutil.copyfile(installed / 'hirsel-core-toolchain.json', replay_only / 'hirsel-core-toolchain.json')
             for directory in ('lib', 'libexec'):
                 (replay_only / directory).symlink_to(installed / directory, target_is_directory=True)
-            replay = [str(replay_only / 'hirsel'), 'replay', '--state', str(state), '--tape', str(tape)]
+            replay = [str(replay_only / 'hirsel'), 'tape', 'replay', '--state', str(state), '--tape', str(tape)]
             result = checked(replay, engine=engine, case=f'{name}:replay-asked')
             assert result.stdout.strip() == 'Sealed', 'replay did not seal against the pinned image'
             gone = [*replay[:-1], str(unpinned(tape, work / 'unpinned.tape'))]
             refused = run_case(f'{name}:gone-asked', engine, gone, capture_output=True, text=True)
-            assert (refused.returncode, refused.stderr.strip()) == (3, 'Unknown(ImageGone)'), refused
+            assert refused.returncode == 1 and 'ImageGone' in refused.stderr, refused
 
             # A host whose operator socket cannot be reached still holds the state, so the
             # offline reader must not run beside it.
@@ -566,14 +566,14 @@ def host_law(args, root, work, engine, name):
             operator.rename(hidden)
             try:
                 busy = run_case(f'{name}:replay-held', engine, replay, capture_output=True, text=True)
-                assert busy.returncode == 75 and 'temporarily unavailable' in busy.stderr, busy
+                assert busy.returncode == 75 and 'PinUnavailable' in busy.stderr, busy
             finally:
                 hidden.rename(operator)
 
         result = checked(replay, engine=engine, case=f'{name}:replay-offline')
         assert result.stdout.strip() == 'Sealed', 'offline replay did not seal against the pinned image'
         refused = run_case(f'{name}:gone-offline', engine, gone, capture_output=True, text=True)
-        assert (refused.returncode, refused.stderr.strip()) == (3, 'Unknown(ImageGone)'), refused
+        assert refused.returncode == 1 and 'ImageGone' in refused.stderr, refused
         return
 
     with running_host():

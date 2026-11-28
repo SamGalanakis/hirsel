@@ -122,7 +122,8 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let runtime = env_record_runtime();
     let run = |command: &str, args: &[&str]| {
-        let mut argv = vec![command.to_owned(), dir.path().display().to_string()];
+        let mut argv = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        argv.push(dir.path().display().to_string());
         argv.extend([
             "--runtime".into(),
             runtime.display().to_string(),
@@ -139,7 +140,7 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
         process::tape_request(&argv, dir.path())
     };
     let expected_main = "FFI-8: a recording build cannot reach foreign code: local/app@1/main/main reaches local/app@1/native/alpha";
-    let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
+    let (code, _, error) = run("tape replay", &["--tape", "missing.tape"]);
     assert_eq!(code, Some(2), "{error}");
     let expected_replay = format!("replay: refused: {expected_main}");
     let mut lines = error
@@ -274,7 +275,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
             let configuration = if release { "release" } else { "default" };
             let profile: &[_] = if release { &["--release"] } else { &[] };
             let tag = format!("{engine}-{configuration}");
-            let mut publish = vec!["publish"];
+            let mut publish = vec!["build", "--emit", "recipe"];
             publish.extend(source.concat());
             publish.extend([
                 "--backend",
@@ -383,7 +384,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
                             let mut replay = if profiled {
                                 vec!["prof", "replay", "--tasks", "--out", out.to_str().unwrap()]
                             } else {
-                                vec!["replay"]
+                                vec!["tape", "replay"]
                             };
                             replay.extend(inputs);
                             replay.extend(link);
@@ -1062,7 +1063,7 @@ fn tape_http_replays_both_native_engines() {
             dir.path().join("cache").display().to_string(),
         ];
         let invoke = |command: &str, args: &[&str]| {
-            let mut call = vec![command.to_owned()];
+            let mut call = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
             call.extend(common.iter().cloned());
             call.extend(args.iter().map(|&arg| arg.to_owned()));
             call
@@ -1158,7 +1159,7 @@ fn tape_http_replays_both_native_engines() {
         );
         let sealed = std::fs::read(&tape).unwrap();
 
-        let replay = invoke("replay", &["--tape", tape.to_str().unwrap()]);
+        let replay = invoke("tape replay", &["--tape", tape.to_str().unwrap()]);
         let mut replaying = process::tape_request_command(&replay, dir.path());
         replaying.env(hirsel_core_net::REACTOR_ENV, replayed_on);
         let (code, stdout, sent) = process::tape_request_output(replaying);
@@ -1166,7 +1167,7 @@ fn tape_http_replays_both_native_engines() {
         assert!(stdout.is_empty(), "{engine}: {stdout}");
         assert_eq!(sent.as_bytes(), wire, "{engine} replay compared to wire");
         let export = dir.path().join(format!("{engine}-output"));
-        let args = invoke("replay", &["--tape", tape.to_str().unwrap(), "--outputs", export.to_str().unwrap()]);
+        let args = invoke("tape replay", &["--tape", tape.to_str().unwrap(), "--outputs", export.to_str().unwrap()]);
         let (code, _, err) = process::tape_request(&args, dir.path());
         assert_eq!(code, Some(0), "{engine}: {err}");
         let mut connections: Vec<_> = std::fs::read_dir(&export).unwrap().map(Result::unwrap)
@@ -1359,7 +1360,7 @@ fn cli_tls_replay(with_secret: bool) {
     ];
     let tape_path = tape.to_str().unwrap();
     let invoke = |command: &str, args: &[&str]| {
-        let mut call = vec![command.to_owned()];
+        let mut call = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
         call.extend(common.iter().cloned());
         call.extend(args.iter().map(|&arg| arg.to_owned()));
         process::tape_request_command(&call, dir.path())
@@ -1479,7 +1480,7 @@ fn cli_tls_replay(with_secret: bool) {
     }
     std::fs::remove_file(&roots).unwrap();
     let outputs = dir.path().join("tls-outputs");
-    let replay = invoke("replay", &["--tape", tape_path, "--outputs", outputs.to_str().unwrap()])
+    let replay = invoke("tape replay", &["--tape", tape_path, "--outputs", outputs.to_str().unwrap()])
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
         .env_remove("HIRSEL_TL10_TOKEN")
@@ -1492,7 +1493,6 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(after(&replay.stdout).is_empty());
     assert_eq!(replay_log, format!("{recorded}inner calls: 0\n"));
     assert_eq!(std::fs::read(&tape).unwrap(), sealed);
-
     let captured = std::fs::read(outputs.join("stdout")).unwrap();
     assert_eq!(captured, recorded.as_bytes());
     for entry in std::fs::read_dir(outputs).unwrap() {
@@ -1502,17 +1502,17 @@ fn cli_tls_replay(with_secret: bool) {
             assert_secrets_absent(&[&std::fs::read(entry.path()).unwrap()]);
         }
     }
-    let show = ["tape".into(), "show".into(), tape_path.into()];
-    let (code, export, error) = process::tape_request(&show, dir.path());
-    assert_ne!(code, Some(0));
-    assert!(export.is_empty());
+    let destination = dir.path().join("raw-export.txt");
+    let mut arguments = vec!["tape".into(), "export".into(), tape_path.into(),
+        "--out".into(), destination.display().to_string()];
+    let (code, _, error) = process::tape_request(&arguments, dir.path());
+    assert_eq!(code, Some(2));
+    assert!(!destination.exists());
     assert!(error.contains("--include-credentials"), "{error}");
-    let [command, subcommand, path] = show;
-    let (code, export, error) = process::tape_request(
-        &[command, subcommand, path, "--include-credentials".into()],
-        dir.path(),
-    );
+    arguments.push("--include-credentials".into());
+    let (code, _, error) = process::tape_request(&arguments, dir.path());
     assert_eq!(code, Some(0), "{error}");
+    let export = std::fs::read_to_string(destination).unwrap();
     assert!(export.contains("op=22"), "{export}");
     if with_secret {
         assert!(export.contains("op=23"));
@@ -1679,7 +1679,7 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
         dir.path().join("cache").display().to_string(),
     ];
     let invoke = |command: &str, args: &[&str]| {
-        let mut call = vec![command.to_owned()];
+        let mut call = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
         call.extend(common.iter().cloned());
         call.extend(args.iter().map(|&arg| arg.to_owned()));
         process::tape_request_command(&call, dir.path())
@@ -1727,7 +1727,7 @@ pub fn main(n: Net) -> Result[(), Exit] waits {
         "resolve_records_one_issue_and_delivery"
     );
 
-    let replay = invoke("replay", &["--tape", path])
+    let replay = invoke("tape replay", &["--tape", path])
         .env("HIRSEL_NET11_OFFLINE", "1")
         .output()
         .unwrap();

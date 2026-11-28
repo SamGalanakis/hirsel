@@ -1,4 +1,4 @@
-//! Run a release on a store and print its report: `hirsel dry-run` and
+//! Run a release on a store and print its report: `hirsel store rehearse` and
 //! `hirsel store verify --release` on an isolated image of the store,
 //! `hirsel store repair --release` on the store itself (STORE-SPEC §15.6).
 
@@ -7,7 +7,7 @@ use crate::native_entry::launch_config;
 use crate::package_content::Sha256Writer;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek},
+    io::{self, BufRead, Read, Seek},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
@@ -21,21 +21,48 @@ const NOT_A_PLACE: i32 = 104;
 
 pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     let name = invocation.command.name;
+    let machine = invocation.options.contains(&Opt::Json);
+    let mut env = crate::operator_cli::finite::Envelope::read(name);
+    env.contract = "execute";
+    let result = execute(invocation, machine.then_some(&mut env));
+    if !machine {
+        return result;
+    }
+    use crate::operator_cli::finite::Failure;
+    match result {
+        Ok(0) => (),
+        Ok(75) => env.fail(Failure::blocked("Held", "the store is held by a writer")),
+        Ok(NOT_A_PLACE) => env.fail(Failure::input("release", "the executable is not a Place")),
+        Ok(_) => env.fail(Failure::negative(
+            "CheckFailed",
+            "the release reported a failed check",
+        )),
+        Err(error) => env.fail(Failure::input("arguments", error)),
+    }
+    Ok(env.render(true))
+}
+
+fn execute(
+    invocation: Request<Opt>,
+    machine: Option<&mut crate::operator_cli::finite::Envelope<'_>>,
+) -> Result<i32, Error> {
+    let name = invocation.command.name;
+    // These markers are the installed release protocol. Public command names can change independently.
     let (flag, header, usage): (&str, &[u8], &str) = match name {
-        "dry-run" => (
+        "store rehearse" => (
             "--hirsel-dry-run",
             b"hirsel dry-run\n",
-            "dry-run --exe NEW --store DIR",
+            "store rehearse DIR --release EXE",
         ),
         "store verify" => (
             "--hirsel-store-verify",
             b"hirsel store verify\n",
             "store verify DIR --release EXE",
         ),
-        "tapes check" => (
+        "tape check" => (
             "--hirsel-tapes-check",
             b"hirsel tapes check\n",
-            "tapes check DIR --recorded EXE --release EXE",
+            "tape check DIR --recorded EXE --release EXE",
         ),
         _ => (
             "--hirsel-store-repair",
@@ -43,16 +70,13 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
             "store repair DIR --release EXE",
         ),
     };
-    let (mut executable, mut store) = (None, invocation.positional.map(PathBuf::from));
+    let (mut executable, store) = (None, invocation.positional.map(PathBuf::from));
     let mut recorded = None;
-    if name == "dry-run" && store.is_some() {
-        return Err("dry-run takes the candidate through --exe".into());
-    }
     for option in invocation.options {
         let (destination, value) = match option {
-            Opt::DryRunExe(value) | Opt::StoreRelease(value) => (&mut executable, value),
-            Opt::RecordedExecutable(value) if name == "tapes check" => (&mut recorded, value),
-            Opt::Store(value) if name == "dry-run" => (&mut store, value),
+            Opt::Json => continue,
+            Opt::StoreRelease(value) => (&mut executable, value),
+            Opt::RecordedExecutable(value) if name == "tape check" => (&mut recorded, value),
             _ => return Err(format!("usage: hirsel {usage}").into()),
         };
         if destination.is_some() {
@@ -63,7 +87,7 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     let (Some(executable), Some(store)) = (executable, store) else {
         return Err(format!("usage: hirsel {usage}").into());
     };
-    if name != "dry-run" && !invocation.arguments.is_empty() {
+    if name != "store rehearse" && !invocation.arguments.is_empty() {
         return Err(format!("usage: hirsel {usage}").into());
     }
     let executable = std::path::absolute(executable)?;
@@ -72,7 +96,7 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
         eprintln!("hirsel: {} is not a place", executable.display());
         return Ok(NOT_A_PLACE);
     }
-    let witness = if name == "tapes check" {
+    let witness = if name == "tape check" {
         let recorded = recorded.ok_or_else(|| format!("usage: hirsel {usage}"))?;
         Some(witness_pair(&recorded, &file)?)
     } else {
@@ -115,10 +139,32 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     report.rewind()?;
     let mut seen = vec![0; header.len()];
     if report.read_exact(&mut seen).is_ok() && seen == header {
-        if let Some((_, identity)) = witness {
-            println!("{identity}");
+        if let Some(env) = machine {
+            if let Some((_, identity)) = witness {
+                let mut summary = None;
+                for line in io::BufReader::new(report).lines() {
+                    let line: serde_json::Value = serde_json::from_str(&line?)?;
+                    if line["through"].is_u64() {
+                        summary = Some(line);
+                    }
+                }
+                let mut coverage = summary.ok_or("the witness did not report journal coverage")?;
+                for value in coverage.as_object_mut().unwrap().values_mut() {
+                    let number = value.as_u64().ok_or("invalid tape check count")?;
+                    *value = serde_json::json!(number.to_string());
+                }
+                env.result = serde_json::json!({"witness":identity, "coverage":coverage});
+            } else {
+                let mut text = String::new();
+                report.read_to_string(&mut text)?;
+                env.result = serde_json::json!({"report":text});
+            }
+        } else {
+            if let Some((_, identity)) = witness {
+                println!("{identity}");
+            }
+            io::copy(&mut report, &mut io::stdout().lock())?;
         }
-        io::copy(&mut report, &mut io::stdout().lock())?;
     } else if status.success() {
         return Err(format!("the executable did not report a {name}").into());
     }

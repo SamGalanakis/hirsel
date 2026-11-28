@@ -85,6 +85,18 @@ pub struct Launch<'a> {
     pub record: Option<&'a OsStr>,
     pub observation: Option<ObservationOptions<'a>>,
     pub source_root: &'a Path,
+    pub stdio: Option<&'a [File; 2]>,
+}
+
+impl Launch<'_> {
+    pub(crate) fn redirect(&self, command: &mut std::process::Command) -> io::Result<()> {
+        if let Some([stdout, stderr]) = self.stdio {
+            command
+                .stdout(stdout.try_clone()?)
+                .stderr(stderr.try_clone()?);
+        }
+        Ok(())
+    }
 }
 
 /// Launch the existing native tape-replay entry without CPU sampling.
@@ -111,6 +123,7 @@ pub fn replay(
                 .filter_map(|(key, value)| value.map(|value| (key, value))),
         );
     }
+    launch.redirect(&mut command)?;
     let mut child = command.spawn()?;
     let pid = child.id();
     let status = child.wait()?;

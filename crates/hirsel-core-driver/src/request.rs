@@ -31,12 +31,14 @@ fn run_compiler_request(
     mut invocation: Request<Opt>,
     command: &str,
     output_kind: OutputKind,
+    emit_recipe: bool,
     profile: Option<crate::prof_command::Run>,
+    streams: Option<[std::fs::File; 2]>,
     package_input: PackageInput,
     remote: Option<Arc<Remote>>,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
     let conclude = |outcome| launch::conclude_with_remote(outcome, remote.as_deref());
-    let replay_command = command == "replay";
+    let replay_command = command == "tape replay";
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
@@ -51,7 +53,7 @@ fn run_compiler_request(
         .or_else(|| inspect_foreign.map(|_| PathBuf::from(".")));
     let test_command = command == "test";
     let static_laws = matches!(command, "laws check" | "laws write");
-    let recipe_command = matches!(command, "build" | "publish");
+    let recipe_command = command == "build";
     let native_command = recipe_command || command == "run" || replay_command || test_command;
     let mut run_args = invocation.arguments;
     // Link with --cc, the installed recipe, or the pinned LLVM clang.
@@ -177,7 +179,7 @@ fn run_compiler_request(
     .or_else(|| {
         (manifest.is_none()
             && recipe_root.is_none()
-            && (static_laws || matches!(command, "check" | "build" | "publish" | "run" | "test")))
+            && (static_laws || matches!(command, "check" | "build" | "run" | "test")))
         .then(|| PathBuf::from("."))
     });
     let (package_mode, package_store, mut workspace_app) = match package_input {
@@ -207,7 +209,7 @@ fn run_compiler_request(
         && (static_laws
             || matches!(
                 command,
-                "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
+                "check" | "build" | "run" | "test" | "inspect" | "tape replay"
             ))
     {
         if let Some(directory) = &app_directory {
@@ -445,7 +447,7 @@ fn run_compiler_request(
     let store = store
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
         .unwrap_or_else(|| crate::store::default_path(directory));
-    let code_store = CodeStore::for_request(command, code_store, &store)?;
+    let code_store = CodeStore::for_request(command, emit_recipe, code_store, &store)?;
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
             (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),
@@ -611,7 +613,7 @@ fn run_compiler_request(
         }
         return conclude(Outcome::Exit(0));
     }
-    if command != "publish"
+    if !emit_recipe
         && native_command
         && (matches!(backend, Some(Backend::Llvm)) || (backend.is_none() && release))
     {
@@ -789,13 +791,12 @@ fn run_compiler_request(
                 || output::default_path(output_kind),
                 |scratch| scratch.path().join("program"),
             );
-            let publishing = command == "publish";
-            let link = if publishing {
+            let link = if emit_recipe {
                 Link::Driver(PathBuf::new())
             } else {
                 select_link(cc)?
             };
-            let archive = if publishing {
+            let archive = if emit_recipe {
                 PathBuf::new()
             } else {
                 select_runtime()?
@@ -904,6 +905,7 @@ fn run_compiler_request(
                 record_path.as_deref(),
                 replay_outputs.as_deref(),
                 profile.as_ref(),
+                streams.as_ref(),
                 temporary_output,
                 &mut meter,
                 metrics,
@@ -1092,16 +1094,22 @@ fn run_compiler_request(
                 n_place.unwrap_or(hirsel_core_ids::launch::DEFAULT_N_PLACE),
             ) {
                 Ok(publication) => {
-                    if command == "build" && output_kind == OutputKind::Executable {
+                    if command == "build" && !emit_recipe && output_kind == OutputKind::Executable {
                         crate::native::recipe_grants::warn_ungranted(&publication.ungranted);
                     }
                     let root = publication.root;
-                    if command == "publish" {
+                    if emit_recipe {
                         if let Some(path) = metrics {
                             meter.write_metrics(path)?;
                         }
                         if json {
-                            println!("{}", serde_json::json!({ "recipe": root.to_string() }));
+                            use crate::operator_cli::finite::Envelope;
+                            let mut env = Envelope::read("build");
+                            env.contract = "execute";
+                            env.result = serde_json::json!({"recipe":root.to_string()});
+                            env.outcome =
+                                serde_json::json!({"kind":"Published","effect":"committed"});
+                            env.render(true);
                         } else {
                             println!("{root}");
                         }
@@ -1134,6 +1142,7 @@ fn run_compiler_request(
                             record_path.as_deref(),
                             replay_outputs.as_deref(),
                             profile.as_ref(),
+                            streams.as_ref(),
                             temporary_output,
                             &mut meter,
                             metrics,
@@ -1277,25 +1286,16 @@ fn run_compiler_request(
         record_path.as_deref(),
         replay_outputs.as_deref(),
         profile.as_ref(),
+        streams.as_ref(),
         temporary_output,
         &mut meter,
         metrics,
         remote.as_deref(),
     )
 }
-/// What a request leaves for its caller: an exit status, the program it
-/// built for `run` or `replay`, which the caller runs and whose status is the
-/// request's, or a `test` request's session, whose launches the caller runs.
-/// A resident compiler's client runs the program and the tests itself, so
-/// they have the client's terminal, signals, directory and environment.
-pub enum Outcome {
-    Exit(i32),
-    Launch(Launch),
-    Test(Box<crate::TestSession>),
-}
 #[path = "request_launch.rs"]
-mod launch;
-pub use launch::Launch;
+pub(crate) mod launch;
+pub use launch::{Launch, Outcome};
 use launch::{conclude, finish};
 pub(crate) use launch::{report_request_error, serve};
 

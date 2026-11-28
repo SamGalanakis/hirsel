@@ -638,7 +638,7 @@ fn contained_recipes_pin_their_module() {
             law.write("wasm_laws/hirsel.toml", manifest.replace(&pin(&original).to_string(), &pin(module).to_string()));
             law.write("wasm_laws/main.hirsel", CONTAINED_RECIPE);
             let root = PackageLaw::pass(law.run(&[
-                "publish", "wasm_laws", "--backend", engine, "--target", execution.target,
+                "build", "--emit", "recipe", "wasm_laws", "--backend", engine, "--target", execution.target,
                 "--grant", "Foreign=hirsel.ai/wasm_laws@1/laws/Box", "--grant", "Stdout",
             ])).trim().to_owned();
             std::fs::remove_dir_all(law.path("wasm_laws")).unwrap();

@@ -95,7 +95,7 @@ Transact and query entries never see `G`. Mints are never recorded or replayed.
 serving budget, not per session. A standalone place has one `n_place`, `PlaceConfig.n_place`: it
 bounds `place` in the head and every session, and `Status` and Welcome report it.
 Each session takes the head's value directly rather than configuring its own. A standalone start ignores
-`--hirsel-n-place`. Under the platform host the recipe's `n_place` (`hirsel publish
+`--hirsel-n-place`. Under the platform host the recipe's `n_place` (`hirsel build --emit recipe --code-store DIR
 --n-place`) replaces both. Generate the SDK with the same value (`hirsel sdk ts
 --n-place`); a client whose bindings carry another value reports both on its
 `launch identity mismatch` diagnostic.

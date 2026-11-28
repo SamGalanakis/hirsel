@@ -1,6 +1,6 @@
 //! The operator's commands (launch.md "Starting the host" and "The operator socket"):
 //! `hirsel host` runs the launcher with the installed platform host, `hirsel op decide` and
-//! `hirsel deploy` drive one exchange each on `STATE/operator.sock`, and `hirsel replay
+//! `hirsel deploy` drive one exchange each on `STATE/operator.sock`, and `hirsel tape replay
 //! --state` resolves a recording's pin through the host or, with no host, the offline pin
 //! reader.
 use crate::cli::{CompilerOption, HostOption, LauncherOption, Request};
@@ -29,6 +29,8 @@ pub(crate) use decision::decide;
 pub(crate) use submit::deploy;
 mod conversation;
 pub(crate) mod finite;
+#[path = "operator_cli/observe.rs"]
+pub(crate) mod observe;
 pub(crate) use context::operation_id;
 #[cfg(test)]
 mod grants_law;
@@ -39,7 +41,7 @@ mod pump;
 #[cfg(test)]
 mod slice2_law;
 mod source;
-mod wait;
+pub(crate) mod wait;
 pub(crate) use wait::{Observer, duration as wait_duration};
 
 use preview::{decision_json, preview_json};
@@ -211,6 +213,7 @@ fn class_name(class: Class) -> &'static str {
         Class::Denied => "denied",
         Class::UnknownRequest => "unknown request",
         Class::UnknownGroup => "unknown group",
+        Class::UnknownActivation => "unknown activation",
         Class::Conflict => "conflict",
         Class::Busy => "busy",
         Class::Full => "full",
@@ -390,6 +393,7 @@ impl Replay {
         use CompilerOption as O;
         for option in invocation.options {
             match option {
+                O::Json => (),
                 O::HostState(value) => state = Some(PathBuf::from(value)),
                 O::Tape(value) => tape = Some(PathBuf::from(value)),
                 O::Diagnose => diagnose = true,
@@ -408,53 +412,80 @@ impl Replay {
     }
 }
 
-/// `hirsel replay --state S --tape TAPE [--diagnose] [--unit NAME]`: run a
-/// recording's retained image, or replay one unit's stream alone.
+/// Run a recording's retained image, or replay one unit's stream alone.
 pub(crate) fn replay(invocation: Request<CompilerOption>) -> Result<i32, Error> {
-    let Replay {
-        state,
-        tape,
-        diagnose,
-        unit,
-        outputs,
-    } = Replay::read(invocation)?;
-    let tape = tape.canonicalize()?;
-    let state = state.ok_or("replay requires --state DIR")?;
-    let (tape_id, launch) = crate::tape_cli::run_route(&tape)?;
-    let assembly = match resolve_pin(&state, tape_id)? {
-        Pin::Found(assembly) => assembly,
-        Pin::Gone => {
-            eprintln!("Unknown(ImageGone)");
-            return Ok(3);
+    use finite::{Envelope, Failure};
+    use serde_json::json;
+    let machine = invocation.options.contains(&CompilerOption::Json);
+    let mut env = Envelope::read("tape replay");
+    env.contract = "execute";
+    let action = || -> Result<(), Failure> {
+        let Replay {
+            state,
+            tape,
+            diagnose,
+            unit,
+            outputs,
+        } = Replay::read(invocation).map_err(|e| Failure::input("arguments", e))?;
+        let tape = tape.canonicalize().map_err(|e| Failure::input("tape", e))?;
+        let state =
+            state.ok_or_else(|| Failure::input("state", "select the host's state directory"))?;
+        let (tape_id, launch) = crate::tape_cli::run_route(&tape)
+            .map_err(|e| Failure::negative("TapeUnreadable", &e.to_string()))?;
+        let gone =
+            || Failure::negative("ImageGone", "the recording's retained image is unavailable");
+        let assembly = match resolve_pin(&state, tape_id)
+            .map_err(|e| Failure::blocked("PinUnavailable", &e.to_string()))?
+        {
+            Pin::Found(assembly) => assembly,
+            Pin::Gone => return Err(gone()),
+            Pin::Unavailable(why) => return Err(Failure::blocked("PinUnavailable", &why)),
+        };
+        let objects = crate::launcher::objects::Records::read_only(&state.join("objects"))
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    gone()
+                } else {
+                    Failure::io(e)
+                }
+            })?;
+        let image = match pinned_image(&state, &objects, assembly, &launch) {
+            Ok(Some(file)) => file,
+            Ok(None) => return Err(Failure::input("image", "the pinned recipe refuses replay")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(gone()),
+            Err(error) => return Err(Failure::input("image", error)),
+        };
+        let mut command = Command::new(crate::host::fd_path(&image).map_err(Failure::io)?);
+        command
+            .arg("--hirsel-replay-recording")
+            .arg(if diagnose { "diagnose" } else { "same" })
+            .arg(tape)
+            .args(unit);
+        if machine {
+            command.stdout(std::process::Stdio::null());
         }
-        Pin::Unavailable(why) => {
-            eprintln!("replay: temporarily unavailable: {why}");
-            return Ok(UNAVAILABLE);
+        let status = crate::tape_cli::outputs::execute(&mut command, outputs.as_deref())
+            .map_err(|e| Failure::input("execution", e))?;
+        use std::os::unix::process::ExitStatusExt;
+        env.result = json!({"assembly":assembly.to_string(),"guest":{"exit":status.code(),"signal":status.signal()}});
+        if !status.success() {
+            return Err(Failure::negative(
+                "ReplayRefused",
+                "the pinned image did not seal the replay",
+            ));
         }
+        env.outcome = json!({"kind":"Sealed","effect":"none"});
+        Ok(())
     };
-    let objects = crate::launcher::objects::Records::read_only(&state.join("objects"))?;
-    let image = pinned_image(&state, &objects, assembly, &launch);
-    let image = match image {
-        Ok(Some(file)) => file,
-        Ok(None) => return Ok(2),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!("Unknown(ImageGone)");
-            return Ok(3);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    // Keep the verified file open across exec, even if collection removes its name.
-    let mut command = Command::new(crate::host::fd_path(&image)?);
-    command
-        .arg("--hirsel-replay-recording")
-        .arg(if diagnose { "diagnose" } else { "same" })
-        .arg(tape)
-        .args(unit);
-    let status = crate::tape_cli::outputs::execute(&mut command, outputs.as_deref())?;
-    if status.success() {
-        println!("Sealed");
+    if let Err(error) = action() {
+        env.fail(error);
     }
-    Ok(status.code().unwrap_or(1))
+    if !machine && env.exit == 0 {
+        println!("Sealed");
+        Ok(0)
+    } else {
+        Ok(env.render(machine))
+    }
 }
 
 fn pinned_image(

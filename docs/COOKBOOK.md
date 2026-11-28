@@ -2,7 +2,7 @@
 
 Seven complete, checked recipes bridging the [Primer](PRIMER.md) and the
 [Specification](spec/index.md). Every Hirsel snippet below is checked against the
-compiler. Always run `hirsel primer` and `hirsel inspect --std --interface` from your
+compiler. Always run `hirsel explain primer` and `hirsel inspect --std --interface` from your
 installed binary as the exact authority for your installed version.
 
 ## 1. CLI configuration with `Args` and `Env`

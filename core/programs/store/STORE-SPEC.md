@@ -6588,7 +6588,7 @@ The case uses a log@1 store with two tables, one of them with a `Many` index. It
 
 ### 15.6 `hirsel store inspect`, `stats`, `verify` and `repair` (Store 1.4, v2.127)
 
-Two kinds of command read a store for an operator. `inspect`, `stats` and `verify DIR` need no release: they run in `store_tool` (§15.4) and read only what the store holds. `verify --release` and `repair --release` need the release, because only its code holds the extractors that say what each index should contain. Those two run in the release's own executable, started by the driver with `--hirsel-store-verify DIR`<!-- doc-ref: external --> or `--hirsel-store-repair DIR`<!-- doc-ref: external --> (launch word 20, docs/spec/launch.md), as `hirsel dry-run` runs.
+Two kinds of command read a store for an operator. `inspect`, `stats` and `verify DIR` need no release: they run in `store_tool` (§15.4) and read only what the store holds. `verify --release` and `repair --release` need the release, because only its code holds the extractors that say what each index should contain. Those two run in the release's own executable, started by the driver with `--hirsel-store-verify DIR`<!-- doc-ref: external --> or `--hirsel-store-repair DIR`<!-- doc-ref: external --> (launch word 20, docs/spec/launch.md), as `hirsel store rehearse` runs.
 
 | Form | Runs | Does |
 |---|---|---|
@@ -6708,7 +6708,7 @@ It prints `changed X` for each changed index identity, each scrub fault, `findin
 
 **`repair --release`.** The release opens the store with `Open`, so a changed revision refuses as it does at a start. `store.repair_indexes` walks every bound Public index in `Repair` mode to its end, demoting each index with a finding, then runs `index_build_step` until no index is Backfilling. It prints `demoted X`, `built X`, and `failed X` for an index a Unique conflict stopped; any failure exits nonzero.
 
-**The dry-run's rebuild report.** `hirsel dry-run` names why it rebuilds each index: `backfill T.IX (CAUSE): read N, wrote M`, where CAUSE is `new index`, `unfinished build`, or every input that changed, comma-separated: the catalog's `shape`, `extractor`, `index key schema`, `payload schema` or `projection`, and the composite's parts `extractor code`, `table key codec`, `row codec`, `index key codec` or `payload codec` (`revision layout` for a composite of another length: one written before v2.112, or the 416-byte composite of v2.112 to v2.171, whose parts cannot be compared with fingerprints). N is the table's exact row count.
+**The dry-run's rebuild report.** `hirsel store rehearse` names why it rebuilds each index: `backfill T.IX (CAUSE): read N, wrote M`, where CAUSE is `new index`, `unfinished build`, or every input that changed, comma-separated: the catalog's `shape`, `extractor`, `index key schema`, `payload schema` or `projection`, and the composite's parts `extractor code`, `table key codec`, `row codec`, `index key codec` or `payload codec` (`revision layout` for a composite of another length: one written before v2.112, or the 416-byte composite of v2.112 to v2.171, whose parts cannot be compared with fingerprints). N is the table's exact row count.
 
 **Not built.**
 - A live store. `verify --release` and `repair` read a stopped store or a copy; a store a place serves is reached through its head, as §15.4's served backup is. The head already drives the walker and builds on idle turns (v2.123), and its counts are in the runner's `Status.upkeep`.

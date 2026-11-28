@@ -174,7 +174,7 @@ fn check(service: &Service, input: &[u8], cancelled: &AtomicBool) -> (u64, Vec<u
             vec![],
         ),
         Err(Refusal::Busy) => (8, vec![]),
-        Err(Refusal::Unavailable(s)) => (9, s.into_bytes()),
+        Err(Refusal::ToolRefusal(s) | Refusal::Unavailable(s)) => (9, s.into_bytes()),
     }
 }
 

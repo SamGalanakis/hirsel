@@ -75,7 +75,7 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
     };
     for engine in ["cranelift", "llvm"] {
         let root = PackageLaw::pass(law.run(&[
-            "publish",
+            "build", "--emit", "recipe",
             "ffi_laws",
             "--backend",
             engine,
@@ -202,7 +202,7 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
 
     let source = law.path("code-store");
     let source = source.to_str().unwrap();
-    let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Exec=profiles.toml git"]));
+    let root = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "app", "--grant", "Exec=profiles.toml git"]));
     let (_operator_root, _state, pin) = law.operator_state();
     let spec = law.group_spec(
         "Exec(policy: \"./profiles.toml\", profiles: [\"git\"])",

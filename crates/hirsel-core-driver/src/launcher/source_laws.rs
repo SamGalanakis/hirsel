@@ -118,7 +118,7 @@ fn source_publishes_with_the_normal_checker() {
     let cache = root.join("cache");
     let child = Arc::new(move |args: &[String], at: &Path| {
         let mut args = args.to_vec();
-        if args[0] == "publish" {
+        if args[0] == "build" {
             args.extend(["--libraries".into(), core.to_string_lossy().into_owned()]);
         }
         let mut command = request_command_at(&exe, &args, at);
@@ -153,7 +153,7 @@ fn source_publishes_with_the_normal_checker() {
         };
         let mut args: Vec<String> = args.iter().map(|&a| a.to_owned()).collect();
         args.extend(["--package-store".into(), path("packages")]);
-        if args[0] == "publish" {
+        if args[0] == "build" {
             args.extend([
                 "--store".into(),
                 path("compiler"),
@@ -182,7 +182,7 @@ fn source_publishes_with_the_normal_checker() {
     main("Ok(())");
     let (status, stdout, stderr) = oracle(&["lock", "."]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
-    let (status, stdout, stderr) = oracle(&["publish", ".", "--frozen"]);
+    let (status, stdout, stderr) = oracle(&["build", "--emit", "recipe", ".", "--frozen"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     let published = crate::native::recipe_build::parse_root(stdout.trim()).unwrap();
 
@@ -224,7 +224,7 @@ fn source_publishes_with_the_normal_checker() {
                     mv "$marker.tmp" "$marker"
                     wait
                 "#,
-                    "publish",
+                    "hirsel-source-law",
                 ])
                 .arg(&marker)
                 .arg(command.get_program())
@@ -273,7 +273,7 @@ fn source_publishes_with_the_normal_checker() {
     }
 
     main("1u64");
-    let (status, _, diagnostic) = oracle(&["publish", ".", "--frozen"]);
+    let (status, _, diagnostic) = oracle(&["build", "--emit", "recipe", ".", "--frozen"]);
     assert!(status.is_some_and(|s| s != 0) && !diagnostic.is_empty());
     let recipes = || -> BTreeSet<PathBuf> {
         let code = CodeStore::new(state.join("code"));

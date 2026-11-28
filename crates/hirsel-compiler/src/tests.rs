@@ -134,7 +134,6 @@ fn a_worker_s_end_is_classified_and_its_module_is_checked() {
         ),
         Refusal::Rejected("main.hirsel:1:1: no\n".into())
     );
-    // The tool's other failures say nothing about the source, so nothing caches them.
     assert_eq!(
         refusal("echo 'hirsel: no runtime' >&2; exit 1", caps()),
         Refusal::Unavailable("hirsel: no runtime\n".into())
@@ -997,3 +996,5 @@ sys.stderr.write('MEMORY_CAP_BYPASSED\\n'); sys.exit(1)";
     assert_eq!(checked_64.header.version, "1.0.0");
     assert_eq!(checked_64.header.charge, "charge-v1");
 }
+
+mod worker_result_tests;

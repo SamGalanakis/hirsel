@@ -96,7 +96,7 @@ impl Run {
                 invocation.options.push(Output(executable.to_owned()));
                 run.replay_executable.set(Some(scratch));
             }
-            invocation.command = crate::cli::named("replay")?;
+            invocation.command = crate::cli::named("tape replay")?;
         } else {
             invocation.command = crate::cli::named("run")?;
         }
@@ -116,6 +116,7 @@ impl Run {
         executable: &Path,
         arguments: &[String],
         record: Option<&str>,
+        stdio: Option<&[std::fs::File; 2]>,
     ) -> Result<ExitStatus> {
         let raw = (self.tasks || self.mem.is_some())
             .then(tempfile::NamedTempFile::new)
@@ -130,6 +131,7 @@ impl Run {
                 mem: self.mem,
             }),
             source_root: &self.source_root,
+            stdio,
         };
         let resolve = |path: &Path, image: &[u8]| symbol_source(path, image, None);
         let status = if self.replay {

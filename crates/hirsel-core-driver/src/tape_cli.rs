@@ -56,9 +56,6 @@ pub(crate) fn run_route(path: &Path) -> io::Result<([u8; 16], Vec<u8>)> {
     let mut file = File::open(path)?;
     format::run_route(|buf| read(&mut file, buf)).map_err(replay_header_error)
 }
-#[path = "tape_json.rs"]
-mod json;
-
 enum Record<'a> {
     Header(&'a Header),
     Stream(u32, &'a str),
@@ -70,40 +67,17 @@ enum Record<'a> {
 #[path = "replay_outputs.rs"]
 pub(crate) mod outputs;
 
-pub(crate) fn show(
-    request: crate::cli::Request<crate::cli::TapeOption>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::cli::TapeOption;
-    let path = request
-        .positional
-        .as_deref()
-        .ok_or("tape show requires a tape file")?;
-    if !request.options.contains(&TapeOption::IncludeCredentials) {
-        return Err("tape show requires --include-credentials".into());
+pub(crate) fn export(path: &Path, destination: &Path) -> io::Result<()> {
+    let parent = destination.parent().filter(|p| !p.as_os_str().is_empty());
+    let mut export = tempfile::NamedTempFile::new_in(parent.unwrap_or(Path::new(".")))?;
+    {
+        let mut writer = io::BufWriter::new(export.as_file_mut());
+        inspect(path, |record| write_text(&mut writer, record))?;
+        writer.flush()?;
     }
-    render(Path::new(path), request.options.contains(&TapeOption::Json))?;
+    export.as_file().sync_all()?;
+    export.persist_noclobber(destination)?;
     Ok(())
-}
-
-fn render(path: &Path, json: bool) -> io::Result<()> {
-    let out = io::stdout();
-    let mut out = io::BufWriter::new(out.lock());
-    if json {
-        let mut first = true;
-        out.write_all(b"[")?;
-        inspect(path, |record| {
-            if !first {
-                out.write_all(b",")?;
-            }
-            first = false;
-            serde_json::to_writer(&mut out, &json::record(record))?;
-            Ok(())
-        })?;
-        out.write_all(b"]\n")?;
-    } else {
-        inspect(path, |record| write_text(&mut out, record))?;
-    }
-    out.flush()
 }
 
 fn inspect(path: &Path, mut emit: impl FnMut(Record<'_>) -> io::Result<()>) -> io::Result<()> {

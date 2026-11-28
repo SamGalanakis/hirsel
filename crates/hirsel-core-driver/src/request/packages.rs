@@ -71,6 +71,8 @@ pub(super) fn run(
                     invocation,
                     check.name,
                     OutputKind::Executable,
+                    false,
+                    None,
                     None,
                     PackageInput::Captured(app),
                     remote.clone(),

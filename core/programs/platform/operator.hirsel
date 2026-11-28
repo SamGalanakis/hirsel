@@ -153,7 +153,59 @@ BeginAsk(Bytes, Precondition, BeginInput, List[String], List[String], bool)
 // Read the catalog StoreId. The connection remains open for the pinned exchange.
     | IdentifyAsk
 // Compare the StoreId on the host that executes the enclosed request.
-    | PinnedAsk(u64, u64, Bytes) | ObserveGroupAsk(String) | PlanAsk(Bytes)
+    | PinnedAsk(u64, u64, Bytes) | ObserveGroupAsk(String) | PlanAsk(Bytes) | WorkloadsAsk(Option[String]) | WorkloadAsk(String, Option[u64]) | EventsAsk(launcher.Group, Option[EventPosition]) | HistoricalAsk(String, Option[u64], u64)
+
+pub type Health: codec + send = ServingHealth | StartingHealth | ColdHealth | FailedHealth | UnknownHealth
+
+pub type OperationPhase: codec + send = InputOperationPhase | AdmissionOperationPhase | ConfirmOperationPhase | AssemblyOperationPhase | PrepareOperationPhase | PendingOperationPhase | UndecidedOperationPhase | DecisionOperationPhase | InstalledOperationPhase | FailedOperationPhase
+
+pub type OperationObservation: codec + send {
+    request: Bytes,
+    phase: OperationPhase
+}
+
+pub type Workload: codec + send {
+    group: launcher.Group,
+    observed_at: u64,
+    activation: u64,
+    assembly: Bytes,
+    generation: Option[u64],
+    store_id: Option[CatalogStore],
+    health: Health,
+    operation: Option[OperationObservation]
+}
+
+pub type EventPosition: codec + send {
+    stream: u64,
+    sequence: u64
+}
+
+pub type Lifecycle: codec + send = ReadyLifecycle | StoppedLifecycle | StartFailedLifecycle | InstalledLifecycle | OperationLifecycle(OperationPhase)
+
+pub type RequestId: codec + send {
+    first: u64,
+    second: u64
+}
+
+pub type LifecycleEvent: codec + send {
+    sequence: u64,
+    incarnation: u64,
+    observed_at: u64,
+    generation: Option[u64],
+    activation: Option[u64],
+    request: Option[RequestId],
+    kind: Lifecycle
+}
+
+pub type EventPage: codec + send {
+    stream: u64,
+    observed_at: u64,
+    oldest: u64,
+    through: u64,
+    latest: u64,
+    gap: bool,
+    events: List[LifecycleEvent]
+}
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.
@@ -206,7 +258,7 @@ pub type Report: codec + send {
 // 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store,
 // 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (a gated source whose
 // tests were not all green).
-pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass | RedClass
+pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass | RedClass | UnknownActivationClass
 
 // Which facts a decision has computed: the admission facts only (grants, approvals), or
 // every fact after prepare.
@@ -284,7 +336,7 @@ StateAnswer(Bytes, launcher.Group, Input, Phase)
     | BackupAnswer(launcher.Group, u64, u64, u64, String)
 // BackupOffline(store_path): the registered group has no running serving place; the CLI backs
 // up `store_path` offline.
-    | BackupOfflineAnswer(String) | CatalogAnswer(u64, u64) | PreconditionAnswer(Precondition) | PlanAnswer(DeployPlan, Bytes)
+    | BackupOfflineAnswer(String) | CatalogAnswer(u64, u64) | PreconditionAnswer(Precondition) | PlanAnswer(DeployPlan, Bytes) | WorkloadsAnswer(List[Workload], Option[String]) | WorkloadAnswer(Workload) | EventsAnswer(EventPage) | HistoricalAnswer(Precondition, Bytes)
 
 pub fn terminal(p: Phase) -> bool {
     match p {

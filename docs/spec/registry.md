@@ -397,7 +397,7 @@ and routing. Publish dependency-first, breaking ties by canonical identity. Use 
 child root and version when packing its parent. Obtain separate authorization per root and
 origin. Stop at the first refusal and identify committed members, failed member and unattempted
 members. Rerunning confirms existing matching releases before continuing. There is no
-workspace-wide commit across labels or registries. `hirsel publish` still emits an executable
+workspace-wide commit across labels or registries. `hirsel build --emit recipe --code-store DIR` still emits an executable
 release recipe.
 
 Named add accepts `HOST[/TENANT]/NAME`, optionally followed by `@MAJOR` or `@VERSION`.

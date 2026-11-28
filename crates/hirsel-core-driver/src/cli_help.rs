@@ -17,7 +17,10 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if matches!(command.name, "op" | "prof" | "lean" | "sdk" | "fleet") {
+        if matches!(
+            command.name,
+            "op" | "prof" | "lean" | "sdk" | "fleet" | "store" | "tape"
+        ) {
             let prefix = format!("{} ", command.name);
             for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
                 result.push_str(&format!(
@@ -62,13 +65,46 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
                 true,
             ),
             ReadContract::Help => ("none", "local", "command schema read", false),
+            ReadContract::Workloads => ("host", "operator_uid", "group page read", false),
+            ReadContract::Workload => ("host_or_dev", "operator_uid", "serving state read", false),
+            ReadContract::Lifecycle => (
+                "host",
+                "operator_uid",
+                "page read, interruption or cursor gap",
+                false,
+            ),
+            ReadContract::DevStream => (
+                "dev",
+                "operator_uid",
+                "edit attempts and session end",
+                false,
+            ),
+            ReadContract::DevWait => (
+                "dev",
+                "operator_uid",
+                "selected edit completes or is superseded",
+                false,
+            ),
+            ReadContract::DevStop => ("dev", "operator_uid", "session stops", false),
+            ReadContract::Rehearsal => ("store", "local", "migration preview completed", false),
+            ReadContract::TapeCheck => {
+                ("store", "local", "retained journal interval checked", false)
+            }
+            ReadContract::Execute => ("local_or_host_pin", "local", "guest or replay ended", false),
+            ReadContract::TapeExport => ("file", "local", "private export written", false),
             ReadContract::Operation => ("host", "operator_uid", "catalog row read", true),
         };
         let mode = match contract {
             ReadContract::Deploy | ReadContract::Decision | ReadContract::Restore => "submit",
+            ReadContract::TapeExport
+            | ReadContract::DevStream
+            | ReadContract::Execute
+            | ReadContract::Rehearsal
+            | ReadContract::TapeCheck => "execute",
+            ReadContract::DevWait | ReadContract::DevStop => "wait",
             _ => "read",
         };
-        let excludes: &[&[&str]] = if matches!(contract, ReadContract::Deploy) {
+        let excludes: &[&[&str]] = if command.name == "deploy" {
             &[&["DIR", "--recipe"], &["--source", "--recipe"]]
         } else {
             &[]
@@ -76,8 +112,22 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
         spec["result"] = json!({"type":"finite", "v":1, "contract":mode,
             "target_kind":target, "authority":authority, "completion":predicate,
             "receipt":receipt, "credential_bearing":false, "mutually_exclusive":excludes});
-        if !matches!(contract, ReadContract::Help | ReadContract::Restore) {
+        if matches!(
+            contract,
+            ReadContract::Deploy | ReadContract::Decision | ReadContract::Operation
+        ) {
             spec["result"]["--wait"] = json!({"contract":"wait","completion":"installed, failed, undecided, decision required, deadline or interrupt"});
+        }
+        if matches!(contract, ReadContract::Lifecycle | ReadContract::DevStream) {
+            spec["result"]["type"] = json!("ndjson");
+            spec["result"]["records"] = json!(["snapshot", "event", "gap", "end"]);
+        }
+        if matches!(contract, ReadContract::Workload) {
+            spec["result"]["--ready"] = json!({"contract":"wait","completion":"fresh serving proof, known unready or indeterminate"});
+        }
+        if matches!(contract, ReadContract::TapeExport) {
+            spec["result"]["credential_bearing"] = json!(true);
+            spec["result"]["required"] = json!(["TAPE", "--include-credentials", "--out"]);
         }
         if matches!(contract, ReadContract::Deploy | ReadContract::Restore) {
             spec["result"]["--plan"] =

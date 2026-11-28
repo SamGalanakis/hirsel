@@ -287,21 +287,21 @@ fn failure(result: Result<AdmittedRelease<'_>, AdmissionError>) -> AdmissionErro
 #[test]
 fn release_requires_a_root_limit_and_development_defaults() {
     use crate::native::tests::process::{request_command_at, tape_request_output};
-
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path();
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../core")
         .canonicalize()
         .unwrap();
     fs::write(
-        path.join("main.hirsel"),
+        dir.path().join("main.hirsel"),
         "pub fn main() -> Result[(), ()] { Ok(()) }\n",
     )
     .unwrap();
     let publish = |extra: &[&str]| {
         let args = [
-            "publish",
+            "build",
+            "--emit",
+            "recipe",
             ".",
             "--libraries",
             libraries.to_str().unwrap(),
@@ -314,8 +314,8 @@ fn release_requires_a_root_limit_and_development_defaults() {
         .chain(extra.iter().copied())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        let mut request = request_command_at(&std::env::current_exe().unwrap(), &args, path);
-        request.env("XDG_CACHE_HOME", path.join("cache"));
+        let mut request = request_command_at(&std::env::current_exe().unwrap(), &args, dir.path());
+        request.env("XDG_CACHE_HOME", dir.path().join("cache"));
         tape_request_output(request)
     };
     let (status, stdout, stderr) = publish(&["--release"]);
@@ -326,7 +326,7 @@ fn release_requires_a_root_limit_and_development_defaults() {
     );
     assert!(stdout.is_empty(), "{stdout}");
 
-    let store = CodeStore::new(path.join("code"));
+    let store = CodeStore::new(dir.path().join("code"));
     let admitted_limit = |extra: &[&str]| {
         let (status, stdout, stderr) = publish(extra);
         assert_eq!(status, Some(0), "{stdout}\n{stderr}");
@@ -342,7 +342,7 @@ fn release_requires_a_root_limit_and_development_defaults() {
         admitted_limit(&["--release", "--limit", "1048576"]),
         1_048_576
     );
-    fs::write(path.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[program]\nlimit = 2097152\n").unwrap();
+    fs::write(dir.path().join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[program]\nlimit = 2097152\n").unwrap();
     assert_eq!(admitted_limit(&["--release"]), 2_097_152);
 }
 

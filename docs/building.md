@@ -208,9 +208,9 @@ not exist yet.
 ```sh
 # When app's main takes Dir and Stdout parameters:
 hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json
-hirsel replay app --tape session.tape
-hirsel tape show session.tape --include-credentials
-hirsel replay app --tape session.tape --diagnose
+hirsel tape replay app --tape session.tape
+hirsel tape export session.tape --include-credentials --out session.txt
+hirsel tape replay app --tape session.tape --diagnose
 hirsel build app --recording -o app-rec
 hirsel test app --replay
 ```

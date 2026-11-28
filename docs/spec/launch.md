@@ -218,7 +218,7 @@ when the invoker's `--inputs` manifest marks it `"toolchain": true`. The library
 already chooses the core the program is built on. Any other `hirsel.toml` member or published
 archive named `runner@1` is a plain package, its program gets no bit, and its `launch_*`
 functions are not bound to the launch words. The native link reads the provenance from the
-check, the recipe link from the recipe's toolchain part (below). `hirsel dry-run`, `hirsel store verify --release` and `hirsel store repair --release` read
+check, the recipe link from the recipe's toolchain part (below). `hirsel store rehearse`, `hirsel store verify --release` and `hirsel store repair --release` read
 the bit from the executable before touching the store or starting the program. If the bit is
 clear or absent, the command names the executable on stderr and exits 104. In a directly launched
 executable without the bit these words are ordinary `Args`: the program keeps its own
@@ -360,7 +360,7 @@ wrote. An executable carries none, and `show` refuses an ELF or Mach-O file as a
 
 `hirsel build` works in two steps. It checks the program and writes its code objects and its
 release recipe into a code store. Then it assembles the executable from that recipe. Both
-steps are the only build path. `hirsel publish` runs the first step alone and prints R.
+steps are the only build path. `hirsel build --emit recipe --code-store DIR` runs the first step alone and prints R.
 `hirsel build --recipe R --code-store DIR` runs the second step alone, from objects already in
 DIR.
 
@@ -553,7 +553,7 @@ outcome (at the attempt's `v`), a genesis adoption, a no-record group's adoption
 activation) and a host-run install write it; a probe's
 intent never does (RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
-launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
+launch settings and keep referenced objects. A retained digest whose image is missing gives `ImageGone`.
 
 A `host_v1.Group` with a recording directory registers a recording group ("Recording a group"
 below): every admission for it assembles with the recording runtime and refuses any recipe
@@ -563,14 +563,14 @@ and the CLI refuses such a recipe itself before it creates DIRECTORY or sends an
 assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
 retention period is the recording specification’s `retention_days`.
-`hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
+`hirsel tape replay --state HOST_STATE --tape TAPE` resolves the recording ID through
 the pin. It asks a running host with `ResolvePin` on `HOST_STATE/operator.sock`. When no host
 listens there, it takes `HOST_STATE/launcher.lock` and then the catalog's `LOCK`, both without
 waiting, and reads the pin with `libexec/hirsel/pin_reader` (`platform_main/read_pin`), which
 replays the catalog journal read-only and prints `found <assembly hex>` or `gone`. A held lock or a
 host that does not answer exits 75 "temporarily unavailable"; a reader error is an error, never
-`Gone`. A `Gone` pin, or a pinned image no longer in the image store, exits 3
-(`Unknown(ImageGone)`). Replay then refuses a recipe with a foreign leaf before reading any record of the tape
+`Gone`. A `Gone` pin, or a pinned image no longer in the image store, reports
+`ImageGone` and exits 1. Replay then refuses a recipe with a foreign leaf before reading any record of the tape
 (FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
 
@@ -728,7 +728,7 @@ listener.
 
 *(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair, 4 tapes check), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what verify and repair do. `hirsel tapes check DIR --recorded WRITER --release WITNESS` starts WITNESS on a copy and carries WRITER's 32-byte executable digest in launch word 27. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24) defines the check.
+`hirsel store rehearse DIR --release NEW` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair, 4 tape check), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what verify and repair do. `hirsel tape check DIR --recorded WRITER --release WITNESS` starts WITNESS on a copy and carries WRITER's 32-byte executable digest in launch word 27. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24) defines the check.
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded
@@ -750,21 +750,16 @@ sessions. Dev speaks no wire protocol. The listener belongs to dev and each serv
 inherits it, and every client recovers across a swap by itself, as it does across a production
 restart (the SDK client restores its subscriptions).
 
-**Built today and planned.** Main runs the older loop: a temporary store, a stat poll, a child
-`hirsel build`, and a session proxy that holds the public socket and replays each client's
-Hello and Subscribe on the new backend. B24's law (`cli_dev_restores_subscription` in
-`tools/tests/wire_admission.py`) checks that proxy and stays green until the replacement laws
-below land with the proxy's deletion. Everything else in this section is specified, not built;
-the forms marked planned are the ones that do not exist yet.
-
-**Commands.**
+Dev holds the public listener while it rebuilds and replays each client's Hello and
+Subscribe after the next Place serves. The proposed automatic SDK publication is
+marked separately below.
 
 | Form | Does |
 |---|---|
-| `hirsel dev [SERVER] [--listen ADDR] [--store DIR] [--fresh] [--sdk DIR] [--n-place BYTES] [--json]`<!-- doc-ref: planned --> | runs the loop |
-| `hirsel dev [SERVER] --wait [--timeout SECONDS] [--json]`<!-- doc-ref: planned --> | blocks until the bytes on disk serve, or have failed |
-| `hirsel dev [SERVER] --status [--json]`<!-- doc-ref: planned --> | prints the loop's latest event |
-| `hirsel dev [SERVER] --stop`<!-- doc-ref: planned --> | stops the loop |
+| `hirsel dev [SERVER] [--listen ADDR] [--store DIR] [--fresh] [--n-place BYTES] [--json]` | Runs the loop. |
+| `hirsel dev wait [SERVER] [--json]` | Waits for the selected edit to activate or fail. |
+| `hirsel status [SERVER] --context dev [--json]` | Reads the current session. |
+| `hirsel dev stop [SERVER]` | Stops the loop for the package. |
 
 `SERVER` is a package directory with a server entry and defaults to the current directory.
 The loop also takes the build options `--limit`, `--grant`, `--dir`, `--backend`,
@@ -785,11 +780,9 @@ the store slot.
 | `--sdk DIR`<!-- doc-ref: planned --> | publish the TypeScript SDK to DIR for every activated generation | none |
 | `--n-place BYTES` | the one allowance for describe, install, serve and SDK generation | 16 MiB (`16777216`) |
 | `--json` | one JSON object per line on stdout and nothing else there | off |
-| `--timeout SECONDS` | with `--wait`<!-- doc-ref: planned -->, give up after this long | none |
 
-The control forms talk to the loop holding `SERVER`'s dev directory, as `hirsel serve --stop`
-does to a resident compiler. Builds go through the resident compiler (`--resident`), which
-stays running when dev exits.
+The control forms use a private, UID-checked Unix socket in the operator's runtime
+directory. Its name is derived from the selected package directory's identity.
 
 **One allowance.** A describe has no `PlaceConfig`, so dev cannot learn `PlaceConfig.n_place`
 without opening the store. Dev therefore passes the allowance explicitly on every launch it
@@ -823,7 +816,6 @@ list's digest) as the identity.
 | Path | Content |
 |---|---|
 | `dev.lock` | `flock` held by the running loop for this package |
-| `dev.sock` | control socket for `--wait`<!-- doc-ref: planned -->, `--status`<!-- doc-ref: planned --> and `--stop` |
 | `stores/<G>/` | dev-owned store generations. `<G>` is a decimal dev creates with `mkdir` and never reuses; each holds a `.hirsel-dev-owned` marker written at creation |
 | `stores/current` | a regular file naming the current `<G>`, written by temp file, rename and parent sync |
 | `gen/<N>/place` | immutable executables. Dev keeps the serving one, the candidate, and both OLD and NEW of any unresolved install |
@@ -994,60 +986,29 @@ reopen, and whenever DIR is missing or not current for the activated release. If
 fails after an install, NEW stays activated, dev reports `serving` with `sdk: "failed"` and the
 cause, and retries from NEW's describe on the next wake without reinstalling.
 
-**Output.** The first stdout line is `hirsel dev listening on <addr>`, printed once the first
-generation serves, even if that is after a failed first build. Status lines go to stderr, and
-the compiler's and the place's own output passes through. Nothing clears the screen.
+**Output.** The first stdout line starts with "hirsel dev listening on" and names the
+listener once the first generation serves. Compiler output and Place diagnostics go
+to stderr.
 
-```text
-hirsel dev listening on 127.0.0.1:7700
-hirsel dev: serving generation 1, store .hirsel-dev/stores/1, allowance 16777216
-hirsel dev: generation 2 serving (built 212 ms, swapped 140 ms, sdk published)
-hirsel dev: unchanged
-hirsel dev: build failed; generation 2 still serving
-hirsel dev: migration refused; generation 2 reopened
-hirsel dev: recovery pending: neither <new> nor <old> opens the store; waiting for a change
-```
-
-With `--json`, stdout carries one object per line and nothing else: the place's stdout goes to
-dev's stderr, and dev drains both child pipes. Every object has `event`, `generation` (or
-`null`), `attempted` (the receipt of the latest attempted capture), `active` (the receipt
-serving, or `null`) and `activated` (the identity digest the store holds as far as dev has
-proof, or `null`).
-
-| `event` | Extra fields |
-|---|---|
-| `serving` | `listen`, `store`, `identity`, `n_place`, `build_ms`, `swap_ms`, `sdk` (`"published"`, `"identical"`, `"failed"` or `null`), `sdk_error` |
-| `unchanged` | `build_ms` |
-| `broken` | `cause` (`"build"`, `"discover"`, `"migration"`, `"start"`, `"crashed"`, `"held"`, `"identity"`, `"store"`), `detail` (at most 64 KiB), `status` |
-| `recovery_pending` | `old`, `new` (identity digests), `detail` |
-| `building`, `stopped` | none |
-
-`--status --json`<!-- doc-ref: planned --> prints the latest object, and `--wait --json`<!-- doc-ref: planned --> the observation it settled on.
-
-**`--wait`<!-- doc-ref: planned -->.** A waiter's request makes the loop take a fresh capture C after the request
-arrives. The **success observation** is the first point where the loop is `Serving` a
-generation `g` whose receipt equals C's digest, whose child passed rule 6a, and whose SDK
-publication is `published` or `identical` (or `--sdk`<!-- doc-ref: planned --> is off); `--wait`<!-- doc-ref: planned --> prints `g` and the
-receipt and exits 0. The **failure observation** is a settled `Broken(*)` or `RecoveryPending`
-with a receipt equal to C's digest, or C itself failing discovery (a malformed manifest, a
-missing named file) with a second capture after the debounce giving the same cause and the same
-partial digest; `--wait`<!-- doc-ref: planned --> prints the cause and exits 1. A waiter never waits for an edit later
-than its own capture, and later edits can supersede what it reported.
+With `--json`, stdout carries NDJSON. The first edit produces a snapshot, later edit
+attempts and results produce events, and a controlled stop produces one end record.
+An edit receipt names the attempted edit, the active generation and any generation
+superseded by activation. Failed edits can report a predecessor still serving.
 
 | Command | 0 | 1 | 2 | 75 |
 |---|---|---|---|---|
-| `hirsel dev` | stopped by a signal or `--stop` | an I/O failure the loop cannot continue past | refused before serving | — |
-| `--wait`<!-- doc-ref: planned --> | success observation | failure observation | usage | no loop, or `--timeout` passed |
-| `--status`<!-- doc-ref: planned --> | a loop answered | — | usage | no loop |
-| `--stop` | the loop stopped | — | usage | no loop |
+| `hirsel dev` | the loop stopped | an error stopped the loop | usage or startup refusal | the store is held |
+| `hirsel dev wait [DIR]` | the selected edit activated | the selected edit failed | usage | the edit could not be observed or was superseded before observation |
+| `hirsel status [DIR] --context dev` | a live session answered | known unready with `--ready` | usage | no session or no serving proof with `--ready` |
+| `hirsel dev stop [DIR]` | the loop stopped | — | usage | no session or the stop could not be observed |
 
 **Refusals** are one block on stderr with exit 2:
 
 | Case | Text |
 |---|---|
 | `--listen` is not loopback | `dev listens on a loopback address` |
-| another loop holds `dev.lock` | `hirsel dev is already running for <dir> (pid N)` |
-| another dev holds the store's supervisor lock | `hirsel dev is already supervising store <dir> (pid N)` |
+| another loop holds `dev.lock` | "hirsel dev is already running for <dir> (pid N)" |
+| another dev holds the store's supervisor lock | "hirsel dev is already supervising store <dir> (pid N)" |
 | another process holds the store | the store's own `Held` refusal |
 | `--fresh`<!-- doc-ref: planned --> with `--store` | `--fresh starts a dev-owned store; it cannot be combined with --store`<!-- doc-ref: planned --> |
 | `--store` or `--sdk`<!-- doc-ref: planned --> overlaps sources, the dev directory, the compiler store or each other | `<dir> overlaps <other>` |
@@ -1096,7 +1057,7 @@ This section specifies how many programs from many authors are run on one machin
 ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). The launcher is built as
 `hirsel launcher` ("The launcher" below says which of its parts), and the platform host
 and its catalog as the store package's `platform` and `platform_main` modules. `hirsel host`
-starts the pair, and `hirsel deploy --create SPEC`, `hirsel deploy` and `hirsel replay --state` are its
+starts the pair, and `hirsel deploy --create SPEC`, `hirsel deploy` and `hirsel tape replay --state` are its
 operator clients ("The operator CLI" below). The cold-place wake contract they rely on is
 RUNNER-SPEC §14.
 
@@ -1570,7 +1531,7 @@ request already preparing under a revoked editor never cuts over.
 `true`. Only a Begin source carries a gate, and a Register is never gated. The operator may
 set it, and the editor must. A gated source is
 admitted as `Source(tree, gate: true)`. The launcher's step 1 ("Publish and assemble")
-runs these steps after `hirsel publish PACKAGE --frozen` gives H in its scratch, and before
+runs these steps after `hirsel build PACKAGE --emit recipe --code-store DIR --frozen` gives H in its scratch, and before
 it records H's recipe or admits `Publication(H)`; only the authority check, which reads
 nothing but the tree's manifest, runs before the publish, so a denied tree compiles
 nothing:
@@ -2013,14 +1974,14 @@ platform's handling of Fleet moves are specified in [Fleet](fleet.md).
      is the codec bytes of `launcher.Tree`: a package path, the grants and `--dir`
      bindings to publish with, and the files (at most 4 MiB in all, plain relative paths,
      no repeats). The launcher writes the files to fresh scratch and runs its own
-     `hirsel publish PACKAGE --frozen` there as a child, under the launcher's compiler
+     `hirsel build PACKAGE --emit recipe --code-store DIR --frozen` there as a child, under the launcher's compiler
      store, package store and code store and the toolchain's memory limit, which it
      inherits. The tree therefore carries its `hirsel.lock`, and its dependencies come
      only from packages the host already holds. A clean exit is a publication H in the
      launcher's code store, which the attempt then admits as `Publication(H)`: admission
      sees only publications. A refused check is `Uncompiled` with the checker's
      diagnostics (at most 64 KiB); a compiler out of memory is `Exhausted`. Neither
-     records a recipe. The same tree always gives the same H as `hirsel publish` of the
+     records a recipe. The same tree always gives the same H as `hirsel build --emit recipe --code-store DIR` of the
      same files. A gated source (`Source(tree, gate: true)`) runs the law gate in the same
      scratch after the publish and before it records H's recipe ("Self-editing" below); a
      red gate is `AdmissionFailed(Red(rows))` and records no recipe, and a lost compiler

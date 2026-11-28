@@ -492,7 +492,7 @@ def cli_dry_run_conflict():
     store = Path(CLI['server']).with_name('migration-store')
     subprocess.run([CLI['server'], 'seed'], check=True)
     before = {file.name: file.read_bytes() for file in store.iterdir()}
-    done = subprocess.run([CLI['compiler'], 'dry-run', '--exe', CLI['server'], '--store', str(store)],
+    done = subprocess.run([CLI['compiler'], 'store', 'rehearse', str(store), '--release', CLI['server']],
                           capture_output=True, text=True)
     assert done.returncode == 1, (done.stdout, done.stderr)
     assert 'add index unique' in done.stdout.splitlines(), done.stdout

@@ -417,7 +417,7 @@ hirsel explain LANG-11             # explain a compiler rule code, with an examp
 hirsel test                        # run every @test, each in its own process
 hirsel run -- a b                  # build and run (pass --grant KIND when main takes grants)
 hirsel run . --record run.tape     # record a run into an owner-only tape
-hirsel replay . --tape run.tape    # replay a recording with no host grants
+hirsel tape replay . --tape run.tape    # replay a recording with no host grants
 hirsel build --release --limit 1048576 -o program  # build a native executable
 hirsel prof run --release --limit 1048576 .        # sample CPU into profile.hprof
 hirsel prof top profile.hprof      # hottest functions and source lines; profile before tuning
@@ -429,7 +429,7 @@ hirsel fmt --check .               # check canonical formatting (hirsel fmt . wr
 
 When `check` refuses, read its rule code and site first, then run `hirsel explain RULE` for
 the exact statement. Look up operations with `hirsel inspect --core --interface` or
-`hirsel inspect --std --interface`. `hirsel primer` (or `hirsel explain primer`) prints this
+`hirsel inspect --std --interface`. `hirsel explain primer` prints this
 document.
 
 ## 11. A command that reads a file

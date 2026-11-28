@@ -31,7 +31,7 @@ archives = [
 ]
 "#));
             PackageLaw::pass(law.run(&[
-                "publish", "ffi_laws", "--backend", engine, "--grant", "Foreign=hirsel.ai/ffi_laws@1/laws/Laws",
+                "build", "--emit", "recipe", "ffi_laws", "--backend", engine, "--grant", "Foreign=hirsel.ai/ffi_laws@1/laws/Laws",
             ])).trim().to_owned()
         };
         let first = publish(b"");
@@ -45,7 +45,7 @@ pub fn main() -> Result[(), Exit] {
     if probe(None) == 0 { Ok(()) } else { Error(Exit(status: 4)) }
 }
 "#);
-        let without_grant = PackageLaw::pass(law.run(&["publish", "ffi_laws", "--backend", engine]));
+        let without_grant = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "ffi_laws", "--backend", engine]));
         std::fs::remove_dir_all(law.path("ffi_laws")).unwrap();
         let build = |root: &str| law.run(&["build", "--recipe", root, "-o", "sealed-program"]);
         for root in [&first, &second] {

@@ -271,32 +271,40 @@ request at the same time; there is no process-wide offline switch.
 
 ## Dev loop
 
-*`hirsel dev` (`--listen`, `--store`, `--fresh`, `--n-place`, `--json`) is built; `--sdk`<!-- doc-ref: planned -->,
-`--wait`<!-- doc-ref: planned -->, `--status`<!-- doc-ref: planned --> and `--stop` remain planned. [launch](launch.md#the-dev-loop) is the full
-text.* `hirsel dev`
-rebuilds a local place as its sources change, keeps its store across sessions, and activates
-each edit by the ordinary install and reopen. Its catalogue row reads "Rebuild a local place and restore its open subscriptions."
+`hirsel dev` rebuilds a local Place as its sources change and keeps its store across
+sessions. A failed compile leaves the last activated edit serving.
 
 | Form | Does |
 |---|---|
-| `hirsel dev [SERVER] [--listen ADDR] [--store DIR] [--fresh] [--sdk DIR] [--n-place BYTES] [--json] [build-opts] [-- args...]`<!-- doc-ref: planned --> | runs the loop |
-| `hirsel dev [SERVER] --wait [--timeout SECONDS] [--json]`<!-- doc-ref: planned --> | waits until the bytes on disk serve (0) or have failed (1) |
-| `hirsel dev [SERVER] --status [--json]`<!-- doc-ref: planned --> | prints the loop's latest event |
-| `hirsel dev [SERVER] --stop`<!-- doc-ref: planned --> | stops the loop |
+| `hirsel dev [DIR] [--listen ADDR] [--store DIR] [--fresh] [--n-place BYTES] [--json] [-- ARGS...]` | Runs the session. In JSON mode it streams edit receipts with attempted, active and superseded identities. |
+| `hirsel dev wait [DIR] [--json]` | Waits for the edit selected at invocation. Exits 0 when it activates, 1 on a failed edit and 75 if the outcome cannot be observed. |
+| `hirsel status [DIR] --context dev [--ready] [--json]` | Reads the live session's current serving state. |
+| `hirsel dev stop [DIR] [--json]` | Stops the session for the selected package. |
 
-`--n-place` (default 16 MiB) is the one allowance for describe, install, serve and SDK
-generation. `--store DIR` is never deleted; `--fresh`<!-- doc-ref: planned --> starts a new
-dev-owned store generation. `--sdk DIR`<!-- doc-ref: planned --> publishes the TypeScript SDK
-for every activated generation by one directory exchange. Builds go through the resident
-compiler. The build options `--libraries`, `--runtime`, `--source-core` and `--source-std` are
-fixed for the session.
+`--n-place` defaults to 16 MiB. The session uses this allowance for describe, install and
+serve. `--fresh` starts a new dev-owned store generation. A user-supplied `--store DIR`
+persists across sessions. The build options remain fixed for each session.
 
-| Command | 0 | 1 | 2 | 75 |
-|---|---|---|---|---|
-| the loop | stopped by a signal or `--stop` | an I/O failure it cannot continue past | refused before serving | — |
-| `--wait`<!-- doc-ref: planned --> | the edit serves | the edit failed | usage | no loop, or `--timeout` passed |
-| `--status`<!-- doc-ref: planned --> | a loop answered | — | usage | no loop |
-| `--stop` | the loop stopped | — | usage | no loop |
+## Workloads
+
+`hirsel ps [--context NAME|/FILE] [--after NAME] [--json]` lists groups in the selected
+authority. A page includes the current activation, health and observation age. Reads
+leave cold groups parked.
+
+`hirsel status --group NAME[@INCARNATION] [--ready] [--json]` reads one host snapshot.
+Plain status exits 0 for a readable group. Readiness exits 0 for fresh serving evidence,
+1 for a known unready state and 75 when evidence is missing or indeterminate. Archive
+data outside the host's observation coverage is identified in the result.
+
+`hirsel logs --group NAME[@INCARNATION] [--follow] [--after CURSOR] [--json]` emits
+bounded NDJSON pages of lifecycle metadata with a cursor scoped to the host and
+incarnation. Use the cursor to resume. A `gap` record requires a fresh snapshot.
+The controlled final `end` record carries the finite result and exit. Diagnostic
+text, guest bytes and tape frames are excluded.
+
+`hirsel rollback ACTIVATION --group NAME[@INCARNATION] [--wait] [--json]` resolves a
+retained release in this incarnation and submits it through the deploy path against
+the current predecessor and store.
 
 ## Store commands
 
@@ -310,11 +318,12 @@ passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the fu
 | `hirsel store restore --from BACKUP --target SELECTOR --to DIR [--plan] [--json]` | checks the stamped backup at the selected boundary and records the plan outside the store. With `--plan` it exits 0. Submit the exact digest with `op decide` to publish a fresh child at the reviewed destination. |
 | `hirsel store inspect DIR` | captures the store beside a live writer and prints its identity and head, then each table and index with its state, revision and exact row count |
 | `hirsel store stats DIR` | the `inspect` lines with each collection's charged bytes, plus the journal's segments and bytes, the account at the cut, pins and pack rows |
+| `hirsel store rehearse DIR --release EXE [--json]` | Runs the candidate migration on a private copy of the offline store. |
 | `hirsel store verify DIR` | scrubs a copy of the store and prints each fault |
 | `hirsel store verify DIR --release EXE` | on a copy, declares the release's schema, scrubs, and checks every Public index against its table under the release's extractors; prints each changed revision, fault and wrong entry; changes nothing |
 | `hirsel store repair DIR --release EXE` | on DIR itself: demotes each index with a wrong entry and builds every index to the end; refuses while a deploy's export lease is held |
 
-`hirsel tapes check DIR --recorded WRITER --release WITNESS` checks the live journal on
+`hirsel tape check DIR --recorded WRITER --release WITNESS` checks the live journal on
 a copy of an offline Place store. Use the original executable and the same program built
 with the other compiler backend. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24)
 defines the report and verdicts.
@@ -337,7 +346,7 @@ again. The `--release` forms exit as the release does when it refuses to start (
 | 1 | Refused with a reason on stderr, or `verify DIR` found a scrub fault |
 | 2 | Usage |
 | 75 | A writer holds the store |
-| 104 | `dry-run` or a `--release` form refused the named executable because it is not a place |
+| 104 | `store rehearse` or a `--release` form refused the named executable because it is not a place |
 
 ## Coverage
 
@@ -374,7 +383,7 @@ Phase 1 routes each scoped package by longest whole-component prefix in the invo
 The default origin is `https://pkg.hirsel.ai`. The command
 `hirsel registry publish [--workspace]`<!-- doc-ref: planned --> checks and uploads the member.
 The workspace form publishes dependencies first and reports which members committed if a
-later member fails. A retry resumes by verifying those releases. `hirsel publish` keeps
+later member fails. A retry resumes by verifying those releases. `hirsel build --emit recipe --code-store DIR` keeps
 its executable recipe meaning. [Registry protocol and client](registry.md)
 
 ## Adding a dependency
@@ -447,7 +456,7 @@ profiling runtime and adds task, wake, host-stack and provider I/O rows.
 When CPU sampling is unavailable, a task capture still runs and reports the
 perf diagnostic in its quality header. It passes arguments after
 `--` to the executable, leaves its standard streams connected, and returns
-its exit status. `--out` names the profile and defaults to `profile.hprof`.
+a nonzero guest status as exit 1. `--out` names the profile and defaults to `profile.hprof`. In structured `run` and `prof run`, redirect guest stdout to fd 3 and stderr to fd 4. Result stdout carries one JSON document and preserves the guest exit or signal.
 The command writes a [portable SQLite profile](profiling.md) after the
 process exits. The sampler resolves verified detached DWARF, embedded DWARF
 and ELF symbols.

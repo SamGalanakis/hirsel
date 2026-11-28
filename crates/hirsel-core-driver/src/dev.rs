@@ -23,6 +23,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "dev_control.rs"]
+pub(crate) mod control;
 #[path = "dev_directory.rs"]
 mod directory;
 #[path = "dev_session.rs"]
@@ -107,6 +109,7 @@ struct Options {
     store: Option<PathBuf>,
     fresh: bool,
     n_place: u64,
+    json: bool,
 }
 
 impl Options {
@@ -122,9 +125,14 @@ impl Options {
             store: None,
             fresh: false,
             n_place: hirsel_core_ids::launch::DEFAULT_N_PLACE,
+            json: false,
         };
         for option in invocation.options {
             let (flag, value) = match option {
+                Opt::Json => {
+                    options.json = true;
+                    continue;
+                }
                 Opt::Listen(value) => {
                     options.listen = value.parse()?;
                     continue;
@@ -391,6 +399,7 @@ struct Supervisor<'a> {
     active: Option<Serving>,
     locator: directory::Locator,
     announced: bool,
+    control: control::State,
 }
 
 impl Supervisor<'_> {
@@ -448,9 +457,14 @@ impl Supervisor<'_> {
             child,
             proof,
         });
+        self.control.active(Some(image_ref_json(
+            self.active.as_ref().unwrap().image.reference,
+        )));
         if !self.announced {
-            println!("hirsel dev listening on {}", self.public);
-            io::stdout().flush()?;
+            if !self.options.json {
+                println!("hirsel dev listening on {}", self.public);
+                io::stdout().flush()?;
+            }
             self.announced = true;
         }
         Ok(())
@@ -458,6 +472,7 @@ impl Supervisor<'_> {
 
     fn stop_place(&mut self) {
         *self.current.lock().unwrap() = None;
+        self.control.active(None);
         drop(self.active.take());
     }
 
@@ -770,6 +785,30 @@ impl Proxy {
 }
 
 pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
+    let structured = invocation.options.contains(&Opt::Json);
+    let result = supervise(invocation);
+    if !structured {
+        return result;
+    }
+    use crate::operator_cli::finite::{Envelope, Failure};
+    let mut env = Envelope::read("dev");
+    env.contract = "execute";
+    match result {
+        Ok(0) => env.outcome = serde_json::json!({"kind":"Stopped","effect":"committed"}),
+        Ok(_) => env.fail(Failure::negative(
+            "DevFailed",
+            "dev session ended with a failure",
+        )),
+        Err(error) if error.is::<HeldStore>() => {
+            env.fail(Failure::blocked("Held", "store is held by another process"))
+        }
+        Err(error) => env.fail(Failure::input("dev", error)),
+    }
+    control::record("end", None, serde_json::to_value(&env)?)?;
+    Ok(env.exit)
+}
+
+fn supervise(invocation: Request<Opt>) -> Result<i32, Error> {
     let options = Options::read(invocation)?;
     if crate::resident::serving() {
         return Err("dev must run in the terminal process".into());
@@ -787,6 +826,8 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
         discovery.as_deref().ok(),
     )?;
     let locator = directory.load()?;
+    let control = control::State::new();
+    let control_server = control::Server::start(&options.server, control.clone())?;
     let public = TcpListener::bind(options.listen)?;
     public.set_nonblocking(true)?;
     let address = public.local_addr()?;
@@ -802,11 +843,13 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
         active: None,
         locator,
         announced: false,
+        control,
     };
     let result = watch(&mut dev, discovery);
     dev.stop_place();
     let interrupted = stopped();
     let proxy_result = proxy.stop();
+    drop(control_server);
     match (result, proxy_result) {
         (Ok(()), Ok(())) => Ok(0),
         (Err(_), _) if interrupted => Ok(0),
@@ -818,35 +861,63 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
     }
 }
 
-fn watch(dev: &mut Supervisor<'_>, discovery: Result<Vec<PathBuf>, Error>) -> Result<(), Error> {
-    let fallback: Vec<_> = dev
-        .options
-        .server
+fn fallback_sources(server: &Path) -> Vec<PathBuf> {
+    server
         .ancestors()
         .map(|path| path.join(crate::package_dir::MANIFEST))
-        .collect();
+        .collect()
+}
+
+fn image_ref_json(image: ImageRef) -> serde_json::Value {
+    serde_json::json!({"generation":image.number.to_string(),"release":hirsel_core_ids::hex::encode(&image.identity)})
+}
+
+fn watch(dev: &mut Supervisor<'_>, discovery: Result<Vec<PathBuf>, Error>) -> Result<(), Error> {
+    let fallback = fallback_sources(&dev.options.server);
     let mut files = fallback.clone();
     let mut next = Some(discovery);
     let mut seen = source_state(&files);
     while !stopped() {
         dev.reap()?;
         if let Some(discovery) = next.take() {
-            match discovery {
+            let edit = control::edit(discovery.as_deref().unwrap_or(&fallback));
+            let predecessor = dev.active.as_ref().map(|active| active.image.reference);
+            let attempt = dev.control.begin(edit)?;
+            if dev.options.json {
+                let kind = if attempt == 1 { "snapshot" } else { "event" };
+                control::record(kind, Some(attempt), dev.control.snapshot())?;
+            }
+            let result = match discovery {
                 Ok(found) => {
                     files = found;
                     seen = source_state(&files);
-                    dev.build(&files)?;
+                    dev.build(&files)
                 }
                 Err(error) => {
                     dev.broken("discovery failed", error);
-                    let mut watched = files.clone();
-                    watched.extend(fallback.iter().cloned());
-                    watched.sort();
-                    watched.dedup();
-                    files = watched;
+                    files.extend(fallback.iter().cloned());
+                    files.sort();
+                    files.dedup();
                     seen = source_state(&files);
+                    Ok(())
                 }
+            };
+            let current = dev.active.as_ref().map(|active| active.image.reference);
+            let advanced =
+                current.is_some_and(|new| predecessor.is_none_or(|old| new.number != old.number));
+            let superseded = predecessor.filter(|_| advanced).map(image_ref_json);
+            let outcome = if stopped() {
+                "Interrupted"
+            } else if result.is_ok() && advanced {
+                "Activated"
+            } else {
+                "Failed"
+            };
+            let receipt = dev.control.finish(outcome, superseded);
+            if dev.options.json {
+                control::record("event", Some(attempt), receipt)?;
             }
+            result?;
         }
         if source_state(&files) != seen {
             next = Some(sources(&dev.options.server));

@@ -240,7 +240,7 @@ class StoreNoSync(unittest.TestCase):
                     "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }\n"
                 )
                 code = root / "code"
-                published = cli("publish", app, "--libraries", ROOT / "core", "--backend", "cranelift",
+                published = cli("build", app, "--emit", "recipe", "--libraries", ROOT / "core", "--backend", "cranelift",
                                 "--store", root / "publish-store", "--code-store", code)
                 self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
                 recipe = published.stdout.strip()
@@ -324,7 +324,7 @@ class StoreNoSync(unittest.TestCase):
         self.assertEqual(len(received), 1)
         sealed = tape.read_bytes()
         # Offline replay opens the tape through the host's confined OS Dir provider.
-        replayed = cli("replay", *common, "--store", root / "replay-store",
+        replayed = cli("tape", "replay", *common, "--store", root / "replay-store",
                        "-o", root / "replay-program", "--tape", tape)
         # Sealed exits 0 and guarantees the recorded outcome. The observer
         # also sees the replayed output while the CLI suppresses live Stdout.

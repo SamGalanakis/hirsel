@@ -31,8 +31,13 @@ pub fn run(
     // Validate an explicit event list even when the runtime stream can
     // carry on without perf.
     perf::events(options.pmu.unwrap_or("cycles"))?;
-    let mut child =
-        SuspendedLaunchedProcess::fork(&path, launch.arguments, launch.record, launch.observation)?;
+    let mut child = SuspendedLaunchedProcess::fork(
+        &path,
+        launch.arguments,
+        launch.record,
+        launch.observation,
+        launch.stdio,
+    )?;
     let pid = child.pid() as u32;
     let sampling = perf::online_cpus().and_then(|cpus| open_perf(pid, &cpus, options, true));
     let (mut group, event, fallback) = match sampling {
@@ -248,6 +253,7 @@ int main(void) {
                 arguments: &[],
                 record: None,
                 observation: None,
+                stdio: None,
                 source_root: dir.path(),
             },
             &CaptureOptions {

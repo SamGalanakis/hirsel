@@ -41,7 +41,7 @@ impl Observer {
     }
 }
 
-pub(super) struct Wait {
+pub(crate) struct Wait {
     pub observer: Observer,
     previous: libc::sigaction,
 }

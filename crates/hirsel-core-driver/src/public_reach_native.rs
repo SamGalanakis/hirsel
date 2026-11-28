@@ -47,7 +47,7 @@ fn cli_replays_public_reach() {
             dir.path().join("cache").display().to_string(),
         ];
         let invoke = |command: &str, args: &[&str]| {
-            let mut call = vec![command.to_owned()];
+            let mut call = command.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
             call.extend(common.iter().cloned());
             call.extend(args.iter().map(|&arg| arg.to_owned()));
             process::tape_request_command(&call, dir.path())
@@ -74,7 +74,7 @@ fn cli_replays_public_reach() {
             "public_reach_survives_grant_snapshot"
         );
 
-        let replay = invoke("replay", &["--tape", path]).output().unwrap();
+        let replay = invoke("tape replay", &["--tape", path]).output().unwrap();
         let replay_log = String::from_utf8_lossy(&replay.stderr);
         assert_eq!(
             replay.status.code(),

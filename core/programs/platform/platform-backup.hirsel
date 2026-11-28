@@ -5,7 +5,7 @@
 // When the registered group is cold (no running serving child), the host answers
 // `BackupOfflineAnswer(g.store)` so the CLI backs up the stopped store directly.
 fn empty_vol() -> Vol {
-    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, cause: None, deposed: None, prep: None, admit: None, backup: None)
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, failed_before_ready: None, last: string.new(), reprobe: false, cause: None, deposed: None, prep: None, admit: None, backup: None)
 }
 
 // The volatile state of one group, by value: read it, change it, put it back.

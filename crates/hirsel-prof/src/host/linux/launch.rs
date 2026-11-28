@@ -38,6 +38,7 @@ impl SuspendedLaunchedProcess {
         arguments: &[String],
         record: Option<&OsStr>,
         observation: Option<ObservationOptions<'_>>,
+        stdio: Option<&[File; 2]>,
     ) -> io::Result<Self> {
         let program = CString::new(path.as_os_str().as_bytes())?;
         let arguments = arguments
@@ -86,6 +87,7 @@ impl SuspendedLaunchedProcess {
 
         // SAFETY: the child calls only async-signal-safe libc routines and
         // never returns to Rust drop glue, allocation, or the caller.
+        let stdio = stdio.map(|[out, err]| (out.as_raw_fd(), err.as_raw_fd()));
         let pid = unsafe {
             let pid = libc::fork();
             if pid == 0 {
@@ -97,6 +99,7 @@ impl SuspendedLaunchedProcess {
                     program.as_ptr(),
                     argv.as_ptr(),
                     envp.as_ptr(),
+                    stdio,
                 );
             }
             pid
@@ -173,6 +176,7 @@ unsafe fn exec_after_resume(
     program: *const libc::c_char,
     argv: *const *const libc::c_char,
     envp: *const *const libc::c_char,
+    stdio: Option<(RawFd, RawFd)>,
 ) -> ! {
     // SAFETY: the caller's exec vectors are terminated and live, the fds are
     // owned, and every attempt to read and write uses a live, fixed-size buffer.
@@ -186,8 +190,14 @@ unsafe fn exec_after_resume(
             }
         }
         libc::close(resume);
-        libc::execve(program, argv, envp);
-        let errno = *libc::__errno_location();
+        let errno = if let Some((stdout, stderr)) = stdio
+            && (libc::dup2(stdout, 1) < 0 || libc::dup2(stderr, 2) < 0)
+        {
+            *libc::__errno_location()
+        } else {
+            libc::execve(program, argv, envp);
+            *libc::__errno_location()
+        };
         // Writes below PIPE_BUF are atomic. Retry only an interrupted write.
         while libc::write(error, (&raw const errno).cast(), size_of::<i32>()) < 0
             && *libc::__errno_location() == libc::EINTR

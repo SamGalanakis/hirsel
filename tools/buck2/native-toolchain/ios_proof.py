@@ -26,6 +26,7 @@ def removed_system_name(name):
     return name.startswith("_posix_spawn") or name in {
         "__NSGetExecutablePath", "_fork", "_vfork", "_kill", "_waitpid",
         "_proc_pidfdinfo", "_proc_pidinfo", "_pthread_fchdir_np",
+        "_socketpair",  # The embedded Exec helper is desktop-only.
     }
 
 

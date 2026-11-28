@@ -186,3 +186,79 @@ fn test_csim_oracle_positive_d6(tasks: Tasks, c: Clock) -> Result[(), String] wa
     }
     Ok(())
 }
+
+// A cut plan whose first draw keeps every unsynced operation.
+fn oc_keep_all() -> std.sim.world.Plan {
+    let mut words: List[u64] = list.new()
+    list.push(mut words, 18446744073709551615)
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take words)
+    std.sim.world.plan_from(std.sim.world.Script(tail_seed: 0, streams: take streams), 0)
+}
+
+// D6 needs the damaged frame synced. A damaged journal write that no sync
+// and no durable reply covered is not a durable frame, even when the power
+// cut happens to keep it and the recovery reads it.
+@test
+fn test_csim_oracle_negative_d6_unsynced(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    // Site 0 opens s/j-1 and site 1 writes it.
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(14, Some((1, Corrupt))), OC_ROOM, Some(take tx))
+    let mut f = host.open(d, "s/j-1", ReadWrite) ?=> |_| "negative control 4: open failed"
+    let mut data: Bytes = list.with_capacity(64)
+    list.fill(mut data, 64, 0x55u8)
+    host.write_at(mut f, 0, data) ?=> |_| "negative control 4: write failed"
+    host.close(take f) ?=> |_| "negative control 4: close failed"
+    let mut crashed = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence(1)
+    oc_drain(rx, mut ev, 4)
+    if list.len(ev.journal) != 1 {
+        return Error("negative control 4: expected one damaging write to s/j-1")
+    }
+    let mut cut = oc_keep_all()
+    std.sim.fs.crash(mut crashed, mut cut)
+    ev.seen = list.new()
+    let (tx2, rx2): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d2, server2) = sim_disk_mount_tapped(tasks, c, take crashed, std.sim.world.plan(15), OC_ROOM, Some(take tx2))
+    oc_get(d2, "s/j-1")?
+    let _ = sim_disk_unmount(take d2, take server2)
+    oc_drain(rx2, mut ev, 4)
+    if oc_count(ev, true) != 1 {
+        return Error("negative control 4: the cut did not keep the unsynced damaged write")
+    }
+    if csim_rollback_allowed(ev, 2, 3) {
+        return Error("negative control 4: an unsynced damaged journal write was excused as D6")
+    }
+    Ok(())
+}
+
+// D6 needs a crash between the damaged write and the recovery that reads
+// it. Here the write is synced and the next mount reads it with no power
+// cut and no dropped Db in between.
+@test
+fn test_csim_oracle_negative_d6_crashless(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(16, Some((1, Corrupt))), OC_ROOM, Some(take tx))
+    oc_put(d, "s/j-1", 0x55)?
+    let closed = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence(1)
+    oc_drain(rx, mut ev, 4)
+    if list.len(ev.journal) != 1 {
+        return Error("negative control 5: expected one damaging write to s/j-1")
+    }
+    ev.seen = list.new()
+    let (tx2, rx2): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d2, server2) = sim_disk_mount_tapped(tasks, c, take closed, std.sim.world.plan(17), OC_ROOM, Some(take tx2))
+    oc_get(d2, "s/j-1")?
+    let _ = sim_disk_unmount(take d2, take server2)
+    oc_drain(rx2, mut ev, 4)
+    if oc_count(ev, true) != 1 {
+        return Error("negative control 5: the next mount did not read the damaged frame")
+    }
+    if csim_rollback_allowed(ev, 2, 3) {
+        return Error("negative control 5: a damaged journal write with no crash before its read was excused as D6")
+    }
+    Ok(())
+}

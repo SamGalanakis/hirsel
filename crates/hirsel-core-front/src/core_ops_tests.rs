@@ -10,6 +10,76 @@ fn canonical(source: &str) -> (NameIndex, Vec<ModuleInput>) {
 }
 
 #[test]
+fn deque_finalizer_verifies_in_its_own_unit() {
+    let (index, modules) = canonical("fn close(take q: deque.Deque[String]) {}");
+    let p = Program::declare(&index, &modules);
+    let lower = |path: DefPath| {
+        let f = p.fns.iter().position(|f| f.path == path).unwrap();
+        let mut e = Emitter::new();
+        let check = p.check_lower(f, &mut e);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        (e.module, check)
+    };
+    let (owner, _) = lower(DefPath::from_full("app@1/main/close").unwrap());
+    let definition = DefPath::core("deque.Deque");
+    let finalizer = owner
+        .functions
+        .iter()
+        .find(|f| owner.instances[f.instance.index()].definition == definition)
+        .unwrap();
+    let identity = owner.identity(finalizer.instance);
+    let elem = owner.instances[finalizer.instance.index()].arguments[0];
+    let (source, check) = lower(definition);
+    let (unit, target) = materialize(
+        &source,
+        check.function.unwrap(),
+        &check.template.unwrap(),
+        &identity,
+        &[&owner.closure(elem)],
+    )
+    .unwrap();
+    assert!(
+        unit.types
+            .iter()
+            .any(|r| r.finalizer == Some(hirsel_core_layout::FuncRef(target.0)))
+    );
+    wf::module(&unit).unwrap();
+}
+
+#[test]
+fn repeat_array_with_live_frame_list() {
+    let (index, modules) = canonical(
+        "fn fill(x: u8) -> u8 {
+            let mut xs: List[u8] = list.new()
+            list.push(mut xs, x)
+            let a: Inline[u8, 32] = [x; 32]
+            a[list.len(xs)]
+        }",
+    );
+    let p = Program::declare(&index, &modules);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.package_is("app", "1"))
+        .unwrap();
+    let mut e = Emitter::new();
+    let check = p.check_lower(f, &mut e);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let body = e.module.functions[check.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    assert!(!body.frame_obligations().is_empty());
+    wf::module(&e.module).unwrap();
+}
+
+#[test]
 fn core_operation_declarations_do_not_drift() {
     let (index, modules) = canonical("");
     let p = Program::declare(&index, &modules);

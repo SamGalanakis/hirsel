@@ -31,9 +31,31 @@ pub opaque type Deque[T]: shareable + send {
         slots_shift(mut d.ring, int.wrapping_add(d.head, i), int.wrapping_add(wrapped, i))
         i = int.wrapping_add(i, 1)
     }
-    reverse(mut d.ring, 0, wrapped)
-    reverse(mut d.ring, wrapped, count)
-    reverse(mut d.ring, 0, count)
+    // Reverse each run, then their union, to put the prefix in logical order.
+    // Keep these moves in the finalizer's independently verified body.
+    let mut pass: u64 = 0
+    while pass < 3 {
+        let mut a: u64 = if pass == 1 {
+            wrapped
+        } else {
+            0
+        }
+        let mut b = if pass == 0 {
+            wrapped
+        } else {
+            count
+        }
+        while a < b {
+            b = int.wrapping_sub(b, 1)
+            if a < b {
+                let x = slots_take(mut d.ring, a)
+                slots_shift(mut d.ring, b, a)
+                slots_put(mut d.ring, b, take x)
+            }
+            a = int.wrapping_add(a, 1)
+        }
+        pass = int.wrapping_add(pass, 1)
+    }
     d.head = 0
 }
 
@@ -219,20 +241,6 @@ fn grow[T](mut d: Deque[T]) {
     let old = replace(mut d.ring, take ring)
     slots_free(take old)
     d.head = 0
-}
-
-fn reverse[T](mut s: Slots[T], lo: u64, hi: u64) {
-    let mut a = lo
-    let mut b = hi
-    while a < b {
-        b = int.wrapping_sub(b, 1)
-        if a < b {
-            let x = slots_take(mut s, a)
-            slots_shift(mut s, b, a)
-            slots_put(mut s, b, take x)
-        }
-        a = int.wrapping_add(a, 1)
-    }
 }
 
 type Slots[T]: shareable + send {

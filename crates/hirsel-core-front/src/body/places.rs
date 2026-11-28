@@ -1530,7 +1530,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         self.install(address, rep, value, n);
-        let next = self.add(index, one, n);
+        let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n); // index < len
         self.jump(head, &[next], n);
         self.start(out);
         Some(())

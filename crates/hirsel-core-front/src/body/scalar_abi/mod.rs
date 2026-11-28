@@ -195,6 +195,22 @@ pub(super) fn rewrite(
     let unchanged = !own.changed() && old_calls.iter().all(|call| !call.conversion.changed());
     let dest = convert(module, body, old_signature, own, old_calls);
     numeric::inline(module, body, numeric_sites);
+    // A closed slot cleanup query is a layout constant. In particular, a
+    // separately compiled own finalizer must not call out for its value.
+    for inst in &mut body.insts {
+        let Inst::Call { call } = *inst else { continue };
+        let site = &body.calls[call.index()];
+        let Callee::Direct(f) = site.callee else {
+            continue;
+        };
+        let key = &module.instances[module.functions[f.index()].instance.index()];
+        if let Some((key_glue::KeyOp::NeedsDrop, ty)) = key_glue::KeyOp::of(key) {
+            *inst = Inst::Const {
+                result: site.results.get(&body.pools.values).unwrap()[0],
+                bits: u64::from(recipes[ty.index()].drop.is_some()),
+            };
+        }
+    }
     key_glue::inline_ordered(module, body);
     // A carrier-only body, such as Map's index installation, has no rigid scalar
     // places to rewrite. Substituting its rows/constants is complete.

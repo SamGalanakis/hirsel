@@ -11,12 +11,12 @@ pkg_v1.Package(
                 ArchiveFile(
                     target: "x86_64-unknown-linux-gnu",
                     file: "libhirsel_dav1d.a",
-                    sha256: "b1521928eaf4ea25d40c108ad93cf566dd89410211d5cf8d0cc3412c0b1eb76a",
+                    sha256: "6f03893f2ad43e9702546cfd10c275bb7f33e087a781cfa46c9b6f97b546605d",
                 ),
                 ArchiveFile(
                     target: "aarch64-apple-darwin",
                     file: "libhirsel_dav1d-aarch64-apple-darwin.a",
-                    sha256: "83ece84e3080fd0cfad8f6b8f34929870080979051a169460a300d38f6d58085",
+                    sha256: "8256eb05df80cc6e43accd38c5bee428eddd1b7556ec68759f825254859f01aa",
                 ),
             ],
         )),
@@ -26,12 +26,12 @@ pkg_v1.Package(
                 ArchiveFile(
                     target: "x86_64-unknown-linux-gnu",
                     file: "libhirsel_svtav1.a",
-                    sha256: "bfc288d5c88d72c8639b320e2980d486222cb46e624476fed5feb8d7690a0efd",
+                    sha256: "769454d5b41cad9ca7f3b8f5e174c4e7cd6bf2725dc9939a63d4494e45b92922",
                 ),
                 ArchiveFile(
                     target: "aarch64-apple-darwin",
                     file: "libhirsel_svtav1-aarch64-apple-darwin.a",
-                    sha256: "ec59ce380170128271b73bd50dc3491ee2cd0ef2ac968efeba218b2fe32ea2b1",
+                    sha256: "0fea1f2120bb085e743a5e1f0a21e9adc6b93976fcbb62fa6c5a7f9a2279fe2e",
                 ),
             ],
         )),

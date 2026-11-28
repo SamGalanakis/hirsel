@@ -256,6 +256,36 @@ fn holding(take h: Holding) -> () waits {
     }
 }
 
+// L21/V2: a second digest at a live position closes the session with 1008.
+// Withhold the first committed reply so the first position stays live.
+fn drive_session_mismatch(take d: Drive) -> () waits {
+    let (head, inbox) = calls_inbox()
+    let (ready, held): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let proxy = task.spawn(d.tasks, bytes 65536u64, (channel.sender(d.head), take inbox, take ready), runner.hold_session_mismatch_reply)
+    let s0 = conn_at(d, head, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    result.unwrap(channel.receive(held))
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
+    match down(s0) {
+        Batched(b) => want(b.version == NEVER, "session_mismatch: a row after the mismatch"),
+        _ => fail("session_mismatch: a frame other than the watchdog's"),
+    }
+    let Socket(take wire, take session, _) = take s0 else {
+        fail("session_mismatch: expected a wire session")
+    }
+    want(wire_client.shut_code(wire) == Some(1008u16), "session_mismatch: expected Close 1008")
+    let _ = wire_client.close(take wire)
+    if let Ok(Ok(())) = task.join(take session) {} else {
+        fail("session_mismatch: the session did not end")
+    }
+    drop(take head)
+    result.unwrap(task.join(take proxy))
+    let s1 = conn(d, 1u64)
+    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    want(ok_value(frame(s1).outcome) == Some(3u64), "session_mismatch: x ran once, at 3")
+    hang(take s1)
+}
+
 pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
     let (head, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let (held_to, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)

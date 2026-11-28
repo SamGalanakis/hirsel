@@ -843,3 +843,29 @@ fn keep_answers(mut waiting: List[Replies], take answers: List[CallAnswer]) {
         }
     }
 }
+
+// Forward the first call to the real head and withhold its publisher reply so the
+// session still owes an outcome when the fixture sends the conflicting call.
+pub fn hold_session_mismatch_reply(take seed: (Sender[HeadInput], Receiver[HeadInput], Sender[()])) waits {
+    let (take head, take from, take ready) = take seed
+    let mut first = loop {
+        let next = result.unwrap(channel.receive(from))
+        match take next {
+            RunRequest(Req(e: Requested(take request))) => break take request,
+            take message => result.unwrap(channel.send(head, take message)),
+        }
+    }
+    let (answer, received): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    first.reply_to = WireReply(take answer)
+    result.unwrap(channel.send(head, RunRequest(Req(e: Requested(take first)))))
+    let WireEvent(e: FromRunner(Notice(e: Updated(reply)))) = result.unwrap(channel.receive(received)) else {
+        fail("session_mismatch: the publisher did not answer the first call")
+    }
+    if reply.version != 3u64 || list.len(reply.outcomes) != 1u64 {
+        fail("session_mismatch: expected one outcome at the first commit")
+    }
+    result.unwrap(channel.send(ready, ()))
+    while let Ok(take message) = channel.receive(from) {
+        result.unwrap(channel.send(head, take message))
+    }
+}

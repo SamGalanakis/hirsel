@@ -347,7 +347,11 @@ fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
 }
 
 fn conn(d: Drive, q: u64) -> Conn waits {
-    let (take cn, take h) = paired(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
+    conn_at(d, d.head, q)
+}
+
+fn conn_at(d: Drive, head: Sender[runner.HeadInput], q: u64) -> Conn waits {
+    let (take cn, take h) = paired(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
     Socket(take cn, take h, d.birth)
 }
 
@@ -719,39 +723,6 @@ fn drive_joiners(take d: Drive) -> () waits {
 pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
     served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 3u64, drive_joiners)
-}
-
-// L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
-// session ends, Close (1008) on this seam, and sends no row for either: the first thing
-// its client receives is the 5 s watchdog's batch, and its task has ended. Another session
-// then gets x's reply at p, so the body ran once, with x.
-fn drive_session_mismatch(take d: Drive) -> () waits {
-    let s0 = conn(d, 1u64)
-    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
-    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
-    match down(s0) {
-        Batched(b) => want(b.version == NEVER, "session_mismatch: a row after the mismatch"),
-        _ => fail("session_mismatch: a frame other than the watchdog's"),
-    }
-    want(session_closed(take s0), "session_mismatch: the session did not end")
-    let s1 = conn(d, 1u64)
-    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
-    want(ok_value(frame(s1).outcome) == Some(3u64), "session_mismatch: x ran once, at 3")
-    hang(take s1)
-}
-
-// The session ended by itself (Close 1008 on the wire): its task has returned.
-fn session_closed(take cn: Conn) -> bool waits {
-    match take cn {
-        Socket(take wire, take s, _) => {
-            let _ = wire_client.close(take wire);
-            match task.join(take s) {
-                Ok(Ok(())) => true,
-                _ => false
-            }
-        },
-        _ => false,
-    }
 }
 
 pub fn law_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {

@@ -456,7 +456,8 @@ fn g6_cli_named_add_update_audit() {
 
     config(dir, true);
     let preview = run(&["audit"], 0);
-    assert!(preview.contains("preview (quorum 0)"), "{preview}");
+    let label = "single-operator signed-log wipeable preview (quorum 0), unwitnessed";
+    assert!(preview.contains(label), "{preview}");
     let (row, intent) = crate::registry_route::laws::signed_takedown(
         HOST,
         "fixture.test",

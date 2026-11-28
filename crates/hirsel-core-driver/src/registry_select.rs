@@ -778,7 +778,8 @@ impl Finding {
             status,
             reason,
             message,
-            trust: preview.then_some("preview (quorum 0), unwitnessed"),
+            trust: preview
+                .then_some("single-operator signed-log wipeable preview (quorum 0), unwitnessed"),
             advisories,
         })
     }

@@ -21,7 +21,7 @@ fn trust(cfg: Settings) -> Result[directory_log.Trust, String] {
     if uri.host == None || uri.userinfo != None || uri.query != None || uri.fragment != None || uri.path.start != uri.path.end {
         return Error("expected a registry origin")
     }
-    if !(cfg.mode == "preview" && cfg.origin != "https://pkg.hirsel.ai" && list.len(cfg.witness_keys) == 0) && !(cfg.mode == "witnessed" && list.len(cfg.witness_keys) == 2) {
+    if !(cfg.mode == "preview" && list.len(cfg.witness_keys) == 0) && !(cfg.mode == "witnessed" && list.len(cfg.witness_keys) == 2) {
         return Error("invalid witness mode")
     }
     let Ok(release) = tlog.note.verifier_key(cfg.release_key) else {
@@ -146,6 +146,9 @@ pub fn main(c: Compiler, n: Net, clock: Clock, tasks: Tasks, random: Random, con
     }
     let Ok(pins) = trust(cfg) else {
         return Error(invalid)
+    }
+    if cfg.mode == "preview" {
+        let _ = stderr.write(err, "registry discovery: single-operator signed-log wipeable preview (quorum 0), unwitnessed\n")
     }
     let mut limits = std.http_client.limits(pending.MAX_COMPRESSED_FRAME)
     limits.redirects = Return

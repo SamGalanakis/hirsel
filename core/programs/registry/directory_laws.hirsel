@@ -1,3 +1,31 @@
+@test
+fn discovery_public_preview(parent: Dir) -> Result[(), String] waits {
+    let origin = "https://pkg.hirsel.ai"
+    let release_key = "pkg.hirsel.ai/log+68717913+AddamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+    let status_key = "pkg.hirsel.ai/status+419b7d2c+AT1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+    let mut name = string.from("registry-discovery-preview-")
+    string.reserve(mut name, 32)
+    let config = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut prefix = string.from("{\"origin\":")
+    string.push(mut prefix, pending.quoted(origin))
+    string.push(mut prefix, ",\"release_key\":")
+    string.push(mut prefix, pending.quoted(release_key))
+    string.push(mut prefix, ",\"status_key\":")
+    string.push(mut prefix, pending.quoted(status_key))
+    string.push(mut prefix, ",\"mode\":")
+    let suffix = ",\"witness_keys\":[],\"allowed_origins\":[],\"mcp_port\":8080,\"json_port\":8081}"
+    result.unwrap(std.file.write(config, "discovery.json", string.as_bytes(cat3(prefix, "\"preview\"", suffix))))
+    let preview = discovery.public_origin(config)
+    result.unwrap(std.file.replace(config, "discovery.json", string.as_bytes(cat3(prefix, "\"witnessed\"", suffix))))
+    let witnessed = discovery.public_origin(config)
+    result.unwrap(std.dir.remove_all(parent, name))
+    require(preview? == origin, "preview must keep the public origin")?
+    match witnessed {
+        Error(message) if message == "invalid witness mode" => Ok(()),
+        _ => Error("witnessed discovery must require witnesses"),
+    }
+}
+
 // A single export may exceed a page, even when the page holds nothing else.
 @test
 fn long_export_round_trip() -> Result[(), String] {

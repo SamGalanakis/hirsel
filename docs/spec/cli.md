@@ -378,8 +378,9 @@ no coverage option. Coverage never enters a law row or `hirsel.laws`.
 ## Registry publication and routing
 
 Phase 1 routes each scoped package by longest whole-component prefix in the invoking user's
-`hirsel/config.hcfg`. A route pins its HTTPS origin, both log keys and independent witnesses.
-The default origin is `https://pkg.hirsel.ai`. The command
+`hirsel/config.hcfg`. A route pins its HTTPS origin, both log keys and a trust policy.
+At `https://pkg.hirsel.ai`, an explicit `Preview` route selects the single-operator signed-log
+wipeable preview (quorum 0). A `Witnessed` route requires two independent witness pins.
 `hirsel registry publish [--workspace]`<!-- doc-ref: planned --> checks and uploads the member.
 The workspace form publishes dependencies first and reports which members committed if a
 later member fails. A retry resumes by verifying those releases. `hirsel build --emit recipe --code-store DIR` keeps
@@ -410,9 +411,10 @@ agree on one root, selects the highest root every edge accepts and writes it to 
 manifest's `[selections]`. It checks the edited workspace on an overlay first and writes
 nothing when the check fails. It prints each changed package's versions and roots, each
 library now built against another version than it was published with, and each package's
-per-export authority diff. Named registry selection verifies inclusion and replays the witnessed
-status log. Unqualified add and update wait 72 hours. An exact version bypasses age only. A
-retired pin whose sole fix is younger makes update refuse and print the exact upgrade command.
+per-export authority diff. Named registry selection verifies inclusion and replays the status
+log under the configured trust policy. Unqualified add and update wait 72 hours. An exact
+version bypasses age only. A retired pin whose sole fix is younger makes update refuse and
+print the exact upgrade command.
 Update refuses `--locked` and `--frozen`, and its exit statuses are
 `add`'s. [Packages](packages.md#updating-dependencies)
 

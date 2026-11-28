@@ -55,6 +55,9 @@ pkg_v1.Package(
         limit: 268435456,
         grants: [Clock, Random, Tasks, Compiler],
         runs: [
+            ("hirsel.ai/registry@1/commit_laws/discovery_public_preview", TestRun(
+                grant_change: Some(ReplaceAll([Dir(".")])),
+            )),
             ("hirsel.ai/registry@1/commit_laws/directory_bucket_rebuild", TestRun(
                 limit: Some(2147483648),
                 grant_change: Some(ReplaceAll([

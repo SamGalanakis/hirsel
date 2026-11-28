@@ -118,11 +118,6 @@ const PUBLIC_ORIGIN: &str = "https://pkg.hirsel.ai";
 
 impl Pin {
     fn trust(&mut self, origin: Origin) -> Result<Route, String> {
-        if origin.0 == PUBLIC_ORIGIN && self.quorum == 0 {
-            return Err(format!(
-                "{PUBLIC_ORIGIN} requires two independent witness operators; configure quorum-zero preview on a separate registry origin"
-            ));
-        }
         self.witness_keys.sort_unstable();
         let operator = |key: &str| {
             key.split_once('+')
@@ -253,7 +248,7 @@ impl Routes {
             .or_else(|| self.0.get(host))
             .or_else(|| self.0.get(""))
             .map(AsRef::as_ref)
-            .ok_or_else(|| format!("no registry route for {name}: {PUBLIC_ORIGIN} has no shipped independent witness pins yet; configure routes in hirsel/config.hcfg for your registry"))
+            .ok_or_else(|| format!("no registry route for {name}: {PUBLIC_ORIGIN} has no built-in trust pins; configure routes in hirsel/config.hcfg"))
     }
 
     pub(crate) fn for_pin(&self, name: &str, origin: &Origin) -> Result<&Route, String> {

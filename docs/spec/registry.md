@@ -225,12 +225,13 @@ operators over the *same* checkpoint text in **each** log. Both signed timestamp
 the interval [now − 86,400 s, now]. Pin the pair for a trust domain: arbitrary two-of-many
 disjoint quorums do not establish a common history. A quiet log periodically resubmits its
 unchanged size and root for fresh signatures and CAS-replaces only the signed envelope.
-A deployment with no independent witnesses must explicitly advertise and configure
-`preview (quorum 0)`; user-visible selection and audit output carries that label. It still
-checks log signatures, consistency, inclusion and status replay. Never auto-downgrade on an
-outage or count two keys of one operator as independent. Public witnessed selection starts
-only with two independent operators. A witnessed checkpoint bounds freshness to 24 hours;
-it cannot prove that a registry has received or appended an unlogged complaint.
+A deployment with no independent witnesses must explicitly advertise and configure a
+single-operator signed-log wipeable preview (quorum 0). The public origin can serve this
+preview. Selection and audit output labels it as unwitnessed. Preview still checks log
+signatures, consistency, inclusion and status replay. Never auto-downgrade on an outage or
+count two keys of one operator as independent. Public witnessed selection starts only with
+two independent operators. A witnessed checkpoint bounds freshness to 24 hours; it cannot
+prove that a registry has received or appended an unlogged complaint.
 
 For each origin keep the last verified checkpoint. A smaller head, a different root at the
 same size, or failure to prove RFC 6962 consistency to a larger head refuses. Keep both signed
@@ -371,12 +372,14 @@ verified C offline. Retirement alone does not remove the frame.
 ## 5. Client selection and transport
 
 Trust configuration belongs to the invoking user's `hirsel/config.hcfg` under XDG_CONFIG_HOME
-(default `~/.config`). Each `[[registry.route]]` has `prefix`, `url`, `release-key`,
-`status-key`, `legal-key`, `witness-keys` (two pinned C2SP note-verifier keys) and `quorum` (2). An
-explicit preview route uses quorum 0 and an empty witness list. Prefix is `*`, `HOST/*` or
-`HOST/TENANT/*`; match complete components of the canonical name and use the longest match.
+(default `~/.config`). Each `Route` in `user_v1.Config.routes` has `prefix`, `url`,
+`release_key`, `status_key`, `legal_key` and `quorum`. Use `Preview` for quorum 0 or
+`Witnessed(first: ..., second: ...)` for two independent pinned C2SP note-verifier keys.
+Prefix is `Global`, `HostPrefix(HOST)` or `Tenant(host: HOST, tenant: TENANT)`. Match complete
+components of the canonical name and use the longest match.
 Reject duplicate prefixes, malformed trust or contradictory trust for the same origin.
-The built-in default for `*` is the public origin with shipped pins once activated.
+The public preview requires a configured route and pinned log keys. The built-in global
+default is the public origin with shipped pins once witnessed selection is activated.
 A manifest, remote index, redirect or fetched dependency cannot supply trust or reroute
 a scope. Never fall back from a failing private route to the public one. Key caches and
 verified checkpoints by origin, log and trust policy. Changing a URL for a pinned manifest

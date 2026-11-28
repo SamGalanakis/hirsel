@@ -1,0 +1,85 @@
+// Published hosts, independent of the targets their runtime archives support.
+// Keys are std-product options. `buck_suffix` preserves existing archive labels.
+// A `buck_suffix` enables archive production. Registration names use
+// `observation` and the presence of the `record` feature.
+// Helper entry paths relative to the selected package's name and major.
+product_v1.Product(
+    hosts: [
+        ("x86_64-unknown-linux-gnu", Host(
+            platform: "Linux-x86_64",
+            runner: "ubuntu-24.04",
+            llvm_library: "lib/libLLVM.so.23.1",
+            llvm_engine_dir: Some("engine"),
+        )),
+        ("aarch64-apple-darwin", Host(platform: "Darwin-arm64", runner: "macos-26", llvm_library: "lib/libLLVM.23.1.dylib")),
+    ],
+    runtime_targets: [
+        ("x86_64-unknown-linux-gnu", Target(platform: "root//tools/buck2:runtime-x86_64", exec_helper: true)),
+        ("aarch64-unknown-linux-gnu", Target(platform: "root//tools/buck2:runtime-aarch64", exec_helper: true)),
+        ("aarch64-apple-darwin", Target(platform: "root//tools/buck2:runtime-darwin", exec_helper: true)),
+        ("aarch64-apple-ios", Target(platform: "root//tools/buck2:runtime-ios", slots: Some(["embed-runtime"]))),
+        ("aarch64-apple-ios-sim", Target(platform: "root//tools/buck2:runtime-ios-sim", slots: Some(["embed-runtime"]))),
+    ],
+    runtime_slots: [
+        ("runtime", Slot(buck_suffix: "", features: ["standalone"], observation: "none")),
+        ("recording-runtime", Slot(buck_suffix: "-record", features: ["standalone", "record"], observation: "none")),
+        ("prof-runtime", Slot(buck_suffix: "-prof", features: ["standalone", "prof"], observation: "prof")),
+        ("prof-recording-runtime", Slot(
+            buck_suffix: "-prof-record",
+            features: ["standalone", "prof", "record"],
+            observation: "prof",
+        )),
+        ("observed-runtime", Slot(
+            buck_suffix: "-observed",
+            features: ["standalone", "charge-observation"],
+            observation: "observed",
+        )),
+        ("observed-recording-runtime", Slot(
+            buck_suffix: "-observed-record",
+            features: ["standalone", "charge-observation", "record"],
+            observation: "observed",
+        )),
+        ("embed-runtime", Slot(
+            buck_suffix: "-embed",
+            crate_name: Some("hirsel-core-rt"),
+            features: [],
+            observation: "none",
+        )),
+    ],
+    sockets: Sockets(launcher: "launcher.sock", operator: "operator.sock"),
+    helpers: [
+        ("platform_main", Helper(
+            entry: "platform_main/main",
+            embedded: true,
+            grants: [
+                Clock,
+                Random,
+                Tasks,
+                Net(UnixRoot(label: "ctl", path: "{cwd}")),
+                Net(UnixConnect(label: "ctl", path: "{launcher}")),
+                Net(UnixListen(label: "ctl", path: "{operator}")),
+                Dir("{cwd}/catalog"),
+            ],
+        )),
+        ("pin_reader", Helper(entry: "platform_main/read_pin", grants: [Clock, Stdout, Dir("{cwd}/catalog")])),
+        ("store_tool", Helper(
+            entry: "store_tool/main",
+            grants: [Clock, Random, Tasks, Stdout, Stderr, Dir("{fd}/3"), Dir("{fd}/4")],
+        )),
+        ("archive_tool", Helper(
+            package: Some("store-archive-tool"),
+            entry: "main/main",
+            grants: [
+                Clock, Random, Tasks, Stdout, Stderr,
+                Secret(parameter: "key", source: Environment("HIRSEL_ARCHIVE_SECRET"), policy: "kdf"),
+                Env(["HIRSEL_ARCHIVE_ENDPOINT", "HIRSEL_ARCHIVE_REGION", "HIRSEL_ARCHIVE_BUCKET", "HIRSEL_ARCHIVE_PREFIX", "HIRSEL_ARCHIVE_PARENT", "HIRSEL_ARCHIVE_ACCESS", "HIRSEL_ARCHIVE_TOKEN"]),
+                Net(Resolve("*")),
+                Net(Connect(cidr: "0.0.0.0/0", first_port: 443, last_port: 443)),
+                Net(Connect(cidr: "::/0", first_port: 443, last_port: 443)),
+                Net(Connect(cidr: "127.0.0.1/32", first_port: 1, last_port: 65535)),
+                Net(Tls("* 443-443 System")),
+                Dir("{fd}/4"),
+            ],
+        )),
+    ],
+)

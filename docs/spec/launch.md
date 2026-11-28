@@ -215,7 +215,7 @@ when it is a workspace member whose directory is `programs/<name>` under the lib
 invoker names (`--libraries ROOT`, or a checkout's `core` when the compiler is not installed), or
 when the invoker's `--inputs` manifest marks it `"toolchain": true`. The library root and the
 `"toolchain"` mark are the invoker's trust, exactly as supplying `core@1` is: whoever chooses them
-already chooses the core the program is built on. Any other `hirsel.toml` member or published
+already chooses the core the program is built on. Any other `hirsel.hcfg` member or published
 archive named `runner@1` is a plain package, its program gets no bit, and its `launch_*`
 functions are not bound to the launch words. The native link reads the provenance from the
 check, the recipe link from the recipe's toolchain part (below). `hirsel store rehearse`, `hirsel store verify --release` and `hirsel store repair --release` read

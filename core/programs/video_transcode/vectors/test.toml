@@ -1,8 +1,0 @@
-
-[tests]
-limit = 2147483648
-grants = ["Foreign=hirsel.ai/av1@1/av1/DecoderCodec", "Foreign=hirsel.ai/av1@1/av1/EncoderCodec", "Foreign=hirsel.ai/h264@1/h264/H264", "Foreign=hirsel.ai/video_yuv@1/video_yuv/Yuv", "Tasks", "Clock"]
-dirs = ["fixtures"]
-
-[tests.sources]
-"tests.hirsel" = "tests"

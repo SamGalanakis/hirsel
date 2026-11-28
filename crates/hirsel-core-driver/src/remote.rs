@@ -1,6 +1,6 @@
 //! The remote object cache (CAS S5, ruling G1 = B): a plain HTTP store of
 //! `o/<sha256>` blobs and `r/<keyid>/<key>` signed records, configured by
-//! `[cache.remote]` in `$XDG_CONFIG_HOME/hirsel/config.toml` (docs/spec/cli.md,
+//! `[cache.remote]` in `$XDG_CONFIG_HOME/hirsel/config.hcfg` (docs/spec/cli.md,
 //! "Remote cache").
 //!
 //! A blob is used only when its bytes hash to the name it was fetched under;
@@ -41,8 +41,7 @@ const CONNECT: Duration = Duration::from_secs(5);
 const READ: Duration = Duration::from_secs(30);
 const STD_MANIFEST_SCHEMA: u32 = 1;
 
-#[derive(Clone, Copy, serde::Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[derive(Clone, Copy)]
 struct TransferPolicy {
     record_bytes: u64,
     blob_bytes: u64,
@@ -66,30 +65,26 @@ impl TransferPolicy {
     }
 }
 
-/// `config.toml`: only the `cache.remote` table is read, and every field of
-/// it is known.
-#[derive(serde::Deserialize)]
-struct ConfigFile {
-    #[serde(default)]
-    cache: CacheTable,
-}
-#[derive(Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CacheTable {
-    remote: Option<Config>,
-}
-/// `[cache.remote]`.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct Config {
-    /// The cache's base URL, `http://` or `https://`.
     pub url: String,
-    /// The Ed25519 public keys, 64 hex digits each, whose records are used.
-    #[serde(default)]
     pub trusted: Vec<String>,
-    /// A PKCS#8 Ed25519 private key file; with it, this host uploads.
     pub signing_key: Option<PathBuf>,
     transfer: TransferPolicy,
+}
+
+impl From<hirsel_config_schema::user_v1::Remote> for Config {
+    fn from(remote: hirsel_config_schema::user_v1::Remote) -> Self {
+        Self {
+            url: remote.url,
+            trusted: remote.trusted,
+            signing_key: remote.signing_key.map(PathBuf::from),
+            transfer: TransferPolicy {
+                record_bytes: remote.record_bytes,
+                blob_bytes: remote.blob_bytes,
+                work_bytes: remote.work_bytes,
+            },
+        }
+    }
 }
 
 /// The signing key this host uploads with.
@@ -195,19 +190,9 @@ pub(crate) fn publish(
 }
 
 fn configured() -> Result<Option<Config>, String> {
-    let directory = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    let Some(path) = directory.map(|d| d.join("hirsel/config.toml")) else {
-        return Ok(None);
-    };
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    let file: ConfigFile = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file.cache.remote)
+    Ok(crate::user_config::load()?
+        .and_then(|c| c.cache)
+        .map(Config::from))
 }
 
 fn public_key(hex: &str) -> Result<[u8; 32], String> {

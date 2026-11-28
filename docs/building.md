@@ -136,7 +136,7 @@ hirsel build
 
 A package is a directory of `.hirsel` files. `check`, `test`, `run` and `build`
 default to the current directory. `new` creates a runnable `main`, a test and its
-limit in `hirsel.toml`. With `--lib` it also creates `lib.hirsel`.
+limit in `hirsel.hcfg`. With `--lib` it also creates `lib.hirsel`.
 `hirsel check DIR` checks every definition and declaration in it; `--json` prints the
 outcome, diagnostics, incomplete features, and resource refusals. When the compiler refuses
 code it prints a short rule code; `hirsel explain RULE` prints the rule and a refused
@@ -155,7 +155,7 @@ differing paths for a file or directory, and writing no formatted bytes for stdi
 reaches; `hirsel run DIR [-- arguments...]` builds it and runs it. Development builds
 default to Cranelift and `--release` to LLVM; `--backend cranelift|llvm` selects the
 engine explicitly. Release builds require a logical root limit in bytes from
-`--limit` or `[program].limit` in `hirsel.toml`. Native builds always emit debug rows
+`--limit` or `[program].limit` in `hirsel.hcfg`. Native builds always emit debug rows
 and write detached DWARF alongside the executable; `--debug-lines on` additionally
 embeds DWARF in the executable (see [CLI specification](spec/cli.md)). Failure
 positions are reported either way.
@@ -177,7 +177,7 @@ does not start (status 103) and names every ungranted parameter at once, one
 interface is refused before native code is emitted, one `not granted: Foreign[D]` line per
 interface. Everything after `--` is passed to the program as `Args`.
 
-A package whose `hirsel.toml` declares `limit`, `dirs` or `grants` in `[program]`
+A package whose `hirsel.hcfg` declares `limit`, `dirs` or `grants` in `[program]`
 ([packages](spec/packages.md)) builds and runs under them, and `--limit`, `--dir` and
 `--grant` are refused; `Foreign` and `Exec` approvals still come from the command line.
 A dependency's `[program]` is never applied. `hirsel build` warns once for each `main`
@@ -249,7 +249,7 @@ hirsel test app
 
 `hirsel test` discovers each `@test` function ([test functions](spec/programs.md#prog-4-tests))
 in the package and runs each execution in its own process. A package whose
-`hirsel.toml` declares `[tests]` (including the scaffold from `hirsel new`) runs under that
+`hirsel.hcfg` declares `[tests]` (including the scaffold from `hirsel new`) runs under that
 configuration, and `--limit`, `--dir` and `--grant` are refused — set `limit`, `dirs` and
 `grants` in `[tests]` instead. Without `[tests]`, `--limit BYTES` is mandatory and `--dir`
 and `--grant` configure capabilities as for `run`. Each test receives only the grants its

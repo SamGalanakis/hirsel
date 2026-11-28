@@ -15,8 +15,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use declaration::ResolvedType;
-pub use edit::{Edit, PathPart};
-pub use read::decode;
+pub use edit::{Edit, PathPart, quote};
+pub use read::{decode, decode_with_root};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -78,6 +78,8 @@ pub struct DataError {
     pub path: Vec<String>,
     pub span: Span,
     pub related: Option<Span>,
+    /// Other unknown fields in the same record, ordered by field name.
+    pub additional: Vec<Span>,
 }
 impl std::fmt::Display for DataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -240,6 +242,7 @@ fn error(kind: ErrorKind, span: Span) -> DataError {
         kind,
         span,
         related: None,
+        additional: Vec::new(),
         path: Vec::new(),
     }
 }

@@ -28,7 +28,10 @@ def pin_host(state, path):
             if tag != 9:
                 raise ValueError("expected catalog identity")
     authority = f"{hi:016x}{lo:016x}"
-    path.write_text(f'kind = "host"\nstate = {json.dumps(str(state))}\nauthority = "{authority}"\nuid = {os.geteuid()}\n')
+    path.write_text(
+        f'user_v1.Config(default_context: Some("job"), contexts: [("job", '
+        f'Host(state: {json.dumps(str(state))}, catalog_id: "{authority}", '
+        f'principal: Uid({os.geteuid()})))], routes: [])\n')
     os.chmod(path, 0o600)
     return authority
 

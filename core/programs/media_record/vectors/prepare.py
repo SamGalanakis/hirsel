@@ -15,14 +15,18 @@ import re
 import shutil
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
+
 
 def closure(programs, name, seen):
     if name in seen:
         return
     seen.add(name)
-    manifest = (programs / name / "hirsel.toml").read_text()
-    for dep in re.findall(r'path = "\.\./([A-Za-z0-9_]+)"', manifest):
-        closure(programs, dep, seen)
+    manifest = hcfg.read(programs / name / "hirsel.hcfg", "pkg_v1.Package")
+    for _, binding in manifest["dependencies"]:
+        if binding["case"] == "Path":
+            closure(programs, (programs / name / binding["fields"]["path"]).resolve().relative_to(programs).as_posix(), seen)
 
 
 def main():
@@ -35,7 +39,7 @@ def main():
     members = set()
     closure(programs, "media_record", members)
     members = sorted(members)
-    (work / "hirsel.toml").write_text("[workspace]\nmembers = " + json.dumps(members) + "\n")
+    hcfg.workspace(work, members)
     for name in members:
         if name != "media_record":
             shutil.copytree(programs / name, work / name, ignore=shutil.ignore_patterns("hirsel.lock", "target", "buck-out"))
@@ -47,9 +51,7 @@ def main():
     shutil.copyfile(vectors / "dump.hirsel", target / "dump.hirsel")
     out = work / "out"
     out.mkdir()
-    base = (package / "hirsel.toml").read_text().split("\n[tests]")[0].rstrip("\n") + "\n"
-    tests = (vectors / "test.toml").read_text().replace('"out"', json.dumps(str(out)))
-    (target / "hirsel.toml").write_text(base + tests)
+    hcfg.vector_package(package, vectors, target, out)
 
 
 if __name__ == "__main__":

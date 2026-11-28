@@ -7,7 +7,7 @@ pub type Package {
     program: Option[Program],
     tests: Option[Tests],
     foreign: Option[Map[String, ForeignModule]],
-    selections: Option[Map[String, Dependency]],
+    selections: Option[Map[String, Selection]],
 }
 
 pub type Workspace {
@@ -15,16 +15,26 @@ pub type Workspace {
     charge: Option[Charge],
     dependencies: Option[Map[String, Dependency]],
     root_package: Option[Package],
-    selections: Option[Map[String, Dependency]],
+    selections: Option[Map[String, Selection]],
+}
+
+pub type VectorTests {
+    tests: Tests,
+    dependencies: Map[String, Dependency],
 }
 
 pub type Charge = ChargeV1 | WorkspaceCharge
 
 pub type Dependency = Toolchain(package: String, major: u32, authority: List[Capability]) | Path(package: String, major: u32, path: String, authority: List[Capability]) | Published(package: String, major: u32, root: String, locator: Locator, authority: List[Capability]) | Inherit
 
+pub type Selection {
+    root: String,
+    locator: Locator,
+}
+
 pub type Locator = Store | Archive(String) | Url(String) | Git(url: String, rev: String, reference: Option[String], dir: Option[String]) | Registry(String)
 
-pub type Capability = Clock | Random | Tasks | Stdin | Stdout | Stderr | Dir | Net | Exec | Foreign | Secret | Cred | Env | Process
+pub type Capability = Args | Compiler | Clock | Random | Tasks | Stdin | Stdout | Stderr | Dir | Net | Exec | Foreign | Secret | Cred | Env | Process
 
 pub type Program {
     module: Option[String],
@@ -55,6 +65,6 @@ pub type ArchiveFile {
     sha256: String,
 }
 
-pub type Directory = Dir(String)
+pub type Directory = Dir(String) | ScopedDir(kind: DirectoryKind, app: String)
 
-pub type NonDirGrant = Clock | Random | Tasks | Stdin | Stdout | Stderr | Process | Net(NetRule) | Env(List[String]) | Secret(parameter: String, source: Binding, policy: String) | Cred(parameter: String, source: String, policy: String) | Foreign(String) | Exec(policy: String, profiles: List[String])
+pub type NonDirGrant = Compiler | Clock | Random | Tasks | Stdin | Stdout | Stderr | Process | Net(NetRule) | Env(List[String]) | Secret(parameter: String, source: Binding, policy: String) | Cred(parameter: String, source: String, policy: String) | Foreign(String) | Exec(policy: String, profiles: List[String])

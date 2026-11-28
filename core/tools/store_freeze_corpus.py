@@ -102,7 +102,7 @@ def load_frozen_dir(corpus_dir):
 
 
 def update_hirsel_toml(root, fmt):
-    toml_path = root / 'core/programs/store/hirsel.toml'
+    toml_path = root / 'core/programs/store/hirsel.hcfg'
     text = toml_path.read_text(encoding='utf-8')
     target = f'"store_corpus_format{fmt}.hirsel" = "store"'
     replaced, count = re.subn(r'"store_corpus_format[0-9]+\.hirsel" = "store"', target, text)

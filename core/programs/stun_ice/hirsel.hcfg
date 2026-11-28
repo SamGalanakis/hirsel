@@ -1,0 +1,14 @@
+pkg_v1.Package(
+    name: "stun_ice",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("stun.hirsel", "stun_ice"),
+        ("integrity.hirsel", "stun_ice"),
+        ("ice_lite.hirsel", "stun_ice"),
+        ("ice.hirsel", "stun_ice"),
+        ("ice_checks.hirsel", "stun_ice"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(sources: [("laws.hirsel", "laws")], limit: 16777216, grants: [Tasks], runs: [])),
+)

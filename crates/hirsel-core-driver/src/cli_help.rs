@@ -19,7 +19,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
         );
         if matches!(
             command.name,
-            "op" | "prof" | "lean" | "sdk" | "fleet" | "store" | "tape"
+            "config" | "op" | "prof" | "lean" | "sdk" | "fleet" | "store" | "tape"
         ) {
             let prefix = format!("{} ", command.name);
             for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {

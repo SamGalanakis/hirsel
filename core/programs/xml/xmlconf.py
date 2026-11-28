@@ -195,7 +195,7 @@ def prepare(suite, destination, inventory):
         "\t".join(row) + "\n" for row in sorted(skips)
     ))
     for source in PACKAGE.iterdir():
-        if source.suffix == ".hirsel" or source.name == "hirsel.toml":
+        if source.suffix == ".hirsel" or source.name == "hirsel.hcfg":
             shutil.copyfile(source, destination / source.name)
 
     with (destination / "laws.hirsel").open("a") as output:

@@ -1,5 +1,132 @@
 // Package walk laws L4, L5 and L12 (packages.md section 13), split from test_run_native.rs.
 
+struct PackageLaw {
+    dir: tempfile::TempDir,
+    libraries: PathBuf,
+}
+
+impl PackageLaw {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core").canonicalize().unwrap();
+        std::fs::create_dir(dir.path().join("packages")).unwrap();
+        std::fs::create_dir(dir.path().join("fixtures")).unwrap();
+        Self { dir, libraries }
+    }
+
+    fn path(&self, path: &str) -> PathBuf {
+        self.dir.path().join(path)
+    }
+
+    fn write(&self, path: &str, bytes: impl AsRef<[u8]>) {
+        let path = self.path(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn manifest(&self, dir: &str, name: &str, version: &str, fields: &str) {
+        self.write(&format!("{dir}/hirsel.hcfg"), format!(
+            "pkg_v1.Package(name: {name:?}, version: {version:?}, charge: ChargeV1, {fields})\n"));
+    }
+
+    fn library(&self, dir: &str, name: &str, version: &str, source: &str, fields: &str) {
+        let module = name.rsplit('/').next().unwrap();
+        let fields = if fields.is_empty() { "dependencies: []," } else { fields };
+        self.manifest(dir, name, version, &format!("sources: [(\"{module}.hirsel\", {module:?})], {fields}"));
+        self.write(&format!("{dir}/{module}.hirsel"), source);
+    }
+
+    fn app(&self, dir: &str, fields: &str) {
+        self.write(&format!("{dir}/main.hirsel"), PACKAGE_MAIN);
+        let fields = if fields.is_empty() { "dependencies: []," } else { fields };
+        self.manifest(dir, "local/app", "1.0.0", &format!("sources: [(\"main.hirsel\", \"main\")], {fields}"));
+    }
+
+    fn with_store(&self, arguments: &[&str], store: &str) -> (Option<i32>, String, String) {
+        Self::output(self.command(arguments, store))
+    }
+
+    /// The request child for `arguments` over package store `store`, not yet run.
+    fn command(&self, arguments: &[&str], store: &str) -> std::process::Command {
+        let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
+        if matches!(arguments[0], "check" | "test" | "run" | "build" | "inspect" | "laws") {
+            if !arguments.contains(&"--recipe") {
+                args.extend(["--libraries".into(), self.libraries.to_str().unwrap().into()]);
+            }
+            args.extend(["--store".into(), self.path("compiler-store").to_str().unwrap().into()]);
+        }
+        if matches!(arguments[0], "build") {
+            args.extend(["--code-store".into(), self.path("code-store").to_str().unwrap().into()]);
+        }
+        if matches!(arguments[0], "run" | "test" | "build") {
+            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { native_options(Backend::Cranelift, self.dir.path()).runtime };
+            args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
+        }
+        let mut command = process::tape_request_command(&args, self.dir.path());
+        command.env("XDG_CACHE_HOME", self.path("cache"));
+        command
+    }
+
+    fn output(mut command: std::process::Command) -> (Option<i32>, String, String) {
+        let output = command.output().unwrap();
+        let after = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            let (_, text) = text.split_once(process::CHILD_MARK).unwrap();
+            text.to_owned()
+        };
+        (output.status.code(), after(&output.stdout), after(&output.stderr))
+    }
+
+    fn run(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        self.with_store(args, "packages")
+    }
+
+    /// A request with no package or build options, such as `hirsel coverage`.
+    fn tool(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let output = process::tape_request_command(&args, self.dir.path()).output().unwrap();
+        let after = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            text.split_once(process::CHILD_MARK).unwrap().1.to_owned()
+        };
+        (output.status.code(), after(&output.stdout), after(&output.stderr))
+    }
+
+    fn pass(output: (Option<i32>, String, String)) -> String {
+        let (status, stdout, stderr) = output;
+        assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+        stdout
+    }
+
+    fn refuse(output: (Option<i32>, String, String), reason: &str) {
+        let (status, stdout, stderr) = output;
+        assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+        assert_eq!(stderr, format!("hirsel: {reason}\n"));
+    }
+
+    fn fixture(&self, directory: &str, out: &str) -> String {
+        Self::pass(self.with_store(&["pack", directory, "--output", out], "fixtures"))
+    }
+
+    fn fixture_json(&self) {
+        self.library("jx", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE, "");
+        self.library("jy", "fixture.test/json", "1.0.1", PACKAGE_Y_SOURCE, "");
+        std::fs::create_dir_all(self.path("vendor")).unwrap();
+        assert_eq!(self.fixture("jx", "vendor/jx.hpkg"), format!("fixture.test/json@1 1.0.0 {PACKAGE_X}\n"));
+        assert_eq!(self.fixture("jy", "vendor/jy.hpkg"), format!("fixture.test/json@1 1.0.1 {PACKAGE_Y}\n"));
+    }
+
+    fn encoded(&self, root: &str) -> Vec<u8> {
+        std::fs::read(self.path(&package_entry("fixtures", root))).unwrap()
+    }
+
+    fn empty_store(&self) {
+        assert!(std::fs::read_dir(self.path("packages")).unwrap().next().is_none());
+    }
+}
+
+
 #[test]
 fn package_known_roots() {
     let law = PackageLaw::new();
@@ -26,15 +153,15 @@ fn package_known_roots() {
     // A local name is never published (packages.md section 1): pack writes no archive.
     law.library("lx", "local/json", "1.0.0", PACKAGE_X_SOURCE, "");
     PackageLaw::refuse(law.run(&["pack", "lx", "-o", "lx.hpkg"]),
-        "lx/hirsel.toml: local/json is a local name and is never packed; give it a scoped name to publish it");
+        "lx/hirsel.hcfg: local/json is a local name and is never packed; give it a scoped name to publish it");
     assert!(!law.path("lx.hpkg").exists());
     // Nor is one that a packed member reaches through a path binding.
-    law.write("ws/hirsel.toml", "[workspace]\nmembers = [\"api\", \"util\"]\n");
+    law.write("ws/hirsel.hcfg", "pkg_v1.Workspace(members: [\"api\", \"util\"])\n");
     law.library("ws/util", "local/util", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "");
     law.library("ws/api", "fixture.test/api", "1.0.0", "pub fn two() -> u64 { 2u64 }\n",
-        "[dependencies]\nutil = { package = \"local/util\", major = 1, path = \"../util\" }\n");
+        "dependencies: [(\"util\", Path(package: \"local/util\", major: 1, path: \"../util\", authority: []))],");
     PackageLaw::refuse(law.run(&["pack", "ws/api", "-o", "api.hpkg"]),
-        "ws/util/hirsel.toml: local/util is a local name and is never packed; give it a scoped name to publish it");
+        "ws/util/hirsel.hcfg: local/util is a local name and is never packed; give it a scoped name to publish it");
     assert!(!law.path("api.hpkg").exists());
 }
 
@@ -42,8 +169,8 @@ fn package_known_roots() {
 fn package_l40_pack_checks_before_publishing() {
     let law = PackageLaw::new();
     law.write(
-        "work/hirsel.toml",
-        "[workspace]\nmembers = [\"lib\", \"middle\", \"app\"]\n",
+        "work/hirsel.hcfg",
+        "pkg_v1.Workspace(members: [\"lib\", \"middle\", \"app\"])\n",
     );
     law.library(
         "work/lib",
@@ -53,10 +180,10 @@ fn package_l40_pack_checks_before_publishing() {
         "",
     );
     law.library("work/middle", "fixture.test/middle", "1.0.0", "pub fn value() -> u64 { json.version() }\n",
-        "[dependencies]\njson = { package = \"fixture.test/json\", major = 1, path = \"../lib\" }\n");
+        "dependencies: [(\"json\", Path(package: \"fixture.test/json\", major: 1, path: \"../lib\", authority: []))],");
     let app_source = "pub fn answer() -> u64 { middle.value() }\n";
     law.library("work/app", "local/app", "1.0.0", app_source,
-        "[dependencies]\nmiddle = { package = \"fixture.test/middle\", major = 1, path = \"../middle\" }\n");
+        "dependencies: [(\"middle\", Path(package: \"fixture.test/middle\", major: 1, path: \"../middle\", authority: []))],");
     let pack = || law.run(&["pack", "work/lib", "--output", "out.hpkg"]);
     let refused = |member: &str, file: &str| {
         let (status, stdout, stderr) = pack();
@@ -68,7 +195,7 @@ fn package_l40_pack_checks_before_publishing() {
         );
         assert!(
             stderr.ends_with(&format!(
-                "hirsel: pack: work/{member}/hirsel.toml does not check; nothing was written\n"
+                "hirsel: pack: work/{member}/hirsel.hcfg does not check; nothing was written\n"
             )),
             "{stderr}"
         );
@@ -93,18 +220,18 @@ fn package_l40_pack_checks_before_publishing() {
         "local",
         "local/lib",
         "1.0.0",
-        "[sources]\n\"missing.hirsel\" = \"lib\"\n",
+        "sources: [(\"missing.hirsel\", \"lib\")], dependencies: [],",
     );
     PackageLaw::refuse(
         law.run(&["pack", "local", "--output", "local.hpkg"]),
-        "local/hirsel.toml: local/lib is a local name and is never packed; give it a scoped name to publish it",
+        "local/hirsel.hcfg: local/lib is a local name and is never packed; give it a scoped name to publish it",
     );
     assert!(!law.path("local.hpkg").exists());
 
     law.fixture_json();
     let binding = |name: &str, root: &str, archive: &str| {
         format!(
-            "[dependencies]\n{name} = {{ package = \"fixture.test/{name}\", major = 1, root = \"{root}\", archive = \"{archive}\" }}\n"
+            "dependencies: [(\"{name}\", Published(package: \"fixture.test/{name}\", major: 1, root: \"{root}\", locator: Archive(\"{archive}\"), authority: []))],"
         )
     };
     let body = "pub fn answer() -> u64 { 42 }\n";
@@ -128,8 +255,8 @@ fn package_l40_pack_checks_before_publishing() {
         .last()
         .unwrap();
     law.write(
-        "displaced/hirsel.toml",
-        "[workspace]\nmembers = [\"lib\", \"json\"]\n",
+        "displaced/hirsel.hcfg",
+        "pkg_v1.Workspace(members: [\"lib\", \"json\"])\n",
     );
     law.library(
         "displaced/json",
@@ -161,7 +288,7 @@ fn package_l40_pack_checks_before_publishing() {
     law.library(
         "netpkg", "fixture.test/netpkg", "1.0.0",
         "pub fn ping(n: Net, addr: Addr) -> Result[Socket, NetError] waits { host.connect(n, addr, Never) }\n",
-        "[dependencies]\nstd = { major = 1 }\n",
+        "dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))],",
     );
     let network = law.fixture("netpkg", "netpkg.hpkg");
     let root = network.split_whitespace().last().unwrap();
@@ -183,7 +310,7 @@ fn package_l40_pack_checks_before_publishing() {
         "{stderr}"
     );
     assert!(
-        stderr.ends_with("hirsel: pack: network/hirsel.toml does not check; nothing was written\n"),
+        stderr.ends_with("hirsel: pack: network/hirsel.hcfg does not check; nothing was written\n"),
         "{stderr}"
     );
     assert!(!law.path("network.hpkg").exists());
@@ -193,11 +320,11 @@ fn package_l40_pack_checks_before_publishing() {
 #[test]
 fn package_l4_symlink_escape() {
     let law = PackageLaw::new();
-    law.manifest("p", "fixture.test/p", "1.0.0", "[sources]\n\"a.hirsel\" = \"a\"\n");
+    law.manifest("p", "fixture.test/p", "1.0.0", "sources: [(\"a.hirsel\", \"a\")], dependencies: [],");
     law.write("outside.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("../outside.hirsel", law.path("p/a.hirsel")).unwrap();
     for args in [&["check", "p"][..], &["pack", "p", "--output", "p.hpkg"][..]] {
-        PackageLaw::refuse(law.run(args), "p/hirsel.toml: sources: \"a.hirsel\" resolves outside the package");
+        PackageLaw::refuse(law.run(args), "p/hirsel.hcfg: sources: \"a.hirsel\" resolves outside the package");
         assert!(!law.path("p/hirsel.lock").exists());
         assert!(!law.path("p.hpkg").exists());
     }
@@ -206,7 +333,7 @@ fn package_l4_symlink_escape() {
     std::os::unix::fs::symlink("real/a.hirsel", law.path("p/a.hirsel")).unwrap();
     PackageLaw::pass(law.run(&["check", "p"]));
     let linked = PackageLaw::pass(law.run(&["pack", "p", "--output", "p.hpkg"]));
-    law.manifest("copy", "fixture.test/p", "1.0.0", "[sources]\n\"a.hirsel\" = \"a\"\n");
+    law.manifest("copy", "fixture.test/p", "1.0.0", "sources: [(\"a.hirsel\", \"a\")], dependencies: [],");
     law.write("copy/a.hirsel", PACKAGE_MAIN);
     assert_eq!(linked, PackageLaw::pass(law.run(&["pack", "copy", "--output", "copy.hpkg"])));
 }
@@ -215,7 +342,7 @@ fn package_l4_symlink_escape() {
 fn package_l5_test_files_do_not_enter_content() {
     let law = PackageLaw::new();
     law.library("jx", "fixture.test/json", "1.0.0", PACKAGE_X_SOURCE,
-        "[tests]\nlimit = 67108864\n[tests.sources]\n\"json_laws.hirsel\" = \"json\"\n");
+        "dependencies: [], tests: Some(Tests(sources: [(\"json_laws.hirsel\", \"json\")], limit: 67108864, grants: [], runs: [])),");
     law.write("jx/json_laws.hirsel",
         "@test\nfn version_law() -> Result[(), ()] { if version() == 1u64 { Ok(()) } else { Error(()) } }\n");
     assert_eq!(PackageLaw::pass(law.run(&["pack", "jx", "--output", "jx.hpkg"])), format!("fixture.test/json@1 1.0.0 {PACKAGE_X}\n"));
@@ -231,18 +358,18 @@ fn package_l5_test_files_do_not_enter_content() {
 #[test]
 fn package_l12_walks_never_leave_their_root() {
     let law = PackageLaw::new();
-    law.write("W/hirsel.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n");
+    law.write("W/hirsel.hcfg", "pkg_v1.Workspace(members: [\"app\", \"lib\"])\n");
     law.app("W/app", "");
     law.library("elsewhere/lib", "local/lib", "1.0.0", PACKAGE_MAIN, "");
     std::os::unix::fs::symlink("../elsewhere/lib", law.path("W/lib")).unwrap();
-    PackageLaw::refuse(law.run(&["lock", "W"]), "W/hirsel.toml: workspace.members: \"lib\" resolves outside the workspace");
+    PackageLaw::refuse(law.run(&["lock", "W"]), "W/hirsel.hcfg: workspace.members: \"lib\" resolves outside the workspace");
     assert!(!law.path("W/hirsel.lock").exists());
 
-    law.manifest("p", "fixture.test/p", "1.0.0", "[sources]\n\"a.hirsel\" = \"a\"\n");
+    law.manifest("p", "fixture.test/p", "1.0.0", "sources: [(\"a.hirsel\", \"a\")], dependencies: [],");
     law.write("p/real.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("..", law.path("p/up")).unwrap();
     std::os::unix::fs::symlink("up/p/real.hirsel", law.path("p/a.hirsel")).unwrap();
-    PackageLaw::refuse(law.run(&["check", "p"]), "p/hirsel.toml: sources: \"a.hirsel\" resolves outside the package");
+    PackageLaw::refuse(law.run(&["check", "p"]), "p/hirsel.hcfg: sources: \"a.hirsel\" resolves outside the package");
     assert!(!law.path("p/hirsel.lock").exists());
 }
 
@@ -297,7 +424,7 @@ fn package_bad_compressed_entry() {
     let law = PackageLaw::new();
     law.fixture_json();
     law.app("app", &format!(
-        "[dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"json.hpkg\" }}\n"
+        "dependencies: [(\"json\", Published(package: \"fixture.test/json\", major: 1, root: \"{PACKAGE_X}\", locator: Archive(\"json.hpkg\"), authority: []))],"
     ));
     let content = law.encoded(PACKAGE_X);
     let frame = package_frame(&content);
@@ -390,18 +517,24 @@ fn package_l42_frozen_makes_no_connection() {
     let law = PackageLaw::new();
     law.fixture_json();
     law.app("app", &format!(
-        "[dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"json.hpkg\" }}\n"
+        "dependencies: [(\"json\", Published(package: \"fixture.test/json\", major: 1, root: \"{PACKAGE_X}\", locator: Archive(\"json.hpkg\"), authority: []))],"
     ));
-    law.write("app/json.hpkg", std::fs::read(law.path("vendor/jx.hpkg")).unwrap());
+    law.write(
+        "app/json.hpkg",
+        std::fs::read(law.path("vendor/jx.hpkg")).unwrap(),
+    );
     PackageLaw::pass(law.run(&["fetch", "app"]));
     std::fs::remove_file(law.path("app/json.hpkg")).unwrap();
     for (name, url) in [("config", "cache.invalid"), ("warm-config", "warm.invalid")] {
-        law.write(&format!("{name}/hirsel/config.toml"), format!(
-            "[cache.remote]\nurl = \"https://{url}\"\ntrusted = [\"{}\"]\n[cache.remote.transfer]\nrecord-bytes = 65536\nblob-bytes = 65536\nwork-bytes = 65536\n",
+        law.write(&format!("{name}/hirsel/config.hcfg"), format!(
+            "user_v1.Config(contexts: [], routes: [], cache: Some(Remote(url: \"https://{url}\", trusted: [\"{}\"], record_bytes: 65536, blob_bytes: 65536, work_bytes: 65536)))",
             "01".repeat(32)
         ));
     }
-    let runtime = tempfile::Builder::new().prefix("l42-").tempdir_in("/tmp").unwrap();
+    let runtime = tempfile::Builder::new()
+        .prefix("l42-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let shared = |command: &mut std::process::Command| {
         command.env("XDG_RUNTIME_DIR", runtime.path());
     };
@@ -452,26 +585,26 @@ pub fn spawn(e: Exec, l: Launch) -> Result[Spawned, ExecError] waits { exec.spaw
 pub fn run[T](take x: T) {}
 pub fn twice(f: fn(Stdout) -> u64 waits, out: Stdout) -> u64 waits { f(out) + f(out) }
 "#;
-    law.library("lib", "fixture.test/effects", "1.0.0", source, "[dependencies]\nstd = { major = 1 }\n");
+    law.library("lib", "fixture.test/effects", "1.0.0", source, "dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))],");
     let packed = law.fixture("lib", "lib.hpkg");
     let root = packed.split_whitespace().last().unwrap();
-    law.write("w/hirsel.toml", "[workspace]\nmembers = [\"app\", \"middle\", \"consumer\"]\n");
+    law.write("w/hirsel.hcfg", "pkg_v1.Workspace(members: [\"app\", \"middle\", \"consumer\"])\n");
     law.write("w/lib.hpkg", std::fs::read(law.path("lib.hpkg")).unwrap());
-    let row = |list: &str| format!("effects = {{ package = \"fixture.test/effects\", major = 1, root = \"{root}\", archive = \"../lib.hpkg\"{list} }}\n");
+    let row = |list: &str| format!(r#"("effects", Published(package: "fixture.test/effects", major: 1, root: "{root}", locator: Archive("../lib.hpkg"), authority: [{list}]))"#);
     law.library("generic", "fixture.test/gen", "1.0.0",
         "pub fn stamp[T](x: T, c: Clock) -> u64 { host.wall_ms(c) }", "");
     let generic = law.fixture("generic", "w/gen.hpkg");
     let generic_root = generic.split_whitespace().last().unwrap();
-    let wide = ", authority = [\"Dir\", \"Net\", \"Clock\", \"Exec\"]";
-    law.library("w/middle", "fixture.test/middle", "1.0.0", "pub fn idle() {}\n", &format!("[dependencies]\n{}", row(wide)));
+    let wide = "Dir, Net, Clock, Exec";
+    law.library("w/middle", "fixture.test/middle", "1.0.0", "pub fn idle() {}\n", &format!("dependencies: [{}],", row(wide)));
     let consumer = |mask: &str| law.library("w/consumer", "fixture.test/consumer", "1.0.0", PACKAGE_MAIN, &format!(
-        "[dependencies]\napp = {{ package = \"fixture.test/app\", major = 1, path = \"../app\", authority = [{mask}] }}\n"));
-    let kinds = "\"Dir\", \"Net\", \"Clock\", \"Exec\"";
-    let all = format!("{kinds}, \"Stdout\"");
+        "dependencies: [(\"app\", Path(package: \"fixture.test/app\", major: 1, path: \"../app\", authority: [{mask}]))],"));
+    let kinds = "Dir, Net, Clock, Exec";
+    let all = format!("{kinds}, Stdout");
     consumer(&all);
     law.write("w/app/helpers.hirsel", "pub fn reads(e: Env) -> u64 { env.len(e) }");
     let app = |list: &str| {
-        let clock = if list.is_empty() { "" } else { ", authority = [\"Clock\"]" };
+        let clock = if list.is_empty() { "" } else { "Clock" };
         law.library("w/app", "fixture.test/app", "1.0.0", r#"
 fn writer(o: Stdout) -> u64 waits { let _ = stdout.write(o, "x")
     1u64 }
@@ -479,7 +612,9 @@ resource type Probe { out: Stdout } drop(p) { let _ = stdout.is_terminal(p.out) 
 pub fn consume(out: Stdout) { effects.run(Probe(out: out)) }
 pub fn use_lib(c: Clock, out: Stdout) -> u64 waits { gen.stamp(1u64, c) + effects.twice(fn(o: Stdout) -> u64 waits { writer(o) }, out) }
 pub fn main() -> Result[(), Exit] { Ok(()) }
-"#, &format!("[program]\nmodule = \"app\"\nfunction = \"main\"\nlimit = 67108864\n[tests]\nlimit = 67108864\n[tests.sources]\n\"helpers.hirsel\" = \"helpers\"\n[dependencies]\ngen = {{ package = \"fixture.test/gen\", major = 1, root = \"{generic_root}\", archive = \"../gen.hpkg\"{clock} }}\nmiddle = {{ package = \"fixture.test/middle\", major = 1, path = \"../middle\"{wide} }}\n{}", row(list)));
+"#, &format!(r#"program: Some(Program(module: Some("app"), function: Some("main"), limit: Some(67108864))),
+tests: Some(Tests(limit: 67108864, sources: [("helpers.hirsel", "helpers")], grants: [], runs: [])),
+dependencies: [("gen", Published(package: "fixture.test/gen", major: 1, root: "{generic_root}", locator: Archive("../gen.hpkg"), authority: [{clock}])), ("middle", Path(package: "fixture.test/middle", major: 1, path: "../middle", authority: [{wide}])), {}],"#, row(list)));
     };
     app(wide);
     PackageLaw::pass(law.run(&["check", "w/app"]));
@@ -495,9 +630,9 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     for command in [&["check", "w/app"][..], &["build", "w/app", "--output", "narrow"][..], &["pack", "w/app", "--output", "forbidden.hpkg"][..]] {
         let (status, _, stderr) = law.run(command);
         assert_eq!(status, Some(2), "{stderr}");
-        for want in ["app/hirsel.toml: dependencies.effects: fixture.test/effects@1 reaches Dir, Net, Clock, Exec",
+        for want in ["app/hirsel.hcfg: dependencies.effects: fixture.test/effects@1 reaches Dir, Net, Clock, Exec",
             "/effects/open -> std@1/file/open -> Open", "/effects/ping -> Connect", "/effects/fake -> ProvideClock", "ExecSpawn",
-            "app/hirsel.toml: dependencies.gen: fixture.test/gen@1 reaches Clock", "/gen/stamp -> WallMs"] {
+            "app/hirsel.hcfg: dependencies.gen: fixture.test/gen@1 reaches Clock", "/gen/stamp -> WallMs"] {
             assert!(stderr.contains(want), "missing {want} in {stderr}");
         }
     }
@@ -507,18 +642,18 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     for (name, contained) in [("native", false), ("contained", true)] {
         let foreign = if contained {
             law.write("contained/empty.wasm", b"\0asm\x01\0\0\0");
-            "containment = \"wasm\"\nmodule = { file = \"empty.wasm\", sha256 = \"93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476\" }"
+            "Contained(symbols: \"aa_\", file: \"empty.wasm\", sha256: \"93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476\")"
         } else {
-            "archives = []"
+            "Native(symbols: \"aa_\", archives: [])"
         };
         law.manifest(name, &format!("fixture.test/{name}"), "1.0.0", &format!(
-            "[sources]\n\"api.hirsel\" = \"api\"\n\"bridge.hirsel\" = \"bridge\"\n[foreign.bridge]\nsymbols = \"aa_\"\n{foreign}\n"));
+            "sources: [(\"api.hirsel\", \"api\"), (\"bridge.hirsel\", \"bridge\")], dependencies: [], foreign: Some([(\"bridge\", {foreign})]),"));
         law.write(&format!("{name}/api.hirsel"), "pub opaque type Api {}\npub fn ping(f: Foreign[Api]) -> u64 { bridge.ping(f) }");
         law.write(&format!("{name}/bridge.hirsel"), "pub fn ping(f: Foreign[api.Api]) -> u64");
         std::fs::create_dir_all(law.path("ffi")).unwrap();
         let pack = law.fixture(name, &format!("ffi/{name}.hpkg"));
         let root = pack.split_whitespace().last().unwrap();
-        law.app("ffi", &format!("[dependencies]\nlib = {{ package = \"fixture.test/{name}\", major = 1, root = \"{root}\", archive = \"{name}.hpkg\" }}\n"));
+        law.app("ffi", &format!("dependencies: [(\"lib\", Published(package: \"fixture.test/{name}\", major: 1, root: \"{root}\", locator: Archive(\"{name}.hpkg\"), authority: []))],"));
         let result = law.run(&["check", "ffi"]);
         if contained {
             PackageLaw::pass(result);

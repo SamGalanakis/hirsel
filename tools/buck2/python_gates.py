@@ -2,9 +2,10 @@
 
 
 def python_gates(out, call, Raw):
-    product = ["//tools/toolchain-dist:product.py", "//tools/toolchain-dist:product.toml"]
+    exporter = {"HIRSEL_CONFIG_EXPORTER": "//:hirsel-config-export-bin-hirsel-config-export"}
+    product = ["//tools/toolchain-dist:product.py", "//tools/toolchain-dist:hcfg.py", "//tools/toolchain-dist:product.hcfg"]
     out.append("\n" + call("hirsel_script_test", name="test-affected", script="tools/tests/affected.py", host=True,
-                           data=["tools/affected"]))
+                           data=["tools/affected", "//tools/toolchain-dist:hcfg.py"], files_env=exporter))
     out.append("\n" + call("hirsel_script_test", name="test-board-freshness",
                            script="tools/tests/test_board_freshness.py", host=True,
                            data=["tools/board-environment.sh", "tools/board-freshness.py", "tools/hirsel-board.service",
@@ -13,7 +14,7 @@ def python_gates(out, call, Raw):
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py",
-                           data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
+                           files_env=exporter, data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
                                  "//tools/buck2:llvm-cxx-headers-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock", *product]))
@@ -45,7 +46,7 @@ def python_gates(out, call, Raw):
           "tools/store-chaos/recover.py", "tools/store-chaos/relay.py"]),
     ]
     for target, script, inputs in python_units:
-        out.append("\n" + call("hirsel_script_test", name=target, script=script, data=inputs))
+        out.append("\n" + call("hirsel_script_test", name=target, script=script, data=inputs, files_env=exporter if product[0] in inputs else {}))
     # These suites use a local checkout, Git, host paths or host CPU affinity.
     for target, script in [
         ("test-capped", "tools/tests/capped.py"),

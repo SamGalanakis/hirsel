@@ -13,8 +13,16 @@ fn json_test_report_refuses_a_full_output_file() {
     let directory = tempfile::tempdir().unwrap();
     let app = directory.path();
     fs::write(
-        app.join("hirsel.toml"),
-        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"test.hirsel\" = \"tests\"\n",
+        app.join("hirsel.hcfg"),
+        r#"pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [],
+    tests: Some(Tests(sources: [("test.hirsel", "tests")], limit: 67108864, grants: [], runs: [])),
+)
+"#,
     )
     .unwrap();
     fs::write(

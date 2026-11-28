@@ -6,7 +6,9 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 SFU = HERE.parent
@@ -47,7 +49,7 @@ def build(args):
     video_source(fixture)
     corpus = inputs(args.scratch, SFU)
     data = json.loads(corpus.read_text())
-    manifest = tomllib.loads((SFU / "hirsel.toml").read_text())
+    manifest = hcfg.package(SFU)
     sfu = next(p for p in data["packages"] if p["package"]["name"] == "webrtc_sfu")
     for file, module in manifest["tests"]["sources"].items():
         sfu["sources"].append({"file": str(SFU / file), "modules": module.split("."), "signatures": False})

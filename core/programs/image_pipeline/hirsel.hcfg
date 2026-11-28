@@ -1,0 +1,34 @@
+pkg_v1.Package(
+    name: "hirsel.ai/image_pipeline",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("pipeline.hirsel", "pipeline"),
+        ("jpeg.hirsel", "pipeline"),
+        ("avif.hirsel", "pipeline"),
+        ("accept.hirsel", "pipeline"),
+        ("url.hirsel", "pipeline"),
+        ("cache.hirsel", "pipeline"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("image_core", Path(package: "hirsel.ai/image_core", major: 1, path: "../image_core", authority: [])),
+        ("image_jpeg", Path(package: "hirsel.ai/image_jpeg", major: 1, path: "../image_jpeg", authority: [Foreign])),
+        ("image_webp", Path(package: "hirsel.ai/image_webp", major: 1, path: "../image_webp", authority: [Foreign])),
+        ("av1", Path(package: "hirsel.ai/av1", major: 1, path: "../av1", authority: [Foreign])),
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("video_yuv", Path(package: "hirsel.ai/video_yuv", major: 1, path: "../video_yuv", authority: [Foreign])),
+    ],
+    tests: Some(Tests(
+        sources: [("pipeline_law.hirsel", "tests"), ("oracle_fixtures.hirsel", "tests")],
+        limit: 268435456,
+        grants: [
+            Foreign("hirsel.ai/image_jpeg@1/image_jpeg/Jpeg"),
+            Foreign("hirsel.ai/image_webp@1/webp/Webp"),
+            Foreign("hirsel.ai/av1@1/av1/DecoderCodec"),
+            Foreign("hirsel.ai/av1@1/av1/EncoderCodec"),
+            Foreign("hirsel.ai/video_yuv@1/video_yuv/Yuv"),
+        ],
+        runs: [],
+    )),
+)

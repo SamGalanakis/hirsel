@@ -108,14 +108,15 @@ Hirsel's CLI is a self-contained feedback loop for agents:
 
 ## Core and toolchain packages
 
-The Hirsel toolchain ships `std` and the [package archives](core/programs/toolchain-packages.toml)
-in `core-packages/`. Bind them by major version in `hirsel.toml`:
+The Hirsel toolchain ships `std` and the [package archives](core/programs/toolchain-packages.hcfg)
+in `core-packages/`. Bind them by major version in `hirsel.hcfg`:
 
-```text
-[dependencies]
-std = { major = 1 }
-store = { major = 1 }
-runner = { major = 1 }
+```hcfg
+dependencies: [
+    ("std", Toolchain(package: "std", major: 1, authority: [])),
+    ("store", Toolchain(package: "store", major: 1, authority: [])),
+    ("runner", Toolchain(package: "runner", major: 1, authority: [])),
+],
 ```
 
 ### Tier 1: verified core
@@ -145,7 +146,7 @@ Store, runner, platform, search, and registry have dedicated correctness suites 
 These packages live under `core/programs/` with scoped names (`hirsel.ai/<name>`).
 Bind members of the same workspace with `{ package = "...", major = 1, path = "..." }`.
 Use `hirsel pack` to create an archive and `hirsel add` to verify and bind it by its SHA-256
-content root. The compiler checks dependency `authority` ceilings declared in `hirsel.toml`,
+content root. The compiler checks dependency `authority` ceilings declared in `hirsel.hcfg`,
 and `hirsel.lock` v2 records the resolved dependencies.
 
 ### Libraries

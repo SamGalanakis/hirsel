@@ -23,6 +23,16 @@ pub(super) fn decode<T: Config>(reader: impl Read) -> Result<T, Failure> {
 fn grant(g: G) -> String {
     match g {
         G::Dir(p) => format!("Dir={p}"),
+        G::Compiler => "Compiler".into(),
+        G::ScopedDir { kind, app } => format!(
+            "Dir=xdg-{}:{app}",
+            match kind {
+                h::DirectoryKind::ConfigDir => "config",
+                h::DirectoryKind::DataDir => "data",
+                h::DirectoryKind::StateDir => "state",
+                h::DirectoryKind::CacheDir => "cache",
+            }
+        ),
         G::Clock => "Clock".into(),
         G::Random => "Random".into(),
         G::Tasks => "Tasks".into(),
@@ -61,7 +71,27 @@ fn grant(g: G) -> String {
                     cidr,
                     first_port,
                     last_port,
-                } => format!("Connect {cidr} {first_port}-{last_port}"),
+                    public_only,
+                } => format!(
+                    "Connect {cidr} {first_port}-{last_port}{}",
+                    if public_only.unwrap_or(false) {
+                        " public"
+                    } else {
+                        ""
+                    }
+                ),
+                N::UdpBind {
+                    cidr,
+                    first_port,
+                    last_port,
+                } => format!("UdpBind {cidr} {first_port}-{last_port}"),
+                N::UdpSend {
+                    cidr,
+                    first_port,
+                    last_port,
+                } => format!("UdpSend {cidr} {first_port}-{last_port}"),
+                N::UnixBind { label, path } => format!("UnixBind {label} {path}"),
+                N::UnixSend { label, path } => format!("UnixSend {label} {path}"),
                 N::UnixRoot { label, path } => format!("UnixRoot {label} {path}"),
                 N::UnixListen { label, path } => format!("UnixListen {label} {path}"),
                 N::UnixConnect { label, path } => format!("UnixConnect {label} {path}"),

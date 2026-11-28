@@ -1,6 +1,6 @@
 #!/bin/sh
 # Rebuilds box.wasm from box.c and box_traps.s byte for byte (FFI-10), then
-# repins it in hirsel.toml. CLANG, WASM_LD and LLVM_OBJCOPY name LLVM 21 tools
+# repins it in hirsel.hcfg. CLANG, WASM_LD and LLVM_OBJCOPY name LLVM 21 tools
 # with the WebAssembly target.
 set -eu
 cd "$(dirname "$0")"
@@ -23,4 +23,4 @@ exports=$(sed -n 's/^pub fn \([a-z_0-9]*\)(.*/--export=hwl_\1/p' native.hirsel)
 "$objcopy" --add-section=hirsel_abi="$stage/abi.txt" "$stage/box.wasm"
 cp "$stage/box.wasm" box.wasm
 pin=$(sha256sum box.wasm | cut -d' ' -f1)
-sed -i "s/^module = .*/module = { file = \"box.wasm\", sha256 = \"$pin\" }/" hirsel.toml
+sed -i "s/^module = .*/module = { file = \"box.wasm\", sha256 = \"$pin\" }/" hirsel.hcfg

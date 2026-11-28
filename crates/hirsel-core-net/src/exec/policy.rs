@@ -1,5 +1,6 @@
 //! The launch request and the policy it pins (EXEC-1 and EXEC-2).
 use super::{ArgToken, ExecRules, Form, ProfileRules, valid_key, valid_name};
+use hirsel_config_schema::{Config, Limits, exec_v1};
 use ring::digest::{Context, SHA256};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,8 +17,13 @@ impl Request {
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let (file, names) = text.rsplit_once(' ').ok_or(GRANT_SYNTAX)?;
         let names = names.split(',').map(str::to_owned).collect::<Vec<_>>();
+        Self::new(file.into(), names)
+    }
+
+    pub fn new(file: String, names: Vec<String>) -> Result<Self, &'static str> {
         let mut seen = std::collections::BTreeSet::new();
         if file.is_empty()
+            || names.is_empty()
             || file.as_bytes().contains(&0)
             || !names
                 .iter()
@@ -25,10 +31,7 @@ impl Request {
         {
             return Err(GRANT_SYNTAX);
         }
-        Ok(Self {
-            file: file.to_owned(),
-            names,
-        })
+        Ok(Self { file, names })
     }
 
     pub fn text(&self) -> String {
@@ -40,7 +43,11 @@ impl Request {
     }
 
     pub fn load_from(&self, workdir: &Path) -> Result<Policy, String> {
-        self.read(std::fs::read_to_string(workdir.join(&self.file)))
+        self.read(
+            std::fs::File::open(workdir.join(&self.file))
+                .and_then(hirsel_config_schema::read_bounded)
+                .and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other)),
+        )
     }
 
     /// The policy in `source`: the text of this request's file, or the error
@@ -55,17 +62,6 @@ impl Request {
         })?;
         Policy::parse(&source, &self.names)
     }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileFile {
-    image: String,
-    sha256: String,
-    argv0: String,
-    args: Vec<Vec<String>>,
-    env: BTreeMap<String, String>,
-    dirs: BTreeMap<String, String>,
 }
 
 pub struct Profile {
@@ -94,8 +90,7 @@ fn ascii_hex(s: &str) -> Option<[u8; 32]> {
 }
 
 impl Profile {
-    fn parse(raw: toml::Value) -> Result<Self, &'static str> {
-        let raw: ProfileFile = raw.try_into().map_err(|_| "malformed profile")?;
+    fn parse(raw: exec_v1::Profile) -> Result<Self, &'static str> {
         let absolute = |path: &str| Path::new(path).is_absolute() && !path.as_bytes().contains(&0);
         if !absolute(&raw.image) {
             return Err("image path must be absolute and contain no NUL");
@@ -119,28 +114,33 @@ impl Profile {
                 Form::new(
                     tokens
                         .into_iter()
-                        .map(|token| match token.as_str() {
-                            "{any}" => ArgToken::Any,
-                            "{rest}" => ArgToken::Rest,
-                            _ => ArgToken::Lit(token.into_bytes()),
+                        .map(|token| match token {
+                            exec_v1::Arg::Any => ArgToken::Any,
+                            exec_v1::Arg::Rest => ArgToken::Rest,
+                            exec_v1::Arg::Lit(literal) => ArgToken::Lit(literal.into_bytes()),
                         })
                         .collect(),
                 )
-                .ok_or("argument form contains NUL or nonfinal {rest}")
+                .ok_or("argument form contains NUL or nonfinal Rest")
             })
             .collect::<Result<_, _>>()?;
         let mut fixed = BTreeMap::new();
         let mut caller_keys = Vec::new();
         for (key, value) in raw.env {
-            if !valid_key(&key) || value.as_bytes().contains(&0) {
-                return Err("invalid environment key or NUL in environment value");
+            if !valid_key(&key) {
+                return Err("invalid environment key");
             }
-            if value == "{any}" {
-                caller_keys.push(key);
-            } else {
-                fixed.insert(key, value);
+            match value {
+                exec_v1::EnvValue::Caller => caller_keys.push(key),
+                exec_v1::EnvValue::Fixed(value) => {
+                    if value.as_bytes().contains(&0) {
+                        return Err("NUL in environment value");
+                    }
+                    fixed.insert(key, value);
+                }
             }
         }
+        caller_keys.sort_unstable();
         Ok(Self {
             image: raw.image,
             pin,
@@ -148,7 +148,7 @@ impl Profile {
             forms,
             fixed,
             caller_keys,
-            dirs: raw.dirs,
+            dirs: raw.dirs.into_iter().collect(),
         })
     }
 
@@ -206,11 +206,10 @@ pub struct Policy {
 
 impl Policy {
     fn parse(source: &str, names: &[String]) -> Result<Self, String> {
-        let table = source
-            .parse::<toml::Table>()
-            .map_err(|_| format!("Exec[{}]: malformed TOML policy", names.join(",")))?;
+        let policy = exec_v1::Policy::read(source.as_bytes(), Limits::default())
+            .map_err(|error| format!("Exec[{}]: {error}", names.join(",")))?;
         let mut profiles = BTreeMap::new();
-        for (name, raw) in table {
+        for (name, raw) in policy.profiles {
             let profile = Profile::parse(raw).map_err(|why| format!("Exec[{name:?}]: {why}"))?;
             if !valid_name(&name) {
                 return Err(format!("Exec[{name:?}]: invalid profile name"));

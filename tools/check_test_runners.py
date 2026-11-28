@@ -15,6 +15,9 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools/toolchain-dist'))
+import hcfg
+
 IGNORED = {'--ignored', '--include-ignored'}
 RUST_LITERAL = re.compile(
     r'//[^\n]*|/\*.*?\*/|(?P<raw>b?r(?P<hashes>\#*)".*?"(?P=hashes))'
@@ -31,7 +34,7 @@ PYTHON_COMMAND = re.compile(r'(?:^[ \t]*(?:- )?|[;&|]\s*)(?:run:\s+|exec\s+)?pyt
 def workspace_files(root):
     paths = subprocess.check_output(
         ['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
-         '--', '*.py', '*.rs', '*.hirsel', '*hirsel.toml', '*test.toml', '*Cargo.toml', '*BUCK'], cwd=root)
+         '--', '*.py', '*.rs', '*.hirsel', '*hirsel.hcfg', '*test.hcfg', '*Cargo.toml', '*BUCK'], cwd=root)
     return {root / name for name in map(Path, paths.decode().split('\0')[:-1])
             if (root / name).is_file()}
 
@@ -240,9 +243,9 @@ def hirsel_problems(root, files):
     registered = set()
     staged = {}
     for manifest in files:
-        if manifest.name == 'hirsel.toml':
+        if manifest.name == 'hirsel.hcfg':
             registered.update(hirsel_test_sources(manifest))
-        elif manifest.name == 'test.toml' and manifest.parent.name == 'vectors':
+        elif manifest.name == 'test.hcfg' and manifest.parent.name == 'vectors':
             # The codec scripts stage these fragments into the package manifest.
             script = manifest.parent.parent / 'test-vectors.sh'
             staged.update((path, script) for path in hirsel_test_sources(manifest))
@@ -263,8 +266,17 @@ def hirsel_problems(root, files):
 
 
 def hirsel_test_sources(manifest):
-    tests = tomllib.loads(manifest.read_text()).get('tests', {})
-    return {(manifest.parent / name).resolve() for name in tests.get('sources', {})}
+    data = hcfg.project(manifest)
+    value = data['value']
+    if data['root'] == 'pkg_v1.VectorTests':
+        tests = value['tests']
+    else:
+        if data['root'] == 'pkg_v1.Workspace':
+            value = hcfg.option(value['root_package'])
+        elif data['root'] != 'pkg_v1.Package':
+            raise ValueError(f'{manifest}: expected a package or workspace')
+        tests = hcfg.option(value['tests']) if value else None
+    return {(manifest.parent / name).resolve() for name, _ in (tests or {}).get('sources', [])}
 
 
 def standalone_rust_roots(root, files):

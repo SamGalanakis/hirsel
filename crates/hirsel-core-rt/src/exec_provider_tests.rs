@@ -237,7 +237,7 @@ fn exec_pin_admits_a_universal_file_only_for_an_image_of_this_machine() {
     };
     let root = tempfile::tempdir().unwrap();
     let image = root.path().join("image");
-    let profile = root.path().join("policy.toml");
+    let profile = root.path().join("policy.hcfg");
     for (case, bytes, admitted) in [
         ("an image of this machine", universal(ARM64, 32), true),
         ("an image of another machine", universal(X86_64, 32), false),
@@ -252,7 +252,7 @@ fn exec_pin_admits_a_universal_file_only_for_an_image_of_this_machine() {
         std::fs::write(
             &profile,
             format!(
-                "[held]\nimage = {:?}\nsha256 = {:?}\nargv0 = \"held\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+                "exec_v1.Policy(profiles: [(\"held\", Profile(image: {:?}, sha256: {:?}, argv0: \"held\", args: [[]], env: [], dirs: [(\"work\", {:?})]))])",
                 image,
                 pin,
                 root.path()
@@ -282,12 +282,12 @@ fn exec_provider_law(image: &std::path::Path) {
 
     let root = image.parent().unwrap();
     let real_image = std::fs::canonicalize(image).unwrap();
-    let profile = root.join("policy.toml");
+    let profile = root.join("policy.hcfg");
     let wanted = sha256_hex(image);
     std::fs::write(
         &profile,
         format!(
-            "[digest]\nimage = {:?}\nsha256 = {:?}\nargv0 = \"pinned digest\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            "exec_v1.Policy(profiles: [(\"digest\", Profile(image: {:?}, sha256: {:?}, argv0: \"pinned digest\", args: [[]], env: [], dirs: [(\"work\", {:?})]))])",
             image, wanted, root
         ),
     )
@@ -452,11 +452,11 @@ fn exec_provider_refuses_post_launch_modification_replacement_and_symlink_swap()
     let original_mtime = original_meta.modified().unwrap();
 
     let wanted = sha256_hex(&pinned);
-    let profile = root.join("policy.toml");
+    let profile = root.join("policy.hcfg");
     std::fs::write(
         &profile,
         format!(
-            "[pinned]\nimage = {:?}\nsha256 = {:?}\nargv0 = \"pinned\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            "exec_v1.Policy(profiles: [(\"pinned\", Profile(image: {:?}, sha256: {:?}, argv0: \"pinned\", args: [[]], env: [], dirs: [(\"work\", {:?})]))])",
             pinned, wanted, root
         ),
     )
@@ -672,13 +672,13 @@ fn exec_provider_runs_system_shells_and_origin_tools() {
     let cat_pin = sha256_hex(cat_path);
     let tool_pin = sha256_hex(&tool);
 
-    let profile = root.join("policy.toml");
+    let profile = root.join("policy.hcfg");
     std::fs::write(
         &profile,
         format!(
-            "[sh]\nimage = {sh:?}\nsha256 = {sh_pin:?}\nargv0 = \"sh\"\nargs = [[\"-c\", \"printf sh-ok\"]]\nenv = {{}}\ndirs = {{ work = {root:?} }}\n\n\
-             [cat]\nimage = \"/bin/cat\"\nsha256 = {cat_pin:?}\nargv0 = \"cat\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {root:?} }}\n\n\
-             [origin]\nimage = {tool:?}\nsha256 = {tool_pin:?}\nargv0 = \"origin\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {root:?} }}\n",
+            "exec_v1.Policy(profiles: [(\"sh\", Profile(image: {sh:?}, sha256: {sh_pin:?}, argv0: \"sh\", args: [[Lit(\"-c\"), Lit(\"printf sh-ok\")]], env: [], dirs: [(\"work\", {root:?})])),\
+             (\"cat\", Profile(image: \"/bin/cat\", sha256: {cat_pin:?}, argv0: \"cat\", args: [[]], env: [], dirs: [(\"work\", {root:?})])),\
+             (\"origin\", Profile(image: {tool:?}, sha256: {tool_pin:?}, argv0: \"origin\", args: [[]], env: [], dirs: [(\"work\", {root:?})]))])",
             sh = sh_path,
             tool = tool,
             root = root,

@@ -60,7 +60,6 @@ libc = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
-toml_edit = { version = "0.22.27", default-features = false, features = ["parse", "display"] }
 ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "=0.8.5"
@@ -78,6 +77,7 @@ twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "
 hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 
 [build-dependencies]
+hirsel-config-schema = { path = "../hirsel-config-schema" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 sha2 = "0.11"

@@ -2,9 +2,12 @@
 """Print the public Store contract without implementation bodies or locations."""
 
 import argparse
+import sys
 from pathlib import Path
 import re
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/toolchain-dist'))
+import hcfg
 
 
 DECLARATION = re.compile(
@@ -21,7 +24,7 @@ PAIRS = {'(': ')', '[': ']', '{': '}'}
 
 def declarations(root, include_tests=False):
     package = root / 'core/programs/store'
-    manifest = tomllib.loads((package / 'hirsel.toml').read_text())
+    manifest = hcfg.package(package)
     sources = dict(manifest['sources'])
     if include_tests:
         sources.update(manifest['tests']['sources'])

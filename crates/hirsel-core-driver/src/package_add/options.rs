@@ -82,7 +82,7 @@ impl Options {
                         crate::package_lock::FROZEN_FLAG
                     };
                     return Err(
-                        format!("hirsel.toml needs to be updated but {flag} was passed").into(),
+                        format!("hirsel.hcfg needs to be updated but {flag} was passed").into(),
                     );
                 }
                 Opt::AddRoot(value) => {

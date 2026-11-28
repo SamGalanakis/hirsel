@@ -1,9 +1,0 @@
-
-[tests]
-limit = 16777216
-grants = ["Foreign=hirsel.ai/image_jpeg@1/image_jpeg/Jpeg"]
-dirs = ["fixtures"]
-
-[tests.sources]
-"tests.hirsel" = "tests"
-"example.hirsel" = "tests"

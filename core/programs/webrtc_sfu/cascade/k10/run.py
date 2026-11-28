@@ -26,7 +26,9 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[5] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 SFU = HERE.parents[1]
@@ -63,14 +65,14 @@ def build_inputs(scratch):
         directory = directory.resolve()
         if directory in done:
             return done[directory]
-        manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
+        manifest = hcfg.package(directory)
         deps = [core]
         for name, dep in manifest.get('dependencies', {}).items():
             if 'path' in dep:
                 deps.append(visit(directory / dep['path']))
             else:
                 deps.append({'name': name, 'version': str(dep['major'])})
-        pkg = {'name': manifest['package']['name'], 'version': str(manifest['package']['version'].split('.')[0])}
+        pkg = {'name': manifest['name'], 'version': str(manifest['version'].split('.')[0])}
         packages.append({
             'package': pkg,
             'dependencies': deps,

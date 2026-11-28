@@ -1,0 +1,9 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests"), ("example.hirsel", "tests")],
+        limit: 268435456,
+        grants: [Foreign("hirsel.ai/opus@1/opus/Opus"), Stdout, Dir("fixtures")],
+        runs: [],
+    ),
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+)

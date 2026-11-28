@@ -38,9 +38,9 @@ fn succeeded(output: Output) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn manifest(name: &str) -> String {
+fn manifest(name: &str, deps: &str) -> String {
     format!(
-        "[package]\nname = {name:?}\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n"
+        "pkg_v1.Package(name: {name:?}, version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [{deps}])\n"
     )
 }
 
@@ -53,31 +53,23 @@ fn producer(root: &Path, corpus: Option<&[u8]>) {
         })
         .collect();
     fs::write(
-        root.join("producer/hirsel.toml"),
-        format!("[workspace]\nmembers = {names:?}\n"),
+        root.join("producer/hirsel.hcfg"),
+        format!("pkg_v1.Workspace(members: {names:?})\n"),
     )
     .unwrap();
     for (i, name) in names.iter().enumerate() {
         let dir = root.join("producer").join(name);
         fs::create_dir(&dir).unwrap();
-        let mut config = manifest(&format!("fixture.test/{name}"));
         let deps: Vec<_> = match (corpus, i) {
             (Some(_), 0) => names[1..].iter().filter(|n| *n != "base").collect(),
             (Some(_), 1 | 2) => vec![&names[3]],
             (None, 0) => names[1..].iter().collect(),
             _ => vec![],
         };
-        if !deps.is_empty() {
-            config.push_str("\n[dependencies]\n");
-            for dep in deps {
-                writeln!(
-                    config,
-                    "{dep} = {{ package = \"fixture.test/{dep}\", major = 1, path = \"../{dep}\" }}"
-                )
-                .unwrap();
-            }
-        }
-        fs::write(dir.join("hirsel.toml"), config).unwrap();
+        let edges: Vec<_> = deps.iter().map(|dep| format!(
+            r#"("{dep}", Path(package: "fixture.test/{dep}", major: 1, path: "../{dep}", authority: []))"#)).collect();
+        let config = manifest(&format!("fixture.test/{name}"), &edges.join(", "));
+        fs::write(dir.join("hirsel.hcfg"), config).unwrap();
         let mut source = format!("pub fn value() -> u64 {{ {i}u64 }}\n").into_bytes();
         for j in 0..32 {
             writeln!(source, "pub fn value_{j}(x: u64) -> u64 {{ x + {j}u64 }}").unwrap();
@@ -153,11 +145,8 @@ impl Fixture {
             .last()
             .unwrap();
         fs::write(
-            self.root.join("app/hirsel.toml"),
-            format!(
-                "{}\n[dependencies]\np00 = {{ package = \"fixture.test/p00\", major = 1, root = {root:?}, archive = \"libs.hpkg\" }}\n",
-                manifest("local/bench")
-            ),
+            self.root.join("app/hirsel.hcfg"),
+            manifest("local/bench", &format!(r#"("p00", Published(package: "fixture.test/p00", major: 1, root: {root:?}, locator: Archive("libs.hpkg"), authority: []))"#)),
         )
         .unwrap();
         fs::write(

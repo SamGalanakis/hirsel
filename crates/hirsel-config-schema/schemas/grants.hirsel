@@ -1,5 +1,7 @@
-pub type Grant: codec = Dir(String) | Clock | Random | Tasks | Stdin | Stdout | Stderr | Process | Net(NetRule) | Env(List[String]) | Secret(parameter: String, source: Binding, policy: String) | Cred(parameter: String, source: String, policy: String) | Foreign(String) | Exec(policy: String, profiles: List[String])
+pub type Grant: codec = Dir(String) | ScopedDir(kind: DirectoryKind, app: String) | Compiler | Clock | Random | Tasks | Stdin | Stdout | Stderr | Process | Net(NetRule) | Env(List[String]) | Secret(parameter: String, source: Binding, policy: String) | Cred(parameter: String, source: String, policy: String) | Foreign(String) | Exec(policy: String, profiles: List[String])
 
-pub type NetRule: codec = Listen(cidr: String, first_port: u16, last_port: u16) | Connect(cidr: String, first_port: u16, last_port: u16) | UnixRoot(label: String, path: String) | UnixListen(label: String, path: String) | UnixConnect(label: String, path: String) | Resolve(String) | Tls(String)
+pub type NetRule: codec = Listen(cidr: String, first_port: u16, last_port: u16) | Connect(cidr: String, first_port: u16, last_port: u16, public_only: Option[bool]) | UdpBind(cidr: String, first_port: u16, last_port: u16) | UdpSend(cidr: String, first_port: u16, last_port: u16) | UnixRoot(label: String, path: String) | UnixListen(label: String, path: String) | UnixConnect(label: String, path: String) | UnixBind(label: String, path: String) | UnixSend(label: String, path: String) | Resolve(String) | Tls(String)
 
 pub type Binding: codec = Environment(String) | File(String)
+
+pub type DirectoryKind: codec = ConfigDir | CacheDir | DataDir | StateDir

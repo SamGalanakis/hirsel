@@ -12,9 +12,6 @@ use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-/// The grants a gate test may hold; `Dir` is allowed separately, as a relative path.
-const ALLOWED: [&str; 5] = ["Clock", "Random", "Stdout", "Stderr", "Tasks"];
-
 /// The most bytes of a gate run's stderr the gate keeps for its diagnostics. The report
 /// itself is spooled to a file and read whole.
 const DIAGNOSTIC_BYTES: usize = 256 << 10;
@@ -103,7 +100,7 @@ pub(super) fn authority(tree: &Tree) -> Result<(), Failure> {
     let manifest = package
         .strip_prefix(".")
         .unwrap_or(package)
-        .join("hirsel.toml");
+        .join(crate::package_dir::MANIFEST);
     let Some((_, bytes)) = tree
         .files
         .iter()
@@ -114,77 +111,69 @@ pub(super) fn authority(tree: &Tree) -> Result<(), Failure> {
             manifest.display()
         )));
     };
-    let text = std::str::from_utf8(bytes)
-        .map_err(|e| Failure::Invalid(format!("{}: {e}", manifest.display())))?;
-    let parsed: toml::Table = text
-        .parse()
-        .map_err(|e| Failure::Invalid(format!("{}: {e}", manifest.display())))?;
-    let Some(tests) = parsed.get("tests") else {
+    use hirsel_config_schema::pkg_v1::{Directory, Grant, GrantChange};
+    let parsed =
+        crate::package_manifest::Manifest::parse(bytes, &manifest).map_err(Failure::Invalid)?;
+    let Some(tests) = parsed.package.and_then(|p| p.tests) else {
         return Ok(());
     };
-    let denied = |test: &str, grant: &dyn std::fmt::Display| {
+    fn check(test: &str, grant: &Grant) -> Result<(), Failure> {
+        let kind = match grant {
+            Grant::Clock | Grant::Random | Grant::Stdout | Grant::Stderr | Grant::Tasks => {
+                return Ok(());
+            }
+            Grant::Dir(dir) => {
+                if !dir.is_empty()
+                    && !dir.contains('\0')
+                    && Path::new(dir)
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+                {
+                    return Ok(());
+                }
+                format!("Dir {dir:?}")
+            }
+            Grant::ScopedDir { .. } => "ScopedDir".into(),
+            Grant::Stdin => "Stdin".into(),
+            Grant::Process => "Process".into(),
+            Grant::Net(_) => "Net".into(),
+            Grant::Exec { .. } => "Exec".into(),
+            Grant::Foreign(_) => "Foreign".into(),
+            Grant::Env(_) => "Env".into(),
+            Grant::Secret { .. } => "Secret".into(),
+            Grant::Cred { .. } => "Cred".into(),
+            Grant::Compiler => "Compiler".into(),
+        };
         Err(Failure::Denied(format!(
-            "law gate: {test} may not be granted {grant}"
+            "law gate: {test} may not be granted {kind}"
         )))
-    };
-    let check = |test: &str, config: &toml::Value, keys: &[&str]| -> Result<(), Failure> {
-        let Some(config) = config.as_table() else {
-            return denied(test, &"a configuration that is not a table");
-        };
-        for (key, value) in config {
-            if !keys.contains(&key.as_str()) {
-                return denied(test, &format!("{key:?}"));
-            }
-            let strings = || -> Result<Vec<&str>, Failure> {
-                value
-                    .as_array()
-                    .and_then(|items| items.iter().map(toml::Value::as_str).collect())
-                    .ok_or_else(|| {
-                        Failure::Invalid(format!("{test}.{key} is not a list of strings"))
-                    })
-            };
-            match key.as_str() {
-                "grants" => {
-                    for grant in strings()? {
-                        let kind = grant.split_once('=').map_or(grant, |(kind, _)| kind);
-                        if !ALLOWED.contains(&kind) {
-                            return denied(test, &grant);
-                        }
-                    }
+    }
+    for grant in &tests.grants {
+        check("tests", grant)?;
+    }
+    for (name, run) in tests.runs {
+        let test = format!("tests.runs.{name}");
+        match run.grant_change {
+            None => {}
+            Some(GrantChange::ReplaceAll(values)) => {
+                for grant in &values {
+                    check(&test, grant)?;
                 }
-                "dirs" => {
-                    for dir in strings()? {
-                        let path = Path::new(dir);
-                        let inside = !dir.is_empty()
-                            && hirsel_core_ids::launch::dir_slot(dir).as_deref() == Ok(dir)
-                            && path
-                                .components()
-                                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-                        if !inside {
-                            return denied(test, &format!("Dir {dir:?}"));
-                        }
-                    }
-                }
-                _ => {}
             }
-        }
-        Ok(())
-    };
-    check(
-        "tests",
-        tests,
-        &["sources", "limit", "grants", "dirs", "runs"],
-    )?;
-    if let Some(runs) = tests.get("runs") {
-        let Some(runs) = runs.as_table() else {
-            return denied("tests.runs", &"a configuration that is not a table");
-        };
-        for (name, run) in runs {
-            check(
-                &format!("tests.runs.{name}"),
-                run,
-                &["limit", "grants", "dirs"],
-            )?;
+            Some(GrantChange::ReplaceDirs(values)) => {
+                for dir in values {
+                    let grant = match dir {
+                        Directory::Dir(p) => Grant::Dir(p),
+                        Directory::ScopedDir { kind, app } => Grant::ScopedDir { kind, app },
+                    };
+                    check(&test, &grant)?;
+                }
+            }
+            Some(GrantChange::ReplaceNonDir(values)) => {
+                for grant in values {
+                    check(&test, &crate::package_dir::grants::non_dir(grant))?;
+                }
+            }
         }
     }
     Ok(())

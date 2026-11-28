@@ -15,7 +15,7 @@ pub const PINS: [&str; 6] = [
     "rust-toolchain.toml",
     "tools/native-toolchain/llvm-23.lock",
     "tools/native-toolchain/native.lock.json",
-    "tools/toolchain-dist/product.toml",
+    "tools/toolchain-dist/product.hcfg",
 ];
 /// Directories a closure crate's build script compiles that sit outside the
 /// closure: hirsel-llvm-lazy's component is built from hirsel-llvm's bridge.

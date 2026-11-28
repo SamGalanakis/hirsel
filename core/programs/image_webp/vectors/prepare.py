@@ -6,7 +6,9 @@ import shutil
 import struct
 import subprocess
 import sys
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
 
 
 TEST_DATA_REVISION = "06ddd96e276c2c638a72d39d3c0f340afd61978c"
@@ -67,9 +69,7 @@ def stage_dependency(programs, work, name):
     original = programs / name
     target = work / name
     target.mkdir(exist_ok=True)
-    manifest = original / "hirsel.toml"
-    package = tomllib.loads(manifest.read_text())
-    for filename in ("hirsel.toml", *package["sources"], *package.get("tests", {}).get("sources", ())):
+    for filename in hcfg.package_files(original):
         shutil.copyfile(original / filename, target / filename)
 
 
@@ -87,16 +87,12 @@ def main():
     dependencies = ("image_core", "media_container", "media_bits")
     for name in dependencies:
         stage_dependency(codec.parent, work, name)
-    (work / "hirsel.toml").write_text(
-        "[workspace]\nmembers = " + json.dumps([*dependencies, "image_webp"]) + "\n"
-    )
+    hcfg.workspace(work, [*dependencies, "image_webp"])
     for filename in ("webp.hirsel", "native.hirsel", "libhirsel_webp.a"):
         shutil.copyfile(codec / filename, package / filename)
     for filename in ("tests.hirsel", "example.hirsel"):
         shutil.copyfile(vectors / filename, package / filename)
-    manifest = (codec / "hirsel.toml").read_text()
-    tests = (vectors / "test.toml").read_text().replace('"fixtures"', json.dumps(str(fixtures)))
-    (package / "hirsel.toml").write_text(manifest + tests)
+    hcfg.vector_package(codec, vectors, package, fixtures)
 
     executable = work / "reference"
     subprocess.run([

@@ -107,26 +107,41 @@ impl NetGrant {
                 else {
                     return Err(format!("expected --grant {RULE_SYNTAX}: {text}"));
                 };
-                if !unix_root_path(path) || label.contains('\0') || grant.roots.contains_key(label)
-                {
-                    return Err(format!("expected --grant {RULE_SYNTAX}: {text}"));
-                }
-                grant.roots.insert(label.to_owned(), path.to_owned());
+                grant
+                    .add_root(label, path)
+                    .map_err(|_| format!("expected --grant {RULE_SYNTAX}: {text}"))?;
             } else {
                 grant.rules.push(GrantRule::parse(text)?);
             }
         }
-        for rule in &grant.rules {
+        grant.check_roots()?;
+        Ok(grant)
+    }
+
+    pub fn add_root(&mut self, label: &str, path: &str) -> Result<(), &'static str> {
+        if label.is_empty()
+            || label.contains('\0')
+            || !unix_root_path(path)
+            || self.roots.contains_key(label)
+        {
+            return Err("invalid or duplicate UnixRoot");
+        }
+        self.roots.insert(label.to_owned(), path.to_owned());
+        Ok(())
+    }
+
+    pub fn check_roots(&self) -> Result<(), String> {
+        for rule in &self.rules {
             if let GrantRule::Unix(rule) = rule
                 && let Some((root, _)) = rule.endpoint()
-                && !grant.roots.contains_key(root)
+                && !self.roots.contains_key(root)
             {
                 return Err(format!(
                     "expected --grant {RULE_SYNTAX}: missing UnixRoot {root}"
                 ));
             }
         }
-        Ok(grant)
+        Ok(())
     }
 }
 

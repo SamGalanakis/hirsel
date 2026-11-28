@@ -112,7 +112,7 @@ fn hirsel_new_dot_in_existing_git_dir_creates_agents_gitignore_and_refuses_reini
     assert!(out.contains("hirsel test"), "{out}");
     assert!(!out.contains("cd ."), "{out}");
 
-    assert!(repo.join("hirsel.toml").is_file());
+    assert!(repo.join("hirsel.hcfg").is_file());
     assert!(repo.join("hirsel.lock").is_file());
     assert!(repo.join("main.hirsel").is_file());
     assert!(repo.join("tests.hirsel").is_file());
@@ -126,7 +126,7 @@ fn hirsel_new_dot_in_existing_git_dir_creates_agents_gitignore_and_refuses_reini
     let refused = run_in(repo, &["new", "."]);
     assert_eq!(refused.status.code(), Some(2));
     assert!(
-        stderr(&refused).contains("hirsel.toml"),
+        stderr(&refused).contains("hirsel.hcfg"),
         "stderr:\n{}",
         stderr(&refused)
     );

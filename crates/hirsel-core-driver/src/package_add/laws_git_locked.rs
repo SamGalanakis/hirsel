@@ -75,7 +75,7 @@ fn l33_nothing_in_the_repository_runs() {
         .env("GIT_CONFIG_GLOBAL", law.path("gitconfig"));
     PackageLaw::pass(result(command.output().unwrap()));
     let binding = wrap_binding("https://alpha.test/r4", R4, PACKAGE_W, Some("refs/tags/v1"));
-    assert!(manifest_text(&law, "app").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "app"));
+    assert!(manifest_text(&law, "app").contains(&binding), "{}", manifest_text(&law, "app"));
     assert!(!sentinel.exists());
     let log = server.log();
     assert!(log.iter().all(|entry| !entry.contains("/evil") && !entry.contains("/lfs")), "{log:?}");
@@ -151,7 +151,7 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--locked"], "s"),
-        "fixture.test/wrap@1: fetching git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap failed: the server would not send commit 77cbe52623fcc3479739eb37e89ddbe5c4626077",
+        "fixture.test/wrap@1: fetching git:https://alpha.test/r1#daf4441842dbd47464a183be86f1128a41b2bf26/wrap failed: the server would not send commit daf4441842dbd47464a183be86f1128a41b2bf26",
     );
     server.with(|served| served.hook = None);
     server.log();
@@ -160,7 +160,7 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--frozen"], "s"),
-        "fixture.test/wrap@1 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap)",
+        "fixture.test/wrap@1 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#daf4441842dbd47464a183be86f1128a41b2bf26/wrap)",
     );
     assert_eq!(server.log(), Vec::<String>::new());
 

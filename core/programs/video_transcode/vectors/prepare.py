@@ -23,6 +23,9 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
+
 import numpy as np
 
 PACKAGES = ["av1", "h264", "media_bits", "media_container", "video_packager", "video_yuv"]
@@ -113,7 +116,7 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     members = PACKAGES + ["video_transcode"]
-    (work / "hirsel.toml").write_text("[workspace]\nmembers = " + json.dumps(members) + "\n")
+    hcfg.workspace(work, members)
     # Members must resolve inside the workspace, so copy rather than link.
     for name in PACKAGES:
         shutil.copytree(programs / name, work / name, ignore=shutil.ignore_patterns("vectors", "hirsel.lock"))
@@ -124,9 +127,7 @@ def main():
     shutil.copyfile(vectors / "tests.hirsel", target / "tests.hirsel")
     fixtures = work / "fixtures"
     fixtures.mkdir()
-    base = (package / "hirsel.toml").read_text().split("\n[tests]")[0].rstrip("\n") + "\n"
-    tests = (vectors / "test.toml").read_text().replace('"fixtures"', json.dumps(str(fixtures)))
-    (target / "hirsel.toml").write_text(base + tests)
+    hcfg.vector_package(package, vectors, target, fixtures)
 
     cases = []
     if mode == "law":

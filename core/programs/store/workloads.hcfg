@@ -1,0 +1,1 @@
+workloads_v1.Config(runs: [("s1", Run(module: "main", grants: [Stdout]))])

@@ -5,7 +5,7 @@ pub type Config {
     cache: Option[Remote],
 }
 
-pub type Context = Host(state: String, catalog_id: String, principal: Principal)
+pub type Context = Host(state: String, catalog_id: String, principal: Principal, group: Option[String], incarnation: Option[u64])
 
 pub type Principal = Uid(u32) | Key(String)
 

@@ -2,7 +2,7 @@ use hirsel_data::{Body, Descriptor, Field, Fields, Scalar, Shape};
 use std::{collections::BTreeSet, env, fmt::Write, fs, path::PathBuf};
 
 const MODULES: &[(&str, &[&str], bool)] = &[
-    ("pkg_v1", &["Package", "Workspace"], true),
+    ("pkg_v1", &["Package", "Workspace", "VectorTests"], true),
     ("user_v1", &["Config"], false),
     ("host_v1", &["Admission", "Group", "Decision"], true),
     ("exec_v1", &["Policy"], false),
@@ -17,6 +17,7 @@ fn main() {
     let grants = fs::read_to_string(base.join("grants.hirsel")).unwrap();
     let mut out = String::new();
     let mut entries = String::new();
+    let mut catalog = Vec::new();
     for &(module, roots, with_grants) in MODULES {
         let mut source = fs::read_to_string(base.join(format!("{module}.hirsel"))).unwrap();
         if with_grants {
@@ -25,6 +26,7 @@ fn main() {
         writeln!(out, "pub mod {module} {{use super::*;").unwrap();
         let mut seen = BTreeSet::new();
         for &name in roots {
+            catalog.push(format!("<{module}::{name} as Config>::schema()"));
             let schema = Descriptor::lower(module, &source, name)
                 .unwrap_or_else(|e| panic!("{module}.{name}: {e}"));
             let file = format!("{module}.{name}.json");
@@ -101,6 +103,12 @@ fn main() {
     writeln!(
         out,
         "pub fn schema(root:&str)->Option<&'static Descriptor>{{match root{{{entries}_=>None}}}}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub fn catalog() -> Vec<&'static Descriptor> {{ vec![{}] }}",
+        catalog.join(",")
     )
     .unwrap();
     fs::write(dir.join("schemas.rs"), out).unwrap();

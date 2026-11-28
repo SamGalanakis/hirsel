@@ -1,0 +1,19 @@
+pkg_v1.Package(
+    name: "hirsel.ai/opus",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("opus.hirsel", "opus"), ("native.hirsel", "native")],
+    dependencies: [],
+    foreign: Some([
+        ("native", Native(
+            symbols: "hop_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "libhirsel_opus.a",
+                    sha256: "d4502484c3bd56f800f88291defe6dc8ad4da40ba1867bee5f7108601a3e7ca0",
+                ),
+            ],
+        )),
+    ]),
+)

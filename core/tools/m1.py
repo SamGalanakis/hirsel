@@ -5,11 +5,14 @@ import copy
 import json
 import os
 import re
+import sys
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 from case_progress import Case, run_case
 from std_native import library_sources
@@ -418,14 +421,14 @@ def darwin_links(compiler, runtime, engines, root, store, packages, cc=None, deb
     for package in packages:
         directory = root / 'core/programs' / package
         try:
-            tests = tomllib.loads((directory / 'hirsel.toml').read_text()).get('tests', {})
+            tests = hcfg.package(directory).get('tests', {})
         except (OSError, ValueError) as error:
             rows.extend(dict(program=package, engine=engine, definition=None, linked=False,
                              stopped=str(error)) for engine in engines)
             continue
         # Foreign grants select archives for the link. No executable is run.
-        grants = [flag for grant in tests.get('grants', []) if grant.startswith('Foreign=')
-                  for flag in ('--grant', grant)]
+        grants = [flag for grant in tests.get('grants', []) if grant['case'] == 'Foreign'
+                  for flag in ('--grant', 'Foreign=' + grant['fields'][0])]
         for engine in engines:
             command = [str(compiler), 'test', str(directory), '--link-only', '--json',
                        '--libraries', str(root / 'core'), '--target', DARWIN_TARGET,

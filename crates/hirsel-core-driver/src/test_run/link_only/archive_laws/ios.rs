@@ -143,26 +143,34 @@ fn ios_system_archives_carry_the_target_platform_and_floor() {
         )
         .unwrap();
         fs::write(
-            fixture.program.join("hirsel.toml"),
+            fixture.program.join("hirsel.hcfg"),
             format!(
-                r#"[package]
-name = "local/embed_place"
-version = "1.0.0"
-charge = "charge-v1"
-
-[dependencies]
-std = {{ major = 1 }}
-store = {{ package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }}
-runner = {{ package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }}
-
-[sources]
-"embed_place.hirsel" = "main"
-"laws.hirsel" = "laws"
-"native.hirsel" = "native"
-
-[foreign.native]
-symbols = "hfl_"
-archives = [{{ target = "{}", file = "laws.a", sha256 = "{pin}" }}]
+                r#"pkg_v1.Package(
+    name: "local/embed_place",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("embed_place.hirsel", "main"),
+        ("laws.hirsel", "laws"),
+        ("native.hirsel", "native"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+    ],
+    foreign: Some([
+        ("native", Native(
+            symbols: "hfl_",
+            archives: [ArchiveFile(target: "{}", file: "laws.a", sha256: "{pin}")],
+        )),
+    ]),
+)
 "#,
                 target.triple(),
             ),

@@ -112,4 +112,4 @@ def core_gates(out, call, Raw, libc_deps):
         bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
         files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                    "HIRSEL_EMBED_RT_ARCHIVE": "//:core-embed-runtime-pic"},
-        data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/embed_place/**"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_place_host.c"]')))
+        data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/embed_place/**"]) + ["core/programs/store/hirsel.hcfg", "core/programs/runner/hirsel.hcfg", "crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_place_host.c"]')))

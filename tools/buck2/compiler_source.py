@@ -10,19 +10,24 @@ from __future__ import annotations
 
 import pathlib
 import re
-import tomllib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "toolchain-dist"))
+import hcfg
 
 SOURCE = "crates/hirsel-core-driver/src/compiler_source.rs"
 # The build script's own sources, and the library sources it bundles.
 SOURCES = ["crates/hirsel-core-driver/build.rs", SOURCE,
            "crates/hirsel-core-driver/src/operator_schema.rs"]
-TOOLCHAIN_MANIFEST = "core/programs/toolchain-packages.toml"
+TOOLCHAIN_MANIFEST = "core/programs/toolchain-packages.hcfg"
 BUNDLED = ["core/core/**", "core/std/**/*.hirsel", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel",
            "core/programs/platform/operator.hirsel", TOOLCHAIN_MANIFEST, "core/programs/runner/frame-schema.bin"]
 
 
 def toolchain_packages(reads, root: pathlib.Path) -> list[str]:
-    return tomllib.loads(reads.text(root / TOOLCHAIN_MANIFEST))["packages"]
+    path = root / TOOLCHAIN_MANIFEST
+    reads.bytes(path)
+    return hcfg.read(path, "toolchain_v1.Packages")["packages"]
 
 
 def lists(reads, root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
@@ -56,11 +61,15 @@ def build_script(reads, root: pathlib.Path, start: str, nodes: dict, packages: d
     its files as `compiler-source`."""
     pins, extra, skipped = lists(reads, root)
     roots = closure(root, start, nodes, packages, members) + extra
-    manifests = [f"core/programs/{name}/hirsel.toml" for name in toolchain_packages(reads, root)]
-    product = "tools/toolchain-dist/product.toml"
+    product = "tools/toolchain-dist/product.hcfg"
+    reads.bytes(root / product)
+    directories = set(toolchain_packages(reads, root))
+    helpers = hcfg.product(root / product)['helpers']
+    directories.update(helper['package'] for helper in helpers.values() if 'package' in helper)
+    manifests = [f"core/programs/{name}/hirsel.hcfg" for name in sorted(directories)]
     globs = BUNDLED + manifests + [path for path in pins if path != product] + [f"{r}/**" for r in roots]
     exclude = ["core/std/tests/**"] + [f"{r}/{skip}/**" for r in roots for skip in skipped]
-    paths = {product: "//tools/toolchain-dist:product.toml"}
+    paths = {product: "//tools/toolchain-dist:product.hcfg"}
     for r in roots:
         for package in reads.glob(root / r, "**/BUCK"):
             directory = str(package.parent.relative_to(root))

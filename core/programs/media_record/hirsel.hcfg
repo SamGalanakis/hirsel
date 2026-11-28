@@ -1,0 +1,25 @@
+pkg_v1.Package(
+    name: "media_record",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("files.hirsel", "files"), ("record.hirsel", "record")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("media_container", Path(package: "media_container", major: 1, path: "../media_container", authority: [Dir])),
+        ("rtp", Path(package: "rtp", major: 1, path: "../rtp", authority: [])),
+        ("rtp_jitter", Path(package: "rtp_jitter", major: 1, path: "../rtp_jitter", authority: [])),
+        ("webrtc_sfu", Path(
+            package: "webrtc_sfu",
+            major: 1,
+            path: "../webrtc_sfu",
+            authority: [Net, Clock, Random, Stdout, Tasks, Secret],
+        )),
+    ],
+    tests: Some(Tests(
+        sources: [("laws.hirsel", "laws"), ("drive.hirsel", "laws"), ("frames.hirsel", "laws")],
+        limit: 268435456,
+        grants: [],
+        runs: [],
+    )),
+)

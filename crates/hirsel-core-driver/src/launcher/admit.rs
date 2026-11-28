@@ -551,7 +551,7 @@ fn source_unit(tree: &Tree) -> String {
     let manifest = package
         .strip_prefix(".")
         .unwrap_or(package)
-        .join("hirsel.toml");
+        .join(crate::package_dir::MANIFEST);
     tree.files
         .iter()
         .find(|(name, _)| Path::new(name) == manifest)

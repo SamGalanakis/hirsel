@@ -690,7 +690,7 @@ fn run_compiler_request(
                 configured.foreign.clear();
                 configured.exec.clear();
                 if root_limit.is_some() || !configured.is_empty() {
-                    return Err("this package declares [tests] in hirsel.toml. Set limit, dirs and grants there".into());
+                    return Err("this package declares tests in hirsel.hcfg. Set limit, dirs and grants there".into());
                 }
                 runs
             }

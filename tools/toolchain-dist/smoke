@@ -41,8 +41,8 @@ case "$mode" in
 esac
 sed '/^\[dependencies\]/a\
 store = { major = 1 }
-' hirsel.toml > hirsel.toml.tmp
-mv hirsel.toml.tmp hirsel.toml
+' hirsel.hcfg > hirsel.hcfg.tmp
+mv hirsel.hcfg.tmp hirsel.hcfg
 sed '/^pub fn main/a\
     let _ = result.unwrap(store.sized(Directory, 2147483648u64))
 ' main.hirsel > main.hirsel.tmp

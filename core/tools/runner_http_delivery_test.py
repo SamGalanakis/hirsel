@@ -10,10 +10,13 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-import tomllib
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools/toolchain-dist'))
+import hcfg
+
 RUNNER = ROOT / "core/programs/runner"
 NET = "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"
 
@@ -32,27 +35,34 @@ def run(command, *, expected=None, json_output=False):
     return result.stderr
 
 
-def runner_fixture_sources(work):
-    (work / "hirsel.toml").write_text('[workspace]\nmembers = ["runner", "store"]\n')
+def runner_fixture_sources(work, compiler):
+    hcfg.workspace(work, ["runner", "store"])
     source = work / "runner"
-    manifest = (RUNNER / "hirsel.toml").read_text()
-    declared = tomllib.loads(manifest)
+    declared = hcfg.package(RUNNER, compiler)
     tests = declared["tests"]["sources"]
     existing = declared["sources"]
     # The package is exactly the files its manifest declares.
-    for path in ["hirsel.toml", *existing, *tests]:
+    for path in ["hirsel.hcfg", *existing, *tests]:
         (source / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(RUNNER / path, source / path)
     shutil.copytree(RUNNER.parent / "store", work / "store",
                     ignore=shutil.ignore_patterns(".hirsel-core"))
-    manifest_file = source / "hirsel.toml"
-    fixtures = [f'{json.dumps(path)} = {json.dumps(module)}' for path, module in tests.items() if path not in existing]
-    manifest_file.write_text(manifest.split("[tests]\n", 1)[0] + "\n".join(fixtures) + "\n")
+    manifest_file = source / "hirsel.hcfg"
+    sources = ", ".join(f"({json.dumps(path)}, {json.dumps(module)})" for path, module in (tests | existing).items())
+    bindings = []
+    for alias, edge in declared['dependencies'].items():
+        fields = f"package: {json.dumps(edge['package'])}, major: {edge['major']}"
+        caps = ", ".join(cap['case'] for cap in edge['authority'])
+        dep = (f"Path({fields}, path: {json.dumps(edge['path'])}, authority: [{caps}])"
+               if 'path' in edge else f"Toolchain({fields}, authority: [{caps}])")
+        bindings.append(f"({json.dumps(alias)}, {dep})")
+    manifest_file.write_text(f'pkg_v1.Package(name: "runner", version: {json.dumps(declared["version"])}, '
+                             f'charge: ChargeV1, sources: [{sources}], dependencies: [{", ".join(bindings)}])\n')
     return source
 
 
 def fixture(work, compiler, cc):
-    source = runner_fixture_sources(work)
+    source = runner_fixture_sources(work, compiler)
     directory = work / "disk"
     directory.mkdir()
     binary = work / "restart"
@@ -72,7 +82,7 @@ def fixture(work, compiler, cc):
 
 def keyed_claim_rebuild(work, compiler, runtime, engine, cc):
     work.mkdir()
-    source = runner_fixture_sources(work)
+    source = runner_fixture_sources(work, compiler)
     directory = work / "disk"
     directory.mkdir()
     command = [

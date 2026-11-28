@@ -100,8 +100,8 @@ impl Fixture {
         fs::create_dir_all(&program).unwrap();
         fs::create_dir_all(libraries.join("programs")).unwrap();
         fs::write(
-            workspace.join("hirsel.toml"),
-            format!("[workspace]\nmembers = [\"store\", \"runner\", \"{name}\"]\n"),
+            workspace.join("hirsel.hcfg"),
+            format!("pkg_v1.Workspace(members: [\"store\", \"runner\", \"{name}\"])\n"),
         )
         .unwrap();
         for package in ["store", "runner"] {
@@ -114,7 +114,7 @@ impl Fixture {
             symlink(root.join("core").join(name), libraries.join(name)).unwrap();
         }
         let source = root.join("crates/hirsel-core-rt/testdata").join(name);
-        fs::copy(source.join("hirsel.toml"), program.join("hirsel.toml")).unwrap();
+        fs::copy(source.join("hirsel.hcfg"), program.join("hirsel.hcfg")).unwrap();
         let file = format!("{name}.hirsel");
         fs::copy(source.join(&file), program.join(&file)).unwrap();
 
@@ -545,19 +545,23 @@ fn embedded_exec_laws() {
         .unwrap();
     let target = crate::host::HOST_TARGET.triple();
     let helper = installed.exec_helper(target).unwrap();
-    let policy = work.join("exec.toml");
+    let policy = work.join("exec.hcfg");
     let profile = |name: &str, image: &str, args: &str| {
         let digest = passed(Command::new("sha256sum").arg(image));
         let digest = String::from_utf8(digest).unwrap();
         format!(
-            "[{name}]\nimage = {image:?}\nsha256 = {:?}\nargv0 = {name:?}\nargs = [{args}]\nenv = {{}}\ndirs = {{ work = {:?} }}\n\n",
+            "({name:?}, Profile(image: {image:?}, sha256: {:?}, argv0: {name:?}, args: [{args}], env: [], dirs: [(\"work\", {:?})]))",
             digest.split_whitespace().next().unwrap(),
             path(work),
         )
     };
     fs::write(
         &policy,
-        profile("true", "/usr/bin/true", "[]") + &profile("sleep", "/usr/bin/sleep", "[\"1000\"]"),
+        format!(
+            "exec_v1.Policy(profiles: [{}, {}])",
+            profile("true", "/usr/bin/true", "[]"),
+            profile("sleep", "/usr/bin/sleep", "[Lit(\"1000\")]")
+        ),
     )
     .unwrap();
     let mut fixture = Fixture::stage(

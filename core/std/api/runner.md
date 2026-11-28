@@ -5,7 +5,7 @@ Package `runner`, module `runner`, implements the entries of a place as a librar
 `operate`, wire serving, triggers, and cold-wake/deploy lifecycles.
 
 To use `runner`, add `runner = { major = 1 }` under `[dependencies]` in
-`hirsel.toml`. The installed Hirsel toolchain supplies the package and the
+`hirsel.hcfg`. The installed Hirsel toolchain supplies the package and the
 `store@1` it binds.
 
 ## No authentication, no authorization

@@ -2494,7 +2494,7 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 **Start.** `start` requires the backing to be `Memory` or `Temp` and `listen` to be 127.0.0.1 port 0. It refuses anything else with `Start(Missing("backing"))` or `Start(Missing("listen"))`.
 - It makes the root with `status_root()`, spawns `operate` in its own task group, and takes the `watch` receiver from the one-use handoff. It receives phases until `Ready`. The fixture keeps a handle to the root for `status`.
 - A `StartError` is returned as `Start(e)`.
-- The place's task group is spawned with `try_spawn`, so a test whose root allowance is too small gets `Full(cap)`. A `Memory` or `Temp` place sizes its store from the test's root limit (`store.sized`, v2.45), so a test's `limit` in hirsel.toml is the whole budget and no figure is reserved beyond it. Those backings open no follower, so their X is 0 (§12.1, v2.54).
+- The place's task group is spawned with `try_spawn`, so a test whose root allowance is too small gets `Full(cap)`. A `Memory` or `Temp` place sizes its store from the test's root limit (`store.sized`, v2.45), so a test's `limit` in hirsel.hcfg is the whole budget and no figure is reserved beyond it. Those backings open no follower, so their X is 0 (§12.1, v2.54).
 - If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
 
 **Typed calls.**

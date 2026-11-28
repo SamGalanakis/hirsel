@@ -10,11 +10,14 @@ through --cc.
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 import shlex
 import shutil
 import tempfile
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 from case_progress import run_case
 from std_native import ROOT, library_sources
@@ -55,16 +58,15 @@ def inputs(root, tests=False, package='store', with_tests=()):
         if directory in placed:
             return
         placed.add(directory)
-        with (directory / 'hirsel.toml').open('rb') as file:
-            manifest = tomllib.load(file)
+        manifest = hcfg.package(directory)
         for dep in manifest['dependencies'].values():
             if 'path' in dep:
                 place((directory / dep['path']).resolve(), False)
         listed = dict(manifest['sources'])
-        if (tests and selected) or manifest['package']['name'] in with_tests:
+        if (tests and selected) or manifest['name'] in with_tests:
             listed.update(manifest.get('tests', {}).get('sources', {}))
         packages.append({
-            'package': {'name': manifest['package']['name'], 'version': str(manifest['package']['version'].split('.')[0])},
+            'package': {'name': manifest['name'], 'version': str(manifest['version'].split('.')[0])},
             'dependencies': [{'name': 'core', 'version': '1'}] +
                             [{'name': name, 'version': str(dep['major'])}
                              for name, dep in manifest['dependencies'].items()],
@@ -72,7 +74,7 @@ def inputs(root, tests=False, package='store', with_tests=()):
                         for file, module in listed.items()],
             # These are the toolchain's own package sources, which the installed toolchain
             # supplies: only a package so marked is the toolchain's runner (launch.md).
-            'toolchain': manifest['package']['name'] in TOOLCHAIN_PACKAGES,
+            'toolchain': manifest['name'] in TOOLCHAIN_PACKAGES,
         })
 
     place((root / 'core/programs' / package).resolve(), True)

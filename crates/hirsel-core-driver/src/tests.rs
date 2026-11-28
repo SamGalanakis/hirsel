@@ -64,28 +64,23 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    // The store package on its own, and the runner package over it as the workspace binds
-    // them: the test reads no other member of the workspace.
+    // Bind only the store and runner members exercised by the launch fixture.
     let store = package_dir::PackageDir::open(&root.join("core/programs/store"))
         .unwrap()
         .package;
     let directory = root.join("core/programs/runner");
-    let manifest: toml::Table = std::fs::read_to_string(directory.join("hirsel.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let hirsel_config_schema::pkg_v1::Package { sources, .. } =
+        hirsel_config_schema::read_file(&directory.join("hirsel.hcfg")).unwrap();
     let mut runner = hirsel_core_resolve::PackageManifest {
         namespace: None,
         package: crate::package("runner"),
-        sources: manifest["sources"]
-            .as_table()
-            .unwrap()
-            .iter()
+        sources: sources
+            .into_iter()
             .map(|(file, module)| hirsel_core_resolve::ModuleSource {
                 foreign: None,
                 captured: None,
                 file: directory.join(file),
-                modules: vec![module.as_str().unwrap().into()],
+                modules: vec![module],
                 signatures: false,
             })
             .collect(),

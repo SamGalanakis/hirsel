@@ -9,11 +9,11 @@ impl PackageLaw {
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = private_dir(base.join("state")).unwrap();
         admit::write_envelope(&state, &admit::limits()).unwrap();
-        let pin = base.join("context.toml");
+        let pin = base.join("job-context.hcfg");
         std::fs::write(
             &pin,
             format!(
-                "kind = \"host\"\nstate = {:?}\nauthority = \"00000000000000000000000000000001\"\nuid = {}\n",
+                "user_v1.Config(contexts: [(\"job\", Host(state: {:?}, catalog_id: \"00000000000000000000000000000001\", principal: Uid({})))], default_context: Some(\"job\"), routes: [])",
                 state,
                 crate::operator::operator_uid()
             ),
@@ -46,7 +46,7 @@ fn foreign_deploy_and_recording_registration_refuse_before_payloads() {
 
     let law = PackageLaw::new();
     for file in [
-        "hirsel.toml",
+        "hirsel.hcfg",
         "laws.hirsel",
         "native.hirsel",
         "tests.hirsel",
@@ -165,7 +165,7 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let law = PackageLaw::new();
     law.app(
         "app",
-        "[tests]\nlimit = 67108864\ngrants = [\"Exec=profiles.toml git\"]\n",
+        "dependencies: [], tests: Some(Tests(sources: [], limit: 67108864, grants: [Exec(policy: \"profiles.hcfg\", profiles: [\"git\"])], runs: [])),",
     );
     law.write(
         "app/main.hirsel",
@@ -174,16 +174,15 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
          @test\nfn ungranted() -> Result[(), ()] { Ok(()) }\n",
     );
     law.write(
-        "profiles.toml",
-        "[git]\nimage = \"/unused\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n\
-         argv0 = \"git\"\nargs = [[]]\nenv = {}\ndirs = { work = \"/unused\" }\n",
+        "profiles.hcfg",
+        "exec_v1.Policy(profiles: [(\"git\", Profile(image: \"/unused\", sha256: \"0000000000000000000000000000000000000000000000000000000000000000\", argv0: \"git\", args: [[]], env: [], dirs: [(\"work\", \"/unused\")]))])",
     );
     let (status, stdout, stderr) = law.run(&[
         "test",
         "app",
         "--json",
         "--grant",
-        "Exec=./profiles.toml git",
+        "Exec=./profiles.hcfg git",
     ]);
     assert_eq!(status, Some(1), "{stdout}\n{stderr}");
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -195,17 +194,17 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     assert_eq!(tests[1]["passed"], true);
     assert!(
         stdout.contains(
-            "not granted: Exec[git]: pass --grant 'Exec=profiles.toml git' to hirsel test"
+            "not granted: Exec[git]: pass --grant 'Exec=profiles.hcfg git' to hirsel test"
         ),
         "{stdout}"
     );
 
     let source = law.path("code-store");
     let source = source.to_str().unwrap();
-    let root = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "app", "--grant", "Exec=profiles.toml git"]));
+    let root = PackageLaw::pass(law.run(&["build", "--emit", "recipe", "app", "--grant", "Exec=profiles.hcfg git"]));
     let (_operator_root, _state, pin) = law.operator_state();
     let spec = law.group_spec(
-        "Exec(policy: \"./profiles.toml\", profiles: [\"git\"])",
+        "Exec(policy: \"./profiles.hcfg\", profiles: [\"git\"])",
         false,
     );
     let args = [
@@ -226,6 +225,6 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let envelope: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(
         envelope["error"]["detail"],
-        "the recipe grants Exec=profiles.toml git"
+        "the recipe grants Exec=profiles.hcfg git"
     );
 }

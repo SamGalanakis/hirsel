@@ -299,7 +299,7 @@ impl Snapshot {
         Ok(Dir { names, trees })
     }
 
-    /// The bytes of `hirsel.toml` in `dir`, `None` when it has none.
+    /// The bytes of `hirsel.hcfg` in `dir`, `None` when it has none.
     pub(crate) fn manifest(&self, dir: &Dir) -> Result<Option<Arc<Vec<u8>>>, Missed> {
         match self.file(dir, dir, crate::package_dir::MANIFEST) {
             Ok(bytes) => Ok(Some(bytes)),

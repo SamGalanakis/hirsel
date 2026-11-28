@@ -33,7 +33,7 @@ class BuckClient(unittest.TestCase):
                 shutil.copy(SCRIPTS / name, scripts / name)
         dist = scripts.parent / 'toolchain-dist'
         dist.mkdir()
-        for name in ('product.py', 'product.toml'):
+        for name in ('product.py', 'hcfg.py', 'product.hcfg'):
             shutil.copy(SCRIPTS.parent / 'toolchain-dist' / name, dist / name)
         # The fake client records exactly when Buck itself was reached.
         binary = '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/called"\nexit 17\n'

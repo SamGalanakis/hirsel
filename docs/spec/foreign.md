@@ -124,7 +124,7 @@ archives = [
 - A `[foreign]` key that names no module of `[sources]`, a module formed by more than one
   file, or a module that a test-only file joins is refused as a bad field
   ([packages](packages.md#9-diagnostics)), for example
-  `hirsel: sqlite/hirsel.toml: foreign.native: module native is formed by 2 files`.
+  `hirsel: sqlite/hirsel.hcfg: foreign.native: module native is formed by 2 files`.
 
 A published library's content `C` holds each foreign module's prefix, its archive table and
 the archives' bytes ([packages](packages.md#1-canonical-library-content)), so its root pins
@@ -1158,17 +1158,16 @@ It is not a port of `sqlite`. SQLite's slice 2 needs a `Dir`, and a contained mo
 A foreign module is contained when its `[foreign."<module path>"]` table holds
 `containment = "wasm"`. With that key, the table holds a `module` row in place of `archives`:
 
-```text
-[foreign.native]
-symbols = "hpng_"
-containment = "wasm"
-module = { file = "native/png.wasm", sha256 = "<64 lower-case hex digits>" }
+```hcfg
+foreign: Some([
+    ("native", Contained(symbols: "hpng_", file: "native/png.wasm", sha256: "<64 lower-case hex digits>")),
+]),
 ```
 
 - `containment` takes the one value `"wasm"`. When the key is absent, the module is native
   (FFI-2 and FFI-3). Any other value is refused as a bad field, and so are a contained table
   that also holds `archives` and one that has no `module`. In
-  `hirsel: P/hirsel.toml: foreign.native: containment: expected "wasm"`, `P` is the package.
+  `hirsel: P/hirsel.hcfg: foreign.native: containment: expected "wasm"`, `P` is the package.
 - `module` is one row, with no target. A Wasm module runs unchanged on every target, so one pin
   covers them all. `file` ends in `.wasm`, follows the packages chapter's path rules, and is
   captured by its reading rule. `sha256` is the SHA-256 of the file's raw bytes.

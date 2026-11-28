@@ -1,6 +1,6 @@
 # WebSocket protocol fixtures
 
-The fixtures are the `core/programs` workspace member `wire` (`hirsel.toml`).
+The fixtures are the `core/programs` workspace member `wire` (`hirsel.hcfg`).
 `wire_build.py` builds its entries with `hirsel build core/programs/wire
 --libraries core` from the current checkout's core/std sources and the existing
 compiler and runtime Buck targets, adding each entry's grants and a 256 MiB

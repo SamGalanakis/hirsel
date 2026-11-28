@@ -3,6 +3,8 @@
 //! configuration. A directory without a manifest is the directory
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
+use hirsel_config_schema::pkg_v1 as cfg;
+pub(crate) mod grants;
 use crate::package_content::{Content, Id, PackageArchive, Root, Source};
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_net::{EnvPatterns, GrantRule, NetGrant, RULE_SYNTAX, SecretGrant};
@@ -12,7 +14,7 @@ use std::error::Error;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) const MANIFEST: &str = "hirsel.toml";
+pub(crate) const MANIFEST: &str = "hirsel.hcfg";
 
 /// A decoded `C`'s bindings as `(alias, identity, root)`.
 fn content_bindings(content: &Content) -> Vec<(&str, &Id, Option<Root>)> {
@@ -26,14 +28,13 @@ fn content_bindings(content: &Content) -> Vec<(&str, &Id, Option<Root>)> {
 pub(crate) fn scaffold_manifest(sources: impl Iterator<Item = &'static str>) -> String {
     use std::fmt::Write;
     let mut manifest = String::from(
-        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[dependencies]\nstd = { major = 1 }\n\n[sources]\n",
+        "pkg_v1.Package(\n    name: \"local/app\", version: \"1.0.0\", charge: ChargeV1,\n    sources: [\n",
     );
     for file in sources {
         let module = file.strip_suffix(".hirsel").unwrap();
-        writeln!(manifest, "{file:?} = {module:?}").unwrap();
+        writeln!(manifest, "        ({file:?}, {module:?}),").unwrap();
     }
-    manifest
-        .push_str("\n[tests]\nlimit = 67108864\n\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n");
+    manifest.push_str("    ],\n    dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))],\n    tests: Some(Tests(sources: [(\"tests.hirsel\", \"tests\")], limit: 67108864, grants: [], runs: [])),\n)\n");
     manifest
 }
 
@@ -194,30 +195,6 @@ impl TestRuns {
     }
 }
 
-type Sources = BTreeMap<String, String>;
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TestFile {
-    #[serde(default)]
-    pub(crate) sources: Sources,
-    limit: u64,
-    #[serde(default)]
-    grants: Vec<String>,
-    #[serde(default)]
-    dirs: Vec<String>,
-    #[serde(default)]
-    runs: BTreeMap<String, RunFile>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunFile {
-    limit: Option<u64>,
-    grants: Option<Vec<String>>,
-    dirs: Option<Vec<String>>,
-}
-
 pub(crate) fn module_path(module: &str) -> Option<Vec<String>> {
     let mut symbols = hirsel_core_syntax::Symbols::default();
     let names: Vec<_> = module.split('.').collect();
@@ -255,45 +232,6 @@ pub(crate) fn path_rule(path: &str, suffix: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A manifest's `grants` and `dirs`, in `--grant` and `--dir` syntax.
-fn manifest_grants(path: &Path, grants: &[String], dirs: &[String]) -> io::Result<Grants> {
-    let mut out = Grants {
-        directories: dirs
-            .iter()
-            .map(|dir| hirsel_core_ids::launch::dir_slot(dir))
-            .collect::<Result<_, _>>()
-            .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?,
-        ..Grants::default()
-    };
-    for grant in grants {
-        out.grant(grant)
-            .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
-    }
-    Ok(out)
-}
-
-/// `[program]`'s `limit`, `grants` and `dirs` (R3), present when the manifest
-/// declares any of them.
-pub(crate) struct ProgramRun {
-    limit: Option<u64>,
-    grants: Vec<String>,
-    dirs: Vec<String>,
-}
-
-impl ProgramRun {
-    pub(crate) fn declared(
-        limit: Option<u64>,
-        grants: Option<Vec<String>>,
-        dirs: Option<Vec<String>>,
-    ) -> Option<Self> {
-        (limit.is_some() || grants.is_some() || dirs.is_some()).then(|| Self {
-            limit,
-            grants: grants.unwrap_or_default(),
-            dirs: dirs.unwrap_or_default(),
-        })
-    }
-}
-
 /// The selected package's `[program]` run configuration, read only for the
 /// package a command builds: never a dependency's.
 pub(crate) struct ProgramGrants {
@@ -301,30 +239,48 @@ pub(crate) struct ProgramGrants {
     grants: Grants,
 }
 
-impl TestFile {
-    fn runs(&self, path: &Path) -> io::Result<TestRuns> {
-        let refuse = |message| io::Error::other(format!("{}: {message}", path.display()));
-        let grants = |grants: &[String], dirs: &[String]| manifest_grants(path, grants, dirs);
+impl TestRuns {
+    fn from_config(config: &cfg::Tests, path: &Path) -> io::Result<Self> {
+        let refuse = |message: String| io::Error::other(format!("{}: {message}", path.display()));
         let package = Run {
-            limit: self.limit,
-            grants: grants(&self.grants, &self.dirs)?,
+            limit: config.limit,
+            grants: grants::decode(config.grants.iter().cloned()).map_err(refuse)?,
         };
         let mut named = BTreeMap::new();
-        for (name, run) in &self.runs {
+        for (name, run) in &config.runs {
             let test = DefPath::from_full(name)
                 .ok_or_else(|| refuse(format!("invalid test path {name}")))?;
+            let grants = match &run.grant_change {
+                None => package.grants.clone(),
+                Some(cfg::GrantChange::ReplaceAll(all)) => {
+                    grants::decode(all.iter().cloned()).map_err(refuse)?
+                }
+                Some(cfg::GrantChange::ReplaceDirs(dirs)) => {
+                    let mut next = package.grants.clone();
+                    next.directories = dirs
+                        .iter()
+                        .cloned()
+                        .map(grants::directory)
+                        .collect::<Result<_, _>>()
+                        .map_err(refuse)?;
+                    next
+                }
+                Some(cfg::GrantChange::ReplaceNonDir(other)) => {
+                    let mut next = grants::decode(other.iter().cloned().map(grants::non_dir))
+                        .map_err(refuse)?;
+                    next.directories.clone_from(&package.grants.directories);
+                    next
+                }
+            };
             named.insert(
                 test,
                 Run {
                     limit: run.limit.unwrap_or(package.limit),
-                    grants: grants(
-                        run.grants.as_deref().unwrap_or(&self.grants),
-                        run.dirs.as_deref().unwrap_or(&self.dirs),
-                    )?,
+                    grants,
                 },
             );
         }
-        Ok(TestRuns { package, named })
+        Ok(Self { package, named })
     }
 }
 
@@ -485,7 +441,7 @@ impl PackageDir {
                         .package
                         .tests
                         .as_ref()
-                        .map(|tests| tests.runs(&member.manifest_path))
+                        .map(|tests| TestRuns::from_config(tests, &member.manifest_path))
                 })
                 .transpose()?
         } else {
@@ -495,12 +451,14 @@ impl PackageDir {
             .and_then(|member| {
                 let run = member.package.program.as_ref()?;
                 Some(
-                    manifest_grants(&member.manifest_path, &run.grants, &run.dirs).map(|grants| {
-                        ProgramGrants {
+                    grants::decode(run.grants.iter().flatten().cloned())
+                        .map_err(|e| {
+                            io::Error::other(format!("{}: {e}", member.manifest_path.display()))
+                        })
+                        .map(|grants| ProgramGrants {
                             limit: run.limit,
                             grants,
-                        }
-                    }),
+                        }),
                 )
             })
             .transpose()?;
@@ -677,7 +635,7 @@ impl PackageDir {
         configured.foreign.clear();
         configured.exec.clear();
         if root_limit.is_some() || !configured.is_empty() {
-            return Err("this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there".into());
+            return Err("this package declares program grants in hirsel.hcfg. Set limit, dirs and grants there".into());
         }
         let mut manifest = program.grants;
         manifest.foreign.append(&mut grants.foreign);

@@ -14,12 +14,24 @@ type Checked<'s> = (Decoded<'s>, Index);
 type Result<T> = std::result::Result<T, DataError>;
 
 pub fn decode<'s>(bytes: &[u8], roots: &[&'s Descriptor], limits: Limits) -> Result<Document<'s>> {
+    decode_with_root(bytes, roots, limits, &mut |_| ())
+}
+
+/// Report the selected role even when one of the document's fields is invalid.
+/// Discovery uses this to retain a malformed workspace as the enclosing root.
+pub fn decode_with_root<'s>(
+    bytes: &[u8],
+    roots: &[&'s Descriptor],
+    limits: Limits,
+    selected: &mut dyn FnMut(&Descriptor),
+) -> Result<Document<'s>> {
     if bytes.len() > limits.input_bytes {
         return Err(error(ErrorKind::Limit("input bytes"), Span::default()));
     }
     let syntax = parse_data_file(bytes).map_err(|e| diagnostic(parse_error(e), limits))?;
-    let (schema, value, index) = semantic::<true>(syntax.item(0), roots, limits, &mut |_| Ok(()))
-        .map_err(|e| diagnostic(e, limits))?;
+    let (schema, value, index) =
+        semantic::<true>(syntax.item(0), roots, limits, &mut |_| Ok(()), selected)
+            .map_err(|e| diagnostic(e, limits))?;
     Ok(Document {
         schema,
         syntax,
@@ -56,7 +68,7 @@ pub(crate) fn guest_with_budget<'s>(
     let mut read = || {
         pay(128 * (bytes.len() as u64).saturating_add(1))?;
         let parsed = parse_data(bytes).map_err(parse_error)?;
-        Ok(semantic::<false>(parsed.item(), &[schema], limits, pay)?.1)
+        Ok(semantic::<false>(parsed.item(), &[schema], limits, pay, &mut |_| ())?.1)
     };
     read().map_err(|e| diagnostic(e, limits))
 }
@@ -66,6 +78,7 @@ fn semantic<'s, const EDIT: bool>(
     roots: &[&'s Descriptor],
     limits: Limits,
     pay: &mut dyn FnMut(u64) -> Result<()>,
+    selected: &mut dyn FnMut(&Descriptor),
 ) -> Result<(&'s Descriptor, Decoded<'s>, Index)> {
     let root = Site(item, item.root);
     if item.tree.nodes.len() > limits.nodes {
@@ -87,6 +100,7 @@ fn semantic<'s, const EDIT: bool>(
     if accepted.any(|s| s.digest() != schema.digest()) {
         return Err(head.error("ambiguous schema digest"));
     }
+    selected(schema);
     let mut reader = Reader::<EDIT> {
         schema,
         limits,
@@ -256,6 +270,7 @@ impl<'s, const EDIT: bool> Reader<'s, '_, EDIT> {
             record: true,
             ..Default::default()
         };
+        let mut unknown = Vec::new();
         for arg in kids {
             if arg.kind() != NodeKind::LabelledArgument {
                 return Err(arg.error("expected a labelled field"));
@@ -274,7 +289,17 @@ impl<'s, const EDIT: bool> Reader<'s, '_, EDIT> {
                     break;
                 }
             }
-            let (i, field) = found.ok_or_else(|| arg.error("unknown field"))?;
+            let Some((i, field)) = found else {
+                if !EDIT || self.limits.diagnostics <= 1 {
+                    return Err(arg.error("unknown field"));
+                }
+                if unknown.len() == self.limits.diagnostics {
+                    return Err(error(ErrorKind::Limit("diagnostics"), arg.span()));
+                }
+                unknown.try_reserve(1).map_err(|_| host_memory())?;
+                unknown.push((label, arg.span()));
+                continue;
+            };
             if slots[i].is_some() {
                 return Err(arg.error("duplicate field"));
             }
@@ -299,6 +324,24 @@ impl<'s, const EDIT: bool> Reader<'s, '_, EDIT> {
                     .children
                     .push((PathPart::Field(field.name.clone()), idx));
             }
+        }
+        if !unknown.is_empty() {
+            let mut cost = 0usize;
+            unknown.sort_unstable_by(|(a, _), (b, _)| {
+                cost = cost.saturating_add(1 + a.len().min(b.len()));
+                a.cmp(b)
+            });
+            spend(
+                &mut self.limits.comparison_bytes,
+                cost,
+                "key comparisons",
+                at,
+            )?;
+            let mut spans = unknown.into_iter().map(|(_, span)| span);
+            let mut failure = error(ErrorKind::Invalid("unknown field"), spans.next().unwrap());
+            failure.additional = storage(spans.len())?;
+            failure.additional.extend(spans);
+            return Err(failure);
         }
         let mut values = storage(fields.len())?;
         for (field, slot) in fields.iter().zip(slots) {

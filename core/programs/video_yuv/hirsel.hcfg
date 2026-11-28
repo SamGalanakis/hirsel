@@ -1,0 +1,29 @@
+pkg_v1.Package(
+    name: "hirsel.ai/video_yuv",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("video_yuv.hirsel", "video_yuv"), ("native.hirsel", "native")],
+    dependencies: [],
+    foreign: Some([
+        ("native", Native(
+            symbols: "hyuv_",
+            archives: [
+                ArchiveFile(
+                    target: "aarch64-unknown-linux-gnu",
+                    file: "libhirsel_yuv-aarch64.a",
+                    sha256: "87ddea6715b4fda6525023945ebb7e8e4e1f8c3c2186b9cf01f00961c60e3c58",
+                ),
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "libhirsel_yuv-x86_64.a",
+                    sha256: "258200a55c5cae5e450146f09371f28927e98e292aeafaba1f80741d63d663ae",
+                ),
+                ArchiveFile(
+                    target: "aarch64-apple-darwin",
+                    file: "libhirsel_yuv-aarch64-apple-darwin.a",
+                    sha256: "357cbfba4683ac7d906814ea636e5e5bc23dac9b9d89761983a2d022e55fda35",
+                ),
+            ],
+        )),
+    ]),
+)

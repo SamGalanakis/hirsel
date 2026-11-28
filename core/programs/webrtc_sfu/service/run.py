@@ -13,8 +13,10 @@ import socket
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'tools/toolchain-dist'))
+import hcfg
 
 PROGRAM = Path(__file__).resolve().parent
 ROOT = PROGRAM.parents[3]
@@ -44,12 +46,12 @@ def inputs(work, root_package=PROGRAM):
         directory = directory.resolve()
         if directory in done:
             return done[directory]
-        manifest = tomllib.loads((directory / "hirsel.toml").read_text())
+        manifest = hcfg.package(directory)
         dependencies = [core]
         for name, dep in manifest.get("dependencies", {}).items():
             dependencies.append(visit(directory / dep["path"]) if "path" in dep else {"name": name, "version": str(dep["major"])})
         program = manifest.get("program", {}).get("module")
-        package = {"name": manifest["package"]["name"], "version": str(manifest["package"]["version"].split(".")[0])}
+        package = {"name": manifest["name"], "version": str(manifest["version"].split(".")[0])}
         # Only the checkout's runner supplies the launch words needed by sdk ts.
         toolchain = directory == (ROOT / "core/programs/runner").resolve()
         packages.append({"package": package, "dependencies": dependencies, "toolchain": toolchain, "sources": [

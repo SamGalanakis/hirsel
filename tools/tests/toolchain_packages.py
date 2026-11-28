@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import tomllib
+import json
 import unittest
 
 class ToolchainPackages(unittest.TestCase):
@@ -21,26 +21,13 @@ class ToolchainPackages(unittest.TestCase):
             store.mkdir(parents=True)
             runner.mkdir()
             for package in (store, runner):
-                (package / 'hirsel.toml').write_text(f'''[package]
-name = "{package.name}"
-version = "1.0.0"
-charge = "charge-v1"
-
-[sources]
-"{package.name}.hirsel" = "{package.name}"
-
-[dependencies]
-std = {{ major = 1 }}
-''' + ('' if package == store else '''
-[dependencies."store"]
-authority = ["Dir", "Clock"]
-path = "../store"
-major = 1
-package = "store"
-
-[tool]
-store = { package = "store", major = 1, path = "../store" }
-'''), encoding='utf-8')
+                deps = ['("std", Toolchain(package: "std", major: 1, authority: []))']
+                if package == runner:
+                    deps.append('("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock]))')
+                (package / 'hirsel.hcfg').write_text(
+                    f'pkg_v1.Package(name: "{package.name}", version: "1.0.0", charge: ChargeV1, '
+                    f'sources: [("{package.name}.hirsel", "{package.name}")], dependencies: [{", ".join(deps)}])\n',
+                    encoding='utf-8')
             (store / 'store.hirsel').write_text('pub fn pack_fixture_value() -> u64 { 7u64 }\n')
             (runner / 'runner.hirsel').write_text('pub fn load() -> u64 { store.pack_fixture_value() }\n')
 
@@ -49,9 +36,10 @@ store = { package = "store", major = 1, path = "../store" }
             subprocess.run([sys.executable, programs, 'pack', compiler, sources, output, work,
                             'store', 'runner'], cwd=root, check=True)
 
-            manifest = tomllib.loads((work / 'runner/hirsel.toml').read_text(encoding='utf-8'))
-            self.assertEqual(manifest['dependencies'], {'std': {'major': 1}, 'store': {'major': 1}})
-            self.assertEqual(manifest['tool']['store'], {'package': 'store', 'major': 1, 'path': '../store'})
+            staged = subprocess.check_output([compiler, 'config', 'export', work / 'runner/hirsel.hcfg', '--json'])
+            bindings = dict(json.loads(staged)['value']['dependencies'])
+            self.assertEqual(bindings, {name: {'case': 'Toolchain', 'fields': {
+                'package': name, 'major': 1, 'authority': []}} for name in ('std', 'store')})
             self.assertEqual({path.name for path in output.iterdir()}, {'store-1.hpkg', 'runner-1.hpkg'})
 
 

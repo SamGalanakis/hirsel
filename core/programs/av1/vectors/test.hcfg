@@ -1,0 +1,13 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests")],
+        limit: 268435456,
+        grants: [
+            Foreign("hirsel.ai/av1@1/av1/DecoderCodec"),
+            Foreign("hirsel.ai/av1@1/av1/EncoderCodec"),
+            Dir("fixtures"),
+        ],
+        runs: [],
+    ),
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+)

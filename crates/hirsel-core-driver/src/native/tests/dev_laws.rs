@@ -611,10 +611,10 @@ fn package_dev_s1_store_ownership() {
         "fn keep() -> u64 { 45u64 }\n",
     );
     // Source paths cannot name `.hirsel-dev`, so the overlap arrives through a link.
-    let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.toml")).unwrap();
+    let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.hcfg")).unwrap();
     fixture.law.write(
-        "runner/hirsel.toml",
-        manifest.replace("[sources]\n", "[sources]\n\"keep.hirsel\" = \"keep\"\n"),
+        "runner/hirsel.hcfg",
+        manifest.replacen("sources: [", r#"sources: [("keep.hirsel", "keep"),"#, 1),
     );
     symlink(
         ".hirsel-dev/stores/4/keep.hirsel",
@@ -715,9 +715,9 @@ fn package_dev_releases_held_runs() {
 #[test]
 fn package_dev_takes_grants_from_program() {
     let fixture = Fixture::new();
-    let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.toml")).unwrap();
+    let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.hcfg")).unwrap();
     fixture.law.write(
-        "runner/hirsel.toml",
+        "runner/hirsel.hcfg",
         manifest
             + "limit = 1610612736\n\
                grants = [\"Clock\", \"Random\", \"Tasks\", \"Process\", \"Stderr\", \"Net=Listen 127.0.0.1/32 0-65535\"]\n\

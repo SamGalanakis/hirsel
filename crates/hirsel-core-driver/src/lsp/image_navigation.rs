@@ -56,7 +56,7 @@ fn image_definition_requires_available_source() {
     let path = app.join("main.hirsel");
     let text = "fn probe() -> u64 { lib.answer() }";
     write(&path, text);
-    write(&app.join("hirsel.toml"), &manifest("local/app", "main"));
+    write(&app.join("hirsel.hcfg"), &manifest("local/app", "main"));
     let mode = Mode::Frozen;
     let workspace = Workspace::discover_for(&app, false).unwrap().unwrap();
     let resolved = Resolution::resolve(

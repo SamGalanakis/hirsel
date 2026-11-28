@@ -19,7 +19,7 @@ fn model_law_package(tests: &str) -> PackageLaw {
     let law = PackageLaw::new();
     law.app(
         "app",
-        "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864",
+        "dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))], tests: Some(Tests(sources: [], limit: 67108864, grants: [], runs: [])),",
     );
     let fixture = std::fs::read_to_string(law.libraries.join("std/tests/model.hirsel")).unwrap();
     let fixture = fixture
@@ -198,7 +198,7 @@ fn law_lock_of_a_package_stays_beside_its_manifest() {
     // bug: naming a directory inside a package wrote the package's inventory over that
     // directory's own lock, dropping its rows (core/programs/opus/vectors).
     let law = PackageLaw::new();
-    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.app("app", "dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))], tests: Some(Tests(sources: [(\"laws.hirsel\", \"main\")], limit: 67108864, grants: [], runs: [])),");
     law.write("app/laws.hirsel", PROP_LAW_PACKAGE);
     PackageLaw::pass(law.run(&["laws", "write", "app"]));
     let written = std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap();
@@ -221,8 +221,8 @@ fn laws_check_dot_inside_a_package_matches_the_path_form() {
     // reported every test missing, while `hirsel laws check <member>` from the
     // workspace root passed.
     let law = PackageLaw::new();
-    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\"]\n");
-    law.app("work/app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.write("work/hirsel.hcfg", "pkg_v1.Workspace(members: [\"app\"])\n");
+    law.app("work/app", "dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))], tests: Some(Tests(sources: [(\"laws.hirsel\", \"main\")], limit: 67108864, grants: [], runs: [])),");
     law.write("work/app/laws.hirsel", PROP_LAW_PACKAGE);
     PackageLaw::pass(law.run(&["laws", "write", "work/app"]));
     let written = std::fs::read_to_string(law.path("work/app/hirsel.laws")).unwrap();

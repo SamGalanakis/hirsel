@@ -51,7 +51,7 @@ patch --quiet -d "$stage/svt-av1" -p1 < svt-once.patch
 
 # Header generation reads the manifest, whose archive paths must exist.
 mkdir "$stage/package"
-cp hirsel.toml ./*.hirsel "$stage/package"
+cp hirsel.hcfg ./*.hirsel "$stage/package"
 "$llvm/bin/llvm-ar" cr "$stage/package/libhirsel_dav1d.a"
 "$llvm/bin/llvm-ar" cr "$stage/package/libhirsel_svtav1.a"
 "$llvm/bin/llvm-ar" cr "$stage/package/libhirsel_dav1d-aarch64-apple-darwin.a"

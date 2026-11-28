@@ -20,8 +20,10 @@ import subprocess
 import sys
 import tempfile
 import threading
-import tomllib
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
@@ -33,7 +35,7 @@ def build(args):
     corpus = inputs(ROOT, package='fleet')
     fleet = corpus['packages'][-1]
     # inputs() uses dependency aliases. CorpusManifest needs package identities.
-    bindings = tomllib.loads((HERE.parent / 'hirsel.toml').read_text())['dependencies']
+    bindings = hcfg.package(HERE.parent)['dependencies']
     for edge in fleet['dependencies']:
         alias = edge['name']
         edge['name'] = bindings.get(alias, {}).get('package', alias)

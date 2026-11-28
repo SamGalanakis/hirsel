@@ -1,0 +1,14 @@
+pkg_v1.Package(
+    name: "hirsel.ai/wasm_laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("laws.hirsel", "laws"), ("native.hirsel", "native"), ("main.hirsel", "main")],
+    dependencies: [],
+    foreign: Some([
+        ("native", Contained(
+            symbols: "hwl_",
+            file: "box.wasm",
+            sha256: "4a89264abd81f8b326b048d88d894a679076b4520cf79bd3f6057cab02f9811c",
+        )),
+    ]),
+)

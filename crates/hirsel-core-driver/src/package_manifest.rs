@@ -1,104 +1,11 @@
 use crate::package_content::{Id, PathTree, Root, parse_digest, symbol_prefix, target_name};
-use crate::package_dir::{ProgramRun, TestFile, module_path, path_rule};
+use crate::package_dir::{module_path, path_rule};
+use hirsel_config_schema::{Config, pkg_v1 as cfg};
 pub(crate) mod name;
 use hirsel_core_ids::DefPath;
 use name::{self as names, Version};
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-
-type Table = toml::Table;
-
-#[derive(Deserialize)]
-struct Document {
-    package: Option<PackageTable>,
-    selections: Option<BTreeMap<String, DependencyTable>>,
-    #[serde(default)]
-    sources: BTreeMap<String, String>,
-    #[serde(default)]
-    dependencies: BTreeMap<String, DependencyTable>,
-    #[serde(default)]
-    program: Program,
-    tests: Option<TestFile>,
-    #[serde(default)]
-    foreign: BTreeMap<String, ForeignTable>,
-    workspace: Option<WorkspaceTable>,
-}
-
-#[derive(Deserialize)]
-struct PackageTable {
-    name: String,
-    version: String,
-    charge: Charge,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Charge {
-    Policy(String),
-    Inherit { workspace: bool },
-}
-
-#[derive(Default, Deserialize, PartialEq)]
-struct Program {
-    module: Option<String>,
-    function: Option<String>,
-    limit: Option<u64>,
-    grants: Option<Vec<String>>,
-    dirs: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct DependencyTable {
-    authority: Option<Vec<String>>,
-    package: Option<String>,
-    major: Option<u32>,
-    path: Option<String>,
-    root: Option<String>,
-    url: Option<String>,
-    archive: Option<String>,
-    registry: Option<String>,
-    git: Option<String>,
-    rev: Option<String>,
-    #[serde(rename = "ref")]
-    reference: Option<String>,
-    dir: Option<String>,
-    workspace: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct ForeignTable {
-    symbols: String,
-    containment: Option<String>,
-    module: Option<WasmTable>,
-    archives: Option<Vec<ArchiveTable>>,
-}
-
-#[derive(Deserialize)]
-struct WasmTable {
-    file: String,
-    sha256: String,
-}
-
-#[derive(Deserialize)]
-struct ArchiveTable {
-    target: String,
-    file: String,
-    sha256: String,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceTable {
-    members: Vec<String>,
-    package: Option<WorkspacePackage>,
-    #[serde(default)]
-    dependencies: BTreeMap<String, DependencyTable>,
-}
-
-#[derive(Deserialize)]
-struct WorkspacePackage {
-    charge: Option<String>,
-}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SourceLocation {
@@ -229,9 +136,9 @@ pub(crate) struct Package {
     pub(crate) test_sources: BTreeMap<String, Vec<String>>,
     pub(crate) dependencies: BTreeMap<String, Dependency>,
     pub(crate) entry: DefPath,
-    pub(crate) tests: Option<TestFile>,
+    pub(crate) tests: Option<cfg::Tests>,
     /// `[program]`'s run configuration, when it declares any of its keys.
-    pub(crate) program: Option<ProgramRun>,
+    pub(crate) program: Option<cfg::Program>,
     pub(crate) foreign: BTreeMap<Vec<String>, Foreign>,
 }
 
@@ -255,91 +162,76 @@ impl Manifest {
     }
 
     pub(crate) fn classify(bytes: &[u8], path: &Path) -> (bool, Result<Self, String>) {
-        let refuse = |message| format!("{}: {message}", path.display());
-        let parsed = || {
-            let text = std::str::from_utf8(bytes).map_err(|error| refuse(error.to_string()))?;
-            let table = text
-                .parse::<Table>()
-                .map_err(|error| refuse(error.to_string()))?;
-            Ok((text, table))
-        };
-        let (text, table) = match parsed() {
-            Ok(parsed) => parsed,
-            Err(error) => return (false, Err(error)),
-        };
-        let workspace = table.contains_key("workspace");
-        let result = Self::validate_table(text, &table, refuse);
-        (workspace, result)
-    }
-
-    fn validate_table(
-        text: &str,
-        table: &Table,
-        refuse: impl Fn(String) -> String,
-    ) -> Result<Self, String> {
-        let mut unknown = Vec::new();
-        unknown_keys(table, "", Shape::Manifest, &mut unknown);
-        if !unknown.is_empty() {
-            unknown.sort_unstable();
-            unknown.dedup();
-            return Err(unknown
-                .into_iter()
-                .map(|key| refuse(format!("unknown key {key}")))
-                .collect::<Vec<_>>()
-                .join("\nhirsel: "));
-        }
-        if table.get("tool").is_some_and(|tool| !tool.is_table()) {
-            return Err(refuse("tool: expected a table".into()));
-        }
-        let document: Document = toml::from_str(text).map_err(|error| refuse(error.to_string()))?;
-        Self::validate(document).map_err(refuse)
-    }
-
-    fn validate(document: Document) -> Result<Self, String> {
-        let selections = document.selections.map(selections).transpose()?;
-        let workspace = document
-            .workspace
-            .map(|workspace| {
-                let mut dirs = BTreeSet::new();
-                for path in &workspace.members {
-                    path_rule(path, "").map_err(|rule| {
-                        format!("workspace.members: {path:?} breaks the path rules: {rule}")
-                    })?;
-                    if !dirs.insert(path) {
-                        return Err(format!("workspace.members: {path:?} is listed twice"));
-                    }
+        let mut workspace = false;
+        let result = hirsel_config_schema::package_document(bytes, &mut workspace)
+            .map_err(|mut error| {
+                let mut message = error.to_string();
+                for span in std::mem::take(&mut error.additional) {
+                    error.span = span;
+                    use std::fmt::Write;
+                    write!(message, "\nhirsel: {}: {error}", path.display()).unwrap();
                 }
-                let charge = workspace.package.and_then(|p| p.charge);
-                if let Some(policy) = &charge {
-                    charge_policy(policy, "workspace.package.charge")?;
-                }
-                let dependencies =
-                    dependencies(workspace.dependencies, "workspace.dependencies", false)?;
-                Ok(Workspace {
-                    members: workspace.members,
-                    charge,
-                    dependencies,
-                })
+                message
             })
-            .transpose()?;
-        let Some(package) = document.package else {
-            if workspace.is_none() {
-                return Err("package: expected [package] or [workspace]".into());
-            }
-            if !document.sources.is_empty()
-                || !document.dependencies.is_empty()
-                || !document.foreign.is_empty()
-                || document.tests.is_some()
-                || document.program != Program::default()
-            {
-                return Err("package: package tables require [package]".into());
-            }
-            return Ok(Self {
-                package: None,
-                selections,
-                workspace,
+            .and_then(|document| {
+                if workspace {
+                    let root =
+                        cfg::Workspace::from_value(&document.value).expect("workspace schema");
+                    if root
+                        .root_package
+                        .as_ref()
+                        .is_some_and(|p| p.selections.is_some())
+                    {
+                        return Err(
+                            "root_package.selections: declare selections on the workspace".into(),
+                        );
+                    }
+                    let mut dirs = BTreeSet::new();
+                    for member in &root.members {
+                        path_rule(member, "").map_err(|e| {
+                            format!("workspace.members: {member:?} breaks the path rules: {e}")
+                        })?;
+                        if !dirs.insert(member) {
+                            return Err(format!("workspace.members: {member:?} is listed twice"));
+                        }
+                    }
+                    let charge = match root.charge {
+                        Some(cfg::Charge::WorkspaceCharge) => {
+                            return Err("a workspace cannot inherit its own charge policy".into());
+                        }
+                        Some(cfg::Charge::ChargeV1) => Some("charge-v1".into()),
+                        None => None,
+                    };
+                    Ok(Self {
+                        workspace: Some(Workspace {
+                            members: root.members,
+                            charge,
+                            dependencies: dependencies(
+                                root.dependencies.unwrap_or_default(),
+                                "workspace.dependencies",
+                                false,
+                            )?,
+                        }),
+                        selections: root.selections.map(selections).transpose()?,
+                        package: root.root_package.map(Self::package).transpose()?,
+                    })
+                } else {
+                    let mut pkg =
+                        cfg::Package::from_value(&document.value).expect("package schema");
+                    Ok(Self {
+                        selections: pkg.selections.take().map(selections).transpose()?,
+                        package: Some(Self::package(pkg)?),
+                        workspace: None,
+                    })
+                }
             });
-        };
+        (
+            workspace,
+            result.map_err(|e| format!("{}: {e}", path.display())),
+        )
+    }
+
+    fn package(mut package: cfg::Package) -> Result<Package, String> {
         // A bare name is a toolchain package's, in the toolchain's own manifests (section 2).
         let toolchain = package.name != "std"
             && crate::package_content::toolchain_major(&package.name).is_some();
@@ -359,19 +251,17 @@ impl Manifest {
             name: package.name,
             major: version.major,
         };
-        let inherit_charge = match package.charge {
-            Charge::Inherit { workspace: true } => true,
-            Charge::Policy(policy) => {
-                charge_policy(&policy, "package.charge")?;
-                false
-            }
-            Charge::Inherit { workspace: false } => {
-                return Err("package.charge.workspace: expected true".into());
-            }
-        };
-        let dependencies = dependencies(document.dependencies, "dependencies", true)?;
-        let module = document.program.module.as_deref().unwrap_or("main");
-        let function = document.program.function.as_deref().unwrap_or("main");
+        let inherit_charge = package.charge == cfg::Charge::WorkspaceCharge;
+        let dependencies = dependencies(package.dependencies, "dependencies", true)?;
+        let program = package.program;
+        let module = program
+            .as_ref()
+            .and_then(|p| p.module.as_deref())
+            .unwrap_or("main");
+        let function = program
+            .as_ref()
+            .and_then(|p| p.function.as_deref())
+            .unwrap_or("main");
         let modules = module_path(module)
             .ok_or_else(|| format!("program.module: {module:?} is not a module path"))?;
         if module_path(function).is_none_or(|parts| parts.len() != 1) {
@@ -380,11 +270,11 @@ impl Manifest {
             ));
         }
         let entry = DefPath::from_full(&format!("{id}/{}/{function}", modules.join("/"))).unwrap();
-        if document.sources.is_empty() {
+        if package.sources.is_empty() {
             return Err("sources: a package lists at least one source".into());
         }
-        let sources = source_paths(document.sources, "sources")?;
-        let mut tests = document.tests;
+        let sources = source_paths(package.sources, "sources")?;
+        let mut tests = package.tests.take();
         let test_sources = tests
             .as_mut()
             .map(|t| source_paths(std::mem::take(&mut t.sources), "tests.sources"))
@@ -400,9 +290,14 @@ impl Manifest {
                 .keys()
                 .map(|p| (p.as_str(), "tests.sources".to_owned())),
         );
-        for (name, module) in &document.foreign {
+        let foreign_modules: BTreeMap<_, _> =
+            package.foreign.unwrap_or_default().into_iter().collect();
+        for (name, module) in &foreign_modules {
             let field = format!("foreign.{name}");
-            let contained = module.contained(&field)?;
+            let symbols = match module {
+                cfg::ForeignModule::Native { symbols, .. }
+                | cfg::ForeignModule::Contained { symbols, .. } => symbols,
+            };
             let components = module_path(name)
                 .ok_or_else(|| format!("{field}: {name:?} is not a module path"))?;
             let count = sources.values().filter(|path| **path == components).count();
@@ -412,60 +307,60 @@ impl Manifest {
             if test_sources.values().any(|path| *path == components) {
                 return Err(format!("{field}: a test-only file joins module {name}"));
             }
-            if !symbol_prefix(&module.symbols) || !prefixes.insert(&module.symbols) {
-                return Err(format!(
-                    "{field}.symbols: bad symbol prefix {:?}",
-                    module.symbols
-                ));
+            if !symbol_prefix(symbols) || !prefixes.insert(symbols) {
+                return Err(format!("{field}.symbols: bad symbol prefix {:?}", symbols));
             }
-            let code = if let Some(row) = contained {
-                path_rule(&row.file, ".wasm").map_err(|rule| {
-                    format!("{field}: {:?} breaks the path rules: {rule}", row.file)
-                })?;
-                if !archive_paths.insert(&row.file) {
-                    return Err(format!("{field}: {:?} is named by two rows", row.file));
-                }
-                listed.push((&row.file, field.clone()));
-                let pin = parse_digest(&row.sha256).ok_or_else(|| {
-                    format!("{field}.module: sha256 must be 64 lower-case hex digits")
-                })?;
-                Code::Wasm(Archive {
-                    file: row.file.clone(),
-                    pin,
-                })
-            } else {
-                let mut rows = BTreeMap::new();
-                for row in module.archives.as_deref().unwrap_or_default() {
-                    if !target_name(&row.target) {
-                        return Err(format!("{field}.archives: bad target {:?}", row.target));
-                    }
-                    path_rule(&row.file, ".a").map_err(|rule| {
-                        format!("{field}: {:?} breaks the path rules: {rule}", row.file)
+            let code = match module {
+                cfg::ForeignModule::Contained { file, sha256, .. } => {
+                    path_rule(file, ".wasm").map_err(|rule| {
+                        format!("{field}: {:?} breaks the path rules: {rule}", file)
                     })?;
-                    if !archive_paths.insert(&row.file) {
-                        return Err(format!(
-                            "{field}: {:?} is named by two archive rows",
-                            row.file
-                        ));
+                    if !archive_paths.insert(file) {
+                        return Err(format!("{field}: {:?} is named by two rows", file));
                     }
-                    listed.push((&row.file, field.clone()));
-                    let pin = parse_digest(&row.sha256).ok_or_else(|| {
-                        format!("{field}.archives: sha256 must be 64 lower-case hex digits")
+                    listed.push((file, field.clone()));
+                    let pin = parse_digest(sha256).ok_or_else(|| {
+                        format!("{field}.module: sha256 must be 64 lower-case hex digits")
                     })?;
-                    let archive = Archive {
-                        file: row.file.clone(),
+                    Code::Wasm(Archive {
+                        file: file.clone(),
                         pin,
-                    };
-                    if rows.insert(row.target.clone(), archive).is_some() {
-                        return Err(format!("{field}.archives: two rows for {}", row.target));
-                    }
+                    })
                 }
-                Code::Native(rows)
+                cfg::ForeignModule::Native { archives, .. } => {
+                    let mut rows = BTreeMap::new();
+                    for row in archives {
+                        if !target_name(&row.target) {
+                            return Err(format!("{field}.archives: bad target {:?}", row.target));
+                        }
+                        path_rule(&row.file, ".a").map_err(|rule| {
+                            format!("{field}: {:?} breaks the path rules: {rule}", row.file)
+                        })?;
+                        if !archive_paths.insert(&row.file) {
+                            return Err(format!(
+                                "{field}: {:?} is named by two archive rows",
+                                row.file
+                            ));
+                        }
+                        listed.push((&row.file, field.clone()));
+                        let pin = parse_digest(&row.sha256).ok_or_else(|| {
+                            format!("{field}.archives: sha256 must be 64 lower-case hex digits")
+                        })?;
+                        let archive = Archive {
+                            file: row.file.clone(),
+                            pin,
+                        };
+                        if rows.insert(row.target.clone(), archive).is_some() {
+                            return Err(format!("{field}.archives: two rows for {}", row.target));
+                        }
+                    }
+                    Code::Native(rows)
+                }
             };
             foreign.insert(
                 components,
                 Foreign {
-                    symbols: module.symbols.clone(),
+                    symbols: symbols.clone(),
                     code,
                 },
             );
@@ -476,61 +371,23 @@ impl Manifest {
             tree.insert(path)
                 .map_err(|error| format!("{field}: {error}"))?;
         }
-        Ok(Self {
-            selections,
-            package: Some(Package {
-                id,
-                version,
-                inherit_charge,
-                sources,
-                test_sources,
-                dependencies,
-                entry,
-                tests,
-                program: ProgramRun::declared(
-                    document.program.limit,
-                    document.program.grants,
-                    document.program.dirs,
-                ),
-                foreign,
-            }),
-            workspace,
+        Ok(Package {
+            id,
+            version,
+            inherit_charge,
+            sources,
+            test_sources,
+            dependencies,
+            entry,
+            tests,
+            program: program.filter(|p| p.limit.is_some() || p.grants.is_some()),
+            foreign,
         })
     }
 }
 
-impl ForeignTable {
-    /// FFI-10's containment key: the contained module's row, or `None` for a
-    /// native module, whose archives the caller reads.
-    fn contained(&self, field: &str) -> Result<Option<&WasmTable>, String> {
-        match self.containment.as_deref() {
-            None if self.module.is_some() => {
-                Err(format!("{field}: module requires containment = \"wasm\""))
-            }
-            None if self.archives.is_none() => Err(format!("{field}: expected archives")),
-            None => Ok(None),
-            Some("wasm") if self.archives.is_some() => Err(format!(
-                "{field}: archives is forbidden with containment = \"wasm\""
-            )),
-            Some("wasm") => self
-                .module
-                .as_ref()
-                .map(Some)
-                .ok_or_else(|| format!("{field}: containment = \"wasm\" requires module")),
-            Some(_) => Err(format!("{field}: containment: expected \"wasm\"")),
-        }
-    }
-}
-
-fn charge_policy(value: &str, field: &str) -> Result<(), String> {
-    if value != "charge-v1" {
-        return Err(format!("{field}: unknown charge policy {value:?}"));
-    }
-    Ok(())
-}
-
 fn source_paths(
-    sources: BTreeMap<String, String>,
+    sources: Vec<(String, String)>,
     field: &str,
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
     sources
@@ -545,9 +402,9 @@ fn source_paths(
         .collect()
 }
 
-fn selections(rows: BTreeMap<String, DependencyTable>) -> Result<Selections, String> {
+fn selections(rows: Vec<(String, cfg::Selection)>) -> Result<Selections, String> {
     rows.into_iter()
-        .map(|(key, binding)| {
+        .map(|(key, selection)| {
             let id = key
                 .split_once('@')
                 .and_then(|(name, major)| {
@@ -558,7 +415,7 @@ fn selections(rows: BTreeMap<String, DependencyTable>) -> Result<Selections, Str
                     (names::scoped(name) && id.to_string() == key).then_some(id)
                 })
                 .ok_or_else(|| format!("selections: {key:?} is not a scoped identity"))?;
-            let (root, mut source) = published(binding, "selections")?;
+            let (root, mut source) = published(&selection.root, selection.locator, "selections")?;
             if let Some(SourceLocation::Archive(path)) = &mut source {
                 *path = crate::package_workspace::archive_path(Path::new(""), path).ok_or_else(
                     || format!("selections: archive {path:?} is not inside the workspace root"),
@@ -570,280 +427,121 @@ fn selections(rows: BTreeMap<String, DependencyTable>) -> Result<Selections, Str
 }
 
 fn published(
-    binding: DependencyTable,
+    pin: &str,
+    locator: cfg::Locator,
     field: &str,
 ) -> Result<(Root, Option<SourceLocation>), String> {
-    let root = Root::parse(binding.root.as_deref().unwrap_or(""))
+    let root = Root::parse(pin)
         .ok_or_else(|| format!("{field}.root: expected sha256: and 64 lower-case hex digits"))?;
-    let sources = [
-        &binding.url,
-        &binding.archive,
-        &binding.git,
-        &binding.registry,
-    ];
-    if sources.iter().filter(|source| source.is_some()).count() > 1 {
-        return Err(format!(
-            "{field}: give at most one of url, archive, git or registry"
-        ));
-    }
-    if binding.git.is_none() {
-        for (key, value) in [
-            ("rev", &binding.rev),
-            ("ref", &binding.reference),
-            ("dir", &binding.dir),
-        ] {
-            if value.is_some() {
-                return Err(format!("{field}: {key} needs git"));
+    let source = match locator {
+        cfg::Locator::Store => None,
+        cfg::Locator::Archive(path) => Some(SourceLocation::Archive(path)),
+        cfg::Locator::Url(url) => {
+            if !url.starts_with("https://") {
+                return Err(format!("{field}.url: expected an HTTPS URL"));
             }
+            Some(SourceLocation::Url(url))
         }
-    }
-    if let Some(origin) = binding.registry {
-        let origin = crate::registry_route::Origin::parse(&origin)
-            .map_err(|error| format!("{field}.registry: {error}"))?;
-        return Ok((root, Some(SourceLocation::Registry(origin))));
-    }
-    let source = match (binding.url, binding.archive, binding.git) {
-        (Some(url), _, _) if !url.starts_with("https://") => {
-            return Err(format!("{field}.url: expected an HTTPS URL"));
-        }
-        (Some(url), _, _) => Some(SourceLocation::Url(url)),
-        (None, Some(path), _) => Some(SourceLocation::Archive(path)),
-        (None, None, Some(url)) => {
-            git_url_rule(&url).map_err(|rule| format!("{field}.git: {rule}"))?;
-            let rev = binding
-                .rev
-                .ok_or_else(|| format!("{field}: git needs rev"))?;
+        cfg::Locator::Registry(url) => Some(SourceLocation::Registry(
+            crate::registry_route::Origin::parse(&url)
+                .map_err(|e| format!("{field}.registry: {e}"))?,
+        )),
+        cfg::Locator::Git {
+            url,
+            rev,
+            reference,
+            dir,
+        } => {
+            git_url_rule(&url).map_err(|e| format!("{field}.git: {e}"))?;
             if !git_rev_rule(&rev) {
                 return Err(format!(
                     "{field}.rev: {rev:?} is not a full commit id of 40 or 64 lower-case hex digits"
                 ));
             }
-            if let Some(reference) = &binding.reference
+            if let Some(reference) = &reference
                 && !git_ref_rule(reference)
             {
                 return Err(format!(
                     "{field}.ref: {reference:?} is not refs/heads/<name> or refs/tags/<name>"
                 ));
             }
-            if let Some(dir) = &binding.dir {
-                git_dir_rule(dir).map_err(|rule| {
-                    format!("{field}.dir: {dir:?} breaks the path rules: {rule}")
-                })?;
+            if let Some(dir) = &dir {
+                git_dir_rule(dir)
+                    .map_err(|e| format!("{field}.dir: {dir:?} breaks the path rules: {e}"))?;
             }
             Some(SourceLocation::Git(GitSource {
                 url,
                 rev,
-                dir: binding.dir,
-                reference: binding.reference,
+                reference,
+                dir,
             }))
         }
-        (None, None, None) => None,
     };
     Ok((root, source))
 }
 
+fn ceiling(kinds: &[cfg::Capability], field: &str) -> Result<u16, String> {
+    use cfg::Capability as C;
+    use hirsel_core_ir::release_recipe::GrantKind as G;
+    let mut mask = 0;
+    for kind in kinds {
+        let tag = match kind {
+            C::Dir => G::Dir,
+            C::Net => G::Net,
+            C::Clock => G::Clock,
+            C::Random => G::Random,
+            C::Stdout => G::Stdout,
+            C::Stderr => G::Stderr,
+            C::Stdin => G::Stdin,
+            C::Env => G::Env,
+            C::Process => G::Process,
+            C::Tasks => G::Tasks,
+            C::Args => G::Args,
+            C::Secret => G::Secret,
+            C::Foreign => G::Foreign,
+            C::Exec => G::Exec,
+            C::Cred => G::Cred,
+            C::Compiler => G::Compiler,
+        };
+        let bit = 1u16 << tag as u8;
+        if mask & bit != 0 {
+            return Err(format!("{field}.authority: names {kind:?} twice"));
+        }
+        mask |= bit;
+    }
+    Ok(mask)
+}
+
 fn dependencies(
-    input: BTreeMap<String, DependencyTable>,
+    rows: Vec<(String, cfg::Dependency)>,
     container: &str,
     allow_inherited: bool,
 ) -> Result<BTreeMap<String, Dependency>, String> {
-    input
-        .into_iter()
-        .map(|(alias, binding)| {
-            let field = format!("{container}.{alias}");
-            if alias == "core" {
-                return Err(format!(
-                    "{field}: core@1 is bound in every package and is not declared"
-                ));
+    rows.into_iter().map(|(alias, binding)| {
+        let field = format!("{container}.{alias}");
+        if alias == "core" { return Err(format!("{field}: core@1 is bound in every package and is not declared")); }
+        if !names::alias(&alias) { return Err(format!("{field}: {alias:?} is not an alias: [a-z][a-z0-9_]* with at most 64 bytes")); }
+        let dep = match binding {
+            cfg::Dependency::Inherit if allow_inherited => Dependency::Inherited,
+            cfg::Dependency::Inherit => return Err(format!("{field}: workspace dependencies cannot inherit")),
+            cfg::Dependency::Toolchain {package, major, authority} => {
+                if !authority.is_empty() { return Err(format!("{field}.authority: a toolchain binding takes no authority")); }
+                let supplied = crate::package_content::toolchain_major(&alias).ok_or_else(|| format!("{field}: {alias:?} is not a toolchain package"))?;
+                if package != alias { return Err(format!("{field}: toolchain package {package} is bound only as {package}")); }
+                if major != supplied { return Err(format!("{field}: the toolchain has {alias}@{supplied}, not {alias}@{major}")); }
+                Dependency::Toolchain(Id {name: package, major})
             }
-            if !names::alias(&alias) {
-                return Err(format!(
-                    "{field}: {alias:?} is not an alias: [a-z][a-z0-9_]* with at most 64 bytes"
-                ));
+            cfg::Dependency::Path {package, major, path, authority} => {
+                if !names::any(&package) { return Err(format!("{field}.package: {package:?} is not a scoped or local name")); }
+                if names::identifier(&package) && package != alias { return Err(format!("{field}: {package} is a toolchain package's name, bound only as {package}")); }
+                Dependency::Member(Id {name:package, major}, path, ceiling(&authority, &field)?)
             }
-            let bad_form = || {
-                format!("{field}: give exactly one of path, root, workspace or a toolchain major")
-            };
-            let toolchain = crate::package_content::toolchain_major(&alias);
-            // The member and published forms name their package; the toolchain form never does.
-            let package = |binding: &DependencyTable| -> Result<String, String> {
-                binding.package.clone().ok_or_else(|| match toolchain {
-                    Some(_) => format!("{field}: a member or published binding gives package"),
-                    None => format!(
-                        "{field}: {alias:?} is not a toolchain package; give package = \"<scoped name>\""
-                    ),
-                })
-            };
-            let located = [
-                &binding.url,
-                &binding.archive,
-                &binding.registry,
-                &binding.git,
-                &binding.rev,
-                &binding.reference,
-                &binding.dir,
-            ]
-            .iter()
-            .any(|field| field.is_some());
-            let mut ceiling = 0u16;
-            for name in binding.authority.iter().flatten() {
-                let kind = crate::native::grant_kind(name).ok_or_else(|| {
-                    format!("{field}.authority: {name:?} is not a capability kind")
-                })?;
-                if ceiling & (1 << kind) != 0 {
-                    return Err(format!("{field}.authority: names {name} twice"));
-                }
-                ceiling |= 1 << kind;
-            }
-            let edge = match (
-                binding.major,
-                &binding.path,
-                &binding.root,
-                binding.workspace,
-                located,
-            ) {
-                (None, None, None, Some(true), false)
-                    if allow_inherited && binding.package.is_none() && binding.authority.is_none() =>
-                {
-                    Dependency::Inherited
-                }
-                (Some(major), None, None, None, false) => {
-                    let Some(supplied) = toolchain else {
-                        package(&binding)?;
-                        return Err(bad_form());
-                    };
-                    if binding.authority.is_some() {
-                        return Err(format!("{field}.authority: a toolchain binding takes no authority"));
-                    }
-                    if binding.package.is_some() {
-                        return Err(format!("{field}: a toolchain binding takes no package"));
-                    }
-                    if major != supplied {
-                        return Err(format!(
-                            "{field}: the toolchain has {alias}@{supplied}, not {alias}@{major}"
-                        ));
-                    }
-                    Dependency::Toolchain(Id {
-                        name: alias.clone(),
-                        major,
-                    })
-                }
-                (Some(major), Some(path), None, None, false) => {
-                    let name = package(&binding)?;
-                    let bare = names::identifier(&name);
-                    if !(names::scoped(&name) || names::local(&name) || bare) {
-                        return Err(format!(
-                            "{field}.package: {name:?} is not a scoped or local name"
-                        ));
-                    }
-                    // A toolchain package's alias is always its bare name (section 2).
-                    if bare && name != alias {
-                        return Err(format!(
-                            "{field}: {name} is a toolchain package's name, bound only as {name}"
-                        ));
-                    }
-                    Dependency::Member(Id { name, major }, path.clone(), ceiling)
-                }
-                (Some(major), None, Some(_), None, _) => {
-                    let name = package(&binding)?;
-                    if names::local(&name) {
-                        return Err(format!(
-                            "{field}: {name} is a local name, which only a workspace member has"
-                        ));
-                    }
-                    if !names::scoped(&name) {
-                        return Err(format!("{field}.package: {name:?} is not a scoped name"));
-                    }
-                    let (root, source) = published(binding, &field)?;
-                    Dependency::Published(Id { name, major }, root, source, ceiling)
-                }
-                _ => return Err(bad_form()),
-            };
-            Ok((alias, edge))
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-enum Shape {
-    Manifest,
-    Package,
-    Charge,
-    Selections,
-    Selection,
-    Dependencies,
-    Dependency,
-    Program,
-    Tests,
-    Runs,
-    Run,
-    Foreign,
-    Module,
-    Archive,
-    Wasm,
-    Workspace,
-    WorkspacePackage,
-}
-
-fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<String>) {
-    use Shape::*;
-    for (key, value) in table {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        let nested = match (shape, key.as_str()) {
-            (Manifest, "package") => Package,
-            (Manifest, "dependencies") | (Workspace, "dependencies") => Dependencies,
-            (Manifest, "selections") => Selections,
-            (Selections, _) => Selection,
-            (Manifest, "program") => Program,
-            (Manifest, "tests") => Tests,
-            (Manifest, "foreign") => Foreign,
-            (Manifest, "workspace") => Workspace,
-            (Package, "charge") => Charge,
-            (Dependencies, _) => Dependency,
-            (Tests, "runs") => Runs,
-            (Runs, _) => Run,
-            (Foreign, _) => Module,
-            (Module, "archives") => Archive,
-            (Module, "module") => Wasm,
-            (Workspace, "package") => WorkspacePackage,
-            (Manifest, "sources" | "tool")
-            | (Package, "name" | "version")
-            | (Charge, "workspace")
-            | (
-                Dependency,
-                "package" | "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref"
-                | "dir" | "workspace" | "authority" | "registry",
-            )
-            | (Selection, "root" | "url" | "archive" | "git" | "rev" | "dir" | "registry")
-            | (Program, "module" | "function" | "limit" | "grants" | "dirs")
-            | (Tests, "sources" | "limit" | "grants" | "dirs")
-            | (Run, "limit" | "grants" | "dirs")
-            | (Module, "symbols" | "containment")
-            | (Archive, "target" | "file" | "sha256")
-            | (Wasm, "file" | "sha256")
-            | (Workspace, "members")
-            | (WorkspacePackage, "charge") => continue,
-            (Tests | Run | Program, "grant" | "dir") => {
-                unknown.push(format!("{path}. Use `{key}s`"));
-                continue;
-            }
-            _ => {
-                unknown.push(path);
-                continue;
+            cfg::Dependency::Published {package, major, root, locator, authority} => {
+                if !names::scoped(&package) { return Err(format!("{field}.package: {package:?} is not a scoped name")); }
+                let (root,source) = published(&root, locator, &field)?;
+                Dependency::Published(Id {name:package, major}, root, source, ceiling(&authority, &field)?)
             }
         };
-        if let Some(table) = value.as_table() {
-            unknown_keys(table, &path, nested, unknown);
-        } else if matches!(nested, Archive)
-            && let Some(rows) = value.as_array()
-        {
-            for table in rows.iter().filter_map(toml::Value::as_table) {
-                unknown_keys(table, &path, nested, unknown);
-            }
-        }
-    }
+        Ok((alias,dep))
+    }).collect()
 }

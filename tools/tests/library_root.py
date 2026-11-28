@@ -14,7 +14,7 @@ def library_root(work, members, replacements):
     programs.mkdir(parents=True)
     for name in ('core', 'std'):
         (libraries / name).symlink_to(ROOT / 'core' / name)
-    (programs / 'hirsel.toml').write_text('[workspace]\nmembers = [' + ', '.join(f'"{m}"' for m in members) + ']\n')
+    (programs / 'hirsel.hcfg').write_text('pkg_v1.Workspace(members: [' + ', '.join(f'"{m}"' for m in members) + '])\n')
     for member in members:
         shutil.copytree(ROOT / 'core/programs' / member, programs / member,
                         ignore=shutil.ignore_patterns('.hirsel-*'))

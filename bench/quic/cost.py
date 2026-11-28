@@ -37,7 +37,9 @@ import statistics
 import subprocess
 import sys
 import time
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -80,7 +82,7 @@ def build_hirsel(out, tree):
     compiler = ROOT / paths['root' + COMPILER_TARGET]
     cc = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
     core, std, quic = ({'name': n, 'version': '1'} for n in ('core', 'std', 'quic'))
-    manifest = tomllib.loads((quic_dir / 'hirsel.toml').read_text())
+    manifest = hcfg.package(quic_dir)
     sources = dict(manifest['sources'])
 
     def write_inputs(name, program, extra):

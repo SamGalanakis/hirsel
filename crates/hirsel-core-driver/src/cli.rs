@@ -90,6 +90,10 @@ commands! {
         Simple(NoOption), None: HELP;
     "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a pinned host or Store operation.";
         [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
+    "config", "config <export>", "Read a typed configuration document.";
+        Simple(NoOption), None: HELP;
+    "config export", "config export FILE --json", "Export a checked configuration as versioned JSON.";
+        ConfigExport(ConfigExportOption), One: HELP, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HELP, Json, SourceCore, SourceStd, CoreProduct, Entry, Libraries,
@@ -252,7 +256,7 @@ commands! {
         [TapeExport] Tape(TapeOption), One: IncludeCredentials, TapeOut, Json, HELP;
     "tape check", "tape check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";
         [TapeCheck] Store(StoreOption), One: HELP, StoreRelease, RecordedExecutable, Json;
-    "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
+    "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.hcfg declares tests, set limit, dirs and grants there.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Replay, ExpectVerdict, Laws, WriteLaws, LawsBaseline, HELP,
             Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Filter, TestExact, TestJobs,

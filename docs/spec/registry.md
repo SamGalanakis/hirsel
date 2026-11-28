@@ -359,7 +359,7 @@ verified C offline. Retirement alone does not remove the frame.
 
 ## 5. Client selection and transport
 
-Trust configuration belongs to the invoking user's `hirsel/config.toml` under XDG_CONFIG_HOME
+Trust configuration belongs to the invoking user's `hirsel/config.hcfg` under XDG_CONFIG_HOME
 (default `~/.config`). Each `[[registry.route]]` has `prefix`, `url`, `release-key`,
 `status-key`, `legal-key`, `witness-keys` (two pinned C2SP note-verifier keys) and `quorum` (2). An
 explicit preview route uses quorum 0 and an empty witness list. Prefix is `*`, `HOST/*` or

@@ -17,7 +17,7 @@ fn l30_git_package_with_sibling_path() {
     app_at(&law, "app");
     PackageLaw::pass(server.add(&law, "app", &[source]));
     let binding = wrap_binding("https://alpha.test/r1", C1, PACKAGE_W, Some("refs/tags/v1"));
-    assert!(manifest_text(&law, "app").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "app"));
+    assert!(manifest_text(&law, "app").contains(&binding), "{}", manifest_text(&law, "app"));
     assert_eq!(fs::read_to_string(law.path("app/hirsel.lock")).unwrap(), L30_LOCK);
     assert_eq!(stored(&law, "packages"), roots(&[PACKAGE_X, PACKAGE_W]));
     assert_eq!(
@@ -31,10 +31,10 @@ fn l30_git_package_with_sibling_path() {
 
     // `hirsel pack` in a checkout of r1 at C1 gives the same roots.
     for (path, bytes) in [
-        ("checkout/hirsel.toml", "[workspace]\nmembers = [\"json\", \"wrap\"]\n"),
-        ("checkout/json/hirsel.toml", JSON_MANIFEST),
+        ("checkout/hirsel.hcfg", "pkg_v1.Workspace(members: [\"json\", \"wrap\"])\n"),
+        ("checkout/json/hirsel.hcfg", JSON_MANIFEST),
         ("checkout/json/json.hirsel", PACKAGE_X_SOURCE),
-        ("checkout/wrap/hirsel.toml", WRAP_MANIFEST),
+        ("checkout/wrap/hirsel.hcfg", WRAP_MANIFEST),
         ("checkout/wrap/wrap.hirsel", WRAP_V1),
     ] {
         law.write(path, bytes);
@@ -65,8 +65,8 @@ fn l30_git_package_with_sibling_path() {
     fresh("broken");
     let mut objects = r1_objects();
     let tree = r1_tree()
-        .file("hirsel.toml", "[workspace]\nmembers = [\"json\", \"wrap\", \"broken\"]\n")
-        .file("broken/hirsel.toml", "this is [ not toml\n");
+        .file("hirsel.hcfg", "pkg_v1.Workspace(members: [\"json\", \"wrap\", \"broken\"])\n")
+        .file("broken/hirsel.hcfg", "this is [ not toml\n");
     let commit = objects.commit(&tree, None, 1_700_000_000, "v1");
     server.serve("alpha.test/rb", Repo::at(objects, &commit));
     added("broken", "https://alpha.test/rb", &commit);
@@ -77,10 +77,10 @@ fn l30_git_package_with_sibling_path() {
     let mut objects = r1_objects();
     let tree = r1_tree()
         .file(
-            "wrap/hirsel.toml",
+            "wrap/hirsel.hcfg",
             WRAP_MANIFEST.replace(
-                "json = { package = \"fixture.test/json\", major = 1, path = \"../json\" }",
-                &format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"../vendor/jx.hpkg\" }}"),
+                "Path(package: \"fixture.test/json\", major: 1, path: \"../json\", authority: [])",
+                &format!("Published(package: \"fixture.test/json\", major: 1, root: \"{PACKAGE_X}\", locator: Archive(\"../vendor/jx.hpkg\"), authority: [])"),
             ),
         )
         .file("vendor/jx.hpkg", fs::read(law.path("vendor/jx.hpkg")).unwrap());
@@ -124,7 +124,7 @@ fn l30_git_package_with_sibling_path() {
 fn rj_repo() -> (Repo, String) {
     let mut objects = Objects::default();
     let tree = Tree::default()
-        .file("hirsel.toml", JSON_MANIFEST)
+        .file("hirsel.hcfg", JSON_MANIFEST)
         .file("json.hirsel", PACKAGE_X_SOURCE);
     let j = objects.commit(&tree, None, 1_700_000_000, "j");
     (Repo::at(objects, &j), j)
@@ -134,13 +134,13 @@ fn rj_repo() -> (Repo, String) {
 fn nested_wrap(server: &GitServer, key: &str, j: &str, pin: &str) -> String {
     let mut objects = r1_objects();
     let tree = r1_tree().without("json").file(
-        "hirsel.toml",
-        "[workspace]\nmembers = [\"wrap\"]\n",
+        "hirsel.hcfg",
+        "pkg_v1.Workspace(members: [\"wrap\"])\n",
     ).file(
-        "wrap/hirsel.toml",
+        "wrap/hirsel.hcfg",
         WRAP_MANIFEST.replace(
-            "json = { package = \"fixture.test/json\", major = 1, path = \"../json\" }",
-            &format!("json = {{ package = \"fixture.test/json\", major = 1, root = \"{pin}\", git = \"https://alpha.test/rj\", rev = \"{j}\" }}"),
+            "Path(package: \"fixture.test/json\", major: 1, path: \"../json\", authority: [])",
+            &format!("Published(package: \"fixture.test/json\", major: 1, root: \"{pin}\", locator: Git(url: \"https://alpha.test/rj\", rev: \"{j}\"), authority: [])"),
         ),
     );
     let commit = objects.commit(&tree, None, 1_700_000_000, "v1");
@@ -192,10 +192,10 @@ fn r5() -> Repo {
     variant(
         r1_tree()
             .file(
-                "wrap/hirsel.toml",
+                "wrap/hirsel.hcfg",
                 WRAP_MANIFEST.replace(
-                    "\"wrap.hirsel\" = \"wrap\"\n",
-                    "\"wrap.hirsel\" = \"wrap\"\n\"ext/x.hirsel\" = \"x\"\n",
+                    "(\"wrap.hirsel\", \"wrap\")",
+                    "(\"wrap.hirsel\", \"wrap\"), (\"ext/x.hirsel\", \"x\")",
                 ),
             )
             .submodule("wrap/ext", C2),
@@ -203,12 +203,46 @@ fn r5() -> Repo {
     )
 }
 
-const R6_MANIFEST: &str = "[package]\nname = \"fixture.test/demo\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"api.hirsel\" = \"api\"\n\"aa.hirsel\" = \"aa\"\n\"b.hirsel\" = \"b\"\n\n[foreign.aa]\nsymbols = \"ha_\"\narchives = [\n  { target = \"x86_64-unknown-linux-gnu\", file = \"native/aa-x86.a\", sha256 = \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\" },\n  { target = \"aarch64-unknown-linux-gnu\", file = \"native/aa-arm.a\", sha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\" },\n]\n\n[foreign.b]\nsymbols = \"hb_\"\narchives = [{ target = \"x86_64-unknown-linux-gnu\", file = \"native/b.a\", sha256 = \"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\" }]\n";
+const R6_MANIFEST: &str = r#"pkg_v1.Package(
+    name: "fixture.test/demo",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("api.hirsel", "api"), ("aa.hirsel", "aa"), ("b.hirsel", "b")],
+    dependencies: [],
+    foreign: Some([
+        ("aa", Native(
+            symbols: "ha_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "native/aa-x86.a",
+                    sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                ),
+                ArchiveFile(
+                    target: "aarch64-unknown-linux-gnu",
+                    file: "native/aa-arm.a",
+                    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                ),
+            ],
+        )),
+        ("b", Native(
+            symbols: "hb_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "native/b.a",
+                    sha256: "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
+                ),
+            ],
+        )),
+    ]),
+)
+"#;
 
 fn r6() -> Repo {
     variant(
         Tree::default()
-            .file("hirsel.toml", R6_MANIFEST)
+            .file("hirsel.hcfg", R6_MANIFEST)
             .file("api.hirsel", "pub opaque type A {}\npub opaque type B {}\n")
             .file("aa.hirsel", "pub fn ping(f: Foreign[api.A]) -> u64\n")
             .file("b.hirsel", "pub fn pong(f: Foreign[api.B]) -> u64\n")
@@ -252,7 +286,7 @@ fn fetch_answers(pack: Vec<u8>) -> impl FnMut(&Request) -> Option<Reply> + Send 
 
 fn hand_binding(root: &str) -> String {
     format!(
-        "[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{root}\", git = \"https://alpha.test/r1\", rev = \"{C1}\", dir = \"wrap\" }}\n"
+        "dependencies: [(\"wrap\", Published(package: \"fixture.test/wrap\", major: 1, root: \"{root}\", locator: Git(url: \"https://alpha.test/r1\", rev: \"{C1}\", dir: Some(\"wrap\")), authority: []))],"
     )
 }
 
@@ -336,7 +370,7 @@ fn l31_tampered_commit_keeps_nothing() {
     let commit = nested_wrap(&server, "alpha.test/rn", &j, PACKAGE_X);
     law.app(
         "app",
-        &format!("[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/rn\", rev = \"{commit}\", dir = \"wrap\" }}\n"),
+        &format!("dependencies: [(\"wrap\", Published(package: \"fixture.test/wrap\", major: 1, root: \"{PACKAGE_X}\", locator: Git(url: \"https://alpha.test/rn\", rev: \"{commit}\", dir: Some(\"wrap\")), authority: []))],"),
     );
     let (status, _, stderr) = server.run(&law, &["check", "app"], "packages");
     assert_eq!(status, Some(2), "{stderr}");
@@ -369,7 +403,7 @@ fn l32_link_that_leaves_the_package() {
     server.serve("alpha.test/r2", r2());
     server.serve("alpha.test/r3", r3());
     let outside = |repo: &str, rev: &str| {
-        format!("git:https://alpha.test/{repo}#{rev}/wrap/hirsel.toml: sources: \"wrap.hirsel\" resolves outside the package")
+        format!("git:https://alpha.test/{repo}#{rev}/wrap/hirsel.hcfg: sources: \"wrap.hirsel\" resolves outside the package")
     };
     app_at(&law, "app");
     let manifest = manifest_text(&law, "app");
@@ -409,7 +443,7 @@ fn l32_link_that_leaves_the_package() {
     app_at(&law, "fortyone");
     PackageLaw::refuse(
         server.add(&law, "fortyone", &["git+https://alpha.test/fortyone?dir=wrap#v1"]),
-        &format!("git:https://alpha.test/fortyone#{rev}/wrap/hirsel.toml: sources: \"wrap.hirsel\" does not resolve to a regular file"),
+        &format!("git:https://alpha.test/fortyone#{rev}/wrap/hirsel.hcfg: sources: \"wrap.hirsel\" does not resolve to a regular file"),
     );
 
     // A top-level entry named `json/json.hirsel` is never what `json/json.hirsel` names.
@@ -434,16 +468,25 @@ fn l32_link_that_leaves_the_package() {
     // A listed member whose directory is a link out of the workspace.
     let (repo, rev) = built(
         Tree::default()
-            .file("ws/hirsel.toml", "[workspace]\nmembers = [\"client\", \"lib\"]\n")
+            .file("ws/hirsel.hcfg", "pkg_v1.Workspace(members: [\"client\", \"lib\"])\n")
             .file(
-                "ws/client/hirsel.toml",
-                "[package]\nname = \"fixture.test/client\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"client.hirsel\" = \"client\"\n\n[dependencies]\nlib = { package = \"fixture.test/lib\", major = 1, path = \"../lib\" }\n",
+                "ws/client/hirsel.hcfg",
+                r#"pkg_v1.Package(
+    name: "fixture.test/client",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("client.hirsel", "client")],
+    dependencies: [
+        ("lib", Path(package: "fixture.test/lib", major: 1, path: "../lib", authority: [])),
+    ],
+)
+"#,
             )
             .file("ws/client/client.hirsel", WRAP_V1)
             .link("ws/lib", "../elsewhere/lib")
             .file(
-                "elsewhere/lib/hirsel.toml",
-                "[package]\nname = \"fixture.test/lib\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"lib.hirsel\" = \"lib\"\n",
+                "elsewhere/lib/hirsel.hcfg",
+                "pkg_v1.Package(name: \"fixture.test/lib\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"lib.hirsel\", \"lib\")], dependencies: [])\n",
             )
             .file("elsewhere/lib/lib.hirsel", PACKAGE_X_SOURCE),
     );
@@ -451,7 +494,7 @@ fn l32_link_that_leaves_the_package() {
     app_at(&law, "ws");
     PackageLaw::refuse(
         server.add(&law, "ws", &["git+https://alpha.test/ws?dir=ws/client#v1"]),
-        &format!("git:https://alpha.test/ws#{rev}/ws/hirsel.toml: workspace.members: \"lib\" resolves outside the workspace"),
+        &format!("git:https://alpha.test/ws#{rev}/ws/hirsel.hcfg: workspace.members: \"lib\" resolves outside the workspace"),
     );
 }
 
@@ -467,12 +510,12 @@ fn l36_submodules_and_lfs_pointers() {
     app_at(&law, "app");
     PackageLaw::refuse(
         server.add(&law, "app", &["git+https://alpha.test/r5?dir=wrap#v1"]),
-        &format!("git:https://alpha.test/r5#{R5}/wrap/hirsel.toml: sources: \"ext/x.hirsel\" reaches submodule \"ext\", and hirsel does not fetch submodules"),
+        &format!("git:https://alpha.test/r5#{R5}/wrap/hirsel.hcfg: sources: \"ext/x.hirsel\" reaches submodule \"ext\", and hirsel does not fetch submodules"),
     );
     assert!(server.log().iter().all(|entry| entry.contains("/r5/")), "a second repository");
     PackageLaw::refuse(
         server.add(&law, "app", &["git+https://alpha.test/r6#v1"]),
-        &format!("git:https://alpha.test/r6#{R6}/hirsel.toml: foreign.b: archive \"native/b.a\" for x86_64-unknown-linux-gnu does not match its pin: expected sha256 3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d, found sha256 70edffc238bc4d1e48b82fd69143269662f8daf7556f399d76669f3976dad323; it is a Git LFS pointer, and hirsel does not fetch LFS content"),
+        &format!("git:https://alpha.test/r6#{R6}/hirsel.hcfg: foreign.b: archive \"native/b.a\" for x86_64-unknown-linux-gnu does not match its pin: expected sha256 3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d, found sha256 70edffc238bc4d1e48b82fd69143269662f8daf7556f399d76669f3976dad323; it is a Git LFS pointer, and hirsel does not fetch LFS content"),
     );
     law.empty_store();
 }

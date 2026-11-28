@@ -45,22 +45,16 @@ fn stdio_editor_queries() {
         "fn refused() -> Missing {}",
     );
     write(
-        &workspace.join("hirsel.toml"),
-        "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+        &workspace.join("hirsel.hcfg"),
+        "pkg_v1.Workspace(members: [\"app\", \"lib\"])\n",
     );
     write(
-        &workspace.join("app/hirsel.toml"),
-        &format!(
-            concat!(
-                "{}\n[dependencies]\ndep = {{ package = \"fixture.test/lib\", major = 1, path = \"../lib\" }}\n",
-                "published = {{ package = \"fixture.test/archive\", major = 1, root = \"{}\", archive = \"archive.hpkg\" }}\n",
-            ),
-            manifest("local/app", "main"),
-            pin,
-        ),
+        &workspace.join("app/hirsel.hcfg"),
+        &manifest("local/app", "main").replace("dependencies: []", &format!(
+            r#"dependencies: [("dep", Path(package: "fixture.test/lib", major: 1, path: "../lib", authority: [])), ("published", Published(package: "fixture.test/archive", major: 1, root: "{pin}", locator: Archive("archive.hpkg"), authority: []))]"#)),
     );
     write(
-        &workspace.join("lib/hirsel.toml"),
+        &workspace.join("lib/hirsel.hcfg"),
         &source_manifest("fixture.test/lib", "main", "lib"),
     );
     write(&app, document);
@@ -240,7 +234,7 @@ fn revision_cache_rechecks_owners_and_rebinds_sites() {
         "fn dependent() { let x = seed(); let _ = x; }\n",
         "fn independent() -> bool { false }\n",
     );
-    write(&root.join("hirsel.toml"), &manifest("local/app", "main"));
+    write(&root.join("hirsel.hcfg"), &manifest("local/app", "main"));
     write(&path, original);
     cli(&driver, &root, &root, &["lock"], 0);
     let mut session = EditorSession::default();
@@ -306,31 +300,25 @@ fn stdio_live_diagnostics_contract() {
     let cache = root.join("cache");
 
     write(
-        &workspace.join("hirsel.toml"),
-        "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+        &workspace.join("hirsel.hcfg"),
+        "pkg_v1.Workspace(members: [\"app\", \"lib\"])\n",
     );
     write(&app, APP);
     write(&lib, LIB_GOOD);
     write(
-        &workspace.join("app/hirsel.toml"),
-        &format!(
-            "{}\n[dependencies]\ndep = {{ package = \"fixture.test/lib\", major = 1, path = \"../lib\" }}\n",
-            manifest("local/app", "main")
-        ),
+        &workspace.join("app/hirsel.hcfg"),
+        &manifest("local/app", "main").replace("dependencies: []", r#"dependencies: [("dep", Path(package: "fixture.test/lib", major: 1, path: "../lib", authority: []))]"#),
     );
     write(
-        &workspace.join("lib/hirsel.toml"),
+        &workspace.join("lib/hirsel.hcfg"),
         &manifest("fixture.test/lib", "lib"),
     );
     cli(&driver, &root, &workspace, &["lock"], 0);
     write(&lone, "💥");
     write(&broken.join("main.hirsel"), "💥");
     write(
-        &broken.join("hirsel.toml"),
-        &format!(
-            "{}\n[dependencies]\nmissing = {{ package = \"fixture.test/missing\", major = 1, root = \"sha256:{PIN}\", url = \"https://example.invalid/pkg.hpkg\" }}\n",
-            manifest("local/broken", "main")
-        ),
+        &broken.join("hirsel.hcfg"),
+        &manifest("local/broken", "main").replace("dependencies: []", &format!(r#"dependencies: [("missing", Published(package: "fixture.test/missing", major: 1, root: "sha256:{PIN}", locator: Url("https://example.invalid/pkg.hpkg"), authority: []))]"#)),
     );
     write(&broken.join("hirsel.lock"), "untouched lock\n");
     write(
@@ -451,7 +439,7 @@ fn stdio_live_diagnostics_contract() {
         assert_eq!(client.diagnostics(&lone, None), json!([]));
 
         client.open(&broken.join("main.hirsel"), "💥");
-        let configuration = client.diagnostics(&broken.join("hirsel.toml"), None);
+        let configuration = client.diagnostics(&broken.join("hirsel.hcfg"), None);
         assert!(
             configuration[0]["message"]
                 .as_str()
@@ -527,7 +515,7 @@ pub(super) fn manifest(name: &str, module: &str) -> String {
 
 pub(super) fn source_manifest(name: &str, file: &str, module: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"{file}.hirsel\" = \"{module}\"\n"
+        "pkg_v1.Package(name: \"{name}\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"{file}.hirsel\", \"{module}\")], dependencies: [])\n"
     )
 }
 
@@ -538,7 +526,7 @@ fn package_archive(root: &Path, archive: &Path, source: &str) -> crate::package_
     let directory = root.join("archive-source");
     write(&directory.join("main.hirsel"), source);
     write(
-        &directory.join("hirsel.toml"),
+        &directory.join("hirsel.hcfg"),
         &source_manifest("fixture.test/archive", "main", "archive"),
     );
     let workspace = Workspace::discover_for(&directory, false).unwrap().unwrap();

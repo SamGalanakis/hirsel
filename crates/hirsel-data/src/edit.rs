@@ -13,7 +13,7 @@ pub struct Edit {
     pub replacement: String,
 }
 impl Edit {
-    fn apply(&self, source: &str) -> String {
+    pub fn apply(&self, source: &str) -> String {
         let mut out = source.to_owned();
         out.replace_range(
             self.span.start as usize..self.span.end as usize,
@@ -43,6 +43,82 @@ fn lookup<'a>(
 }
 
 impl Document<'_> {
+    pub fn at(&self, path: &[PathPart]) -> Option<&Value> {
+        lookup(&self.index, &self.value, path).map(|(_, v)| v)
+    }
+
+    pub fn literal_span(&self, path: &[PathPart]) -> Option<Span> {
+        lookup(&self.index, &self.value, path)?.0.span
+    }
+
+    pub fn literal(&self, path: &[PathPart]) -> Option<&str> {
+        let (index, _) = lookup(&self.index, &self.value, path)?;
+        let span = index.span?;
+        self.syntax
+            .source
+            .get(span.start as usize..span.end as usize)
+    }
+
+    /// Remove one pair and its separator. Refuse when comments between the
+    /// adjacent pairs make ownership ambiguous.
+    pub fn remove_key(
+        &self,
+        path: &[PathPart],
+        key: &str,
+        limits: Limits,
+    ) -> Result<Option<Edit>, DataError> {
+        let (index, values) = lookup(&self.index, &self.value, path)
+            .filter(|(i, _)| i.map)
+            .ok_or_else(|| error(ErrorKind::Invalid("expected map"), Span::default()))?;
+        let Some(pos) = index
+            .children
+            .iter()
+            .position(|(part, _)| matches!(part,PathPart::Key(k) if k==key))
+        else {
+            return Ok(None);
+        };
+        let span = index.span.unwrap();
+        let item = self.syntax.item(0);
+        let array = item
+            .range
+            .nodes
+            .clone()
+            .map(|i| Site(item, NodeId(i)))
+            .find(|n| n.span() == span && n.kind() == NodeKind::Array)
+            .ok_or_else(|| error(ErrorKind::Invalid("expected map literal"), span))?;
+        let pairs: Vec<_> = array.kids().map(|n| n.span()).collect();
+        let current = pairs[pos];
+        let left = pos.checked_sub(1).map_or(span.start + 1, |i| pairs[i].end);
+        let right = pairs.get(pos + 1).map_or(span.end - 1, |s| s.start);
+        if self.has_comment(left, right) {
+            return Err(array.error("ambiguous comment attachment"));
+        }
+        let source = &self.syntax.source;
+        let comma = source[current.end as usize..right as usize].find(',');
+        let removed = match comma {
+            Some(i) => Span {
+                start: current.start,
+                end: current.end + i as u32 + 1,
+            },
+            None if pos > 0 => Span {
+                start: left,
+                end: current.end,
+            },
+            None => current,
+        };
+        let edit = Edit {
+            span: removed,
+            replacement: String::new(),
+        };
+        let candidate = decode(edit.apply(source).as_bytes(), &[self.schema], limits)?;
+        let mut expected = values.clone();
+        expected.as_array_mut().unwrap().remove(pos);
+        if candidate.at(path) != Some(&expected) {
+            return Err(array.error("removal changed siblings"));
+        }
+        Ok(Some(edit))
+    }
+
     /// Parse the splice and check that only the selected value changed. Return
     /// no edit when the written value already has the requested meaning.
     pub fn replace(
@@ -160,9 +236,26 @@ impl Document<'_> {
             let prev = position
                 .checked_sub(1)
                 .map_or(span.start, |i| siblings[i].span().end);
-            if self.has_comment(prev, at) {
-                return Err(node.error("ambiguous comment attachment"));
-            }
+            // Whole-line comments immediately preceding a pair stay with it.
+            // An inline comment may belong to the previous pair.
+            let at = if let Some(comment) = self
+                .syntax
+                .tree
+                .tokens
+                .iter()
+                .find(|t| t.kind.is_trivia() && t.span.start >= prev && t.span.end <= at)
+            {
+                let line = source[..comment.span.start as usize]
+                    .rsplit('\n')
+                    .next()
+                    .unwrap();
+                if !line.trim().is_empty() {
+                    return Err(node.error("ambiguous comment attachment"));
+                }
+                comment.span.start
+            } else {
+                at
+            };
             let indent = source[..at as usize]
                 .rsplit_once('\n')
                 .map(|(_, s)| s)
@@ -232,7 +325,7 @@ impl Document<'_> {
             .any(|t| t.kind.is_trivia() && t.span.start >= start && t.span.end <= end)
     }
 }
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     use std::fmt::Write;
     let mut out = String::from("\"");
     for ch in s.chars() {

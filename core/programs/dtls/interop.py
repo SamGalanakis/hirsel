@@ -16,6 +16,7 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 import queue
 import re
@@ -23,7 +24,9 @@ import socket
 import subprocess
 import threading
 import time
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -53,8 +56,8 @@ def library(name, extra=()):
 
 
 def program(directory, core, std):
-    manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
-    return {'package': {'name': manifest['package']['name'], 'version': '1'}, 'dependencies': [core, std],
+    manifest = hcfg.package(directory)
+    return {'package': {'name': manifest['name'], 'version': '1'}, 'dependencies': [core, std],
             'sources': [{'file': str(directory / f), 'modules': m.split('.'), 'signatures': False}
                         for f, m in manifest['sources'].items()]}
 

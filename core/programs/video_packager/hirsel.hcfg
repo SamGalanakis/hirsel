@@ -1,0 +1,27 @@
+pkg_v1.Package(
+    name: "hirsel.ai/video_packager",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("cmaf.hirsel", "packager"),
+        ("hls.hirsel", "packager"),
+        ("dash.hirsel", "packager"),
+        ("low_latency.hirsel", "packager"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("media_container", Path(package: "media_container", major: 1, path: "../media_container", authority: [Dir])),
+    ],
+    tests: Some(Tests(
+        sources: [
+            ("example.hirsel", "tests"),
+            ("hls_laws.hirsel", "tests"),
+            ("dash_laws.hirsel", "tests"),
+            ("low_latency_laws.hirsel", "tests"),
+        ],
+        limit: 16777216,
+        grants: [],
+        runs: [],
+    )),
+)

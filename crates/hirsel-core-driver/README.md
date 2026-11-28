@@ -437,7 +437,7 @@ The selectors are mutually exclusive. The driver visits matching paths in
 lexical order. No matching test exits 2.
 
 Each selected test builds through the ordinary reachable closure and runs in
-its own process. When `hirsel.toml` declares `[tests]`, its `limit`, `dirs`, and `grants`
+its own process. When `hirsel.hcfg` declares `[tests]`, its `limit`, `dirs`, and `grants`
 keys configure the run (and CLI `--limit`/`--dir`/`--grant` are refused); otherwise `--limit`
 is mandatory and supplies each run's root limit while `--dir` and `--grant` configure
 capabilities exactly as for `run`. The typed API exposes

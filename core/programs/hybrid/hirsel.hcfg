@@ -1,0 +1,8 @@
+pkg_v1.Package(
+    name: "hirsel.ai/hybrid",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("hybrid.hirsel", "hybrid")],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(sources: [("tests.hirsel", "tests")], limit: 67108864, grants: [], runs: [])),
+)

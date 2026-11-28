@@ -77,22 +77,25 @@ fn prog4_published_test_marker_and_edits_keep_reference_restrictions() {
 #[test]
 fn default_check_resolves_frozen_foreign_handles() {
     let law = PackageLaw::new();
-    law.write("hirsel.toml", "[workspace]\nmembers = [\"codec\", \"app\"]\n");
-    law.app("app", "[dependencies]\ncodec = { package = \"local/codec\", major = 1, path = \"../codec\", authority = [\"Foreign\"] }\n");
+    law.write("hirsel.hcfg", "pkg_v1.Workspace(members: [\"codec\", \"app\"])\n");
+    law.app("app", "dependencies: [(\"codec\", Path(package: \"local/codec\", major: 1, path: \"../codec\", authority: [Foreign]))],");
     law.write(
         "app/main.hirsel",
         "pub fn open(f: Foreign[codec.Codec]) waits { codec.open(f) }\n",
     );
     law.manifest("codec", "local/codec", "1.0.0",
-        &format!(r#"
-[sources]
-"codec.hirsel" = "codec"
-"native.hirsel" = "native"
-
-[foreign.native]
-symbols = "fixture_"
-archives = [{{ target = "{}", file = "native.a", sha256 = "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5" }}]
-"#, crate::host::HOST_TARGET.triple()),
+        &format!(r#"sources: [("codec.hirsel", "codec"), ("native.hirsel", "native")], dependencies: [], foreign: Some([
+    ("native", Native(
+        symbols: "fixture_",
+        archives: [
+            ArchiveFile(
+                target: "{}",
+                file: "native.a",
+                sha256: "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+            ),
+        ],
+    )),
+]),"#, crate::host::HOST_TARGET.triple()),
     );
     law.write(
         "codec/codec.hirsel",
@@ -124,7 +127,7 @@ fn package_cred_grants_are_per_test_and_replay_uses_the_tape() {
     let (east, east_server) = fake_imds(b"fixture-east", b"east-token".to_vec(), 1);
     let (west, west_server) = fake_imds(b"fixture-west", b"west-token".to_vec(), 1);
     law.app("app", &format!(
-        "[tests]\nlimit = 1048576\ngrants = [\"Cred:east=imds:127.0.0.1:{east} mac\", \"Cred:west=imds:127.0.0.1:{west} mac\"]\n",
+        "dependencies: [], tests: Some(Tests(sources: [], limit: 1048576, grants: [Cred(parameter: \"east\", source: \"imds:127.0.0.1:{east}\", policy: \"mac\"), Cred(parameter: \"west\", source: \"imds:127.0.0.1:{west}\", policy: \"mac\")], runs: [])),",
     ));
     law.write(
         "app/main.hirsel",
@@ -180,15 +183,14 @@ fn default_test_store_rebuilds_when_named_grants_change() {
     let configure = |variable| {
         law.manifest("app", "local/app", "1.0.0",
             &format!(
-                r#"[sources]
-"main.hirsel" = "main"
-
-[tests]
-limit = 1048576
-
-[tests.runs."local/app@1/main/reads_env"]
-grants = ["Stdout", "Env={variable}"]
-"#,
+                r#"sources: [("main.hirsel", "main")], dependencies: [], tests: Some(Tests(
+    sources: [],
+    limit: 1048576,
+    grants: [],
+    runs: [
+        ("local/app@1/main/reads_env", TestRun(grant_change: Some(ReplaceNonDir([Stdout, Env(["{variable}"])])))),
+    ],
+)),"#,
             ),
         );
     };
@@ -278,7 +280,7 @@ const PROGRAM_GRANTED: &str = "pub fn main(out: Stdout, clock: Clock) -> Result[
 #[test]
 fn program_manifest_grants_build_an_executable_that_starts() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\nlimit = 1048576\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(limit: Some(1048576), grants: Some([Stdout, Clock]))),");
     law.write("app/main.hirsel", PROGRAM_GRANTED);
     let (status, stdout, stderr) = law.run(&["build", "app", "--output", "program"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
@@ -294,9 +296,9 @@ fn program_manifest_grants_build_an_executable_that_starts() {
 #[test]
 fn program_manifest_grants_refuse_command_line_grants() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Stdout, Clock]))),");
     law.write("app/main.hirsel", PROGRAM_GRANTED);
-    let reason = "this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there";
+    let reason = "this package declares program grants in hirsel.hcfg. Set limit, dirs and grants there";
     for flags in [&["--dir", "data"][..], &["--grant", "Stdout"], &["--limit", "1048576"]] {
         for command in ["build", "run"] {
             let mut args = vec![command, "app"];
@@ -313,10 +315,10 @@ fn program_manifest_grants_refuse_command_line_grants() {
 #[test]
 fn program_grants_of_a_dependency_are_never_applied() {
     let law = PackageLaw::new();
-    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"util\"]\n");
-    law.manifest("work/app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nutil = { package = \"local/util\", major = 1, path = \"../util\" }\n");
+    law.write("work/hirsel.hcfg", "pkg_v1.Workspace(members: [\"app\", \"util\"])\n");
+    law.manifest("work/app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [(\"util\", Path(package: \"local/util\", major: 1, path: \"../util\", authority: []))],");
     law.write("work/app/main.hirsel", PROGRAM_GRANTED);
-    law.library("work/util", "local/util", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.library("work/util", "local/util", "1.0.0", "pub fn one() -> u64 { 1u64 }\n", "dependencies: [], program: Some(Program(grants: Some([Stdout, Clock]))),");
     let (status, stdout, stderr) = law.run(&["build", "work/app", "--output", "program"]);
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     assert_eq!(ungranted_warnings(&stderr), [ungranted("out"), ungranted("clock")]);
@@ -329,7 +331,7 @@ fn program_grants_of_a_dependency_are_never_applied() {
 #[test]
 fn program_build_warns_for_each_ungranted_parameter_in_order() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ndirs = [\"data\"]\ngrants = [\"Clock\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Clock, Dir(\"data\")]))),");
     law.write(
         "app/main.hirsel",
         "pub fn main(err: Stderr, dir: Dir, clock: Clock, out: Stdout) -> Result[(), Exit] waits {\n    let _ = host.mono_ns(clock)\n    result.unwrap(stdout.write(out, \"x\"))\n    result.unwrap(stderr.write(err, \"x\"))\n    Ok(())\n}\n",
@@ -409,7 +411,14 @@ pub(crate) fn stop_resident(runtime: &Path, directory: &Path, mut server: std::p
 fn resident_test_session_gives_the_one_shot_run() {
     let law = PackageLaw::new();
     law.manifest("app", "local/app", "1.0.0",
-        "[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 1048576\n\n[tests.runs.\"local/app@1/main/reads_pwd\"]\ngrants = [\"Stdout\", \"Env=PWD\"]\n",
+        r#"sources: [("main.hirsel", "main")], dependencies: [], tests: Some(Tests(
+    sources: [],
+    limit: 1048576,
+    grants: [],
+    runs: [
+        ("local/app@1/main/reads_pwd", TestRun(grant_change: Some(ReplaceNonDir([Stdout, Env(["PWD"])])))),
+    ],
+)),"#,
     );
     law.write(
         "app/main.hirsel",
@@ -514,7 +523,7 @@ fn error() -> Result[(), ()] { Error(()) }
 fn resident_server_answers_every_directory_and_contains_a_panic() {
     let law = PackageLaw::new();
     for side in ["one", "two"] {
-        law.manifest(&format!("{side}/app"), "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        law.manifest(&format!("{side}/app"), "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Stdout]))),");
         law.write(
             &format!("{side}/app/main.hirsel"),
             format!("pub fn main(out: Stdout) -> Result[(), Exit] waits {{\n    result.unwrap(stdout.write(out, \"{side}\\n\"))\n    Ok(())\n}}\n"),
@@ -596,7 +605,7 @@ fn resident_server_answers_every_directory_and_contains_a_panic() {
 #[test]
 fn resident_server_stops_a_request_over_its_budget_and_serves_the_others() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Stdout]))),");
     law.write(
         "app/main.hirsel",
         "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    result.unwrap(stdout.write(out, \"small\\n\"))\n    Ok(())\n}\n",
@@ -673,7 +682,7 @@ fn resident_server_stops_a_request_over_its_budget_and_serves_the_others() {
 #[test]
 fn resident_server_keeps_the_served_set_over_its_memory_cap() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Stdout]))),");
     let source = |text: &str| {
         law.write(
             "app/main.hirsel",
@@ -759,7 +768,7 @@ fn resident_server_peak_over_distinct_packages_is_the_largest_alone() {
     let law = PackageLaw::new();
     for k in 0..PACKAGES {
         let name = format!("p{k}");
-        law.manifest(&name, &format!("local/{name}"), "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        law.manifest(&name, &format!("local/{name}"), "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(grants: Some([Stdout]))),");
         let mut source = String::new();
         for i in 0..FUNCTIONS {
             writeln!(source, "fn f{i}(x: u64) -> u64 {{\n    x * {}u64 + {k}u64\n}}", i + k * 100_000).unwrap();
@@ -851,7 +860,7 @@ fn test_reports_check_diagnostic_for_unparseable_test_source() {
     let law = PackageLaw::new();
     law.app(
         "app",
-        "[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"laws\"\n",
+        "dependencies: [], tests: Some(Tests(sources: [(\"laws.hirsel\", \"laws\")], limit: 67108864, grants: [], runs: [])),",
     );
     law.write(
         "app/laws.hirsel",

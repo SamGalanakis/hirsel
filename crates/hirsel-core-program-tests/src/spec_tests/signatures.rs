@@ -29,7 +29,7 @@ pub(super) fn check(fences: &[&Fence]) -> Vec<String> {
             && !repo()
                 .join("core/programs")
                 .join(name)
-                .join("hirsel.toml")
+                .join("hirsel.hcfg")
                 .is_file()
         {
             failures.push(format!("{}: unknown package {name}", fence.location()));

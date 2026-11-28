@@ -11,6 +11,7 @@ impl Program<'_> {
             kind: ErrorKind::Invalid("data root declaration is unavailable"),
             span: Span::default(),
             related: None,
+            additional: Vec::new(),
             path: Vec::new(),
         };
         let id = self

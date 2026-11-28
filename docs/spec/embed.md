@@ -1592,7 +1592,7 @@ platforms the FFI-3 rows check.
 The iOS crate set grows with the slices: the layout crate first, then the runtime closure
 (the embed slot's crates), then the driver's embed and SDK modules.
 
-**The embed slot.** `tools/toolchain-dist/product.toml` gains embed runtime rows for every
+**The embed slot.** `tools/toolchain-dist/product.hcfg` gains embed runtime rows for every
 target and both iOS triples. Each is a Buck platform like `runtime-darwin`, built without
 `standalone`. An iOS embed slot is built on Linux like the Darwin runtime archive, from the
 locked Rust std, with the pinned clang for its C and assembly members.

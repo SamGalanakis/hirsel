@@ -11,6 +11,7 @@ use serde_json::json;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -47,20 +48,9 @@ fn witnesses() -> [Key<'static>; 2] {
     [("first.test/witness", 7, 4), ("second.test/witness", 8, 4)]
 }
 
-pub(crate) fn route(prefix: &str, authority: &str, preview: bool, legal: u8) -> String {
-    let keys: Vec<_> = if preview {
-        Vec::new()
-    } else {
-        witnesses().into_iter().map(|key| c2sp_key(key).0).collect()
-    };
-    format!(
-        "[[registry.route]]\nprefix = {prefix:?}\nurl = \"https://{authority}\"\nrelease-key = {:?}\nstatus-key = {:?}\nlegal-key = {:?}\nwitness-keys = {keys:?}\nquorum = {}\n",
-        c2sp_key((&format!("{authority}/log"), 1, 1)).0,
-        c2sp_key((&format!("{authority}/status"), 2, 1)).0,
-        b64(signer(legal).public_key().as_ref()),
-        keys.len(),
-    )
-}
+mod config;
+pub(crate) use config::route;
+use config::{route_row, routes};
 
 pub(crate) fn note(authority: &str, log: Log, size: u64, root: Hash, time: Option<u64>) -> Vec<u8> {
     let origin = format!("{authority}/{}", log.prefix());
@@ -260,41 +250,6 @@ pub(crate) fn merkle(rows: &[Vec<u8>]) -> Hash {
                 .into()
         }
     }
-}
-
-fn route_checks() {
-    let missing = Routes::default().for_name(TARGET).err().unwrap();
-    assert!(missing.contains("https://pkg.hirsel.ai") && missing.contains("[[registry.route]]"));
-    assert!(Routes::parse(&route("*", "PKG.HIRSEL.AI:443", true, 3)).is_err());
-
-    let text = route("*", "default.test", false, 3)
-        + &route("fixture.test/*", BETA, false, 3)
-        + &route("fixture.test/tenant/*", ALPHA, true, 3);
-    let routes = Routes::parse(&text).unwrap();
-    for (name, origin) in [
-        (TARGET, ALPHA),
-        ("fixture.test/tenant", BETA),
-        ("fixture.test/tenant-team/wrap", BETA),
-        ("another.test/wrap", "default.test"),
-    ] {
-        assert_eq!(
-            routes.for_name(name).unwrap().origin().to_string(),
-            format!("https://{origin}")
-        );
-    }
-    assert!(routes.for_name("fixture.test/tenant/wrap/extra").is_err());
-    assert!(
-        routes
-            .for_pin(TARGET, &Origin::parse("https://beta.test").unwrap())
-            .is_err()
-    );
-    assert!(Routes::parse(&(text.clone() + &route("*", ALPHA, true, 3))).is_err());
-    assert!(Routes::parse(&(text.clone() + &route("another.test/*", ALPHA, false, 3))).is_err());
-    assert!(Routes::parse(&text.replace("quorum = 2", "quorum = 0")).is_err());
-    assert!(Routes::parse(&text.replace("quorum = 0", "quorum = 1")).is_err());
-    assert!(Routes::parse(&text.replace("https://alpha.test", "https://alpha.test/path")).is_err());
-    let witness = c2sp_key(("another.test/witness", 7, 4)).0;
-    assert!(Routes::parse(&text.replace(&c2sp_key(witnesses()[1]).0, &witness)).is_err());
 }
 
 fn proofs(server: &Server, cache: &Path, target: Root) {
@@ -547,16 +502,37 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
     let config = dir.join("config");
     fs::create_dir_all(config.join("hirsel")).unwrap();
     fs::write(
-        config.join("hirsel/config.toml"),
-        route("*", "default.test", false, 3)
-            + &route("fixture.test/*", BETA, false, 3)
-            + &route("fixture.test/tenant/*", ALPHA, true, 3),
+        config.join("hirsel/config.hcfg"),
+        routes(
+            &(route_row("*", "default.test", false, 3)
+                + &route_row("fixture.test/*", BETA, false, 3)
+                + &route_row("fixture.test/tenant/*", ALPHA, true, 3)),
+        ),
     )
     .unwrap();
     fs::create_dir(&project).unwrap();
-    fs::write(project.join("hirsel.toml"), format!(
-        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[dependencies]\nwrap = {{ package = {TARGET:?}, major = 1, root = \"{target}\", registry = \"https://alpha.test\" }}\n"
-    )).unwrap();
+    fs::write(
+        project.join("hirsel.hcfg"),
+        format!(
+            r#"pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("wrap", Published(
+            package: {TARGET:?},
+            major: 1,
+            root: "{target}",
+            locator: Registry("https://alpha.test"),
+            authority: [],
+        )),
+    ],
+)
+"#
+        ),
+    )
+    .unwrap();
     fs::write(
         project.join("main.hirsel"),
         "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
@@ -728,7 +704,7 @@ fn builds(server: &Server, dir: &Path, target: Root, child: Root, target_c: &[u8
 
 #[test]
 fn route_and_fetch_contract() {
-    route_checks();
+    config::route_checks();
     let work = tempfile::tempdir().unwrap();
     let server = Server::start();
     let (child_id, child, child_c) = content("unlogged.test/json", BTreeMap::new());

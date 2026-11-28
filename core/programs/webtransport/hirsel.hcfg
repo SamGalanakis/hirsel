@@ -1,0 +1,35 @@
+pkg_v1.Package(
+    name: "webtransport",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("h3_wire.hirsel", "h3_wire"),
+        ("qpack_tables.hirsel", "qpack"),
+        ("qpack.hirsel", "qpack"),
+        ("endpoint.hirsel", "webtransport"),
+        ("control.hirsel", "webtransport"),
+        ("request.hirsel", "webtransport"),
+        ("streams.hirsel", "webtransport"),
+        ("capsule.hirsel", "webtransport"),
+        ("wrappers.hirsel", "webtransport"),
+        ("flow.hirsel", "webtransport"),
+        ("certificates.hirsel", "webtransport"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("quic", Path(package: "quic", major: 1, path: "../quic", authority: [Net, Clock, Random, Secret])),
+    ],
+    tests: Some(Tests(
+        sources: [
+            ("laws.hirsel", "laws"),
+            ("session_laws.hirsel", "laws"),
+            ("session_vectors.hirsel", "laws"),
+            ("stream_laws.hirsel", "laws"),
+            ("flow_laws.hirsel", "laws"),
+            ("certificate_laws.hirsel", "laws"),
+        ],
+        limit: 67108864,
+        grants: [Tasks],
+        runs: [],
+    )),
+)

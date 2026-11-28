@@ -1,0 +1,14 @@
+pkg_v1.Package(
+    name: "local/ffi_laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("laws.hirsel", "laws"), ("native.hirsel", "native")],
+    dependencies: [],
+    foreign: Some([
+        ("native", Contained(
+            symbols: "hfc_",
+            file: "empty.wasm",
+            sha256: "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476",
+        )),
+    ]),
+)

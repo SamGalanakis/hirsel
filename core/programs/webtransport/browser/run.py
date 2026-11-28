@@ -33,11 +33,11 @@ def stage(work, compiler, runtime, linker):
     for source, name in [(compiler, "hirsel"), (runtime, "runtime.a"), (linker, "ld.lld")]:
         shutil.copy2(source, tools / name)
     for name, globs in [("core", ["*.hirsel"]), ("std", ["*.hirsel", "sim/*.hirsel"]),
-                         ("programs/quic", ["*.hirsel", "hirsel.toml", "hirsel.laws"]),
-                         ("programs/webtransport", ["*.hirsel", "hirsel.toml", "hirsel.laws",
-                                                    "browser/*.hirsel", "browser/hirsel.toml", "browser/*.mjs"])]:
+                         ("programs/quic", ["*.hirsel", "hirsel.hcfg", "hirsel.laws"]),
+                         ("programs/webtransport", ["*.hirsel", "hirsel.hcfg", "hirsel.laws",
+                                                    "browser/*.hirsel", "browser/hirsel.hcfg", "browser/*.mjs"])]:
         copy_sources(CORE / name, bundle / "core" / name, globs)
-    (bundle / "core/programs/hirsel.toml").write_text(
+    (bundle / "core/programs/hirsel.hcfg").write_text(
         '[workspace]\nmembers = ["quic", "webtransport", "webtransport/browser"]\n'
     )
     return bundle

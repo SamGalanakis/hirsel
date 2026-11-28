@@ -1,0 +1,9 @@
+pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("ffi_laws", Path(package: "local/ffi_laws", major: 1, path: "../ffi_laws", authority: [Foreign])),
+    ],
+)

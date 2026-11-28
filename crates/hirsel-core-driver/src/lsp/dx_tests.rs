@@ -79,7 +79,7 @@ fn unlocked_package_explains_how_to_restore_analysis_in_the_open_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let path = root.join("main.hirsel");
-    let manifest_path = root.join("hirsel.toml");
+    let manifest_path = root.join("hirsel.hcfg");
     let source = "fn broken() -> u64 { true }\n";
     write(&manifest_path, &manifest("local/app", "main"));
     write(&path, source);
@@ -104,7 +104,7 @@ fn watching_manifest_and_lock_republishes_open_buffer_diagnostics() {
     let root = temp.path().canonicalize().unwrap();
     let workspace = root.join("workspace");
     let path = workspace.join("main.hirsel");
-    let manifest_path = workspace.join("hirsel.toml");
+    let manifest_path = workspace.join("hirsel.hcfg");
     let lock = workspace.join("hirsel.lock");
     let initial = manifest("local/app", "main");
     let source = "fn broken() -> u64 { true }\n";

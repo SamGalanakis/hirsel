@@ -157,7 +157,7 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     use crate::coverage::{Profile, SiteMap};
     let law = PackageLaw::new();
     law.manifest("app", "local/app", "1.0.0",
-        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\n",
+        "sources: [(\"main.hirsel\", \"main\")], dependencies: [(\"std\", Toolchain(package: \"std\", major: 1, authority: []))], tests: Some(Tests(sources: [], limit: 1048576, grants: [], runs: [])),",
     );
     let (a, b) = (law.path("a.json"), law.path("b.json"));
     for (input, out) in [("0u64", &a), ("1u64", &b)] {

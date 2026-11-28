@@ -101,7 +101,7 @@ impl fmt::Display for AdmissionError {
             Self::Unsupported(reason) => write!(out, "Unsupported({reason})"),
             Self::Limit(limit) => write!(out, "Limit({limit:?})"),
             Self::MissingRootLimit => {
-                out.write_str("release requires a root limit (`[program].limit` or `--limit`)")
+                out.write_str("release requires a root limit (`program.limit` or `--limit`)")
             }
             Self::Disconnected => out.write_str("admission peer disconnected"),
             Self::InvalidCoreIr(reason) => write!(out, "InvalidCoreIr({reason})"),

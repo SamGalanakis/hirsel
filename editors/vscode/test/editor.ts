@@ -64,7 +64,7 @@ export async function run() {
   }
   assert.equal(methods.filter((method) => method === "textDocument/formatting").length, 2);
 
-  const watched = ["hirsel.toml", "hirsel.lock", "app.hcfg"].map((file) =>
+  const watched = ["hirsel.hcfg", "hirsel.lock", "app.hcfg"].map((file) =>
     vscode.Uri.joinPath(workspace.uri, file));
   for (const file of watched) await writeFile(file.fsPath, "# watched\n");
   await waitFor(async () => {

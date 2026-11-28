@@ -25,13 +25,16 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import queue
 import re
 import subprocess
 import threading
 import time
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -79,7 +82,7 @@ def library(name, extra=()):
 
 def build(args):
     core, std, quic = {'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}, {'name': 'quic', 'version': '1'}
-    manifest = tomllib.loads((HERE / 'hirsel.toml').read_text())
+    manifest = hcfg.package(HERE)
     packages = [
         {'package': core, 'dependencies': [], 'sources': library('core')},
         {'package': std, 'dependencies': [core], 'sources': library('std', ['sim'])},

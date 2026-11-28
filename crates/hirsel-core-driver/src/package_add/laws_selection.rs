@@ -40,13 +40,13 @@ fn fixture_root(bytes: &[u8]) -> String {
 
 fn exact_row(name: &str, major: u8, root: &str) -> String {
     format!(
-        "{name} = {{ package = \"fixture.test/{name}\", major = {major}, root = \"{root}\", archive = \"{name}.hpkg\" }}\n"
+        "(\"{name}\", Published(package: \"fixture.test/{name}\", major: {major}, root: \"{root}\", locator: Archive(\"{name}.hpkg\"), authority: []))"
     )
 }
 
 fn select_row(name: &str, major: u8, root: &str) -> String {
     format!(
-        "[selections]\n\"fixture.test/{name}@{major}\" = {{ root = \"{root}\", archive = \"selected.hpkg\" }}\n"
+        "selections: Some([(\"fixture.test/{name}@{major}\", Selection(root: \"{root}\", locator: Archive(\"selected.hpkg\")))]),"
     )
 }
 
@@ -70,7 +70,7 @@ fn l1b_selected_floor_and_version_collision() {
     law.write("app/wrap.hpkg", package_bundle(&[&wrap, &json]));
     let tail = |root| {
         format!(
-            "[dependencies]\n{}{}",
+            "dependencies: [{}, {}],",
             exact_row("wrap", 1, &w),
             exact_row("json", 1, root)
         )
@@ -106,7 +106,7 @@ fn l1b_selected_floor_and_version_collision() {
     law.app(
         "app",
         &format!(
-            "[dependencies]\n{}{}",
+            "dependencies: [{}], {}",
             exact_row("json", 1, PACKAGE_X),
             select_row("json", 1, PACKAGE_Y)
         ),
@@ -115,14 +115,14 @@ fn l1b_selected_floor_and_version_collision() {
     PackageLaw::refuse(
         law.run(&["lock", "app"]),
         &format!(
-            "fixture.test/json@1 is bound to {PACKAGE_Y} (selected in app/hirsel.toml), but local/app@1 -> fixture.test/json@1 pins {PACKAGE_X} exactly"
+            "fixture.test/json@1 is bound to {PACKAGE_Y} (selected in app/hirsel.hcfg), but local/app@1 -> fixture.test/json@1 pins {PACKAGE_X} exactly"
         ),
     );
     // The stale row cannot supply its locator to an unrelated identity at the same root.
     law.app(
         "app",
         &format!(
-            "[dependencies]\n{}{}",
+            "dependencies: [{}], {}",
             exact_row("json", 1, PACKAGE_Y),
             select_row("unused", 1, PACKAGE_Y)
         ),
@@ -130,7 +130,7 @@ fn l1b_selected_floor_and_version_collision() {
     fs::remove_file(law.path("app/selected.hpkg")).unwrap();
     law.write("app/json.hpkg", package_bundle(&[&y]));
     let out = law.with_store(&["lock", "app"], "empty");
-    assert!(out.2.contains(&format!("hirsel: app/hirsel.toml: selections.fixture.test/unused@1 selects {PACKAGE_Y}, which no edge of the closure names; hirsel update removes it")), "{}", out.2);
+    assert!(out.2.contains(&format!("hirsel: app/hirsel.hcfg: selections.fixture.test/unused@1 selects {PACKAGE_Y}, which no edge of the closure names; hirsel update removes it")), "{}", out.2);
     PackageLaw::pass(out);
 }
 
@@ -151,11 +151,13 @@ fn l39_selection_rechecks_the_reader() {
     law.write("app/reader.hpkg", package_bundle(&[&reader, &old]));
     let configure = |bytes: &[u8], exact: bool, selected: bool| {
         let root = fixture_root(bytes);
-        let mut tail = format!("[dependencies]\n{reader_row}");
+        let mut tail = format!("dependencies: [{reader_row}");
         if exact {
             law.write("app/num.hpkg", package_bundle(&[bytes]));
+            tail.push_str(", ");
             tail += &exact_row("num", 0, &root);
         }
+        tail.push_str("],");
         if selected {
             law.write("app/selected.hpkg", package_bundle(&[bytes]));
             tail += &select_row("num", 0, &root);
@@ -209,9 +211,9 @@ fn l39_selection_rechecks_the_reader() {
         "{stdout}"
     );
     assert_eq!(
-        fs::read_to_string(law.path("app/hirsel.toml"))
+        fs::read_to_string(law.path("app/hirsel.hcfg"))
             .unwrap()
-            .matches("\"fixture.test/num@0\" =")
+            .matches(r#"("fixture.test/num@0", Selection("#)
             .count(),
         1,
     );
@@ -242,7 +244,7 @@ fn l39_selection_rechecks_the_reader() {
         PackageLaw::refuse(
             law.run(&["check", "app"]),
             &format!(
-                "fixture.test/num@0 is bound to {version} {root} (selected in app/hirsel.toml), but local/app@1 -> fixture.test/reader@1 -> fixture.test/num@0 requires 0.3.1 or a later 0.3.x"
+                "fixture.test/num@0 is bound to {version} {root} (selected in app/hirsel.hcfg), but local/app@1 -> fixture.test/reader@1 -> fixture.test/num@0 requires 0.3.1 or a later 0.3.x"
             ),
         );
         assert_eq!(
@@ -253,7 +255,7 @@ fn l39_selection_rechecks_the_reader() {
     let broken = num(3, 9, "", "pub fn missing() -> u64 { 39u64 }\n");
     configure(&broken, true, false);
     let lock = fs::read(law.path("app/hirsel.lock")).unwrap();
-    let manifest = fs::read(law.path("app/hirsel.toml")).unwrap();
+    let manifest = fs::read(law.path("app/hirsel.hcfg")).unwrap();
     let (status, stdout, stderr) = update();
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
@@ -261,7 +263,7 @@ fn l39_selection_rechecks_the_reader() {
         "{stdout}{stderr}"
     );
     assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
-    assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), manifest);
+    assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), manifest);
 }
 
 #[test]
@@ -271,7 +273,7 @@ fn l18_changed_archive_names_the_bound_alias() {
     law.app("app", "");
     copy(&law, "vendor/jx.hpkg", "app/dep.hpkg");
     PackageLaw::pass(invoke(&law, "app", &["dep.hpkg"]));
-    let manifest = fs::read(law.path("app/hirsel.toml")).unwrap();
+    let manifest = fs::read(law.path("app/hirsel.hcfg")).unwrap();
     let lock = fs::read(law.path("app/hirsel.lock")).unwrap();
     copy(&law, "vendor/jy.hpkg", "app/dep.hpkg");
     PackageLaw::refuse(
@@ -280,6 +282,6 @@ fn l18_changed_archive_names_the_bound_alias() {
             "dep.hpkg is already bound to another root\n  bound: {PACKAGE_X}\n  fetched: {PACKAGE_Y}\nto take the fetched root, run: hirsel update json"
         ),
     );
-    assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), manifest);
+    assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), manifest);
     assert_eq!(fs::read(law.path("app/hirsel.lock")).unwrap(), lock);
 }

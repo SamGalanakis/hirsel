@@ -1,0 +1,33 @@
+pkg_v1.Package(
+    name: "hirsel.ai/h264",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("h264.hirsel", "h264"), ("native.hirsel", "native")],
+    dependencies: [
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+    ],
+    tests: Some(Tests(
+        sources: [("bounds.hirsel", "tests")],
+        limit: 536870912,
+        grants: [Foreign("hirsel.ai/h264@1/h264/H264")],
+        runs: [],
+    )),
+    foreign: Some([
+        ("native", Native(
+            symbols: "hh264_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "libhirsel_h264.a",
+                    sha256: "0ad007335b669d8145b8e3eece706305f4203222b3062006d33343a3eec627b0",
+                ),
+                ArchiveFile(
+                    target: "aarch64-apple-darwin",
+                    file: "libhirsel_h264-aarch64-apple-darwin.a",
+                    sha256: "7148a441b9dcee186437f10db6428afd72a931254730db5e5d661895131e893a",
+                ),
+            ],
+        )),
+    ]),
+)

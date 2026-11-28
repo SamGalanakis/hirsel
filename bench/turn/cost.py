@@ -17,7 +17,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -55,8 +57,8 @@ def phase_linker(cc, out, flavor):
 
 
 def program(directory, dependencies):
-    manifest = tomllib.loads((directory / "hirsel.toml").read_text())
-    return dict(package=dict(name=manifest["package"]["name"], version=str(manifest["package"]["version"].split(".")[0])),
+    manifest = hcfg.package(directory)
+    return dict(package=dict(name=manifest["name"], version=str(manifest["version"].split(".")[0])),
                 dependencies=dependencies,
                 sources=[dict(file=str(directory / f), modules=m.split("/"), signatures=False)
                          for f, m in manifest["sources"].items()])

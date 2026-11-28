@@ -1,0 +1,31 @@
+pkg_v1.Package(
+    name: "mcp",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("rpc.hirsel", "rpc"),
+        ("metadata.hirsel", "metadata"),
+        ("client.hirsel", "client"),
+        ("server.hirsel", "server"),
+        ("sessions.hirsel", "sessions"),
+        ("tests/interop.hirsel", "interop"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [
+            ("tests/rpc.hirsel", "laws"),
+            ("tests/legacy.hirsel", "laws"),
+            ("example.hirsel", "example"),
+        ],
+        limit: 33554432,
+        grants: [
+            Clock,
+            Tasks,
+            Net(Listen(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+            Net(Connect(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+        ],
+        runs: [
+            ("mcp@1/laws/tool_context_reads_fixture", TestRun(grant_change: Some(ReplaceDirs([Dir(".")])))),
+        ],
+    )),
+)

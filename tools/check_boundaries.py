@@ -6,10 +6,13 @@ from bisect import bisect_right
 from pathlib import Path
 import re
 import sys
-import tomllib
+import subprocess
 
 from check_file_lengths import git_paths, snapshot
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'toolchain-dist'))
+import hcfg
 
 PROGRAMS = Path('core/programs')
 TEST_ONLY = {'store.fixture', 'store.signup', 'runner.fixture'}
@@ -57,18 +60,18 @@ def violations(root, staged=False):
     if staged:
         paths = git_paths(root, 'ls-files', '-z', '--', str(PROGRAMS))
         manifest_paths = {path for path in paths if Path(path).parent.parent == PROGRAMS
-                          and Path(path).name == 'hirsel.toml'}
+                          and Path(path).name == 'hirsel.hcfg'}
     else:
-        manifest_paths = {str(path.relative_to(root)) for path in (root / PROGRAMS).glob('*/hirsel.toml')}
+        manifest_paths = {str(path.relative_to(root)) for path in (root / PROGRAMS).glob('*/hirsel.hcfg')}
     revision = ':0' if staged else None
     manifests = []
     qualified = {}
     source_paths = set()
     for path, data in sorted(snapshot(root, revision, manifest_paths).items()):
-        manifest = tomllib.loads(data.decode())
-        package = manifest['package']['name']
-        sources = manifest.get('sources', {})
-        test_sources = manifest.get('tests', {}).get('sources', {})
+        manifest = hcfg.project('/dev/stdin', 'pkg_v1.Package', input_bytes=data)['value']
+        package = manifest['name']
+        sources = dict(manifest['sources'])
+        test_sources = dict((hcfg.option(manifest['tests']) or {}).get('sources', []))
         local = {tuple(module.split('.')): True for module in test_sources.values()}
         local.update((tuple(module.split('.')), False) for module in sources.values())
         crash_package = Path(path).parent.name == 'store-crash'

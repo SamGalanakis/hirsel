@@ -502,6 +502,10 @@ def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_obser
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
     """
+    if any([path in data for path in ["core/tools/store_tests.py", "core/tools/m1.py", "core/tools/law_board.py", "core/tools/sim_campaign.py"]]) or name in ("test-fmt", "test-check-boundaries", "test-check-target"):
+        if "//tools/toolchain-dist:hcfg.py" not in data:
+            data = data + ["//tools/toolchain-dist:hcfg.py"]
+        files_env = dict(files_env, HIRSEL_CONFIG_EXPORTER = "//:hirsel-config-export-bin-hirsel-config-export")
     binary = name + "-script"
     _script_binary(name = binary, script = script)
     _rust_test(
@@ -566,7 +570,7 @@ def _toolchain_packages_impl(ctx):
     ctx.actions.run(
         cmd_args("python3", ctx.attrs._programs, "pack", ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  sources, packages.as_output(), scratch.as_output(), ctx.attrs.packages,
-                 hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
+                 hidden = [ctx.attrs._hcfg] + ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_packages",
     )
@@ -579,6 +583,7 @@ _toolchain_packages = rule(
         "packages": attrs.list(attrs.string()),
         "sources": attrs.list(attrs.source()),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+        "_hcfg": attrs.source(default = "root//tools/toolchain-dist:hcfg.py"),
         "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain_programs.py"),
     },
 )
@@ -586,7 +591,7 @@ _toolchain_packages = rule(
 def hirsel_toolchain_packages(name, hirsel, packages):
     sources = []
     for package in packages:
-        sources += native.glob(["core/programs/{}/**/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
+        sources += native.glob(["core/programs/{}/**/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.hcfg".format(package)]
     _toolchain_packages(name = name, hirsel = hirsel, packages = packages, sources = sources)
 
 def _dev_fixture_cache_impl(ctx):
@@ -623,8 +628,8 @@ def _dev_fixture_cache_impl(ctx):
         # persistence_and_fencing reopens with --backend llvm.
         'for release in 0 1 2 3; do build $release cranelift; done',
         'build 2 llvm',
-        # The library root's symlinks leave the sandbox; scratch is not uploaded with them.
-        'rm -rf "$work/workspace/libraries"',
+        # Only the object cache is consumed. Workspace and temporary links are sandbox-local.
+        'cd "$work"; rm -rf workspace tmp place',
     ])
     llvm = ctx.attrs._llvm[DefaultInfo].default_outputs[0]
     ctx.actions.run(
@@ -651,7 +656,7 @@ _dev_fixture_cache = rule(
 def hirsel_dev_fixture_cache(name, hirsel, runtime):
     libraries = native.glob(["core/core/**", "core/std/**"])
     for package in ["runner", "store"]:
-        libraries += native.glob(["core/programs/{}/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
+        libraries += native.glob(["core/programs/{}/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.hcfg".format(package)]
     libraries.append("core/programs/runner/tests/b9-vectors.hirsel")
     libraries += native.glob(["core/programs/runner/observe/*.hirsel"])
     testdata = ["crates/hirsel-core-driver/src/testdata/" + file for file in ["dev_fixture.sh", "dev_place.hirsel"]]
@@ -708,7 +713,7 @@ def _toolchain_bundle_impl(ctx):
                  ctx.attrs.toolchain_packages[DefaultInfo].default_outputs[0],
                  platform_sources, ctx.attrs._programs, ctx.attrs._product,
                  cmd_args(ctx.attrs._clang[DefaultInfo].default_outputs[0], format = "{}/bin/llvm-objcopy"), runtimes,
-                 hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
+                 hidden = [ctx.attrs._hcfg] + ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": bundle_memory, "HIRSEL_JOBS": str(DIST_BUNDLE_JOBS)},
         category = "toolchain_bundle",
     )
@@ -726,10 +731,11 @@ hirsel_toolchain_bundle = rule(
         "exec_helpers": attrs.dep(),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
-        "_product": attrs.source(default = "root//tools/toolchain-dist:product.toml"),
+        "_product": attrs.source(default = "root//tools/toolchain-dist:product.hcfg"),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_clang": attrs.dep(default = "toolchains//:clang"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+        "_hcfg": attrs.source(default = "root//tools/toolchain-dist:hcfg.py"),
         "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain_programs.py"),
     } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),
 )

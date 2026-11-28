@@ -1,0 +1,12 @@
+pkg_v1.Package(
+    name: "local/place_density",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Toolchain(package: "store", major: 1, authority: [])),
+        ("runner", Toolchain(package: "runner", major: 1, authority: [])),
+    ],
+    program: Some(Program(module: Some("main"))),
+)

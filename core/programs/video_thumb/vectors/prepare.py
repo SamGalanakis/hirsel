@@ -6,7 +6,9 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
 
 
 def stage(work):
@@ -20,21 +22,12 @@ def stage(work):
         source = programs / name
         target = work / name
         target.mkdir(parents=True, exist_ok=True)
-        manifest = (source / "hirsel.toml").read_text()
-        package = tomllib.loads(manifest)
-        archives = [
-            entry["file"]
-            for lib in package.get("foreign", {}).values()
-            for entry in lib["archives"]
-        ]
-        for filename in ("hirsel.toml", *package["sources"], *package.get("tests", {}).get("sources", ()), *archives):
+        for filename in hcfg.package_files(source):
             shutil.copyfile(source / filename, target / filename)
-    (work / "hirsel.toml").write_text("[workspace]\nmembers = " + json.dumps(packages) + "\n")
+    hcfg.workspace(work, packages)
     fixtures = work / "fixtures"
     fixtures.mkdir(exist_ok=True)
-    test = (vectors / "test.toml").read_text().replace('"fixtures"', json.dumps(str(fixtures)))
-    with (work / "video_thumb" / "hirsel.toml").open("a") as manifest:
-        manifest.write(test)
+    hcfg.vector_package(vectors.parent, vectors, work / "video_thumb", fixtures)
     shutil.copyfile(vectors / "tests.hirsel", work / "video_thumb" / "tests.hirsel")
     return fixtures
 

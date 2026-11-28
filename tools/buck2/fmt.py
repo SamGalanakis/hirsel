@@ -25,7 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
-import tomllib
+
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -34,6 +34,7 @@ from check_file_lengths import check_changed as check_file_lengths
 from check_target import check as check_target
 from check_test_runners import check as check_runners
 import apple_check
+import hcfg
 
 BUCK2 = ROOT / '.buck2/bin/buck2'
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
@@ -53,7 +54,7 @@ DARWIN_IMPORT_INPUTS = (
     'tools/buck2/runtime_parts.py', 'tools/buck2/build_script_inputs.py', 'tools/buck2/cargo_units.py',
     'tools/buck2/sync.py', 'tools/buck2/distribution_gates.py', 'tools/buck2/production-features.json',
     'tools/buck2/pins.json', 'tools/buck2/toolchain-lock.json', 'tools/buck2/llvm-cxx-headers-lock.json',
-    'tools/buck2/prelude_overlay.py', 'tools/toolchain-dist/product.toml',
+    'tools/buck2/prelude_overlay.py', 'tools/toolchain-dist/product.hcfg',
     ':(exclude)*.md',
 )
 
@@ -84,8 +85,8 @@ def check_darwin_import_law():
 
 
 def manifest_paths():
-    paths = set(git_output('ls-files', '-z', '--', '**/hirsel.toml').split('\0'))
-    paths.update(git_output('ls-files', '--others', '--exclude-standard', '-z', '--', '**/hirsel.toml').split('\0'))
+    paths = set(git_output('ls-files', '-z', '--', '**/hirsel.hcfg').split('\0'))
+    paths.update(git_output('ls-files', '--others', '--exclude-standard', '-z', '--', '**/hirsel.hcfg').split('\0'))
     return sorted(path for path in paths if path and (ROOT / path).is_file())
 
 
@@ -93,16 +94,14 @@ def declared_foreign_sources():
     """Every source file its package manifest declares as a foreign module."""
     foreign = set()
     for manifest in manifest_paths():
-        try:
-            document = tomllib.loads((ROOT / manifest).read_text())
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        projection = hcfg.project(ROOT / manifest)
+        document = projection['value']
+        if projection['root'] == 'pkg_v1.Workspace':
+            document = hcfg.option(document['root_package'])
+        if not document:
             continue
-        sources = document.get('sources')
-        declarations = document.get('foreign')
-        if not isinstance(sources, dict) or not isinstance(declarations, dict):
-            continue
-        for module in declarations:
-            matches = [source for source, declared in sources.items() if declared == module]
+        for module, _ in hcfg.option(document['foreign']) or []:
+            matches = [source for source, declared in document['sources'] if declared == module]
             if len(matches) == 1:
                 foreign.add(str(Path(manifest).parent / matches[0]))
     return foreign

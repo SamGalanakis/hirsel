@@ -323,7 +323,7 @@ secrets, credentials, foreign interfaces, child processes (`Exec`), and tasks ar
 only through capability parameters (full list in [capabilities](https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/capabilities.md)).
 A function holds exactly the authority it is passed, and no constant holds any. `main`'s
 parameters are granted at launch with `--grant` and `--dir`, or declared in `[program]` in
-`hirsel.toml` (`Args` comes from arguments after `--` and needs no grant flag).
+`hirsel.hcfg` (`Args` comes from arguments after `--` and needs no grant flag).
 
 ```hirsel
 fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
@@ -369,7 +369,7 @@ fn twice(x: u64) -> u64 waits { x * 2 }                   // refused: waits with
 ## 9. Tests and packages
 
 A `@test` function takes only capabilities and returns `Result[(), E]`. Each test runs in
-its own process; add `grants = ["Stdout"]` to `[tests]` in `hirsel.toml` when a test takes
+its own process; add `grants = ["Stdout"]` to `[tests]` in `hirsel.hcfg` when a test takes
 `Stdout` (such as `greets` below):
 
 ```hirsel
@@ -380,25 +380,17 @@ fn doubles() -> Result[(), ()] { if twice(21) == 42 { Ok(()) } else { Error(()) 
 fn greets(out: Stdout) -> Result[(), WriteError] waits { stdout.write(out, "hi\n") }
 ```
 
-A package is a directory with a `hirsel.toml`. `hirsel new app` writes this one:
+A package is a directory with a `hirsel.hcfg`. `hirsel new app` writes this one:
 
-```text
-[package]
-name = "local/app"
-version = "1.0.0"
-charge = "charge-v1"
-
-[dependencies]
-std = { major = 1 }
-
-[sources]
-"main.hirsel" = "main"
-
-[tests]
-limit = 67108864
-
-[tests.sources]
-"tests.hirsel" = "tests"
+```hcfg
+pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(sources: [("tests.hirsel", "tests")], limit: 67108864, grants: [], runs: [])),
+)
 ```
 
 `local/*` names are workspace-only; published packages use scoped names (`HOST/NAME` or
@@ -460,14 +452,11 @@ fn reads_utf8(files: Dir, out: Stdout) -> Result[(), ()] waits {
 }
 ```
 
-In `hirsel.toml`, set these keys in the existing `[tests]` table. Each test starts in an
+In `hirsel.hcfg`, set these keys in the existing `[tests]` table. Each test starts in an
 empty temporary directory, so `dirs = ["."]` grants that scratch directory:
 
-```text
-[tests]
-limit = 67108864
-dirs = ["."]
-grants = ["Stdout"]
+```hcfg
+tests: Some(Tests(sources: [], limit: 67108864, grants: [Stdout, Dir(".")], runs: [])),
 ```
 
 ```sh
@@ -534,10 +523,18 @@ fn get_hello(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 In the test manifest, port zero requests an ephemeral port, so the loopback Listen grant
 covers `0-65535` and Connect covers `1-65535`:
 
-```text
-[tests]
-limit = 67108864
-grants = ["Clock", "Tasks", "Net=Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 1-65535"]
+```hcfg
+tests: Some(Tests(
+    sources: [],
+    limit: 67108864,
+    grants: [
+        Clock,
+        Tasks,
+        Net(Listen(cidr: "127.0.0.1/32", first_port: 0, last_port: 65535)),
+        Net(Connect(cidr: "127.0.0.1/32", first_port: 1, last_port: 65535)),
+    ],
+    runs: [],
+)),
 ```
 
 ```sh

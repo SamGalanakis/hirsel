@@ -7,7 +7,11 @@ impl EnvPatterns {
     pub const SYNTAX: &str = "expected --grant 'Env=<pattern>[,<pattern>]'";
 
     pub fn parse(text: &str) -> Option<Self> {
-        text.split(',')
+        Self::from_patterns(text.split(','))
+    }
+
+    pub fn from_patterns<'a>(patterns: impl Iterator<Item = &'a str>) -> Option<Self> {
+        patterns
             .map(|pattern| {
                 let prefix = pattern.strip_suffix('*');
                 (pattern == "*" || valid_env_name(prefix.unwrap_or(pattern)))

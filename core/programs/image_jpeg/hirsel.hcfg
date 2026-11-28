@@ -1,0 +1,26 @@
+pkg_v1.Package(
+    name: "hirsel.ai/image_jpeg",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("image_jpeg.hirsel", "image_jpeg"), ("native.hirsel", "native")],
+    dependencies: [
+        ("image_core", Path(package: "hirsel.ai/image_core", major: 1, path: "../image_core", authority: [])),
+    ],
+    foreign: Some([
+        ("native", Native(
+            symbols: "hjpg_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "libhirsel_jpeg.a",
+                    sha256: "5000c050a1d7f0a7e3ef1917204399dee933f1e6d5e1438a80f9e9d1bf25652f",
+                ),
+                ArchiveFile(
+                    target: "aarch64-apple-darwin",
+                    file: "libhirsel_jpeg-aarch64-apple-darwin.a",
+                    sha256: "91d0b081d0ef9187e6dcc76c0897f75f99dd076809287db7baaad2309c3b8046",
+                ),
+            ],
+        )),
+    ]),
+)

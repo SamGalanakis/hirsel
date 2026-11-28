@@ -13,11 +13,13 @@ import argparse
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 BUCK2 = ROOT / '.buck2/bin/buck2'
-PACKAGE_LIST = 'core/programs/toolchain-packages.toml'
+sys.path.insert(0, str(ROOT / 'tools/toolchain-dist'))
+import hcfg
+
+PACKAGE_LIST = 'core/programs/toolchain-packages.hcfg'
 PACKAGE_GATE = '//:toolchain-packages'
 PACK_INPUTS = {
     PACKAGE_LIST, 'tools/toolchain-dist/toolchain_programs.py', 'tools/toolchain-dist/BUCK',
@@ -43,11 +45,11 @@ def packages_changed(paths):
             'crates/hirsel-core-driver/src/package_',
     )) for path in paths):
         return True
-    packages = set(tomllib.loads((ROOT / PACKAGE_LIST).read_text())['packages'])
+    packages = set(hcfg.read(ROOT / PACKAGE_LIST, 'toolchain_v1.Packages')['packages'])
     for path in paths:
         parts = Path(path).parts
         if parts[:2] == ('core', 'programs') and len(parts) > 3 and parts[2] in packages:
-            if parts[-1] == 'hirsel.toml' or path.endswith('.hirsel'):
+            if parts[-1] == 'hirsel.hcfg' or path.endswith('.hirsel'):
                 return True
     return False
 

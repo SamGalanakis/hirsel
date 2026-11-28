@@ -1,5 +1,4 @@
-//! One core-only request path from an immutable source snapshot to published products.
-//! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
+//! Compile explicit source and signature snapshots into published products.
 pub mod call;
 mod checked;
 pub use checked::Driver;
@@ -78,6 +77,7 @@ mod registry_route;
 mod registry_verify;
 mod release_manifest;
 mod unsupported_reach;
+mod user_config;
 pub use prebuild::Prebuilt;
 mod core_inventory;
 mod layers;

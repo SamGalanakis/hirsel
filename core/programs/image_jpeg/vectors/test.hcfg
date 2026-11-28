@@ -1,0 +1,9 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests"), ("example.hirsel", "tests")],
+        limit: 16777216,
+        grants: [Foreign("hirsel.ai/image_jpeg@1/image_jpeg/Jpeg"), Dir("fixtures")],
+        runs: [],
+    ),
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+)

@@ -203,8 +203,8 @@ pub fn main(e: Exec) -> Result[(), Exit] waits {
     );
     assert_eq!(code, Some(0), "{out}{err}");
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
-    let policy = work.join("exec.toml");
-    std::fs::write(&policy, format!("[child]\nimage = {image:?}\nsha256 = \"{pin}\"\nargv0 = \"child\"\nargs = [[]]\nenv = {{ HIRSEL_RECORD = {tape:?} }}\ndirs = {{ work = {work:?} }}\n")).unwrap();
+    let policy = work.join("exec.hcfg");
+    std::fs::write(&policy, format!("exec_v1.Policy(profiles: [(\"child\", Profile(image: {image:?}, sha256: \"{pin}\", argv0: \"child\", args: [[]], env: [(\"HIRSEL_RECORD\", Fixed({tape:?}))], dirs: [(\"work\", {work:?})]))])")).unwrap();
     let plain = native_options(Backend::Cranelift, work)
         .runtime
         .canonicalize()

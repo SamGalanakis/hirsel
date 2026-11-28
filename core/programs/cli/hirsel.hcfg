@@ -1,0 +1,31 @@
+pkg_v1.Package(
+    name: "cli",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("spec.hirsel", "cli"),
+        ("scan.hirsel", "cli"),
+        ("matches.hirsel", "cli"),
+        ("report.hirsel", "cli"),
+        ("help.hirsel", "cli"),
+        ("style.hirsel", "cli"),
+        ("width.hirsel", "cli"),
+        ("complete.hirsel", "cli"),
+        ("table.hirsel", "cli"),
+        ("diagnostics.hirsel", "cli"),
+        ("prompt.hirsel", "cli"),
+        ("progress.hirsel", "progress"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [
+            ("tests/parse.hirsel", "cli"),
+            ("tests/output.hirsel", "cli"),
+            ("tests/terminal.hirsel", "cli"),
+            ("tests/progress.hirsel", "cli"),
+        ],
+        limit: 67108864,
+        grants: [Tasks],
+        runs: [],
+    )),
+)

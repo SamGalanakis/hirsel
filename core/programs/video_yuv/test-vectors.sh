@@ -11,16 +11,13 @@ reference=$(cd "$2" && pwd)
 shift 2
 cp "$codec"/*.hirsel "$codec"/*.a "$codec/vectors/tests.hirsel" "$work"
 python3 - "$codec" "$work" <<'PYTHON'
-import json
 from pathlib import Path
 import sys
 
 codec, work = map(Path, sys.argv[1:])
-manifest = (codec / "hirsel.toml").read_text()
-tests = (codec / "vectors/test.toml").read_text()
-(work / "hirsel.toml").write_text(
-    manifest + tests.replace('"fixtures"', json.dumps(str(work / "fixtures"), ensure_ascii=False))
-)
+sys.path.insert(0, str(codec.parents[2] / "tools/toolchain-dist"))
+import hcfg
+hcfg.vector_package(codec, codec / "vectors", work, work / "fixtures")
 PYTHON
 "$llvm/bin/clang" -O2 -std=c11 -Wall -Wextra -Werror -I "$reference/include" \
     "$codec/vectors/reference.c" "$reference/libyuv.a" -o "$work/reference"

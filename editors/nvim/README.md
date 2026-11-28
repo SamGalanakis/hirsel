@@ -22,7 +22,7 @@ vim.api.nvim_create_autocmd("FileType", {
 vim.lsp.enable("hirsel")
 ```
 
-Neovim looks for `hirsel.toml` when choosing the LSP project root.
+Neovim looks for `hirsel.hcfg` when choosing the LSP project root.
 Regenerate the runtime queries when the common queries change by copying
 `highlights.scm`, `injections.scm`, and `locals.scm` from
 `editors/tree-sitter-hirsel/queries/` to `queries/hirsel/`.

@@ -31,7 +31,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
+import hcfg
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,7 +43,7 @@ import link_kit  # noqa: E402
 APPLE = AppleRecords((ROOT / SOURCE).read_text()).rows['macos']
 TARGET = APPLE['triple']
 FLOOR = APPLE['floor']
-PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
+PRODUCT = hcfg.product(Path(__file__).with_name('product.hcfg'))
 SYSTEM = {name: path for name, path in link_kit.DARWIN_LIBRARIES.items()}
 LIBSYSTEM = SYSTEM['libSystem']
 LIBCXX = '/usr/lib/libc++.1.dylib'
@@ -491,11 +491,11 @@ def build(output, work, release_tag, archives):
          '--target', TARGET, '--link-kit', kit, '--exec-helper', helper_image],
         env=install, stdout=subprocess.DEVNULL)
     programs = ROOT / 'tools/toolchain-dist/toolchain_programs.py'
-    packages = tomllib.loads((ROOT / 'core/programs/toolchain-packages.toml').read_text())['packages']
+    packages = hcfg.read(ROOT / 'core/programs/toolchain-packages.hcfg', 'toolchain_v1.Packages')['packages']
     run([sys.executable, programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
          *packages], env=install)
     host = scratch / 'platform_main'
-    run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.toml'),
+    run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.hcfg'),
          output, ROOT / 'core/programs/platform', scratch, host], env=install)
     run(['/usr/bin/codesign', '-v', '--strict', host])
     # Embed the platform host into the signed compiler image. Reuse the

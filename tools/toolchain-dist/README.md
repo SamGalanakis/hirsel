@@ -1,6 +1,6 @@
 # Distribution compiler experiments
 
-`product.toml` declares the published hosts and their LLVM library paths, the
+`product.hcfg` declares the published hosts and their LLVM library paths, the
 supported runtime targets and feature variants, and the installed helper
 entries and socket names. To render the standalone installer from this checkout,
 run `python3 tools/toolchain-dist/product.py installer > install.sh`.

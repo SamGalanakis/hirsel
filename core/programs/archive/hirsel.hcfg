@@ -1,0 +1,20 @@
+pkg_v1.Package(
+    name: "hirsel.ai/archive",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("limits.hirsel", "limits"),
+        ("tar.hirsel", "tar"),
+        ("tar_write.hirsel", "tar"),
+        ("zip.hirsel", "zip"),
+        ("zip_read.hirsel", "zip"),
+        ("zip_write.hirsel", "zip"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [("conformance.hirsel", "conformance"), ("fixtures.hirsel", "conformance")],
+        limit: 67108864,
+        grants: [],
+        runs: [],
+    )),
+)

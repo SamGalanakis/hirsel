@@ -1,0 +1,25 @@
+// Packages shipped as archives alongside the built-in std image.
+toolchain_v1.Packages(
+    packages: [
+        "store",
+        "runner",
+        "media_bits",
+        "sframe",
+        "media_container",
+        "rtp",
+        "srtp",
+        "dtls",
+        "stun_ice",
+        "turn",
+        "quic",
+        "webtransport",
+        "moq",
+        "rtp_jitter",
+        "webrtc_sfu",
+        "media_record",
+        "platform",
+        "search",
+        "mcp",
+        "cli",
+    ],
+)

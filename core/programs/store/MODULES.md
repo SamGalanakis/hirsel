@@ -13,7 +13,7 @@ The disposition table for every 3107 finding and lane row is in `hirsel-briefs/s
 
 ## 1. Summary
 
-`core/programs/store/hirsel.toml` lists **127** production sources:
+`core/programs/store/hirsel.hcfg` lists **127** production sources:
 - 125 are in module `"store"`;
 - `store-health-types.hirsel` is in `"status"`;
 - `main.hirsel` is in `"main"`.
@@ -837,14 +837,14 @@ Notes:
 
 **Root surface gate (lane step, not a law):** L1's first commit adds `tools/store_public_contract.py`, which prints the full public contract of every `pub` declaration of modules `"store"` and `"status"`, sorted by name: kind and capability bounds, generic parameters and bounds, every parameter with its mode and type, the result with its anchors, `waits`, the finalizer and its grant, and the fields and variants of every non-opaque public type. Opaque types contribute their kind, bounds and finalizer only; their private backing is ignored, and so are file and line. Each lane runs it before and after; the outputs must be byte-identical. v3's `inventory.py` comparison printed only file, module, kind, visibility, name and line, so a changed parameter or public field passed it.
 
-**Placement gate (lane step, not a law):** L1's first commit also adds `tools/store_placement.py`. It reads each declaration's module from the tree's real `hirsel.toml` file assignments (the module column of `inventory.py`). It then compares that module with `placement.tsv`, committed beside it, for every declaration whose landing is at or before the current lane. It fails on any mismatch, unless the declaration is listed in the lane's recorded lower-owner moves (§3.5). The build's own module-dependency check remains the acyclicity oracle; this gate keeps lanes from drifting from §3.5 on the way.
+**Placement gate (lane step, not a law):** L1's first commit also adds `tools/store_placement.py`. It reads each declaration's module from the tree's real `hirsel.hcfg` file assignments (the module column of `inventory.py`). It then compares that module with `placement.tsv`, committed beside it, for every declaration whose landing is at or before the current lane. It fails on any mismatch, unless the declaration is listed in the lane's recorded lower-owner moves (§3.5). The build's own module-dependency check remains the acyclicity oracle; this gate keeps lanes from drifting from §3.5 on the way.
 
 ---
 
 ## 10. Cutover Sequence
 
 Lanes land in order on top of each other. Each lane:
-- updates `hirsel.toml`;
+- updates `hirsel.hcfg`;
 - regenerates `hirsel.laws` (`hirsel laws write core/programs/store --libraries core`);
 - runs its laws, O1 and its O4 control;
 - runs the placement gate and the root surface gate (§9.2);

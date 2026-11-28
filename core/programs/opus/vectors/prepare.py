@@ -9,6 +9,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
 import tarfile
 
 ARCHIVES = (
@@ -92,11 +95,7 @@ def stage(work):
         shutil.copyfile(vectors / filename, work / filename)
 
     # The test runs in its own empty working directory, so its grant is absolute.
-    base = (codec / "hirsel.toml").read_text()
-    tests = (vectors / "test.toml").read_text().replace(
-        '"fixtures"', json.dumps(str(fixtures), ensure_ascii=False),
-    )
-    (work / "hirsel.toml").write_text(base + tests)
+    hcfg.vector_package(codec, vectors, work, fixtures)
 
 
 def main():

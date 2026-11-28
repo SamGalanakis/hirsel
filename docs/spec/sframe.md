@@ -1277,7 +1277,7 @@ SFrame's own inputs.
 
 | Slice | Size | Depends on | Delivers | Laws |
 | --- | --- | --- | --- | --- |
-| **B1** core | M | — | `hirsel.toml` (std and `media_bits`), `sframe` module: header, library HKDF, key schedule, `Sender`, `Receiver`, `seal`, `open`, window, ratchet; `vectors.hirsel` from RFC C.1 and C.3 | V1, V2, W1, K1, K2, S1, and R1 and T1 for the RFC framing |
+| **B1** core | M | — | `hirsel.hcfg` (std and `media_bits`), `sframe` module: header, library HKDF, key schedule, `Sender`, `Receiver`, `seal`, `open`, window, ratchet; `vectors.hirsel` from RFC C.1 and C.3 | V1, V2, W1, K1, K2, S1, and R1 and T1 for the RFC framing |
 | **B2** ranged | M | B1 | `ranges` module: layout encoding, `seal_ranged`, `open_ranged`, Annex B escaping, `vp8`, `h264`, `h265`, `normalize_h264`, `normalize_h265`; `oracle.py`; the Chromium capture script and its vectors | R1 and T1 for ranged framing, T2, L1, G1, G2, A1 |
 | **B3** VP9 and AV1 | S | B2, a browser capture of each codec's round trip through Encoded Transform | their range rules, or `none()` for VP9 if the capture confirms it | G1 cases |
 | **P1** rtp-sframe | S | B1, E1, a named consumer (the Hirsel native SDK) | `descriptor`; a TLS-8 child-schedule operation for per-SSRC keys, specified with P1 (SFRAME-14), in place of `ssrc_key`; reassembly in `rtp`; `a=sframe` in webrtc | draft §7 per-SSRC key by Python `hmac` through that operation, and a repeated SSRC on a send parent refused; descriptor round trip |

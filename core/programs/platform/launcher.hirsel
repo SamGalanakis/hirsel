@@ -80,7 +80,7 @@ pub type Launch: codec + send {
 // "The law gate"): its tests run in the publish scratch after H and before H is admitted.
 pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes, bool)
 
-// Submitted source: the files of a workspace whose root holds its `hirsel.toml` and
+// Submitted source: the files of a workspace whose root holds its `hirsel.hcfg` and
 // `hirsel.lock`, the package directory to publish within it, and the `--grant` and `--dir`
 // values its recipe binds. Paths are relative, `/`-separated and plain.
 pub type Tree: codec + send {

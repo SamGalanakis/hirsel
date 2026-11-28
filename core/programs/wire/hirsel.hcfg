@@ -1,0 +1,29 @@
+pkg_v1.Package(
+    name: "hirsel.ai/wire",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("echo.hirsel", "echo"),
+        ("finish.hirsel", "finish"),
+        ("session.hirsel", "session"),
+        ("admission.hirsel", "admission"),
+        ("migration.hirsel", "migration"),
+        ("front.hirsel", "front"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+        ("platform", Path(
+            package: "platform",
+            major: 1,
+            path: "../platform",
+            authority: [Dir, Net, Clock, Random, Stdout, Stderr, Tasks, Args, Secret, Cred],
+        )),
+    ],
+)

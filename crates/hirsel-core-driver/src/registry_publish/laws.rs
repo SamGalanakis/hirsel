@@ -64,18 +64,18 @@ fn workspace_refuses_unpublishable_members_before_contact() {
     let peer = Peer::start();
     fixture.configure(&peer);
     let root = fixture.dir.path();
-    let members = root.join("workspace/hirsel.toml");
+    let members = root.join("workspace/hirsel.hcfg");
     fs::write(
         &members,
-        "[workspace]\nmembers = [\"base\", \"left\", \"right\", \"root\", \"no\"]\n",
+        "pkg_v1.Workspace(members: [\"base\", \"left\", \"right\", \"root\", \"no\"])\n",
     )
     .unwrap();
     fs::create_dir(root.join("workspace/no")).unwrap();
-    let manifest = root.join("workspace/no/hirsel.toml");
+    let manifest = root.join("workspace/no/hirsel.hcfg");
     let run = |name: &str, omit_version: bool, source: &str, extra: &str, expected: &str| {
         fs::write(&manifest, format!(
-            "[package]\nname = {name:?}\n{}charge = \"charge-v1\"\n[sources]\n\"no.hirsel\" = \"no\"\n{extra}",
-            if omit_version { "" } else { "version = \"1.0.0\"\n" },
+            "pkg_v1.Package(name: {name:?}, {}charge: ChargeV1, sources: [(\"no.hirsel\", \"no\")], {})\n",
+            if omit_version { "" } else { "version: \"1.0.0\", " }, if extra.is_empty() { "dependencies: []," } else { extra },
         )).unwrap();
         fs::write(root.join("workspace/no/no.hirsel"), source).unwrap();
         let result = fixture.publish("workspace", &["--workspace"]);
@@ -93,7 +93,7 @@ fn workspace_refuses_unpublishable_members_before_contact() {
         "fixture.test/no",
         false,
         valid,
-        "[dependencies]\noutside = { package = \"fixture.test/outside\", major = 1, path = \"../../outside\" }\n",
+        "dependencies: [(\"outside\", Path(package: \"fixture.test/outside\", major: 1, path: \"../../outside\", authority: []))],",
         "is not a member",
     );
     run(
@@ -110,10 +110,29 @@ fn check_registry_dependency(fixture: &Fixture, peer: &Peer) {
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("lib.hirsel"), "pub fn one() -> u64 { 2u64 }\n").unwrap();
     let (_, root) = peer.state.lock().unwrap().committed["base"];
-    fs::write(dir.join("hirsel.toml"), format!(
-        "[package]\nname = \"fixture.test/left\"\nversion = \"1.2.3\"\ncharge = \"charge-v1\"\n[sources]\n\"lib.hirsel\" = \"lib\"\n[dependencies]\nbase = {{ package = \"fixture.test/base\", major = 1, root = \"{root}\", registry = \"https://{}\" }}\n",
-        peer.authority,
-    )).unwrap();
+    fs::write(
+        dir.join("hirsel.hcfg"),
+        format!(
+            r#"pkg_v1.Package(
+    name: "fixture.test/left",
+    version: "1.2.3",
+    charge: ChargeV1,
+    sources: [("lib.hirsel", "lib")],
+    dependencies: [
+        ("base", Published(
+            package: "fixture.test/base",
+            major: 1,
+            root: "{root}",
+            locator: Registry("https://{}"),
+            authority: [],
+        )),
+    ],
+)
+"#,
+            peer.authority,
+        ),
+    )
+    .unwrap();
 
     peer.state.lock().unwrap().misdirect_hint = true;
     let refused = fixture.publish("external", &[]);
@@ -179,8 +198,8 @@ impl Fixture {
         let root = dir.path();
         fs::create_dir(root.join("workspace")).unwrap();
         fs::write(
-            root.join("workspace/hirsel.toml"),
-            "[workspace]\nmembers = [\"root\", \"right\", \"left\", \"base\"]\n",
+            root.join("workspace/hirsel.hcfg"),
+            "pkg_v1.Workspace(members: [\"root\", \"right\", \"left\", \"base\"])\n",
         )
         .unwrap();
         for (name, deps) in [
@@ -191,18 +210,19 @@ impl Fixture {
         ] {
             let member = root.join("workspace").join(name);
             fs::create_dir(&member).unwrap();
-            let mut manifest = format!(
-                "[package]\nname = \"fixture.test/{name}\"\nversion = \"1.2.3\"\ncharge = \"charge-v1\"\n[sources]\n\"lib.hirsel\" = \"lib\"\n[dependencies]\n"
+            let deps: Vec<_> = deps.iter().map(|dep| format!(
+                r#"("{dep}", Path(package: "fixture.test/{dep}", major: 1, path: "../{dep}", authority: []))"#)).collect();
+            let manifest = format!(
+                r#"pkg_v1.Package(name: "fixture.test/{name}", version: "1.2.3", charge: ChargeV1,
+                sources: [("lib.hirsel", "lib")], dependencies: [{}])"#,
+                deps.join(", ")
             );
-            for dep in deps {
-                manifest.push_str(&format!("{dep} = {{ package = \"fixture.test/{dep}\", major = 1, path = \"../{dep}\" }}\n"));
-            }
-            fs::write(member.join("hirsel.toml"), manifest).unwrap();
+            fs::write(member.join("hirsel.hcfg"), manifest).unwrap();
             fs::write(member.join("lib.hirsel"), "pub fn one() -> u64 { 1u64 }\n").unwrap();
         }
         fs::create_dir(root.join("recipe")).unwrap();
-        fs::write(root.join("recipe/hirsel.toml"),
-            "[package]\nname = \"local/recipe\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+        fs::write(root.join("recipe/hirsel.hcfg"),
+            "pkg_v1.Package(name: \"local/recipe\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [])\n").unwrap();
         fs::write(
             root.join("recipe/main.hirsel"),
             "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
@@ -225,7 +245,7 @@ impl Fixture {
         let conf = dir.join("config/hirsel");
         fs::create_dir_all(&conf).unwrap();
         fs::write(
-            conf.join("config.toml"),
+            conf.join("config.hcfg"),
             route("fixture.test/*", &peer.authority, true, 42),
         )
         .unwrap();

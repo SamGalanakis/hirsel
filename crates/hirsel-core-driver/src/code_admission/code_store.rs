@@ -322,7 +322,7 @@ fn release_requires_a_root_limit_and_development_defaults() {
     assert_eq!(status, Some(2), "{stdout}\n{stderr}");
     assert_eq!(
         stderr,
-        "hirsel: release requires a root limit (`[program].limit` or `--limit`)\n"
+        "hirsel: release requires a root limit (`program.limit` or `--limit`)\n"
     );
     assert!(stdout.is_empty(), "{stdout}");
 
@@ -342,7 +342,7 @@ fn release_requires_a_root_limit_and_development_defaults() {
         admitted_limit(&["--release", "--limit", "1048576"]),
         1_048_576
     );
-    fs::write(dir.path().join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[program]\nlimit = 2097152\n").unwrap();
+    fs::write(dir.path().join("hirsel.hcfg"), "pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [], program: Some(Program(limit: Some(2097152))))\n").unwrap();
     assert_eq!(admitted_limit(&["--release"]), 2_097_152);
 }
 

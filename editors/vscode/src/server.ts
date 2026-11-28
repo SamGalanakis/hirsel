@@ -35,7 +35,7 @@ type ServerState = "starting" | "ready" | "error";
 export class Server {
   private readonly output = vscode.window.createOutputChannel("Hirsel");
   private readonly status = vscode.window.createStatusBarItem("hirsel.server", vscode.StatusBarAlignment.Left);
-  private readonly watchers = ["**/hirsel.toml", "**/hirsel.lock", "**/*.hcfg"]
+  private readonly watchers = ["**/hirsel.lock", "**/*.hcfg"]
     .map((glob) => vscode.workspace.createFileSystemWatcher(glob));
   private client?: LanguageClient;
   private pending = Promise.resolve();

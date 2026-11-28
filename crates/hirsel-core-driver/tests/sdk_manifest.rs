@@ -41,17 +41,14 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
     };
     let library = |name: &str, dependencies: &[&str]| {
         let dir = root.join("core/programs").join(name);
-        let manifest: toml::Table = std::fs::read_to_string(dir.join("hirsel.toml"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let manifest: hirsel_config_schema::pkg_v1::Package =
+            hirsel_config_schema::read_file(&dir.join("hirsel.hcfg")).unwrap();
         PackageManifest {
             package: package(name),
-            sources: manifest["sources"]
-                .as_table()
-                .unwrap()
+            sources: manifest
+                .sources
                 .iter()
-                .map(|(file, module)| source(dir.join(file), module.as_str().unwrap()))
+                .map(|(file, module)| source(dir.join(file), module.as_str()))
                 .collect(),
             dependencies: dependencies.iter().map(|name| package(name)).collect(),
             namespace: None,
@@ -280,8 +277,8 @@ fn swift_sdk_writes_one_projection_and_refuses_target_dependent_entries() {
         symlink(root.join("core").join(name), libraries.join(name)).unwrap();
     }
     fs::write(
-        workspace.join("hirsel.toml"),
-        "[workspace]\nmembers = [\"store\", \"runner\", \"app\"]\n",
+        workspace.join("hirsel.hcfg"),
+        "pkg_v1.Workspace(members: [\"store\", \"runner\", \"app\"])\n",
     )
     .unwrap();
     for name in ["runner", "store"] {
@@ -290,19 +287,18 @@ fn swift_sdk_writes_one_projection_and_refuses_target_dependent_entries() {
         symlink(staged, programs.join(name)).unwrap();
     }
     fs::write(
-        package.join("hirsel.toml"),
-        r#"[package]
-name = "swift_law"
-major = 1
-charge = "charge-v1"
-
-[dependencies]
-std = { major = 1 }
-store = { major = 1, path = "../store" }
-runner = { major = 1, path = "../runner" }
-
-[sources]
-"main.hirsel" = "main"
+        package.join("hirsel.hcfg"),
+        r#"pkg_v1.Package(
+    name: "swift_law",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [])),
+        ("runner", Path(package: "runner", major: 1, path: "../runner", authority: [])),
+    ],
+)
 "#,
     )
     .unwrap();

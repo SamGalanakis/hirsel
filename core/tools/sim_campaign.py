@@ -5,12 +5,15 @@ from collections import defaultdict
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import re
 import shutil
 import signal
 import subprocess
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 import runner_tests
 import std_native
@@ -87,8 +90,8 @@ def source_probes(source, path, laws):
 def seeded_package_laws(package, probes=None):
     """A package test opts in with its simulation-specific Env parameter."""
     directory = ROOT / 'core/programs' / package
-    manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
-    version = manifest['package']['version'].split('.')[0]
+    manifest = hcfg.package(directory)
+    version = manifest['version'].split('.')[0]
     laws = {}
     for file, module in manifest.get('tests', {}).get('sources', {}).items():
         path = directory / file
@@ -96,7 +99,7 @@ def seeded_package_laws(package, probes=None):
         definitions = []
         for name, parameters in SEEDED_TEST.findall(source):
             if re.search(r'(^|,)\s*seed_grant\s*:\s*Env\s*(,|$)', parameters):
-                definition = f'{manifest["package"]["name"]}@{version}/{module.replace(".", "/")}/{name}'
+                definition = f'{manifest["name"]}@{version}/{module.replace(".", "/")}/{name}'
                 laws[definition] = definition
                 definitions.append(definition)
         if probes is not None and (declared := source_probes(source, path, definitions)):
@@ -106,9 +109,9 @@ def seeded_package_laws(package, probes=None):
 
 def seeded_package_inventory(probes=None):
     """Every workspace package with at least one seeded law."""
-    workspace = tomllib.loads((ROOT / 'core/programs/hirsel.toml').read_text())
+    workspace = hcfg.read(ROOT / 'core/programs/hirsel.hcfg', 'pkg_v1.Workspace')
     inventory = {}
-    for package in workspace['workspace']['members']:
+    for package in workspace['members']:
         if laws := seeded_package_laws(package, probes):
             inventory[package] = laws
     return inventory

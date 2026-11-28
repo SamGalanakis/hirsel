@@ -16,4 +16,4 @@ hirsel-guard = { path = "../hirsel-guard" }
 libc = "0.2"
 
 [build-dependencies]
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+hirsel-config-schema = { path = "../hirsel-config-schema" }

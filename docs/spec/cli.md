@@ -11,18 +11,18 @@ catalog Directory StoreId (high word first). REQUEST is the 16-byte caller ID
 in hex. Both survive a host restart. The row names the group and incarnation
 of the original request, including after a name is reused.
 
-An absolute job file contains one complete host pin. A named context selects
-a record under `[contexts.NAME]` in `$XDG_CONFIG_HOME/hirsel/config.toml`
-(fallback `~/.config/hirsel/config.toml`). With no explicit selection, the
-workstation file must set `default = "NAME"`. A job pin has this shape:
+An absolute job file selects the host named by its `default_context`.
+A named context looks up the name in the workstation's
+`$XDG_CONFIG_HOME/hirsel/config.hcfg` (fallback `~/.config/hirsel/config.hcfg`).
+Both files use the same schema. A job pin can select a group and incarnation.
 
-```toml
-kind = "host"
-state = "/srv/hirsel/private"
-authority = "c01d3dedc01d3dedc01d3dedc01d3ded"
-uid = 1001
-group = "orders"
-incarnation = "17"
+```hcfg
+user_v1.Config(
+    contexts: [("ci", Host(state: "/srv/hirsel/private", catalog_id: "c01d3dedc01d3dedc01d3dedc01d3ded",
+        principal: Uid(1001), group: Some("orders"), incarnation: Some(17)))],
+    default_context: Some("ci"),
+    routes: [],
+)
 ```
 
 The last two fields narrow the read and are optional. Preflight prints the
@@ -93,18 +93,16 @@ never run.
 ### Remote cache
 
 A build or test request can also read a remote cache, configured in
-`$XDG_CONFIG_HOME/hirsel/config.toml` (default `~/.config/hirsel`):
+`$XDG_CONFIG_HOME/hirsel/config.hcfg` (default `~/.config/hirsel`):
 
-```toml
-[cache.remote]
-url = "https://cache.example.test"  # http:// or https://
-trusted = ["<64 hex digits: an Ed25519 public key>"]  # default: none
-signing-key = "/path/to/builder.pk8"  # optional: PKCS#8 Ed25519; uploads
-
-[cache.remote.transfer]
-record-bytes = 268435456
-blob-bytes = 1073741824
-work-bytes = 2147483648
+```hcfg
+user_v1.Config(
+    contexts: [],
+    routes: [],
+    cache: Some(Remote(url: "https://cache.example.test", trusted: ["<64 hex digits>"],
+        signing_key: Some("/path/to/builder.pk8"), record_bytes: 268435456,
+        blob_bytes: 1073741824, work_bytes: 2147483648)),
+)
 ```
 
 Every configured remote requires a transfer policy. `record-bytes` bounds the
@@ -380,7 +378,7 @@ no coverage option. Coverage never enters a law row or `hirsel.laws`.
 ## Registry publication and routing
 
 Phase 1 routes each scoped package by longest whole-component prefix in the invoking user's
-`hirsel/config.toml`. A route pins its HTTPS origin, both log keys and independent witnesses.
+`hirsel/config.hcfg`. A route pins its HTTPS origin, both log keys and independent witnesses.
 The default origin is `https://pkg.hirsel.ai`. The command
 `hirsel registry publish [--workspace]`<!-- doc-ref: planned --> checks and uploads the member.
 The workspace form publishes dependencies first and reports which members committed if a

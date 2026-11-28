@@ -1,0 +1,8 @@
+pkg_v1.Package(
+    name: "local/ffi_laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("native.hirsel", "native"), ("wrapper.hirsel", "wrapper")],
+    dependencies: [],
+    foreign: Some([("native", Native(symbols: "hfl_", archives: []))]),
+)

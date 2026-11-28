@@ -7,6 +7,12 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
     if args.len() == 1 && args[0] == check_library::WORKER_ARG {
         return conclude(Outcome::Exit(check_library::run_worker()));
     }
+    if let [worker, directory] = args.as_slice()
+        && worker == "--stage-toolchain-package"
+    {
+        crate::package_add::edit::stage(Path::new(directory))?;
+        return conclude(Outcome::Exit(0));
+    }
     let json = args
         .iter()
         .take_while(|arg| *arg != "--")
@@ -195,6 +201,18 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
                 request.positional.as_deref(),
                 request.options.contains(&ExplainOption::ListRules),
                 request.options.contains(&ExplainOption::Json),
+            )?;
+            conclude(Outcome::Exit(0))
+        }
+        Invocation::ConfigExport(request) => {
+            let path = request.positional.ok_or("config export requires FILE")?;
+            if request.options.is_empty() {
+                return Err("config export requires --json".into());
+            }
+            hirsel_config_schema::export(
+                Path::new(&path),
+                &hirsel_config_schema::catalog(),
+                std::io::stdout().lock(),
             )?;
             conclude(Outcome::Exit(0))
         }

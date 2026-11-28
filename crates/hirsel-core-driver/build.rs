@@ -3,6 +3,7 @@
 mod compiler_source;
 #[path = "src/operator_schema.rs"]
 mod operator_schema;
+use hirsel_config_schema::{pkg_v1, product_v1, toolchain_v1};
 use sha2::{Digest, Sha256};
 use std::{
     env,
@@ -52,59 +53,79 @@ fn package(root: &Path, symbol: &str, generated: &mut String) -> [u8; 32] {
     hash.finalize().into()
 }
 
-fn manifest(path: &Path) -> toml::Table {
+fn manifest<T: hirsel_config_schema::Config>(path: &Path) -> T {
     println!("cargo:rerun-if-changed={}", path.display());
-    fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-        .parse()
+    hirsel_config_schema::read_file(path)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-fn toolchain_packages(programs: &Path, generated: &mut String) {
-    let inventory = manifest(&programs.join("toolchain-packages.toml"));
+fn installed_row(path: &Path, installed: &[String]) -> (String, u32, Vec<(String, u32)>) {
+    let package: pkg_v1::Package = manifest(path);
+    let major: u32 = package
+        .version
+        .split('.')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("{}: invalid version {:?}", path.display(), package.version));
+    let mut bindings = Vec::new();
+    for (alias, binding) in package.dependencies {
+        use pkg_v1::Dependency::{Path, Toolchain};
+        let (bound, major) = match binding {
+            Toolchain {
+                package,
+                major,
+                authority,
+            } if authority.is_empty() => (package, major),
+            Path {
+                package,
+                major,
+                path: relative,
+                ..
+            } if relative == format!("../{alias}") && installed.contains(&alias) => {
+                (package, major)
+            }
+            _ => panic!("{}: invalid installed binding {alias}", path.display()),
+        };
+        assert_eq!(bound, alias, "{}", path.display());
+        bindings.push((alias, major));
+    }
+    bindings.sort_unstable();
+    (package.name, major, bindings)
+}
+
+fn toolchain_packages(programs: &Path, product: &product_v1::Product, generated: &mut String) {
+    let inventory: toolchain_v1::Packages = manifest(&programs.join("toolchain-packages.hcfg"));
     generated.push_str(
         "type ToolchainId = (&'static str, u32);\n\
          pub(crate) const TOOLCHAIN: &[(ToolchainId, &[ToolchainId])] = &[\n    ((\"std\", 1), &[]),\n",
     );
-    for name in inventory["packages"].as_array().unwrap() {
-        let name = name.as_str().unwrap();
-        let path = programs.join(name).join("hirsel.toml");
-        let document = manifest(&path);
-        let package = document["package"].as_table().unwrap();
-        assert_eq!(
-            package["name"].as_str().unwrap(),
-            name,
-            "{}",
-            path.display()
-        );
-        // The identity's major is the version's MAJOR (packages.md section 1).
-        let version = package["version"].as_str().unwrap();
-        let major: u32 = version
-            .split(['.', '-'])
-            .next()
-            .and_then(|major| major.parse().ok())
-            .unwrap_or_else(|| panic!("{}: bad version {version:?}", path.display()));
-        let mut bindings = Vec::new();
-        if let Some(dependencies) = document.get("dependencies") {
-            for (dependency, binding) in dependencies.as_table().unwrap() {
-                let major = binding
-                    .get("major")
-                    .and_then(toml::Value::as_integer)
-                    .and_then(|major| u32::try_from(major).ok())
-                    .unwrap_or_else(|| {
-                        panic!("{}: {dependency} must declare a major", path.display())
-                    });
-                // A toolchain package binds only toolchain packages, each under its bare name.
-                let bound = binding
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(dependency);
-                assert_eq!(bound, dependency, "{}", path.display());
-                bindings.push((dependency, major));
-            }
-        }
-        bindings.sort_unstable();
+    for name in &inventory.packages {
+        let path = programs.join(name).join("hirsel.hcfg");
+        let (bound, major, bindings) = installed_row(&path, &inventory.packages);
+        assert_eq!(&bound, name, "{}", path.display());
         writeln!(generated, "    (({name:?}, {major}), &{bindings:?}),").unwrap();
+    }
+    generated.push_str(
+        "];\npub(crate) const HELPER_PACKAGES: &[(&str, ToolchainId, &[ToolchainId])] = &[\n",
+    );
+    let directories: std::collections::BTreeSet<_> = product
+        .helpers
+        .iter()
+        .filter_map(|(_, helper)| helper.package.as_ref())
+        .collect();
+    for dir in directories {
+        assert_eq!(
+            Path::new(dir).file_name().and_then(|p| p.to_str()),
+            Some(dir.as_str()),
+            "invalid helper package directory"
+        );
+        let (name, major, bindings) =
+            installed_row(&programs.join(dir).join("hirsel.hcfg"), &inventory.packages);
+        writeln!(
+            generated,
+            "    ({dir:?}, ({name:?}, {major}), &{bindings:?}),"
+        )
+        .unwrap();
     }
     generated.push_str("];\n");
 }
@@ -130,13 +151,14 @@ fn main() {
     let std = package(&root.join("std"), "STD_SOURCES", &mut generated);
     for (name, symbol) in [("store", "STORE_SOURCES"), ("runner", "RUNNER_SOURCES")] {
         let directory = root.join("programs").join(name);
-        let manifest = manifest(&directory.join("hirsel.toml"));
+        let manifest: pkg_v1::Package = manifest(&directory.join("hirsel.hcfg"));
         generated.push_str(&format!("pub const {symbol}: &[(&str, &str, &str)] = &[\n"));
-        for (file, module) in manifest["sources"].as_table().unwrap() {
-            let path = directory.join(file);
+        let mut sources = manifest.sources;
+        sources.sort_unstable();
+        for (file, module) in sources {
+            let path = directory.join(&file);
             println!("cargo:rerun-if-changed={}", path.display());
             let source = fs::read_to_string(path).unwrap();
-            let module = module.as_str().unwrap();
             generated.push_str(&format!("({file:?}, {module:?}, {source:?}),\n"));
         }
         generated.push_str("];\n");
@@ -153,23 +175,28 @@ fn main() {
         "pub const DIGEST: [u8;32] = {core:?};\npub const STD_DIGEST: [u8;32] = {:?};\n",
         <[u8; 32]>::from(combined.finalize())
     ));
-    toolchain_packages(&root.join("programs"), &mut generated);
     // The compiler identity (docs/building.md, "Compiler identity"): the
     // compiler's source closure and pins, the library sources it bundles, and
     // the toolchain package bindings it supplies.
     let repository = root.parent().unwrap();
-    let product = manifest(&repository.join("tools/toolchain-dist/product.toml"));
-    for (symbol, socket) in [
-        ("LAUNCHER_SOCKET", "launcher"),
-        ("OPERATOR_SOCKET", "operator"),
+    let product: product_v1::Product =
+        manifest(&repository.join("tools/toolchain-dist/product.hcfg"));
+    toolchain_packages(&root.join("programs"), &product, &mut generated);
+    for (symbol, name) in [
+        ("LAUNCHER_SOCKET", product.sockets.launcher),
+        ("OPERATOR_SOCKET", product.sockets.operator),
     ] {
-        let name = product["sockets"][socket].as_str().unwrap();
         writeln!(generated, "pub(crate) const {symbol}: &str = {name:?};").unwrap();
     }
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos") {
-        let library = product["hosts"]["aarch64-apple-darwin"]["llvm_library"]
-            .as_str()
-            .unwrap();
+        let target = env::var("TARGET").expect("Cargo target triple");
+        let library = &product
+            .hosts
+            .iter()
+            .find(|(triple, _)| triple == &target)
+            .unwrap()
+            .1
+            .llvm_library;
         writeln!(
             generated,
             "pub(crate) const DARWIN_LLVM_LIBRARY: &str = {library:?};"

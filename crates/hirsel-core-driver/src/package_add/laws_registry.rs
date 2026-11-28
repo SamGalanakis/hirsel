@@ -142,14 +142,14 @@ fn invoke(server: &Server, dir: &Path, now: u64, args: &[&str], expected: i32) -
 fn config(dir: &Path, preview: bool) {
     fs::create_dir_all(dir.join("config/hirsel")).unwrap();
     fs::write(
-        dir.join("config/hirsel/config.toml"),
+        dir.join("config/hirsel/config.hcfg"),
         route("*", HOST, preview, 3),
     )
     .unwrap();
 }
 
 fn snapshot(dir: &Path) -> [Option<Vec<u8>>; 2] {
-    ["hirsel.toml", "hirsel.lock"].map(|name| fs::read(dir.join(name)).ok())
+    ["hirsel.hcfg", "hirsel.lock"].map(|name| fs::read(dir.join(name)).ok())
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn g6_cli_named_add_update_audit() {
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
     config(dir, false);
-    fs::write(dir.join("hirsel.toml"),"[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+    fs::write(dir.join("hirsel.hcfg"),"pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [])\n").unwrap();
     fs::write(dir.join("main.hirsel"), APP).unwrap();
     let mut catalog = Catalog {
         server: &server,
@@ -265,9 +265,9 @@ fn g6_cli_named_add_update_audit() {
     )]
     .into();
     let wrap = catalog.publish("fixture.test/wrap", "1.0.0", LIB, NOW - WAIT, edges);
-    let manifest = dir.join("hirsel.toml");
+    let manifest = dir.join("hirsel.hcfg");
     let original = fs::read_to_string(&manifest).unwrap();
-    let constrained_manifest = original.replace("[dependencies]",&format!("[dependencies]\nwrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{wrap}\", registry = \"https://alpha.test\" }}"));
+    let constrained_manifest = original.replace("dependencies: [",&format!("dependencies: [(\"wrap\", Published(package: \"fixture.test/wrap\", major: 1, root: \"{wrap}\", locator: Registry(\"https://alpha.test\"), authority: [])), "));
     fs::write(&manifest, constrained_manifest).unwrap();
     let constrained = snapshot(dir);
     let rejected = run(&["update", "j@0.3.1"], 2);
@@ -450,7 +450,7 @@ fn g6_cli_named_add_update_audit() {
     assert_eq!(hints, [&format!("{HOST}/versions/{child_name}")]);
     let text = fs::read_to_string(&manifest).unwrap();
     assert!(
-        text.contains("[selections]") && text.contains(&selected.to_string()),
+        text.contains("selections: Some([") && text.contains(&selected.to_string()),
         "{text}"
     );
 
@@ -499,7 +499,7 @@ fn cold_floor_proofs_reuse_the_authenticated_release_bundle() {
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
     config(dir, false);
-    fs::write(dir.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+    fs::write(dir.join("hirsel.hcfg"), "pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [])\n").unwrap();
     fs::write(dir.join("main.hirsel"), APP).unwrap();
     let mut catalog = Catalog {
         server: &server,
@@ -563,7 +563,7 @@ fn decimal_hints_skip_skew_and_unrelated_advisory_lag() {
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path();
     config(dir, false);
-    fs::write(dir.join("hirsel.toml"), "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n").unwrap();
+    fs::write(dir.join("hirsel.hcfg"), "pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [])\n").unwrap();
     fs::write(dir.join("main.hirsel"), APP).unwrap();
     let mut catalog = Catalog {
         server: &server,

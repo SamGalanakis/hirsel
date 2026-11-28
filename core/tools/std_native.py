@@ -149,10 +149,10 @@ def exec_fixture(scratch, host):
     image = Path('/usr/bin/true').resolve()
     contents = image.read_bytes()
     pin = hashlib.sha256(contents)
-    policy = scratch / 'exec.toml'
-    policy.write_text(f'[parity]\nimage = {json.dumps(str(image))}\nsha256 = "{pin.hexdigest()}"\n'
-                      f'argv0 = "true"\nargs = [[]]\nenv = {{}}\n'
-                      f'dirs = {{ work = {json.dumps(str(host))} }}\n')
+    policy = scratch / 'exec.hcfg'
+    policy.write_text(f'exec_v1.Policy(profiles: [("parity", Profile(image: {json.dumps(str(image))}, '
+                      f'sha256: "{pin.hexdigest()}", argv0: "true", args: [[]], env: [], '
+                      f'dirs: [("work", {json.dumps(str(host))})]))])')
 
     def field(data):
         return struct.pack('<I', len(data)) + data

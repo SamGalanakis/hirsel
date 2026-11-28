@@ -18,9 +18,12 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import tomllib
+
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools/toolchain-dist"))
+import hcfg
+
 WORKSPACE = ROOT / "core" / "programs"
 FOREIGN_GRANTS = {
     "ffi_laws": ("Foreign=hirsel.ai/ffi_laws@1/laws/Laws",),
@@ -45,7 +48,7 @@ FOREIGN_GRANTS = {
 # the nightly's full check.
 ALL_TRIGGERS = (
     "core/std/", "core/core/",
-    "core/programs/hirsel.toml", "core/programs/hirsel.lock",
+    "core/programs/hirsel.hcfg", "core/programs/hirsel.lock",
     "crates/hirsel-core-driver/src/law_lock", "crates/hirsel-core-driver/src/reuse.rs",
     "crates/hirsel-core-driver/src/native_entry.rs", "crates/hirsel-core-ids/src/lib.rs",
     "crates/hirsel-core-syntax/src/token.rs", "crates/hirsel-core-syntax/src/lexer.rs",
@@ -53,30 +56,21 @@ ALL_TRIGGERS = (
 )
 
 
-def manifest(directory):
-    with (directory / "hirsel.toml").open("rb") as source:
-        return tomllib.load(source)
+def members(compiler):
+    return hcfg.read(WORKSPACE / "hirsel.hcfg", "pkg_v1.Workspace", compiler)["members"]
 
 
-def package_manifest(directory):
-    for name in ("hirsel.toml", "test.toml"):
-        if (directory / name).is_file():
-            with (directory / name).open("rb") as source:
-                return tomllib.load(source)
-    return {}
-
-
-def lock_packages():
+def lock_packages(compiler):
     """Workspace members and every directory holding a tracked hirsel.laws."""
-    members = set(manifest(WORKSPACE)["workspace"]["members"])
+    listed = set(members(compiler))
     tracked = subprocess.check_output(
         ["git", "ls-files", "-z", "--", "core/programs/**/hirsel.laws"], cwd=ROOT, text=True)
-    members.update((ROOT / path).parent.relative_to(WORKSPACE).as_posix()
+    listed.update((ROOT / path).parent.relative_to(WORKSPACE).as_posix()
                    for path in tracked.split("\0") if path)
-    return sorted(members)
+    return sorted(listed)
 
 
-def reached_directories(member):
+def reached_directories(member, compiler):
     """The package directory and every directory it reaches by path dependency."""
     start = (WORKSPACE / member).resolve()
     seen, pending = set(), [start]
@@ -85,11 +79,18 @@ def reached_directories(member):
         if directory in seen:
             continue
         seen.add(directory)
-        if (directory / "test.toml").is_file() and (directory.parent / "hirsel.toml").is_file():
+        vector = directory / "test.hcfg"
+        manifest = directory / "hirsel.hcfg"
+        if vector.is_file():
             pending.append(directory.parent)
-        for binding in package_manifest(directory).get("dependencies", {}).values():
-            if isinstance(binding, dict) and "path" in binding:
-                pending.append((directory / binding["path"]).resolve())
+            data = hcfg.read(vector, "pkg_v1.VectorTests", compiler)
+        elif manifest.is_file():
+            data = hcfg.read(manifest, "pkg_v1.Package", compiler)
+        else:
+            continue
+        for _, binding in data["dependencies"]:
+            if binding["case"] == "Path":
+                pending.append((directory / binding["fields"]["path"]).resolve())
     return [directory.relative_to(ROOT).as_posix() + "/" for directory in seen]
 
 
@@ -102,13 +103,13 @@ def changed_paths(base):
     return {path for path in (diff + "\0" + untracked).split("\0") if path}
 
 
-def selected_packages(base):
-    packages = lock_packages()
+def selected_packages(base, compiler):
+    packages = lock_packages(compiler)
     changed = changed_paths(base)
     if any(path.startswith(ALL_TRIGGERS) for path in changed):
         return packages
     return [member for member in packages
-            if any(path.startswith(tuple(reached_directories(member))) for path in changed)]
+            if any(path.startswith(tuple(reached_directories(member, compiler))) for path in changed)]
 
 
 def baseline_for(commit, package, destination):
@@ -158,7 +159,7 @@ def run_package(args, member, env, commit, compiler_scratch):
                "--laws", "--json", "--test-timeout", "300"]
     if compiler_scratch is not None:
         command.extend(["--store", str(compiler_scratch / member)])
-    if "tests" not in manifest(package):
+    if hcfg.option(hcfg.read(package / "hirsel.hcfg", "pkg_v1.Package", args.compiler)["tests"]) is None:
         command += ["--limit", "67108864"]
     for grant in FOREIGN_GRANTS.get(member, ()):
         command += ["--grant", grant]
@@ -218,14 +219,14 @@ def main():
         cache = (compiler_scratch or Path(temp)) / "cache"
         env = os.environ | {"TMPDIR": temp, "XDG_CACHE_HOME": str(cache)}
         if args.mode != "check":
-            members = manifest(WORKSPACE)["workspace"]["members"]
+            selected = members(args.compiler)
         elif args.changed_since:
-            members = selected_packages(args.changed_since)
+            selected = selected_packages(args.changed_since, args.compiler)
         else:
-            members = lock_packages()
+            selected = lock_packages(args.compiler)
         if args.mode == "check":
-            print(f"laws check: {len(members)} package(s)", flush=True)
-        for member in members:
+            print(f"laws check: {len(selected)} package(s)", flush=True)
+        for member in selected:
             status |= int(run_package(args, member, env, commit, compiler_scratch) != 0)
     return status
 

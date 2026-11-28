@@ -252,7 +252,7 @@ impl Graph<'_> {
     fn read(&self, dir: Option<&str>) -> Result<(Dir, Members, Selections, Id), String> {
         let (who, spelling) = (self.who, self.spelling);
         let top = self.snapshot.top();
-        let no_manifest = || format!("{who}{spelling} has no hirsel.toml");
+        let no_manifest = || format!("{who}{spelling} has no hirsel.hcfg");
         let package_dir = match dir {
             None => top.clone(),
             Some(dir) => match self.snapshot.dir(&top, &top, dir) {
@@ -429,7 +429,7 @@ impl Graph<'_> {
                 manifest.package
             };
             let package = package
-                .ok_or_else(|| format!("{}: expected [package]", manifest_path.display()))?;
+                .ok_or_else(|| format!("{}: expected a package record", manifest_path.display()))?;
             if drafts.contains_key(&package.id) {
                 return Err(format!(
                     "{}: workspace.members: {entry:?} repeats {}",
@@ -496,7 +496,7 @@ impl Graph<'_> {
                         let source = match source {
                             Some(SourceLocation::Archive(path)) => {
                                 let path = archive_path(Path::new(&from), path).ok_or_else(|| format!(
-                                    "{}: dependencies.{name}: archive {path:?} is not inside the workspace root. To share an archive across packages, add a parent hirsel.toml with [workspace] and members listing the package directories, then use a relative path within that workspace",
+                                    "{}: dependencies.{name}: archive {path:?} is not inside the workspace root. To share an archive across packages, add a parent hirsel.hcfg with a pkg_v1.Workspace and members listing the package directories, then use a relative path within that workspace",
                                     manifest_path.display()
                                 ))?;
                                 Some(SourceLocation::Archive(path))
@@ -628,6 +628,6 @@ impl Graph<'_> {
         Manifest::parse(&bytes, &path)?
             .package
             .map(|package| package.id)
-            .ok_or_else(|| format!("{}: expected [package]", path.display()))
+            .ok_or_else(|| format!("{}: expected a package record", path.display()))
     }
 }

@@ -11,6 +11,11 @@ def third_party_http_archive(name, **kwargs):
     # SHA-256 (prelude http_archive/http_archive.bzl `prefer_local`): on the
     # default pool platform, so a second checkout gets an action-cache hit and
     # never downloads or unpacks the crate on this host.
+    # Offline builders can serve the cached .crate files on loopback. The
+    # generated Cargo.lock checksum still pins every archive.
+    mirror = read_root_config("hirsel", "crate_mirror")
+    if mirror:
+        kwargs["urls"] = [mirror.rstrip("/") + "/" + name]
     native.http_archive(name = name, **kwargs)
 
 def _compatible(platforms, kwargs):

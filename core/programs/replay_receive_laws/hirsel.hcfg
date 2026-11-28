@@ -1,0 +1,19 @@
+pkg_v1.Package(
+    name: "hirsel.ai/replay_receive_laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("wire.hirsel", "laws")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("dtls", Path(package: "dtls", major: 1, path: "../dtls", authority: [Random, Secret])),
+        ("rtp", Path(package: "rtp", major: 1, path: "../rtp", authority: [])),
+        ("srtp", Path(package: "srtp", major: 1, path: "../srtp", authority: [])),
+        ("sframe", Path(package: "sframe", major: 1, path: "../sframe", authority: [])),
+    ],
+    tests: Some(Tests(
+        sources: [("replay_prop_laws.hirsel", "laws")],
+        limit: 67108864,
+        grants: [Env(["HIRSEL_TEST_SIM_SEED"])],
+        runs: [],
+    )),
+)

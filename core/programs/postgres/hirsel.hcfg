@@ -1,0 +1,17 @@
+pkg_v1.Package(
+    name: "hirsel.ai/postgres",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("postgres.hirsel", "postgres"),
+        ("diagnostic.hirsel", "postgres"),
+        ("exchange.hirsel", "postgres"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [("sim_tests.hirsel", "sim_tests"), ("example.hirsel", "example")],
+        limit: 16777216,
+        grants: [Tasks, Env(["HIRSEL_TEST_SIM_SEED"])],
+        runs: [],
+    )),
+)

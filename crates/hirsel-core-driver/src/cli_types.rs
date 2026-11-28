@@ -45,6 +45,7 @@ pub enum NoOption {}
 pub enum Invocation {
     OpGet(Request<OpGetOption>),
     Help(Request<HelpOption>),
+    ConfigExport(Request<ConfigExportOption>),
     Compiler(Request<CompilerOption>),
     Simple(Request<NoOption>),
     Lsp(Request<NoOption>),

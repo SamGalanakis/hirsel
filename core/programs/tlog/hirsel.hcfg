@@ -1,0 +1,18 @@
+pkg_v1.Package(
+    name: "hirsel.ai/tlog",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("tlog.hirsel", "tlog"),
+        ("tiles.hirsel", "tiles"),
+        ("note.hirsel", "note"),
+        ("witness.hirsel", "witness"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [("interop_laws.hirsel", "interop_laws")],
+        limit: 67108864,
+        grants: [Random],
+        runs: [],
+    )),
+)

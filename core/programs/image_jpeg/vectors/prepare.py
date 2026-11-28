@@ -8,6 +8,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
+
 
 def main(work, reference):
     vectors = Path(__file__).resolve().parent
@@ -17,17 +20,14 @@ def main(work, reference):
     staged = work / "codec"
     staged.mkdir(exist_ok=True)
     dependencies = ["image_core", "media_container", "media_bits"]
-    (work / "hirsel.toml").write_text("[workspace]\nmembers = " + json.dumps(["codec", *dependencies]) + "\n")
+    hcfg.workspace(work, ["codec", *dependencies])
     for dependency in dependencies:
         shutil.copytree(codec.parent / dependency, work / dependency, dirs_exist_ok=True)
     for name in ("image_jpeg.hirsel", "native.hirsel", "libhirsel_jpeg.a"):
         shutil.copyfile(codec / name, staged / name)
     for name in ("tests.hirsel", "example.hirsel"):
         shutil.copyfile(vectors / name, staged / name)
-    manifest = (codec / "hirsel.toml").read_text()
-    manifest = manifest.replace("[dependencies]\n", "[dependencies]\nstd = { major = 1 }\n")
-    tests = (vectors / "test.toml").read_text()
-    (staged / "hirsel.toml").write_text(manifest + tests.replace('"fixtures"', json.dumps(str(fixtures))))
+    hcfg.vector_package(codec, vectors, staged, fixtures)
 
     direct = work / "direct"
     subprocess.run([

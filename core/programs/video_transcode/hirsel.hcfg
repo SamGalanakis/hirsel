@@ -1,0 +1,20 @@
+pkg_v1.Package(
+    name: "hirsel.ai/video_transcode",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("split.hirsel", "split"),
+        ("stitch.hirsel", "stitch"),
+        ("tone.hirsel", "tone"),
+        ("transcode.hirsel", "transcode"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("av1", Path(package: "hirsel.ai/av1", major: 1, path: "../av1", authority: [Foreign])),
+        ("h264", Path(package: "hirsel.ai/h264", major: 1, path: "../h264", authority: [Foreign])),
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("media_container", Path(package: "media_container", major: 1, path: "../media_container", authority: [Dir])),
+        ("video_packager", Path(package: "hirsel.ai/video_packager", major: 1, path: "../video_packager", authority: [])),
+        ("video_yuv", Path(package: "hirsel.ai/video_yuv", major: 1, path: "../video_yuv", authority: [Foreign])),
+    ],
+)

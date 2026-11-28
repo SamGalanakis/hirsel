@@ -30,7 +30,7 @@ fn source_walk_manifest_approvals_and_refusals() {
         }
         super::submission(Some(source.into()), None, code, lines, &state).map(|_| ())
     };
-    let grants = ["Clock", "Foreign=app@1/main/I", "Exec=tools.toml build"].map(str::to_owned);
+    let grants = ["Clock", "Foreign=app@1/main/I", "Exec=tools.hcfg build"].map(str::to_owned);
     let (input, upload, source, approvals) =
         super::submission(Some(root.clone()), None, None, grants.to_vec(), &root).unwrap();
     assert!(upload.is_none());
@@ -38,7 +38,7 @@ fn source_walk_manifest_approvals_and_refusals() {
         panic!("--source did not submit a source manifest");
     };
     assert_eq!(approvals.foreign, ["app@1/main/I"]);
-    assert_eq!(approvals.exec, ["tools.toml build"]);
+    assert_eq!(approvals.exec, ["tools.hcfg build"]);
 
     let files: [(&str, &[u8]); 3] = [
         ("a.txt", b"a"),
@@ -87,7 +87,7 @@ fn source_walk_manifest_approvals_and_refusals() {
             "a Foreign interface can be granted only once",
         ),
         (
-            &["--grant", "Exec=tools.toml"],
+            &["--grant", "Exec=tools.hcfg"],
             "Exec requires --grant 'Exec=FILE NAME[,NAME]'",
         ),
     ] {

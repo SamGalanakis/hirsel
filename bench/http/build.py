@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -58,7 +60,7 @@ def manifest_for(fixture, source, service=False):
     core, std = (item["package"] for item in base["packages"])
     store = {"name": "store", "version": "1"}
     store_root = ROOT / "core/programs/store"
-    store_sources = tomllib.loads((store_root / "hirsel.toml").read_text())["sources"]
+    store_sources = hcfg.package(store_root)["sources"]
     base["packages"].extend([
         {"package": store, "dependencies": [core, std],
          "sources": [{"file": str(store_root / file), "modules": [module], "signatures": False}

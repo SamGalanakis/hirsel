@@ -8,11 +8,11 @@
 
 export_file(name = "notices.py", mode = "reference", visibility = ["PUBLIC"])
 
-export_file(name = "toolchain_programs.py", visibility = ["PUBLIC"])
+export_file(name = "toolchain_programs.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "link_exec_helper.py", visibility = ["PUBLIC"])
 
-export_file(name = "product.toml", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "product.hcfg", mode = "reference", visibility = ["PUBLIC"])
 
 # The distribution gates read these at their repository paths.
 [export_file(name = path, src = path, mode = "reference", visibility = ["PUBLIC"])
- for path in ["build", "check-installer", "darwin_host.py", "install.sh.in", "product.py", "notice-sources.json", "validate-install"] + glob(["licenses/**"])]
+ for path in ["build", "check-installer", "darwin_host.py", "install.sh.in", "product.py", "hcfg.py", "notice-sources.json", "validate-install"] + glob(["licenses/**"])]

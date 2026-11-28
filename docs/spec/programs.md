@@ -14,7 +14,7 @@ definition's identity, so two aliases of one package name one set of types. A pa
 records, for each dependency, the root it was checked against (an exact binding) or a floor
 version that the root workspace may raise ([packages §1](packages.md#1-canonical-library-content));
 the manifest format is outside the language, and the `hirsel` tool's is
-[`hirsel.toml`](packages.md). A package states the charge policy it was
+[`hirsel.hcfg`](packages.md). A package states the charge policy it was
 written for ([MEM-24](budgets.md#mem-24-logical-charges)); in v1 that is `charge-v1`.
 
 ### PROG-2: Visibility
@@ -167,7 +167,7 @@ rows recorded with it; otherwise the test is executed.
 Version note (2026-11-24, verify-observer-2037): adds the `--laws` strength row
 beside the PROG-4 outcome and its reuse condition. The outcome rules are unchanged.
 
-In `hirsel.toml`, use plural `grants` and `dirs` in `[tests]` or an individual
+In `hirsel.hcfg`, use plural `grants` and `dirs` in `[tests]` or an individual
 test's run table. The `test` command accepts `--grant` and `--dir` when the package
 has no manifest test configuration.
 

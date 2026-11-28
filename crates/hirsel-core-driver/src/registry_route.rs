@@ -3,11 +3,10 @@
 use crate::package_manifest::name::scoped;
 use crate::registry_verify::notes::{Log, Trust, Witnesses};
 use crate::registry_verify::{Hash, decode_base64};
-use serde::Deserialize;
+use hirsel_config_schema::user_v1::{self, Prefix, Quorum};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use ureq::http::Uri;
 
@@ -105,21 +104,6 @@ impl Route {
     }
 }
 
-#[derive(Deserialize, Default)]
-struct Config {
-    #[serde(default)]
-    registry: Registry,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct Registry {
-    #[serde(default)]
-    route: Vec<Pin>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct Pin {
     prefix: String,
     url: String,
@@ -193,46 +177,49 @@ pub(crate) struct Routes(BTreeMap<String, Arc<Route>>);
 
 impl Routes {
     pub(crate) fn load() -> Result<Self, String> {
-        let directory = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|path| path.join(".config"))
-            });
-        directory.map_or_else(
-            || Ok(Self::default()),
-            |dir| Self::read(&dir.join("hirsel/config.toml")),
+        Self::from_rows(
+            crate::user_config::load()?
+                .map(|config| config.routes)
+                .unwrap_or_default(),
         )
     }
 
-    fn read(path: &Path) -> Result<Self, String> {
-        let data = match std::fs::read_to_string(path) {
-            Ok(data) => data,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(error) => return Err(format!("{}: {error}", path.display())),
-        };
-        Self::parse(&data).map_err(|error| format!("{}: {error}", path.display()))
+    #[cfg(test)]
+    pub(crate) fn parse(input: &str) -> Result<Self, String> {
+        Self::from_rows(crate::user_config::decode(input.as_bytes())?.routes)
     }
 
-    pub(crate) fn parse(input: &str) -> Result<Self, String> {
-        let config: Config = toml::from_str(input).map_err(|error| error.to_string())?;
+    fn from_rows(rows: Vec<user_v1::Route>) -> Result<Self, String> {
         let mut routes = BTreeMap::new();
         let mut origins = BTreeMap::<Origin, Arc<Route>>::new();
-        for mut pin in config.registry.route {
-            let prefix = if pin.prefix == "*" {
-                ""
-            } else {
-                pin.prefix
-                    .strip_suffix("/*")
-                    .filter(|scope| scoped(&format!("{scope}/x")))
-                    .ok_or_else(|| format!("invalid registry prefix {:?}", pin.prefix))?
-            }
-            .to_owned();
+        for row in rows {
+            let prefix = match row.prefix {
+                Prefix::Global => String::new(),
+                Prefix::HostPrefix(host) if !host.contains('/') && scoped(&format!("{host}/x")) => {
+                    host
+                }
+                Prefix::Tenant { host, tenant }
+                    if !host.contains('/')
+                        && !tenant.contains('/')
+                        && scoped(&format!("{host}/{tenant}/x")) =>
+                {
+                    format!("{host}/{tenant}")
+                }
+                other => return Err(format!("invalid registry prefix {other:?}")),
+            };
+            let (quorum, witness_keys) = match row.quorum {
+                Quorum::Preview => (0, vec![]),
+                Quorum::Witnessed { first, second } => (2, vec![first, second]),
+            };
+            let mut pin = Pin {
+                prefix: prefix.clone(),
+                url: row.url,
+                release_key: row.release_key,
+                status_key: row.status_key,
+                legal_key: row.legal_key,
+                witness_keys,
+                quorum,
+            };
             if routes.contains_key(&prefix) {
                 return Err(format!("duplicate registry prefix {:?}", pin.prefix));
             }
@@ -266,7 +253,7 @@ impl Routes {
             .or_else(|| self.0.get(host))
             .or_else(|| self.0.get(""))
             .map(AsRef::as_ref)
-            .ok_or_else(|| format!("no registry route for {name}: {PUBLIC_ORIGIN} has no shipped independent witness pins yet; configure [[registry.route]] in hirsel/config.toml for your registry"))
+            .ok_or_else(|| format!("no registry route for {name}: {PUBLIC_ORIGIN} has no shipped independent witness pins yet; configure routes in hirsel/config.hcfg for your registry"))
     }
 
     pub(crate) fn for_pin(&self, name: &str, origin: &Origin) -> Result<&Route, String> {

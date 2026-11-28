@@ -1,0 +1,9 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests")],
+        limit: 16777216,
+        grants: [Foreign("hirsel.ai/video_yuv@1/video_yuv/Yuv"), Dir("fixtures")],
+        runs: [],
+    ),
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+)

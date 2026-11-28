@@ -339,7 +339,7 @@ impl State {
                             "method": "workspace/didChangeWatchedFiles",
                             "registerOptions": {"watchers": [
                                 {"globPattern": "**/*.hirsel"},
-                                {"globPattern": "**/hirsel.toml"},
+                                {"globPattern": format!("**/{}", crate::package_dir::MANIFEST)},
                                 {"globPattern": "**/hirsel.lock"}
                             ]}
                         }]}
@@ -692,19 +692,20 @@ mod stdio_fixture {
         let app_path = workspace.join("app/main.hirsel");
         let lib_path = workspace.join("lib/main.hirsel");
         write(
-            &workspace.join("hirsel.toml"),
-            "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+            &workspace.join("hirsel.hcfg"),
+            "pkg_v1.Workspace(members: [\"app\", \"lib\"])\n",
         );
-        let dependency = "{ package = \"fixture.test/lib\", major = 1, path = \"../lib\" }";
+        let dependency =
+            "Path(package: \"fixture.test/lib\", major: 1, path: \"../lib\", authority: [])";
         write(
-            &workspace.join("app/hirsel.toml"),
-            &format!(
-                "{}\n[dependencies]\ndep = {dependency}\nsecond = {dependency}\n",
-                manifest("local/app", "main"),
+            &workspace.join("app/hirsel.hcfg"),
+            &manifest("local/app", "main").replace(
+                "dependencies: []",
+                &format!(r#"dependencies: [("dep", {dependency}), ("second", {dependency})]"#),
             ),
         );
         write(
-            &workspace.join("lib/hirsel.toml"),
+            &workspace.join("lib/hirsel.hcfg"),
             &source_manifest("fixture.test/lib", "main", "lib"),
         );
         write(&app_path, app);

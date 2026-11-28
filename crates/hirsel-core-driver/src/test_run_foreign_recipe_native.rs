@@ -17,19 +17,20 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
         let publish = |arm: &[u8]| {
             let arm_pin = ObjectKind::ForeignArchive.hash(arm).to_string();
             law.write("ffi_laws/arm.a", arm);
-            law.manifest("ffi_laws", "hirsel.ai/ffi_laws", "1.0.0", &format!(r#"
-[sources]
-"laws.hirsel" = "laws"
-"native.hirsel" = "native"
-"main.hirsel" = "main"
-[foreign.native]
-symbols = "hfl_"
-archives = [
-    {{ target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "{x86_pin}" }},
-    {{ target = "aarch64-unknown-linux-gnu", file = "arm.a", sha256 = "{arm_pin}" }},
-    {{ target = "aarch64-apple-darwin", file = "libffi_laws-aarch64-apple-darwin.a", sha256 = "{darwin_pin}" }},
-]
-"#));
+            law.manifest("ffi_laws", "hirsel.ai/ffi_laws", "1.0.0", &format!(r#"sources: [("laws.hirsel", "laws"), ("native.hirsel", "native"), ("main.hirsel", "main")], dependencies: [], foreign: Some([
+    ("native", Native(
+        symbols: "hfl_",
+        archives: [
+            ArchiveFile(target: "x86_64-unknown-linux-gnu", file: "libffi_laws.a", sha256: "{x86_pin}"),
+            ArchiveFile(target: "aarch64-unknown-linux-gnu", file: "arm.a", sha256: "{arm_pin}"),
+            ArchiveFile(
+                target: "aarch64-apple-darwin",
+                file: "libffi_laws-aarch64-apple-darwin.a",
+                sha256: "{darwin_pin}",
+            ),
+        ],
+    )),
+]),"#));
             PackageLaw::pass(law.run(&[
                 "build", "--emit", "recipe", "ffi_laws", "--backend", engine, "--grant", "Foreign=hirsel.ai/ffi_laws@1/laws/Laws",
             ])).trim().to_owned()

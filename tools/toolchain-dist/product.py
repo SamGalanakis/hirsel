@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render release workflow and standalone installer inputs from product.toml."""
+"""Render release workflow and standalone installer inputs from product.hcfg."""
 
 import argparse
 import json
@@ -8,15 +8,15 @@ import platform
 import shlex
 import shutil
 import subprocess
-import tomllib
+import hcfg
 
-PRODUCT = Path(__file__).with_suffix('.toml')
+PRODUCT = Path(__file__).with_suffix('.hcfg')
 APPLE_TARGETS = PRODUCT.parents[1] / 'native-toolchain/apple-targets.json'
 ASSET = 'hirsel-{tag}-{target}.tar.gz'
 
 
 def load():
-    return tomllib.loads(PRODUCT.read_text())
+    return hcfg.product(PRODUCT)
 
 
 def llvm_engine(host):

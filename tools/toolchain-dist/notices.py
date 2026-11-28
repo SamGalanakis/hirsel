@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import hcfg
 import tomllib
 import urllib.request
 
@@ -32,7 +33,7 @@ OPTIONAL_ENTRIES = {'hirsel.profdata'}
 
 def notice_sources(target='x86_64-unknown-linux-gnu'):
     sources = json.loads(SOURCES.read_text())
-    product = tomllib.loads(SOURCES.with_name('product.toml').read_text())
+    product = hcfg.product(SOURCES.with_name('product.hcfg'))
     llvm = product['hosts'][target]['llvm_library']
     files = sources['files']
     files[llvm] = files.pop('@llvm_library@')

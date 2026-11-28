@@ -1735,7 +1735,7 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`) is the language peer. `str0m` (`/tmp/ref-s
 The build lane writes each law **red first**: the case is added to its harness before the
 code it tests, and it fails there. Each law names its oracle, which comes from outside the
 code under test. The harness is the package's law suite, `core/programs/rtp/laws.hirsel` <!-- doc-ref: planned -->
-(`[tests.sources]` in `core/programs/rtp/hirsel.toml` <!-- doc-ref: planned -->), unless a law names another.
+(`[tests.sources]` in `core/programs/rtp/hirsel.hcfg` <!-- doc-ref: planned -->), unless a law names another.
 Where a law gives an expected value that is not quoted from a source, its arithmetic is
 written here and repeated in the law's comment.
 
@@ -2082,7 +2082,7 @@ package. Each law is carried by exactly one slice.
 
 | slice | scope | needs | laws | size | lane |
 |---|---|---|---|---|---|
-| **S1** header and extensions | RTP-1, RTP-2, RTP-3: `core/programs/rtp/` <!-- doc-ref: planned --> with `hirsel.toml`, modules `header`, `seq`, `ext` | nothing | `header_chrome_vector`, `padding_counts`, `extension_forms`, `egress_form`, `index_estimate`, the RTP-1 and RTP-3 cases of `bounded_views` | M | Sol |
+| **S1** header and extensions | RTP-1, RTP-2, RTP-3: `core/programs/rtp/` <!-- doc-ref: planned --> with `hirsel.hcfg`, modules `header`, `seq`, `ext` | nothing | `header_chrome_vector`, `padding_counts`, `extension_forms`, `egress_form`, `index_estimate`, the RTP-1 and RTP-3 cases of `bounded_views` | M | Sol |
 | **S2** RTCP | RTP-4: module `rtcp`, `check`, the `Packet` views and the writers | S1 | `rtcp_compound_rules`, the RTP-4 cases of `bounded_views`, the parse half of `nack_pairs` | M | Sol |
 | **S3** statistics and requests | RTP-5, RTP-6: modules `stats` and `loss` | S2 | `rtt_example`, `reception_report`, `keyframe_coalesce`, the packing half of `nack_pairs` | M | Sol |
 | **S4** history and RTX | RTP-7: modules `history` and `rtx`, plaintext layout and the per-leg contract | S1 | `history_lookup`, `rtx_layout`, the RTX case of `bounded_views` | S | Sol |

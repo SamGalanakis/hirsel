@@ -10,7 +10,7 @@ It also contains `manifest.json`, generated from the same Describe response.
 from the same manifest, over the C embed ABI instead of WebSocket.
 
 A server using `runner` declares `runner = { major = 1 }` under
-`[dependencies]` in `hirsel.toml`.
+`[dependencies]` in `hirsel.hcfg`.
 
 ## 4. Generated code
 

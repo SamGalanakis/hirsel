@@ -1,0 +1,31 @@
+pkg_v1.Package(
+    name: "dtls",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("wire.hirsel", "dtls"),
+        ("records.hirsel", "dtls"),
+        ("handshake.hirsel", "dtls"),
+        ("identity.hirsel", "dtls"),
+        ("admit.hirsel", "dtls"),
+        ("messages.hirsel", "dtls"),
+        ("endpoint.hirsel", "dtls"),
+        ("flights.hirsel", "dtls"),
+        ("receive.hirsel", "dtls"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [
+            ("laws.hirsel", "laws"),
+            ("identity_laws.hirsel", "laws"),
+            ("handshake_laws.hirsel", "laws"),
+            ("timer_laws.hirsel", "laws"),
+            ("attack_laws.hirsel", "laws"),
+            ("loss_laws.hirsel", "laws"),
+            ("vopr_laws.hirsel", "laws"),
+        ],
+        limit: 67108864,
+        grants: [Tasks, Env(["HIRSEL_TEST_SIM_SEED"])],
+        runs: [],
+    )),
+)

@@ -65,7 +65,8 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         for package in ('archive', 'image_core'):
             directory = self.root / 'core/programs' / package
             directory.mkdir(parents=True)
-            (directory / 'hirsel.toml').write_text('[tests]\nlimit = 1024\n')
+            (directory / 'hirsel.hcfg').write_text('pkg_v1.Package(name: "local/sample", version: "1.0.0", charge: ChargeV1, sources: [], '
+                'dependencies: [], tests: Some(Tests(sources: [], limit: 1024, grants: [], runs: [])))\n')
         self.compiler.write_text('''#!/usr/bin/env python3
 import json, pathlib, sys
 args = sys.argv[1:]

@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 hirsel-core-ids = { path = "../hirsel-core-ids" }
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+hirsel-config-schema = { path = "../hirsel-config-schema" }
 libc = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ring = "=0.17.14"

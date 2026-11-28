@@ -14,17 +14,20 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUSTC = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'
 DARWIN_EXCLUDED = ('hirsel-llvm', 'hirsel-core-program-tests')
 
-PRODUCT = ROOT / 'tools/toolchain-dist/product.toml'
+sys.path.insert(0, str(ROOT / 'tools/toolchain-dist'))
+import hcfg
+
+PRODUCT = ROOT / 'tools/toolchain-dist/product.hcfg'
 
 
 def apple_targets():
-    product = tomllib.loads(PRODUCT.read_text())
+    product = hcfg.product(PRODUCT)
     slots = product['runtime_slots']
     targets = {'aarch64-apple-darwin': None}  # Workspace tests, with DARWIN_EXCLUDED.
     for target in ('aarch64-apple-ios', 'aarch64-apple-ios-sim'):
@@ -35,7 +38,7 @@ def apple_targets():
 
 def rust_changed():
     base = subprocess.check_output(['git', 'merge-base', 'HEAD', 'origin/main'], cwd=ROOT, text=True).strip()
-    specs = ['*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'tools/toolchain-dist/product.toml']
+    specs = ['*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'tools/toolchain-dist/product.hcfg']
     changed = subprocess.check_output(['git', 'diff', '--name-only', base, '--', *specs], cwd=ROOT, text=True)
     untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '--', *specs],
                                         cwd=ROOT, text=True)
@@ -61,7 +64,7 @@ def check_target(target, slot):
         for crate in DARWIN_EXCLUDED:
             command.extend(('--exclude', crate))
     else:
-        command.extend(('--package', slot['crate'], '--no-default-features'))
+        command.extend(('--package', slot['crate_name'], '--no-default-features'))
         if slot['features']:
             command.extend(('--features', ','.join(slot['features'])))
     print(f'apple check: {target}', flush=True)

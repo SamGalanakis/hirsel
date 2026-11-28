@@ -6,7 +6,7 @@ own tree. The package provides memory, disk, and object-bucket stores, typed tab
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 `CallInfo`, followers, resident admission, online scrub, offline read-only opens, and foreign-handle checks.
 
-An installed Hirsel toolchain supplies `store@1`. In `hirsel.toml`, add
+An installed Hirsel toolchain supplies `store@1`. In `hirsel.hcfg`, add
 `store = { major = 1 }` under `[dependencies]`.
 
 `memory(clock, random, options)` draws a 16-byte StoreId once.

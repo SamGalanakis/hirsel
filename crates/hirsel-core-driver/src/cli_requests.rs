@@ -357,3 +357,8 @@ pub enum CompilerOption {
     Unused,
     WriteLaws,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigExportOption {
+    Json,
+}

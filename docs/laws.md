@@ -46,7 +46,7 @@ Version note (2026-11-25, laws-land-lint-2703): land lint is
 `tools/buck2/fmt.py --check`. It builds the compiler from the tree being checked
 and runs `core/tools/law_board.py check --changed-since origin/main`, which runs
 `hirsel laws check PKG --libraries core` on each lock package (a member of
-`core/programs/hirsel.toml` or a directory with a tracked `hirsel.laws`, such as
+`core/programs/hirsel.hcfg` or a directory with a tracked `hirsel.laws`, such as
 the `*/vectors` packages) that a change since the merge base can move: a changed
 path inside the package or inside a package it reaches through `path`
 dependencies. A change to `core/std`, `core/core`, the workspace manifest or
@@ -221,7 +221,7 @@ and pass reuse with recorded observations.
 
 ## The lock file
 
-`hirsel.laws` sits beside each package's `hirsel.toml`. Its first line is
+`hirsel.laws` sits beside each package's `hirsel.hcfg`. Its first line is
 `hirsel.laws 1`, followed by one line per `@test`, sorted bytewise by full definition path.
 With one sorted line per law, two lanes that touch different laws merge as text.
 
@@ -237,7 +237,7 @@ Fields:
   contributes its full path and its source bytes without doc comments, in path order.
 - **`sig`.** The same, over the PROG-5 identity and checked signature digest of each
   production definition those definitions name directly, in path order.
-- **`run`.** The same, over the test's effective run configuration from `hirsel.toml`:
+- **`run`.** The same, over the test's effective run configuration from `hirsel.hcfg`:
   root limit, grants, directories and environment values.
 - **`bug` and `oracle`.** The same, over the text of the test's `/// bug:` and
   `/// oracle:` doc-comment lines, or `-` when the test has none. They are prose. Nothing

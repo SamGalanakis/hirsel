@@ -30,13 +30,19 @@ class ProductionBoundaries(unittest.TestCase):
                     ok = check_boundaries.check(root, staged=staged)
                 return ok, errors.getvalue()
 
-            write('laws/hirsel.toml', '''[package]
-name = "laws"
-[sources]
-"main.hirsel" = "main"
-[tests.sources]
-"tools.hirsel" = "helpers.extra"
-"tests.hirsel" = "main"
+            write('laws/hirsel.hcfg', '''pkg_v1.Package(
+    name: "laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [],
+    tests: Some(Tests(
+        sources: [("tools.hirsel", "helpers.extra"), ("tests.hirsel", "main")],
+        limit: 1024,
+        grants: [],
+        runs: [],
+    )),
+)
 ''')
             write('laws/tools.hirsel', 'pub fn law_extra() {}\n')
             write('laws/tests.hirsel', '@test fn law_valid() {}\n')
@@ -46,16 +52,22 @@ const raw: String = r#"quoted " @test fn law_raw() { store.fixture.setup() }"#
 fn main() { main.shared(); value. store.fixture.setup() }
 '''
             write('laws/main.hirsel', clean)
-            write('consumer/hirsel.toml', '''[package]
-name = "consumer"
-[sources]
-"main.hirsel" = "main"
+            write('consumer/hirsel.hcfg', '''pkg_v1.Package(
+    name: "consumer",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [],
+)
 ''')
             write('consumer/main.hirsel', 'fn main() {}\n')
-            write('store-crash/hirsel.toml', '''[package]
-name = "store_crash"
-[sources]
-"cut.hirsel" = "cut"
+            write('store-crash/hirsel.hcfg', '''pkg_v1.Package(
+    name: "store_crash",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("cut.hirsel", "cut")],
+    dependencies: [],
+)
 ''')
             write('store-crash/cut.hirsel', 'pub fn run() {}\n')
             git('init', '-q')

@@ -65,7 +65,7 @@ def checked(command, **kwargs):
 def publish(compiler, scratch):
     source = scratch / "source"
     source.mkdir()
-    for name in ("hirsel.toml", "main.hirsel"):
+    for name in ("hirsel.hcfg", "main.hirsel"):
         shutil.copyfile(HERE / name, source / name)
     return checked([
         compiler, "build", source, "--emit", "recipe", "--backend", "llvm", "--limit", str(ROOT_LIMIT),
@@ -208,7 +208,7 @@ def register_places(compiler, scratch, state, recipe, launcher, places=PLACES):
         for port in sockets:
             port.close()
 
-    pin = scratch / "operator-context.toml"
+    pin = scratch / "job-context.hcfg"
     pin_host(state, pin)
     def register(work):
         spec = work / "group.hcfg"

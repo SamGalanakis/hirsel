@@ -8,6 +8,9 @@ import shutil
 import struct
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
 import tempfile
 
 CODEC = Path(__file__).resolve().parents[1]
@@ -114,10 +117,7 @@ def main(work, reference):
     fixtures.mkdir(parents=True, exist_ok=True)
     shutil.copy2(CODEC / "vectors/tests.hirsel", work)
     # The test runs in its own empty working directory, so its grant is absolute.
-    tests = (CODEC / "vectors/test.toml").read_text().replace(
-        '"fixtures"', json.dumps(str(fixtures.resolve()), ensure_ascii=False),
-    )
-    (work / "hirsel.toml").write_text((CODEC / "hirsel.toml").read_text() + tests)
+    hcfg.vector_package(CODEC, CODEC / "vectors", work, fixtures)
     executable = work / "reference"
     llvm = Path(os.environ["LLVM_SYS_231_PREFIX"])
     run(llvm / "bin/clang", "-O2", "-I", reference,

@@ -347,9 +347,9 @@ fn peak_rss(mut command: Command) -> (Option<i32>, String, i64) {
 fn fetch_chain(law: &PackageLaw, server: &GitServer) {
     let mut next: Option<String> = None;
     for n in (0..257).rev() {
-        let binding = next.as_ref().map_or(String::new(), |rev| {
+        let binding = next.as_ref().map_or("dependencies: [],".into(), |rev| {
             format!(
-                "\n[dependencies]\nn{} = {{ package = \"fixture.test/n{}\", major = 1, root = \"{PACKAGE_X}\", git = \"https://alpha.test/n{}\", rev = \"{rev}\" }}\n",
+                "dependencies: [(\"n{}\", Published(package: \"fixture.test/n{}\", major: 1, root: \"{PACKAGE_X}\", locator: Git(url: \"https://alpha.test/n{}\", rev: \"{rev}\"), authority: []))],",
                 n + 1,
                 n + 1,
                 n + 1
@@ -357,8 +357,8 @@ fn fetch_chain(law: &PackageLaw, server: &GitServer) {
         });
         let tree = Tree::default()
             .file(
-                "hirsel.toml",
-                format!("[package]\nname = \"fixture.test/n{n}\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"n.hirsel\" = \"n\"\n{binding}"),
+                "hirsel.hcfg",
+                format!("pkg_v1.Package(name: \"fixture.test/n{n}\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"n.hirsel\", \"n\")], {binding})\n"),
             )
             .file("n.hirsel", "pub fn one() -> u64 { 1u64 }\n");
         let (repo, commit) = built(tree);

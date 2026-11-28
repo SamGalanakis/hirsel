@@ -16,6 +16,9 @@ import shutil
 import struct
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools/toolchain-dist"))
+import hcfg
 import tarfile
 
 TARBALL_SHA256 = "5178775c8b440073e70920e97d195efff721c0e56d0a78cc82c919e95d54924d"
@@ -189,15 +192,13 @@ def main():
     fixtures.mkdir(parents=True)
     package.mkdir()
     # A path dependency must be a workspace member.
-    (work / "hirsel.toml").write_text('[workspace]\nmembers = ["h264", "media_bits"]\n')
+    hcfg.workspace(work, ["h264", "media_bits"])
     shutil.copytree(codec.parent / "media_bits", work / "media_bits")
     for filename in ("h264.hirsel", "native.hirsel", "libhirsel_h264.a"):
         shutil.copyfile(codec / filename, package / filename)
     shutil.copyfile(vectors / "tests.hirsel", package / "tests.hirsel")
     # The test runs in its own empty working directory, so its grant is absolute.
-    base = (codec / "hirsel.toml").read_text().split("\n[tests]")[0]
-    tests = (vectors / "test.toml").read_text().replace('"fixtures"', json.dumps(str(fixtures)))
-    (package / "hirsel.toml").write_text(base + tests)
+    hcfg.vector_package(codec, vectors, package, fixtures)
 
     with tarball.open("rb") as archive:
         if hashlib.file_digest(archive, "sha256").hexdigest() != TARBALL_SHA256:

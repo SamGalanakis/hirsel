@@ -1,0 +1,30 @@
+pkg_v1.Package(
+    name: "hirsel.ai/ffi_laws",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("laws.hirsel", "laws"), ("native.hirsel", "native"), ("main.hirsel", "main")],
+    dependencies: [],
+    tests: Some(Tests(
+        sources: [("tests.hirsel", "tests")],
+        limit: 67108864,
+        grants: [Foreign("hirsel.ai/ffi_laws@1/laws/Laws"), Tasks],
+        runs: [],
+    )),
+    foreign: Some([
+        ("native", Native(
+            symbols: "hfl_",
+            archives: [
+                ArchiveFile(
+                    target: "x86_64-unknown-linux-gnu",
+                    file: "libffi_laws.a",
+                    sha256: "8cf28137f7cca16f2d5dd8f1dec8b08b0690cce125e8b5891cb64029c20eef04",
+                ),
+                ArchiveFile(
+                    target: "aarch64-apple-darwin",
+                    file: "libffi_laws-aarch64-apple-darwin.a",
+                    sha256: "8d9c0c35fd2c98ea67d745dc881d0af32fd96382bd5838fe84b0aa2c457d7131",
+                ),
+            ],
+        )),
+    ]),
+)

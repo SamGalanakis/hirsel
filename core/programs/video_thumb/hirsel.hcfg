@@ -1,0 +1,26 @@
+pkg_v1.Package(
+    name: "hirsel.ai/video_thumb",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("index.hirsel", "thumb"),
+        ("decode.hirsel", "thumb"),
+        ("output.hirsel", "thumb"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("av1", Path(package: "hirsel.ai/av1", major: 1, path: "../av1", authority: [Foreign])),
+        ("h264", Path(package: "hirsel.ai/h264", major: 1, path: "../h264", authority: [Foreign])),
+        ("image_core", Path(package: "hirsel.ai/image_core", major: 1, path: "../image_core", authority: [])),
+        ("image_pipeline", Path(
+            package: "hirsel.ai/image_pipeline",
+            major: 1,
+            path: "../image_pipeline",
+            authority: [Random, Secret, Foreign],
+        )),
+        ("image_webp", Path(package: "hirsel.ai/image_webp", major: 1, path: "../image_webp", authority: [Foreign])),
+        ("media_bits", Path(package: "media_bits", major: 1, path: "../media_bits", authority: [])),
+        ("media_container", Path(package: "media_container", major: 1, path: "../media_container", authority: [Dir])),
+        ("video_yuv", Path(package: "hirsel.ai/video_yuv", major: 1, path: "../video_yuv", authority: [Foreign])),
+    ],
+)

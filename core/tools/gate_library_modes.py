@@ -320,10 +320,18 @@ def main():
             bundle = Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-srtp-consumer-') as temporary:
                 app = Path(temporary)
-                (app / 'hirsel.toml').write_text(
-                    '[package]\nname = "local/srtp_consumer"\nversion = "1.0.0"\ncharge = "charge-v1"\n\n'
-                    '[dependencies]\nstd = { major = 1 }\nsrtp = { major = 1 }\n\n'
-                    '[sources]\n"main.hirsel" = "main"\n')
+                (app / 'hirsel.hcfg').write_text(
+                    '''pkg_v1.Package(
+    name: "local/srtp_consumer",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("srtp", Toolchain(package: "srtp", major: 1, authority: [])),
+    ],
+)
+''')
                 (app / 'main.hirsel').write_text(
                     'pub fn main() -> Result[(), Exit] {\n'
                     '    let _ = srtp.tag_room(AeadAes128Gcm)\n'
@@ -359,12 +367,25 @@ def main():
                 clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}
                 app = work / 'call'
                 app.mkdir()
-                (app / 'hirsel.toml').write_text(
-                    '[package]\nname = "local/call"\nversion = "1.0.0"\ncharge = "charge-v1"\n\n'
-                    '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n'
-                    'platform = { major = 1 }\nsearch = { major = 1 }\nmcp = { major = 1 }\n'
-                    'sframe = { major = 1 }\nmedia_record = { major = 1 }\ncli = { major = 1 }\n\n'
-                    '[sources]\n"main.hirsel" = "main"\n')
+                (app / 'hirsel.hcfg').write_text(
+                    '''pkg_v1.Package(
+    name: "local/call",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("webrtc_sfu", Toolchain(package: "webrtc_sfu", major: 1, authority: [])),
+        ("turn", Toolchain(package: "turn", major: 1, authority: [])),
+        ("platform", Toolchain(package: "platform", major: 1, authority: [])),
+        ("search", Toolchain(package: "search", major: 1, authority: [])),
+        ("mcp", Toolchain(package: "mcp", major: 1, authority: [])),
+        ("sframe", Toolchain(package: "sframe", major: 1, authority: [])),
+        ("media_record", Toolchain(package: "media_record", major: 1, authority: [])),
+        ("cli", Toolchain(package: "cli", major: 1, authority: [])),
+    ],
+)
+''')
                 (app / 'main.hirsel').write_text(
                     'pub fn main() -> Result[(), Exit] {\n'
                     '    if webrtc_sfu.signal.code(Suspended) != 5 || list.len(turn.offered_algorithms()) == 0 {\n'
@@ -495,13 +516,13 @@ def main():
                 created = self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT,
                                             capture_output=True, text=True)
                 self.assertEqual(created.returncode, 0, created.stderr)
-                manifest = app / 'hirsel.toml'
+                manifest = app / 'hirsel.hcfg'
                 config = manifest.read_text()
-                manifest.write_text(config.replace('[tests]\n', '[tests]\ngrant = ["Stdout"]\n'))
+                manifest.write_text(config.replace('Tests(', 'Tests(grant: [Stdout], '))
                 refused = self.progress.run([str(compiler), 'check'], cwd=app,
                                             capture_output=True, text=True)
                 self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
-                self.assertIn('unknown key tests.grant. Use `grants`', refused.stderr)
+                self.assertIn('unknown field', refused.stderr)
                 manifest.write_text(config)
                 (app / 'tests.hirsel').write_text(
                     '@test fn bad() -> Result[(), ()] { true }\n')
@@ -520,8 +541,8 @@ def main():
             def examples(title):
                 section = primer.split(title + '\n', 1)[1].split('\n## ', 1)[0]
                 source = re.search(r'^```hirsel\n(.*?)^```$', section, re.M | re.S).group(1)
-                table = re.search(r'^```text\n(.*?)^```$', section, re.M | re.S)
-                return source, table.group(1).removeprefix('[tests]\n') if table else None
+                table = re.search(r'^```hcfg\n(tests:.*?)^```$', section, re.M | re.S)
+                return source, table.group(1).strip() if table else None
 
             samples = [
                 ('## 11. A command that reads a file', 'main.hirsel', 'reads_utf8'),
@@ -539,12 +560,13 @@ def main():
                         (app / filename).write_text(source)
                         if filename == 'main.hirsel':
                             (app / 'tests.hirsel').write_text('')
-                        manifest = app / 'hirsel.toml'
+                        manifest = app / 'hirsel.hcfg'
                         config = manifest.read_text()
                         if settings is None:
-                            settings = 'limit = 67108864\ngrants = ["Tasks"]\n'
-                        config = config.replace('[tests]\nlimit = 67108864\n',
-                                                '[tests]\n' + settings)
+                            config = config.replace('grants: []', 'grants: [Tasks]')
+                        else:
+                            start = config.index('tests: Some(Tests(')
+                            config = config[:start] + settings + '\n)\n'
                         manifest.write_text(config)
                         common = ['--runtime', str(runtime), '--libraries', str(ROOT / 'core')]
                         tested = self.progress.run(

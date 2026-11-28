@@ -24,7 +24,7 @@ fn std_manifest() -> PackageManifest {
 
 fn library_manifest(name: &str) -> PackageManifest {
     let root = repo().join("core/programs").join(name);
-    let text = std::fs::read_to_string(root.join("hirsel.toml")).unwrap();
+    let text = std::fs::read_to_string(root.join("hirsel.hcfg")).unwrap();
     let manifest: toml::Table = text.parse().unwrap();
     let dependencies = std::iter::once(package("core"))
         .chain(

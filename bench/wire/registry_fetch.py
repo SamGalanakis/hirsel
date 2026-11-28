@@ -89,10 +89,10 @@ def prepare(args):
     (w / 'registry.json').write_bytes(compact([ORIGIN, legal, release, status, 'preview', [],
         ['https://s3.test:8112', 'us-east-1', 'bucket', ''], [], '8111', [PUBLISHER + '/*']]))
     (w / 'config/hirsel').mkdir(parents=True)
-    (w / 'config/hirsel/config.toml').write_text(
-        f'[[registry.route]]\nprefix = "{PUBLISHER}/*"\nurl = "{ORIGIN}"\n'
-        f'release-key = "{release}"\nstatus-key = "{status}"\nlegal-key = "{legal}"\n'
-        'witness-keys = []\nquorum = 0\n')
+    (w / 'config/hirsel/config.hcfg').write_text(
+        f'user_v1.Config(contexts: [], routes: [Route(prefix: HostPrefix("{PUBLISHER}"), '
+        f'url: "{ORIGIN}", release_key: "{release}", status_key: "{status}", '
+        f'legal_key: "{legal}", quorum: Preview)])\n')
     (w / 'hosts').write_text(f'127.0.0.1 localhost registry.test bucket.s3.test {socket.gethostname()}\n{DOMAIN_IP} {PUBLISHER}\n')
     (w / 'san').write_text(f'subjectAltName=DNS:registry.test,DNS:bucket.s3.test,DNS:{PUBLISHER}\n'
                            'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n')
@@ -399,8 +399,14 @@ def qualify(args, proxy, scratch):
     for i in range(args.samples):
         app = scratch / f'consumer-{i}'
         app.mkdir()
-        (app / 'hirsel.toml').write_text('[package]\nname = "local/app"\nversion = "1.0.0"\n'
-            'charge = "charge-v1"\n[sources]\n"main.hirsel" = "main"\n')
+        (app / 'hirsel.hcfg').write_text('''pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [],
+)
+''')
         (app / 'main.hirsel').write_text('pub fn main() -> Result[(), Exit] { Ok(()) }\n')
         apps.append(app)
         packages = app / 'store'
@@ -417,7 +423,7 @@ def qualify(args, proxy, scratch):
     sockets = (w / 'frozen.sockets').read_text()
     check('socket(AF_INET' not in sockets and 'connect(' not in sockets, sockets)
     check(before == (proxy.connections, len(proxy.rows)), frozen)
-    base = producer / 'base/hirsel.toml'
+    base = producer / 'base/hirsel.hcfg'
     original = base.read_text()
     base.write_text(original.replace('version = "1.0.0"', 'version = "1.0.1"'))
     new = cli(args, base.parent, store, *publish)
@@ -444,7 +450,7 @@ def qualify(args, proxy, scratch):
     status(w, 'takedown', updated)
     fresh = scratch / 'taken-down'
     fresh.mkdir()
-    for name in ('hirsel.toml', 'hirsel.lock', 'main.hirsel'):
+    for name in ('hirsel.hcfg', 'hirsel.lock', 'main.hirsel'):
         shutil.copy(app / name, fresh / name)
     start = len(proxy.rows)
     refused = cli(args, fresh, fresh / 'store', 'check', expected=2)

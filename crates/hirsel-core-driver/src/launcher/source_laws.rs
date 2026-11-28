@@ -133,8 +133,8 @@ fn source_publishes_with_the_normal_checker() {
     let app = root.join("app");
     fs::create_dir_all(&app).unwrap();
     fs::write(
-        app.join("hirsel.toml"),
-        "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
+        app.join("hirsel.hcfg"),
+        "pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [])\n",
     )
     .unwrap();
     let main = |body: &str| {
@@ -169,7 +169,7 @@ fn source_publishes_with_the_normal_checker() {
         )
     };
     let tree = || {
-        let files = ["hirsel.toml", "hirsel.lock", "main.hirsel"]
+        let files = ["hirsel.hcfg", "hirsel.lock", "main.hirsel"]
             .map(|name| (name.to_owned(), fs::read(app.join(name)).unwrap()));
         Tree {
             package: ".".into(),
@@ -372,10 +372,19 @@ fn source_publishes_with_the_normal_checker() {
 
     // This is the same checked-in entry and native archive as the FFI law. It is a valid
     // Foreign call with the capability granted. An untrusted tree submits no grant.
-    let ffi_manifest = fs::read_to_string(ffi.join("hirsel.toml")).unwrap();
-    let (manifest, _) = ffi_manifest.split_once("[tests]").unwrap();
-    fs::write(app.join("hirsel.toml"), manifest).unwrap();
-    let mut names = vec!["hirsel.toml", "hirsel.lock"];
+    let ffi_manifest = fs::read_to_string(ffi.join("hirsel.hcfg")).unwrap();
+    let doc = hirsel_config_schema::package_document(ffi_manifest.as_bytes(), &mut false).unwrap();
+    let tests = doc
+        .replace(
+            &[hirsel_config_schema::PathPart::Field("tests".into())],
+            "None",
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let manifest = tests.apply(&ffi_manifest);
+    fs::write(app.join("hirsel.hcfg"), manifest).unwrap();
+    let mut names = vec!["hirsel.hcfg", "hirsel.lock"];
     for file in [
         "main.hirsel",
         "laws.hirsel",
@@ -485,7 +494,7 @@ fn source_trees_stay_inside_their_scratch() {
     }
     let kept = tree(
         "app",
-        vec![file("app/hirsel.toml"), file("app-x/a"), file("app/src/a")],
+        vec![file("app/hirsel.hcfg"), file("app-x/a"), file("app/src/a")],
     );
     assert_eq!(super::admit::tree(&kept.encode()), Ok(kept));
 }
@@ -557,9 +566,9 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     fs::create_dir_all(&app).unwrap();
     let tree = |tests: &str, body: &str| {
         fs::write(
-            app.join("hirsel.toml"),
+            app.join("hirsel.hcfg"),
             format!(
-                "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n{tests}\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n"
+                "pkg_v1.Package(name: \"local/app\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [], tests: Some(Tests(limit: 67108864, sources: [(\"tests.hirsel\", \"tests\")], {tests})))\n"
             ),
         )
         .unwrap();
@@ -578,7 +587,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         .unwrap();
         let output = lock.current_dir(&app).output().unwrap();
         assert!(output.status.success(), "{output:?}");
-        let files = ["hirsel.toml", "hirsel.lock", "main.hirsel", "tests.hirsel"]
+        let files = ["hirsel.hcfg", "hirsel.lock", "main.hirsel", "tests.hirsel"]
             .map(|name| (name.to_owned(), fs::read(app.join(name)).unwrap()));
         Tree {
             package: ".".into(),
@@ -639,15 +648,19 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     for (case, tests, named) in [
         (
             "a Net grant",
-            "grants = [\"Clock\", \"Net=allow tcp a:1\"]\n",
-            "Net=allow tcp a:1",
+            "grants: [Clock, Net(Connect(cidr: \"127.0.0.1/32\", first_port: 1, last_port: 1))], runs: []",
+            "Net",
         ),
         (
             "a parent Dir",
-            "\n[tests.runs.good]\ndirs = [\"data/../../up\"]\n",
+            "grants: [], runs: [(\"good\", TestRun(grant_change: Some(ReplaceDirs([Dir(\"data/../../up\")]))))]",
             "data/../../up",
         ),
-        ("an absolute Dir", "dirs = [\"/tmp\"]\n", "/tmp"),
+        (
+            "an absolute Dir",
+            "grants: [Dir(\"/tmp\")], runs: []",
+            "/tmp",
+        ),
     ] {
         let answered = admit(&mut rig, &tree(tests, green), true);
         assert!(
@@ -662,7 +675,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     }
 
     let failing = tree(
-        "grants = [\"Tasks\"]\n",
+        "grants: [Tasks], runs: []",
         "@test\nfn bad() -> Result[(), ()] { Error(()) }\n\n@test\nfn good() -> Result[(), ()] { Ok(()) }\n",
     );
     let before = recipes();
@@ -677,7 +690,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     // A test source that does not parse lists no tests; read alone, that run is green.
     let answered = admit(
         &mut rig,
-        &tree("grants = [\"Tasks\"]\n", "@test\nfn broken( -> {\n"),
+        &tree("grants: [Tasks], runs: []", "@test\nfn broken( -> {\n"),
         true,
     );
     assert!(
@@ -693,7 +706,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         "an ungated source ran the gate: {answered:?}"
     );
 
-    let green_tree = tree("grants = [\"Tasks\"]\ndirs = [\"data\"]\n", green);
+    let green_tree = tree("grants: [Tasks, Dir(\"data\")], runs: []", green);
     // The gate names the tree by its manifest's digest, which is what the operator sent.
     let digest = sha2::Sha256::digest(Tree::decode(&green_tree).unwrap().manifest()).to_vec();
     for pass in ["first", "cached"] {

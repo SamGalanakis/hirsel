@@ -216,9 +216,9 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
         files.lock().unwrap().insert(blob_path, blob.to_vec());
         let url = remote_fixture(files);
         let trusted = hirsel_core_ids::hex::encode(&builder(&listed).public);
-        let config = toml::from_str(&format!(
-            "url = {url:?}\ntrusted = [{trusted:?}]\n[transfer]\nrecord-bytes = 4096\nblob-bytes = 1024\nwork-bytes = 1024"
-        )).unwrap();
+        let config = crate::user_config::decode(format!(
+            "user_v1.Config(contexts: [], routes: [], cache: Some(Remote(url: {url:?}, trusted: [{trusted:?}], record_bytes: 4096, blob_bytes: 1024, work_bytes: 1024)))"
+        ).as_bytes()).unwrap().cache.unwrap().into();
         let remote = Remote::new(config, &crate::package_store::Transport::online())
             .unwrap()
             .unwrap();
@@ -279,12 +279,12 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
 #[test]
 fn remote_transfer_policy_bounds_both_directions() {
     use crate::store::{
-        remote::{Config, Remote},
+        remote::Remote,
         signed::{Builder, Kind},
     };
     use hirsel_core_net::key_wrap;
 
-    assert!(toml::from_str::<Config>("url = 'http://127.0.0.1'").is_err());
+    assert!(crate::user_config::decode(br#"user_v1.Config(contexts: [], routes: [], cache: Some(Remote(url: "http://127.0.0.1")))"#.as_slice()).is_err());
     let dir = tempfile::tempdir().unwrap();
     let pkcs8 = key_wrap::ed25519_generate();
     let signing_key = dir.path().join("builder.pk8");
@@ -306,9 +306,9 @@ fn remote_transfer_policy_bounds_both_directions() {
     let files = Files::default();
     let url = remote_fixture(files.clone());
     let remote = |record, blob, work| {
-        let config = toml::from_str(&format!(
-            "url = {url:?}\ntrusted = [{trusted:?}]\nsigning-key = {signing_key:?}\n[transfer]\nrecord-bytes = {record}\nblob-bytes = {blob}\nwork-bytes = {work}"
-        )).unwrap();
+        let config = crate::user_config::decode(format!(
+            "user_v1.Config(contexts: [], routes: [], cache: Some(Remote(url: {url:?}, trusted: [{trusted:?}], signing_key: Some({signing_key:?}), record_bytes: {record}, blob_bytes: {blob}, work_bytes: {work})))"
+        ).as_bytes()).unwrap().cache.unwrap().into();
         Remote::new(config, &crate::package_store::Transport::online())
     };
     assert!(remote(record_bytes, blob_bytes, blob_bytes - 1).is_err());

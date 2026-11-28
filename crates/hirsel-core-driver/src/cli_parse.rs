@@ -179,6 +179,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
     if matches!(
         name.as_str(),
         "op" | "registry"
+            | "config"
             | "prof"
             | "laws"
             | "lean"

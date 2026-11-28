@@ -9,7 +9,7 @@ set -eu
 libraries="$1"; testdata="$2"; workspace="$3"
 for package in runner store; do
     mkdir -p "$workspace/$package"
-    for file in "$libraries/programs/$package"/hirsel.toml "$libraries/programs/$package"/*.hirsel; do
+    for file in "$libraries/programs/$package"/hirsel.hcfg "$libraries/programs/$package"/*.hirsel; do
         cp -L "$file" "$workspace/$package/"
     done
 done
@@ -18,7 +18,7 @@ mkdir -p "$workspace/runner/tests" "$workspace/runner/observe"
 cp -L "$libraries/programs/runner/tests/b9-vectors.hirsel" "$workspace/runner/tests/"
 cp -L "$libraries/programs/runner/observe"/*.hirsel "$workspace/runner/observe/"
 cp -L "$testdata/dev_place.hirsel" "$workspace/runner/"
-printf '[workspace]\nmembers = ["runner", "store"]\n' > "$workspace/hirsel.toml"
+printf 'pkg_v1.Workspace(members: ["runner", "store"])\n' > "$workspace/hirsel.hcfg"
 # The library root the dev child is given: core and std from LIBRARIES, and
 # the members as its programs, so the runner is the toolchain's (launch.md,
 # "Private prefix") and the build gets the place bit.
@@ -29,10 +29,11 @@ ln -s ../../runner "$workspace/libraries/programs/runner"
 ln -s ../../store "$workspace/libraries/programs/store"
 # The copies keep the inputs' read-only mode under remote execution: replace
 # the manifest rather than write through it.
-manifest="$workspace/runner/hirsel.toml"
-sed '/^\[sources\]$/a\
-"dev_place.hirsel" = "runner"
+manifest="$workspace/runner/hirsel.hcfg"
+sed '/^    sources: \[$/a\
+        ("dev_place.hirsel", "runner"),
+/^pkg_v1.Package($/a\
+    program: Some(Program(module: Some("runner"), function: Some("dev_fixture"))),
 ' "$manifest" > "$manifest.new"
-printf '\n[program]\nmodule = "runner"\nfunction = "dev_fixture"\n' >> "$manifest.new"
-rm -f "$manifest"; mv "$manifest.new" "$manifest"
+mv "$manifest.new" "$manifest"
 chmod -R u+w "$workspace"

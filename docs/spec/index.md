@@ -121,7 +121,7 @@ The [in-process code loading specification](packing.md) defines how a pack host 
 The [Compute specification](compute.md) defines the reusable core scheduler for Archetype C elastic remote compute (`compute@1`) outside `fleet@1`: worker-only admission, hard per-principal concurrency limits, placement (`COMP-3`, credit desk), three retry classes, `AccountBeforeMint` restart custody by `ReapBeforeMint`, opaque versioned handles, contained Wasm pricing, multi-cell federation, and the formal/statistical verification split (specified, not built).
 The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
 The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).
-The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
+The [packages specification](packages.md) defines `hirsel.hcfg`, `hirsel.lock`, local
 workspaces, library roots and package archives.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.

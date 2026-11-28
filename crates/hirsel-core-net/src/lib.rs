@@ -272,27 +272,43 @@ impl Rule {
             .into_iter()
             .find(|direction| direction.word() == parts[0])
             .ok_or_else(error)?;
-        let (prefix, bits) = parts[1].split_once('/').ok_or_else(error)?;
-        let ip: IpAddr = prefix.parse().map_err(|_| error())?;
-        let (family, hi, lo) = match ip {
+        let (first, last) = parts[2].split_once('-').ok_or_else(error)?;
+        Self::from_cidr(
+            dir,
+            parts[1],
+            first.parse().map_err(|_| error())?,
+            last.parse().map_err(|_| error())?,
+            reach,
+        )
+        .ok_or_else(error)
+    }
+
+    pub fn from_cidr(
+        dir: AddressDirection,
+        cidr: &str,
+        first: u16,
+        last: u16,
+        reach: Reach,
+    ) -> Option<Self> {
+        let (prefix, bits) = cidr.split_once('/')?;
+        let (family, hi, lo) = match prefix.parse::<IpAddr>().ok()? {
             IpAddr::V4(ip) => (AddressFamily::V4, 0, u64::from(u32::from(ip))),
             IpAddr::V6(ip) => {
                 let n = u128::from(ip);
                 (AddressFamily::V6, (n >> 64) as u64, n as u64)
             }
         };
-        let (first, last) = parts[2].split_once('-').ok_or_else(error)?;
         let rule = Self {
             dir,
             family,
             hi,
             lo,
-            bits: bits.parse().map_err(|_| error())?,
+            bits: bits.parse().ok()?,
             reach,
-            first: first.parse().map_err(|_| error())?,
-            last: last.parse().map_err(|_| error())?,
+            first,
+            last,
         };
-        rule.checked().ok_or_else(error)
+        rule.checked()
     }
 }
 

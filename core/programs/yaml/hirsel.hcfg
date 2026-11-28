@@ -1,0 +1,18 @@
+pkg_v1.Package(
+    name: "hirsel.ai/yaml",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("yaml.hirsel", "yaml"),
+        ("reader.hirsel", "yaml"),
+        ("scalar.hirsel", "yaml"),
+        ("properties.hirsel", "yaml"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(
+        sources: [("laws.hirsel", "laws"), ("vectors.hirsel", "laws")],
+        limit: 67108864,
+        grants: [],
+        runs: [],
+    )),
+)

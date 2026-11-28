@@ -380,25 +380,17 @@ fn doubles() -> Result[(), ()] { if twice(21) == 42 { Ok(()) } else { Error(()) 
 fn greets(out: Stdout) -> Result[(), WriteError] waits { stdout.write(out, "hi\n") }
 ```
 
-A package is a directory with a `hirsel.toml`. `hirsel new app` writes this one:
+A package is a directory with a `hirsel.hcfg`. `hirsel new app` writes this one:
 
-```text
-[package]
-name = "app"
-major = 1
-charge = "charge-v1"
-
-[dependencies]
-std = { major = 1 }
-
-[sources]
-"main.hirsel" = "main"
-
-[tests]
-limit = 67108864
-
-[tests.sources]
-"tests.hirsel" = "tests"
+```hcfg
+pkg_v1.Package(
+    name: "app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(sources: [("tests.hirsel", "tests")], limit: 67108864, grants: [], runs: [])),
+)
 ```
 
 Each `[sources]` entry maps a file to a module, and `[tests]` gives every test its root
@@ -456,14 +448,11 @@ fn reads_utf8(files: Dir, out: Stdout) -> Result[(), ()] waits {
 }
 ```
 
-In `hirsel.toml`, set these keys in the existing `[tests]` table. The test
+In `hirsel.hcfg`, set these keys in the existing `[tests]` table. The test
 starts in an empty directory, so `dirs = ["."]` grants that directory.
 
-```text
-[tests]
-limit = 67108864
-dirs = ["."]
-grants = ["Stdout"]
+```hcfg
+tests: Some(Tests(sources: [], limit: 67108864, grants: [Stdout, Dir(".")], runs: [])),
 ```
 
 ```sh
@@ -531,10 +520,18 @@ In the test manifest, port zero requests an ephemeral port, so the loopback
 Listen grant covers the full port range. Connect also covers the range where
 the OS can select the server port.
 
-```text
-[tests]
-limit = 67108864
-grants = ["Clock", "Tasks", "Net=Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 1-65535"]
+```hcfg
+tests: Some(Tests(
+    sources: [],
+    limit: 67108864,
+    grants: [
+        Clock,
+        Tasks,
+        Net(Listen(cidr: "127.0.0.1/32", first_port: 0, last_port: 65535)),
+        Net(Connect(cidr: "127.0.0.1/32", first_port: 1, last_port: 65535)),
+    ],
+    runs: [],
+)),
 ```
 
 ```sh

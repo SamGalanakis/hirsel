@@ -389,7 +389,7 @@ def host_law(args, root, work, engine, name):
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         address = f'127.0.0.1:{probe.getsockname()[1]}'
-    context = work / 'operator-context.toml'
+    context = work / 'job-context.hcfg'
     spec = work / 'group.hcfg'
     def create(store=work / 'group-store', recording=None):
         group_spec(spec, 'app', address, store, launch_store, recording)

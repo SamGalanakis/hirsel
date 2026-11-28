@@ -244,17 +244,14 @@ sys.exit(index.read_text() != 'current')
 
     def test_modified_foreign_source_is_checked_in_signature_mode(self):
         path = 'core/programs/av1/native.hirsel'
-        self.write('core/programs/av1/hirsel.toml', '''[package]
-name = "hirsel.ai/av1"
-version = "1.0.0"
-charge = "charge-v1"
-
-[sources]
-"native.hirsel" = "native"
-
-[foreign.native]
-symbols = "hfl_"
-archives = []
+        self.write('core/programs/av1/hirsel.hcfg', '''pkg_v1.Package(
+    name: "hirsel.ai/av1",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("native.hirsel", "native")],
+    dependencies: [],
+    foreign: Some([("native", Native(symbols: "hfl_", archives: []))]),
+)
 ''')
         self.write(path, 'pub  fn  f(x:u64)->u64\n')
         status, output = self.run_fmt_result('--check')

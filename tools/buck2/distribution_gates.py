@@ -2,13 +2,14 @@
 
 import importlib.util
 import json
-import tomllib
 
-from compiler_source import toolchain_packages
+from compiler_source import hcfg, toolchain_packages
 
 
 def release_product(reads):
-    return tomllib.loads(reads.text(reads.root / "tools/toolchain-dist/product.toml"))
+    path = reads.root / "tools/toolchain-dist/product.hcfg"
+    reads.bytes(path)
+    return hcfg.product(path)
 
 
 def archive_slots(reads):
@@ -57,7 +58,7 @@ def distribution_gates(out, call, Raw, reads, slots):
     out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel",
                             packages=toolchain_packages(reads, reads.root)))
     out.append("\n" + call("hirsel_script_test", name="test-toolchain-packages", script="tools/tests/toolchain_packages.py",
-                            data=[],
+                            data=["//tools/toolchain-dist:hcfg.py"],
                             files_env={"HIRSEL_PACK_COMPILER": "//:hirsel-core-driver-bin-hirsel",
                                        "HIRSEL_PACK_PROGRAMS": "//tools/toolchain-dist:toolchain_programs.py"},
                             extra_env={"HIRSEL_JOBS": "1"}))
@@ -67,7 +68,7 @@ def distribution_gates(out, call, Raw, reads, slots):
                             embed_runtime="//:hirsel-core-rt-ios-embed-archives",
                             exec_helpers="//:hirsel-exec-helpers",
                             toolchain_packages="//:toolchain-packages",
-                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.toml", "core/programs/store-archive-tool/hirsel.toml"]'),
+                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.hcfg", "core/programs/store-archive-tool/hirsel.hcfg"]'),
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py",
                             data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
@@ -76,21 +77,22 @@ def distribution_gates(out, call, Raw, reads, slots):
                             data=["tools/tests/store_archive_server.py", "tools/tests/fixtures/store-archive-format14.json"],
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
-                            data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",
-                                  "//tools/toolchain-dist:product.toml", "//tools/toolchain-dist:validate-install",
-                                  "tools/native-toolchain/apple-targets.json"]))
+                            files_env={"HIRSEL_CONFIG_EXPORTER":"//:hirsel-config-export-bin-hirsel-config-export"},
+                            data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py", "//tools/toolchain-dist:hcfg.py",
+                                  "//tools/toolchain-dist:product.hcfg", "//tools/toolchain-dist:validate-install", "tools/native-toolchain/apple-targets.json"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present(reads)],
                             data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build",
                                   "//tools/toolchain-dist:darwin_host.py", "//tools/buck2/native-toolchain:link-kit-source",
                                   "//tools/buck2:apple_records.py", "//tools/buck2:generated.py",
                                   "tools/native-toolchain/apple-targets.json",
-                                  "//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",
-                                  "//tools/toolchain-dist:product.toml",
+                                  "//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py", "//tools/toolchain-dist:hcfg.py",
+                                  "//tools/toolchain-dist:product.hcfg",
                                   "NOTICES.md", "Cargo.lock",
                                   *("tools/tests/fixtures/glibc-gate/" + name for name in ("strong-glibc239", "weak-dynsym", "weak-symtab")),
                                   "//third-party:NOTICES.md", "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
                                   *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/") for path in distribution_license_paths(reads))],
-                            files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
+                            files_env={"HIRSEL_CONFIG_EXPORTER": "//:hirsel-config-export-bin-hirsel-config-export",
+                                       "HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
                                        "HIRSEL_DISTRIBUTION_LLVM": "//tools/buck2/native-toolchain:llvm",
                                        "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))

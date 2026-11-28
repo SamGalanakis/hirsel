@@ -480,20 +480,20 @@ def render(program):
     return '\n'.join(parts)
 
 
-MANIFEST = '''[package]
-name = "local/gen"
-version = "1.0.0"
-charge = "charge-v1"
-
-[sources]
-"main.hirsel" = "main"
+MANIFEST = '''pkg_v1.Package(
+    name: "local/gen",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [],
+)
 '''
 
 
 def write_package(program, directory):
     """The repro: source, manifest and the predictions and argv the driver judged it by."""
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / 'hirsel.toml').write_text(MANIFEST)
+    (directory / 'hirsel.hcfg').write_text(MANIFEST)
     (directory / 'main.hirsel').write_text(program.source)
     meta = dict(version=VERSION, seed=program.seed, policy=program.policy, root_limit=ROOT_LIMIT,
                 entries=[dict(index=e.index, large=e.large, small_size=e.small_size, large_size=e.large_size,

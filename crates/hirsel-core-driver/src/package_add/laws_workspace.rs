@@ -17,8 +17,8 @@ fn invocation(args: &[&str]) -> crate::cli::Request<crate::cli::AddOption> {
 fn two_members(law: &PackageLaw) {
     law.fixture_json();
     law.write(
-        "work/hirsel.toml",
-        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n",
+        "work/hirsel.hcfg",
+        "pkg_v1.Workspace(members: [\"apps/ui\", \"apps/api\"])\n",
     );
     for name in ["ui", "api"] {
         law.library(
@@ -26,7 +26,7 @@ fn two_members(law: &PackageLaw) {
             &format!("local/{name}"),
             "1.0.0",
             "pub fn one() -> u64 { 1u64 }\n",
-            "[dependencies]\n",
+            "dependencies: [],",
         );
     }
     copy(law, "vendor/jx.hpkg", "work/vendor/pkg.hpkg");
@@ -35,7 +35,7 @@ fn two_members(law: &PackageLaw) {
 
 fn declared(root: &str, archive: &str) -> String {
     format!(
-        "[workspace]\nmembers = [\"apps/ui\", \"apps/api\"]\n\n[workspace.dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{root}\", archive = \"{archive}\" }}\n"
+        "pkg_v1.Workspace(members: [\"apps/ui\", \"apps/api\"], dependencies: Some([(\"json\", Published(package: \"fixture.test/json\", major: 1, root: \"{root}\", locator: Archive(\"{archive}\"), authority: []))]))\n"
     )
 }
 
@@ -61,12 +61,15 @@ fn s8_add_interrupted_child() {
 
 /// L8.1, L8.2 and the shared-binding rules: two members end with one root
 /// declaration, each source spelled relative to the manifest declaring it.
+fn inherits(before: &str) -> String {
+    before.replace("dependencies: []", "dependencies: [(\"json\", Inherit)]")
+}
+
 fn members_share_one_binding() {
     let law = PackageLaw::new();
     two_members(&law);
-    let ui = text(&law, "work/apps/ui/hirsel.toml");
-    let api = text(&law, "work/apps/api/hirsel.toml");
-    let inherits = |before: &str| format!("{before}json = {{ workspace = true }}\n");
+    let ui = text(&law, "work/apps/ui/hirsel.hcfg");
+    let api = text(&law, "work/apps/api/hirsel.hcfg");
 
     let json = PackageLaw::pass(invoke(
         &law,
@@ -77,14 +80,14 @@ fn members_share_one_binding() {
     assert_eq!(json["result"], "added");
     assert_eq!(
         json["committed"],
-        serde_json::json!(["hirsel.toml", "hirsel.lock", "apps/ui/hirsel.toml"])
+        serde_json::json!(["hirsel.hcfg", "hirsel.lock", "apps/ui/hirsel.hcfg"])
     );
     assert_eq!(json["pending"], serde_json::json!([]));
     assert_eq!(
-        text(&law, "work/hirsel.toml"),
+        text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_X, "vendor/pkg.hpkg")
     );
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
 
     let json = PackageLaw::pass(invoke(
         &law,
@@ -95,13 +98,13 @@ fn members_share_one_binding() {
     assert_eq!(json["result"], "added");
     assert_eq!(
         json["committed"],
-        serde_json::json!(["apps/api/hirsel.toml", "hirsel.lock"])
+        serde_json::json!(["apps/api/hirsel.hcfg", "hirsel.lock"])
     );
     assert_eq!(
-        text(&law, "work/hirsel.toml"),
+        text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_X, "vendor/pkg.hpkg")
     );
-    assert_eq!(text(&law, "work/apps/api/hirsel.toml"), inherits(&api));
+    assert_eq!(text(&law, "work/apps/api/hirsel.hcfg"), inherits(&api));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
     PackageLaw::pass(law.with_store(&["fetch", "work/apps/ui", "--locked"], "cold-store"));
     assert_eq!(
@@ -117,14 +120,14 @@ fn members_share_one_binding() {
         &["../../vendor/pkg.hpkg", "--json"],
     ));
     assert!(json.contains("\"result\":\"unchanged\""), "{json}");
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
     let (status, _, stderr) = invoke(&law, "work/apps/ui", &["../../vendor/jy.hpkg"]);
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
         stderr.contains("dependencies.json inherits the workspace binding"),
         "{stderr}"
     );
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
 
     // Refresh an inherited archive in the workspace declaration.
     copy(&law, "vendor/jy.hpkg", "work/vendor/pkg.hpkg");
@@ -134,11 +137,11 @@ fn members_share_one_binding() {
             .unwrap(),
     ));
     assert_eq!(
-        text(&law, "work/hirsel.toml"),
+        text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_Y, "vendor/pkg.hpkg")
     );
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
-    assert_eq!(text(&law, "work/apps/api/hirsel.toml"), inherits(&api));
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
+    assert_eq!(text(&law, "work/apps/api/hirsel.hcfg"), inherits(&api));
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
 
     // The same local binding can become a shared declaration.
@@ -150,7 +153,7 @@ fn members_share_one_binding() {
         "work/apps/ui",
         &["../../vendor/pkg.hpkg", "--workspace"],
     ));
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), inherits(&ui));
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), inherits(&ui));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
 }
 
@@ -158,7 +161,7 @@ fn members_share_one_binding() {
 fn virtual_root_declares_only() {
     let law = PackageLaw::new();
     law.fixture_json();
-    law.write("v/hirsel.toml", "[workspace]\nmembers = [\"m\"]\n");
+    law.write("v/hirsel.hcfg", "pkg_v1.Workspace(members: [\"m\"])\n");
     law.library(
         "v/m",
         "local/m",
@@ -178,23 +181,23 @@ fn virtual_root_declares_only() {
     );
     PackageLaw::pass(invoke(&law, "v", &["vendor/pkg.hpkg", "--workspace"]));
     assert_eq!(
-        fs::read_to_string(law.path("v/hirsel.toml")).unwrap(),
+        fs::read_to_string(law.path("v/hirsel.hcfg")).unwrap(),
         format!(
-            "[workspace]\nmembers = [\"m\"]\n\n[workspace.dependencies]\njson = {{ package = \"fixture.test/json\", major = 1, root = \"{PACKAGE_X}\", archive = \"vendor/pkg.hpkg\" }}\n"
+            "pkg_v1.Workspace(members: [\"m\"], dependencies: Some([(\"json\", Published(package: \"fixture.test/json\", major: 1, root: \"{PACKAGE_X}\", locator: Archive(\"vendor/pkg.hpkg\"), authority: []))]))\n"
         )
     );
     assert_eq!(fs::read(law.path("v/hirsel.lock")).unwrap(), lock);
 
     law.app("app", "");
     copy(&law, "vendor/jx.hpkg", "app/jx.hpkg");
-    let manifest = fs::read(law.path("app/hirsel.toml")).unwrap();
+    let manifest = fs::read(law.path("app/hirsel.hcfg")).unwrap();
     let (status, _, stderr) = invoke(&law, "app", &["jx.hpkg", "--workspace"]);
     assert_eq!(status, Some(2), "{stderr}");
     assert!(
-        stderr.contains("no [workspace]; hirsel add does not create a workspace boundary"),
+        stderr.contains("no workspace record; hirsel add does not create a workspace boundary"),
         "{stderr}"
     );
-    assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), manifest);
+    assert_eq!(fs::read(law.path("app/hirsel.hcfg")).unwrap(), manifest);
 }
 
 /// L8.4: partial completion is exit 1 and a rerun finishes it; a crash between
@@ -203,8 +206,8 @@ fn virtual_root_declares_only() {
 fn partial_completion() {
     let law = PackageLaw::new();
     two_members(&law);
-    let api = text(&law, "work/apps/api/hirsel.toml");
-    let edited = format!("{api}# edited while add runs\n");
+    let api = text(&law, "work/apps/api/hirsel.hcfg");
+    let edited = format!("{api}// edited while add runs\n");
     let store = law.path("packages");
     let args = [
         "add",
@@ -217,16 +220,16 @@ fn partial_completion() {
     let status = run_at(invocation(&args), &law.path("work/apps/api"), |point| {
         if point == Checkpoint::ManifestCommitted && !fired {
             fired = true;
-            fs::write(law.path("work/apps/api/hirsel.toml"), &edited).unwrap();
+            fs::write(law.path("work/apps/api/hirsel.hcfg"), &edited).unwrap();
         }
     })
     .unwrap();
     assert_eq!(status, 1);
     assert_eq!(
-        text(&law, "work/hirsel.toml"),
+        text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_X, "vendor/pkg.hpkg")
     );
-    assert_eq!(text(&law, "work/apps/api/hirsel.toml"), edited);
+    assert_eq!(text(&law, "work/apps/api/hirsel.hcfg"), edited);
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
     let json = PackageLaw::pass(invoke(
         &law,
@@ -236,17 +239,17 @@ fn partial_completion() {
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         json["committed"],
-        serde_json::json!(["apps/api/hirsel.toml", "hirsel.lock"])
+        serde_json::json!(["apps/api/hirsel.hcfg", "hirsel.lock"])
     );
     assert_eq!(
-        text(&law, "work/apps/api/hirsel.toml"),
-        format!("{api}json = {{ workspace = true }}\n# edited while add runs\n")
+        text(&law, "work/apps/api/hirsel.hcfg"),
+        inherits(&edited)
     );
 
     let law = PackageLaw::new();
     two_members(&law);
     PackageLaw::pass(law.run(&["lock", "work/apps/ui"]));
-    let ui = text(&law, "work/apps/ui/hirsel.toml");
+    let ui = text(&law, "work/apps/ui/hirsel.hcfg");
     let crash = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -259,10 +262,10 @@ fn partial_completion() {
         .unwrap();
     assert_eq!(crash.status.code(), Some(44), "{crash:?}");
     assert_eq!(
-        text(&law, "work/hirsel.toml"),
+        text(&law, "work/hirsel.hcfg"),
         declared(PACKAGE_X, "vendor/pkg.hpkg")
     );
-    assert_eq!(text(&law, "work/apps/ui/hirsel.toml"), ui);
+    assert_eq!(text(&law, "work/apps/ui/hirsel.hcfg"), ui);
     PackageLaw::pass(law.run(&["lock", "work/apps/ui"]));
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
     let json = PackageLaw::pass(invoke(
@@ -273,11 +276,11 @@ fn partial_completion() {
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         json["committed"],
-        serde_json::json!(["apps/ui/hirsel.toml", "hirsel.lock"])
+        serde_json::json!(["apps/ui/hirsel.hcfg", "hirsel.lock"])
     );
     assert_eq!(
-        text(&law, "work/apps/ui/hirsel.toml"),
-        format!("{ui}json = {{ workspace = true }}\n")
+        text(&law, "work/apps/ui/hirsel.hcfg"),
+        inherits(&ui)
     );
     PackageLaw::pass(law.run(&["lock", "work/apps/ui", "--locked"]));
 
@@ -286,9 +289,9 @@ fn partial_completion() {
     PackageLaw::pass(invoke(&law, "work/apps/api", &["../../vendor/pkg.hpkg"]));
     PackageLaw::pass(law.run(&["lock", "work/apps/api", "--locked"]));
     let files = [
-        "work/hirsel.toml",
-        "work/apps/ui/hirsel.toml",
-        "work/apps/api/hirsel.toml",
+        "work/hirsel.hcfg",
+        "work/apps/ui/hirsel.hcfg",
+        "work/apps/api/hirsel.hcfg",
         "work/hirsel.lock",
     ]
     .map(|path| (path, text(&law, path)));

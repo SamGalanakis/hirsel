@@ -1,0 +1,13 @@
+pkg_v1.Package(
+    name: "hirsel.ai/compute",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("resources.hirsel", "resources"),
+        ("protocol.hirsel", "protocol"),
+        ("worker.hirsel", "worker"),
+        ("desk.hirsel", "desk"),
+        ("dispatcher.hirsel", "dispatcher"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+)

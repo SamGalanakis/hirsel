@@ -1,0 +1,12 @@
+[package]
+name = "hirsel-config-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-config-schema = { path = "../hirsel-config-schema" }
+hirsel-data = { path = "../hirsel-data" }
+hirsel-guard = { path = "../hirsel-guard" }

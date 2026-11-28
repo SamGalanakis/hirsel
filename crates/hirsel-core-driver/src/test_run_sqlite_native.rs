@@ -36,9 +36,9 @@ fn sqlite_directory_recovery_locking_and_sync() {
     crate::openat2_required::require();
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/sqlite");
-    let manifest = fs::read_to_string(fixture.join("hirsel.toml")).unwrap()
-        .replace("\"native.hirsel\" = \"native\"", "\"native.hirsel\" = \"native\"\n\"boundary.hirsel\" = \"boundary\"");
-    law.write("core/programs/sqlite/hirsel.toml", manifest);
+    let manifest = fs::read_to_string(fixture.join("hirsel.hcfg")).unwrap()
+        .replace(r#"("native.hirsel", "native")"#, r#"("native.hirsel", "native"), ("boundary.hirsel", "boundary")"#);
+    law.write("core/programs/sqlite/hirsel.hcfg", manifest);
     for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "libhirsel_sqlite-aarch64-unknown-linux-gnu.a", "libhirsel_sqlite-aarch64-apple-darwin.a", "tests.hirsel", "error_buffer_test.hirsel", "example.hirsel"] {
         law.write(&format!("core/programs/sqlite/{file}"), fs::read(fixture.join(file)).unwrap());
     }

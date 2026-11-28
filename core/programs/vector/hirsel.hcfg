@@ -1,0 +1,28 @@
+pkg_v1.Package(
+    name: "hirsel.ai/vector",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("vector.hirsel", "vector"),
+        ("ivf.hirsel", "vector"),
+        ("ivf-query.hirsel", "vector"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+    ],
+    tests: Some(Tests(
+        sources: [
+            ("tests.hirsel", "tests"),
+            ("tests-charges.hirsel", "tests"),
+            ("tests-tail.hirsel", "tests"),
+        ],
+        limit: 67108864,
+        grants: [Clock, Random, Tasks],
+        runs: [
+            ("hirsel.ai/vector@1/tests/ivf_tiered_source", TestRun(limit: Some(268435456), grant_change: Some(ReplaceDirs([Dir(".")])))),
+            ("hirsel.ai/vector@1/tests/ivf_tiered_blocks", TestRun(limit: Some(268435456), grant_change: Some(ReplaceDirs([Dir(".")])))),
+            ("hirsel.ai/vector@1/tests/ivf_demoted_source", TestRun(limit: Some(268435456), grant_change: Some(ReplaceDirs([Dir(".")])))),
+        ],
+    )),
+)

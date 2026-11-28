@@ -16,7 +16,7 @@ flags! {
     PublishSourceCommit ["--source-commit"] "HEX" => "Include this Git object name in each release intent.";
     AddRoot ["--root"] "sha256:HEX" => "Require this archive head root.";
     AddAs ["--as"] "ALIAS" => "Bind the dependency under this alias.";
-    AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's [workspace.dependencies].";
+    AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's dependencies.";
     AddDryRun ["--dry-run"] => "Resolve the change without writing the manifest or lock.";
     PackageStore ["--package-store"] "DIR" => "Select the verified library store.";
     Locked ["--locked"] => "Require a current workspace lock.";

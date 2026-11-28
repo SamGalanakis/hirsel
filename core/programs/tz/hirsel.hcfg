@@ -1,0 +1,14 @@
+pkg_v1.Package(
+    name: "hirsel.ai/tz",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("zone.hirsel", "zone"),
+        ("tzif.hirsel", "zone"),
+        ("posix.hirsel", "zone"),
+        ("database.hirsel", "zone"),
+        ("data.hirsel", "zone"),
+    ],
+    dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))],
+    tests: Some(Tests(sources: [("conformance.hirsel", "tests")], limit: 8388608, grants: [], runs: [])),
+)

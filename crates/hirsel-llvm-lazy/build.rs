@@ -47,17 +47,21 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     let product_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/toolchain-dist/product.toml");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/toolchain-dist/product.hcfg");
     println!("cargo:rerun-if-changed={}", product_path.display());
-    let product: toml::Table = std::fs::read_to_string(product_path)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let product: hirsel_config_schema::product_v1::Product =
+        hirsel_config_schema::read_file(&product_path)
+            .map_err(|error| format!("{}: {error}", product_path.display()))?;
     let target = env::var("TARGET").unwrap();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
         return Err(format!("no LLVM engine build for {target}"));
     }
-    let host = Host::of(&prefix, &product["hosts"][&target]);
+    let artifacts = product
+        .hosts
+        .iter()
+        .find(|(triple, _)| triple == &target)
+        .ok_or_else(|| format!("no host artifacts for {target}"))?;
+    let host = Host::of(&prefix, &artifacts.1);
     let buck_engine = match host.os {
         Os::Linux => Some(
             Path::new("../../../../../../tools/buck2/toolchains/llvm-files").join(&host.engine),
@@ -183,11 +187,11 @@ enum Os {
 }
 
 impl<'a> Host<'a> {
-    fn of(prefix: &Path, artifacts: &'a toml::Value) -> Self {
-        let library = Path::new(artifacts["llvm_library"].as_str().unwrap());
-        let engine = artifacts.get("llvm_engine_dir").map_or_else(
+    fn of(prefix: &Path, artifacts: &'a hirsel_config_schema::product_v1::Host) -> Self {
+        let library = Path::new(&artifacts.llvm_library);
+        let engine = artifacts.llvm_engine_dir.as_deref().map_or_else(
             || library.to_owned(),
-            |dir| Path::new(dir.as_str().unwrap()).join(library.file_name().unwrap()),
+            |dir| Path::new(dir).join(library.file_name().unwrap()),
         );
         match env::var("CARGO_CFG_TARGET_OS").unwrap().as_str() {
             "linux" => {

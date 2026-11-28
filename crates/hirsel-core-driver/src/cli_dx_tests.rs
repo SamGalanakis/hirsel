@@ -13,7 +13,7 @@ fn scaffold_in_existing_git_directory_preserves_existing_files_and_refuses_clobb
 
     scaffold(root, false).unwrap();
 
-    assert!(root.join("hirsel.toml").is_file());
+    assert!(root.join("hirsel.hcfg").is_file());
     assert!(root.join("main.hirsel").is_file());
     assert!(root.join("tests.hirsel").is_file());
     assert_eq!(
@@ -32,7 +32,7 @@ fn scaffold_in_existing_git_directory_preserves_existing_files_and_refuses_clobb
 
     let err = scaffold(root, false).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-    assert!(err.to_string().contains("hirsel.toml"), "{err}");
+    assert!(err.to_string().contains("hirsel.hcfg"), "{err}");
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn scaffold_keeps_existing_gitignore_and_agents_md_and_refuses_existing_main_wit
     let err = scaffold(dir2.path(), false).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     assert!(err.to_string().contains("main.hirsel"), "{err}");
-    assert!(!dir2.path().join("hirsel.toml").exists());
+    assert!(!dir2.path().join("hirsel.hcfg").exists());
     assert!(!dir2.path().join(".gitignore").exists());
     assert!(!dir2.path().join("AGENTS.md").exists());
     assert_eq!(

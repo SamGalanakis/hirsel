@@ -2,19 +2,12 @@
 use super::finite::Failure;
 use crate::launcher::session::Wire;
 use crate::operator::{self, Answer, Ask};
+use hirsel_config_schema::user_v1::{Context, Principal};
 use hirsel_core_ids::hex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
-
-#[derive(Deserialize)]
-struct Workstation {
-    default: Option<String>,
-    contexts: BTreeMap<String, Pin>,
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -133,17 +126,13 @@ impl Target {
                         "select a context name or an absolute pin file",
                     ));
                 }
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .filter(|p| !p.is_empty())
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
+                crate::user_config::path()
                     .ok_or_else(|| Failure::context("no workstation configuration directory"))?
-                    .join("hirsel/config.toml")
             }
         };
         eprintln!("context {}", source.display());
         trusted_path(&source, uid)?;
-        let mut input = OpenOptions::new()
+        let input = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&source)
@@ -154,22 +143,36 @@ impl Target {
                 "context must be an operator- or root-owned regular file protected from other writers",
             ));
         }
-        let mut text = String::new();
-        input.read_to_string(&mut text).map_err(Failure::context)?;
-        let (pin, context) = if file.is_some() {
-            (toml::from_str(&text).map_err(Failure::context)?, None)
-        } else {
-            let mut settings: Workstation = toml::from_str(&text).map_err(Failure::context)?;
-            let name = selected
-                .map(str::to_owned)
-                .or(settings.default)
-                .ok_or_else(|| Failure::context("no default host context"))?;
-            let pin = settings
-                .contexts
-                .remove(&name)
-                .ok_or_else(|| Failure::context("unknown host context"))?;
-            (pin, Some(name))
+        let settings = crate::user_config::decode(input).map_err(Failure::context)?;
+        let name = selected
+            .filter(|_| file.is_none())
+            .map(str::to_owned)
+            .or(settings.default_context)
+            .ok_or_else(|| Failure::context("no default host context"))?;
+        let (_, context) = settings
+            .contexts
+            .into_iter()
+            .find(|(key, _)| key == &name)
+            .ok_or_else(|| Failure::context("unknown host context"))?;
+        let Context::Host {
+            state,
+            catalog_id,
+            principal,
+            group,
+            incarnation,
+        } = context;
+        let Principal::Uid(uid) = principal else {
+            return Err(Failure::context("a local host context requires a UID"));
         };
+        let pin = Pin {
+            kind: Host::Host,
+            state: state.into(),
+            authority: catalog_id,
+            uid,
+            group,
+            incarnation: incarnation.map(|i| i.to_string()),
+        };
+        let context = file.is_none().then_some(name);
         let target = Self {
             pin,
             source,

@@ -198,6 +198,26 @@ impl Workspace {
         Self::discover_with(dir, needs_package, false, BTreeMap::new())
     }
 
+    /// The isolated distribution staging directory with its proposed manifest.
+    pub(crate) fn staged(
+        dir: &Path,
+        original: &Captured,
+        proposed: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let key = identity(&open_directory(dir)?)?;
+        let proposed = Captured {
+            bytes: proposed.as_bytes().into(),
+            identity: original.identity,
+        };
+        let inputs = BTreeMap::from([(key, Some(proposed))]);
+        let workspace =
+            Self::discover_with(dir, true, false, inputs)?.ok_or("missing staged package")?;
+        if identity(&workspace.root)? != key || workspace.members.len() != 1 {
+            return Err("the staged package must be outside a workspace".into());
+        }
+        Ok(workspace)
+    }
+
     pub(crate) fn discover_pack(dir: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         Self::discover_with(dir, true, true, BTreeMap::new())
     }
@@ -381,7 +401,7 @@ impl Workspace {
                         ancestor = above;
                     }
                     let package = manifest.package.ok_or_else(|| {
-                        format!("{}: expected [package]", manifest_path.display())
+                        format!("{}: expected a package record", manifest_path.display())
                     })?;
                     if drafts.contains_key(&package.id) {
                         return Err(format!(
@@ -488,7 +508,7 @@ impl Workspace {
                         let source = match source {
                             Some(SourceLocation::Archive(path)) => {
                                 let path = archive_path(from, path).ok_or_else(|| format!(
-                                    "{}: dependencies.{name}: archive {path:?} is not inside the workspace root. To share an archive across packages, add a parent hirsel.toml with [workspace] and members listing the package directories, then use a relative path within that workspace",
+                                    "{}: dependencies.{name}: archive {path:?} is not inside the workspace root. To share an archive across packages, add a parent hirsel.hcfg with a pkg_v1.Workspace and members listing the package directories, then use a relative path within that workspace",
                                     manifest.display()
                                 ))?;
                                 Some(SourceLocation::Archive(path))

@@ -12,7 +12,7 @@
 # Gated libraries: `library PACKAGE MANIFEST|installed [MODULE...]`. A library
 # lane adds its line when it lands; m2b's line goes when its programs are deleted.
 library m2b core/programs/m2b/manifest.json
-library store core/programs/store/hirsel.toml
+library store core/programs/store/hirsel.hcfg
 library std installed codec
 library std installed check
 

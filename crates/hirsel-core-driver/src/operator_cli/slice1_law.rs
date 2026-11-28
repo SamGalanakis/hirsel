@@ -172,7 +172,7 @@ pub(super) fn resolve_identify_read() {
     let unwanted = listen(&project);
     let control = UnixListener::bind(project.join("launcher.sock")).unwrap();
     fs::write(
-        project.join("hirsel.toml"),
+        project.join("hirsel.hcfg"),
         format!(
             "[operator]\nstate={project:?}\n[registry]\nurl='http://{}'\n",
             route.local_addr().unwrap()
@@ -276,20 +276,20 @@ pub(super) fn resolve_identify_read() {
     );
     let state = root.join("authority");
     let record = format!(
-        "kind='host'\nstate={state:?}\nauthority='{A:032x}'\nuid={}\n",
+        "Host(state: {state:?}, catalog_id: \"{A:032x}\", principal: Uid({}))",
         operator::operator_uid()
     );
     fs::create_dir_all(config.join("hirsel")).unwrap();
     fs::write(
-        config.join("hirsel/config.toml"),
-        format!("default='production'\n[cache.remote]\nurl='http://{}'\n[contexts.production]\n{record}",route.local_addr().unwrap()),
+        config.join("hirsel/config.hcfg"),
+        format!("user_v1.Config(default_context: Some(\"production\"), contexts: [(\"production\", {record})], routes: [], cache: Some(Remote(url: \"http://{}\", trusted: [], record_bytes: 1, blob_bytes: 1, work_bytes: 1)))",route.local_addr().unwrap()),
     )
     .unwrap();
     for dir in [&config, &config.join("hirsel")] {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
     fs::set_permissions(
-        config.join("hirsel/config.toml"),
+        config.join("hirsel/config.hcfg"),
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
@@ -307,8 +307,8 @@ pub(super) fn resolve_identify_read() {
     fs::rename(&state, root.join("old")).unwrap();
     let replaced = listen(&state);
     let peer = host(replaced.try_clone().unwrap(), B, false);
-    let pin = root.join("job.toml");
-    fs::write(&pin, &record).unwrap();
+    let pin = root.join("job-context.hcfg");
+    fs::write(&pin, format!("user_v1.Config(default_context: Some(\"job\"), contexts: [(\"job\", {record})], routes: [])")).unwrap();
     fs::set_permissions(&pin, fs::Permissions::from_mode(0o600)).unwrap();
     let refused = run(
         &[

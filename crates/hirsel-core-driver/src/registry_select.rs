@@ -499,10 +499,12 @@ impl Registry {
         let dir = tempfile::tempdir()?;
         let kinds = crate::reachability::authority::names(ceiling.into());
         let manifest = format!(
-            "[package]\nname = \"local/consumer\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n[sources]\n\"main.hirsel\" = \"main\"\n[dependencies]\nsubject = {{ package = {:?}, major = {}, root = \"{root}\", registry = \"{origin}\", authority = {kinds:?} }}\n",
-            id.name, id.major
+            "pkg_v1.Package(name: \"local/consumer\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"main.hirsel\", \"main\")], dependencies: [(\"subject\", Published(package: {}, major: {}, root: \"{root}\", locator: Registry(\"{origin}\"), authority: [{}]))])",
+            hirsel_config_schema::quote(&id.name),
+            id.major,
+            kinds.join(", ")
         );
-        std::fs::write(dir.path().join("hirsel.toml"), manifest)?;
+        std::fs::write(dir.path().join(crate::package_dir::MANIFEST), manifest)?;
         std::fs::write(
             dir.path().join("main.hirsel"),
             "pub fn main() -> Result[(), Exit] { Ok(()) }\n",

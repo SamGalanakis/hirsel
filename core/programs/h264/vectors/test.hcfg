@@ -1,0 +1,9 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests")],
+        limit: 536870912,
+        grants: [Foreign("hirsel.ai/h264@1/h264/H264"), Stdout, Dir("fixtures")],
+        runs: [],
+    ),
+    dependencies: [],
+)

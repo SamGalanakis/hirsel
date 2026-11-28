@@ -1,47 +1,57 @@
 """Pack toolchain packages and build the installed host helpers."""
 
-from datetime import date, time
-import json
 from pathlib import Path
 import platform
 import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
+
+import hcfg
 
 
-def toml_value(value):
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False).replace('\x7f', r'\u007f')
-    if isinstance(value, dict):
-        fields = (f'{toml_value(key)} = {toml_value(item)}' for key, item in value.items())
-        return '{ ' + ', '.join(fields) + ' }'
-    if isinstance(value, list):
-        return '[' + ', '.join(map(toml_value, value)) + ']'
-    if isinstance(value, (date, time)):
-        return value.isoformat()
-    return str(value).lower()
-
-
-def place(source, destination):
-    manifest = source / 'hirsel.toml'
-    document = tomllib.loads(manifest.read_text(encoding='utf-8'))
-    package = document['package']
-    # Installed bindings name the package by its alias and take only a major.
-    dependencies = document.get('dependencies', {})
-    for alias, binding in dependencies.items():
-        if 'path' in binding and binding.get('package') == alias:
-            dependencies[alias] = {'major': binding['major']}
+def place(compiler, source, destination):
+    package = hcfg.read(source / 'hirsel.hcfg', 'pkg_v1.Package', compiler)
     shutil.copytree(source, destination, dirs_exist_ok=True)
-    # The copies keep the inputs' read-only mode under remote execution.
-    installed = destination / manifest.name
-    installed.unlink()
-    installed.write_text(''.join(
-        f'{toml_value(key)} = {toml_value(value)}\n' for key, value in document.items()
-    ), encoding='utf-8')
-    # The identity's major is the version's MAJOR (packages.md section 1).
-    return dict(package, major=package['version'].split('.')[0])
+    manifest = destination / 'hirsel.hcfg'
+    edited = subprocess.check_output([compiler, '--stage-toolchain-package', destination])
+    # A Buck action's staged source files can have read-only permissions.
+    with tempfile.NamedTemporaryFile(dir=destination, delete=False) as output:
+        output.write(edited)
+    Path(output.name).replace(manifest)
+    return package['name'], package['version'].split('.')[0]
+
+
+def helper_args(grants, values):
+    args = []
+    network = []
+    for grant in grants:
+        kind, fields = grant['case'], grant['fields']
+        if kind == 'Net':
+            rule = fields[0]
+            case, body = rule['case'], rule['fields']
+            if case.startswith('Unix'):
+                network.append(f"{case} {body['label']} {body['path'].format_map(values)}")
+            elif case in ('Resolve', 'Tls'):
+                network.append(f'{case} {body[0]}')
+            else:
+                public = ' public' if case == 'Connect' and hcfg.option(body['public_only']) else ''
+                network.append(f"{case} {body['cidr']} {body['first_port']}-{body['last_port']}{public}")
+        elif kind == 'Env':
+            args.extend(['--grant', 'Env=' + ','.join(fields[0])])
+        elif kind == 'Secret':
+            binding = fields['source']
+            source = {'Environment': 'env', 'File': 'file'}[binding['case']]
+            args.extend(['--grant', f"Secret:{fields['parameter']}={source}:{binding['fields'][0]} {fields['policy']}"])
+        elif kind == 'Dir':
+            args.extend(['--dir', fields[0].format_map(values)])
+        elif not fields:
+            args.extend(['--grant', kind])
+        else:
+            raise ValueError(f'unsupported installed helper grant {kind}')
+    if network:
+        args.extend(['--grant', 'Net=' + ';'.join(network)])
+    return args
 
 
 def pack(compiler, sources, output, work, names):
@@ -52,8 +62,8 @@ def pack(compiler, sources, output, work, names):
         subprocess.run([compiler, 'std-product', '--install', prefix],
                        stdout=subprocess.DEVNULL, check=True)
         for name in names:
-            package = place(sources / name, work / name)
-            archive = output / f"{package['name']}-{package['major']}.hpkg"
+            bound, major = place(prefix / 'hirsel', sources / name, work / name)
+            archive = output / f"{bound}-{major}.hpkg"
             subprocess.run([prefix / 'hirsel', 'pack', work / name, '--package-store', work / 'packages',
                             '--output', archive], stdout=subprocess.DEVNULL, check=True)
             shutil.copyfile(archive, prefix / 'core-packages' / archive.name)
@@ -61,6 +71,7 @@ def pack(compiler, sources, output, work, names):
 
 def helpers(product, root, source, work, host_image):
     cwd, fd = ('.', '/dev/fd') if platform.system() == 'Darwin' else ('/proc/self/cwd', '/proc/self/fd')
+    product = hcfg.product(product, root / 'hirsel')
     values = dict(product['sockets'], cwd=cwd, fd=fd)
     staged_packages = {}
     directory = root / 'libexec/hirsel'
@@ -69,14 +80,13 @@ def helpers(product, root, source, work, host_image):
         package_name = helper.get('package', source.name)
         if package_name not in staged_packages:
             staged = work / package_name
-            package = place(source.parent / package_name, staged)
-            staged_packages[package_name] = staged, f"{package['name']}@{package['major']}"
+            bound, major = place(root / 'hirsel', source.parent / package_name, staged)
+            staged_packages[package_name] = staged, f'{bound}@{major}'
         staged, identity = staged_packages[package_name]
-        grants = [word for grant in helper['grants'] for word in ('--grant', grant.format_map(values))]
-        dirs = [word for path in helper['dirs'] for word in ('--dir', path.format_map(values))]
+        grants = helper_args(helper['grants'], values)
         image = host_image if helper.get('embedded') else directory / name
         subprocess.run([root / 'hirsel', 'build', staged, '--entry', f"{identity}/{helper['entry']}",
-                        *grants, *dirs, '--limit', '1073741824', '-o', image],
+                        *grants, '--limit', '1073741824', '-o', image],
                        stdout=subprocess.DEVNULL, check=True)
 
 
@@ -86,6 +96,6 @@ if __name__ == '__main__':
         pack(*map(Path, args[:4]), args[4:])
     elif command == 'helpers':
         product, root, source, work, host_image = map(Path, args)
-        helpers(tomllib.loads(product.read_text()), root, source, work, host_image)
+        helpers(product, root, source, work, host_image)
     else:
         sys.exit(f'toolchain_programs.py: unknown command {command}')

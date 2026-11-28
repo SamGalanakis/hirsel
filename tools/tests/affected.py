@@ -16,6 +16,7 @@ class AffectedPackages(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
+        self.write('tools/toolchain-dist/hcfg.py', (TOOLS / 'toolchain-dist/hcfg.py').read_text())
         self.write('tools/affected', (TOOLS / 'affected').read_text()).chmod(0o755)
         self.write('tools/consumers', '''#!/bin/sh
 if [ -n "$FIXTURE_TEST" ]; then
@@ -33,9 +34,9 @@ if sys.argv[1] == 'uquery' and os.environ['FIXTURE_TEST'] == '//:gate-distributi
     print('root//:toolchain-packages')
 ''').chmod(0o755)
         self.write('.gitignore', '.buck2/\n')
-        self.write('core/programs/toolchain-packages.toml', 'packages = ["runner"]\n')
-        self.manifest = 'core/programs/runner/hirsel.toml'
-        self.write(self.manifest, '[dependencies]\n')
+        self.write('core/programs/toolchain-packages.hcfg', 'toolchain_v1.Packages(packages: ["runner"])\n')
+        self.manifest = 'core/programs/runner/hirsel.hcfg'
+        self.write(self.manifest, 'pkg_v1.Package(name: "runner", version: "1.0.0", charge: ChargeV1, sources: [], dependencies: [])\n')
         self.git('init', '-q')
         self.git('add', '.')
         self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base')

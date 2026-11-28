@@ -80,20 +80,15 @@ fn foreign_source_replay_refuses_before_reading_tape() {
     let dir = tempfile::tempdir().unwrap();
     let write = |name, text| std::fs::write(dir.path().join(name), text).unwrap();
     write(
-        "hirsel.toml",
-        r#"
-[package]
-name = "local/app"
-version = "1.0.0"
-charge = "charge-v1"
-
-[sources]
-"main.hirsel" = "main"
-"native.hirsel" = "native"
-
-[foreign.native]
-symbols = "hfl_"
-archives = []
+        "hirsel.hcfg",
+        r#"pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main"), ("native.hirsel", "native")],
+    dependencies: [],
+    foreign: Some([("native", Native(symbols: "hfl_", archives: []))]),
+)
 "#,
     );
     write(
@@ -2534,23 +2529,16 @@ pub fn main() -> Result[(), Exit] { Ok(()) }
     let manifest_app = dir.path().join("manifest-app");
     std::fs::create_dir(&manifest_app).unwrap();
     std::fs::write(
-        manifest_app.join("hirsel.toml"),
-        r#"[package]
-name = "local/counter"
-version = "2.0.0"
-charge = "charge-v1"
-
-[sources]
-"app.hirsel" = "counter"
-
-[program]
-module = "counter"
-
-[tests]
-limit = 1048576
-
-[tests.sources]
-"laws.hirsel" = "counter"
+        manifest_app.join("hirsel.hcfg"),
+        r#"pkg_v1.Package(
+    name: "local/counter",
+    version: "2.0.0",
+    charge: ChargeV1,
+    sources: [("app.hirsel", "counter")],
+    dependencies: [],
+    program: Some(Program(module: Some("counter"))),
+    tests: Some(Tests(sources: [("laws.hirsel", "counter")], limit: 1048576, grants: [], runs: [])),
+)
 "#,
     )
     .unwrap();
@@ -3830,13 +3818,13 @@ fn exec_unix_recording_replays_without_host_resources() {
     let image = work.join("image");
     build_copy_filter(&image);
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
-    let policy = work.join("policy.toml");
+    let policy = work.join("policy.hcfg");
     // The recording must split a valid profile snapshot larger than a tape block.
     let unused_arg = "x".repeat(hirsel_tape_format::MAX_LEN);
     std::fs::write(
         &policy,
         format!(
-            "[cat]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"cat\"\nargs = [[], [\"{unused_arg}\"]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            "exec_v1.Policy(profiles: [(\"cat\", Profile(image: {:?}, sha256: \"{pin}\", argv0: \"cat\", args: [[], [Lit(\"{unused_arg}\")]], env: [], dirs: [(\"work\", {:?})]))])",
             image.to_str().unwrap(),
             work.to_str().unwrap(),
         ),

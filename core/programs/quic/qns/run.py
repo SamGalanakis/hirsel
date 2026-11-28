@@ -18,10 +18,13 @@ Usage: run.py build --compiler HIRSEL --runtime LIBHIRSEL_CORE_RT.a --scratch DI
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 import shutil
 import subprocess
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 QUIC = HERE.parent
@@ -51,7 +54,7 @@ def build(args):
     shutil.rmtree(context, ignore_errors=True)
     context.mkdir(parents=True)
     core, std, quic = {'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}, {'name': 'quic', 'version': '1'}
-    manifest = tomllib.loads((QUIC / 'hirsel.toml').read_text())
+    manifest = hcfg.package(QUIC)
     packages = [
         {'package': core, 'dependencies': [], 'sources': library('core')},
         {'package': std, 'dependencies': [core], 'sources': library('std', ['sim'])},

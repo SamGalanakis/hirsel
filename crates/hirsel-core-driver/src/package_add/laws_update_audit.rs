@@ -33,7 +33,7 @@ pub fn get(t: T) -> u64 { t.v }
     PackageLaw::pass(invoke(&law, "app", &["json.hpkg"]));
     let snapshot = || {
         [
-            fs::read(law.path("app/hirsel.toml")).unwrap(),
+            fs::read(law.path("app/hirsel.hcfg")).unwrap(),
             fs::read(law.path("app/hirsel.lock")).unwrap(),
         ]
     };
@@ -62,7 +62,12 @@ pub fn value() -> u64 {{ json.version() * 100u64 + bjson.other() * 10u64 + p2.ge
     );
     PackageLaw::pass(law.run(&["check", "app", "--frozen"]));
     let [manifest, lock] = snapshot();
-    assert!(!String::from_utf8_lossy(&manifest).contains("authority"));
+    let config = <hirsel_config_schema::pkg_v1::Package as hirsel_config_schema::Config>::read(
+        &manifest, hirsel_config_schema::Limits::default(),
+    ).unwrap();
+    assert!(config.dependencies.iter().all(|(_, edge)| matches!(edge,
+        hirsel_config_schema::pkg_v1::Dependency::Published { authority, .. } if authority.is_empty()
+    )));
     assert_eq!(
         String::from_utf8_lossy(&lock)
             .matches("id = \"fixture.test/pt@1\"")
@@ -113,26 +118,18 @@ pub fn ping(n: Net, e: Env, addr: Addr) -> Result[Socket, NetError] waits {
         law.write(&format!("app/{name}.hpkg"), package_bundle(&[content]));
     }
     let tail = |root: &str, authority: &str| {
-        let row = exact_row("effects", 1, root);
-        let row = row.trim_end().strip_suffix(" }").unwrap();
-        format!(
-            "[dependencies]\n{row}{authority} }}\n{}{}",
-            exact_row("hof", 1, &fixture_root(&hof)),
-            exact_row("fake", 1, &fixture_root(&fake))
-                .trim_end()
-                .strip_suffix(" }")
-                .unwrap()
-                .to_owned()
-                + ", authority = [\"Clock\"] }\n"
-        )
+        let effects = exact_row("effects", 1, root).replace("authority: []", authority);
+        let hof = exact_row("hof", 1, &fixture_root(&hof));
+        let fake = exact_row("fake", 1, &fixture_root(&fake)).replace("authority: []", "authority: [Clock]");
+        format!("dependencies: [{effects}, {hof}, {fake}],")
     };
     let root = fixture_root(&v1);
-    law.app("app", &tail(&root, ", authority = [\"Net\"]"));
+    law.app("app", &tail(&root, "authority: [Net]"));
     PackageLaw::pass(law.run(&["check", "app"]));
     law.write("app/effects.hpkg", package_bundle(&[&v2]));
     let snapshot = || {
         [
-            fs::read(law.path("app/hirsel.toml")).unwrap(),
+            fs::read(law.path("app/hirsel.hcfg")).unwrap(),
             fs::read(law.path("app/hirsel.lock")).unwrap(),
         ]
     };
@@ -185,7 +182,7 @@ pub fn ping(n: Net, e: Env, addr: Addr) -> Result[Socket, NetError] waits {
     );
     assert_eq!(snapshot(), before);
 
-    law.app("app", &tail(&fixture_root(&v2), ", authority = [\"Net\"]"));
+    law.app("app", &tail(&fixture_root(&v2), "authority: [Net]"));
     let before = snapshot();
     let (status, json, stderr) = law.run(&["audit", "app", "--json"]);
     assert_eq!(status, Some(2), "{json}\n{stderr}");

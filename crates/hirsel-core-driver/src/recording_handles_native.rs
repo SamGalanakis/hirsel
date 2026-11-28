@@ -687,11 +687,11 @@ fn rl9_narrowed_exec_crosses() {
     let image = dir.path().join("image");
     std::fs::copy("/bin/cat", &image).unwrap();
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
-    let policy = dir.path().join("policy.toml");
+    let policy = dir.path().join("policy.hcfg");
     std::fs::write(
         &policy,
         format!(
-            "[cat]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"cat\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            "exec_v1.Policy(profiles: [(\"cat\", Profile(image: {:?}, sha256: \"{pin}\", argv0: \"cat\", args: [[]], env: [], dirs: [(\"work\", {:?})]))])",
             image.to_str().unwrap(),
             dir.path().to_str().unwrap(),
         ),

@@ -35,7 +35,7 @@ try {
     await writeFile(join(workspace, "main.hirsel"), "fn answer() -> u64 { let count = 42u64; count }\n");
     await symlink(resolve(driver), executable);
   } else {
-    await writeFile(join(workspace, "hirsel.toml"), "");
+    await writeFile(join(workspace, "hirsel.hcfg"), "");
     await writeFile(join(workspace, "main.hirsel"), "fn  main() -> u8 { 0 }\n");
     await writeFile(join(workspace, "target.hirsel"), "fn target() -> u8 { 0 }\n");
     await symlink(join(adapter, "test/mock-lsp.py"), executable);

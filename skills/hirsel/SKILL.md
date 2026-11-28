@@ -1,6 +1,6 @@
 ---
 name: hirsel
-description: Write, check, test and fix Hirsel programs with the installed hirsel binary. Use when writing or editing .hirsel files or a hirsel.toml package, or when hirsel check refuses code.
+description: Write, check, test and fix Hirsel programs with the installed hirsel binary. Use when writing or editing .hirsel files or a hirsel.hcfg package, or when hirsel check refuses code.
 ---
 
 # Hirsel
@@ -35,7 +35,7 @@ and repeat each `mut` and `take` mode at the call site.
    Fix to the rule, not to the message's wording.
 5. Repeat from step 2 until it prints `accepted`.
 6. Run `hirsel test`. It runs every `@test` in its own process under the `[tests]`
-   limit in `hirsel.toml`, and prints one row per test (use `--filter TEXT` to select
+   limit in `hirsel.hcfg`, and prints one row per test (use `--filter TEXT` to select
    tests, or `--sim --seeds N` for deterministic simulation runs).
 7. Run `hirsel run --grant Stdout` (one `--grant KIND` or `--dir PATH` per
    capability parameter of `main`). A missing grant exits 103 before the program starts.

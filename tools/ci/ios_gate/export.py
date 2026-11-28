@@ -16,20 +16,23 @@ MAC_RUNTIME = "root//:hirsel-core-rt-archives[aarch64-apple-darwin]"
 MAC_EMBED = "root//:hirsel-core-rt-embed-archives[aarch64-apple-darwin]"
 IOS_EMBED = "root//:hirsel-core-rt-ios-embed-archives"
 KIT = "root//tools/buck2/native-toolchain:kit"
-PACKAGE = """[package]
-name = "local/sim_gate"
-version = "1.0.0"
-charge = "charge-v1"
-
-[dependencies]
-std = { major = 1 }
-store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }
-runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }
-
-[sources]
-"fixture.hirsel" = "main"
-"counter.hirsel" = "counter"
-"""
+PACKAGE = '''pkg_v1.Package(
+    name: "local/sim_gate",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("fixture.hirsel", "main"), ("counter.hirsel", "counter")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+    ],
+)
+'''
 
 
 def export(compiler, kit, output):
@@ -49,8 +52,8 @@ def export(compiler, kit, output):
             libraries = workspace / "libraries"
             programs = libraries / "programs"
             programs.mkdir(parents=True)
-            (workspace / "hirsel.toml").write_text(
-                '[workspace]\nmembers = ["store", "runner", "app"]\n'
+            (workspace / "hirsel.hcfg").write_text(
+                'pkg_v1.Workspace(members: ["store", "runner", "app"])\n'
             )
             for name in ("core", "std"):
                 (libraries / name).symlink_to(ROOT / "core" / name, target_is_directory=True)
@@ -61,7 +64,7 @@ def export(compiler, kit, output):
 
             app = workspace / "app"
             app.mkdir()
-            (app / "hirsel.toml").write_text(PACKAGE.replace('name = "sim_gate"', f'name = "{package_name}"'))
+            (app / "hirsel.hcfg").write_text(PACKAGE.replace('name: "local/sim_gate"', f'name: "local/{package_name}"'))
             (app / "fixture.hirsel").write_text(source)
             shutil.copyfile(HERE / "counter.hirsel", app / "counter.hirsel")
             subprocess.run(

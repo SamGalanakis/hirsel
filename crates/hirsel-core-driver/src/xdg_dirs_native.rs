@@ -7,7 +7,7 @@ const XDG_NOTE: &str = "pub fn main(dir: Dir, out: Stdout) -> Result[(), Exit] w
 
 /// The law's program built with `dir` as its one directory and Stdout.
 fn xdg_program(law: &PackageLaw, dir: &str, source: &str) -> PathBuf {
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [],");
     law.write("app/main.hirsel", source);
     let (status, stdout, stderr) =
         law.run(&["build", "app", "--output", "program", "--dir", dir, "--grant", "Stdout", "--limit", "1048576"]);
@@ -84,7 +84,7 @@ fn xdg_directory_is_not_created_for_a_run_that_does_not_start() {
 #[test]
 fn xdg_directory_name_is_refused_at_build() {
     let law = PackageLaw::new();
-    law.manifest("app", "local/app", "1.0.0", "[sources]\n\"main.hirsel\" = \"main\"\n");
+    law.manifest("app", "local/app", "1.0.0", "sources: [(\"main.hirsel\", \"main\")], dependencies: [],");
     law.write("app/main.hirsel", XDG_NOTE);
     let long = format!("xdg-data:{}", "a".repeat(65));
     for dir in ["xdg-config:..", "xdg-config:a/b", "xdg-cache:", "xdg-state:.hidden", "xdg-data:-flag", long.as_str()] {

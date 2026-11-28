@@ -546,7 +546,7 @@ fn add(
         let declared = Manifest::parse(&root_captured.bytes, &root_manifest)?;
         Some(declared.workspace.ok_or_else(|| {
             format!(
-                "{}: no [workspace]; hirsel add does not create a workspace boundary",
+                "{}: no workspace record; hirsel add does not create a workspace boundary",
                 member
                     .map_or(&root_manifest, |member| &member.manifest_path)
                     .display()

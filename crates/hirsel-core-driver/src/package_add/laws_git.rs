@@ -8,21 +8,30 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use super::PACKAGE_X_SOURCE;
 use std::sync::Mutex;
 
-const C1: &str = "77cbe52623fcc3479739eb37e89ddbe5c4626077";
-const C2: &str = "0944e001a1bd66c618ca9bb9770617490946b4bc";
-const C1_TREE: &str = "dacb7c152a2668836bfbbc493e001beda1eba1dd";
+const C1: &str = "daf4441842dbd47464a183be86f1128a41b2bf26";
+const C2: &str = "a9bad28634316d4b90052da470a735871d764838";
+const C1_TREE: &str = "9f16615bb5871e0ee3340022cf0dfc99b2404553";
 const C1_WRAP_BLOB: &str = "b8b63ee2ea62f1ec73509eedeed52c7206deaffe";
-const R2: &str = "982a782edca378653976803415e0da35a90e4cb3";
-const R3: &str = "1a7464347304d4598aaa6a7757f609e3b886af68";
-const R4: &str = "d757e66ef28c660c4c93ec4e7a7685b3292edc7d";
-const R5: &str = "7d2e1669ccd4a9b703489b662187438d170bacf8";
-const R6: &str = "ad85c4f6d43cd1c95f68016171f623e36b27681e";
+const R2: &str = "3f0715f5398ee15cddb4a7c97b281ad89e482da7";
+const R3: &str = "b26b8634da6312f3ef26f7894df256307c95ac9f";
+const R4: &str = "cb5d68e5223fad4ae1e476c6468f88517d3ea356";
+const R5: &str = "d37fdca1ca37d5ec8bdefe37f477281a51857a8f";
+const R6: &str = "48dc7934b5ac1c3f8b65be96ba996dfe67f922b5";
 const PACKAGE_W2: &str =
     "sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5";
 
 const JSON_MANIFEST: &str =
-    "[package]\nname = \"fixture.test/json\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"json.hirsel\" = \"json\"\n";
-const WRAP_MANIFEST: &str = "[package]\nname = \"fixture.test/wrap\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"wrap.hirsel\" = \"wrap\"\n\n[dependencies]\njson = { package = \"fixture.test/json\", major = 1, path = \"../json\" }\n";
+    "pkg_v1.Package(name: \"fixture.test/json\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"json.hirsel\", \"json\")], dependencies: [])\n";
+const WRAP_MANIFEST: &str = r#"pkg_v1.Package(
+    name: "fixture.test/wrap",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("wrap.hirsel", "wrap")],
+    dependencies: [
+        ("json", Path(package: "fixture.test/json", major: 1, path: "../json", authority: [])),
+    ],
+)
+"#;
 const WRAP_V1: &str = "pub fn one() -> u64 { 1u64 }\n";
 const WRAP_V2: &str = "pub fn one() -> u64 { 2u64 }\n";
 
@@ -218,10 +227,10 @@ impl Objects {
 /// r1's tree at C1 (packages.md section 12, Git fixtures).
 fn r1_tree() -> Tree {
     Tree::default()
-        .file("hirsel.toml", "[workspace]\nmembers = [\"json\", \"wrap\"]\n")
-        .file("json/hirsel.toml", JSON_MANIFEST)
+        .file("hirsel.hcfg", "pkg_v1.Workspace(members: [\"json\", \"wrap\"])\n")
+        .file("json/hirsel.hcfg", JSON_MANIFEST)
         .file("json/json.hirsel", PACKAGE_X_SOURCE)
-        .file("wrap/hirsel.toml", WRAP_MANIFEST)
+        .file("wrap/hirsel.hcfg", WRAP_MANIFEST)
         .file("wrap/wrap.hirsel", WRAP_V1)
 }
 
@@ -893,14 +902,14 @@ fn roots(list: &[&str]) -> BTreeSet<String> {
 
 /// The binding L23 writes, for `git` at `rev`, with `reference` when one was resolved.
 fn wrap_binding(git: &str, rev: &str, root: &str, reference: Option<&str>) -> String {
-    let reference = reference.map_or(String::new(), |r| format!(", ref = \"{r}\""));
+    let reference = reference.map_or_else(|| "None".into(), |r| format!("Some({r:?})"));
     format!(
-        "wrap = {{ package = \"fixture.test/wrap\", major = 1, root = \"{root}\", git = \"{git}\", rev = \"{rev}\"{reference}, dir = \"wrap\" }}"
+        "(\"wrap\", Published(package: \"fixture.test/wrap\", major: 1, root: \"{root}\", locator: Git(url: \"{git}\", rev: \"{rev}\", reference: {reference}, dir: Some(\"wrap\")), authority: []))"
     )
 }
 
 fn manifest_text(law: &PackageLaw, dir: &str) -> String {
-    fs::read_to_string(law.path(&format!("{dir}/hirsel.toml"))).unwrap()
+    fs::read_to_string(law.path(&format!("{dir}/hirsel.hcfg"))).unwrap()
 }
 
 /// A fresh single-package workspace `dir` binding nothing.
@@ -935,7 +944,7 @@ edges = []
 id = \"fixture.test/wrap@1\"
 version = \"1.0.0\"
 root = \"sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5\"
-source = \"git:https://alpha.test/r1#77cbe52623fcc3479739eb37e89ddbe5c4626077/wrap\"
+source = \"git:https://alpha.test/r1#daf4441842dbd47464a183be86f1128a41b2bf26/wrap\"
 edges = [\"fixture.test/json@1\"]
 
 [[package]]

@@ -1,0 +1,18 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [("tests.hirsel", "tests")],
+        limit: 805306368,
+        grants: [
+            Foreign("hirsel.ai/h264@1/h264/H264"),
+            Foreign("hirsel.ai/av1@1/av1/DecoderCodec"),
+            Foreign("hirsel.ai/av1@1/av1/EncoderCodec"),
+            Foreign("hirsel.ai/video_yuv@1/video_yuv/Yuv"),
+            Foreign("hirsel.ai/image_webp@1/webp/Webp"),
+            Clock,
+            Stdout,
+            Dir("fixtures"),
+        ],
+        runs: [],
+    ),
+    dependencies: [],
+)

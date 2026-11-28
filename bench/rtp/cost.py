@@ -18,7 +18,9 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
+import hcfg
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -79,10 +81,10 @@ def build(out):
     cc = ROOT / "tools/buck2/toolchains/llvm-files/bin/hirsel-clang"
 
     source_package = ROOT / "core/programs/rtp"
-    manifest = tomllib.loads((source_package / "hirsel.toml").read_text())
+    manifest = hcfg.package(source_package)
     core = dict(name="core", version="1")
     std = dict(name="std", version="1")
-    rtp = dict(name="rtp", version=str(manifest["package"]["version"].split(".")[0]))
+    rtp = dict(name="rtp", version=str(manifest["version"].split(".")[0]))
     app = dict(name="rtp_cost", version="1")
     document = dict(core=core, packages=[
         dict(package=core, dependencies=[], sources=library_sources(ROOT / "core/core", True)),

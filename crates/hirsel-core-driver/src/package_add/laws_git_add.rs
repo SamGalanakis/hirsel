@@ -2,7 +2,7 @@
 // of laws_git.rs, included after it.
 
 /// The L23 binding, copied from the spec's text block: W (section 6) and C1 (Git 2.43.0).
-const L23_BINDING: &str = "wrap = { package = \"fixture.test/wrap\", major = 1, root = \"sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5\", git = \"https://github.com/o/r\", rev = \"77cbe52623fcc3479739eb37e89ddbe5c4626077\", ref = \"refs/tags/v1\", dir = \"wrap\" }";
+const L23_BINDING: &str = "(\"wrap\", Published(package: \"fixture.test/wrap\", major: 1, root: \"sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5\", locator: Git(url: \"https://github.com/o/r\", rev: \"daf4441842dbd47464a183be86f1128a41b2bf26\", reference: Some(\"refs/tags/v1\"), dir: Some(\"wrap\")), authority: []))";
 
 /// Moves `name` of the repository at `key` to `commit`.
 fn point(server: &GitServer, key: &str, name: &str, commit: &str) {
@@ -31,7 +31,7 @@ fn l23_github_reference_is_a_commit() {
 
     app_at(&law, "app");
     PackageLaw::pass(server.add(&law, "app", &["github:o/r/wrap@v1"]));
-    assert!(manifest_text(&law, "app").contains(&format!("\n{L23_BINDING}\n")), "{}", manifest_text(&law, "app"));
+    assert!(manifest_text(&law, "app").contains(L23_BINDING), "{}", manifest_text(&law, "app"));
     assert_eq!(
         server.log(),
         [
@@ -44,14 +44,14 @@ fn l23_github_reference_is_a_commit() {
     app_at(&law, "head");
     let stdout = PackageLaw::pass(server.add(&law, "head", &["github:o/r/wrap"]));
     let head = L23_BINDING.replace("refs/tags/v1", "refs/heads/main");
-    assert!(manifest_text(&law, "head").contains(&format!("\n{head}\n")), "{}", manifest_text(&law, "head"));
+    assert!(manifest_text(&law, "head").contains(&head), "{}", manifest_text(&law, "head"));
     assert!(stdout.contains(&format!("HEAD of https://github.com/o/r is refs/heads/main at {C1}")), "{stdout}");
     assert_eq!(server.log()[1], listing("github.com", "o/r", &["HEAD"]));
 
     app_at(&law, "pinned");
     PackageLaw::pass(server.add(&law, "pinned", &[&format!("github:o/r/wrap@{C1}")]));
-    let pinned = L23_BINDING.replace(", ref = \"refs/tags/v1\"", "");
-    assert!(manifest_text(&law, "pinned").contains(&format!("\n{pinned}\n")), "{}", manifest_text(&law, "pinned"));
+    let pinned = L23_BINDING.replace("Some(\"refs/tags/v1\")", "None");
+    assert!(manifest_text(&law, "pinned").contains(&pinned), "{}", manifest_text(&law, "pinned"));
     assert_eq!(server.log(), [info("github.com", "o/r"), fetching("github.com", "o/r", C1)]);
 }
 
@@ -97,7 +97,7 @@ fn l24_each_source_text_has_one_meaning() {
     server.log();
     PackageLaw::pass(server.add(&law, "app", &["git+https://alpha.test/r1?dir=wrap#refs/tags/v1"]));
     let binding = wrap_binding("https://alpha.test/r1", C1, PACKAGE_W, Some("refs/tags/v1"));
-    assert!(manifest_text(&law, "app").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "app"));
+    assert!(manifest_text(&law, "app").contains(&binding), "{}", manifest_text(&law, "app"));
     server.log();
 
     app_at(&law, "html");
@@ -126,8 +126,8 @@ fn l35_moved_tag_is_reported() {
     PackageLaw::refuse(
         server.add(&law, "app", &[tagged]),
         "https://alpha.test/r1 refs/tags/v1 moved:
-  bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
-  fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
+  bound: daf4441842dbd47464a183be86f1128a41b2bf26 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
+  fetched: a9bad28634316d4b90052da470a735871d764838 sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
 to take it, run: hirsel update wrap",
     );
     assert_eq!(manifest_text(&law, "app"), manifest);
@@ -141,7 +141,7 @@ to take it, run: hirsel update wrap",
     assert!(stdout.contains(&format!("{PACKAGE_W} -> ")), "{stdout}");
     assert!(stdout.contains(PACKAGE_W2), "{stdout}");
     let binding = wrap_binding("https://alpha.test/r1", C2, PACKAGE_W2, Some("refs/tags/v1"));
-    assert!(manifest_text(&law, "app").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "app"));
+    assert!(manifest_text(&law, "app").contains(&binding), "{}", manifest_text(&law, "app"));
     point(&server, "alpha.test/r1", "refs/tags/v1", C1);
 
     // A branch that names another commit.
@@ -152,8 +152,8 @@ to take it, run: hirsel update wrap",
     PackageLaw::refuse(
         server.add(&law, "branch", &[branch]),
         "https://alpha.test/r1 refs/heads/main now names another commit:
-  bound: 77cbe52623fcc3479739eb37e89ddbe5c4626077 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
-  fetched: 0944e001a1bd66c618ca9bb9770617490946b4bc sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
+  bound: daf4441842dbd47464a183be86f1128a41b2bf26 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5
+  fetched: a9bad28634316d4b90052da470a735871d764838 sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5
 to take it, run: hirsel update wrap",
     );
     point(&server, "alpha.test/r1", "refs/heads/main", C1);
@@ -165,5 +165,5 @@ to take it, run: hirsel update wrap",
     let stdout = PackageLaw::pass(server.add(&law, "named", &["git+https://alpha.test/r1?dir=wrap#v2"]));
     assert!(stdout.starts_with(&updated), "{stdout}");
     let binding = wrap_binding("https://alpha.test/r1", C2, PACKAGE_W2, Some("refs/tags/v2"));
-    assert!(manifest_text(&law, "named").contains(&format!("\n{binding}\n")), "{}", manifest_text(&law, "named"));
+    assert!(manifest_text(&law, "named").contains(&binding), "{}", manifest_text(&law, "named"));
 }

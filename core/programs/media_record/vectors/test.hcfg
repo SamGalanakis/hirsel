@@ -1,0 +1,13 @@
+pkg_v1.VectorTests(
+    tests: Tests(
+        sources: [
+            ("dump.hirsel", "vectors"),
+            ("drive.hirsel", "vectors"),
+            ("frames.hirsel", "vectors"),
+        ],
+        limit: 268435456,
+        grants: [Dir("out")],
+        runs: [],
+    ),
+    dependencies: [],
+)

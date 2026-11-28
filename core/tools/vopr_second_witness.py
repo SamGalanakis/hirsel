@@ -19,13 +19,13 @@ def prepare(compiler, runtime, work):
     for name in ("runner", "store"):
         shutil.copytree(ROOT / "core" / "programs" / name, libraries / "programs" / name,
                         ignore=shutil.ignore_patterns("*.md"))
-    (libraries / "programs" / "hirsel.toml").write_text('[workspace]\nmembers = ["runner", "store"]\n')
+    (libraries / "programs" / "hirsel.hcfg").write_text('pkg_v1.Workspace(members: ["runner", "store"])\n')
     package = libraries / "programs" / "runner"
     shutil.copyfile(ROOT / "core/tools/tapes_check_fixture.hirsel", package / "tapes_check_fixture.hirsel")
-    manifest = package / "hirsel.toml"
+    manifest = package / "hirsel.hcfg"
     manifest.write_text(manifest.read_text().replace(
-        "[sources]", '[sources]\n"tapes_check_fixture.hirsel" = "runner"', 1
-    ) + '\n[program]\nmodule = "runner"\nfunction = "witness_fixture"\n')
+        "sources: [", 'program: Some(Program(module: Some("runner"), function: Some("witness_fixture"))), '
+        'sources: [("tapes_check_fixture.hirsel", "runner"),', 1))
     for backend in ("cranelift", "llvm"):
         subprocess.run([
             compiler, "build", package, "--backend", backend, "--libraries", libraries,

@@ -508,13 +508,26 @@ def cli_dev_restores_subscription():
         work = Path(tmp)
         server = work / 'board'
         server.mkdir()
-        (work / 'hirsel.toml').write_text('[workspace]\nmembers = ["board", "store", "runner"]\n')
-        (server / 'hirsel.toml').write_text(
-            '[package]\nname = "local/board"\nversion = "1.0.0"\ncharge = "charge-v1"\n'
-            '[dependencies]\nstd = { major = 1 }\n'
-            'store = { package = "store", major = 1, path = "../store", authority = ["Dir", "Clock", "Random", "Tasks"] }\n'
-            'runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }\n'
-            '[sources]\n"main.hirsel" = "main"\n[program]\nmodule = "main"\nfunction = "main"\n')
+        (work / 'hirsel.hcfg').write_text('pkg_v1.Workspace(members: ["board", "store", "runner"])\n')
+        (server / 'hirsel.hcfg').write_text(
+            '''pkg_v1.Package(
+    name: "local/board",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+    ],
+    program: Some(Program(module: Some("main"), function: Some("main"))),
+)
+''')
         for package in ('store', 'runner'):
             original = root / 'core/programs' / package
             shutil.copytree(original, work / package, ignore=shutil.ignore_patterns('hirsel.lock', '.hirsel-*'))

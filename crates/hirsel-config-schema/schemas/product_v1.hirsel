@@ -32,6 +32,7 @@ pub type Sockets {
 }
 
 pub type Helper: codec {
+    package: Option[String],
     entry: String,
     embedded: bool = false,
     grants: List[Grant],

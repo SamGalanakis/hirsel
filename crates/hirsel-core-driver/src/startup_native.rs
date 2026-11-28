@@ -489,24 +489,31 @@ fn a_user_package_named_runner_is_not_a_place() {
     for (member, manifest, file, text) in [
         (
             "app",
-            "[package]\nname = \"local/app\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[dependencies]\nrunner = { package = \"runner\", major = 1, path = \"../runner\" }\n\n[sources]\n\"main.hirsel\" = \"main\"\n",
+            r#"pkg_v1.Package(
+    name: "local/app",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("main.hirsel", "main")],
+    dependencies: [("runner", Path(package: "runner", major: 1, path: "../runner", authority: []))],
+)
+"#,
             "main.hirsel",
             source,
         ),
         (
             "runner",
-            "[package]\nname = \"runner\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n[sources]\n\"runner.hirsel\" = \"runner\"\n",
+            "pkg_v1.Package(name: \"runner\", version: \"1.0.0\", charge: ChargeV1, sources: [(\"runner.hirsel\", \"runner\")], dependencies: [])\n",
             "runner.hirsel",
             "pub fn note() -> String { \"plain program entered\\n\" }\n",
         ),
     ] {
         std::fs::create_dir_all(workspace.join(member)).unwrap();
-        std::fs::write(workspace.join(member).join("hirsel.toml"), manifest).unwrap();
+        std::fs::write(workspace.join(member).join("hirsel.hcfg"), manifest).unwrap();
         std::fs::write(workspace.join(member).join(file), text).unwrap();
     }
     std::fs::write(
-        workspace.join("hirsel.toml"),
-        "[workspace]\nmembers = [\"app\", \"runner\"]\n",
+        workspace.join("hirsel.hcfg"),
+        "pkg_v1.Workspace(members: [\"app\", \"runner\"])\n",
     )
     .unwrap();
     let request =
@@ -536,7 +543,7 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
 
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
-    let profile = dir.path().join("profiles.toml");
+    let profile = dir.path().join("profiles.hcfg");
     let (executable, interpreter) = match crate::host::HOST_TARGET.object_format() {
         hirsel_core_layout::ObjectFormat::MachO => (std::fs::read("/bin/echo").unwrap(), None),
         hirsel_core_layout::ObjectFormat::Elf => {
@@ -571,7 +578,7 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
     std::fs::write(&image, &executable).unwrap();
     let pin = hirsel_core_ids::hex::encode(&archive_digest(&executable));
     let policy = format!(
-        "[git]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
+        "exec_v1.Policy(profiles: [(\"git\", Profile(image: {:?}, sha256: \"{pin}\", argv0: \"git\", args: [[Lit(\"status\")]], env: [(\"LANG\", Fixed(\"C.UTF-8\"))], dirs: [(\"work\", {:?})]))])",
         image.to_str().unwrap(),
         dir.path().to_str().unwrap(),
     );

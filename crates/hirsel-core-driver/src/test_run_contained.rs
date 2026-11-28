@@ -157,9 +157,9 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     Ok(())
 }
 "#);
-    let original = fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
+    let original = fs::read_to_string(fixture.join("hirsel.hcfg")).unwrap();
     let (head, _) = original.split_once("containment").unwrap();
-    let manifest = |table: &str| law.write("wasm_laws/hirsel.toml", format!("{head}{table}\n"));
+    let manifest = |table: &str| law.write("wasm_laws/hirsel.hcfg", format!("{head}{table}\n"));
     let repin = |bytes: &[u8], pin: Option<&str>| {
         law.write("wasm_laws/box.wasm", bytes);
         let pin = pin.map_or_else(|| hirsel_core_ids::hex::encode(&Sha256::digest(bytes)), str::to_owned);
@@ -234,7 +234,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
 
     // FW20: after W1 the fixture module builds; `native` is not a containment.
     law.write("wasm_laws/box.wasm", fs::read(fixture.join("box.wasm")).unwrap());
-    law.write("wasm_laws/hirsel.toml", original.as_str());
+    law.write("wasm_laws/hirsel.hcfg", original.as_str());
     for &engine in ContainedExecution::engines() {
         let (status, output, error) = build(engine);
         assert_eq!(status, Some(0), "FW20 builds\n{output}\n{error}");
@@ -243,7 +243,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     }
     law.write("wasm_laws/box.wasm", b"abc");
     manifest(&format!("containment = \"native\"\nmodule = {{ file = \"box.wasm\", sha256 = \"{ABC}\" }}"));
-    refused(ContainedExecution::engines()[0], &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
+    refused(ContainedExecution::engines()[0], &|line: &str| line.ends_with("hirsel.hcfg: foreign.native: containment: expected \"wasm\""), "FW20");
 }
 
 /// FW3, FW5 to FW16, FW21 to FW26, FW28 and FW31 on `box.wasm`, each observation
@@ -262,7 +262,7 @@ fn contained_calls_run_in_the_tasks_own_instance() {
     }
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/wasm_laws");
-    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
+    for file in ["hirsel.hcfg", "laws.hirsel", "native.hirsel", "box.wasm"] {
         law.write(&format!("wasm_laws/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("wasm_laws/main.hirsel", fs::read(fixture.join("run.hirsel")).unwrap());
@@ -370,7 +370,7 @@ fn contained_host_memory_refusal_stops_with_host_memory() {
     }
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/wasm_laws");
-    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
+    for file in ["hirsel.hcfg", "laws.hirsel", "native.hirsel", "box.wasm"] {
         law.write(&format!("wasm_laws/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write(
@@ -467,12 +467,15 @@ fn contained_tests_record_and_replay() {
     for file in ["laws.hirsel", "native.hirsel", "box.wasm"] {
         law.write(&format!("wasm_laws/{file}"), std::fs::read(fixture.join(file)).unwrap());
     }
-    let manifest = std::fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
-    law.write("wasm_laws/hirsel.toml", format!(
-        "{}\n[foreign.other]\nsymbols = \"hwo_\"\narchives = []\n\n[tests]\nlimit = 268435456\n{}\n",
-        manifest.replace("\"main.hirsel\" = \"main\"", "\"main.hirsel\" = \"main\"\n\"other.hirsel\" = \"other\""),
-        r#"grants = ["Foreign=hirsel.ai/wasm_laws@1/laws/Box", "Foreign=hirsel.ai/wasm_laws@1/laws/Other", "Tasks", "Stdout"]"#,
-    ));
+    let manifest = std::fs::read_to_string(fixture.join("hirsel.hcfg")).unwrap();
+    let manifest = manifest
+        .replace("sources: [", r#"sources: [("other.hirsel", "other"), "#)
+        .replace("foreign: Some([", r#"foreign: Some([("other", Native(symbols: "hwo_", archives: [])), "#)
+        .replace("dependencies: [],", r#"dependencies: [], tests: Some(Tests(
+            sources: [], limit: 268435456, runs: [],
+            grants: [Foreign("hirsel.ai/wasm_laws@1/laws/Box"), Foreign("hirsel.ai/wasm_laws@1/laws/Other"), Tasks, Stdout],
+        )),"#);
+    law.write("wasm_laws/hirsel.hcfg", manifest);
     law.write("wasm_laws/other.hirsel", "pub fn poke(f: Foreign[laws.Other]) -> i32\n");
     law.write("wasm_laws/laws.hirsel", format!(
         "{}\npub opaque type Other {{}}\n",
@@ -611,7 +614,7 @@ fn contained_recipes_pin_their_module() {
     let at = original.windows(4).position(|w| w == b"bump").unwrap() + 3;
     let mut changed = original.clone();
     changed[at] = b'q';
-    let manifest = String::from_utf8(fixture("hirsel.toml")).unwrap();
+    let manifest = String::from_utf8(fixture("hirsel.hcfg")).unwrap();
     let pin = |bytes: &[u8]| ContentHash(Sha256::digest(bytes).into());
     for &engine in ContainedExecution::engines() {
         let law = PackageLaw::new();
@@ -635,7 +638,7 @@ fn contained_recipes_pin_their_module() {
                 law.write(&format!("wasm_laws/{file}"), fixture(file));
             }
             law.write("wasm_laws/box.wasm", module);
-            law.write("wasm_laws/hirsel.toml", manifest.replace(&pin(&original).to_string(), &pin(module).to_string()));
+            law.write("wasm_laws/hirsel.hcfg", manifest.replace(&pin(&original).to_string(), &pin(module).to_string()));
             law.write("wasm_laws/main.hirsel", CONTAINED_RECIPE);
             let root = PackageLaw::pass(law.run(&[
                 "build", "--emit", "recipe", "wasm_laws", "--backend", engine, "--target", execution.target,

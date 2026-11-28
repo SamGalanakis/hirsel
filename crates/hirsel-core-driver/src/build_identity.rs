@@ -117,7 +117,7 @@ mod build_identity {
         let search = std::env::var_os("PATH").unwrap_or_default();
         let image = crate::host::find_program(Path::new("true"), &search).unwrap();
         let profile = format!(
-            "[true]\nimage = {:?}\nsha256 = \"{}\"\nargv0 = \"true\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = \"/\" }}\n",
+            "exec_v1.Policy(profiles: [(\"true\", Profile(image: {:?}, sha256: \"{}\", argv0: \"true\", args: [[]], env: [], dirs: [(\"work\", \"/\")]))])",
             image.to_str().unwrap(),
             hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap())),
         );
@@ -132,7 +132,7 @@ mod build_identity {
         for law in &places {
             law.app("app", "");
             law.write("app/main.hirsel", source);
-            law.write("profiles.toml", &profile);
+            law.write("profiles.hcfg", &profile);
             std::fs::create_dir(law.path("data")).unwrap();
             let out = law.path("out");
             let (status, stdout, stderr) = law.run(&[
@@ -142,7 +142,7 @@ mod build_identity {
                 "--limit",
                 "67108864",
                 "--grant",
-                "Exec=profiles.toml true",
+                "Exec=profiles.hcfg true",
                 "--dir",
                 "data",
                 "-o",

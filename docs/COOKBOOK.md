@@ -116,7 +116,7 @@ fn directory_round_trip(files: Dir) -> Result[(), ()] waits {
 }
 ```
 
-Add `dirs = ["."]` in `[tests]` in `hirsel.toml`, then run `hirsel test`.
+Add `dirs = ["."]` in `[tests]` in `hirsel.hcfg`, then run `hirsel test`.
 
 ### Decode a request inside `isolate`
 
@@ -225,17 +225,25 @@ fn routes_user_json(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
-Grant loopback listen/connect in `[tests]` in `hirsel.toml`:
+Grant loopback listen/connect in `[tests]` in `hirsel.hcfg`:
 
-```text
-[tests]
-limit = 67108864
-grants = ["Clock", "Tasks", "Net=Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 1-65535"]
+```hcfg
+tests: Some(Tests(
+    sources: [],
+    limit: 67108864,
+    grants: [
+        Clock,
+        Tasks,
+        Net(Listen(cidr: "127.0.0.1/32", first_port: 0, last_port: 65535)),
+        Net(Connect(cidr: "127.0.0.1/32", first_port: 1, last_port: 65535)),
+    ],
+    runs: [],
+)),
 ```
 
 ## 4. Store: typed table, secondary index, and transactions
 
-Bind `store` in `hirsel.toml` with `store = { major = 1 }` (toolchain package). Declare
+Bind `store` in `hirsel.hcfg` with `store = { major = 1 }` (toolchain package). Declare
 tables and secondary indexes inside a `store.declare` block, seal the schema, write rows
 atomically inside `store.run`, and query immutable snapshots with `store.get` and
 `store.find`. For durable on-disk storage, pass a directory capability to
@@ -325,7 +333,7 @@ fn store_table_and_index(clock: Clock, random: Random) -> Result[(), store.Error
 ```
 
 Add `store = { major = 1 }` under `[dependencies]` and `grants = ["Clock", "Random"]`
-under `[tests]` in `hirsel.toml`.
+under `[tests]` in `hirsel.hcfg`.
 
 ## 5. Task fan-out over channels and isolated units
 
@@ -383,7 +391,7 @@ fn fan_out_and_unit(tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
-Add `grants = ["Tasks"]` under `[tests]` in `hirsel.toml`, then run `hirsel test`.
+Add `grants = ["Tasks"]` under `[tests]` in `hirsel.hcfg`, then run `hirsel test`.
 
 ## 6. Deterministic `sim` clock/network testing and property laws
 
@@ -504,7 +512,7 @@ fn law_addition_commutes() -> Result[(), ()] {
 }
 ```
 
-Add `grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]` under `[tests]` in `hirsel.toml`, then
+Add `grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]` under `[tests]` in `hirsel.hcfg`, then
 sweep seeds or inspect law strength:
 
 ```sh

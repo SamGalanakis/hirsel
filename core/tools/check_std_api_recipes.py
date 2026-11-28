@@ -128,7 +128,7 @@ def module_name(index):
 def write_consumer(work, found):
     package = work / "consumer"
     package.mkdir()
-    entries = ['"main.hirsel" = "main"']
+    entries = ['("main.hirsel", "main")']
     (package / "main.hirsel").write_text("pub fn main() -> Result[(), u8] { Ok(()) }\n")
     for index, (key, _line, source) in enumerate(found):
         name = module_name(index)
@@ -138,10 +138,11 @@ def write_consumer(work, found):
         except ValueError as error:
             raise ValueError(f"{error} (fence line {_line})") from None
         (package / filename).write_text(text)
-        entries.append(f'"{filename}" = "{name}"')
-    manifest = "[package]\nname = \"local/std_api_recipes\"\nversion = \"1.0.0\"\ncharge = \"charge-v1\"\n\n"
-    manifest += "[dependencies]\nstd = { major = 1 }\n\n[sources]\n" + "\n".join(entries) + "\n"
-    (package / "hirsel.toml").write_text(manifest)
+        entries.append(f'("{filename}", "{name}")')
+    manifest = ('pkg_v1.Package(name: "local/std_api_recipes", version: "1.0.0", charge: ChargeV1, '
+                'dependencies: [("std", Toolchain(package: "std", major: 1, authority: []))], '
+                f'sources: [{", ".join(entries)}])\n')
+    (package / "hirsel.hcfg").write_text(manifest)
     return package
 
 
@@ -201,7 +202,7 @@ def store_interfaces(compiler, work):
     package.mkdir()
     for source in STORE_PACKAGE.glob("*.hirsel"):
         shutil.copy(source, package / source.name)
-    shutil.copy(STORE_PACKAGE / "hirsel.toml", package / "hirsel.toml")
+    shutil.copy(STORE_PACKAGE / "hirsel.hcfg", package / "hirsel.hcfg")
     inspected = run(
         [compiler, "inspect", str(package), "--interface", "--json", "--libraries", str(ROOT / "core")],
         cwd=work,

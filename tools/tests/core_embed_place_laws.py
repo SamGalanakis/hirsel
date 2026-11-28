@@ -216,7 +216,7 @@ class EmbedRealPlaceLaws(unittest.TestCase):
         # `is_toolchain_runner` is true, binding `launch_word`/`launch_emit` and the place bit!
         ws = cls.dir / "ws"
         ws.mkdir()
-        (ws / "hirsel.toml").write_text('[workspace]\nmembers = ["store", "runner", "embed_place"]\n')
+        (ws / "hirsel.hcfg").write_text('pkg_v1.Workspace(members: ["store", "runner", "embed_place"])\n')
         shutil.copytree(ROOT / "core/programs/store", ws / "store", dirs_exist_ok=True)
         shutil.copytree(ROOT / "core/programs/runner", ws / "runner", dirs_exist_ok=True)
         shutil.copytree(PLACE_DIR, ws / "embed_place", dirs_exist_ok=True)

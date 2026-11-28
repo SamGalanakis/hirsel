@@ -693,7 +693,7 @@ fn law_tiers_swept(e: Env, tasks: Tasks) -> Result[(), ()] waits {
 }
 ```
 
-- The test's grants must include `Env=HIRSEL_TEST_SIM_SEED`, in `hirsel.toml` or by
+- The test's grants must include `Env=HIRSEL_TEST_SIM_SEED`, in `hirsel.hcfg` or by
   `--grant`.
 - A property without tasks sets `c.seed` only.
 - A test that takes `Env` is not parameterless, so its pass is never reused. Each seed is a

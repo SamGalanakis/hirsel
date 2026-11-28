@@ -61,7 +61,7 @@ pub struct PackageManifest {
     pub namespace: Option<PackageNamespace>,
     /// The installed toolchain supplied this package (its core-packages
     /// archive), or the invoker said so in an `--inputs` manifest. A
-    /// `hirsel.toml` member or a published archive never is, whatever its name
+    /// `hirsel.hcfg` member or a published archive never is, whatever its name
     /// (launch.md, "Private prefix").
     #[serde(default)]
     pub toolchain: bool,

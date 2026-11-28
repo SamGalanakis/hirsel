@@ -922,6 +922,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-config-export"
+version = "0.1.0"
+dependencies = [
+ "hirsel-config-schema",
+ "hirsel-data",
+ "hirsel-guard",
+]
+
+[[package]]
 name = "hirsel-config-schema"
 version = "0.1.0"
 dependencies = [
@@ -1016,7 +1025,6 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "toml",
- "toml_edit",
  "twox-hash",
  "ureq",
  "zstd-safe",
@@ -1108,6 +1116,7 @@ dependencies = [
  "argon2",
  "base64",
  "base64ct",
+ "hirsel-config-schema",
  "hirsel-core-ids",
  "hirsel-guard",
  "io-uring",
@@ -1120,7 +1129,6 @@ dependencies = [
  "serde",
  "stringprep",
  "subtle",
- "toml",
  "unicode-normalization",
  "x25519-dalek",
  "zeroize",
@@ -1284,13 +1292,13 @@ name = "hirsel-llvm-lazy"
 version = "0.1.0"
 dependencies = [
  "gimli",
+ "hirsel-config-schema",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-guard",
  "libc",
  "object 0.40.0",
- "toml",
 ]
 
 [[package]]
@@ -2232,15 +2240,8 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime",
- "toml_write",
  "winnow",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "twox-hash"

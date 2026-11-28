@@ -625,12 +625,14 @@ fn archive_trace_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random, 
         fail("trace: missing independent base")
     }
     let keep = option.unwrap(survivor.through).gen
-    let expiry = archive_expire(mut expired, db_rec.store, KeepFromBase(keep), None, true, disk_test_directory(d), DF_OP_MS)?
-    if expiry.floor.boundary.base_ordinal != keep || expiry.previous.boundary.base_ordinal >= keep || expiry.deleted == 0 {
+    let scratch = disk_test_directory(d)
+    let expiry_plan = archive_expire(mut expired, db_rec.store, KeepFromBase(keep), None, None, scratch, DF_OP_MS)?
+    let expiry = archive_expire(mut expired, db_rec.store, KeepFromBase(keep), None, Some(expiry_plan.plan), scratch, DF_OP_MS)?
+    if expiry.plan.floor.boundary.base_ordinal != keep || expiry.plan.previous.boundary.base_ordinal >= keep || expiry.deleted == 0 {
         fail("trace: floor CAS did not move")
     }
     string.push(mut trace_out, "{\"kind\":\"expire\",\"op\":\"floor\",\"floor\":5}\n")
-    let before = expiry.previous.boundary
+    let before = expiry.plan.previous.boundary
     let key = format.archive_key(store_key_to_rep(db_rec.store), format.archive_log_manifest_rel(before.base_ordinal, before.base_digest))
     let mut raw: Bytes = list.with_capacity(1)
     let due = std.object.deadline_after_ms(expired, DF_OP_MS)

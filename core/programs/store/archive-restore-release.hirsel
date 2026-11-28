@@ -18,3 +18,24 @@ pub fn plain_restore_release(db: Db) -> Result[RestoreRelease, Error] {
     }
     Ok(RestoreRelease(activation: 0, binding: [0; 32]))
 }
+
+// Check the Directory child while its writer owns the same manifest used to open it.
+pub fn verify_restore_origin(db: Db, receipt: Restored) -> Result[(), Error] {
+    if db.store != receipt.child || db.store == receipt.point.token.parent {
+        return Error(Foreign)
+    }
+    let Some(disk) = view db.disk else {
+        return Error(Foreign)
+    }
+    let Some(origin) = manifest.pack_restore_origin(disk.packs) else {
+        return Error(Foreign)
+    }
+    if !restore_matches(origin, restore_origin_for(receipt.point, receipt.attempt), false) {
+        return Error(Foreign)
+    }
+    let main = pages.holder_heads(db.holders)[0u64]
+    if main.head != receipt.point.main_version || main.at != receipt.point.main_at {
+        return Error(NotCurrent(receipt.point.main_version))
+    }
+    Ok(())
+}

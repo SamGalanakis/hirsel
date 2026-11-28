@@ -55,3 +55,4 @@ platform@1/platform/wake_probe_bound src=6450cd6f8fc71c85 sig=743cd16392b83b18 r
 platform@1/platform/wake_restart_reordered_ends src=5cf3a798d3f76e75 sig=57dbd624ae24d2ba run=f94640602bd0fc9f bug=- oracle=- rows=pending
 platform@1/store_tool/describe_matches_open src=136de8034c2aec2a sig=b47047d953817778 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 platform@1/store_tool/stats_prints_persisted_scrub_round src=9eee260f28ec62f3 sig=1ceeddb36f5c0890 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+platform@1/store_tool/test_la9_adoption_checks_restore_origin src=b774bf80584f72f4 sig=69b206d5ef4913e8 run=aa75ab2775f5e821 bug=- oracle=- rows=pending

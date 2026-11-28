@@ -168,3 +168,43 @@ fn stats_prints_persisted_scrub_round(d: Dir, c: Clock, r: Random, tasks: Tasks)
     }
     Ok(())
 }
+
+// The adoption receipt is operator input. A parent at the selected version has
+// the right rows and release, but no fresh-child provenance in its manifest.
+@test
+fn test_la9_adoption_checks_restore_origin(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut src_name = string.with_capacity(64)
+    string.push(mut src_name, "la9-")
+    let src = result.unwrap(host.mkdtemp(d, mut src_name))
+    let mut captured_name = string.with_capacity(64)
+    string.push(mut captured_name, "la9-")
+    let captured = result.unwrap(host.mkdtemp(d, mut captured_name))
+    let mut child_name = string.with_capacity(64)
+    string.push(mut child_name, "la9-")
+    let child = result.unwrap(host.mkdtemp(d, mut child_name))
+    let mut opts = result.unwrap(store.sized(Directory, 268435456))
+    opts.create = true
+    let mut parent = store.open(tasks, src, c, r, opts)?
+    let nonce = b"abcdefghijklmnop"
+    let lease = result.unwrap(store.begin_backup(mut parent, captured, clone(nonce)))
+    let _ = result.unwrap(store.export_copy(take lease))
+    store.release_export(mut parent, nonce)
+    let genuine = result.unwrap(store.restore(tasks, captured, child, c, r, opts, Latest,[42; 16]))
+    let parent_id = store.snapshot_identity(store.snapshot(parent))
+    let mut forged: store.Restored = clone(genuine)
+    forged.child = parent_id
+    match runner.verified_restored_child(parent, take forged) {
+        Error(Foreign) => (),
+        _ => fail("an identity-preserving copy passed adoption"),
+    }
+    store.close(take parent)?
+    let reopened = store.open(tasks, child, c, r, opts)?
+    let mut wrong: store.Restored = clone(genuine)
+    wrong.attempt[0] = 0
+    match runner.verified_restored_child(reopened, take wrong) {
+        Error(Foreign) => (),
+        _ => fail("an unrelated attempt passed adoption"),
+    }
+    let _ = runner.verified_restored_child(reopened, take genuine)?
+    store.close(take reopened)
+}

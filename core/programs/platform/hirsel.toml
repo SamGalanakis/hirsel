@@ -139,3 +139,6 @@ limit = 536870912
 
 [tests.runs."platform@1/platform/test_la11_host_adopts_restored_child"]
 limit = 536870912
+
+[tests.runs."platform@1/store_tool/test_la9_adoption_checks_restore_origin"]
+limit = 536870912

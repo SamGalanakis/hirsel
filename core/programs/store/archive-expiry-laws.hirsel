@@ -38,8 +38,8 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
         fail("archive head")
     }
     let wanted = option.unwrap(head2.through).gen
-    let plan = archive_expire(mut inspect, id, KeepFromBase(wanted), None, false, work, DF_OP_MS)?
-    if plan.floor.boundary.base_ordinal <= plan.previous.boundary.base_ordinal {
+    let plan = archive_expire(mut inspect, id, KeepFromBase(wanted), None, None, work, DF_OP_MS)?
+    if plan.plan.floor.boundary.base_ordinal <= plan.plan.previous.boundary.base_ordinal {
         fail("floor did not advance")
     }
     let due = std.object.deadline_after_ms(inspect, DF_OP_MS)
@@ -72,8 +72,8 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
     let future = format.archive_log_pack_rel(floor.frontier.next_pack, 0x1234)
     let key = format.archive_key(store_key_to_rep(id), future)
     arch_law_put_garbage(mut inspect, key, 3, 16, DF_OP_MS)?
-    let raised = archive_expire(mut inspect, id, KeepFromBase(wanted), None, true, work, DF_OP_MS)?
-    if raised.deleted == 0 || raised.floor != plan.floor {
+    let raised = archive_expire(mut inspect, id, KeepFromBase(wanted), None, Some(plan.plan), work, DF_OP_MS)?
+    if raised.deleted == 0 || raised.plan.floor != plan.plan.floor {
         fail("expiry skipped old base")
     }
     let shared_key = format.archive_key(store_key_to_rep(id), format.archive_log_pack_rel(shared_pack.seq, shared_pack.digest))
@@ -88,14 +88,20 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
     let cut3 = checkpoint(mut db)?
     durable(mut db, cut3)?
     let _ = archive_drain(mut db, 16)?
-    let _ = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, true, work, DF_OP_MS)?
+    // A decision prepared at head2 no longer authorizes a floor CAS at head3.
+    match archive_expire(mut inspect, id, KeepFromBase(wanted), None, Some(plan.plan), work, DF_OP_MS) {
+        Error(Conflict(_)) => (),
+        _ => fail("stale expiry decision changed the archive")
+    }
+    let latest = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, None, work, DF_OP_MS)?
+    let _ = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, Some(latest.plan), work, DF_OP_MS)?
     let prefix = expiry_push_namespace(mut inspect, store_key_to_rep(id))
     let _ = expiry_erase(mut inspect, head2.source_kind, floor, held, due)?
     let _ = std.object.set_prefix(mut inspect, take prefix)
     let RestorePresent(point) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
         fail("late deleter damaged the latest interval")
     }
-    let _ = archive_expire(mut inspect, id, KeepFromBase(point.token.boundary.base_ordinal), None, false, work, DF_OP_MS)?
+    let _ = archive_expire(mut inspect, id, KeepFromBase(point.token.boundary.base_ordinal), None, None, work, DF_OP_MS)?
     let last_key = format.archive_key(store_key_to_rep(id), format.archive_log_manifest_rel(point.token.boundary.base_ordinal, point.token.boundary.base_digest))
     std.object.erase(mut inspect, last_key, due) ?=> Remote
     match plan_archive_restore(mut inspect, id, Latest, DF_OP_MS) {

@@ -31,12 +31,7 @@ pub fn restored_release(db: store.Db) -> Result[store.RestoreRelease, store.Erro
 
 pub fn verified_restored_child(db: store.Db, take recovered: store.Restored) -> Result[store.Restored, store.Error] waits {
     let mut receipt = take recovered
-    if store.snapshot_identity(store.snapshot(db)) != receipt.child {
-        return Error(Foreign)
-    }
-    if store.version(store.snapshot(db)) != receipt.point.main_version {
-        return Error(NotCurrent(receipt.point.main_version))
-    }
+    store.verify_restore_origin(db, receipt)?
     let release = restored_release(db)?
     if receipt.point.activation != 0 && (release.activation != receipt.point.activation || release.binding != receipt.point.binding) {
         return Error(NotCurrent(receipt.point.activation))

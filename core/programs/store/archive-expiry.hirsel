@@ -1,8 +1,13 @@
 pub type ExpiryCutoff: send = KeepFromBase(u64) | KeepFromTime(u64)
 
-pub type ExpiryResult: send {
+pub type ExpiryPlan: key + send {
+    head: std.object.ETag,
     floor: RestoreToken,
-    previous: RestoreToken,
+    previous: RestoreToken
+}
+
+pub type ExpiryResult: send {
+    plan: ExpiryPlan,
     deleted: u64
 }
 
@@ -146,33 +151,37 @@ fn expiry_erase(mut src: std.object.Client, kind: u8, floor: format.ArchiveBaseR
     }
 }
 
-pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: ExpiryCutoff, protected_from_ms: Option[u64], confirm: bool, scratch: Dir, op_ms: u64) -> Result[ExpiryResult, Error] waits {
+pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: ExpiryCutoff, protected_from_ms: Option[u64], approved: Option[ExpiryPlan], scratch: Dir, op_ms: u64) -> Result[ExpiryResult, Error] waits {
     let id = store_key_to_rep(parent)
     let deadline = std.object.deadline_after_ms(src, op_ms)
-    loop {
-        let Some((take head, tag)) = failure_result_from_rep(history.archive_head_fetch(mut src, id, deadline))? else {
-            return Error(NotFound)
-        }
-        let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
-        let rows = restore_base_rows(mut src, head, idx, deadline)?
-        let floor = expiry_select(rows, cutoff, protected_from_ms)?
-        let previous = restore_base_token(parent, head.source_kind, rows[0u64], head.binding_id)
-        let point = restore_base_token(parent, head.source_kind, floor, head.binding_id)
-        let candidate = expiry_candidate(head, floor)?
-        let held = expiry_verify_survivors(mut src, candidate, parent, scratch, deadline)?
-        let mut removed = 0u64
-        if confirm {
-            // Even a retry at the installed floor fences concurrent changes before deletion.
-            match failure_result_from_rep(history.archive_head_cas(mut src, id, Match(tag), candidate, deadline))? {
-                ArchiveCasConflict(_, _) => continue,
-                ArchiveCasUncertain => return Error(Undecided),
-                ArchiveCasApplied(_) => (),
-            }
-            let prefix = expiry_push_namespace(mut src, id)
-            let res = expiry_erase(mut src, head.source_kind, floor, held, deadline)
-            let _ = std.object.set_prefix(mut src, take prefix)
-            removed = res?
-        }
-        return Ok(ExpiryResult(floor: point, previous, deleted: removed))
+    let Some((take head, tag)) = failure_result_from_rep(history.archive_head_fetch(mut src, id, deadline))? else {
+        return Error(NotFound)
     }
+    let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
+    let rows = restore_base_rows(mut src, head, idx, deadline)?
+    let floor = expiry_select(rows, cutoff, protected_from_ms)?
+    let previous = restore_base_token(parent, head.source_kind, rows[0u64], head.binding_id)
+    let point = restore_base_token(parent, head.source_kind, floor, head.binding_id)
+    let plan = ExpiryPlan(head: tag, floor: point, previous)
+    if let Some(expected) = approved {
+        if expected != plan {
+            return Error(Conflict("expiry plan changed"))
+        }
+    }
+    let candidate = expiry_candidate(head, floor)?
+    let held = expiry_verify_survivors(mut src, candidate, parent, scratch, deadline)?
+    let mut removed = 0u64
+    if let Some(_) = approved {
+        // Even a retry at the installed floor fences concurrent changes before deletion.
+        match failure_result_from_rep(history.archive_head_cas(mut src, id, Match(tag), candidate, deadline))? {
+            ArchiveCasConflict(_, _) => return Error(Conflict("expiry plan changed")),
+            ArchiveCasUncertain => return Error(Undecided),
+            ArchiveCasApplied(_) => (),
+        }
+        let prefix = expiry_push_namespace(mut src, id)
+        let res = expiry_erase(mut src, head.source_kind, floor, held, deadline)
+        let _ = std.object.set_prefix(mut src, take prefix)
+        removed = res?
+    }
+    Ok(ExpiryResult(plan, deleted: removed))
 }

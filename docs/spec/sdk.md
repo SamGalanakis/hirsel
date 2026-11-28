@@ -391,10 +391,15 @@ The pump has no timer. On each turn it puts every ready call that fits the
 credit into one `Call` list of at most 256 items, and it has at most one frame
 write pending. So a lone call goes out at once, and calls that arrive while a
 write is pending ride the next list. Each `Call` list is persisted as pending
-before it is sent. Settlement writes each lane's terminal outcome and next
+before it is sent. A lane sends its next position only after the previous
+position's terminal is durably settled. That successor is the place's only sign
+of settlement, and there is no acknowledgement message. Settlement writes each lane's terminal outcome and next
 position in one durable write per received frame. Recovery resends unsettled
-calls with their original bytes on their own streams, inside the new
-connection's grant. Recovery format 4 is unchanged. Opening the client leases every free stream of one Caller
+calls, oldest first, with their original bytes on their own streams, inside
+the new connection's grant. Items of a list that may not have been sent count
+as unsettled. Items are never merged, split or re-encoded, and a smaller grant
+only slows recovery (RUNNER-SPEC §3 "Recovery under credit"). The queue of
+calls not yet issued is application memory and is not bounded by credit. Recovery format 4 is unchanged. Opening the client leases every free stream of one Caller
 that still holds a call, so each recovered call resumes on its own lane next to
 new work. Completions settle their own lane in any order; Returned and Failed
 answers in one Batch commit in one storage write. Adjacent reply-only Batches

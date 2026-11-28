@@ -14,7 +14,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 
 load("@root//tools/toolchain-dist:product.bzl", "EMBED_RUNTIME_TARGETS", "EXEC_HELPER_TARGETS", "HOSTS", "RUNTIME_TARGETS")
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "HOST_TEST_BINARIES", "NAMESPACE_TEST_CASES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES")
+load(":test_requirements.bzl", "FILE_RING_TEST_CASES", "HOST_TEST_BINARIES", "NAMESPACE_TEST_CASES", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES", "PERF_TEST_CASES", "POOL_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@toolchains//:apple.bzl", "APPLE_TARGETS")
@@ -366,10 +366,15 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     )
     perf_cases = PERF_TEST_CASES.get(name, [])
     namespace_cases = NAMESPACE_TEST_CASES.get(name, [])
-    host_cases = OPENAT2_TEST_CASES.get(name, []) + perf_cases + namespace_cases
+    file_ring_cases = FILE_RING_TEST_CASES.get(name, [])
+    host_cases = OPENAT2_TEST_CASES.get(name, []) + perf_cases + namespace_cases + file_ring_cases
+    pool_cases = POOL_TEST_CASES.get(name, [])
     selection_env = {"HIRSEL_TEST_HOST_CASES": " ".join(host_cases)} if host_cases else {}
+    if pool_cases:
+        selection_env["HIRSEL_TEST_POOL_CASES"] = " ".join(pool_cases)
+    sharded = bool(host_cases or pool_cases)
     _rust_test(
-        name = name + "-shard-1" if host_cases else name,
+        name = name + "-shard-1" if sharded else name,
         labels = ["local-execution"] if name in HOST_TEST_BINARIES else [],
         exec_compatible_with = _test_platform(name),
         pool = not (TESTS_ON_HOST or name in HOST_TEST_BINARIES),
@@ -377,7 +382,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         **common
     )
     isolated_common = {key: value for key, value in common.items() if key != "args"}
-    if host_cases:
+    if sharded:
         _rust_test(
             name = name + "-inventory",
             args = ["--list"],
@@ -386,16 +391,37 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             pool = not TESTS_ON_HOST,
             **{key: value for key, value in isolated_common.items() if key != "test_binary"}
         )
+    pool_targets = []
+    for index, case in enumerate(pool_cases):
+        target = "{}-shard-{}".format(name, index + 2)
+        pool_targets.append(":" + target)
+        _rust_test(
+            name = target,
+            args = ["--exact", case],
+            labels = ["dedicated-pool-case"],
+            exec_compatible_with = _test_platform(name),
+            pool = not TESTS_ON_HOST,
+            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            **isolated_common
+        )
     host_targets = []
     openat2_targets = []
     for index, case in enumerate(host_cases):
-        requirement = "namespace" if case in namespace_cases else ("perf" if case in perf_cases else "openat2")
+        requirement = "openat2"
+        if case in namespace_cases:
+            requirement = "namespace"
+        elif case in perf_cases:
+            requirement = "perf"
+        elif case in file_ring_cases:
+            requirement = "file-ring"
         target = "{}-{}-{}".format(name, requirement, index + 1)
         environment = {"HIRSEL_TEST_DEDICATED_CASE": case}
         if case in NATIVE_EXEC_TEST_CASES:
             environment["HIRSEL_TEST_NATIVE_EXEC"] = "1"
         if requirement == "namespace":
             environment["HIRSEL_TEST_OWNS_NETNS"] = "1"
+        if requirement == "file-ring":
+            environment["HIRSEL_TEST_REQUIRE_FILE_RING"] = "1"
         host_targets.append(":" + target)
         if requirement == "openat2":
             openat2_targets.append(":" + target)
@@ -410,8 +436,8 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         )
     if openat2_targets:
         _suite(name = name + "-openat2", tests = openat2_targets, labels = ["local-execution", "requires-openat2"])
-    if host_cases:
-        _suite(name = name, tests = host_targets + [":" + name + "-shard-1"])
+    if sharded:
+        _suite(name = name, tests = host_targets + [":" + name + "-shard-1"] + pool_targets)
 
 def _rust_test_impl(ctx):
     binaries = dict(ctx.attrs.bin_exes)

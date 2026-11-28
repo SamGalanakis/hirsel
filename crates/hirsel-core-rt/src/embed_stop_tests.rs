@@ -538,6 +538,12 @@ fn returned_stops_release_locks_and_allow_restart() {
 // ---------------------------------------------------------------------------
 #[test]
 fn room_check_prevents_guard_hit_and_growth_fault_in_lock() {
+    // Fault counters are shared by every contained worker in the process.
+    if crate::test_process::run_isolated(
+        "embed_stop_tests::room_check_prevents_guard_hit_and_growth_fault_in_lock",
+    ) {
+        return;
+    }
     // (a) Near hard guard: fiber::room(RUNTIME_ROOM) raises Stack with 0 guard hits.
     #[inline(never)]
     fn recurse_near_guard(guard_end: usize) {

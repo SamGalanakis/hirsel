@@ -1521,7 +1521,6 @@ mod tests {
 
     #[test]
     fn trim_and_purge_keep_a_slot_until_its_foreign_return_is_published() {
-        let _idle = IDLE.lock().unwrap_or_else(|poison| poison.into_inner());
         const BYTES: usize = 512;
         const CHARGE: u64 = 17;
         const LIMIT: u64 = 1 << 20;
@@ -1899,10 +1898,6 @@ mod tests {
         resident_pages(payload, page_bytes()) != 0
     }
 
-    // Tests that observe residency against `purge`, which is
-    // process-wide.
-    static IDLE: Mutex<()> = Mutex::new(());
-
     fn mapping(payload: NonNull<u8>) -> (NonNull<u8>, usize) {
         // SAFETY: the owned buffer pins its backing until free, and the cache
         // retains the reservation during the observations below.
@@ -1911,7 +1906,12 @@ mod tests {
 
     #[test]
     fn emptied_dedicated_pages_stay_resident_within_the_peak_until_idle() {
-        let _idle = IDLE.lock().unwrap_or_else(|poison| poison.into_inner());
+        // Any idle worker in the process can purge these pages.
+        if crate::test_process::run_isolated(
+            "task_heap::tests::emptied_dedicated_pages_stay_resident_within_the_peak_until_idle",
+        ) {
+            return;
+        }
         const SMALL: usize = 64 * 1024;
         const LARGE: usize = 1024 * 1024;
         const OVERSIZED: usize = 8 * LARGE;

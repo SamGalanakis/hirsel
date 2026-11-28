@@ -2,6 +2,8 @@
 //! park while their worker continues to issue and reap other requests.
 use hirsel_core_net::{FileRequest, file_ring::FileRing};
 use std::cell::Cell;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::{io, os::fd::RawFd};
 
 pub(crate) use crate::task_heap::file_buffers::allocate as allocate_buffer;
@@ -81,8 +83,10 @@ unsafe fn request(ring: &FileRing, entry: io_uring::squeue::Entry) -> io::Result
 }
 
 #[cfg(test)]
+static SYSCALL_WRITES: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
 thread_local! {
-    static SYSCALL_WRITES: Cell<u32> = const { Cell::new(0) };
     static FIXED_WRITES: Cell<u32> = const { Cell::new(0) };
     static RING_WRITES: Cell<u32> = const { Cell::new(0) };
 }
@@ -131,7 +135,7 @@ pub(crate) fn write_part(
         });
     }
     #[cfg(test)]
-    SYSCALL_WRITES.set(SYSCALL_WRITES.get() + 1);
+    SYSCALL_WRITES.fetch_add(1, Ordering::Relaxed);
     // SAFETY: fd and bytes remain live through the syscall.
     let result = unsafe {
         let data = bytes.as_ptr().cast();

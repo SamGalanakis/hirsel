@@ -2,7 +2,7 @@ use super::{CASES, run_one};
 use std::process::Command;
 
 /// Run `case` over seeds in child processes (one schedule each, on the
-/// CPUs this process may use, two at a time). Returns the first failing
+/// CPUs this process may use, up to two at a time by default). Returns the first failing
 /// seed and its report, plus the schedule, completion and goal counts.
 fn search(case: &str) -> (Option<(u64, String)>, u64, u64, u64) {
     let env = |k: &str, d: u64| {
@@ -13,7 +13,11 @@ fn search(case: &str) -> (Option<(u64, String)>, u64, u64, u64) {
     };
     let first = env("HIRSEL_CHECK_FROM", 0);
     let count = env("HIRSEL_CHECK_SEEDS", 2000);
-    let jobs = env("HIRSEL_CHECK_JOBS", 2) as usize;
+    let jobs = env("HIRSEL_CHECK_JOBS", env("HIRSEL_JOBS", 2).min(2)) as usize;
+    assert!(
+        jobs > 0,
+        "the scheduler campaign needs at least one child slot"
+    );
     // HIRSEL_CHECK_ALL: run every seed and list each failing one (for
     // measuring how often an unaided search hits a case).
     let all = std::env::var_os("HIRSEL_CHECK_ALL").is_some();
@@ -22,8 +26,8 @@ fn search(case: &str) -> (Option<(u64, String)>, u64, u64, u64) {
     let mut completed = 0u64;
     let mut reached_goal = 0u64;
     let cpus = crate::host::sys::allowed_cpus();
-    let dir = std::env::temp_dir().join(format!("hirsel-units-check-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let case_index = CASES.iter().position(|entry| entry.name == case).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let exe = std::env::current_exe().unwrap();
     let test = format!("units::check::tests::{case}");
     let mut seed = first;
@@ -33,8 +37,8 @@ fn search(case: &str) -> (Option<(u64, String)>, u64, u64, u64) {
     let mut law = super::conn::Law::default();
     while (seed < first + count && (all || found.is_none())) || !running.is_empty() {
         while running.len() < jobs && seed < first + count && (all || found.is_none()) {
-            let out = dir.join(format!("{case}-{seed}.txt"));
-            let cpu = cpus[running.len() % cpus.len()];
+            let out = dir.path().join(format!("{seed}.txt"));
+            let cpu = cpus[(case_index + (seed - first) as usize) % cpus.len()];
             let child = Command::new(&exe)
                 .env("HIRSEL_CHECK_CPU", cpu.to_string())
                 .args(["--exact", &test, "--nocapture", "--test-threads=1", "-q"])
@@ -83,7 +87,6 @@ fn search(case: &str) -> (Option<(u64, String)>, u64, u64, u64) {
             }
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
     if all {
         fails.sort();
         eprintln!(

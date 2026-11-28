@@ -57,7 +57,7 @@ def test_graph(root, seeds):
 
 
 def assignments(root, graph, inventories, *, overrides=True):
-    """Each live binary has one pool target, plus its host-only bodies."""
+    """Deal each live binary to its main target and dedicated cases."""
     result = {}
     for binary, cases in inventories.items():
         target = 'root//:' + binary

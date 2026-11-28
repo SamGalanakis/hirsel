@@ -81,7 +81,10 @@ fn write_law() {
         b"abbcd\0\0h"
     );
     assert_eq!(RING_WRITES.get(), if ring { 2 } else { 0 });
-    assert_eq!(SYSCALL_WRITES.get(), if ring { 0 } else { 2 });
+    assert_eq!(
+        SYSCALL_WRITES.load(Ordering::Relaxed),
+        if ring { 0 } else { 2 }
+    );
     if ring {
         fixed_writes(&mut f, file);
         batched_slots();
@@ -194,7 +197,10 @@ fn fixed_writes(f: &mut Fixture, file: u64) {
             .written,
         1
     );
-    assert_eq!((FIXED_WRITES.get(), SYSCALL_WRITES.get()), (2, 0));
+    assert_eq!(
+        (FIXED_WRITES.get(), SYSCALL_WRITES.load(Ordering::Relaxed)),
+        (2, 0)
+    );
     assert_eq!(f.simple(CLOSE, direct, &[], 0).error, IoError::OK);
 }
 

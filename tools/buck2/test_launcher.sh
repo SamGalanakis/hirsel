@@ -415,8 +415,10 @@ if "$discovery" && [ -n "${HIRSEL_TEST_FILTER_CASES:-}" ]; then
   echo "test_launcher.sh: filtered execution requires test bodies" >&2
   exit 2
 fi
-if "$discovery" && [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
-if [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
+excluded_cases="${HIRSEL_TEST_HOST_CASES:-}${HIRSEL_TEST_POOL_CASES:+ $HIRSEL_TEST_POOL_CASES}"
+unset HIRSEL_TEST_HOST_CASES HIRSEL_TEST_POOL_CASES
+if "$discovery" && [ -z "$excluded_cases" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
+if [ -z "$excluded_cases" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   if [ -n "$test_binary" ] && { "$filtered" || "$restricted"; }; then
     cases="$(list_cases "$@")"
     if [ -z "$cases" ] && ! selection_exists "$@"; then
@@ -437,16 +439,15 @@ if [ -n "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
     exit 2
   fi
   cases="$(printf '%s\n' "$cases" | awk -v selected="$HIRSEL_TEST_DEDICATED_CASE" '$0 == selected')"
-  unset HIRSEL_TEST_HOST_CASES
+  excluded_cases=""
 fi
 unset HIRSEL_TEST_DEDICATED_CASE
-# Host requirements remain physical ownership under positive filters as well.
-if [ -n "${HIRSEL_TEST_HOST_CASES:-}" ]; then
-  cases="$(printf '%s\n' "$cases" | awk -v isolated="$HIRSEL_TEST_HOST_CASES" '
+# Cases assigned to another action stay excluded under positive filters.
+if [ -n "$excluded_cases" ]; then
+  cases="$(printf '%s\n' "$cases" | awk -v isolated="$excluded_cases" '
     BEGIN { n = split(isolated, names, " "); for (i = 1; i <= n; i++) excluded[names[i]] = 1 }
     !($0 in excluded)')"
 fi
-unset HIRSEL_TEST_HOST_CASES
 if [ -z "$cases" ] && "$filtered" && ! "$discovery"; then
   printf 'test_launcher.sh: selector [%s] matched no test bodies on %s\n' "$*" "$test_binary" >&2
   exit 2

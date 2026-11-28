@@ -3,6 +3,36 @@
 # The profiler exercises perf_event_open on a child of the test process.
 HOST_TEST_BINARIES = ["hirsel-prof-unittest"]
 
+# The file issuer law exercises durable O_DIRECT and actual /dev/full
+# completions. The pool's tmpfs scratch cannot establish this contract.
+FILE_RING_TEST_CASES = {
+    "hirsel-core-rt-unittest": ["host::linux::file::tests::file_issuer_writes_and_reaps"],
+}
+
+# Each scheduler campaign spawns one process per seed. Give each full
+# campaign its own action so they can run concurrently on the pool.
+POOL_TEST_CASES = {
+    "hirsel-core-rt-unittest": ["units::check::tests::" + case for case in [
+        "busy_slot_deadline",
+        "conn_flat_slot_reuse",
+        "conn_helper_forward",
+        "conn_release_race",
+        "conn_seal_in_flight",
+        "conn_slot_reuse",
+        "conn_wait_serve",
+        "connection_spin_yields_to_work",
+        "injector_starved",
+        "nobody_in_poller",
+        "outside_end_wakes_waiter",
+        "park_waits",
+        "requeue_without_notification",
+        "returnable_receive",
+        "returnable_stack_reuse",
+        "returnable_transfer",
+        "stale_sleep_bound",
+    ]],
+}
+
 PERF_TEST_CASES = {
     "hirsel-core-driver-unittest": [
         "native::tests::profiler_attributes_a_hot_and_a_cold_definition_on_both_backends",

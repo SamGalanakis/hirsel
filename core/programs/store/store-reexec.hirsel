@@ -207,7 +207,11 @@ type RerunTrace {
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
 fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], mut trace: Option[RerunTrace], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
-    let reads: core.Log[Read] = log.new()
+    let reads: Option[core.Log[Read]] = if let Some(_) = trace {
+        Some(log.new())
+    } else {
+        None
+    }
     let values: txn.ValueSink[Read] = match trace {
         Some(kept) => txn.ValueSink(point: witness_point_event, observed: Some(log.samples(kept.sample_bytes)), unresolved_upload: if kept.detached {
             Some(cell.new(false))
@@ -221,7 +225,11 @@ fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u6
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(R) -> bool] = None
-                let staged = draft_at(start, bases, tiered_bytes, registry, base, ci, keep, reads, values, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
+                let observed_reads = match view reads {
+                    Some(held) => Some(view held),
+                    None => None,
+                }
+                let staged = draft_at(start, bases, tiered_bytes, registry, base, ci, keep, observed_reads, values, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(base, issued, attempt, pins, take staged) {
@@ -233,7 +241,6 @@ fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u6
             take drafted
         }
     })
-    let logged = log.finish(take reads)
     if let Some(mut kept) = trace {
         let txn.ValueSink(observed: take observed, unresolved_upload: take missing, ..) = take values
         if let Some(take flag) = take missing {
@@ -247,7 +254,7 @@ fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u6
                 kept.sample_bytes = needed
             },
         }
-        for take event in take logged {
+        for take event in log.finish(option.unwrap(take reads)) {
             match take event {
                 Span(take key, upper) if list.len(upper) == 0 => {
                     list.push(mut kept.values, txn.ValueRead(key: clone(key), cursor_value: None))

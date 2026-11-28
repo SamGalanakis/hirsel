@@ -359,7 +359,7 @@ pub opaque scoped type TxRows[K, V] {
     decoder: RowDecoder[K, V],
     owner: CallId,
     depth: u64,
-    reads: View[core.Log[Read]]
+    reads: Option[View[core.Log[Read]]]
 }
 
 type TxWalk {
@@ -380,15 +380,17 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     step_tx_walk(tx, r.reads, r.decoder, mut r.walk)
 }
 
-fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K, V], mut r: TxWalk) -> Result[Option[(K, V)], Error] {
+fn step_tx_walk[K, V](tx: Tx, reads: Option[View[core.Log[Read]]], decoder: RowDecoder[K, V], mut r: TxWalk) -> Result[Option[(K, V)], Error] {
     if let Some(mut cursor) = r.cursor {
         let found = next_tx_page(mut cursor.walk, cursor.leading, decoder, reads, tx.values.observed, r.low, r.high, r.reverse)
         if let Some(take row) = take found {
             let (take boundary, take decoded_row) = take row
-            if r.reverse {
-                r.high = take boundary
-            } else {
-                r.low = take boundary
+            if let Some(take key) = take boundary {
+                if r.reverse {
+                    r.high = take key
+                } else {
+                    r.low = take key
+                }
             }
             return Ok(Some(decoded_row?))
         }
@@ -404,38 +406,48 @@ fn step_tx_walk[K, V](tx: Tx, reads: View[core.Log[Read]], decoder: RowDecoder[K
     }
     match take found {
         Some((key, raw)) => {
-            note_tx_row(reads, tx.values.observed, mut r.low, mut r.high, r.reverse, key, raw)?
+            if let Some(logged) = reads {
+                note_tx_row(logged, tx.values.observed, mut r.low, mut r.high, r.reverse, key, raw)?
+            }
             Ok(Some(decode_table_row(decoder, list.slice(key, 4, list.len(key)), raw)?))
         },
         None => {
-            if r.low < r.high {
-                let low = replace(mut r.low, list.new())
-                let high = replace(mut r.high, list.new())
-                log.append(reads, Span(take low, take high))
+            if let Some(logged) = reads {
+                if r.low < r.high {
+                    let low = replace(mut r.low, list.new())
+                    let high = replace(mut r.high, list.new())
+                    log.append(logged, Span(take low, take high))
+                }
             }
             Ok(None)
         },
     }
 }
 
-fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], reads: core.Log[Read], observed: Option[log.Samples], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Result[(K, V), Error])] {
-    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Bytes, Result[(K, V), Error]) {
-        let mut key = pages.collection_row_key(leading, suffix)
-        if reverse {
-            let event: Read = Span(clone(key), clone(high))
-            match view observed {
-                Some(samples) => log.append_sampled(reads, take event, samples, key, false, raw),
-                None => log.append(reads, take event),
-            }
-        } else {
-            list.push(mut key, 0u8)
-            let event: Read = Span(clone(low), clone(key))
-            match view observed {
-                Some(samples) => log.append_sampled(reads, take event, samples, key, true, raw),
-                None => log.append(reads, take event),
-            }
+fn next_tx_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], reads: Option[View[core.Log[Read]]], observed: Option[log.Samples], low: Bytes, high: Bytes, reverse: bool) -> Option[(Option[Bytes], Result[(K, V), Error])] {
+    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> (Option[Bytes], Result[(K, V), Error]) {
+        let boundary = match reads {
+            Some(logged) => {
+                let mut key = pages.collection_row_key(leading, suffix)
+                if reverse {
+                    let event: Read = Span(clone(key), clone(high))
+                    match view observed {
+                        Some(samples) => log.append_sampled(logged, take event, samples, key, false, raw),
+                        None => log.append(logged, take event),
+                    }
+                } else {
+                    list.push(mut key, 0u8)
+                    let event: Read = Span(clone(low), clone(key))
+                    match view observed {
+                        Some(samples) => log.append_sampled(logged, take event, samples, key, true, raw),
+                        None => log.append(logged, take event),
+                    }
+                }
+                Some(take key)
+            },
+            None => None,
         }
-        (take key, decode_table_row(decoder, suffix, raw))
+        (take boundary, decode_table_row(decoder, suffix, raw))
     })
 }
 
@@ -462,7 +474,7 @@ fn note_tx_row(reads: core.Log[Read], observed: Option[log.Samples], mut low: By
 
 pub scoped type IndexRows[K, V] {
     rows: PageRows[K, V],
-    reads: View[core.Log[Read]],
+    reads: Option[View[core.Log[Read]]],
     low: Bytes,
     high: Bytes,
     tiered: Option[TxIndexTiered],
@@ -509,7 +521,7 @@ fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take 
 pub opaque scoped type IndexEntries[J, K, P] {
     cursor: read.EntryCursor,
     read: read.TieredReadInput,
-    reads: View[core.Log[Read]],
+    reads: Option[View[core.Log[Read]]],
     low: Bytes,
     high: Bytes,
     id: u32,
@@ -585,7 +597,9 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
                 let mut boundary = failure_result_from_rep(types.copied(r.low))?
                 note_index_step(r.reads, mut boundary, r.high, Some(view key))?
                 let seen: scoped[view] fn(Bytes) -> Result[(), types.Failure] = scoped fn(observed: Bytes) -> Result[(), types.Failure] {
-                    log.append(r.reads, Point(types.copied(observed)?))
+                    if let Some(logged) = r.reads {
+                        log.append(logged, Point(types.copied(observed)?))
+                    }
                     Ok(())
                 }
                 let row = failure_result_from_rep(txn.tx_tiered_index_row(txn.index_tiered_view(context.inner), r.rows.decoder, r.rows.data, key, raw, read_row_value, seen))
@@ -607,16 +621,20 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
     Ok(None)
 }
 
-fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: pages.PageTree, tiered: Option[TxIndexTiered], reads: View[core.Log[Read]], low: Bytes, high: Bytes) -> Option[Result[(Bytes, Result[Option[(K, V)], Error]), Error]] {
+fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: pages.PageTree, tiered: Option[TxIndexTiered], reads: Option[View[core.Log[Read]]], low: Bytes, high: Bytes) -> Option[Result[(Bytes, Result[Option[(K, V)], Error]), Error]] {
     let context = match tiered {
         Some(held) => Some(txn.index_tiered_view(held.inner)),
         None => None,
     }
     let record_span: scoped[view] fn(take Bytes, take Bytes) = scoped fn(take start: Bytes, take end: Bytes) {
-        log.append(reads, Span(take start, take end))
+        if let Some(logged) = reads {
+            log.append(logged, Span(take start, take end))
+        }
     }
     let record_point: scoped[view] fn(take Bytes) = scoped fn(take key: Bytes) {
-        log.append(reads, Point(take key))
+        if let Some(logged) = reads {
+            log.append(logged, Point(take key))
+        }
     }
     let stepped = txn.next_index_page(mut walk, leading, decoder, data, context, low, high, read_row_value, record_span, record_point)
     match take stepped {
@@ -647,9 +665,11 @@ pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
     Snapshot(store: store_key_from_rep(id), open: 0, branch: 0, head: head, roots: pages.share_roots(read.read_only_roots(read_source.inner)), watermark: watermark, bases: pages.share_tail_bases(read.read_only_bases(read_source.inner)))
 }
 
-fn step_entry[P, T](mut cursor: read.EntryCursor, input: read.TieredReadInput, reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
+fn step_entry[P, T](mut cursor: read.EntryCursor, input: read.TieredReadInput, reads: Option[View[core.Log[Read]]], mut low: Bytes, high: Bytes, id: u32, payload: Option[Arc[Readers[P]]], visit: scoped[view] fn(Bytes, Bytes, Option[Arc[Readers[P]]]) -> Result[T, Error]) -> Result[Option[T], Error] {
     let row = failure_result_from_rep(read.step_entry(mut cursor, input, scoped fn(take start: Bytes, take end: Bytes) {
-        log.append(reads, Span(take start, take end))
+        if let Some(logged) = reads {
+            log.append(logged, Span(take start, take end))
+        }
     }, mut low, high, id, scoped fn(key: Bytes, raw: Bytes) -> Result[T, Error] {
         visit(key, raw, payload)
     }))?
@@ -659,9 +679,11 @@ fn step_entry[P, T](mut cursor: read.EntryCursor, input: read.TieredReadInput, r
     }
 }
 
-fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), Error] {
+fn note_index_step(reads: Option[View[core.Log[Read]]], mut low: Bytes, high: Bytes, last_key: Option[View[Bytes]]) -> Result[(), Error] {
     failure_result_from_rep(read.note_index_step(scoped fn(take start: Bytes, take end: Bytes) {
-        log.append(reads, Span(take start, take end))
+        if let Some(logged) = reads {
+            log.append(logged, Span(take start, take end))
+        }
     }, mut low, high, last_key))
 }
 

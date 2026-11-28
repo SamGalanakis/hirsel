@@ -29,7 +29,7 @@ pub opaque scoped type TxState[Event: inert + shareable + send] {
     resident: u64,
     retain_old: bool,
     frame_tail: u64,
-    reads: View[core.Log[Event]],
+    reads: Option[View[core.Log[Event]]],
     values: View[ValueSink[Event]],
     issued: View[core.Cell[u64]],
     observed_info: View[core.Cell[bool]],
@@ -765,7 +765,9 @@ pub fn reserve_ids[Event: inert + shareable + send](mut tx: TxState[Event], heig
 }
 
 pub fn note_read[Event: inert + shareable + send](tx: TxState[Event], take seen: Event) -> Result[(), types.Failure] {
-    log.append(tx.reads, take seen)
+    if let Some(reads) = tx.reads {
+        log.append(reads, take seen)
+    }
     Ok(())
 }
 
@@ -773,13 +775,17 @@ pub fn note_read[Event: inert + shareable + send](tx: TxState[Event], take seen:
 // count precedes the logical append on every path (§13.3).
 pub fn fetch_logical[Event: inert + shareable + send](tx: TxState[Event], take key: Bytes, point_event: fn(take Bytes) -> Event) -> Result[Option[View[Bytes]], types.Failure] in tx {
     if let Some(staged) = staged_row(tx, key) {
-        log.append(tx.reads, point_event(take key))
+        if let Some(reads) = tx.reads {
+            log.append(reads, point_event(take key))
+        }
         return Ok(staged)
     }
     let found = fetch_base(tx, key)?
-    match found {
-        Some(_) => log.append(tx.reads, (tx.values.point)(take key)),
-        None => log.append(tx.reads, point_event(take key)),
+    if let Some(reads) = tx.reads {
+        match found {
+            Some(_) => log.append(reads, (tx.values.point)(take key)),
+            None => log.append(reads, point_event(take key)),
+        }
     }
     Ok(found)
 }
@@ -798,7 +804,7 @@ pub type ValueSink[Event: inert] {
 pub scoped type TxViews[Event: inert + shareable + send] {
     base: View[pages.Roots],
     indexes: View[indexes.IndexRegistry],
-    reads: View[core.Log[Event]],
+    reads: Option[View[core.Log[Event]]],
     values: View[ValueSink[Event]],
     issued: View[core.Cell[u64]],
     observed_info: View[core.Cell[bool]],
@@ -870,7 +876,7 @@ pub fn tx_ops[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages
     view tx.ops
 }
 
-pub fn tx_reads[Event: inert + shareable + send](tx: TxState[Event]) -> View[core.Log[Event]] in tx {
+pub fn tx_reads[Event: inert + shareable + send](tx: TxState[Event]) -> Option[View[core.Log[Event]]] in tx {
     tx.reads
 }
 

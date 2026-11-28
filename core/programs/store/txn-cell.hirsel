@@ -128,7 +128,9 @@ pub fn fetch_cell[Event: inert + shareable + send](tx: TxState[Event], id: u32, 
             (base, selected)
         },
     }
-    log.append(tx.reads, event(take key))
+    if let Some(reads) = tx.reads {
+        log.append(reads, event(take key))
+    }
     stored
 }
 

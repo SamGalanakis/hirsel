@@ -141,8 +141,10 @@ fn apply_edits[Event: inert + shareable + send](mut tx: TxState[Event], take edi
     for take edit in take rest {
         apply_edit(mut tx, take edit)?
     }
-    for take (_, take key) in take probes {
-        log.append(tx.reads, point_event(take key))
+    if let Some(reads) = tx.reads {
+        for take (_, take key) in take probes {
+            log.append(reads, point_event(take key))
+        }
     }
     Ok(())
 }

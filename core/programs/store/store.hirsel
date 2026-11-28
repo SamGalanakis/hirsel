@@ -866,7 +866,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     let ci = call_info(db.store, pages.holder_heads(db.holders)[i].id, pages.holder_heads(db.holders)[i].head + 1, wall, pages.holder_heads(db.holders)[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
-            let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
+            let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[i].roots, ci, keep_reply, Some(view reads), issued, attempt, pins, body)
             let prepared = match prepare_writer_pages(db, pages.holder_heads(db.holders)[i].roots, issued, attempt, pins, take staged) {
                 Ok(take ready) => take ready,
                 Error(Full(problem)) => RolledBack(Refused(problem)),

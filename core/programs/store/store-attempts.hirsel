@@ -112,9 +112,8 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         let perform = scoped fn() -> Result[CallDraft, Capacity] {
             let keep: Option[fn(ServeReply) -> bool] = None
             let draft = bound bytes plan.n_e {
-                let reads: core.Log[Read] = log.new()
                 let issued: core.Cell[u64] = cell.new(0)
-                let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, ci, keep, None, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, keyed_completion_credit(db, complete), body)
                 })
                 let finished = match prepare_writer_pages(db, pages.holder_heads(db.holders)[0].roots, issued, attempt, pins, take staged) {
@@ -122,15 +121,15 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(take problem) => DraftFault(take problem),
                 }
-                CallDraft(finished: take finished, reads: take reads, issued: take issued)
+                CallDraft(finished: take finished, issued: take issued)
             }
-            let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
+            let CallDraft(finished: take result, issued: take issued) = (take draft)?
             // Encoding spends the call's steps and the head's frame bytes.
             let framed = match frame_draft(db, pages.holder_heads(db.holders)[0].roots.collections, ci, rec, None, false, take result) {
                 Ok(take finished) => take finished,
                 Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
             }
-            Ok(CallDraft(finished: take framed, reads: take reads, issued: take issued))
+            Ok(CallDraft(finished: take framed, issued: take issued))
         }
         bound steps plan.s_e {
             perform()
@@ -146,12 +145,12 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         Ok(Ok(Error(limit))) => Over(Stopped(limit)),
         Ok(Ok(Ok(Error(problem)))) => Over(Refused(Allocation(problem))),
         Ok(Ok(Ok(Ok(take draft)))) => {
-            let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
+            let CallDraft(finished: take result, issued: take issued) = take draft
             let high = cell.into_inner(take issued)
             if high > next_id {
                 next_id = high
             }
-            txn.finish_stage(CallInfo(id: ci.id, at: ci.at, seed: ci.seed), take result, log.finish(take reads))
+            txn.finish_stage(CallInfo(id: ci.id, at: ci.at, seed: ci.seed), take result, list.new())
         },
     }
     // A fault or step stop drops the private roots, so none of their IDs escape.
@@ -160,7 +159,6 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
 
 type CallDraft {
     finished: Finished[Bytes, ServeReply],
-    reads: core.Log[Read],
     issued: core.Cell[u64]
 }
 
@@ -244,7 +242,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
         let perform = scoped fn() -> R {
             let registry = indexes.empty_index_registry()
             let values = txn.ValueSink(point: point_event, observed: None, unresolved_upload: None)
-            let scope = txn.TxViews(base: view s.roots, indexes: view registry, reads: view reads, values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+            let scope = txn.TxViews(base: view s.roots, indexes: view registry, reads: Some(view reads), values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
             let start = txn.TxStart(store: types.StoreKey(hi: s.store.hi, lo: s.store.lo), ids: 0, resident: 0, retain_old: false, journaled: false, limits: types.default_limits())
             let tx = Tx(inner: txn.begin_tx(scope, s.bases, start, false), values: view values, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
             body(tx, env)
@@ -278,13 +276,13 @@ fn tx_start(db: Db) -> txn.TxStart {
     }, limits: types.LimitsRep(frame: db.limits.frame, value: db.limits.value, meta: db.limits.meta))
 }
 
-fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Option[View[core.Log[Read]]], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     draft_at(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, keep_reply, reads, txn.ValueSink(point: point_event, observed: None, unresolved_upload: None), issued, attempt, pins, body)
 }
 
-fn draft_at[R, A](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], values: txn.ValueSink[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_at[R, A](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Option[View[core.Log[Read]]], values: txn.ValueSink[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let observed_info: core.Cell[bool] = cell.new(false)
-    let scope = txn.TxViews(base: view base, indexes: view registry, reads: view reads, values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+    let scope = txn.TxViews(base: view base, indexes: view registry, reads: reads, values: view values, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
     let mut tx = Tx(inner: txn.begin_tx(scope, bases, start, true), values: view values, info: ci)
     let outcome = body(mut tx)
     let Tx(inner: take state, ..) = take tx

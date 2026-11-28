@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "17eaf142e224af05226653bdaf60a6376daed4f0eabcf5842f3e95f1ffdeb3a1": "474554202f74776f20485454502f312e300d0a413a20620d0a583a",
+    "3efb058b93b326c9f8dc7de777dc8cbfde75a71e57085ba0644e08cd3d29d364": "474554202f746872656520485454502f312e310d0a406578747261",
+    "531e4c54dc7c173ca63c2627ae6934c8101651fd4f5660833fc811a10ba179e1": "474554202f6f6e6520485454502f312e310d0a486f73743a20780d0a0d0a626f6479"
+  },
+  "cases": [
+    {
+      "id": "complete-with-body",
+      "target": "http1",
+      "law": "reviewed_fragmentation",
+      "input_kind": "request-head",
+      "generator_version": 1,
+      "digest": "531e4c54dc7c173ca63c2627ae6934c8101651fd4f5660833fc811a10ba179e1",
+      "limits": {
+        "head_bytes": 32768
+      },
+      "setup": {
+        "parser": "request"
+      },
+      "oracle": {
+        "name": "http1-request-head",
+        "version": 1
+      },
+      "expected": {
+        "status": "Complete",
+        "consumed": 30,
+        "end": 30,
+        "method": "GET",
+        "target": "/one",
+        "version": 1,
+        "fields": [
+          [
+            "Host",
+            "x"
+          ]
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            0,
+            2,
+            8,
+            34
+          ]
+        },
+        {
+          "seed": 3393,
+          "max_chunk": 6
+        }
+      ]
+    },
+    {
+      "id": "partial-field",
+      "target": "http1",
+      "law": "reviewed_fragmentation",
+      "input_kind": "request-head",
+      "generator_version": 1,
+      "digest": "17eaf142e224af05226653bdaf60a6376daed4f0eabcf5842f3e95f1ffdeb3a1",
+      "limits": {
+        "head_bytes": 32768
+      },
+      "setup": {
+        "parser": "request"
+      },
+      "oracle": {
+        "name": "http1-request-head",
+        "version": 1
+      },
+      "expected": {
+        "status": "Partial",
+        "consumed": 27,
+        "end": 0,
+        "method": "GET",
+        "target": "/two",
+        "version": 0,
+        "fields": [
+          [
+            "A",
+            "b"
+          ]
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            0,
+            2,
+            8,
+            27
+          ]
+        },
+        {
+          "seed": 3393,
+          "max_chunk": 6
+        }
+      ]
+    },
+    {
+      "id": "refused-field",
+      "target": "http1",
+      "law": "reviewed_fragmentation",
+      "input_kind": "request-head",
+      "generator_version": 1,
+      "digest": "3efb058b93b326c9f8dc7de777dc8cbfde75a71e57085ba0644e08cd3d29d364",
+      "limits": {
+        "head_bytes": 32768
+      },
+      "setup": {
+        "parser": "request"
+      },
+      "oracle": {
+        "name": "http1-request-head",
+        "version": 1
+      },
+      "expected": {
+        "status": "Bad",
+        "consumed": 22,
+        "end": 0,
+        "method": "GET",
+        "target": "/three",
+        "version": 1,
+        "fields": []
+      },
+      "schedules": [
+        {
+          "ends": [
+            0,
+            2,
+            8,
+            27
+          ]
+        },
+        {
+          "seed": 3393,
+          "max_chunk": 6
+        }
+      ]
+    }
+  ]
+}

@@ -47,6 +47,26 @@ def fixture_source(file):
     return source
 
 
+def reviewed_cases(root, contracts):
+    for case in contracts:
+        if not case.call.endswith('(reviewed)'):
+            yield case
+            continue
+        artifact = os.environ.get('HIRSEL_REVIEWED_HTTP1')
+        if artifact:
+            rows = json.loads(Path(artifact).read_bytes())
+        else:
+            rows = json.loads(subprocess.check_output([
+                sys.executable, root / 'tools/decoder-fuzz/fixtures.py', 'http1',
+                root / 'core/tests/decoder-corpus/http1.json',
+            ]))
+        if not rows:
+            raise ValueError('empty reviewed HTTP projection')
+        for row in rows:
+            yield dataclasses.replace(case, reviewed_id=row['id'],
+                                      reviewed_source=row['source'])
+
+
 def simulation_support(module):
     """Hirsel declarations shared by source-only simulation adapters."""
     return f"""
@@ -258,7 +278,8 @@ def entry_observation(case, result):
 
 def wrapper(case, port=None, metering=False):
     # The adapter lives in the original module, so private helpers remain private.
-    call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
+    call = 'reviewed_input()' if case.reviewed_id is not None else case.call
+    call = call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
     call = call.replace('(compiler)', '(native_compiler)')
     call = call.replace('(clock, tasks)', '(native_clock,native_tasks)')
@@ -442,6 +463,7 @@ def save_row(rows, row, output):
 
 def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release', replay=False, agree=False):
     rows = []
+    contracts = list(reviewed_cases(root, contracts))
     requested_engines = set(engines)
     engines = list(engines)
     # Each determined law's reached sites, by (test, file) and build.
@@ -476,6 +498,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            engine=engine, profile=profile,
                            call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None, native_only=False)
+                if case.reviewed_id is not None:
+                    row['cohort'] = dataclasses.replace(case, reviewed_id=None).name
                 if engine == 'evaluator' and case.native_only:
                     row.update(applicable=False, passed=None, native_only=True, cause=case.native_only)
                     save_row(rows, row, output)
@@ -518,7 +542,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 contract_dir_fixture(case.name, host, scratch)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                source = original + fixture_source(case.file)
+                source = original + fixture_source(case.file) + case.reviewed_source
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
                     frame = case.package == 'runner'
                     if frame and protocol_codec is None and typescript_override is None:
@@ -637,7 +661,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--entry', entry])
                 else:
                     command.extend(['--test-timeout', str(timeout)])
-                    if '(compiler)' not in case.call:
+                    if '(compiler)' not in case.call and case.reviewed_id is None:
                         command.extend(['--dir', str(host)])
                 compiler_worker = (compiler or evaluator) if '(compiler)' in case.call else None
                 if evaluating:
@@ -876,7 +900,7 @@ def main():
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                record_runtime=args.record_runtime.resolve() if args.record_runtime else None,
                llvm_profile=args.llvm_profile, replay=args.replay, agree=args.engines_agree)
-    ran = {(row['test'], row['file']) for row in rows if row['ran']}
+    ran = {(row.get('cohort', row['test']), row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and
                         (case.name, str(case.file.relative_to(root))) in ran for case in contracts)]

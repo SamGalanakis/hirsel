@@ -1,0 +1,7 @@
+genrule(
+    name = "http1",
+    srcs = ["fixtures.py", "//:reviewed-http1-bundle"],
+    cmd = 'python3 "$SRCDIR/fixtures.py" http1 "$(location //:reviewed-http1-bundle)" > "$OUT"',
+    out = "http1-projection.json",
+    visibility = ["PUBLIC"],
+)

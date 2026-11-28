@@ -1,5 +1,7 @@
 """Repository inputs read by Rust test binaries at runtime."""
 
+REVIEWED_HTTP1 = {"HIRSEL_REVIEWED_HTTP1": "//tools/decoder-fuzz:http1"}
+
 TEST_FILES_ENV = {
     "hirsel-compiler-unittest": {
         "HIRSEL_COMPILER_WORKER": "//:hirsel-core-driver-bin-hirsel",
@@ -58,7 +60,7 @@ TEST_DATA = {
         "crates/hirsel-core-driver/Cargo.toml", "crates/hirsel-core-rt/include/**",
     ],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"],
-    "hirsel-core-driver-unittest": ["core/programs/platform/*.hirsel", "core/programs/platform/hirsel.toml",
+    "hirsel-core-driver-unittest": ["core/tests/decoder-corpus/archive.json", "core/programs/platform/*.hirsel", "core/programs/platform/hirsel.toml",
         "core/tools/store_tests.py", "core/tools/case_progress.py", "core/tools/std_native.py",
         "core/tools/contract_exec.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/core/**", "core/programs/ffi_laws/**", "core/programs/wasm_laws/**", "core/programs/sqlite/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/tests/b9-vectors.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-driver-test-sdk_manifest": ["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/hirsel.toml", "core/programs/runner/tests/b9-vectors.hirsel", "sdk/client/tests/packed_consumer.hirsel"],

@@ -37,6 +37,9 @@ class Contract:
     native_only: str | None = None
     argv: tuple[str, ...] | None = None
 
+    reviewed_id: str | None = None
+    reviewed_source: str = ""
+
     @property
     def name(self):
         prefix = self.package + '.' if self.package != 'std' else ''
@@ -44,7 +47,7 @@ class Contract:
         # Table rows can pass a literal selector after their entry parameters.
         selector = re.search(r', (\d+)\)$', inputs) if self.argv is not None else None
         suffix = ':' + selector[1] if selector else ''
-        return f'{prefix}{self.file.stem}:{name}{suffix}'
+        return f'{prefix}{self.file.stem}:{name}{suffix}' + (':' + self.reviewed_id if self.reviewed_id is not None else '')
 
 
 def masked_source(source):

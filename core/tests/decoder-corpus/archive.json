@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "1945fa783b83bbbaef9c1740dda6e7955e39016d6f79b95bb23bf02dad4bc367": "28b52ffda01d940400e001000315666978747572652e746573742f726576696577656401000000096368617267652d763100010b6d61696e2e68697273656c01046d61696ee0a71202350c2002350c2002350c2009000000",
+    "3e85245c5f7999c324e75409d76ebff37d2936561d930441dcf910a4194a7ab8": "28b52ffda01d940400340200d4030315666978747572652e746573742f726576696577656401000000096368617267652d763100010b6d61696e2e68697273656c01046d61696ee0a7122001000dfc9f032802001020550000102000010018141d0801",
+    "65582bc3edd519ffb1bb3746bfce214c498655da0cb041be7fe8a04cdd8bbaaf": "28b52ffda01d940400",
+    "76985af9ec6982f129809254eabe1622f92e74815124600d7a7dd536e17cbe97": "28b52ffda01d940400e001000315666978747572652e746573742f726576696577656401000000096368617267652d763100010b6d61696e2e68697273656c01046d61696ee0a71202350c2002350c2002350c20"
+  },
+  "cases": [
+    {
+      "id": "block-rle",
+      "target": "archive",
+      "law": "reviewed_short_reads",
+      "input_kind": "zstd-frame",
+      "generator_version": 1,
+      "digest": "1945fa783b83bbbaef9c1740dda6e7955e39016d6f79b95bb23bf02dad4bc367",
+      "limits": {
+        "initial_output_bytes": 65536,
+        "max_output_bytes": 67108864
+      },
+      "setup": {
+        "lengths": [
+          "known",
+          "unknown"
+        ]
+      },
+      "oracle": {
+        "name": "package-content-v3",
+        "version": 1
+      },
+      "expected": {
+        "status": "decoded",
+        "root": "sha256:725aca8d1e8c021e1b5b9f5889f3ea40a6cabdcc1acd063a10a073a61c9b3de7",
+        "bytes": 300061,
+        "package": "fixture.test/reviewed@1"
+      },
+      "schedules": [
+        {
+          "max_read": null
+        },
+        {
+          "max_read": 3
+        }
+      ]
+    },
+    {
+      "id": "compressed",
+      "target": "archive",
+      "law": "reviewed_short_reads",
+      "input_kind": "zstd-frame",
+      "generator_version": 1,
+      "digest": "3e85245c5f7999c324e75409d76ebff37d2936561d930441dcf910a4194a7ab8",
+      "limits": {
+        "initial_output_bytes": 65536,
+        "max_output_bytes": 67108864
+      },
+      "setup": {
+        "lengths": [
+          "known",
+          "unknown"
+        ]
+      },
+      "oracle": {
+        "name": "package-content-v3",
+        "version": 1
+      },
+      "expected": {
+        "status": "decoded",
+        "root": "sha256:725aca8d1e8c021e1b5b9f5889f3ea40a6cabdcc1acd063a10a073a61c9b3de7",
+        "bytes": 300061,
+        "package": "fixture.test/reviewed@1"
+      },
+      "schedules": [
+        {
+          "max_read": null
+        },
+        {
+          "max_read": 3
+        }
+      ]
+    },
+    {
+      "id": "truncated-after-block",
+      "target": "archive",
+      "law": "reviewed_short_reads",
+      "input_kind": "zstd-frame",
+      "generator_version": 1,
+      "digest": "76985af9ec6982f129809254eabe1622f92e74815124600d7a7dd536e17cbe97",
+      "limits": {
+        "initial_output_bytes": 65536,
+        "max_output_bytes": 67108864
+      },
+      "setup": {
+        "lengths": [
+          "known",
+          "unknown"
+        ]
+      },
+      "oracle": {
+        "name": "package-content-v3",
+        "version": 1
+      },
+      "expected": {
+        "status": "refused",
+        "reason": "not one Zstandard frame",
+        "output": "some"
+      },
+      "schedules": [
+        {
+          "max_read": null
+        },
+        {
+          "max_read": 3
+        }
+      ]
+    },
+    {
+      "id": "truncated-before-block",
+      "target": "archive",
+      "law": "reviewed_short_reads",
+      "input_kind": "zstd-frame",
+      "generator_version": 1,
+      "digest": "65582bc3edd519ffb1bb3746bfce214c498655da0cb041be7fe8a04cdd8bbaaf",
+      "limits": {
+        "initial_output_bytes": 65536,
+        "max_output_bytes": 67108864
+      },
+      "setup": {
+        "lengths": [
+          "known",
+          "unknown"
+        ]
+      },
+      "oracle": {
+        "name": "package-content-v3",
+        "version": 1
+      },
+      "expected": {
+        "status": "refused",
+        "reason": "not one Zstandard frame",
+        "output": "none"
+      },
+      "schedules": [
+        {
+          "max_read": null
+        },
+        {
+          "max_read": 3
+        }
+      ]
+    }
+  ]
+}

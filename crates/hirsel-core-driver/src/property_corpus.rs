@@ -1,4 +1,7 @@
 //! Owner-only storage for the test runner's primary minimized property tapes.
+#[cfg(test)]
+pub(crate) mod reviewed;
+
 use hirsel_core_ids::{ContentHash, DefPath};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, DirBuilder, File, OpenOptions};

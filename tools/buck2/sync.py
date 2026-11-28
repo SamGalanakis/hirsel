@@ -61,7 +61,7 @@ from cargo_units import Resolution, configured, relocate
 from distribution_gates import archive_slots, distribution_gates, runtime_product_bzl
 from runner_gates import runner_gates
 from python_gates import python_gates
-from test_inputs import RUNTIME_DATA, TEST_DATA, TEST_FILES_ENV
+from test_inputs import REVIEWED_HTTP1, RUNTIME_DATA, TEST_DATA, TEST_FILES_ENV
 from build_script_inputs import BUILD_SCRIPT_INPUTS
 from core_gates import core_gates
 from test_sizes_from_usage import requests_bzl
@@ -433,7 +433,7 @@ def first_party(meta: dict) -> str:
         HEADER,
         'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_driver_archive_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle", "hirsel_dev_fixture_cache")\n',
     ]
-
+    out.append("\n" + call("export_file", name="reviewed-http1-bundle", src="core/tests/decoder-corpus/http1.json", visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration", "AppleTargetRecords"],
@@ -602,7 +602,7 @@ def first_party(meta: dict) -> str:
         tls = ' + glob(["crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"])' if phase == "std" else ""
         env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"}
         if phase == "std":
-            env["HIRSEL_CORE_RT_RECORD_ARCHIVE"] = "//:hirsel-core-rt-record-archives[aarch64]"
+            env.update(REVIEWED_HTTP1, HIRSEL_CORE_RT_RECORD_ARCHIVE="//:hirsel-core-rt-record-archives[aarch64]")
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py",
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
             files_env=env,
@@ -666,7 +666,7 @@ def first_party(meta: dict) -> str:
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-evaluator/hirsel-core-contract-eval",
                                   "--compiler", "buck-out/tmp/cargo-bin-exe/core-evaluator/hirsel",
                                   "--node", "buck-out/tmp/cargo-bin-exe/core-evaluator/node"],
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                            files_env=REVIEWED_HTTP1 | {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_SDK_NODE_DIST": "//tools/buck2:sdk-node",
                                        "HIRSEL_SDK_TYPESCRIPT": "//tools/buck2:sdk-typescript",
                                        "HIRSEL_SDK_NODE_TYPES": "//tools/buck2:sdk-node-types",
@@ -745,7 +745,7 @@ def first_party(meta: dict) -> str:
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
                                           "node": "//tools/buck2:sdk-node[bin/node]",
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
-                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                files_env=REVIEWED_HTTP1 | {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                            "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
                                 data=Raw('glob(["core/programs/ffi_laws/**", "core/programs/sqlite/**", "core/programs/stun_ice/**", "core/core/**", "core/std/**", "core/programs/runner/tests/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/platform/*.hirsel", "core/programs/store-crash/*.hirsel", "core/programs/jwtbind/*.hirsel", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"]) + ["core/tools/std_native.py", "core/tools/contract_exec.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/hirsel.toml", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/platform/hirsel.toml", "core/programs/store-crash/hirsel.toml", "core/programs/jwtbind/hirsel.toml"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",

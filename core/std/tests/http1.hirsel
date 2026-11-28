@@ -854,3 +854,26 @@ fn httparse_rejects_malformed_response_heads() -> bool {
     }
     true
 }
+
+// expect: run reviewed_fragmentation(reviewed) = true
+fn reviewed_fragmentation(raw: Bytes, ends: List[u64], expected: http1.Progress, end: u64, consumed: u64) -> bool {
+    let mut whole = http1.head()
+    if http1.request(raw, mut whole) != expected {
+        return false
+    }
+    let mut h = http1.head()
+    let mut cur = http1.cursor()
+    let mut progress: http1.Progress = Partial
+    for stop in ends {
+        progress = http1.resume(list.slice(raw, 0, stop), mut h, mut cur)
+        let want: http1.Progress = if stop < consumed {
+            Partial
+        } else {
+            expected
+        }
+        if progress != want {
+            return false
+        }
+    }
+    progress == expected && h.end == end && cur.offset == consumed && same_head(h, whole)
+}

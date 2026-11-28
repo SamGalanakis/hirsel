@@ -723,19 +723,19 @@ fn fingerprint_table_walk() -> bool {
     codec.fingerprint_of(unhex("95 a6 2f 02 c0 2f 33 de 44 cf 99 24 42 72 fb 47 2f 79 e1 98 51 95 60 0e 3e b5 e3 5e 38 08 81 3d 75 99 9c 6c fa d7 db 11 b0 3b 6d d0 b6 86 0f b3 db 8d 15 6c a5 61 94 fa ca 41 17 aa cc fc 75 c9 c1 72 03 4f 2f a5 18 21 21 aa fc 41 27 17 9e 22 4a 1c 84 fd 34 f0 05 6b 5b d0 86 3b 5d 6d e4 58 10 fc f9 09 9f b2 be 74 d5 5e 08 b5 d3 e3 6a d6 be e8 70 09 c0 04 f1 9f af 24 72 cf a9 99 10 ac 24 02 d4 4f 8b 3b a7 c3 02 89 df 62 04 34 bd 01 69 3f a7 de 17 d3 26 48 78 f3 a5 18 7e 4e c7 7b 33 df da 2a bc 91 9d 57 f6 7d 2b 96 f0 c0 49 f5 9d cb 53 2a e3 27 d2 bc 8c 07 51 ec 8a ba 33 8f 87 34 45 09 69 e3 5e 67 67 ec ba 07 61 51 d8 64 0c 5a c2 bb 72 b6 43 2d 1d 96 c0 7d 1b 2b a2 1e 56 ba bf 4f d9 f4 f8 32 93 18 4e f3 95 a5 2c 90 f8 ae 36 4f 86 42 b7 d9 e9 62 34 89 ef df 56 ea")) == 0x9a8f7337af6a4562
 }
 
-// MEM-30 gives one call step for fingerprint_of and two per byte, from
-// int.widen and the back edge. The two-byte published Avro vector takes five.
+// MEM-30 counts the calls to fingerprint_of and crc64avro.fingerprint, plus
+// int.widen and a back edge per byte. The two-byte Avro vector takes six steps.
 // expect: run fingerprint_step_bound() = true
 fn fingerprint_step_bound() -> bool {
     let b = string.as_bytes("[]")
-    let enough = bound steps 5 {
+    let enough = bound steps 6 {
         codec.fingerprint_of(b)
     }
-    let short = bound steps 4 {
+    let short = bound steps 5 {
         codec.fingerprint_of(b)
     }
     match (enough, short) {
-        (Ok(value), Error(out)) => value == 0xeec6e173d23fb9d1 && out.steps == 4,
+        (Ok(value), Error(out)) => value == 0xeec6e173d23fb9d1 && out.steps == 5,
         _ => false,
     }
 }

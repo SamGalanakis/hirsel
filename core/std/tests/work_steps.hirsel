@@ -10,22 +10,22 @@ fn input(len: u64) -> Bytes {
     b
 }
 
-// sha256.blocks over 912 blocks, quantum 256 bytes: 1 + 228 steps.
+// sha256.blocks over 912 blocks: 1 call + 1 state repeat + 228 hash steps.
 // expect: run sha256_blocks_steps() = true
 fn sha256_blocks_steps() -> bool {
     let b = input(58368)
-    let done = bound steps 229 {
+    let done = bound steps 230 {
         let mut h: Inline[u32, 8] =[0; 8]
         sha256.blocks(mut h, b, 0, 912)
         h[0]
     }
-    let short = bound steps 228 {
+    let short = bound steps 229 {
         let mut h: Inline[u32, 8] =[0; 8]
         sha256.blocks(mut h, b, 0, 912)
         h[0]
     }
     match (done, short) {
-        (Ok(_), Error(OutOfTime(steps: 228))) => true,
+        (Ok(_), Error(OutOfTime(steps: 229))) => true,
         _ => false,
     }
 }
@@ -48,42 +48,42 @@ fn sha256_repro_refused() -> bool {
     }
 }
 
-// sha1.blocks over 58,368 bytes, quantum 256: 1 + 228 steps.
+// sha1.blocks over 912 blocks: 1 call + 1 state repeat + 228 hash steps.
 // expect: run sha1_blocks_steps() = true
 fn sha1_blocks_steps() -> bool {
     let b = input(58368)
-    let done = bound steps 229 {
+    let done = bound steps 230 {
         let mut h: Inline[u32, 5] =[0; 5]
         sha1.blocks(mut h, b)
         h[0]
     }
-    let short = bound steps 228 {
+    let short = bound steps 229 {
         let mut h: Inline[u32, 5] =[0; 5]
         sha1.blocks(mut h, b)
         h[0]
     }
     match (done, short) {
-        (Ok(_), Error(OutOfTime(steps: 228))) => true,
+        (Ok(_), Error(OutOfTime(steps: 229))) => true,
         _ => false,
     }
 }
 
-// sha512.blocks over 456 blocks of 128 bytes, quantum 32: 1 + 1824 steps.
+// sha512.blocks over 456 blocks: 1 call + 1 state repeat + 1824 hash steps.
 // expect: run sha512_blocks_steps() = true
 fn sha512_blocks_steps() -> bool {
     let b = input(58368)
-    let done = bound steps 1825 {
+    let done = bound steps 1826 {
         let mut h: Inline[u64, 8] =[0; 8]
         sha512.blocks(mut h, b, 0, 456)
         h[0]
     }
-    let short = bound steps 1824 {
+    let short = bound steps 1825 {
         let mut h: Inline[u64, 8] =[0; 8]
         sha512.blocks(mut h, b, 0, 456)
         h[0]
     }
     match (done, short) {
-        (Ok(_), Error(OutOfTime(steps: 1824))) => true,
+        (Ok(_), Error(OutOfTime(steps: 1825))) => true,
         _ => false,
     }
 }

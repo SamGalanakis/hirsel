@@ -62,26 +62,28 @@ class NightlyReceipt(unittest.TestCase):
             self.assertEqual((rare["runs"], rare["hits"], rare["severity"]), (2, 0, 30))
             self.assertEqual((common["runs"], common["hits"], common["severity"]), (2, 1, None))
 
-    def test_a_deferred_night_reports_no_reach_miss_for_laws_boat_never_ran(self):
-        # 2026-11-28: one deferred batch turned all 27 declared probes into runs-0 reach reds.
+    def test_reach_requires_seed_results_somewhere_in_the_night(self):
         from vopr_nightly_receipt import summarize
 
         law = "store@1/store/test_model"
-        for rows, missed in (
-            ([{"kind": "batch_deferred", "campaign": "night-001"}], []),
-            ([], [(law, "64 or more commands")]),
+        for rows, deferred, missed in (
+            ([{"kind": "batch_deferred", "campaign": "night-001"}], 1, []),
+            ([], 0, []),
+            ([{"build": "commit", "law": CANARY, "seed": 1, "status": 1,
+               "stdout": "", "stderr": "error: ()\n"}], 0, [(law, "64 or more commands")]),
         ):
-            with self.subTest(deferred=bool(rows)), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(rows=rows), tempfile.TemporaryDirectory() as directory:
                 run = Path(directory)
                 manifest = run / "manifest.json"
-                manifest.write_text(json.dumps([{"build": "commit", "law": law}]))
+                manifest.write_text(json.dumps([{"build": "commit", "law": name}
+                                                for name in (law, CANARY)]))
                 (run / "probe-declarations.json").write_text(json.dumps({law: {"64 or more commands": False}}))
                 with gzip.open(run / "night-001.jsonl.gz", "wt") as stream:
                     for row in [{"build": "commit", "law": law, "seed": 0, "status": 0}, *rows]:
                         print(json.dumps(row), file=stream)
                 summary = summarize(run, manifest, "commit")
                 self.assertEqual(summary["probes_missed"], missed)
-                self.assertEqual(summary["batches_deferred"], len(rows))
+                self.assertEqual(summary["batches_deferred"], deferred)
                 self.assertFalse([error for error in summary["evidence_errors"] if "unexpected" in error])
 
     def test_a_night_that_swept_no_seeds_says_so_instead_of_canary_missing_or_reach_red(self):
@@ -90,10 +92,14 @@ class NightlyReceipt(unittest.TestCase):
         tool = Path(__file__).with_name("vopr_nightly_receipt.py")
         law = "store@1/store/test_model"
         deferral = {"kind": "batch_deferred", "campaign": "night-001"}
-        for phase, batch, group in (
-            ("sweep-not-run", None, "sweep_not_run"),
-            ("sweep-deferred", [{"build": "commit", "law": law, "seed": 0, "status": 0}, deferral],
-             "batch_deferred"),
+        deterministic = {"build": "commit", "law": law, "seed": 0, "status": 101,
+                         "stdout": "", "stderr": "deterministic failure", "kind": "deterministic_red"}
+        for phase, batch, status, groups in (
+            ("sweep-not-run", None, 75, [["boat-dispatch", "sweep_not_run", None]]),
+            ("sweep-deferred", [deterministic, deferral], 75,
+             [[law, "deterministic_red", "exit 101 deterministic failure"], ["boat-dispatch", "batch_deferred", None]]),
+            ("sweep-failed", [deterministic], 2,
+             [[law, "deterministic_red", "exit 101 deterministic failure"], ["boat-dispatch", "batch_no_seed_results", None]]),
         ):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -115,13 +121,13 @@ class NightlyReceipt(unittest.TestCase):
                     with gzip.open(run / "night-001.jsonl.gz", "wt") as stream:
                         for row in batch:
                             print(json.dumps(row), file=stream)
-                ran = subprocess.run([sys.executable, tool, run, manifest, "commit", phase, "75"])
-                self.assertEqual(ran.returncode, 75)
-                groups = [json.loads(line)["group"] for line in (run / "failure-groups.jsonl").read_text().splitlines()]
-                self.assertEqual(groups, [["boat-dispatch", group, None]])
+                ran = subprocess.run([sys.executable, tool, run, manifest, "commit", phase, str(status)])
+                self.assertEqual(ran.returncode, status)
+                written = [json.loads(line)["group"] for line in (run / "failure-groups.jsonl").read_text().splitlines()]
+                self.assertEqual(written, groups)
                 self.assertFalse((run / "complete").exists())
                 receipt = json.loads((root / "receipts.ndjson").read_text())
-                self.assertEqual((receipt["phase"], receipt["status"], receipt["probes_missed"]), (phase, 75, []))
+                self.assertEqual((receipt["phase"], receipt["status"], receipt["probes_missed"]), (phase, status, []))
 
     def test_sometimes_counts_hits_per_seed_across_batches(self):
         from vopr_nightly_receipt import summarize

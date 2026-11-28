@@ -115,6 +115,7 @@ def summarize(run, manifest, commit):
     batches = sorted(run.glob("*.jsonl.gz"))
     for batch in batches:
         canaries = []
+        seeded_batch = False
         rows = list(read_evidence(batch, errors))
         batch_deferred = deferred(rows)
         batches_deferred += batch_deferred
@@ -137,6 +138,7 @@ def summarize(run, manifest, commit):
                 errors.append(f"{batch.name}: duplicate fresh seed {seed}")
                 continue
             seen.add(seed)
+            seeded_batch = True
             counts["seeds_executed"] += 1
             counts["replays_diverged"] += bool(row.get("tape_divergence") or row.get("same_build_nondeterminism"))
             expected_red = law == CANARY and expected_canary(row)
@@ -155,7 +157,7 @@ def summarize(run, manifest, commit):
                             faults.add(label.removeprefix("fault:"))
                         elif law == "store@1/store/test_l69_random_arm" and label in STORE_CRASH_PROBES:
                             faults.add(STORE_CRASH_PROBES[label])
-        if batch_deferred:
+        if batch_deferred or not seeded_batch:
             continue
         good = sorted(canaries) == [(0, True), (1, True)]
         canary_red = good if canary_red is None else canary_red and good
@@ -165,10 +167,10 @@ def summarize(run, manifest, commit):
                "hits": count["hits"], "true_calls": count["true_calls"]}
         if label in declared.get(law, {}):
             rare = declared[law][label]
-            # With no batch swept, a law that never ran has no reach evidence; the
-            # deferral or the unswept night is the red.
+            # A night with no seed results has no reach evidence. Its dispatch
+            # receipt carries the failure.
             missed = (frequency_missed(row["hits"], row["runs"])
-                      and (row["runs"] or batches_deferred < len(batches)))
+                      and counts["seeds_executed"] > 0)
             row.update(rare=rare, divisor=PROBE_DIVISOR, severity=(30 if rare else 40) if missed else None)
             if missed:
                 misses.add((law, label))

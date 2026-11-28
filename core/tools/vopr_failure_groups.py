@@ -54,6 +54,10 @@ def deferred(rows):
     return any(row.get("kind") == "batch_deferred" for row in rows)
 
 
+def has_seed_results(rows):
+    return any((row.get("seed") or 0) > 0 for row in rows)
+
+
 def expected_canary(row):
     seed = row["seed"]
     return (seed > 0 and row["status"] == seed % 2
@@ -79,6 +83,7 @@ def publish(run, *, require_canary=False, probe_reds=(), not_run=False):
     receipts = ([prepare] if prepare.is_file() else []) + batches
     canary_ok = not require_canary or bool(batches) or not_run
     deferrals = 0
+    empty_batches = []
     for receipt in receipts:
         canary = []
         rows = list(result_rows(receipt))
@@ -101,6 +106,9 @@ def publish(run, *, require_canary=False, probe_reds=(), not_run=False):
                         samples[key].setdefault(field, row[field])
         # A deferred batch ran seed 0 only; its canary seeds were never dispatched.
         if require_canary and receipt.suffix == ".gz" and not batch_deferred:
+            if not has_seed_results(rows):
+                empty_batches.append(receipt.name)
+                continue
             passed = (len(canary) == 2 and {row["seed"] % 2 for row in canary} == {0, 1}
                       and all(expected_canary(row) for row in canary))
             if not passed:
@@ -110,6 +118,10 @@ def publish(run, *, require_canary=False, probe_reds=(), not_run=False):
         key = "boat-dispatch", "batch_deferred", None
         counts[key] = deferrals
         samples[key] = {"receipt": None, "build": None, "digest": None, "seed": None}
+    if empty_batches:
+        key = "boat-dispatch", "batch_no_seed_results", None
+        counts[key] = len(empty_batches)
+        samples[key] = {"receipt": empty_batches[0], "build": None, "digest": None, "seed": None}
     if not_run:
         key = "boat-dispatch", "sweep_not_run", None
         counts[key] = 1
@@ -139,6 +151,9 @@ def publish(run, *, require_canary=False, probe_reds=(), not_run=False):
                               **samples[key]}), file=report)
     output.replace(run / "failure-groups.jsonl")
     if not canary_ok:
+        return 2
+    if empty_batches:
+        print(f"{run}: {len(empty_batches)} batch(es) returned no seeded results", file=sys.stderr)
         return 2
     if not_run:
         print(f"{run}: the sweep dispatched no batch; no seeds ran", file=sys.stderr)

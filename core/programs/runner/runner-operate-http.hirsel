@@ -194,8 +194,10 @@ fn run_http_place_front[G: send, H: shareable + inert + send](take job: HttpPlac
 
 fn serve_http_place_front[G: send, H: shareable + inert + send](take job: HttpPlaceFront[G, H]) -> Result[(), HttpPlaceError] waits {
     let HttpPlaceFront(listener: take listener, http: take http, routes: take routes, plans: take plans, reads: take reads, placing: take placing, relay, head: take head, publisher: take pub_to, binding: take supplied, claims: take claims, clock, tasks, random, state_bytes, request_bytes, stream_queue, stop: take stop) = take job
-    let reg = instantiate(placing) ?=> |take problem| PlaceStart(Open(Place(take problem)))
-    let (take endpoint, take relaying) = start_relay(reg, head, pub_to, clock, tasks, relay) ?=> RelayFailure
+    let (take endpoint, take relaying) = match placing.made {
+        Ok(made) => start_registered_relay(made.0, list.len(made.0.rows), head, pub_to, clock, tasks, relay) ?=> RelayFailure,
+        Error(problem) => return Error(PlaceStart(Open(Place(clone(problem))))),
+    }
     let make: scoped[view] fn() -> HttpConnection[G, H] = fn() -> HttpConnection[G, H] {
         let registered = result.unwrap(instantiate(placing))
         let compiled = arc.share(plans)

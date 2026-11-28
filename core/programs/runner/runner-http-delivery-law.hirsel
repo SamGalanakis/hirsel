@@ -66,7 +66,7 @@ fn l15_timers(tasks: Tasks) waits {
         let mut records: List[RelaySend] = list.with_capacity(2u64)
         list.push(mut records, Vacant)
         list.push(mut records, Vacant)
-        let mut state = RelayState(sends: take records, positions: list.with_capacity(cfg.positions_max), generation: 0u64, owner: take own_head, inbox: channel.sender(to), clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg))
+        let mut state = RelayState(sends: take records, positions: list.with_capacity(cfg.positions_max), generation: 0u64, owner: take own_head, inbox: channel.sender(to), clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg.t, list.len(reg.slots)))
         let (first, closed_first): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
         relay_step(mut state, RelayAsk(l15_send(reg, key, time, 1u32, 0u64, 1u64), take first))
         let _ = take closed_first
@@ -200,7 +200,7 @@ fn http_caller_cap_structured(tasks: Tasks) -> Result[(), ()] waits {
     let mut sends: List[RelaySend] = list.with_capacity(2u64)
     list.push(mut sends, Vacant)
     list.push(mut sends, Vacant)
-    let mut state = RelayState(sends: take sends, positions: list.with_capacity(6u64), generation: 0u64, owner: take owner, inbox: take to, clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg))
+    let mut state = RelayState(sends: take sends, positions: list.with_capacity(6u64), generation: 0u64, owner: take owner, inbox: take to, clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg.t, list.len(reg.slots)))
     l15_position_caps(mut state, from, reg, key, time)
     for _ in 0u64 .. 6u64 {
         if let Ok(RunRequest(_)) = channel.try_receive(forwarded) {} else {
@@ -235,7 +235,7 @@ fn relay_handler_expiry_leaves_ask_queued(tasks: Tasks) -> Result[(), ()] waits 
     let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
     let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
-    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg, inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg))
+    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg, inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg.t, list.len(reg.slots)))
     let (take booted, take incoming, take credits, take end_credits) = option.unwrap(relay_boot(take setup))
     let mut state = take booted
     let endpoint = result.unwrap(channel.receive(from))
@@ -274,7 +274,7 @@ fn http_retire_end_credit_survives_owner_failure(tasks: Tasks) -> Result[(), ()]
     let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
     let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
-    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg, inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg))
+    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg, inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg.t, list.len(reg.slots)))
     let (take booted, take incoming, take asks, take ends) = option.unwrap(relay_boot(take setup))
     let mut state = take booted
     let endpoint = result.unwrap(channel.receive(from))
@@ -490,7 +490,7 @@ fn l15_relay(take input: L15Relay) waits {
 fn l15_start_relay(reg: Registry[(), HttpLawHandles], head: Sender[HeadInput], pub_to: Sender[PubIn], clock: Clock, tasks: Tasks, cfg: RelayConfig) -> (Relay, Task[()], Receiver[()]) waits {
     let (ready, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
     let (join_to, joined): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let key_max = relay_key_max(reg)
+    let key_max = relay_key_max(reg.t, list.len(reg.slots))
     let seed = RelayStart(to: take ready, head: channel.sender(head), clock: clock, tasks: tasks, config: cfg, inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: key_max)
     let child = task.spawn(tasks, bytes option.unwrap(relay_child_bytes(cfg, key_max, false)), L15Relay(seed: take seed, joined: take join_to), l15_relay)
     let endpoint = result.unwrap(channel.receive(from))

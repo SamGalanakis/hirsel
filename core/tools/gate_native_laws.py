@@ -89,7 +89,8 @@ def sqlite_laws(args, root, backend):
 
 
 def stun_ice_laws(args, root, backend):
-    # NET-18's address-class law (S1); the package's other laws are not wired here.
+    # One deterministic wire-vector law exercises the package on each native engine.
+    selected = 'binding_vectors'
     with tempfile.TemporaryDirectory(prefix='hirsel-stun-ice-laws-') as store:
         fixture = Path(store) / 'core/programs/stun_ice'
         shutil.copytree(root / 'core/programs/stun_ice', fixture)
@@ -98,14 +99,14 @@ def stun_ice_laws(args, root, backend):
             '--runtime', str(args.runtime.resolve()), '--cc', str(args.cc.resolve()),
             '--libraries', str(root / 'core'), '--source-core', '--source-std',
             '--store', str(Path(store) / 'build'), '-o', str(Path(store) / 'tests'),
-            '--filter', 'public_class_table', '--test-timeout', '20', '--json',
+            '--filter', selected, '--test-timeout', '20', '--json',
         ]
         env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache')}
         output = subprocess.run(command, cwd=fixture, env=env, capture_output=True, text=True, check=False)
         if output.returncode:
             raise AssertionError(output.stdout + output.stderr)
         rows = json.loads(output.stdout)['tests']
-        if [row['definition'].rsplit('/', 1)[-1] for row in rows] != ['public_class_table']:
+        if [row['definition'].rsplit('/', 1)[-1] for row in rows] != [selected]:
             raise AssertionError(rows)
         return len(rows)
 

@@ -535,10 +535,9 @@ fn archive_witnessed_through(db: Db) -> u64 {
 }
 
 fn archive_attention_seq(db: Db) -> u64 {
-    if !is_disk(db) {
+    let Some(state) = view db.disk else {
         return 0u64
     }
-    let state = disk_state(db)
     let lane_seq = match view state.archiver {
         Some(lane) => latest.read(lane.status).seq,
         None => 0u64,

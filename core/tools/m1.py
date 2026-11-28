@@ -421,7 +421,7 @@ def darwin_links(compiler, runtime, engines, root, store, packages, cc=None, deb
     for package in packages:
         directory = root / 'core/programs' / package
         try:
-            tests = hcfg.package(directory).get('tests', {})
+            tests = hcfg.package(directory, compiler=compiler).get('tests', {})
         except (OSError, ValueError) as error:
             rows.extend(dict(program=package, engine=engine, definition=None, linked=False,
                              stopped=str(error)) for engine in engines)

@@ -2,6 +2,7 @@
 """Behavioral fixtures for milestone stage and exact-observation reporting."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -70,13 +71,22 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         self.compiler.write_text('''#!/usr/bin/env python3
 import json, pathlib, sys
 args = sys.argv[1:]
+if args[:2] == ['config', 'export']:
+    manifest = pathlib.Path(args[2])
+    assert args[3:] == ['--json']
+    assert manifest.name == 'hirsel.hcfg' and manifest.is_file()
+    print(json.dumps({'version': 1, 'root': 'pkg_v1.Package', 'value': {
+        'sources': [], 'dependencies': [], 'program': {'case': 'None'},
+        'tests': {'case': 'Some', 'fields': [{'sources': [], 'grants': []}]},
+    }}))
+    raise SystemExit(0)
 assert args[0] == 'test'
 assert '--link-only' in args
 assert args[args.index('--target')+1] == 'aarch64-apple-darwin'
 package = pathlib.Path(args[1]).name
 linked = package == 'image_core'
 print(json.dumps({'linked': linked, 'tests': [
-    {'definition': f'{package}@1/tests/law', 'linked': linked,
+    {'definition': f'hirsel.ai/{package}@1/tests/law', 'linked': linked,
      'stopped': None if linked else 'undefined symbol _fixture'}
 ]}))
 raise SystemExit(not linked)
@@ -86,7 +96,8 @@ raise SystemExit(not linked)
             [sys.executable, str(Path(__file__).with_name('m1.py')), '--compiler', str(self.compiler),
              '--runtime', str(self.root / 'runtime.a'), '--root', str(self.root),
              '--target', 'aarch64-apple-darwin', '--only', 'archive', 'image_core',
-             '--report', str(artifact)], capture_output=True, text=True)
+             '--report', str(artifact)], capture_output=True, text=True,
+            env=dict(os.environ, HIRSEL_CONFIG_EXPORTER=str(self.root / 'unavailable-exporter')))
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(
             [(row['program'], row['engine'], row['linked']) for row in json.loads(artifact.read_text())],

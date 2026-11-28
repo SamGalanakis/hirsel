@@ -62,6 +62,7 @@ jobs:
         run: |
           rust=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           rustup toolchain install "$rust" --profile minimal --no-self-update
+          cargo fetch --locked
           python3 tools/buck2/bootstrap_rust_toolchain.py
           python3 tools/apple_check.py
 
